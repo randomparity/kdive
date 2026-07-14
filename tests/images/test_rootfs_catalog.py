@@ -137,6 +137,21 @@ def test_only_below_threshold_rows_are_live_drgn_incapable() -> None:
         assert cap.status == expected, name
 
 
+def test_ppc64le_row_drgn_version_is_capability_meaningful() -> None:
+    """#1150: the ppc64le row's ``drgn_version`` is meaningful, not a placeholder.
+
+    Restates, named explicitly for the ppc64le row (grep-able against the #1150 acceptance
+    criterion "drgn_version stays meaningful for ppc64le rows"), the invariant the generic loops
+    above cover across all rows: the value is non-empty and computes a ``capable`` live-drgn
+    verdict (parses and clears the BTF floor). The parse/floor machinery lives in
+    ``drgn_support``; this asserts it, it does not re-implement it.
+    """
+    row = load_rootfs_catalog()["fedora-kdive-ready-44-ppc64le"]
+    assert row.drgn_version  # non-empty / non-placeholder
+    cap = live_drgn_capability(drgn_version=row.drgn_version, drgn_tooling=True)
+    assert cap.status == "capable"
+
+
 _CAPABLE_ROWS = {"fedora-kdive-ready-44", "fedora-kdive-ready-44-ppc64le"}
 
 

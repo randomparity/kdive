@@ -124,16 +124,19 @@ class _FakeProgram:
         tasks: list[_FakeTask] | None = None,
         modules: list[_FakeModule] | None = None,
         uts: dict[str, str] | None = None,
+        arch: str = "x86_64",
         boot_cmdline: str = "root=/dev/vda1 quiet",
         cpus_online: int = 4,
         mem_total_pages: int = 1048576,
     ) -> None:
         self._tasks = tasks if tasks is not None else [_FakeTask(1, "init", "D")]
         self._modules = modules if modules is not None else [_FakeModule("nfs")]
+        # `arch` feeds the default uts.machine so a ppc64le core drives the same contract as
+        # x86_64; the "x86_64" default keeps every existing no-arch caller byte-identical.
         self._uts = uts or {
             "release": "6.8.0",
             "version": "#1 SMP",
-            "machine": "x86_64",
+            "machine": arch,
             "nodename": "guest",
         }
         self._boot_cmdline = boot_cmdline
@@ -254,11 +257,17 @@ def test_modules_monolithic_kernel_is_empty_not_all_failed() -> None:
 # --- sysinfo helper ------------------------------------------------------------------------
 
 
-def test_sysinfo_returns_uts_and_counters() -> None:
-    prog = _FakeProgram()
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_sysinfo_returns_uts_and_counters(arch: str) -> None:
+    """sysinfo reports the guest arch verbatim and the same counters on every arch (#1150).
+
+    `machine` is the single arch-observable value in the introspection contract; every other
+    field is arch-invariant, so a ppc64le core yields an identical-shaped sysinfo section.
+    """
+    prog = _FakeProgram(arch=arch)
     out = helper_sysinfo(prog)
     assert out["release"] == "6.8.0"
-    assert out["machine"] == "x86_64"
+    assert out["machine"] == arch
     assert out["boot_cmdline"] == "root=/dev/vda1 quiet"
     assert out["cpus_online"] == 4
     assert out["mem_total_pages"] == 1048576
@@ -302,6 +311,25 @@ def test_from_vmcore_happy_path_populates_report() -> None:
     )
     assert out.sysinfo["release"] == "6.8.0"
     assert cast("list[object]", out.tasks["tasks"])  # the canned blocked task is present
+    assert out.truncated is False
+
+
+@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
+def test_from_vmcore_yields_same_contract_shape_across_arches(arch: str) -> None:
+    """A ppc64le core yields the identical four-section contract as x86_64 (#1150 AC2).
+
+    The offline orchestration is arch-blind: only `sysinfo.machine` differs by arch. This
+    proves the *orchestration* is arch-neutral against a fake `_Program`; it does not (and
+    cannot) exercise real drgn DWARF decoding — that is the `live_vm` proof's job (AC1a).
+    """
+    out = _introspector(program=_FakeProgram(arch=arch)).from_vmcore(
+        vmcore_ref="v", debuginfo_ref="d", expected_build_id="deadbeef"
+    )
+    # Same four sections, same keys, same shape — only machine tracks the arch.
+    assert out.sysinfo["machine"] == arch
+    assert out.sysinfo["release"] == "6.8.0"
+    assert cast("list[object]", out.tasks["tasks"])  # blocked task present on either arch
+    assert "modules" in out.modules
     assert out.truncated is False
 
 

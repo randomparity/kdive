@@ -78,6 +78,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "test (epic #1139); unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_PPC64LE_VMCORE",
+        "test",
+        None,
+        "Path to the retained real #1148 ppc64le vmcore for the live_vm drgn-open proof (#1150, "
+        "ADR-0348, epic #1139); unset → that test skips (a set-but-missing/mismatched path fails).",
+    ),
+    ExternalEnvVar(
         "KDIVE_TEST_BUILD_CONFIG",
         "test",
         None,
