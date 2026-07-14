@@ -77,15 +77,21 @@ class FormatContract:
 
 @dataclass(frozen=True, slots=True)
 class LayoutMember:
-    """One member inside a container artifact (e.g. a path inside the combined kernel tar)."""
+    """One member inside a container artifact (e.g. a path inside the combined kernel tar).
+
+    A member carries at most one of ``format`` (a single arch-neutral byte contract) or
+    ``formats_by_arch`` (a per-arch contract, e.g. the ``boot/vmlinuz`` bzImage-vs-ELF split of
+    #1145). They are mutually exclusive in ``to_json``.
+    """
 
     path: str
     required: bool
     note: str
     format: FormatContract | None = None
+    formats_by_arch: Mapping[str, FormatContract] | None = None
 
     def to_json(self) -> dict[str, JsonValue]:
-        """Return a JSON-safe view; the nested ``format`` is present only when the member has it."""
+        """Return a JSON-safe view; nested format(s) appear only when the member declares them."""
         data: dict[str, JsonValue] = {
             "path": self.path,
             "required": self.required,
@@ -93,6 +99,10 @@ class LayoutMember:
         }
         if self.format is not None:
             data["format"] = self.format.to_json()
+        if self.formats_by_arch is not None:
+            data["formats_by_arch"] = {
+                arch: fmt.to_json() for arch, fmt in self.formats_by_arch.items()
+            }
         return data
 
 
@@ -158,9 +168,9 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
         name="kernel",
         requirement="required",
         summary=(
-            "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage, NOT the vmlinux ELF) "
-            "plus lib/modules/<release>/. One artifact for both; there is no separate 'modules' "
-            "upload."
+            "Combined kernel+modules tar (gzip): boot/vmlinuz (the bzImage for x86_64, the ELF "
+            "vmlinux for ppc64le - the arch is declared in the build profile) plus "
+            "lib/modules/<release>/. One artifact for both; there is no separate 'modules' upload."
         ),
         format=FormatContract(
             container="gzip tar",
@@ -170,11 +180,12 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             LayoutMember(
                 path=_KERNEL_BOOT_MEMBER,
                 required=True,
-                note="The bzImage (arch/x86/boot/bzImage), renamed to boot/vmlinuz in the tar.",
-                format=FormatContract(
-                    container="bzImage",
-                    magic=(MagicPin(offset=_BZIMAGE_MAGIC_OFFSET, hex=_BZIMAGE_MAGIC.hex()),),
+                note=(
+                    "The bootable kernel renamed to boot/vmlinuz: the bzImage "
+                    "(arch/x86/boot/bzImage) for x86_64, or the stripped ELF vmlinux for ppc64le "
+                    "(powerpc has no bzImage). The format is keyed by the build profile's arch."
                 ),
+                formats_by_arch=BOOT_MEMBER_FORMATS,
             ),
             LayoutMember(
                 path=_MODULES_MEMBER_PREFIX,
