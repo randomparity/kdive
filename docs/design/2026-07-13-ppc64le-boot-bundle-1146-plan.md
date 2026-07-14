@@ -176,18 +176,26 @@ narrowly-scoped pseries accommodation in code + a test (spec §3, ADR-0344).
    initramfs-stage failure token (`VFS: Unable to mount root fs` / `dracut:` FATAL / `Cannot open
    root device`) → "quirk," land the accommodation + test and attribute via the offline `virsh`
    per-Run-path check; anything else → indeterminate (do **not** retire), iterate.
-6. **Writer verdict (criterion 5):** a second `runs.install` with a **stub** `debuginfo_ref`
-   (`method != KDUMP`) to trigger `_RealGuestKernelWriter.inject` on the ppc64le overlay. The stub
-   must be an **actually-uploaded, resolvable object-store artifact carrying non-empty bytes**:
-   `_inject_built_modules` *fetches* `debuginfo_ref` (install.py:401) **before** `inject()`, and
-   `_stage_vmlinux` size-checks it (`size>0`, guest_kernel_writer.py:169) — a made-up ref string
-   raises `STALE_HANDLE` at fetch and depmod never runs, and a zero-length blob fails the size
-   check *after* depmod. The bytes' arch is irrelevant (they are not executed; depmod runs first).
+6. **Writer verdict (criterion 5) — needs a distinct debuginfo-carrying build.** `debuginfo_ref`
+   is **not** a `runs.install` parameter — it is a *build-result* field: the install job reads
+   `build_result.debuginfo_ref` (`jobs/handlers/runs/install.py`) into the `InstallRequest`, and
+   that value is persisted at `runs.complete_build` from the uploaded `vmlinux` key
+   (`services/runs/steps.py:127-128`, `complete_build.py:356`); it gates inject at `install.py:339`.
+   The boot-proof Run (steps 2-5) carries no debuginfo, so its `debuginfo_ref` is `NULL` and inject
+   never fires. To exercise the writer, run a **separate** ppc64le Run whose expected-uploads set
+   includes a **stub** `vmlinux`/debuginfo artifact (an actually-uploaded, resolvable object-store
+   object carrying **non-empty** bytes), `runs.complete_build` it (persists that Run's
+   `debuginfo_ref`), then `runs.install` **that** Run — which fires `_RealGuestKernelWriter.inject`
+   on the ppc64le overlay. Why a stub suffices: `_inject_built_modules` *fetches* `debuginfo_ref`
+   (install.py:401) **before** `inject()`, and `inject()` runs `depmod` in `_extract_and_index`
+   *before* `_stage_vmlinux` size-checks the bytes (`size>0`, guest_kernel_writer.py:169) — so the
+   bytes' arch is irrelevant (never executed) and only their non-emptiness + resolvability matter.
    If inject completes → writer verified. If `depmod` fails, read the chained `__cause__` /
    libguestfs log for `exec format error` / binfmt → record the cross-arch constraint, defer the
-   `qemu-user`/`binfmt` accommodation to issue 9. **A fetch/resolve failure is a proof-wiring error
-   to fix, NOT the UNVERIFIED case** — UNVERIFIED applies only if the writer's inject itself cannot
-   run on the host (e.g. libguestfs absent), never because a ref was mis-supplied.
+   `qemu-user`/`binfmt` accommodation to issue 9. **A fetch/resolve failure (a made-up ref →
+   `STALE_HANDLE`, or a zero-length blob) is a proof-wiring error to fix, NOT the UNVERIFIED case**
+   — UNVERIFIED applies only if the writer's inject itself cannot run on the host (e.g. libguestfs
+   absent), never because a ref was mis-supplied.
 
 **Do — the record:** Write the proof-record doc with the console evidence (the `hvc0` capture),
 the per-Run-path attribution, the initrd finding, and the writer verdict. Append the definitive
