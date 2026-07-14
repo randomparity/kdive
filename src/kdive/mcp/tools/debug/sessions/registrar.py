@@ -81,7 +81,13 @@ def register(
             Field(description="Transport kind: `gdbstub` (default) or `drgn-live`."),
         ] = _GDBSTUB,
     ) -> ToolResponse:
-        """Open a single-attach transport and insert a live DebugSession. Requires contributor."""
+        """Open a single-attach transport and insert a live DebugSession. Requires contributor.
+
+        A `gdbstub` session on a System whose guest architecture differs from the worker host's
+        (e.g. a ppc64le guest on an x86_64 host) needs a multiarch-capable gdb on the worker; a
+        later debug op failing with `missing_dependency` naming `gdb-multiarch` means installing
+        it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this ahead of time.
+        """
         return await handlers.start_session(
             pool, current_context(), run_id=run_id, transport=transport
         )

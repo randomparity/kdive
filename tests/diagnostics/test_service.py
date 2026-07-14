@@ -384,16 +384,18 @@ def _load_remote_config(monkeypatch, tmp_path) -> None:
 def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
     monkeypatch, tmp_path
 ) -> None:
-    # With a pool AND remote-libvirt configured, worker-vantage outcomes are delegated to a
-    # JobWorkerCheckDispatcher built with the supplied pool, the contribution's provider, and
-    # the unavailable worker-check ids (provider_tls + gdbstub_acl) — ADR-0164. A misrouted pool,
-    # provider, or id tuple would leave the dispatcher unable to enqueue against the right job.
+    # With a pool AND remote-libvirt configured, worker-vantage outcomes are delegated per provider
+    # to a JobWorkerCheckDispatcher built with the supplied pool, the contribution's provider, and
+    # its unavailable worker-check ids (ADR-0164). local-libvirt is always enabled and contributes
+    # multiarch_gdb, so the two providers compose into a _CompositeWorkerCheckDispatcher; each
+    # sub-dispatcher must carry the right pool/provider/id tuple, or a check enqueues against the
+    # wrong job.
     from typing import cast
 
     from psycopg_pool import AsyncConnectionPool
 
-    from kdive.diagnostics.checks import GDBSTUB_ACL_ID, PROVIDER_TLS_ID
-    from kdive.diagnostics.service import default_service_factory
+    from kdive.diagnostics.checks import GDBSTUB_ACL_ID, MULTIARCH_GDB_ID, PROVIDER_TLS_ID
+    from kdive.diagnostics.service import _CompositeWorkerCheckDispatcher, default_service_factory
     from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
@@ -403,9 +405,19 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
         None, pool=pool, provider_contributions=diagnostic_provider_contributions()
     )
     assert isinstance(service._worker_mode, WorkerVantageDispatchMode)  # noqa: SLF001
-    # The dispatcher field is typed as the WorkerCheckDispatcher Protocol; narrow to the
-    # concrete impl to inspect its wired pool/provider/check-id internals.
-    dispatcher = cast(JobWorkerCheckDispatcher, service._worker_mode.dispatcher)  # noqa: SLF001
-    assert dispatcher._pool is pool  # noqa: SLF001
-    assert dispatcher._provider == "remote-libvirt"  # noqa: SLF001
-    assert set(dispatcher._worker_check_ids) == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID}  # noqa: SLF001
+    composite = cast(
+        _CompositeWorkerCheckDispatcher,
+        service._worker_mode.dispatcher,  # noqa: SLF001
+    )
+    by_provider = {
+        cast(JobWorkerCheckDispatcher, d)._provider: cast(JobWorkerCheckDispatcher, d)  # noqa: SLF001
+        for d in composite.dispatchers
+    }
+    assert set(by_provider) == {"local-libvirt", "remote-libvirt"}
+    for dispatcher in by_provider.values():
+        assert dispatcher._pool is pool  # noqa: SLF001
+    assert set(by_provider["remote-libvirt"]._worker_check_ids) == {  # noqa: SLF001
+        PROVIDER_TLS_ID,
+        GDBSTUB_ACL_ID,
+    }
+    assert set(by_provider["local-libvirt"]._worker_check_ids) == {MULTIARCH_GDB_ID}  # noqa: SLF001

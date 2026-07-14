@@ -6,6 +6,7 @@ import pytest
 
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
+    MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     CheckResult,
     CheckStatus,
@@ -40,6 +41,23 @@ def test_roundtrip_preserves_three_state_and_fields() -> None:
             ErrorCategory.CONFIGURATION_ERROR,
         ),
     ]
+
+
+def test_multiarch_gdb_id_survives_roundtrip() -> None:
+    src = [
+        CheckResult(
+            MULTIARCH_GDB_ID,
+            CheckStatus.FAIL,
+            "no multiarch gdb",
+            fix="install gdb-multiarch",
+            provider="local-libvirt",
+            failure_category=ErrorCategory.MISSING_DEPENDENCY,
+        )
+    ]
+    [result] = deserialize_results(serialize_results(src))
+    assert result.check_id == MULTIARCH_GDB_ID
+    assert result.status is CheckStatus.FAIL
+    assert result.failure_category is ErrorCategory.MISSING_DEPENDENCY
 
 
 def test_roundtrip_preserves_resource_id() -> None:
