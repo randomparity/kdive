@@ -20,6 +20,12 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
+# Host-side extraction runs as root over a contributor-uploaded (semi-trusted) tar, so it is bounded
+# so a gzip/tar bomb cannot exhaust the worker host's temp filesystem (often tmpfs/RAM). The upload
+# gate (ADR-0343) only *scans* the first 128 MiB to find headers — it does not reject an oversized
+# tree — so the bound lives here. A real one-version module tree is well under 2 GiB / 200k files.
+_MAX_MODULES_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_MODULES_MEMBERS = 200_000
 
 
 class DepmodRunner(Protocol):
@@ -44,7 +50,39 @@ def _safe_module_extract_filter(member: tarfile.TarInfo, dest_path: str) -> tarf
     try:
         return tarfile.data_filter(member, dest_path)
     except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError) as _exc:
+        # Named at debug so a dropped-but-needed link is diagnosable rather than a silent trim.
+        _log.debug(
+            "module indexing: skipping unsafe link member %r -> %r", member.name, member.linkname
+        )
         return None
+
+
+def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
+    """Extract a modules tar member-by-member under a cumulative-size and member-count cap.
+
+    Bounds the root host-side extraction so a gzip/tar bomb in a semi-trusted upload cannot exhaust
+    the worker's temp filesystem: each member's declared size accrues, and the extraction aborts
+    (before writing the offending member) once either cap is crossed. Per-member extraction applies
+    :func:`_safe_module_extract_filter`, so path-traversal / symlink-escape protection is unchanged.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the uncompressed tree exceeds
+            :data:`_MAX_MODULES_UNCOMPRESSED_BYTES` or the member count exceeds
+            :data:`_MAX_MODULES_MEMBERS` — an oversized/hostile upload the caller can fix.
+    """
+    total = 0
+    for count, member in enumerate(archive, start=1):
+        total += member.size if member.isreg() else 0
+        if count > _MAX_MODULES_MEMBERS or total > _MAX_MODULES_UNCOMPRESSED_BYTES:
+            raise CategorizedError(
+                "uploaded module tree exceeds the host-extraction bound",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "max_uncompressed_bytes": _MAX_MODULES_UNCOMPRESSED_BYTES,
+                    "max_members": _MAX_MODULES_MEMBERS,
+                },
+            )
+        archive.extract(member, workdir, filter=_safe_module_extract_filter)
 
 
 def _run_host_depmod(*, basedir: Path, version: str) -> None:
@@ -109,10 +147,10 @@ def index_modules_tar(
     """
     try:
         with tarfile.open(modules_tar, "r:gz") as archive:
-            # Root extracts on the host, so keep data-filter safety and skip the unsafe build/source
-            # symlinks a module tree carries (see _safe_module_extract_filter) rather than the
-            # weaker "tar" filter, which would allow a root symlink-escape write.
-            archive.extractall(workdir, filter=_safe_module_extract_filter)
+            # Root extracts on the host: keep data-filter safety (skipping the unsafe build/source
+            # symlinks a module tree carries, see _safe_module_extract_filter) and bound the total
+            # size so a tar bomb cannot exhaust the host temp filesystem.
+            _extract_modules_bounded(archive, workdir)
     except (OSError, tarfile.TarError) as exc:
         raise CategorizedError(
             "failed to extract the modules tar for host-side indexing",

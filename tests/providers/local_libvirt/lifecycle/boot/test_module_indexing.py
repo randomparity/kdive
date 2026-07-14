@@ -97,6 +97,32 @@ def test_index_modules_tar_runs_depmod_and_repacks_with_dep(tmp_path: Path) -> N
     assert f"lib/modules/{_VERSION}/kernel/drivers/foo.ko" in names
 
 
+def test_index_modules_tar_rejects_oversize_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A gzip/tar bomb must not extract unbounded as root on the worker host: the cumulative
+    # uncompressed size is capped (#1148 review). Shrink the cap so the small fixture trips it.
+    modules_tar = _modules_tar(tmp_path, _VERSION)
+    monkeypatch.setattr(gkw, "_MAX_MODULES_UNCOMPRESSED_BYTES", 4)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    with pytest.raises(CategorizedError) as exc:
+        index_modules_tar(modules_tar, _VERSION, workdir=workdir, run_depmod=lambda **_kw: None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_index_modules_tar_rejects_too_many_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modules_tar = _modules_tar(tmp_path, _VERSION)
+    monkeypatch.setattr(gkw, "_MAX_MODULES_MEMBERS", 0)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    with pytest.raises(CategorizedError) as exc:
+        index_modules_tar(modules_tar, _VERSION, workdir=workdir, run_depmod=lambda **_kw: None)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_index_modules_tar_fails_when_depmod_produces_no_dep(tmp_path: Path) -> None:
     modules_tar = _modules_tar(tmp_path, _VERSION)
 
