@@ -125,13 +125,22 @@ remote-libvirt and fault-inject KDUMP sites are untouched — fadump is local-li
 ### 5. Live capture proof (attempt first, documented-verdict fallback)
 
 A `live_stack` driver attempts a real fadump capture under TCG on the x86_64 host, reusing
-the #1148 kdump-enabled ppc64le rootfs and bundle. Discriminating attribution: the running
-domain observed with `fadump=on`, `crashkernel=512M fadump=on` in the guest `/proc/cmdline`,
-and a non-empty `EM_PPC64` core under the `vmcore-fadump` key with makedumpfile fields
-recorded. Unlike the kdump AC, fadump-under-TCG may legitimately prove unusable: if the
-capture cannot be made to work after honest iteration, the verdict is documented (this QEMU
-10.2 floor + native-POWER validation deferred to #1152), which is the issue's explicit
-feasibility-gate fallback — not shipped as indeterminate.
+the #1148 kdump-enabled ppc64le rootfs and bundle. The proof must prove the **mechanism,
+not just the outcome**: the kernel silently kdump-falls-back when fadump cannot reserve or
+register memory (and still writes a `/var/crash/vmcore` kdive labels `vmcore-fadump`), so
+`fadump=on` in the cmdline and the object key only prove the flag was set. Confirm-first
+preconditions: `CONFIG_FA_DUMP=y` in the running kernel (strictly stronger than kdump's
+`CONFIG_CRASH_DUMP`), the kdump userspace, and ≥2 GB RAM. Discriminating attribution: the
+provisioned guest observed **pre-crash** with `/sys/kernel/fadump_registered==1` and
+`kexec_crash_loaded==0` (the fadump-active runtime signal ruling out the kdump fallback),
+plus the domain cmdline `fadump=on`, `crashkernel=512M fadump=on` in `/proc/cmdline`, and a
+non-empty `EM_PPC64` core under `vmcore-fadump` with makedumpfile fields recorded. The
+ADR-0318 config gate stays kdump-symbol-only (it cannot tell a fadump kernel from one that
+falls back), so this runtime signal — not a static config check — is the fadump safeguard.
+Unlike the kdump AC, fadump-under-TCG may legitimately prove unusable: if the capture cannot
+be made to work after honest iteration, the verdict is documented (this QEMU 10.2 floor +
+native-POWER validation deferred to #1152), which is the issue's explicit feasibility-gate
+fallback — not shipped as indeterminate.
 
 ## Consequences
 
