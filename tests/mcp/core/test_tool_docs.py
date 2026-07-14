@@ -405,6 +405,26 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
+def test_runs_create_build_profile_documents_arch() -> None:
+    # The nested build_profile.arch is agent-facing (ADR-0343): its description must name the
+    # allowed values. test_every_parameter_has_a_description checks only top-level params, so
+    # this guards the nested field explicitly.
+    tools = {t.name: t for t in TOOLS}
+    params = tools["runs.create"].parameters
+    build_profile = _object_schema(
+        cast(dict[str, object], _request_properties(params)["build_profile"])
+    )
+    ref = build_profile.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/"):
+        defs = cast(dict[str, object], params["$defs"])
+        build_profile = cast(dict[str, object], defs[ref.removeprefix("#/$defs/")])
+    props = cast(dict[str, object], build_profile["properties"])
+    arch = cast(dict[str, object], props["arch"])
+    description = arch.get("description")
+    assert isinstance(description, str) and description.strip()
+    assert "ppc64le" in description and "x86_64" in description
+
+
 def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
     # Extra kernel cmdline args are set on the real build/finalize tools, not through a
     # phantom subtool. The discovery text must name the actual public parameters.

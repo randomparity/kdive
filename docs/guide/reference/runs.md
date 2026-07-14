@@ -56,7 +56,12 @@ Cancel a non-terminal run, freeing its system without a teardown.
 
 `implemented`
 
-Complete an externally built run.
+Finalize an externally built Run: validate the uploaded artifacts, mark it succeeded.
+
+The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
+(declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
+does not match the declared arch is rejected. See artifacts.expected_uploads for the
+per-arch byte contract.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -83,7 +88,7 @@ Create a run, bound to a system or unbound against a target_kind.
 `request` fields:
 
 - `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, currently just {'schema_version': 1}. The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the request.cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
+- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the request.cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
   - `schema_version` (``=1``, required)
   - `arch` (`string`, optional) — Target CPU architecture the uploaded kernel is built for. One of ppc64le, x86_64; defaults to x86_64. Selects the boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md.
 - `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
