@@ -22,6 +22,11 @@ PCIE_DEVICES_KEY = "pcie_devices"
 # ``<guest>`` blocks; admission validates a profile arch against this set.
 GUEST_ARCHES_KEY = "guest_arches"
 
+# Whether the host QEMU implements pseries firmware-assisted dump (``ibm,configure-kernel-dump``,
+# QEMU ≥10.2) — a fail-closed bool recorded by local-libvirt discovery (ADR-0349). Admission gates
+# a fadump-opted provision against it; absent/non-bool reads as ``False`` (never fadump by default).
+PSERIES_FADUMP_KEY = "pseries_fadump"
+
 
 class GuestArch(TypedDict):
     """One bootable guest arch's accelerator and emulator, as advertised by discovery."""
@@ -92,6 +97,7 @@ _KNOWN_KEYS = frozenset(
         GUEST_ARCHES_KEY,
         MEMORY_MB_KEY,
         PCIE_DEVICES_KEY,
+        PSERIES_FADUMP_KEY,
         VCPUS_KEY,
         "arch",
     }
@@ -196,6 +202,15 @@ class ResourceCapabilities:
             if isinstance(accel, str) and isinstance(emulator, str):
                 arches[arch] = {"accel": accel, "emulator": emulator}
         return arches
+
+    def pseries_fadump(self) -> bool:
+        """Whether the host QEMU implements pseries fadump (ADR-0349), fail-closed.
+
+        Returns ``True`` only for a stored ``bool`` ``True``; an absent key, a non-``bool``
+        value, or a stale/hand-edited row reads as ``False`` so a fadump-opted provision is never
+        admitted against a host that does not advertise support.
+        """
+        return self._values.get(PSERIES_FADUMP_KEY) is True
 
     def pcie_descriptors(self) -> list[PCIeDescriptor]:
         raw = self._values.get(PCIE_DEVICES_KEY)

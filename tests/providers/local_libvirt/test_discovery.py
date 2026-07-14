@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import libvirt
 import pytest
@@ -12,6 +13,7 @@ from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     DISK_GB_KEY,
     GUEST_ARCHES_KEY,
+    PSERIES_FADUMP_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -26,9 +28,16 @@ from tests.providers.local_libvirt.fakes import (
 )
 
 
-def _discovery(conn: FakeLibvirtConn, *, cap: int = 2) -> LocalLibvirtDiscovery:
+def _discovery(
+    conn: FakeLibvirtConn, *, cap: int = 2, fadump: bool = False
+) -> LocalLibvirtDiscovery:
+    # Inject a hermetic fadump probe by default so no test spawns a real qemu --version subprocess
+    # (the production probe runs one when a ppc64le arch is advertised).
     return LocalLibvirtDiscovery(
-        host_uri="qemu:///system", connect=lambda: conn, concurrent_allocation_cap=cap
+        host_uri="qemu:///system",
+        connect=lambda: conn,
+        concurrent_allocation_cap=cap,
+        fadump_probe=lambda _guest_arches: fadump,
     )
 
 
@@ -99,6 +108,34 @@ def test_list_resources_advertises_guest_arches_filtered_to_supported() -> None:
         "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
         "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
     }
+
+
+def test_list_resources_records_pseries_fadump_from_the_probe() -> None:
+    # The probe's verdict (keyed off the discovered ppc64le emulator, ADR-0349) is recorded on the
+    # capabilities column, so admission can gate a fadump-opted provision against it.
+    conn = FakeLibvirtConn(caps_xml=_CAPS_XML_WITH_GUESTS)
+    supported = _discovery(conn, fadump=True).list_resources()[0]["capabilities"]
+    assert supported[PSERIES_FADUMP_KEY] is True
+    unsupported = _discovery(conn, fadump=False).list_resources()[0]["capabilities"]
+    assert unsupported[PSERIES_FADUMP_KEY] is False
+
+
+def test_list_resources_probe_receives_the_parsed_guest_arches() -> None:
+    # The probe is fed the same guest_arches recorded on the row, so it reads the ppc64le emulator.
+    seen: dict[str, Mapping[str, Mapping[str, str]]] = {}
+
+    def _probe(guest_arches: Mapping[str, Mapping[str, str]]) -> bool:
+        seen["arches"] = guest_arches
+        return False
+
+    conn = FakeLibvirtConn(caps_xml=_CAPS_XML_WITH_GUESTS)
+    LocalLibvirtDiscovery(
+        host_uri="qemu:///system",
+        connect=lambda: conn,
+        concurrent_allocation_cap=2,
+        fadump_probe=_probe,
+    ).list_resources()
+    assert seen["arches"]["ppc64le"]["emulator"] == "/usr/bin/qemu-system-ppc64"
 
 
 def test_list_resources_guest_arches_empty_when_no_guest_blocks() -> None:

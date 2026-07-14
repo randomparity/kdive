@@ -179,6 +179,28 @@ def test_guest_arches_key_not_in_extras() -> None:
     assert caps.extras() == {"other": 1}
 
 
+def test_pseries_fadump_true_only_for_a_bool_true() -> None:
+    from kdive.domain.catalog.resource_capabilities import PSERIES_FADUMP_KEY
+
+    assert ResourceCapabilities.from_mapping({PSERIES_FADUMP_KEY: True}).pseries_fadump() is True
+
+
+@pytest.mark.parametrize("value", [False, None, "true", 1, {}])
+def test_pseries_fadump_false_when_absent_or_not_a_bool(value: object) -> None:
+    # Fail-closed (ADR-0349): a stale or hand-edited row never advertises fadump by accident.
+    from kdive.domain.catalog.resource_capabilities import PSERIES_FADUMP_KEY
+
+    assert ResourceCapabilities.from_mapping({PSERIES_FADUMP_KEY: value}).pseries_fadump() is False
+    assert ResourceCapabilities.from_mapping({VCPUS_KEY: 8}).pseries_fadump() is False
+
+
+def test_pseries_fadump_key_not_in_extras() -> None:
+    from kdive.domain.catalog.resource_capabilities import PSERIES_FADUMP_KEY
+
+    caps = ResourceCapabilities.from_mapping({PSERIES_FADUMP_KEY: True, "other": 1})
+    assert PSERIES_FADUMP_KEY not in caps.extras()
+
+
 _X86_KVM: dict[str, GuestArch] = {
     "x86_64": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"},
     "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"},
