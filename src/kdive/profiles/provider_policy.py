@@ -36,6 +36,13 @@ class ProfilePolicy(Protocol):
 
     def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool: ...
 
+    def fadump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        """Return whether the System is provisioned for firmware-assisted dump (ADR-0349).
+
+        Only local-libvirt on ppc64le offers fadump; other providers return ``False``. Admission
+        gates a fadump-opted provision against the host's discovered ``pseries_fadump`` capability.
+        """
+
 
 def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> ProvisioningProfile:
     if isinstance(profile, ProvisioningProfile):

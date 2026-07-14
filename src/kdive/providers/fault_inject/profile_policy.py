@@ -30,3 +30,7 @@ class FaultInjectProfilePolicy:
 
     def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
         return False
+
+    def fadump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        # fadump is a local-libvirt/pseries opt-in (ADR-0349); the mock provider does not offer it.
+        return False

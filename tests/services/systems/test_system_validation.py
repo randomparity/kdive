@@ -18,6 +18,7 @@ from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.services.systems.validation import (
     _reject_unknown_destructive_ops,
+    require_fadump_supported,
     resolve_accel,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
@@ -295,6 +296,25 @@ def test_resolve_accel_rejects_unadvertised_arch_naming_supported_set() -> None:
     assert "x86_64" in str(exc)
     assert "ppc64le" in str(exc)  # the supported set is named in the message
     assert exc.details == {"requested_arch": "x86_64", "accepted_values": ["ppc64le"]}
+
+
+def test_require_fadump_supported_noop_when_not_requested() -> None:
+    # A non-fadump provision is never gated, regardless of the host signal (ADR-0349).
+    require_fadump_supported(requested=False, supported=False)
+    require_fadump_supported(requested=False, supported=True)
+
+
+def test_require_fadump_supported_passes_when_requested_and_supported() -> None:
+    require_fadump_supported(requested=True, supported=True)
+
+
+def test_require_fadump_supported_rejects_when_requested_but_unsupported() -> None:
+    # Fail-closed: a fadump-opted provision on an unsupporting host is a CONFIGURATION_ERROR
+    # naming the QEMU floor, raised before any capacity is debited (never a hang).
+    with pytest.raises(CategorizedError) as exc:
+        require_fadump_supported(requested=True, supported=False)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "10.2" in str(exc.value)
 
 
 @pytest.mark.parametrize(
