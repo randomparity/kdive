@@ -6,8 +6,9 @@ bzImage on x86_64, an ELF ``vmlinux`` on ppc64le. These tests lock that contract
 ELF boot member round-trips byte-identically and a ``.ppc64le`` module version is handled, so the
 day someone re-adds a bzImage-only assumption to the host-side path, ppc64le fails CI here.
 
-Scope: the *host-side tar I/O* only. The real ``_RealGuestKernelWriter``'s in-guest ``depmod`` on
-a ppc64le overlay (libguestfs cross-arch execution) is a live-only question, not covered here.
+Scope: the *host-side tar I/O* only. Cross-arch module indexing (``depmod``) is covered separately
+in ``test_module_indexing.py`` — as of #1148 it runs host-side, so it is no longer a libguestfs
+cross-arch-execution question.
 """
 
 from __future__ import annotations
@@ -19,8 +20,10 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import _RealGuestKernelWriter
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
+    capped_tar_members,
     extract_boot_vmlinuz,
     repack_modules_subtree,
 )
@@ -159,3 +162,44 @@ def test_repack_modules_subtree_returns_false_when_no_modules_present(tmp_path: 
 
     assert repack_modules_subtree(combined, modules_tar) is False
     assert not modules_tar.exists()
+
+
+def test_capped_tar_members_rejects_a_member_count_bomb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # getmembers()/getnames() eagerly build one TarInfo per member, so a header bomb would OOM the
+    # worker before any content is read. The lazy capped iterator rejects past the bound (#1148).
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_MEMBERS", 2)
+    tar_path = tmp_path / "many.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as out:
+        for i in range(5):
+            _tar_add(out, f"lib/modules/{_PPC64LE_VERSION}/m{i}.ko", b"x")
+    with tarfile.open(tar_path, "r:gz") as archive, pytest.raises(CategorizedError) as exc:
+        list(capped_tar_members(archive))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_extract_boot_vmlinuz_rejects_an_oversize_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A boot member declaring a huge size is a decompression bomb: reject before read() allocates.
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member()))
+    with pytest.raises(CategorizedError) as exc:
+        extract_boot_vmlinuz(combined, tmp_path / "kernel")
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_repack_modules_subtree_rejects_an_oversize_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cumulative module-tree size over the bound is rejected, and the partial temp tar is cleaned.
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member()))
+    dest = tmp_path / "modules.tar.gz"
+    with pytest.raises(CategorizedError) as exc:
+        repack_modules_subtree(combined, dest)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert not dest.with_name(dest.name + ".part").exists()

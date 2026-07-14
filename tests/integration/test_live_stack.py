@@ -1014,8 +1014,9 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
     ADR-0342/0055) — the positive initrd-addressing signal (no pseries ``<initrd>`` quirk).
 
     Skips cleanly without ``qemu-system-ppc64`` / the published rootfs / the uploaded bundle. The
-    guest-kernel-writer's in-guest ``depmod`` (module injection) is a separate, arch-constrained
-    path proven in the committed record, not exercised by this plain boot (ADR-0344). Self-cleans.
+    guest-kernel-writer's module injection is a separate path (host-side ``depmod`` as of #1148,
+    ADR-0346); this plain boot injects no modules, so it does not exercise it (ADR-0344).
+    Self-cleans.
     """
     issuer, base_url, image, kernel_tar, initrd = _ppc64le_bundle_preflight()
     operator_token = _token(issuer, role="operator")
@@ -1130,6 +1131,205 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                     assert run_id in xml, "domain <kernel>/<initrd> not at the per-Run staged path"
                     assert proof_token in xml, "install cmdline token did not reach <cmdline>"
                     assert "pseries" in xml, "domain is not a pseries machine"
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
+def _ppc64le_kdump_provision_profile(image: str) -> dict[str, object]:
+    """A ppc64le KDUMP + force_crash provision profile for the #1148 capture proof.
+
+    ``crashkernel`` is set to a **sentinel** ``"256M"`` — different from the ppc64le arch default
+    (512M, ADR-0346) — for the sole purpose of selecting ``CaptureMethod.KDUMP`` (the profile token
+    is only a method signal; ``capture_method`` keys off its presence, never its value). No
+    per-install ``crashkernel`` is passed at ``runs.install``, so the *arch default* 512M is what
+    actually reaches the boot cmdline. Observing ``crashkernel=512M`` (not ``256M``) in the running
+    domain's ``<cmdline>`` therefore proves the arch default sized the reservation. ``memory_mb`` is
+    2048 so the 512M reservation is honored and still leaves a bootable first kernel;
+    ``force_crash`` is opted in for the destructive-op gate (ADR-0045).
+    """
+    return {
+        "schema_version": 1,
+        "arch": "ppc64le",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": image},
+                "crashkernel": "256M",
+                "destructive_ops": ["force_crash"],
+            }
+        },
+    }
+
+
+@pytest.mark.live_stack
+def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
+    """Prove kdump capture works on a ppc64le guest under TCG on the x86_64 host (#1148).
+
+    The blocking live proof for #1148 acceptance criterion 5. Extends the #1146 uploaded-bundle
+    boot through the **KDUMP** capture path:
+
+    - ``runs.install`` on a KDUMP System fires the guest kernel writer, whose module indexing now
+      runs **host-side** (``depmod -b``, ADR-0346) — so the ppc64le module tree indexes correctly
+      under the x86_64 libguestfs appliance, retiring #1146's CONSTRAINED depmod verdict.
+    - The boot uses the ppc64le **arch-default** ``crashkernel=512M`` (ADR-0346), not the ``256M``
+      sentinel profile token and no per-install override — asserted in the running domain's
+      ``<cmdline>``, so the default (not the profile/per-install value) provably sized it.
+    - ``control.force_crash`` panics the guest; its kdump kernel kexec-boots, runs makedumpfile, and
+      writes the vmcore; ``vmcore.fetch`` harvests it and ``vmcore.list`` surfaces a redacted core.
+
+    The pseries VMCOREINFO/fw_cfg verdict is recorded from this run (the domain emits no
+    ``<features>`` device — kdump reads VMCOREINFO from ``/proc/vmcore``, ADR-0346 §3) in the
+    proof-record doc. Skips cleanly without ``qemu-system-ppc64`` / the rootfs / the bundle.
+    Self-cleans (release) on exit.
+    """
+    issuer, base_url, image, kernel_tar, initrd = _ppc64le_bundle_preflight()
+    operator_token = _token(issuer, role="operator")
+    admin_token = _token(issuer, role="admin")
+    proof_token = f"kdive_proof_token={uuid4().hex[:12]}"
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        admin = LiveStackClient.over_http(base_url, admin_token)
+        allocation_id = ""
+        async with op, admin:
+            try:
+                async with phase("ppc64le-kdump:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "ppc64le-kdump:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("ppc64le-kdump:provision"):
+                    profile = _ppc64le_kdump_provision_profile(image)
+                    env = ok(
+                        await scalar(
+                            op, "systems.provision", allocation_id=allocation_id, profile=profile
+                        ),
+                        "ppc64le-kdump:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "ppc64le-kdump:provision", system_id, "ready")
+                async with phase("ppc64le-kdump:create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            request={"project": _PROJECT, "title": "ppc64le-kdump-1148"},
+                        ),
+                        "ppc64le-kdump:create-run",
+                    )
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            request={
+                                "investigation_id": env.object_id,
+                                "system_id": system_id,
+                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                            },
+                        ),
+                        "ppc64le-kdump:create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("ppc64le-kdump:upload"):
+                    decls = [
+                        {
+                            "name": "kernel",
+                            "sha256": _sha256_b64(kernel_tar),
+                            "size_bytes": kernel_tar.stat().st_size,
+                        },
+                        {
+                            "name": "initrd",
+                            "sha256": _sha256_b64(initrd),
+                            "size_bytes": initrd.stat().st_size,
+                        },
+                    ]
+                    up = ok(
+                        await scalar(
+                            op, "artifacts.create_run_upload", run_id=run_id, artifacts=decls
+                        ),
+                        "ppc64le-kdump:upload",
+                    )
+                    by_name = {item.data.get("name"): item for item in up.items}
+                    await _put_presigned(by_name["kernel"], kernel_tar)
+                    await _put_presigned(by_name["initrd"], initrd)
+                    ok(
+                        await scalar(op, "runs.complete_build", run_id=run_id),
+                        "ppc64le-kdump:upload",
+                    )
+                async with phase("ppc64le-kdump:install"):
+                    # KDUMP install → the guest kernel writer indexes the ppc64le module tree
+                    # host-side (ADR-0346). No per-install crashkernel → the arch default (512M).
+                    env = ok(
+                        await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
+                        "ppc64le-kdump:install",
+                    )
+                    await drain_job(op, "ppc64le-kdump:install", env.object_id)
+                async with phase("ppc64le-kdump:boot"):
+                    env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-kdump:boot")
+                    await drain_job(
+                        op, "ppc64le-kdump:boot", env.object_id, deadline_s=_PPC64LE_BOOT_DEADLINE_S
+                    )
+                async with phase("ppc64le-kdump:attribute"):
+                    xml = subprocess.run(
+                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout
+                    assert run_id in xml, "domain <kernel> not at the per-Run staged path"
+                    assert proof_token in xml, "install cmdline token did not reach <cmdline>"
+                    assert "pseries" in xml, "domain is not a pseries machine"
+                    # The arch default sized the reservation (not the 256M sentinel profile token).
+                    assert "crashkernel=512M" in xml, (
+                        "arch-default crashkernel=512M not in <cmdline>"
+                    )
+                    # kdump needs no QEMU vmcoreinfo device on pseries (ADR-0346 §3): none emitted.
+                    assert "<vmcoreinfo" not in xml, (
+                        "pseries domain unexpectedly emits <vmcoreinfo>"
+                    )
+                async with phase("ppc64le-kdump:crash"):
+                    ok(
+                        await scalar(admin, "control.force_crash", system_id=system_id),
+                        "ppc64le-kdump:crash",
+                    )
+                    await await_system_state(admin, "ppc64le-kdump:crash", system_id, "crashed")
+                async with phase("ppc64le-kdump:capture"):
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-kdump:capture"
+                    )
+                    await drain_job(
+                        op,
+                        "ppc64le-kdump:capture",
+                        env.object_id,
+                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                    )
+                    listing = ok(
+                        await scalar(op, "vmcore.list", run_id=run_id), "ppc64le-kdump:capture"
+                    )
+                    refs = [v for item in listing.items for v in item.refs.values()]
+                    assert refs, "no vmcore artifact listed — kdump captured no core"
+                    # Only the redacted core is exposed (raw vmcore-<method> must never surface).
+                    assert all(
+                        not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
+                    ), "raw ppc64le vmcore leaked"
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)

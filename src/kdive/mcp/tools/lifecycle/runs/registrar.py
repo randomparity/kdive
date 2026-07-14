@@ -11,6 +11,7 @@ from pydantic import Field
 from kdive.domain.capacity.state import RunState
 from kdive.domain.external_provenance import PROVENANCE_FIELD_MAX_LEN
 from kdive.domain.labels import LABEL_MAX_LEN
+from kdive.domain.platform.arch_traits import default_crashkernel_summary
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
@@ -41,7 +42,6 @@ from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
 from kdive.security.authz.rbac import Role
-from kdive.services.runs.steps import DEFAULT_CRASHKERNEL
 
 
 class _RunsCreatePayload(ToolPayload):
@@ -428,7 +428,8 @@ def _register_runs_install(
                     "needed. Replaces any build-time extra args. These platform args are always "
                     "present and cannot be overridden: the platform serial console "
                     "(console=ttyS0 on x86, console=hvc0 on pseries), root=/dev/vda, plus "
-                    "crashkernel=256M (kdump) or nokaslr (gdbstub) per the System's capture "
+                    f"crashkernel (kdump, per-arch default: {default_crashkernel_summary()}) or "
+                    "nokaslr (gdbstub) per the System's capture "
                     "method. Passing a value different from the currently installed one re-stages "
                     "the boot; sweep boot-parameter variants (e.g. 'dhash_entries=1' then "
                     "'dhash_entries=2') by calling runs.install with a new value then runs.boot, "
@@ -441,14 +442,15 @@ def _register_runs_install(
             str | None,
             Field(
                 description=(
-                    f"kdump crash-capture reservation size, replacing the default "
-                    f"{DEFAULT_CRASHKERNEL} in the platform crashkernel= token (e.g. '512M' for a "
-                    "KASAN kernel or a large guest). Pass only the reservation argument, not the "
-                    "whole token; a size or a kernel range is accepted. Applies only to "
-                    "kdump-capture Systems — a value on a non-kdump System is rejected. Each "
-                    "install fully specifies both cmdline and crashkernel: omitting either reverts "
-                    f"that one to its default (cmdline to the build-time args, crashkernel to "
-                    f"{DEFAULT_CRASHKERNEL}), so on an already-installed Run, restate both to keep "
+                    "kdump crash-capture reservation size, replacing the platform per-arch "
+                    f"default ({default_crashkernel_summary()}) in the crashkernel= token (e.g. "
+                    "'1G' for a KASAN kernel or a large guest). Pass only the reservation "
+                    "argument, not the whole token; a size or a kernel range is accepted. Applies "
+                    "only to kdump-capture Systems — a value on a non-kdump System is rejected. "
+                    "Each install fully specifies both cmdline and crashkernel: omitting either "
+                    "reverts "
+                    "that one to its default (cmdline to the build-time args, crashkernel to the "
+                    "per-arch default), so on an already-installed Run, restate both to keep "
                     "them. The live value is reported by runs.get as data.installed_crashkernel."
                 )
             ),

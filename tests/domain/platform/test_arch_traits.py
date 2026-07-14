@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.domain.platform.arch_traits import _TRAITS, SUPPORTED_ARCHES, arch_traits
+from kdive.domain.platform.arch_traits import (
+    _TRAITS,
+    SUPPORTED_ARCHES,
+    arch_traits,
+    default_crashkernel_summary,
+)
 
 
 def test_x86_64_traits_are_q35_ttys0_pinned() -> None:
@@ -38,6 +43,22 @@ def test_ppc64le_kvm_cpu_mode_and_no_acpi_features() -> None:
     traits = arch_traits("ppc64le")
     assert traits.kvm_cpu_mode == "host-model"
     assert traits.emit_acpi_features is False
+
+
+def test_per_arch_crashkernel_defaults() -> None:
+    # ppc64le distros reserve more than x86 for kdump (RHEL's kdump-utils floor is 384M for a
+    # 2-4 GB guest, 512M for 4-16 GB — roughly double x86); a ppc64le guest that boots with the
+    # x86 256M risks a kdump kernel that OOMs before makedumpfile runs (#1148, ADR-0346).
+    assert arch_traits("x86_64").default_crashkernel == "256M"
+    assert arch_traits("ppc64le").default_crashkernel == "512M"
+
+
+def test_default_crashkernel_summary_names_every_arch_default() -> None:
+    # The agent-facing runs.install Field text is rendered from this single source, so it cannot
+    # drift from the trait table (#1148). Adding an arch updates the agent text automatically.
+    summary = default_crashkernel_summary()
+    assert "256M on x86_64" in summary
+    assert "512M on ppc64le" in summary
 
 
 def test_supported_arches_is_the_traits_keys() -> None:

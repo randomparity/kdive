@@ -127,8 +127,9 @@ class InstallPayload(RunPayload):
     build-baked extra. A blank value is rejected (a caller mistake, distinct from omitting it). A
     pre-#988 install job serialized as bare ``{run_id}`` decodes here with ``cmdline=None``.
 
-    ``crashkernel`` (#989) is the per-install kdump reservation size that replaces the default
-    ``256M`` in the platform ``crashkernel=<size>`` token; ``None`` uses the default. The token is
+    ``crashkernel`` (#989) is the per-install kdump reservation size that replaces the per-arch
+    default (``arch_traits(arch).default_crashkernel`` — 256M x86_64, 512M ppc64le; ADR-0346) in the
+    platform ``crashkernel=<size>`` token; ``None`` uses that default. The token is
     opaque (a size, or a multi-range like ``1G-2G:128M,2G-:256M``), but injection-safe: a blank
     value, internal whitespace (which would inject an extra kernel token into the space-joined
     cmdline), a non-printable character (which would fail XML rendering of the domain

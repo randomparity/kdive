@@ -63,12 +63,25 @@ def test_local_root_console_omits_crashkernel() -> None:
     )
 
 
-def test_ppc64le_leads_with_the_hvc0_console() -> None:
+def test_ppc64le_leads_with_the_hvc0_console_and_512m_default() -> None:
     # pseries has no ttyS0; the serial console is hvc0 (spapr-vty). A ppc64le System must lead with
     # console=hvc0 or the readiness marker never reaches the host serial log and boot times out.
+    # The crashkernel default is the per-arch value from arch_traits — 512M on ppc64le, not the
+    # x86 256M (#1148, ADR-0346).
     assert (
         system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch="ppc64le")
-        == "console=hvc0 root=/dev/vda crashkernel=256M"
+        == "console=hvc0 root=/dev/vda crashkernel=512M"
+    )
+
+
+def test_ppc64le_explicit_crashkernel_still_wins_over_the_arch_default() -> None:
+    # The ADR-0300 per-install reservation overrides the per-arch default on ppc64le too — only the
+    # None fallback is arch-keyed.
+    assert (
+        system_required_cmdline(
+            CaptureMethod.KDUMP, _LOCAL_ROOT, arch="ppc64le", crashkernel="384M"
+        )
+        == "console=hvc0 root=/dev/vda crashkernel=384M"
     )
 
 
