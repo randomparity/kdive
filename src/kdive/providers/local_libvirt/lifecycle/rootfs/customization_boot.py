@@ -1,11 +1,14 @@
-"""Customization-boot console classification (ADR-0345).
+"""Customization-boot console classification, orchestration, and offline seal (ADR-0345).
 
 The boot-to-self-customize mechanism replaces `virt-customize --install/--run-command`
 execution with a transient domain that boots the rootfs's own kernel, runs a firstboot
 script, and reports completion via a console marker line. This module owns the shared
 constants that both the firstboot renderer (`renderers.py`) and the offline injector
-(`rootfs_build.py`) must agree on, plus the console classifier that turns a raw console
-capture into an :class:`CustomizeVerdict`.
+(`rootfs_build.py`) must agree on, the console classifier that turns a raw console capture
+into a :class:`CustomizeVerdict`, the `run_customization_boot` orchestration that drives the
+transient domain to completion, and `seal_customized_image`, which offline-reseals the image
+(cloud-init reset, optional SELinux relabel, firstboot-unit-removed assertion) once the boot
+reports ok.
 
 The genuine-fault pattern is the provisioning boot's `_CRASH_SIGNATURE`
 (`kdive.providers.local_libvirt.lifecycle.boot.readiness`) minus the two signatures that are
@@ -24,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from math import ceil
+from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
@@ -31,12 +35,14 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.planes._build_common import run_guestfs_tool
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import _domain_exit_probe
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.settings import (
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
     LIBVIRT_URI,
 )
+from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
 from kdive.providers.shared.runtime_paths import (
     build_domain_name,
     console_log_path,
@@ -259,4 +265,68 @@ def _boot_timeout(data: bytes) -> CategorizedError:
         "customization boot did not reach the ok marker within the window",
         category=ErrorCategory.BOOT_TIMEOUT,
         details={"console_tail": _console_tail(data)},
+    )
+
+
+type GuestfishRunner = Callable[[Path, str], None]
+
+_SEAL_UNIT_NOT_REMOVED_MESSAGE = (
+    "customization firstboot unit was not self-removed; the build boot did not complete cleanly"
+)
+_SEAL_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
+
+
+def _seal_script(*, unit_name: str, selinux: bool) -> str:
+    """Render the offline seal guestfish script (ADR-0345).
+
+    Resets cloud-init's per-instance state (so a subsequent provision boot re-runs
+    ``resize_rootfs`` against the fresh overlay rather than a stale seen-once record),
+    optionally forces a first-boot SELinux relabel, and — as its last check — asserts the
+    firstboot customization unit self-removed: the ``sh`` command aborts the guestfish
+    script non-zero if the unit file or its ``multi-user.target.wants`` symlink is still
+    present (mirrors ``verify_cloud_init``'s empirically-verified abort-on-failed-check
+    pattern), which the real runner maps onto ``PROVISIONING_FAILURE``.
+    """
+    lines = [
+        "rm-rf /var/lib/cloud/instances",
+        "rm-rf /var/lib/cloud/instance",
+        "rm-rf /var/lib/cloud/sem",
+        "rm-rf /var/lib/cloud/data",
+    ]
+    if selinux:
+        lines.append("touch /.autorelabel")
+    lines.append(f"sh 'test ! -e /etc/systemd/system/{unit_name}'")
+    lines.append(f"sh 'test ! -e /etc/systemd/system/multi-user.target.wants/{unit_name}'")
+    return "\n".join(lines) + "\n"
+
+
+def seal_customized_image(
+    qcow2: Path, *, unit_name: str, selinux: bool, run_guestfish: GuestfishRunner
+) -> None:
+    """Offline-seal a customized rootfs image after a successful customization boot (ADR-0345).
+
+    Runs one guestfish script (via the injected ``run_guestfish``) that resets cloud-init's
+    per-instance state, optionally touches ``/.autorelabel``, and asserts the firstboot
+    customization unit self-removed. ``run_guestfish`` raises on any script failure — a
+    still-present unit is the only realistic way this script exits non-zero, so its failure
+    is reported as the customization boot not completing cleanly.
+
+    Args:
+        qcow2: The staged rootfs image the customization boot ran against.
+        unit_name: The firstboot unit name that must have self-removed (``CUSTOMIZE_UNIT``).
+        selinux: Whether to force a first-boot SELinux relabel via ``/.autorelabel``.
+        run_guestfish: The injected guestfish script runner (real or fake).
+    """
+    run_guestfish(qcow2, _seal_script(unit_name=unit_name, selinux=selinux))
+
+
+def _real_run_guestfish(qcow2: Path, script: str) -> None:  # pragma: no cover - live_vm
+    """Run a guestfish script against ``qcow2``, mapping any failure onto a categorized error."""
+    run_guestfs_tool(
+        ["guestfish", "--rw", "-a", str(qcow2), "-i"],
+        stage="customization-seal",
+        timeout_s=_SEAL_TIMEOUT_S,
+        missing_message="guestfish is not installed; cannot seal the customized rootfs image",
+        failure_message=_SEAL_UNIT_NOT_REMOVED_MESSAGE,
+        input_text=script,
     )

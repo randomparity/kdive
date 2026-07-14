@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
+    CUSTOMIZE_UNIT,
     CustomizationBootSeams,
     CustomizeVerdict,
     run_customization_boot,
+    seal_customized_image,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
     classify_customization_console as C,
@@ -176,3 +179,75 @@ def test_unreadable_console_propagates_and_tears_down():
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert domain.destroyed is True  # finally force-off ran despite the raise
+
+
+class _RecordingGuestfish:
+    """A fake `GuestfishRunner` that records the `(qcow2, script)` it was called with."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, str]] = []
+
+    def __call__(self, qcow2: Path, script: str) -> None:
+        self.calls.append((qcow2, script))
+
+
+def _raising_guestfish(_qcow2: Path, _script: str) -> None:
+    """A fake `GuestfishRunner` simulating a guestfish script whose unit-removed check failed.
+
+    Mirrors the real runner: the check is embedded in the guestfish script itself, so a still-
+    present unit surfaces as the script exiting non-zero, which `run_guestfs_tool` maps onto
+    `PROVISIONING_FAILURE`.
+    """
+    raise CategorizedError(
+        "customization firstboot unit was not self-removed; the build boot did not "
+        "complete cleanly",
+        category=ErrorCategory.PROVISIONING_FAILURE,
+    )
+
+
+def test_seal_script_resets_cloud_init_state(tmp_path):
+    guestfish = _RecordingGuestfish()
+    seal_customized_image(
+        tmp_path / "img.qcow2", unit_name=CUSTOMIZE_UNIT, selinux=False, run_guestfish=guestfish
+    )
+    (_qcow2, script) = guestfish.calls[0]
+    assert "rm-rf /var/lib/cloud/instances" in script
+    assert "rm-rf /var/lib/cloud/instance" in script
+    assert "rm-rf /var/lib/cloud/sem" in script
+    assert "rm-rf /var/lib/cloud/data" in script
+
+
+def test_seal_script_touches_autorelabel_iff_selinux():
+    guestfish = _RecordingGuestfish()
+    seal_customized_image(
+        Path("/img.qcow2"), unit_name=CUSTOMIZE_UNIT, selinux=True, run_guestfish=guestfish
+    )
+    assert "touch /.autorelabel" in guestfish.calls[0][1]
+
+    guestfish = _RecordingGuestfish()
+    seal_customized_image(
+        Path("/img.qcow2"), unit_name=CUSTOMIZE_UNIT, selinux=False, run_guestfish=guestfish
+    )
+    assert "touch /.autorelabel" not in guestfish.calls[0][1]
+
+
+def test_seal_script_asserts_firstboot_unit_and_wants_symlink_are_gone():
+    guestfish = _RecordingGuestfish()
+    seal_customized_image(
+        Path("/img.qcow2"), unit_name=CUSTOMIZE_UNIT, selinux=False, run_guestfish=guestfish
+    )
+    script = guestfish.calls[0][1]
+    assert f"/etc/systemd/system/{CUSTOMIZE_UNIT}" in script
+    assert f"multi-user.target.wants/{CUSTOMIZE_UNIT}" in script
+
+
+def test_seal_raises_provisioning_failure_when_unit_still_present():
+    with pytest.raises(CategorizedError) as ei:
+        seal_customized_image(
+            Path("/img.qcow2"),
+            unit_name=CUSTOMIZE_UNIT,
+            selinux=False,
+            run_guestfish=_raising_guestfish,
+        )
+    assert ei.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert "was not self-removed" in str(ei.value)
