@@ -63,6 +63,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "SSH-reachability live_stack test (#956, ADR-0294); unset → the rhel parameter skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_GUEST_IMAGE_PPC64LE",
+        "test",
+        None,
+        "Path to a Fedora ppc64le kdive-ready qcow2 for the live TCG boot proof live_stack test "
+        "(#1144, epic #1139); unset (or no qemu-system-ppc64) → that test skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_TEST_BUILD_CONFIG",
         "test",
         None,

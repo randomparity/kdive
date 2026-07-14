@@ -28,6 +28,16 @@ name: console-ready_x86_64
 arch: x86_64
 """
 
+# The ppc64le sibling (#1144, epic #1139). Same shape as the x86_64 profile — just the
+# (provider, name, arch) triple; arch=ppc64le is what routes a System pointed at it through the
+# pseries arch traits (machine=pseries, console=hvc0; kdive.domain.platform).
+_PPC64LE_PROFILE_RELATIVE = "profiles/console-ready_ppc64le.yaml"
+
+_PPC64LE_PROFILE_YAML = """provider: local-libvirt
+name: console-ready_ppc64le
+arch: ppc64le
+"""
+
 
 def _manifest_yaml() -> str:
     """Serialize the local-libvirt fixture manifest (empty rootfs list; profiles only)."""
@@ -40,7 +50,7 @@ def _manifest_yaml() -> str:
             overlay_dir=Path("/var/lib/kdive/rootfs/overlays"),
         ),
         rootfs=[],
-        profiles=[_PROFILE_RELATIVE],
+        profiles=[_PROFILE_RELATIVE, _PPC64LE_PROFILE_RELATIVE],
     )
     return yaml.safe_dump(manifest.model_dump(mode="json"), sort_keys=False)
 
@@ -49,6 +59,7 @@ def _build_fixture_files() -> dict[str, str]:
     return {
         "manifest.yaml": _manifest_yaml(),
         _PROFILE_RELATIVE: _PROFILE_YAML,
+        _PPC64LE_PROFILE_RELATIVE: _PPC64LE_PROFILE_YAML,
     }
 
 

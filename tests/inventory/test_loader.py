@@ -125,6 +125,23 @@ def test_repo_systems_toml_example_parses_with_staged_path_image() -> None:
     assert img.source.path.startswith("/var/lib/kdive/rootfs/")
 
 
+def test_repo_systems_toml_example_declares_ppc64le_baseline_image() -> None:
+    # The ppc64le baseline seed row (#1144, epic #1139): the operator template must carry a
+    # ppc64le sibling of fedora-kdive-ready-44 so a ppc64le System can resolve an image_catalog
+    # row. arch=ppc64le is the identity component that distinguishes it from the x86_64 row.
+    example = Path(__file__).resolve().parents[2] / "systems.toml.example"
+    doc = load_inventory(example)
+    ppc = [img for img in doc.image if img.name == "fedora-kdive-ready-44-ppc64le"]
+    assert ppc, "systems.toml.example must declare the fedora-kdive-ready-44-ppc64le image"
+    img = ppc[0]
+    assert img.provider == "local-libvirt"
+    assert img.arch == "ppc64le"
+    # It is an externally-baked s3 image with operator-attested operands (ADR-0323): the attested
+    # boot_kernel_count keeps the single-kernel baseline provisionable at describe-time.
+    assert img.attested is not None
+    assert img.attested.boot_kernel_count == 1
+
+
 def test_repo_systems_toml_example_uses_only_known_capability_tokens() -> None:
     # Every capability tag in the shipped inventory must be a member of the closed vocabulary
     # (ADR-0286); no off-vocabulary `kdive-ready-console`/`ssh`/`cloud-init` tokens.

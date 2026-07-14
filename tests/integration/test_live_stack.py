@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import time
 from pathlib import Path
 
 import pytest
@@ -67,6 +69,17 @@ _ARTIFACT_NAME = "accounting-report.json"
 # Per-family *-kdive-ready rootfs images for the SSH-reachability proof (#956, ADR-0294). Each is a
 # distinct artifact; a host with only one family's image proves that family and skips the other.
 _FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_IMAGE_RHEL"}
+# The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
+# published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
+# emulation on the x86_64 host (qemu-system-ppc64), so it also gates on that emulator being present.
+_PPC64LE_IMAGE_ENV = "KDIVE_GUEST_IMAGE_PPC64LE"
+_PPC64LE_EMULATOR = "qemu-system-ppc64"
+# A Fedora ppc64le guest under TCG boots far slower than a native KVM guest — the first boot
+# runs the SELinux relabel and reboots, then the second boot brings up cloud-init networking and
+# sshd (~several minutes wall-clock on the x86_64 host). Poll the reachability probe under a
+# generous deadline rather than the fast KVM-tuned authorize_ssh_key pre-flight (#1144).
+_PPC64LE_REACHABLE_DEADLINE_S = 900.0
+_PPC64LE_REACHABLE_POLL_S = 20.0
 # A throwaway ed25519 public key (public half only; KDIVE never needs the private key to append it).
 # Fixed is fine: authorize_ssh_key dedups on the key fingerprint, so a re-run is idempotent.
 _REACHABILITY_PUBKEY = (
@@ -226,6 +239,27 @@ def test_provision_profile_disk_gb_equals_allocation_request(
         reconcile_profile_sizing(over_asking, snapshot)
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert caught.value.details["field"] == "disk_gb"
+
+
+def test_ppc64le_provision_profile_disk_gb_equals_allocation_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ppc64le reachability profile obeys the same disk-equality invariant, at arch=ppc64le.
+
+    The live proof (#1144) is ``live_stack``-gated, so this non-gated companion keeps a CI
+    assertion on the new ppc64le factory: its ``disk_gb`` equals the allocation constant (ADR-0205)
+    and its ``arch`` is ``ppc64le`` (the field that routes provisioning through the pseries traits).
+    """
+    monkeypatch.setenv(_KERNEL_TREE_ENV, "/nonexistent/kernel-src")
+    profile = _reachability_provision_profile(
+        "/nonexistent/fedora-ppc64le.qcow2", arch="ppc64le", crashkernel="512M"
+    )
+    assert profile["arch"] == "ppc64le"
+    assert profile["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
+
+    snapshot = AllocationSizing(vcpu=2, memory_mb=2048, disk_gb=LOCAL_ALLOCATION_DISK_GB)
+    reconciled = reconcile_profile_sizing(profile, snapshot)
+    assert reconciled["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
 
 
 # --- RBAC negative: the raised path (no real system needed) ----------------------------------
@@ -651,16 +685,23 @@ def _reachability_preflight(family: str) -> tuple[OidcIssuer, str, str, str]:
     return issuer, base_url, db_url, image
 
 
-def _reachability_provision_profile(image: str) -> dict[str, object]:
+def _reachability_provision_profile(
+    image: str, *, arch: str = "x86_64", crashkernel: str = "256M"
+) -> dict[str, object]:
     """A minimal direct-kernel profile for the reachability proof.
 
     The loopback SSH forward + virtio NIC render on *every* local-libvirt provision (ADR-0281), so
     the profile carries no credential field — drgn-live authenticates with the per-System bootstrap
     key (ADR-0289/0315). No ``force_crash`` (no destructive op needed).
+
+    ``arch`` selects the guest arch (``ppc64le`` for the #1144 TCG boot proof; admission then
+    persists ``accel=tcg`` and the provisioner renders a pseries/qemu domain). ``kernel_source_ref``
+    is a required-but-unread ``direct-kernel`` token — provision boots the rootfs's *own* baseline
+    kernel (ADR-0272), so the x86_64 kernel tree is a valid arch-opaque value for a ppc64le guest.
     """
     return {
         "schema_version": 1,
-        "arch": "x86_64",
+        "arch": arch,
         "vcpu": 2,
         "memory_mb": 2048,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -669,7 +710,7 @@ def _reachability_provision_profile(image: str) -> dict[str, object]:
         "provider": {
             "local-libvirt": {
                 "rootfs": {"kind": "local", "path": image},
-                "crashkernel": "256M",
+                "crashkernel": crashkernel,
             }
         },
     }
@@ -747,6 +788,159 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                     # A *succeeded* drain is the reachability proof: a non-succeeded drain raises a
                     # SpinePhaseError naming this family + the job's error_category.
                     await drain_job(op, f"{family}:authorize_ssh_key", env.object_id)
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
+# --- ppc64le live TCG boot proof (#1144, epic #1139) ---------------------------------------
+
+
+def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
+    """Resolve issuer + stack + db + the ppc64le image, or skip with the exact fix.
+
+    Adds the ppc64le emulator gate to the reachability preflight idiom: a host without
+    ``qemu-system-ppc64`` cannot boot a pseries guest under TCG, so it skips this proof cleanly
+    rather than erroring at define-time.
+    """
+    if shutil.which(_PPC64LE_EMULATOR) is None:
+        pytest.skip(
+            f"{_PPC64LE_EMULATOR} not on PATH; a ppc64le guest boots under TCG emulation on the "
+            "x86_64 host — install qemu-system-ppc (the pseries emulator)"
+        )
+    image = os.environ.get(_PPC64LE_IMAGE_ENV)
+    if not image or not Path(image).exists():
+        pytest.skip(
+            f"{_PPC64LE_IMAGE_ENV} unset or points at a missing file; publish the Fedora ppc64le "
+            "rootfs (see docs/design/2026-07-13-ppc64le-fixture-live-proof-1144.md §4) and set "
+            f"{_PPC64LE_IMAGE_ENV} to its path"
+        )
+    tree = os.environ.get(_KERNEL_TREE_ENV)
+    if not tree or not Path(tree).exists():
+        pytest.skip(
+            f"{_KERNEL_TREE_ENV} unset or missing; run the fetch-kernel-tree fixture script"
+        )
+    db_url = os.environ.get(_DATABASE_URL_ENV)
+    if not db_url:
+        pytest.skip(f"{_DATABASE_URL_ENV} unset; bring up the stack (see the live-stack runbook)")
+    issuer = require_issuer()  # skips if the OIDC issuer is unset/unreachable
+    base_url = require_stack()  # skips if KDIVE_STACK_BASE_URL is unset
+    return issuer, base_url, db_url, image
+
+
+@pytest.mark.live_stack
+def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
+    """Prove a Fedora ppc64le guest boots end-to-end under TCG on the x86_64 host (#1144).
+
+    allocate → provision (``arch=ppc64le``: admission persists ``accel=tcg``, ADR-0339; the
+    provisioner renders a pseries/qemu/emulator domain, ADR-0340; the boot handler applies the
+    TCG-scaled deadline, ADR-0341, and direct-kernel-boots the rootfs's own baseline ppc64le
+    kernel under QEMU/SLOF, ADR-0272) → the System reaches ``ready`` (the domain is defined+started;
+    the baseline boot is optimistic, ADR-0272) → poll ``systems.check_ssh_reachable`` until the
+    guest answers an SSH banner. That reachable verdict is the load-bearing proof: it means the
+    ppc64le kernel booted to userspace under TCG (no ISA/CPU fault), the virtio NIC leased its DHCP
+    address without a pinned PCI slot (retiring PR #1070's ``pin_nic_slot=False``), and sshd is up.
+
+    The ``kdive-ready`` marker on ``hvc0`` (spapr-vty, retiring PR #1070's ``console_device``) is
+    proven separately in the committed boot-console record
+    (``docs/design/2026-07-13-ppc64le-tcg-boot-proof-record-1144.md``): reaching ``ready`` here is
+    optimistic (ADR-0272 provision does not await the console marker), so this test asserts SSH
+    reachability, not the marker.
+
+    Vehicle note: ``live_stack`` is the repo's only end-to-end provision→boot path; this is a
+    live-VM-class proof under TCG. The distinct ``live_vm``/``live_vm_tcg`` marker split is
+    epic issue 15's scope, not here. Self-cleans (release) on exit.
+    """
+    issuer, base_url, db_url, image = _ppc64le_reachability_preflight()
+    operator_token = _token(issuer, role="operator")
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        allocation_id = ""
+        async with op:
+            await seed_metering(db_url, _PROJECT)
+            try:
+                async with phase("ppc64le:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "ppc64le:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("ppc64le:provision"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "systems.provision",
+                            allocation_id=allocation_id,
+                            profile=_reachability_provision_profile(
+                                image, arch="ppc64le", crashkernel="512M"
+                            ),
+                        ),
+                        "ppc64le:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "ppc64le:provision", system_id, "ready")
+                async with phase("ppc64le:systems_get"):
+                    got = ok(
+                        await scalar(op, "systems.get", system_id=system_id),
+                        "ppc64le:systems_get",
+                    )
+                    # The persisted accel is the recorded TCG fact the deadline scaling keyed off.
+                    assert data_str(got, "accel") == "tcg", f"expected accel=tcg: {got!r}"
+                async with phase("ppc64le:ssh_info"):
+                    info = ok(
+                        await scalar(op, "systems.ssh_info", system_id=system_id),
+                        "ppc64le:ssh_info",
+                    )
+                    ssh = data_mapping(info, "ssh")
+                    assert ssh["host_scope"] == "worker_loopback", f"unexpected ssh_info: {ssh!r}"
+                    assert ssh["host"] and isinstance(ssh["port"], int), (
+                        f"ssh_info returned no endpoint on a ready System: {ssh!r}"
+                    )
+                async with phase("ppc64le:await_ssh_reachable"):
+                    # A reachable verdict is the load-bearing proof: an SSH banner from the guest
+                    # means the ppc64le kernel booted end-to-end under TCG, the virtio NIC leased
+                    # its DHCP address without a pinned PCI slot (pin_nic_slot=False), and sshd is
+                    # up. authorize_ssh_key's pre-flight fails a not-yet-booted guest terminally, so
+                    # the slow TCG boot is spanned by polling the read-only reachability probe
+                    # (which succeeds whether reachable or not, carrying the verdict inline) under a
+                    # generous deadline.
+                    deadline = time.monotonic() + _PPC64LE_REACHABLE_DEADLINE_S
+                    while True:
+                        probe = ok(
+                            await scalar(op, "systems.check_ssh_reachable", system_id=system_id),
+                            "ppc64le:await_ssh_reachable",
+                        )
+                        done = await drain_job(op, "ppc64le:await_ssh_reachable", probe.object_id)
+                        verdict_json = done.refs.get("result")
+                        assert verdict_json is not None, (
+                            f"check_ssh_reachable succeeded with no result verdict: {done!r}"
+                        )
+                        verdict = json.loads(verdict_json)
+                        if verdict.get("reachable"):
+                            break
+                        # On an unreachable verdict the probe attaches a redacted console tail
+                        # (ADR-0306) — the boot-stall evidence a timeout most needs; surface it so a
+                        # guest that never boots (e.g. a future ISA/CPU regression) self-diagnoses.
+                        detail = verdict.get("detail")
+                        tail = verdict.get("console_tail")
+                        assert time.monotonic() < deadline, (
+                            f"guest never became SSH-reachable under TCG ({detail!r}); "
+                            f"console tail: {tail!r}"
+                        )
+                        await asyncio.sleep(_PPC64LE_REACHABLE_POLL_S)
             finally:
                 if allocation_id:
                     await scalar(op, "allocations.release", allocation_id=allocation_id)

@@ -65,6 +65,29 @@ object_key = "rootfs/local/fedora-kdive-ready-44.qcow2"
 boot_kernel_count = 1
 makedumpfile_version = "1.7.9"
 
+# The ppc64le (POWER) sibling of the default rootfs (#1144, epic #1139) — the Fedora-secondary
+# ppc64le GenericCloud base. arch=ppc64le routes a System pointed at it through the pseries arch
+# traits (machine=pseries, console=hvc0). Declared `s3` at
+# `rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2`; it reaches `registered` once its object is
+# published and a `digest` is supplied. NOTE: the attested operands below describe the eventual
+# `build-fs`-built image; the file-injection scaffold used for the #1144 live TCG boot proof
+# installs no makedumpfile, so that scaffold proves boot + SSH only, never a kdump capability.
+[[image]]
+provider = "local-libvirt"
+name = "fedora-kdive-ready-44-ppc64le"
+arch = "ppc64le"
+format = "qcow2"
+root_device = "/dev/vda"
+visibility = "public"
+capabilities = ["ssh", "selinux", "kdump", "drgn"]
+[image.source]
+kind = "s3"
+object_key = "rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2"
+# digest = "sha256:…"   # uncomment once published to mark the row `registered`
+[image.attested]
+boot_kernel_count = 1
+makedumpfile_version = "1.7.9"
+
 # The kdive-ready local baseline rootfs (the former seed_data baseline), retained as the #817
 # regression reference (ADR-0251): its makedumpfile (1.7.8) cannot filter the newest kernels, so
 # the default `kdump` method leaves an incomplete core on a from-source kernel — use 44 for that.

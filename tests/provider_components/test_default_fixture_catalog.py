@@ -19,6 +19,17 @@ def test_default_fixture_catalog_has_no_rootfs_entries() -> None:
     assert catalog.profiles != []
 
 
+def test_default_fixture_catalog_resolves_both_arch_profiles() -> None:
+    # Both console-ready profiles resolve; ppc64le carries arch=ppc64le so a System pointed at it
+    # routes through the pseries arch traits (#1144, epic #1139).
+    catalog = load_fixture_catalog(DEFAULT_FIXTURE_CATALOG_PATH)
+
+    x86 = catalog.profile("local-libvirt", "console-ready_x86_64")
+    ppc = catalog.profile("local-libvirt", "console-ready_ppc64le")
+    assert x86 is not None and x86.arch == "x86_64"
+    assert ppc is not None and ppc.arch == "ppc64le"
+
+
 def test_catalog_path_can_be_overridden_by_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
