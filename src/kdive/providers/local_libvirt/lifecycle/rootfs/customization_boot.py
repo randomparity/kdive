@@ -17,8 +17,33 @@ kernel paging request`) still matches.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import StrEnum
+from math import ceil
+from typing import Protocol
+from uuid import UUID
+
+import libvirt
+
+import kdive.config as config
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot.readiness import _domain_exit_probe
+from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
+from kdive.providers.local_libvirt.settings import (
+    LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
+    LIBVIRT_URI,
+)
+from kdive.providers.shared.runtime_paths import (
+    build_domain_name,
+    console_log_path,
+    read_console_log,
+)
+
+_log = logging.getLogger(__name__)
 
 OK_MARKER = "kdive-customize-ok"
 FAIL_MARKER = "kdive-customize-failed"
@@ -61,3 +86,177 @@ def classify_customization_console(data: bytes) -> CustomizeVerdict:
     if _GENUINE_FAULT.search(text):
         return CustomizeVerdict.FAILED
     return CustomizeVerdict.PENDING
+
+
+# The customization boot is minutes-to-tens-of-minutes (package install + initramfs rebuild), so
+# the completion poll is coarser than the boot-readiness 5.0s cadence; the window budget scales
+# with the accelerator's TCG multiplier (ADR-0341).
+_POLL_INTERVAL_S = 10.0
+_CONSOLE_TAIL_CHARS = 800
+
+
+class _Domain(Protocol):
+    """The libvirt transient-domain surface the teardown drives."""
+
+    def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
+    def destroy(self) -> int: ...
+
+
+class _Conn(Protocol):
+    """The libvirt connection surface the orchestration holds open for the whole call."""
+
+    def createXML(  # noqa: N802, N803 - mirrors the libvirt binding names
+        self, xmlDesc: str, flags: int
+    ) -> _Domain: ...
+    def close(self) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CustomizationBootSeams:
+    """Injected host seams for one customization boot (ADR-0345).
+
+    Every real-host interaction (libvirt connect/createXML, console-log read, domstate probe,
+    sleep, poll-budget) is a seam so the orchestration is exercised entirely in-process without
+    libguestfs/qemu/network. :meth:`from_env` wires the live implementations.
+    """
+
+    open_conn: Callable[[], _Conn]
+    create_transient: Callable[[_Conn, str], _Domain]
+    read_console: Callable[[UUID], bytes]
+    domain_settled: Callable[[UUID], bool]
+    sleep: Callable[[float], None]
+    window_polls: Callable[[str], int]
+
+    @classmethod
+    def from_env(cls) -> CustomizationBootSeams:  # pragma: no cover - live_vm
+        """Wire the live host seams from configuration (ADR-0345/0341/0223).
+
+        The connection is opened once and returned to the caller, which holds it open for the
+        whole boot: closing it triggers ``VIR_DOMAIN_START_AUTODESTROY`` cleanup, so an
+        opened/closed-per-poll connection would reap the domain mid-customization. The console
+        read is the completion handshake; under a non-root ``qemu:///system`` worker it raises
+        ``CONFIGURATION_ERROR`` on the first poll (ADR-0223), which the caller propagates. The
+        settled probe is the crashed-aware domstate probe (shut off *or* crashed).
+        """
+        uri = config.require(LIBVIRT_URI)
+        return cls(
+            open_conn=lambda: libvirt.open(uri),
+            create_transient=lambda conn, xml: conn.createXML(
+                xml, libvirt.VIR_DOMAIN_START_AUTODESTROY
+            ),
+            read_console=lambda bid: read_console_log(console_log_path(bid)),
+            domain_settled=lambda bid: _domain_exit_probe(build_domain_name(bid)).exited,
+            sleep=time.sleep,
+            window_polls=_real_window_polls,
+        )
+
+
+def _real_window_polls(accel: str) -> int:  # pragma: no cover - live_vm
+    """Poll budget = base window / interval, scaled by the accelerator's TCG factor (ADR-0341)."""
+    base = config.require(LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S)
+    return ceil(base / _POLL_INTERVAL_S * tcg_deadline_multiplier(accel))
+
+
+def run_customization_boot(
+    build_id: UUID, domain_xml: str, *, accel: str, seams: CustomizationBootSeams
+) -> None:
+    """Boot a transient domain that self-customizes and wait for its completion marker (ADR-0345).
+
+    Opens exactly one libvirt connection and creates the transient AUTODESTROY domain on it, then
+    polls the console for the ``kdive-customize-ok``/``-failed`` marker (or a genuine kernel
+    fault) within the accelerator-scaled window. The connection stays open for the whole call —
+    it is force-off + closed only in the ``finally`` (closing triggers AUTODESTROY cleanup).
+
+    Args:
+        build_id: The build whose transient domain and console log this boot owns.
+        domain_xml: The rendered customization-boot domain XML.
+        accel: The resolved accelerator (``"kvm"``/``"tcg"``) scaling the poll window.
+        seams: The injected host seams (see :class:`CustomizationBootSeams`).
+
+    Raises:
+        CategorizedError: ``PROVISIONING_FAILURE`` (with ``details["console_tail"]``) on a
+            fail-marker, genuine-fault, or domain-settled-without-ok verdict; ``BOOT_TIMEOUT``
+            (also with the tail) when the window is exhausted; and it lets a console-read
+            ``CONFIGURATION_ERROR`` (the ADR-0223 readability wall) propagate.
+    """
+    conn = seams.open_conn()
+    domain: _Domain | None = None
+    try:
+        domain = seams.create_transient(conn, domain_xml)
+        _await_customize_ok(build_id, seams, seams.window_polls(accel))
+    finally:
+        _teardown(domain, conn)
+
+
+def _await_customize_ok(build_id: UUID, seams: CustomizationBootSeams, polls: int) -> None:
+    """Poll the console up to ``polls`` times; return on ok, raise on failure/timeout."""
+    last_data = b""
+    for _ in range(polls):
+        last_data = seams.read_console(build_id)
+        verdict = classify_customization_console(last_data)
+        if verdict is CustomizeVerdict.OK:
+            return
+        if verdict is CustomizeVerdict.FAILED:
+            raise _provisioning_failure("customization boot reported failure", last_data)
+        if seams.domain_settled(build_id):
+            _raise_unless_settled_ok(build_id, seams)
+            return
+        seams.sleep(_POLL_INTERVAL_S)
+    raise _boot_timeout(last_data)
+
+
+def _raise_unless_settled_ok(build_id: UUID, seams: CustomizationBootSeams) -> None:
+    """Re-read a settled domain's console: return on ok, else raise settled-without-ok."""
+    data = seams.read_console(build_id)
+    if classify_customization_console(data) is CustomizeVerdict.OK:
+        return
+    raise _provisioning_failure("customization boot domain settled without the ok marker", data)
+
+
+def _teardown(domain: _Domain | None, conn: _Conn) -> None:
+    """Force the domain off (if active) and only then close the connection (AUTODESTROY)."""
+    if domain is not None:
+        _force_off(domain)
+    _close(conn)
+
+
+def _force_off(domain: _Domain) -> None:
+    """Destroy the transient domain if it is still running (best-effort)."""
+    try:
+        if domain.isActive():
+            domain.destroy()
+    except libvirt.libvirtError:  # pragma: no cover - live_vm
+        _log.warning("force-off of the customization-boot domain failed; continuing", exc_info=True)
+
+
+def _close(conn: _Conn) -> None:
+    """Close the libvirt connection, swallowing a close-time error (best-effort cleanup)."""
+    try:
+        conn.close()
+    except libvirt.libvirtError:  # pragma: no cover - live_vm
+        _log.warning("libvirt connection close failed; continuing", exc_info=True)
+
+
+def _console_tail(data: bytes) -> str:
+    """Decode the console bytes (utf-8, replacement) and keep the last ~800 chars.
+
+    A build has no ``RequestContext``/secret registry, so this is a plain bounded tail rather
+    than :func:`redacted_console_tail` — there is nothing to redact against here.
+    """
+    return data.decode("utf-8", errors="replace")[-_CONSOLE_TAIL_CHARS:]
+
+
+def _provisioning_failure(message: str, data: bytes) -> CategorizedError:
+    return CategorizedError(
+        message,
+        category=ErrorCategory.PROVISIONING_FAILURE,
+        details={"console_tail": _console_tail(data)},
+    )
+
+
+def _boot_timeout(data: bytes) -> CategorizedError:
+    return CategorizedError(
+        "customization boot did not reach the ok marker within the window",
+        category=ErrorCategory.BOOT_TIMEOUT,
+        details={"console_tail": _console_tail(data)},
+    )
