@@ -76,9 +76,16 @@ Concretely (the mechanism is specified in
   from provision domains, giving concurrent-build isolation). The domain is created **transient**
   via `createXML(VIR_DOMAIN_START_AUTODESTROY)` — never persisted (nothing to `undefine` or
   leak) and auto-destroyed when the worker connection drops, so even a mid-build worker SIGKILL
-  (#583) cannot leave a defined build domain behind; no reaper is needed. It renders
-  `on_reboot=destroy` so a guest-initiated reboot during customization fails fast (→
-  shutoff-without-marker) rather than re-running the firstboot or looping.
+  (#583) cannot leave a defined build domain behind; no reaper is needed. Its **corollary** is
+  load-bearing: AUTODESTROY ties the domain to the creating connection, so the build holds **one**
+  libvirt connection open across the whole poll+seal — not the open/close-per-op pattern the
+  reused seams use. It renders `on_reboot=destroy` (a guest reboot mid-customization fast-fails
+  rather than re-running/looping) and `restrict=off` (`guest_egress=True`) **unconditionally** —
+  the build's mirror fetch is decoupled from the provision-time ADR-0313 operator egress policy
+  (the build boot runs the vendor image + kdive firstboot, the same trust as today's
+  `virt-customize` fetch). `render_domain_xml`/`domain_name_for` are **extended** to emit the
+  `kdive-build-<uuid>` name (currently hardcoded to the `kdive-<uuid>` System form); that form is
+  already excluded from System-name parsing, so the reconciler ignores build domains.
 - **Three seal-time details the reordering forces (all offline, post-boot).** (1) The build boot
   runs cloud-init to completion for the *constant* NoCloud instance-id, so seal removes
   `/var/lib/cloud/{instances,instance,sem,data}` — else the provision boot sees the instance as

@@ -128,20 +128,29 @@ the customized `staged` image, not `scratch` (which is never customized on this 
 
 Assembled from existing local-libvirt seams (all injected for unit tests):
 
-- **Build-boot identity (a build is not a System).** The reused seams
-  (`render_domain_xml`, the serial `<log>` sink, `classify_console`/domstate polling) are keyed
-  on a UUID. A customization build has no `system_id`, so the orchestration mints a **per-build
-  UUID** and drives those seams with it: the domain is named `kdive-build-<uuid>` (namespaced
-  away from `kdive-<system-uuid>` provision domains) and its console log resolves from the same
-  UUID. Distinct per-build UUIDs give **concurrent-build isolation** — two builds on one host
-  never collide on domain name or console path, and never collide with a provisioned System.
-- **Transient auto-destroy domain (no leak, no reaper).** Unlike provision domains (persistent,
-  because a System outlives the worker), the build domain is created **transient** via
-  `createXML(xml, VIR_DOMAIN_START_AUTODESTROY)` — it is **never persisted** (nothing to
-  `undefine`, nothing to leak) and libvirt **auto-destroys it when the worker's connection
-  drops**. So even the uncovered failure mode of the worker being SIGKILLed mid-build (an
-  established mode, #583) cannot leave a defined build domain behind; no `kdive-build-*` reaper
-  is needed. On the normal exit paths the orchestration also force-offs explicitly.
+- **Build-boot identity (a build is not a System) — the naming seam needs extending, not just
+  reuse.** A customization build has no `system_id`, so the orchestration mints a **per-build
+  UUID**. But `render_domain_xml`→`domain_name_for` hardcodes the **System** form `kdive-<uuid>`
+  (`runtime_paths.py`), so reusing it verbatim would name the build domain `kdive-<build_uuid>`,
+  which `system_id_from_domain_name` parses as a System — exposing the build domain to the
+  reconciler's name-fallback reap **mid-build**. `render_domain_xml`/`domain_name_for` are
+  therefore **extended** to emit `kdive-build-<uuid>` for the build path; that form is already
+  excluded from System-name parsing (`runtime_paths.py`), so once the renderer emits it the
+  reconciler correctly ignores it. Distinct per-build UUIDs give **concurrent-build isolation**
+  (domain name + console path), with no collision with a provisioned System.
+- **Transient auto-destroy domain — one connection held open across the whole build.** Unlike
+  provision domains (persistent, because a System outlives the worker), the build domain is
+  created **transient** via `createXML(xml, VIR_DOMAIN_START_AUTODESTROY)` — never persisted
+  (nothing to `undefine` or leak) and auto-destroyed when the **creating connection** drops, so
+  a mid-build worker SIGKILL (#583) cannot leave a defined build domain behind; no reaper
+  needed. **Corollary (load-bearing):** AUTODESTROY ties the domain's life to the creating
+  connection, so the build orchestration must hold **one** libvirt connection open from
+  `createXML` through the entire poll loop **and** the seal force-off — *not* the
+  open/`create`/close-per-op pattern `provisioning.py`/`install.py` use (which would close the
+  connection immediately and auto-destroy the VM before customization runs). The poll does not
+  need the owning connection: the domstate check is a separate `virsh` subprocess and the
+  console read is a file read. Closing the connection at the end (or on crash) is what performs
+  the auto-destroy cleanup.
 - **`on_reboot=destroy` (fail fast on an unexpected reboot).** The firstboot unit self-removes
   only on the success path, immediately before the ok-marker + poweroff. A guest-initiated
   reboot during customization (a package scriptlet, a cloud-init `power_state`) would otherwise
@@ -155,7 +164,15 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
   `WriteFile` steps injected offline *before* the boot, so cloud-init brings up deterministic
   DHCP over the SLIRP NIC on the customization boot itself — not dependent on the vendor base's
   default (which kdive already distrusts). The firstboot unit is
-  `After=network-online.target Wants=network-online.target`. **Cloud-image bases only**: a
+  `After=network-online.target Wants=network-online.target`. **Egress is mandatory and
+  unconditional:** the build domain renders `guest_egress=True` (`restrict=off`), *decoupled*
+  from the provision-time ADR-0313 operator egress policy. DHCP is layer-3 only — with the
+  default `guest_egress=False` (`restrict=on`, `xml.py`) the leased NIC still cannot reach any
+  mirror and `dnf` fails on every resource left at the secure default. The decoupling is a trust
+  judgement, not a hole: the customization boot runs the *vendor cloud image + kdive's own
+  firstboot* (the same egress trust level as today's `virt-customize` mirror fetch), whereas the
+  ADR-0313 policy governs *agent-supplied* kernels at provision — a different trust boundary.
+  **Cloud-image bases only**: a
   virt-builder base ships no cloud-init to bring the network up on first boot, so it is out of
   scope for the boot path and documented as such (rhel catalog rows are all cloud images).
 - **Completion handshake — distinct markers, fast-fail.** The firstboot script writes to the
@@ -247,9 +264,12 @@ the customized `staged` image, before publish:
 - **subtractive classifier:** a region with a genuine fault (`Oops:`, `unable to handle kernel`,
   `KFENCE:`, `Kernel panic`) → fail; a region with only the two excluded watchdog lines
   (`rcu: … detected stalls`, `watchdog: BUG: soft lockup …`) and no marker → **not** a failure.
-- **transient domain:** created via `createXML(AUTODESTROY)` (asserted, not `defineXML`), so no
-  persistent definition exists to leak; force-off invoked on normal exits; `on_reboot=destroy`
-  is rendered so a mid-customization reboot fails fast rather than re-running the firstboot.
+- **transient domain + connection lifetime:** created via `createXML(AUTODESTROY)` (asserted,
+  not `defineXML`); the creating connection is held open across the whole poll+seal (a fake
+  connection asserts it is not closed until after seal force-off); `on_reboot=destroy` rendered.
+- **build render seam:** the rendered `<name>` is `kdive-build-<uuid>` (not `kdive-<uuid>`) and
+  `system_id_from_domain_name` returns `None` for it (reconciler-safe); the domain renders
+  `restrict=off` regardless of the operator ADR-0313 egress default.
 - **seal steps invoked:** cloud-init per-instance state removed; `/.autorelabel` touched exactly
   once (post-boot, not before); firstboot-unit-removed assertion runs.
 - **build-boot identity:** the transient domain is `kdive-build-<uuid>` with a UUID-derived
