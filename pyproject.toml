@@ -77,7 +77,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # ty resolves them, and the per-site `# ty: ignore[unresolved-import]`/`[unresolved-attribute]`
 # directives flip from "used" (CI) to "unused" (host with the extensions). `unused-ignore-comment`
 # is the one rule that cannot be satisfied in both environments at once, so it is scoped off for
-# exactly these four C-extension wrapper files; every other rule stays strict here. This keeps
+# exactly these C-extension wrapper files; every other rule stays strict here. This keeps
 # `just type` consistent whether or not the extensions are installed — no `SKIP=ty` ritual.
 include = [
   "src/kdive/providers/local_libvirt/lifecycle/rootfs/baseline_kernel.py",
@@ -86,6 +86,7 @@ include = [
   "src/kdive/providers/local_libvirt/retrieve.py",
   "src/kdive/providers/shared/debug_common/core_file.py",
   "src/kdive/providers/shared/debug_common/drgn_program.py",
+  "tests/providers/local_libvirt/test_introspect_ppc64le_live.py",
 ]
 
 [tool.ty.overrides.rules]
