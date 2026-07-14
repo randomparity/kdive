@@ -93,8 +93,12 @@ inherently x86). The generalized boot-member check reads the member bytes up to 
 pin extent and requires **all** pins for the declared arch to match — the multi-pin
 generalization of today's single-pin `_member_is_bzimage`.
 
-- `validate_external_artifacts` gains an `arch: str` parameter, threaded from the persisted
-  build profile (§3).
+- `validate_external_artifacts` gains an `arch: str = "x86_64"` parameter, threaded from the
+  persisted build profile (§3). The default is a documented *parameter* default so a caller
+  that omits it — and the ~15 existing direct-call tests — get the prior x86 behavior with no
+  edits; it is **not** the forbidden *unknown-arch silent fallback* (an unrecognized value
+  still fails fast, below). Every production caller (`complete_build`) threads a concrete
+  arch, so the default is never silently relied on in production.
 - `_check_kernel_combined_tar` / `_verify_combined_tar_shape` / the boot-member check take
   `arch` and match the member bytes against `BOOT_MEMBER_FORMATS[arch]`. For `x86_64` this
   is byte-identical to today.
@@ -114,11 +118,16 @@ install as `/boot/vmlinuz-<ver>` (tens of MB), **not** the unstripped build-tree
 `boot/vmlinuz`-first ordering reaches the first `lib/modules` header inside the cap. The
 recipe (§4) therefore strips explicitly. A caller who packages the unstripped `vmlinux`
 pushes `lib/modules` past the cap and hits the existing
-`kernel combined tar has no lib/modules member within the scan bound` rejection; to keep
-that failure legible the validator emits, when the boot member *was* seen but the cap was
-reached before any `lib/modules` header, a message that names the oversized-boot-member
-cause rather than a bare "no lib/modules member." (The DWARF-carrying unstripped ELF belongs
-in the optional `vmlinux` artifact, not the boot member.)
+`kernel combined tar has no lib/modules member within the scan bound` rejection.
+
+To keep that failure legible **without** mislabeling a genuinely small, modules-less tar,
+the reworded message is gated on a **cap-reached** signal: `_decompress_bounded` surfaces
+`cap_reached = len(out) >= max_out` (it currently returns only the truncated bytes, so this
+one bit is added to its return). Only when `boot_ok and cap_reached and not modules_ok` does
+the validator emit the oversized-boot-member wording; a small boot-only tar under the cap
+(`boot_ok and not cap_reached and not modules_ok`) keeps the plain
+`no lib/modules member within the scan bound` message. (The DWARF-carrying unstripped ELF
+belongs in the optional `vmlinux` artifact, not the boot member.)
 
 ### 3. Threading arch through `runs.complete_build`
 
@@ -188,9 +197,10 @@ Runs to be drained; that is out of scope (the epic only *adds* arches).
 1. **x86_64 validator behavior unchanged.** A build profile with no `arch` (or
    `arch: x86_64`) validates a valid x86 combined tar byte-identically to today, with the
    same rejection messages for a bad member. Existing `validation` *behavior* tests pass
-   unmodified. (The `expected_uploads` advertisement JSON does change shape — see #6 — so
-   its snapshot/no-drift test is updated deliberately; "unchanged" scopes to validator
-   behavior, not the advertisement.)
+   unmodified — the new `validate_external_artifacts` `arch` parameter defaults to `x86_64`,
+   so the ~15 existing direct-call sites need no edit. (The `expected_uploads` advertisement
+   JSON does change shape — see #6 — so its snapshot/no-drift test is updated deliberately;
+   "unchanged" scopes to validator behavior, not the advertisement.)
 2. **ppc64le validates.** A build profile `arch: ppc64le` + a combined tar whose
    `boot/vmlinuz` is a ppc64le ELF64-LE kernel (`EM_PPC64`) validates (with a `lib/modules`
    member); the optional `vmlinux` build-id path works for a ppc64le ELF.
@@ -202,9 +212,11 @@ Runs to be drained; that is out of scope (the epic only *adds* arches).
    `SUPPORTED_ARCHES` is rejected `CONFIGURATION_ERROR` at parse, before any upload.
 5. **Shape-scan bound holds.** The 128 MiB gzip-bomb cap is unchanged and still bounds the
    ELF payload's decompressed scan; a gzip bomb under `arch: ppc64le` is still stopped. When
-   the boot member is seen but the cap is reached before any `lib/modules` header (e.g. an
-   unstripped boot ELF), the rejection message names the oversized-boot-member cause, not a
-   bare "no lib/modules member."
+   the boot member is seen **and the cap was reached** before any `lib/modules` header (e.g.
+   an unstripped boot ELF), the rejection names the oversized-boot-member cause. A small
+   boot-only tar that is **under** the cap and simply lacks `lib/modules` still gets the
+   plain `no lib/modules member within the scan bound` message (asserted by a negative test),
+   so the two causes are not conflated.
 6. **Discoverable + pinned shape.** `artifacts.expected_uploads`, the
    `runs.create`/`runs.complete_build` wrapper text, and `external-build-upload.md` name the
    per-arch payload expectation; the advertisement is derived from the same
