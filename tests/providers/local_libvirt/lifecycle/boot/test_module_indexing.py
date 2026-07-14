@@ -35,6 +35,47 @@ def _modules_tar(tmp_path: Path, version: str) -> Path:
     return tar_path
 
 
+def _modules_tar_with_build_symlink(tmp_path: Path, version: str) -> Path:
+    """A modules tar that also carries the ``build`` symlink to an absolute path.
+
+    Every real kernel module tree has ``lib/modules/<ver>/build`` (and ``source``) as a symlink to
+    an absolute path like ``/usr/src/kernels/<ver>``. Python's ``data`` extraction filter rejects
+    such absolute-symlink targets (``AbsoluteLinkError``); the ``tar`` filter allows them while
+    still blocking path traversal. Regression guard for the failure the #1148 live proof surfaced.
+    """
+    tar_path = tmp_path / "modules-with-build.tar.gz"
+    data = b"\x7fELF\x02\x01 fake ppc64le ko"
+    with tarfile.open(tar_path, "w:gz") as out:
+        ko = tarfile.TarInfo(f"lib/modules/{version}/kernel/drivers/foo.ko")
+        ko.size = len(data)
+        out.addfile(ko, io.BytesIO(data))
+        link = tarfile.TarInfo(f"lib/modules/{version}/build")
+        link.type = tarfile.SYMTYPE
+        link.linkname = f"/usr/src/kernels/{version}"
+        out.addfile(link)
+    return tar_path
+
+
+def test_index_modules_tar_skips_unsafe_build_symlink(tmp_path: Path) -> None:
+    modules_tar = _modules_tar_with_build_symlink(tmp_path, _VERSION)
+
+    def fake_depmod(*, basedir: Path, version: str) -> None:
+        dep = basedir / "lib" / "modules" / version / "modules.dep"
+        dep.parent.mkdir(parents=True, exist_ok=True)
+        dep.write_text("kernel/drivers/foo.ko:\n")
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    # Must not raise AbsoluteLinkError: the absolute build symlink is skipped (a root symlink-escape
+    # risk, and unneeded for depmod/kdump), while the real modules still extract and index.
+    indexed = index_modules_tar(modules_tar, _VERSION, workdir=workdir, run_depmod=fake_depmod)
+    with tarfile.open(indexed, "r:gz") as archive:
+        names = set(archive.getnames())
+    assert f"lib/modules/{_VERSION}/build" not in names, "unsafe absolute symlink was extracted"
+    assert f"lib/modules/{_VERSION}/kernel/drivers/foo.ko" in names
+    assert f"lib/modules/{_VERSION}/modules.dep" in names
+
+
 def test_index_modules_tar_runs_depmod_and_repacks_with_dep(tmp_path: Path) -> None:
     modules_tar = _modules_tar(tmp_path, _VERSION)
 
