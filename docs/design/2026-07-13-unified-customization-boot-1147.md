@@ -101,16 +101,21 @@ then boot the finished-layout image to self-customize.
 ```
 acquire_base -> scratch (partitioned cloud base)
   -> repack whole-disk-ext4 -> staged
-  -> normalize (fstab=/dev/vda, rm crypttab, SELINUX=permissive)   [file-level, pre-boot]
+  -> normalize (fstab=/dev/vda, rm crypttab, SELINUX=permissive)   [pre-boot; NO /.autorelabel yet]
   -> inject offline steps + firstboot unit                          [guestfish, arch-safe]
-  -> boot staged under accel (KVM native / TCG foreign)
+  -> boot transient domain kdive-build-<uuid> under accel (KVM native / TCG foreign)
        firstboot: install pkgs, enable units, record versions,
-                  self-remove unit, echo success marker, poweroff
-  -> await success marker | fail on failure-marker/crash/timeout (+ console tail)
-  -> seal: force-off, re-touch /.autorelabel (SELinux), assert unit removed
+                  self-remove unit, echo kdive-customize-ok, poweroff
+  -> await ok-marker | fail on failure-marker / hard-panic / crashed-domstate / timeout (+tail)
+  -> seal: force-off + undefine domain; reset cloud-init per-instance state;
+           touch /.autorelabel (SELinux); assert firstboot unit removed
   -> provenance probes read from `staged`
   -> verify_cloud_init -> publish
 ```
+
+`normalize` deliberately does **not** touch `/.autorelabel` on this path (see seal-time
+details below): the build boot runs under permissive with the repack-dropped labels, which is
+harmless, and only the provision boot relabels.
 
 The base cloud image ships a bootable kernel + initramfs in `/boot`; `select_kernel_and_initrd`
 (ADR-0272) picks it for the direct-kernel `<kernel>`/`<initrd>`. The debug/build package sets
@@ -123,9 +128,18 @@ the customized `staged` image, not `scratch` (which is never customized on this 
 
 Assembled from existing local-libvirt seams (all injected for unit tests):
 
-- **Render + start.** `render_domain_xml(..., accel, emulator)` with an egress NIC, then
-  `defineXML`+`create` (the `_define_and_start` pattern). The per-System serial `<log
-  append="off">` sink gives a truncated per-boot console automatically.
+- **Build-boot identity (a build is not a System).** The reused seams
+  (`render_domain_xml`, the serial `<log>` sink, `classify_console`/domstate polling) are keyed
+  on a UUID. A customization build has no `system_id`, so the orchestration mints a **per-build
+  UUID** and drives those seams with it: the transient domain is named `kdive-build-<uuid>`
+  (namespaced away from `kdive-<system-uuid>` provision domains) and its console log resolves
+  from the same UUID. Distinct per-build UUIDs give **concurrent-build isolation** — two builds
+  on one host never collide on domain name or console path, and never collide with a
+  provisioned System. The transient domain is **force-off + `undefine`d on every exit path**
+  (success, failure-marker, hard-panic, timeout, crash) so no build domain is ever left defined.
+- **Render + start.** `render_domain_xml(build_uuid, ..., accel, emulator)` with an egress NIC,
+  then `defineXML`+`create` (the `_define_and_start` pattern). The serial `<log append="off">`
+  sink gives a truncated per-boot console automatically.
 - **Network on the customization boot.** The kdive DHCP `cloud.cfg` drop-in + NoCloud seed are
   `WriteFile` steps injected offline *before* the boot, so cloud-init brings up deterministic
   DHCP over the SLIRP NIC on the customization boot itself — not dependent on the vendor base's
@@ -141,28 +155,59 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
     `poweroff` immediately (never waits the full timeout on a broken install).
 
   The two build markers are **distinct** from the provision-time `kdive-ready` marker.
-- **Poll.** Reuses `classify_console`-style matching + domstate, scaled by
-  `tcg_deadline_multiplier(accel)` (ADR-0341):
-  - `kdive-customize-ok` → success → force-off-if-active → seal.
-  - `kdive-customize-failed` **or** crash signature **or** shutoff-without-ok-marker →
-    `PROVISIONING_FAILURE` + `redacted_console_tail` (the normal evidence path).
+- **Poll — the explicit marker is authoritative, not a heuristic regex.** The provision-boot
+  `classify_console` crash regex (`readiness.py` `_CRASH_SIGNATURE`) matches `detected stall`
+  and `soft lockup` — lines a **slow TCG guest emits benignly under load** while running `dnf`
+  + a kdump initramfs rebuild. Reusing it verbatim would spuriously fail the exact ppc64le-TCG
+  build this feature must prove. So the customization boot does **not** reuse that regex.
+  Failure is signalled authoritatively by:
+  - `kdive-customize-ok` → success → force-off + undefine → seal.
+  - `kdive-customize-failed` (the ERR-trap marker) **or** a libvirt **`crashed`** domstate
+    **or** a hard-panic-only console pattern (`Kernel panic`, GPF, KASAN — patterns that cannot
+    fire benignly) **or** shutoff-without-ok-marker → `PROVISIONING_FAILURE` +
+    `redacted_console_tail` (the normal evidence path).
   - window elapsed → `BOOT_TIMEOUT` + console tail.
-- **Deadline.** A dedicated customization-boot window generous enough for `dnf install` of the
-  debug set **plus** the kdump initramfs rebuild (the slow step), × the TCG multiplier for
-  foreign. New operator-tunable setting, defaulting high.
 
-### Two seal-time details the reordering forces
+  Benign `detected stall` / `soft lockup` lines are explicitly **excluded** from the build-boot
+  classifier; the guest's own `set -e`/ERR trap is the real install-failure detector.
+- **Deadline — measured, not "high".** A dedicated customization-boot window (new operator-
+  tunable `KDIVE_*` setting) covers `dnf install` of the debug set **plus** the kdump initramfs
+  rebuild, × `tcg_deadline_multiplier(accel)` for foreign. The default is **pinned to the
+  native-KVM customization time measured in the live proof** (recorded in the proof record) with
+  margin — not an arbitrary constant — so it is falsifiable. The live proof also records whether
+  the boot-tuned TCG multiplier suffices for this download+install+initramfs workload or needs a
+  dedicated factor. **In-guest package fetch:** `dnf` install now runs in the guest over the
+  SLIRP NIC (host uplink, NAT'd — the same upstream mirrors virt-customize used, not a new
+  network dependency). Transient mirror/GPG failures rely on `dnf`'s built-in retries and, on
+  exhaustion, fail the build via the ERR-trap marker with the console tail as evidence — never a
+  silent timeout. A host-side package cache/proxy is a documented future optimization, not
+  required for correctness.
 
-1. **SELinux relabel timing.** `normalize` touches `/.autorelabel` so the *first* boot
-   relabels. But the customization boot is now that first boot — it would consume the flag
-   before packages are installed, leaving provision-time-installed files unlabeled. Fix:
-   re-touch `/.autorelabel` **offline during seal** (post-boot) so the provision boot relabels
-   everything customization added. SELINUX=permissive keeps this non-fatal, matching today's
-   images. (rhel/SELinux families only; debian/AppArmor needs no relabel.)
-2. **Self-removal is guest-side on the success path.** Any failure discards the whole image
-   (the build works in a scratch workspace and publishes atomically), so a guest that never
-   reached self-removal never ships. A cheap offline `guestfish` assert that the firstboot unit
-   is gone before publish is defense-in-depth.
+### Seal-time details the reordering forces
+
+The seal runs **offline** (guestfish) after the transient domain is force-off + undefined, on
+the customized `staged` image, before publish:
+
+1. **Reset cloud-init per-instance state — else `resize_rootfs` is skipped at provision.** The
+   customization boot runs cloud-init to completion for the baked NoCloud instance-id (a
+   **constant** `kdive-rootfs`, `_fedora_customize.py`). cloud-init records once-per-instance
+   modules as done under `/var/lib/cloud/instances/<id>`. If that state ships in the image, the
+   provision boot sees the *same* instance-id as already-initialized and **skips** cc_resizefs
+   (`resize_rootfs`, ADR-0312/#985) — silently losing the disk-grow guarantee the build even
+   asserts is enabled. Fix: seal removes `/var/lib/cloud/instances`, the `instance` symlink,
+   `/var/lib/cloud/sem`, and `/var/lib/cloud/data` so the provision boot is a genuine cloud-init
+   first boot. A test/live assertion confirms `resize_rootfs` actually runs at provision.
+2. **SELinux relabel happens only at provision — not on the build boot.** `normalize` does
+   **not** touch `/.autorelabel` before the build boot; the build boot runs under permissive
+   with the repack-dropped labels (harmless — permissive raises no denials on unlabeled files),
+   so there is no in-build relabel, no autorelabel-triggered reboot, and no relabel time to
+   budget. Seal touches `/.autorelabel` **once, post-boot**, so the *provision* boot relabels
+   everything — the base tree and everything customization installed. (rhel/SELinux families
+   only; debian/AppArmor needs no relabel.)
+3. **Self-removal is guest-side on the success path.** Any failure discards the whole image (the
+   build works in a scratch workspace and publishes atomically), so a guest that never reached
+   self-removal never ships. A cheap offline `guestfish` assert that the firstboot unit is gone
+   before publish is defense-in-depth.
 
 ## Testing
 
@@ -175,16 +220,28 @@ Assembled from existing local-libvirt seams (all injected for unit tests):
 - **debian argv-renderer regression guard:** its `virt-customize` argv is byte-identical to
   today (debian is not converted yet; this proves no accidental drift).
 - boot-customize-seal orchestration against fake domain/console seams:
-  success-marker→seal; failure-marker→`PROVISIONING_FAILURE`+tail; crash-signature→fail;
-  timeout→`BOOT_TIMEOUT`+tail; shutoff-without-marker→fail; `/.autorelabel` re-touch invoked;
-  unit-removed assertion runs; deadline scales by `tcg_deadline_multiplier(accel)`.
+  ok-marker→seal; failure-marker→`PROVISIONING_FAILURE`+tail; hard-panic pattern→fail;
+  `crashed` domstate→fail; timeout→`BOOT_TIMEOUT`+tail; shutoff-without-ok-marker→fail;
+  deadline scales by `tcg_deadline_multiplier(accel)`.
+- **build-boot classifier excludes benign TCG output:** a console region containing
+  `rcu: … detected stalls` / `watchdog: BUG: soft lockup …` **without** the ok/failed marker is
+  *not* classified as a failure (only the markers, `crashed` domstate, hard-panic patterns, and
+  timeout are).
+- **seal steps invoked:** cloud-init per-instance state removed; `/.autorelabel` touched exactly
+  once (post-boot, not before); firstboot-unit-removed assertion runs; transient domain
+  undefined on every exit path (success/failure/timeout/crash).
+- **build-boot identity:** the transient domain is `kdive-build-<uuid>` with a UUID-derived
+  console path; two concurrent builds get distinct names/paths.
 
 **Live proof (x86_64 host):**
 - **x86_64 KVM** — build a Fedora x86_64 kdive-ready image *via customization boot* (the native
-  path now boots too), then provision + boot it. This is the native no-regression evidence,
-  redefined as **behavioral** (the image still provisions and boots) rather than byte-identical.
+  path now boots too), then provision + boot it, **asserting `resize_rootfs` runs at provision**
+  (the cloud-init-state-reset guarantee). This is the native no-regression evidence, redefined
+  as **behavioral** (the image still provisions, boots, and grows its disk) rather than
+  byte-identical. The measured native-KVM customization time pins the deadline default.
 - **ppc64le TCG** — build the Fedora ppc64le Cloud Base into a kdive-ready image via TCG
-  customization boot, then provision + boot. The original #1147 acceptance criterion.
+  customization boot, then provision + boot. The original #1147 acceptance criterion. The proof
+  records whether the boot TCG multiplier covered the download+install+initramfs workload.
 
 ## Epic re-sequencing
 

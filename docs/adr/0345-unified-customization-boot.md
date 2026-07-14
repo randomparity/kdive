@@ -57,20 +57,32 @@ Concretely (the mechanism is specified in
   `root=/dev/vda` layout, so the boot path repacks + normalizes **before** the customization
   boot, then boots the finished-layout image to self-customize, then seals. Provenance probes
   read the customized `staged` image.
-- **Completion handshake — distinct markers, fast-fail.** The firstboot script self-removes its
-  own unit, then echoes `kdive-customize-ok` to the arch console (`ttyS0`/`hvc0`) and powers
-  off; an `ERR`/`EXIT` trap echoes `kdive-customize-failed` + the error tail and powers off
-  immediately, so a broken install fails fast instead of burning the full timeout. These build
-  markers are distinct from the provision-time `kdive-ready` marker. Orchestration polls the
-  console (reusing `classify_console` matching + domstate) scaled by
-  `tcg_deadline_multiplier(accel)`; failure surfaces `redacted_console_tail` (the normal
-  evidence path).
-- **Two seal-time details the reordering forces.** (1) The customization boot is now the first
-  boot, so it consumes `/.autorelabel` before packages install; seal re-touches `/.autorelabel`
-  offline so the provision boot relabels what customization added (SELinux/rhel only,
-  non-fatal under permissive). (2) Self-removal is guest-side on the success path only — any
-  failure discards the whole image, so a guest that never self-removed never ships; an offline
-  assert that the unit is gone before publish is defense-in-depth.
+- **Completion handshake — the explicit marker is authoritative, not a heuristic.** The
+  firstboot script self-removes its own unit, then echoes `kdive-customize-ok` to the arch
+  console (`ttyS0`/`hvc0`) and powers off; an `ERR`/`EXIT` trap echoes `kdive-customize-failed` +
+  the error tail and powers off immediately, so a broken install fails fast instead of burning
+  the full timeout. These build markers are distinct from the provision-time `kdive-ready`
+  marker. The customization boot does **not** reuse the provision-boot crash regex
+  (`_CRASH_SIGNATURE` matches `detected stall`/`soft lockup`, which a slow TCG guest emits
+  benignly under load — a false-fail on the exact path this feature proves): failure is the
+  `kdive-customize-failed` marker, a libvirt `crashed` domstate, a hard-panic-only pattern
+  (`Kernel panic`/GPF/KASAN), or timeout. The deadline is a measured value (pinned to the
+  live-proof native-KVM customization time) × `tcg_deadline_multiplier(accel)`, not an arbitrary
+  constant; failure surfaces `redacted_console_tail`.
+- **Build-boot identity.** A build is not a System, so the orchestration mints a per-build UUID,
+  names the transient domain `kdive-build-<uuid>` (namespaced from provision domains), derives
+  the console path from it, and force-off + `undefine`s it on every exit path — giving
+  concurrent-build isolation and no collision with provisioned Systems.
+- **Three seal-time details the reordering forces (all offline, post-boot).** (1) The build boot
+  runs cloud-init to completion for the *constant* NoCloud instance-id, so seal removes
+  `/var/lib/cloud/{instances,instance,sem,data}` — else the provision boot sees the instance as
+  already-initialized and skips once-per-instance modules, notably `resize_rootfs`
+  (ADR-0312), silently losing the disk-grow guarantee. (2) `normalize` does **not** touch
+  `/.autorelabel` before the build boot (permissive tolerates the repack-dropped labels, so no
+  in-build relabel/reboot); seal touches it once so only the *provision* boot relabels what
+  customization added (SELinux/rhel only). (3) Self-removal is guest-side on the success path
+  only — any failure discards the whole image; an offline assert the unit is gone before publish
+  is defense-in-depth.
 
 The x86_64-byte-identical acceptance criterion of decision 5 is **intentionally dropped**:
 native builds now boot to customize, so their behavior changes by design. It is replaced by a
