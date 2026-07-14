@@ -30,7 +30,6 @@ from kdive.profiles.provider_policy import ProfilePolicy, capture_method
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.serialization import JsonValue
 
-DEFAULT_CRASHKERNEL = "256M"
 # Disable KASLR on a gdbstub-debug boot so the running kernel's base matches the fetched
 # vmlinux's link-time symbol addresses. With CONFIG_RANDOMIZE_BASE=y (the kdump fragment
 # default) the kernel relocates to a random base, so a breakpoint set by symbol resolves to the
@@ -206,7 +205,7 @@ async def step_progress(conn: AsyncConnection, run_id: UUID) -> StepProgress:
     cmdline extra the install handler recorded (ADR-0299), surfaced for sweep read-back on
     ``runs.get``; ``None`` when install is unrecorded or applied no extra. ``installed_crashkernel``
     is the applied kdump reservation the install handler recorded (ADR-0300, #989); ``None`` when
-    install is unrecorded or the default 256M was in force.
+    install is unrecorded or the arch default was in force.
     """
     states: dict[str, RunStepState] = {step: RUN_STEP_PENDING for step in _PROGRESS_STEPS}
     boot_outcome: BootOutcome | None = None
@@ -361,15 +360,17 @@ def system_required_cmdline(
     the running KASLR base. Tokens are emitted in this fixed order, dropping ``None``.
 
     ``crashkernel`` is the per-install reservation size (ADR-0300, #989): when set it replaces the
-    default ``256M`` in the ``crashkernel=<size>`` token. It is honored **only** on the ``KDUMP``
-    path — a non-kdump method never emits the token, so a supplied value there is inert (the tool
-    boundary rejects that request; this stays a pure composition function).
+    per-arch default (``arch_traits(arch).default_crashkernel`` — 256M on x86_64, 512M on ppc64le;
+    ADR-0346) in the ``crashkernel=<size>`` token. It is honored **only** on the ``KDUMP`` path — a
+    non-kdump method never emits the token, so a supplied value there is inert (the tool boundary
+    rejects that request; this stays a pure composition function).
     """
-    tokens = [f"console={arch_traits(arch).console_device}"]
+    traits = arch_traits(arch)
+    tokens = [f"console={traits.console_device}"]
     if root_cmdline:
         tokens.append(root_cmdline)
     if method is CaptureMethod.KDUMP:
-        tokens.append(f"crashkernel={crashkernel or DEFAULT_CRASHKERNEL}")
+        tokens.append(f"crashkernel={crashkernel or traits.default_crashkernel}")
     elif method is CaptureMethod.GDBSTUB:
         tokens.append(_GDBSTUB_NOKASLR)
     return " ".join(tokens)

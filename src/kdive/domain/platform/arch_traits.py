@@ -42,6 +42,11 @@ class ArchTraits:
         emit_acpi_features: Whether the domain emits the x86 ``<features><acpi/><vmcoreinfo/>``
             block (ADR-0340). ``True`` on x86; ``False`` on pseries, whose fw_cfg/VMCOREINFO
             crash-capture behavior is proven in the kdump sub-issue, not rendered here.
+        default_crashkernel: The kdump ``crashkernel=<size>`` reservation applied when a System
+            gives no per-install override (ADR-0300/0346). ``256M`` on x86_64; ``512M`` on
+            ppc64le, which reserves more (RHEL's ``kdump-utils`` floor is 384M for a 2-4 GB guest,
+            512M for 4-16 GB — roughly double x86), so a ppc64le kdump kernel does not OOM before
+            makedumpfile runs. An explicit ADR-0300 reservation still wins over this default.
     """
 
     machine: str
@@ -49,6 +54,7 @@ class ArchTraits:
     pin_nic_slot: bool
     kvm_cpu_mode: str
     emit_acpi_features: bool
+    default_crashkernel: str
 
 
 _TRAITS: dict[str, ArchTraits] = {
@@ -58,6 +64,7 @@ _TRAITS: dict[str, ArchTraits] = {
         pin_nic_slot=True,
         kvm_cpu_mode="host-passthrough",
         emit_acpi_features=True,
+        default_crashkernel="256M",
     ),
     "ppc64le": ArchTraits(
         machine="pseries",
@@ -65,6 +72,7 @@ _TRAITS: dict[str, ArchTraits] = {
         pin_nic_slot=False,
         kvm_cpu_mode="host-model",
         emit_acpi_features=False,
+        default_crashkernel="512M",
     ),
 }
 
@@ -96,3 +104,17 @@ def arch_traits(arch: str) -> ArchTraits:
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     return traits
+
+
+def default_crashkernel_summary() -> str:
+    """Render the per-arch kdump ``crashkernel`` defaults for the agent-facing tool text.
+
+    The ``runs.install`` ``crashkernel`` field description is built from this single source, so the
+    agent contract cannot drift from the trait table — adding an arch updates the text
+    automatically (ADR-0346). Example: ``"256M on x86_64, 512M on ppc64le"`` (arch-sorted for a
+    stable rendering).
+
+    Returns:
+        A comma-separated ``"<size> on <arch>"`` summary over every supported architecture.
+    """
+    return ", ".join(f"{_TRAITS[arch].default_crashkernel} on {arch}" for arch in sorted(_TRAITS))

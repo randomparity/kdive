@@ -50,10 +50,14 @@ def test_runs_install_exposes_cmdline_override() -> None:
 
 
 def test_runs_install_cmdline_enumerates_platform_tokens() -> None:
-    # The agent must know exactly which args are always present and cannot be overridden.
+    # The agent must know exactly which args are always present and cannot be overridden. The
+    # crashkernel default is per-arch (ADR-0346), so the Field names the token and both per-arch
+    # defaults rather than a single x86 literal.
     desc = _field_description("runs.install", "cmdline")
-    for token in ("console=ttyS0", "root=/dev/vda", "crashkernel=256M", "nokaslr"):
+    for token in ("console=ttyS0", "root=/dev/vda", "crashkernel", "nokaslr"):
         assert token in desc, f"cmdline Field must name the platform token {token}"
+    for default in ("256M on x86_64", "512M on ppc64le"):
+        assert default in desc, f"cmdline Field must name the per-arch default {default}"
 
 
 def test_runs_boot_doc_points_cmdline_iteration_at_install() -> None:
