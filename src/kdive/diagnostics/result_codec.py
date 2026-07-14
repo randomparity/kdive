@@ -15,13 +15,14 @@ from typing import Any
 
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
+    MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     CheckResult,
     CheckStatus,
 )
 from kdive.domain.errors import ErrorCategory
 
-_ALLOWED_IDS = frozenset({PROVIDER_TLS_ID, GDBSTUB_ACL_ID})
+_ALLOWED_IDS = frozenset({PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID})
 
 
 class ResultCodecError(ValueError):

@@ -12,16 +12,21 @@ import asyncio
 
 from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
+    MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     CheckStatus,
 )
 from kdive.diagnostics.provider_checks import (
     GdbstubAclCheck,
     GdbstubAclProbe,
+    MultiarchGdbCheck,
+    MultiarchGdbOutcome,
+    MultiarchGdbProbe,
     ProviderTlsCheck,
     TlsProbe,
     TlsProbeOutcome,
 )
+from kdive.domain.errors import ErrorCategory
 
 _PROVIDER = "remote-libvirt"
 _CA_PATH = "/etc/kdive/ca.pem"
@@ -145,3 +150,48 @@ def test_gdbstub_acl_indeterminate_is_error() -> None:
     assert result.provider == _PROVIDER
     assert result.check_id == GDBSTUB_ACL_ID
     assert result.detail == f"could not determine the ACL on {_GDB_HOST} for {_PORT_RANGE}"
+
+
+# ---- multiarch_gdb ------------------------------------------------------------------
+
+_LOCAL_PROVIDER = "local-libvirt"
+
+
+def _multiarch_probe(outcome: MultiarchGdbOutcome) -> MultiarchGdbProbe:
+    async def _probe() -> MultiarchGdbOutcome:
+        return outcome
+
+    return _probe
+
+
+def test_multiarch_gdb_supported_is_pass() -> None:
+    check = MultiarchGdbCheck(
+        provider=_LOCAL_PROVIDER, probe=_multiarch_probe(MultiarchGdbOutcome.SUPPORTED)
+    )
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.PASS
+    assert result.check_id == MULTIARCH_GDB_ID
+    assert result.provider == _LOCAL_PROVIDER
+    assert result.fix is None
+    assert result.failure_category is None
+
+
+def test_multiarch_gdb_missing_is_fail_with_install_hint() -> None:
+    check = MultiarchGdbCheck(
+        provider=_LOCAL_PROVIDER, probe=_multiarch_probe(MultiarchGdbOutcome.MISSING)
+    )
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.FAIL
+    assert result.failure_category is ErrorCategory.MISSING_DEPENDENCY
+    assert result.fix is not None
+    assert "gdb-multiarch" in result.fix
+
+
+def test_multiarch_gdb_undeterminable_is_error() -> None:
+    check = MultiarchGdbCheck(
+        provider=_LOCAL_PROVIDER, probe=_multiarch_probe(MultiarchGdbOutcome.UNDETERMINABLE)
+    )
+    result = asyncio.run(check.run())
+    assert result.status is CheckStatus.ERROR
+    assert result.fix is None
+    assert result.failure_category is None

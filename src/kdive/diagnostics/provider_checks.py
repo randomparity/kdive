@@ -1,4 +1,4 @@
-"""Remote-provider diagnostic check implementations."""
+"""Provider diagnostic check implementations (remote-libvirt and local-libvirt)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from enum import StrEnum
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     GDBSTUB_ACL_ID,
+    MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     REACHABILITY_ID,
     Check,
@@ -22,8 +23,14 @@ BASE_VOLUME_NOT_STAGED_FIX = (
     "operator-provided base image volume on the configured pool (ADR-0080), then retry"
 )
 
+MULTIARCH_GDB_MISSING_FIX = (
+    "no gdb on this host can target a supported foreign architecture; install gdb-multiarch "
+    "(Debian/Ubuntu) or a multiarch-capable gdb build so cross-arch debug sessions can attach"
+)
+
 _TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
 _CONFIGURATION_ERROR = ErrorCategory.CONFIGURATION_ERROR
+_MISSING_DEPENDENCY = ErrorCategory.MISSING_DEPENDENCY
 
 
 class TlsProbeOutcome(StrEnum):
@@ -262,4 +269,61 @@ class BaseImageStagingCheck(Check):
             provider=self._provider,
             failure_category=_CONFIGURATION_ERROR,
             resource_id=self._resource_id,
+        )
+
+
+class MultiarchGdbOutcome(StrEnum):
+    """The three observable outcomes of the multiarch-gdb prerequisite probe (ADR-0347)."""
+
+    SUPPORTED = "supported"
+    MISSING = "missing"
+    UNDETERMINABLE = "undeterminable"
+
+
+MultiarchGdbProbe = Callable[[], Awaitable[MultiarchGdbOutcome]]
+
+
+class MultiarchGdbCheck(Check):
+    """Worker-vantage: a multiarch-capable gdb can target every supported foreign arch (ADR-0347).
+
+    Cross-arch debug sessions (a ppc64le guest on an x86_64 host) spawn a multiarch-capable gdb.
+    This check runs where the worker spawns gdb and reports a missing prerequisite as a ``fail``
+    with an actionable install hint, rather than letting a live attach fail opaquely later.
+    """
+
+    def __init__(self, *, provider: str, probe: MultiarchGdbProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return MULTIARCH_GDB_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        outcome = await self._probe()
+        if outcome is MultiarchGdbOutcome.SUPPORTED:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="a multiarch-capable gdb targets every supported foreign architecture",
+                provider=self._provider,
+            )
+        if outcome is MultiarchGdbOutcome.MISSING:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail="no gdb on this host can target a supported foreign architecture",
+                fix=MULTIARCH_GDB_MISSING_FIX,
+                provider=self._provider,
+                failure_category=_MISSING_DEPENDENCY,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.ERROR,
+            detail="could not run a candidate gdb to a multiarch verdict",
+            provider=self._provider,
         )
