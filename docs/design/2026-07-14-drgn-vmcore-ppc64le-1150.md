@@ -3,6 +3,7 @@
 - **Date:** 2026-07-14
 - **Issue:** #1150 · **Epic:** #1139 (full ppc64le support) · **Depends on:** #1148 (merged, PR#1169)
 - **ADR:** [0348](../adr/0348-drgn-vmcore-ppc64le-verification.md)
+- **Proof record:** [2026-07-14-drgn-vmcore-ppc64le-proof-record-1150.md](2026-07-14-drgn-vmcore-ppc64le-proof-record-1150.md) (AC1a PASS)
 - **Design:** `docs/design/2026-07-13-ppc64le-full-support.md` §Debug plane
 
 ## Problem
