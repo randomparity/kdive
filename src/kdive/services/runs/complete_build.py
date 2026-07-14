@@ -268,10 +268,15 @@ def _build_arch(run: Run) -> str:
     The build profile was arch-validated at ``runs.create`` (ADR-0343); reading the field here
     (defaulting to ``x86_64`` when absent) — rather than re-parsing the whole profile — keeps a
     Run finalizable even if the arch vocabulary shifts after create, and the validator's own
-    fail-fast is the backstop for an unrecognized value.
+    fail-fast is the backstop for an unrecognized value. A present-but-non-string arch is a
+    corrupt profile (unreachable via ``runs.create``): fail loudly rather than mask it as x86_64.
     """
-    arch = run.build_profile.get("arch", "x86_64")
-    return arch if isinstance(arch, str) else "x86_64"
+    arch = run.build_profile.get("arch")
+    if arch is None:
+        return "x86_64"
+    if not isinstance(arch, str):
+        raise CompleteBuildConfigurationError({"reason": "invalid_build_profile_arch"})
+    return arch
 
 
 async def _finalize_external_build(

@@ -225,6 +225,26 @@ def test_complete_build_defaults_arch_x86_64_when_profile_omits_it(migrated_url:
     asyncio.run(_run())
 
 
+def test_complete_build_rejects_corrupt_non_string_arch(migrated_url: str) -> None:
+    # A present-but-non-string persisted arch (unreachable via runs.create) fails loudly rather
+    # than being silently masked as x86_64.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(
+                pool, build_profile={"schema_version": 1, "arch": 123}
+            )
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "invalid_build_profile_arch"
+        assert validator.calls == 0  # rejected before any finalize work
+
+    asyncio.run(_run())
+
+
 def test_complete_build_without_cmdline_records_none(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

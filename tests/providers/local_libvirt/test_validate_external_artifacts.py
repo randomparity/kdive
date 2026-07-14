@@ -182,14 +182,16 @@ def test_kernel_tar_missing_boot_vmlinuz_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(_combined_kernel_tar(boot=None))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
-    assert "boot/vmlinuz" in str(e.value)
+    # Absent member: "has no ... member" (present-but-wrong uses a distinct message).
+    assert "has no boot/vmlinuz" in str(e.value)
 
 
 def test_kernel_tar_boot_not_bzimage_is_build_failure() -> None:
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(_combined_kernel_tar(boot=b"\x00" * 0x300))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
-    assert "boot/vmlinuz" in str(e.value)
+    # Member present but wrong format: names it as present, not missing.
+    assert "boot/vmlinuz is present but is not" in str(e.value)
 
 
 def test_kernel_tar_missing_lib_modules_is_build_failure() -> None:

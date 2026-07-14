@@ -443,6 +443,7 @@ def _decompress_bounded(
 def _verify_combined_tar_shape(
     data: bytes, name: str, boot_format: FormatContract, *, cap_reached: bool
 ) -> None:
+    boot_seen = False
     boot_ok = False
     modules_ok = False
     try:
@@ -450,6 +451,7 @@ def _verify_combined_tar_shape(
             for member in archive:
                 path = _normalized_member_name(member.name)
                 if path == _KERNEL_BOOT_MEMBER and member.isfile():
+                    boot_seen = True
                     boot_ok = _member_matches_format(archive, member, boot_format)
                 elif path.startswith(_MODULES_MEMBER_PREFIX):
                     modules_ok = True
@@ -462,6 +464,15 @@ def _verify_combined_tar_shape(
         if not (boot_ok or modules_ok):
             raise _build_failure("kernel artifact is not a readable tar", name=name) from exc
     if not boot_ok:
+        # Distinguish "member absent" from "member present but wrong arch" — the latter is the
+        # #1145 arch cross-check (a plausible operator mistake: right file, wrong build arch), and
+        # a "has no ... member" message would misdirect them to look for a missing file.
+        if boot_seen:
+            raise _build_failure(
+                f"kernel combined tar boot/vmlinuz is present but is not a "
+                f"{boot_format.container} member for the declared arch",
+                name=name,
+            )
         raise _build_failure(
             f"kernel combined tar has no boot/vmlinuz {boot_format.container} member", name=name
         )
