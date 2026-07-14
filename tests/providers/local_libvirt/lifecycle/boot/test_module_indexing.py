@@ -148,7 +148,7 @@ def test_index_modules_tar_rejects_too_many_members(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     modules_tar = _modules_tar(tmp_path, _VERSION)
-    monkeypatch.setattr(gkw, "_MAX_MODULES_MEMBERS", 0)
+    monkeypatch.setattr(gkw, "MAX_KERNEL_TAR_MEMBERS", 0)
     workdir = tmp_path / "work"
     workdir.mkdir()
     with pytest.raises(CategorizedError) as exc:

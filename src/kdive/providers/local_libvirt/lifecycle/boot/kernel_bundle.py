@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import tarfile
+from collections.abc import Iterator
 from pathlib import Path
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -11,6 +12,29 @@ from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_stag
 
 _KERNEL_BUNDLE_BOOT_MEMBER = "boot/vmlinuz"
 _MODULES_MEMBER_PREFIX = "lib/modules/"
+# Upper bound on tar members read from a semi-trusted uploaded kernel tar. ``getmembers()`` /
+# ``getnames()`` eagerly build one ``TarInfo`` per member, so a header bomb (a tiny gzip encoding
+# 10^8 near-identical 512-byte headers) would OOM the worker before any content is read. Every scan
+# of the uploaded tar iterates lazily through ``capped_tar_members`` instead, rejecting past this
+# bound. A real combined kernel tar (boot/vmlinuz + one module tree) is far under it (#1148 review).
+MAX_KERNEL_TAR_MEMBERS = 200_000
+
+
+def capped_tar_members(archive: tarfile.TarFile) -> Iterator[tarfile.TarInfo]:
+    """Yield tar members lazily, rejecting a member-count bomb before the full header list loads.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` once more than :data:`MAX_KERNEL_TAR_MEMBERS`
+            members have been seen — an oversized/hostile upload, not a transient fault.
+    """
+    for count, member in enumerate(archive, start=1):
+        if count > MAX_KERNEL_TAR_MEMBERS:
+            raise CategorizedError(
+                "uploaded kernel tar exceeds the member-count bound",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"max_members": MAX_KERNEL_TAR_MEMBERS},
+            )
+        yield member
 
 
 def _tar_member_path(name: str) -> str:
@@ -35,7 +59,7 @@ def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
             member = next(
                 (
                     item
-                    for item in archive.getmembers()
+                    for item in capped_tar_members(archive)
                     if _tar_member_path(item.name) == _KERNEL_BUNDLE_BOOT_MEMBER
                 ),
                 None,
@@ -63,7 +87,7 @@ def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
     found = False
     try:
         with tarfile.open(combined_tar, "r:gz") as src, tarfile.open(tmp, "w:gz") as out:
-            for member in src.getmembers():
+            for member in capped_tar_members(src):
                 normalized = _tar_member_path(member.name)
                 if ".." in normalized.split("/"):
                     continue

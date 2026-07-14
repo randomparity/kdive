@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
+    MAX_KERNEL_TAR_MEMBERS,
+    capped_tar_members,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -45,12 +49,12 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
-# Host-side extraction runs as root over a contributor-uploaded (semi-trusted) tar, so it is bounded
-# so a gzip/tar bomb cannot exhaust the worker host's temp filesystem (often tmpfs/RAM). The upload
-# gate (ADR-0343) only *scans* the first 128 MiB to find headers — it does not reject an oversized
-# tree — so the bound lives here. A real one-version module tree is well under 2 GiB / 200k files.
+# Host-side extraction runs as root over a contributor-uploaded (semi-trusted) tar, so its total
+# uncompressed size is bounded so a gzip/tar bomb cannot exhaust the worker host's temp filesystem
+# (often tmpfs/RAM). The upload gate (ADR-0343) only *scans* the first 128 MiB to find headers — it
+# does not reject an oversized tree — so the bound lives here. The member-count cap is shared with
+# the earlier tar scans (``MAX_KERNEL_TAR_MEMBERS``). A real module tree is far under either.
 _MAX_MODULES_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
-_MAX_MODULES_MEMBERS = 200_000
 
 
 class DepmodRunner(Protocol):
@@ -96,18 +100,18 @@ def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the uncompressed tree exceeds
             :data:`_MAX_MODULES_UNCOMPRESSED_BYTES` or the member count exceeds
-            :data:`_MAX_MODULES_MEMBERS` — an oversized/hostile upload the caller can fix.
+            :data:`MAX_KERNEL_TAR_MEMBERS` — an oversized/hostile upload the caller can fix.
     """
     total = 0
     for count, member in enumerate(archive, start=1):
         total += member.size if member.isreg() else 0
-        if count > _MAX_MODULES_MEMBERS or total > _MAX_MODULES_UNCOMPRESSED_BYTES:
+        if count > MAX_KERNEL_TAR_MEMBERS or total > _MAX_MODULES_UNCOMPRESSED_BYTES:
             raise CategorizedError(
                 "uploaded module tree exceeds the host-extraction bound",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={
                     "max_uncompressed_bytes": _MAX_MODULES_UNCOMPRESSED_BYTES,
-                    "max_members": _MAX_MODULES_MEMBERS,
+                    "max_members": MAX_KERNEL_TAR_MEMBERS,
                 },
             )
         archive.extract(member, workdir, filter=_safe_module_extract_filter)
@@ -382,8 +386,10 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
         prefix = _MODULES_ROOT.strip("/") + "/"
         try:
             with tarfile.open(modules_tar, "r:gz") as archive:
-                for name in archive.getnames():
-                    normalized = name.strip("/")
+                # Stream through the capped iterator (not getnames(), which eagerly loads every
+                # header): a member-count bomb is rejected here too, not only at extraction.
+                for member in capped_tar_members(archive):
+                    normalized = member.name.strip("/")
                     if normalized.startswith(prefix):
                         version = normalized[len(prefix) :].split("/", 1)[0]
                         if version:

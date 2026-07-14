@@ -20,8 +20,10 @@ from pathlib import Path
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import _RealGuestKernelWriter
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
+    capped_tar_members,
     extract_boot_vmlinuz,
     repack_modules_subtree,
 )
@@ -160,3 +162,18 @@ def test_repack_modules_subtree_returns_false_when_no_modules_present(tmp_path: 
 
     assert repack_modules_subtree(combined, modules_tar) is False
     assert not modules_tar.exists()
+
+
+def test_capped_tar_members_rejects_a_member_count_bomb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # getmembers()/getnames() eagerly build one TarInfo per member, so a header bomb would OOM the
+    # worker before any content is read. The lazy capped iterator rejects past the bound (#1148).
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_MEMBERS", 2)
+    tar_path = tmp_path / "many.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as out:
+        for i in range(5):
+            _tar_add(out, f"lib/modules/{_PPC64LE_VERSION}/m{i}.ko", b"x")
+    with tarfile.open(tar_path, "r:gz") as archive, pytest.raises(CategorizedError) as exc:
+        list(capped_tar_members(archive))
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
