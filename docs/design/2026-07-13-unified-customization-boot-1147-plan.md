@@ -26,11 +26,15 @@
   serial `<log>` (`read_console_log`), which raises `CONFIGURATION_ERROR` on `PermissionError` —
   the virtlogd `root:0600` wall a non-root worker under `qemu:///system` hits. For provisioning
   this only degrades evidence; here it is **load-bearing** (the read *is* the handshake), so a
-  non-root `qemu:///system` worker fails every build. Task 11 documents the remediation (run the
-  worker as root, use `KDIVE_LIBVIRT_URI=qemu:///session`, or grant the worker group read access);
-  Task 9 adds a `build-fs` preflight that fails fast with that remediation **before** starting a
-  30-minute boot, rather than after. (This dev host runs `qemu:///system` — build-fs live proof
-  runs the worker as root or grants group read.)
+  non-root `qemu:///system` worker fails every build. This fails **fast, not after a 30-minute
+  boot**: `run_customization_boot`'s **first poll** reads the console within seconds of
+  `createXML` (virtlogd creates the log at domain start), so the unreadable read raises
+  `CONFIGURATION_ERROR` on the first iteration — no separate preflight is needed (and none can
+  work: before boot the log does not exist, so `read_console_log` returns `b""`, not a permission
+  error). `run_customization_boot` must let that `CategorizedError` propagate (force-off + close
+  in `finally`, then re-raise). Task 11 documents the remediation (run the worker as root, use
+  `KDIVE_LIBVIRT_URI=qemu:///session`, or grant the worker group read). (This dev host runs
+  `qemu:///system` — build-fs live proof runs the worker as root or grants group read.)
 - **Base image shape.** Boot-path customization requires a **cloud-init-enabled** base with no
   `network:{config:disabled}` drop-in (the injected `99-kdive.cfg` is the primary network config;
   `/etc/cloud/cloud-init.disabled` is removed offline pre-boot). Shipped Fedora Cloud Base rows
@@ -154,28 +158,44 @@ def test_uploadfile_mode_appends_chmod():
 - Test: `tests/images/families/test_renderers.py`
 
 **Interfaces:**
-- Produces: `partition_steps(steps: list[Step]) -> tuple[list[Step], list[Step]]` (file-ops = `Mkdir`/`WriteFile`/`StageFile`/`UploadFile`; exec-ops = `InstallPackages`/`RunCommand`, order preserved). `render_firstboot_script(exec_steps: list[Step], *, console_device: str, unit_name: str, ok_marker: str, fail_marker: str) -> str`.
+- Produces (all in `renderers.py`, importing the shared constants below from `customization_boot.py` — Task 5): `partition_steps(steps: list[Step]) -> tuple[list[Step], list[Step]]` (file-ops = `Mkdir`/`WriteFile`/`StageFile`/`UploadFile`; exec-ops = `InstallPackages`/`RunCommand`, order preserved); `render_firstboot_script(exec_steps: list[Step], *, console_device: str, unit_name: str, script_path: str, ok_marker: str, fail_marker: str) -> str`; **`render_firstboot_unit(*, script_path: str) -> str`** (the systemd unit body).
+- Shared constants (define in Task 5's `customization_boot.py`, import here + in Task 8/9): `CUSTOMIZE_UNIT = "kdive-customize.service"`, `CUSTOMIZE_SCRIPT_PATH = "/usr/local/sbin/kdive-customize"`. Both `render_firstboot_script` (self-`rm` targets) and `inject_offline` (write locations) MUST use the same two constants — a path skew leaves the unit `ExecStart`-ing a missing script (no marker → timeout) or mis-anchors Task 8's unit-removed assert.
 
-**Firstboot script contract** (the string `render_firstboot_script` returns):
+**Firstboot script contract** (`render_firstboot_script` returns; `<script>` = `CUSTOMIZE_SCRIPT_PATH`, `<unit>` = `CUSTOMIZE_UNIT`):
 ```sh
 #!/bin/sh
 set -e
 trap 'echo <fail_marker> > /dev/<console_device>; sync; systemctl poweroff' EXIT
 dnf -y install <pkgs>            # one line per InstallPackages
 <RunCommand sh>                  # one line per RunCommand, in order
-systemctl disable <unit_name>
-rm -f /etc/systemd/system/<unit_name> /usr/local/sbin/<script>
+rm -f /etc/systemd/system/<unit> /etc/systemd/system/multi-user.target.wants/<unit> <script>
 trap - EXIT
 echo <ok_marker> > /dev/<console_device>
 sync
 systemctl poweroff
 ```
-The `trap … EXIT` fires the fail marker on any non-zero exit (`set -e`) OR early exit; the success path clears the trap (`trap - EXIT`) before echoing `ok`. `InstallPackages` renders `dnf -y install a b c` (space-separated, not the comma form virt-customize uses).
+The self-removal `rm`s the unit file, its **offline-created** `multi-user.target.wants` symlink (see below), and the script. The `trap … EXIT` fires the fail marker on any non-zero exit (`set -e`) OR early exit; the success path clears the trap (`trap - EXIT`) before echoing `ok`. `InstallPackages` renders `dnf -y install a b c` (space-separated).
+
+**Firstboot unit contract** (`render_firstboot_unit` returns):
+```ini
+[Unit]
+Description=kdive one-shot build customization
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=<script_path>
+[Install]
+WantedBy=multi-user.target
+```
+This unit is the **bootstrap** — there is no in-guest `systemctl enable` for it (that would run in the very firstboot it is trying to trigger), so `inject_offline` (Task 9) enables it **offline** via a guestfish symlink (below).
 
 - [ ] **Step 1: Write failing tests**
 
 ```python
-from kdive.images.families.renderers import partition_steps, render_firstboot_script
+from kdive.images.families.renderers import (
+    partition_steps, render_firstboot_script, render_firstboot_unit,
+)
 from kdive.images.families.steps import InstallPackages, Mkdir, RunCommand, WriteFile
 
 def test_partition_separates_file_and_exec_ops():
@@ -188,19 +208,31 @@ def test_firstboot_script_shape():
     s = render_firstboot_script(
         [InstallPackages(("drgn", "kexec-tools")), RunCommand("systemctl enable kdump.service")],
         console_device="hvc0", unit_name="kdive-customize.service",
+        script_path="/usr/local/sbin/kdive-customize",
         ok_marker="kdive-customize-ok", fail_marker="kdive-customize-failed")
     assert s.startswith("#!/bin/sh\nset -e\n")
     assert "trap 'echo kdive-customize-failed > /dev/hvc0" in s
     assert "dnf -y install drgn kexec-tools" in s
-    assert "systemctl enable kdump.service" in s
-    assert "systemctl disable kdive-customize.service" in s
+    assert "systemctl enable kdump.service" in s      # an exec-step, runs in-guest
+    # self-removal targets the unit, its wants-symlink, and the script
+    assert "rm -f /etc/systemd/system/kdive-customize.service" in s
+    assert "multi-user.target.wants/kdive-customize.service" in s
+    assert "/usr/local/sbin/kdive-customize" in s
     assert "trap - EXIT" in s
     assert s.rstrip().endswith("systemctl poweroff")
     assert "echo kdive-customize-ok > /dev/hvc0" in s
+
+def test_firstboot_unit_orders_after_network_and_wants_multiuser():
+    u = render_firstboot_unit(script_path="/usr/local/sbin/kdive-customize")
+    assert "After=network-online.target" in u
+    assert "Wants=network-online.target" in u
+    assert "Type=oneshot" in u
+    assert "ExecStart=/usr/local/sbin/kdive-customize" in u
+    assert "WantedBy=multi-user.target" in u
 ```
 
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement `partition_steps` + `render_firstboot_script`.**
+- [ ] **Step 3: Implement `partition_steps` + `render_firstboot_script` + `render_firstboot_unit`** (import `CUSTOMIZE_UNIT`/`CUSTOMIZE_SCRIPT_PATH` from Task 5's module — land those two constants in Task 5 first, or as a tiny prerequisite step here).
 - [ ] **Step 4: Run — PASS.**
 - [ ] **Step 5: `just lint && just type`; commit** → `feat(images): firstboot renderer (offline file ops + exec script) (#1147)`.
 
@@ -276,7 +308,7 @@ def test_customization_domain_x86_kvm_has_no_emulator_and_egress_on():
 - Test: `tests/providers/local_libvirt/lifecycle/rootfs/test_customization_boot.py`
 
 **Interfaces:**
-- Produces: `OK_MARKER = "kdive-customize-ok"`, `FAIL_MARKER = "kdive-customize-failed"`; `class CustomizeVerdict(StrEnum): OK/FAILED/PENDING`; `classify_customization_console(data: bytes) -> CustomizeVerdict`.
+- Produces: `OK_MARKER = "kdive-customize-ok"`, `FAIL_MARKER = "kdive-customize-failed"`, `CUSTOMIZE_UNIT = "kdive-customize.service"`, `CUSTOMIZE_SCRIPT_PATH = "/usr/local/sbin/kdive-customize"` (the shared constants Tasks 3/8/9 import from here); `class CustomizeVerdict(StrEnum): OK/FAILED/PENDING`; `classify_customization_console(data: bytes) -> CustomizeVerdict`.
 
 **Classifier rules (order matters):** OK if the `OK_MARKER` line is present; else FAILED if the `FAIL_MARKER` line is present; else FAILED if a **genuine-fault** pattern is present; else PENDING. Genuine-fault regex = the provision `_CRASH_SIGNATURE` **minus** the two benign-under-TCG watchdog patterns: drop `detected stall`, and change the `BUG:` alternative to `(?<![A-Za-z])BUG:(?! soft lockup)` so `watchdog: BUG: soft lockup` no longer matches while a real `BUG: unable to handle …` still does. Keep `Kernel panic`, `Oops:`, `general protection fault`, `unable to handle kernel`, `KASAN:`, `KFENCE:`.
 
@@ -395,6 +427,19 @@ def test_window_exhaustion_is_boot_timeout():
     with pytest.raises(CategorizedError) as ei:
         run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
     assert ei.value.category is ErrorCategory.BOOT_TIMEOUT
+
+def test_unreadable_console_propagates_and_tears_down(monkeypatch):
+    # ADR-0223 root:0600 wall: the first read raises CONFIGURATION_ERROR; it must
+    # propagate (not be swallowed) AND the domain must still be force-off in finally.
+    domain = FakeDomain(events := [])
+    def raise_perm(_bid):
+        raise CategorizedError("failed to read console log",
+                               category=ErrorCategory.CONFIGURATION_ERROR)
+    seams = _seams_custom(read_console=raise_perm, domain=domain)
+    with pytest.raises(CategorizedError) as ei:
+        run_customization_boot(BID, "<domain/>", accel="tcg", seams=seams)
+    assert ei.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert domain.destroyed is True   # finally force-off ran despite the raise
 ```
 
 - [ ] **Step 2: Run — FAIL.**
@@ -428,10 +473,10 @@ def test_window_exhaustion_is_boot_timeout():
 - Test: `tests/providers/local_libvirt/test_rootfs_build.py`
 
 **Interfaces:**
-- `RootfsBuildTools` gains injected boot seams: `inject_offline: Callable[[Path, list[Step], str, str], None]` (apply file-ops + write the firstboot unit into the qcow2; args: qcow2, file_ops, firstboot_script, unit_name — it also unconditionally `rm -f /etc/cloud/cloud-init.disabled` offline via guestfish, see the network-precondition note), `run_customization_boot: Callable[..., None]` (Task 7 `run_customization_boot`, defaulting to the `_from_env` seams), `seal_customized_image: Callable[..., None]` (Task 8), `extract_baseline_kernel: ExtractBaselineKernel` (reuse the provisioning seam type to get kernel+initrd from `staged`), and **`resolve_accel: Callable[[str], tuple[str, str | None]]`** — resolves `(accel, emulator)` for `spec.arch`. Its default (`# pragma: no cover - live_vm`) wraps the live `conn.getCapabilities()` → `parse_guest_arches(caps_xml, arch_traits.SUPPORTED_ARCHES)` → `resolve_accel_emulator(guest_arches, arch)` path (mirroring `provisioning.py`), returning `("kvm", None)` fail-open on empty guest_arches (exactly `resolve_accel_emulator`'s documented default). Defaults wire the real implementations.
+- `RootfsBuildTools` gains injected boot seams: `inject_offline: Callable[[Path, list[Step], str, str], None]` (args: qcow2, file_ops, firstboot_script, firstboot_unit). Offline via guestfish it: applies the file-ops; writes `firstboot_script` to `CUSTOMIZE_SCRIPT_PATH` mode `0755`; writes `firstboot_unit` to `/etc/systemd/system/{CUSTOMIZE_UNIT}`; **enables the bootstrap unit offline** by creating the symlink `/etc/systemd/system/multi-user.target.wants/{CUSTOMIZE_UNIT}` → `/etc/systemd/system/{CUSTOMIZE_UNIT}` (guestfish `ln-s` — arch-safe, no in-guest `systemctl`); and `rm -f /etc/cloud/cloud-init.disabled` (network precondition). The build plane renders `firstboot_unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)` and `firstboot_script = render_firstboot_script(exec, …, script_path=CUSTOMIZE_SCRIPT_PATH)`. `run_customization_boot: Callable[..., None]` (Task 7 `run_customization_boot`, defaulting to the `_from_env` seams), `seal_customized_image: Callable[..., None]` (Task 8), `extract_baseline_kernel: ExtractBaselineKernel` (reuse the provisioning seam type to get kernel+initrd from `staged`), and **`resolve_accel: Callable[[str], tuple[str, str | None]]`** — resolves `(accel, emulator)` for `spec.arch`. Its default (`# pragma: no cover - live_vm`) wraps the live `conn.getCapabilities()` → `parse_guest_arches(caps_xml, arch_traits.SUPPORTED_ARCHES)` → `resolve_accel_emulator(guest_arches, arch)` path (mirroring `provisioning.py`), returning `("kvm", None)` fail-open on empty guest_arches (exactly `resolve_accel_emulator`'s documented default). Defaults wire the real implementations.
 - `build()` dispatches on `family.customize_via`:
   - `"virt_customize"` (debian): the **current** order (acquire → customize(argv) → repack → normalize → probes-from-scratch → publish), unchanged.
-  - `"boot"` (rhel): acquire → **repack `staged`** → **normalize `staged` WITHOUT `/.autorelabel`** (see note) → `steps = family.customize_steps(ctx)`; `file_ops, exec = partition_steps(steps)`; `script = render_firstboot_script(exec, console_device=arch_traits(spec.arch).console_device, unit_name=_CUSTOMIZE_UNIT, ok_marker=OK_MARKER, fail_marker=FAIL_MARKER)`; `inject_offline(staged, file_ops, script, _CUSTOMIZE_UNIT)`; extract baseline kernel from `staged`; `accel, emulator = self._tools.resolve_accel(spec.arch)`; `xml = render_customization_domain_xml(build_id, arch=spec.arch, disk_path=str(staged), kernel_path=…, initrd_path=…, accel=accel, emulator=emulator)`; `run_customization_boot(build_id, xml, accel=accel, seams=…)`; `seal_customized_image(staged, unit_name=_CUSTOMIZE_UNIT, selinux=(family.guest_mac.startswith("selinux")))`; **probes read `staged`**; `verify_cloud_init(staged)`; publish.
+  - `"boot"` (rhel): acquire → **repack `staged`** → **normalize `staged` WITHOUT `/.autorelabel`** (see note) → `steps = family.customize_steps(ctx)`; `file_ops, exec = partition_steps(steps)`; `script = render_firstboot_script(exec, console_device=arch_traits(spec.arch).console_device, unit_name=CUSTOMIZE_UNIT, script_path=CUSTOMIZE_SCRIPT_PATH, ok_marker=OK_MARKER, fail_marker=FAIL_MARKER)`; `unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)`; `inject_offline(staged, file_ops, script, unit)`; extract baseline kernel from `staged`; `accel, emulator = self._tools.resolve_accel(spec.arch)`; `xml = render_customization_domain_xml(build_id, arch=spec.arch, disk_path=str(staged), kernel_path=…, initrd_path=…, accel=accel, emulator=emulator)`; `run_customization_boot(build_id, xml, accel=accel, seams=…)`; `seal_customized_image(staged, unit_name=_CUSTOMIZE_UNIT, selinux=(family.guest_mac.startswith("selinux")))`; **probes read `staged`**; `verify_cloud_init(staged)`; publish.
 
 **Network precondition (offline).** `inject_offline` removes `/etc/cloud/cloud-init.disabled` **offline** (guestfish `rm-f`, arch-safe) *before* the boot — that file disables cloud-init wholesale, so deferring its removal to a post-`network-online.target` firstboot would deadlock (no cloud-init → no DHCP → firstboot never runs). Boot-path customization requires a **cloud-init-enabled base with no `network:{config:disabled}` drop-in**; the injected `99-kdive.cfg` (`StageFile`) is the primary network config (highest-numbered drop-in wins). The `_STRIP_NET_DISABLE_CMD` `RunCommand` stays best-effort in the firstboot (a no-op on compliant bases). Shipped Fedora rows satisfy this (see Known preconditions).
 
@@ -476,7 +521,7 @@ def test_boot_failure_aborts_publish(tmp_path):
 ```
 
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Implement** the dispatch + reordered boot path + `RootfsBuildTools` boot seams + `normalize(relabel=…)` split. Keep `build()` ≤100 lines by extracting `_build_via_boot(...)` and `_build_via_virt_customize(...)`. On the boot path, before the (long) boot, run a **console-readability preflight**: attempt `read_console_log(console_log_path(build_id))` on the not-yet-existent log (absent → `b""`, fine) and surface an early `CONFIGURATION_ERROR` with the ADR-0223 remediation if it raises `PermissionError` on the console *directory* — i.e. fail fast rather than after a 30-minute boot. (Simplest: check the console dir is writable/readable by the worker; reuse `WORKER_READABILITY_REMEDIATION`.) Add a unit test that an injected read seam raising `CONFIGURATION_ERROR` aborts before `run_customization_boot`.
+- [ ] **Step 3: Implement** the dispatch + reordered boot path + `RootfsBuildTools` boot seams + `normalize(relabel=…)` split. Keep `build()` ≤100 lines by extracting `_build_via_boot(...)` and `_build_via_virt_customize(...)`. No separate console-readability preflight is added — the ADR-0223 wall fails fast on `run_customization_boot`'s first console read (Task 7 covers propagation + `finally` teardown; see Known preconditions).
 - [ ] **Step 4: Run** the full `test_rootfs_build.py` + families suites — PASS (debian unchanged, rhel now boots).
 - [ ] **Step 5: `just lint && just type && just test`; commit** → `feat(local-libvirt): build rhel rootfs via customization boot (#1147)`.
 
@@ -489,7 +534,7 @@ def test_boot_failure_aborts_publish(tmp_path):
 - Create: `docs/design/2026-07-13-unified-customization-boot-proof-record-1147.md`
 
 **Acceptance:**
-- x86_64 KVM: `build-fs` a Fedora x86_64 kdive-ready image via the customization boot, then provision + boot the built image; assert it reaches `ready` and that `resize_rootfs` ran at provision (the cloud-init-state-reset guarantee — e.g. the provisioned rootfs grew to the overlay size). Record the measured native-KVM customization time (pins the deadline default).
+- x86_64 KVM: `build-fs` a Fedora x86_64 kdive-ready image via the customization boot, then provision + boot the built image; assert it reaches `ready` and that `resize_rootfs` ran at provision (the cloud-init-state-reset guarantee — e.g. the provisioned rootfs grew to the overlay size). Record the measured native-KVM customization time (pins the deadline default). Reaching the build's `kdive-customize-ok` marker **is** the proof that `inject_offline`'s offline `multi-user.target.wants` symlink enabled the bootstrap unit (a missed offline-enable manifests as `BOOT_TIMEOUT` here — the live gate the faked-seam unit tests cannot provide).
 - ppc64le TCG: `build-fs` the Fedora ppc64le Cloud Base via the TCG customization boot on the x86_64 host, then provision + boot; assert `ready`. Record whether the boot TCG multiplier covered the install+rebuild workload.
 - The proof record documents both outcomes (mirror the #1144/#1146 proof-record format) and updates the deadline default if the measurement warrants.
 
