@@ -13,9 +13,8 @@ from typing import Protocol, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
-    MAX_KERNEL_TAR_MEMBERS,
-    MAX_KERNEL_TAR_UNCOMPRESSED_BYTES,
     capped_tar_members,
+    reject_oversize_member,
 )
 
 _log = logging.getLogger(__name__)
@@ -50,11 +49,6 @@ _DEBUGINFO_ROOT = "/usr/lib/debug/lib/modules"
 # The relative in-tar / in-guest modules root (``_MODULES_ROOT`` without the leading slash).
 _MODULES_TREE = _MODULES_ROOT.lstrip("/")
 _DEPMOD_STDERR_MAX = 500
-# Host-side extraction runs as root over a contributor-uploaded (semi-trusted) tar, so its size and
-# member count are bounded so a gzip/tar bomb cannot exhaust the worker host's temp filesystem
-# (often tmpfs/RAM). Both bounds are shared with the earlier kernel-tar scans
-# (``MAX_KERNEL_TAR_UNCOMPRESSED_BYTES`` / ``MAX_KERNEL_TAR_MEMBERS``); the upload gate (ADR-0343)
-# only *scans* the first 128 MiB and does not reject an oversized tree, so the bound lives here.
 
 
 class DepmodRunner(Protocol):
@@ -93,27 +87,21 @@ def _extract_modules_bounded(archive: tarfile.TarFile, workdir: Path) -> None:
     """Extract a modules tar member-by-member under a cumulative-size and member-count cap.
 
     Bounds the root host-side extraction so a gzip/tar bomb in a semi-trusted upload cannot exhaust
-    the worker's temp filesystem: each member's declared size accrues, and the extraction aborts
-    (before writing the offending member) once either cap is crossed. Per-member extraction applies
-    :func:`_safe_module_extract_filter`, so path-traversal / symlink-escape protection is unchanged.
+    the worker's temp filesystem: :func:`capped_tar_members` enforces the member-count cap and
+    :func:`reject_oversize_member` the cumulative-size cap (both aborting before the offending
+    member is written), single-sourced with the earlier kernel-tar scans. Per-member extraction
+    applies :func:`_safe_module_extract_filter`, so path-traversal / symlink-escape protection is
+    unchanged.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` when the uncompressed tree exceeds
-            :data:`MAX_KERNEL_TAR_UNCOMPRESSED_BYTES` or the member count exceeds
-            :data:`MAX_KERNEL_TAR_MEMBERS` — an oversized/hostile upload the caller can fix.
+        CategorizedError: ``CONFIGURATION_ERROR`` when the member count or cumulative uncompressed
+            size exceeds the shared kernel-tar bounds — an oversized/hostile upload the caller can
+            fix; the safe-extract filter's own categories propagate.
     """
     total = 0
-    for count, member in enumerate(archive, start=1):
-        total += member.size if member.isreg() else 0
-        if count > MAX_KERNEL_TAR_MEMBERS or total > MAX_KERNEL_TAR_UNCOMPRESSED_BYTES:
-            raise CategorizedError(
-                "uploaded module tree exceeds the host-extraction bound",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={
-                    "max_uncompressed_bytes": MAX_KERNEL_TAR_UNCOMPRESSED_BYTES,
-                    "max_members": MAX_KERNEL_TAR_MEMBERS,
-                },
-            )
+    for member in capped_tar_members(archive):
+        total += member.size if member.isfile() else 0
+        reject_oversize_member(total, dest=str(workdir))
         archive.extract(member, workdir, filter=_safe_module_extract_filter)
 
 
@@ -383,7 +371,7 @@ class _RealGuestKernelWriter:  # pragma: no cover - live_vm (libguestfs)
 
     @staticmethod
     def _read_release(modules_tar: Path, overlay: str) -> str:
-        prefix = _MODULES_ROOT.strip("/") + "/"
+        prefix = _MODULES_TREE + "/"
         try:
             with tarfile.open(modules_tar, "r:gz") as archive:
                 # Stream through the capped iterator (not getnames(), which eagerly loads every

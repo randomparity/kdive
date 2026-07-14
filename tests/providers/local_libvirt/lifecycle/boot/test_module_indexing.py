@@ -18,6 +18,7 @@ import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot import guest_kernel_writer as gkw
+from kdive.providers.local_libvirt.lifecycle.boot import kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import index_modules_tar
 
 # A ppc64le uname — the arch suffix must survive indexing unchanged (the cross-arch case #1148 fix).
@@ -136,7 +137,7 @@ def test_index_modules_tar_rejects_oversize_tree(
     # A gzip/tar bomb must not extract unbounded as root on the worker host: the cumulative
     # uncompressed size is capped (#1148 review). Shrink the cap so the small fixture trips it.
     modules_tar = _modules_tar(tmp_path, _VERSION)
-    monkeypatch.setattr(gkw, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
     workdir = tmp_path / "work"
     workdir.mkdir()
     with pytest.raises(CategorizedError) as exc:
@@ -148,7 +149,7 @@ def test_index_modules_tar_rejects_too_many_members(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     modules_tar = _modules_tar(tmp_path, _VERSION)
-    monkeypatch.setattr(gkw, "MAX_KERNEL_TAR_MEMBERS", 0)
+    monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_MEMBERS", 0)
     workdir = tmp_path / "work"
     workdir.mkdir()
     with pytest.raises(CategorizedError) as exc:
