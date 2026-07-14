@@ -11,6 +11,7 @@ drives ``acquire base → virt-customize(family argv) → repack ext4 → family
 from __future__ import annotations
 
 import hashlib
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,7 +22,13 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
 from kdive.images.families.renderers import render_argv
 from kdive.images.families.rhel import RhelFamily
-from kdive.images.families.steps import InstallPackages, RunCommand, Step
+from kdive.images.families.steps import (
+    InstallPackages,
+    RunCommand,
+    Step,
+    UploadFile,
+    WriteFile,
+)
 from kdive.images.planes._build_common import (
     BootEntriesProbeSeam,
     DrgnProbeSeam,
@@ -37,6 +44,7 @@ from kdive.images.rootfs.catalog import (
     VirtBuilderSource,
     resolve_rootfs_entry,
 )
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.rootfs_build import (
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
@@ -82,7 +90,7 @@ class _FakeFamily:
         self.rec.readiness_unit_texts.append(ctx.readiness_unit_path.read_text())
         return [InstallPackages(("marker-pkg",)), RunCommand("marker-customize")]
 
-    def normalize(self, qcow2: Path) -> None:
+    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
         self.rec.order.append("normalize")
         self.rec.normalize_calls.append(qcow2)
 
@@ -732,3 +740,196 @@ def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
     with pytest.raises(CategorizedError) as exc:
         _rhel_argv(tmp_path, packages=("drgn",))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+# --- Task 9: the customization-boot build path (ADR-0345) -----------------------------------------
+
+
+@dataclass
+class _RecordingBootFamily:
+    """A FamilyCustomizer stub whose ``customize_via`` drives the build plane's dispatch."""
+
+    rec: _RecordingBootTools
+    family: str = "rhel"
+    kdump_unit: str = "kdump.service"
+    guest_mac: str = "selinux-permissive"
+    customize_via: str = "boot"
+
+    def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
+        return ("marker-pkg",)
+
+    def capabilities(self, kind: str, distro: str, version: str) -> tuple[Capability, ...]:
+        return (Capability.SSH,)
+
+    def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
+        # A mix of file-ops (partitioned to inject_offline) and exec-ops (the firstboot script),
+        # plus the plane-rendered kdive-ready unit upload — read it to guard the point-6 wiring.
+        self.rec.readiness_unit_texts.append(ctx.readiness_unit_path.read_text())
+        return [
+            InstallPackages(("marker-pkg",)),
+            RunCommand("marker-customize"),
+            WriteFile("/etc/kdive-marker", "x"),
+            UploadFile(ctx.readiness_unit_path, "/etc/systemd/system/kdive-ready.service"),
+        ]
+
+    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+        self.rec.order.append("normalize")
+        self.rec.normalize_relabel = relabel
+
+
+@dataclass
+class _RecordingBootTools:
+    """Injected toolset recording the boot-path build; no libvirt/guestfs is touched."""
+
+    accel: tuple[str, str | None] = ("kvm", None)
+    boot_raises: CategorizedError | None = None
+    order: list[str] = field(default_factory=list)
+    readiness_unit_texts: list[str] = field(default_factory=list)
+    staged_path: Path | None = None
+    probed_path: Path | None = None
+    customization_boot_ran: bool = False
+    virt_customize_ran: bool = False
+    boot_accel: str | None = None
+    boot_domain_name: str | None = None
+    inject_file_ops: list[Step] = field(default_factory=list)
+    inject_script: str | None = None
+    normalize_relabel: bool | None = None
+    sealed: bool = False
+    seal_selinux: bool | None = None
+    payload: bytes = b"qcow2-bytes"
+
+    def family_for(self, name: str) -> _RecordingBootFamily:
+        if name == "debian":
+            return _RecordingBootFamily(
+                self,
+                family="debian",
+                kdump_unit="kdump-tools.service",
+                guest_mac="apparmor",
+                customize_via="virt_customize",
+            )
+        return _RecordingBootFamily(self)
+
+    def acquire_base(
+        self,
+        source: RootfsSource,
+        scratch: Path,
+        *,
+        releasever: str,
+        arch: str,
+        virt_builder: object,
+        downloader: object,
+    ) -> None:
+        scratch.write_bytes(b"scratch")
+        self.order.append("acquire")
+
+    def customize(self, qcow2: Path, argv: list[str]) -> None:
+        self.virt_customize_ran = True
+        self.order.append("customize")
+
+    def repack_whole_disk_ext4(self, *, scratch: Path, qcow2: Path, size: str) -> None:
+        qcow2.write_bytes(self.payload)
+        self.staged_path = qcow2
+        self.order.append("repack")
+
+    def inject_offline(
+        self, qcow2: Path, file_ops: list[Step], firstboot_script: str, firstboot_unit: str
+    ) -> None:
+        self.inject_file_ops = list(file_ops)
+        self.inject_script = firstboot_script
+        self.order.append("inject")
+
+    def extract_baseline_kernel(
+        self, base: Path, dest_dir: Path, hint: str | None
+    ) -> BaselineKernel:
+        return BaselineKernel(kernel=dest_dir / "kernel", initrd=None)
+
+    def resolve_accel(self, arch: str) -> tuple[str, str | None]:
+        return self.accel
+
+    def run_customization_boot(self, build_id: object, domain_xml: str, *, accel: str) -> None:
+        self.customization_boot_ran = True
+        self.boot_accel = accel
+        self.boot_domain_name = ET.fromstring(domain_xml).findtext("name")
+        self.order.append("boot")
+        if self.boot_raises is not None:
+            raise self.boot_raises
+
+    def seal_customized_image(self, qcow2: Path, *, unit_name: str, selinux: bool) -> None:
+        self.sealed = True
+        self.seal_selinux = selinux
+        self.order.append("seal")
+
+    def verify_cloud_init(self, qcow2: Path) -> None:
+        self.order.append("verify")
+
+    def inspect_versions(self, qcow2: Path) -> dict[str, str]:
+        self.probed_path = qcow2
+        return {}
+
+    def as_tools(self) -> RootfsBuildTools:
+        return RootfsBuildTools(
+            acquire_base=self.acquire_base,
+            customize=self.customize,
+            repack_whole_disk_ext4=self.repack_whole_disk_ext4,
+            family_for=self.family_for,
+            inject_offline=self.inject_offline,
+            extract_baseline_kernel=self.extract_baseline_kernel,
+            resolve_accel=self.resolve_accel,
+            run_customization_boot=self.run_customization_boot,
+            seal_customized_image=self.seal_customized_image,
+            verify_cloud_init=self.verify_cloud_init,
+            inspect_versions=self.inspect_versions,
+            probe_makedumpfile=_no_makedumpfile,
+            probe_drgn=_no_drgn,
+            probe_boot_entries=_no_boot_entries,
+            probe_os_release=_no_os_release,
+            probe_kernel_config=_no_kernel_config,
+        )
+
+
+def test_rhel_build_uses_customization_boot(tmp_path: Path) -> None:
+    calls = _RecordingBootTools(accel=("kvm", None))
+    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane.build(_spec(name="fedora-kdive-ready-44", arch="x86_64"))
+    assert calls.customization_boot_ran
+    assert not calls.virt_customize_ran, "the boot path never runs virt-customize"
+    assert calls.boot_accel == "kvm", "the resolve_accel seam drove the accelerator branch"
+    assert calls.boot_domain_name is not None
+    assert calls.boot_domain_name.startswith("kdive-build-")
+    assert calls.normalize_relabel is False, "the boot path normalizes without /.autorelabel"
+    assert calls.sealed and calls.seal_selinux is True, "selinux family seals with a relabel"
+    assert calls.probed_path == calls.staged_path, "provenance is probed from staged, not scratch"
+    # The firstboot script carries the exec-ops; the file-ops go to inject_offline.
+    assert calls.inject_script is not None
+    assert "dnf -y install marker-pkg" in calls.inject_script
+    assert any(isinstance(op, WriteFile) for op in calls.inject_file_ops)
+    assert not any(isinstance(op, InstallPackages) for op in calls.inject_file_ops)
+
+
+def test_ppc64le_build_boots_under_tcg(tmp_path: Path) -> None:
+    calls = _RecordingBootTools(accel=("tcg", "/usr/bin/qemu-system-ppc64"))
+    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane.build(_spec(name="fedora-kdive-ready-44-ppc64le", arch="ppc64le"))
+    assert calls.boot_accel == "tcg", "the TCG branch is unit-covered"
+    assert calls.customization_boot_ran
+
+
+def test_debian_build_stays_on_virt_customize(tmp_path: Path) -> None:
+    calls = _RecordingBootTools()
+    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    plane.build(_spec(name="debian-kdive-ready-13", arch="x86_64", distro="debian"))
+    assert calls.virt_customize_ran
+    assert not calls.customization_boot_ran, "debian is unchanged (virt-customize path)"
+    assert calls.normalize_relabel is True, "the virt-customize path normalizes with relabel"
+
+
+def test_boot_failure_aborts_publish(tmp_path: Path) -> None:
+    calls = _RecordingBootTools(
+        boot_raises=CategorizedError("dnf failed", category=ErrorCategory.PROVISIONING_FAILURE)
+    )
+    plane = LocalLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=calls.as_tools())
+    with pytest.raises(CategorizedError) as err:
+        plane.build(_spec(name="fedora-kdive-ready-44"))
+    assert err.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert not calls.sealed, "a failed boot never reaches seal"
+    assert not (tmp_path / "work" / "fedora-kdive-ready-44.qcow2").exists(), "publish did not run"

@@ -80,6 +80,12 @@ class FamilyCustomizer(Protocol):
         """Return the ordered customization steps that turn the base into a kdive-ready rootfs."""
         ...
 
-    def normalize(self, qcow2: Path) -> None:
-        """Normalize the repacked qcow2 (fstab/crypttab/SELinux) in place via guestfish."""
+    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+        """Normalize the repacked qcow2 (fstab/crypttab/SELinux) in place via guestfish.
+
+        ``relabel`` controls the first-boot SELinux relabel (``/.autorelabel``): the
+        virt-customize path leaves it on (default); the boot path passes ``relabel=False`` and
+        defers the touch to the offline seal after the customization boot (ADR-0345). Families
+        with no SELinux (debian) ignore the flag.
+        """
         ...

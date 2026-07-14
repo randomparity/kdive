@@ -32,9 +32,18 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID, uuid4
 
+import libvirt
+
+import kdive.config as config
+from kdive.domain.catalog.resource_capabilities import (
+    GUEST_ARCHES_KEY,
+    ResourceCapabilities,
+    resolve_accel_emulator,
+)
 from kdive.domain.errors import CategorizedError
-from kdive.domain.platform.arch_traits import arch_traits
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.drgn_support import DrgnVersion
 from kdive.images.families import family_for
 from kdive.images.families._fedora_customize import (
@@ -44,7 +53,19 @@ from kdive.images.families._fedora_customize import (
     readiness_unit as _readiness_unit,
 )
 from kdive.images.families.base import CustomizeContext, FamilyCustomizer
-from kdive.images.families.renderers import render_argv
+from kdive.images.families.renderers import (
+    partition_steps,
+    render_argv,
+    render_firstboot_script,
+    render_firstboot_unit,
+)
+from kdive.images.families.steps import (
+    Mkdir,
+    StageFile,
+    Step,
+    UploadFile,
+    WriteFile,
+)
 from kdive.images.kdump_support import MakedumpfileVersion
 from kdive.images.planes._build_common import (
     build_workspace,
@@ -75,8 +96,27 @@ from kdive.images.rootfs.catalog import (
     RootfsSource,
     resolve_rootfs_entry,
 )
-from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import baseline_kernel_names
+from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import (
+    ExtractBaselineKernel,
+    _real_extract_baseline_kernel,
+    baseline_kernel_names,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
+    CUSTOMIZE_SCRIPT_PATH,
+    CUSTOMIZE_UNIT,
+    FAIL_MARKER,
+    OK_MARKER,
+    CustomizationBootSeams,
+    _real_run_guestfish,
+    seal_customized_image,
+)
+from kdive.providers.local_libvirt.lifecycle.rootfs.customization_boot import (
+    run_customization_boot as _run_customization_boot,
+)
+from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
+from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.shared.build_timeouts import SLOW_BUILD_TOOL_TIMEOUT_S
+from kdive.providers.shared.libvirt_xml import parse_guest_arches
 
 _log = logging.getLogger(__name__)
 
@@ -147,6 +187,121 @@ type Customize = Callable[[Path, list[str]], None]
 type RepackWholeDiskExt4 = Callable[..., None]
 type FamilyResolver = Callable[[str], FamilyCustomizer]
 type VerifyCloudInit = Callable[[Path], None]
+type InjectOffline = Callable[[Path, list[Step], str, str], None]
+type RunCustomizationBoot = Callable[..., None]
+type SealCustomizedImage = Callable[..., None]
+type ResolveAccel = Callable[[str], tuple[str, str | None]]
+
+_INJECT_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
+
+
+def _real_resolve_accel(arch: str) -> tuple[str, str | None]:  # pragma: no cover - live_vm
+    """Resolve ``(accel, emulator)`` for ``arch`` from live libvirt capabilities (ADR-0340/0345).
+
+    Mirrors the provisioning resolver: reads ``getCapabilities``, routes it through the shared
+    :func:`resolve_accel_emulator` branch, and fails **open** to ``("kvm", None)`` when the host
+    advertises no guest arches (not re-discovered since ADR-0338) — the legacy x86-KVM path.
+    """
+    conn = libvirt.open(config.require(LIBVIRT_URI))
+    try:
+        caps_xml = conn.getCapabilities()
+    finally:
+        conn.close()
+    guest_arches = ResourceCapabilities.from_mapping(
+        {GUEST_ARCHES_KEY: parse_guest_arches(caps_xml, SUPPORTED_ARCHES)}
+    ).guest_arches()
+    resolved = resolve_accel_emulator(guest_arches, arch)
+    return resolved if resolved is not None else ("kvm", None)
+
+
+def _guestfish_file_op(step: Step, cleanup: list[Path]) -> list[str]:  # pragma: no cover - live_vm
+    """Render one file-op ``Step`` to guestfish commands, staging host content as needed."""
+    match step:
+        case Mkdir(path):
+            return [f"mkdir-p {path}"]
+        case WriteFile(path, content):
+            return [f"upload {_stage_content(content, cleanup)} {path}"]
+        case StageFile(path, content):
+            return [f"upload {_stage_content(content, cleanup)} {path}"]
+        case UploadFile(host_src, dest, mode):
+            lines = [f"upload {host_src} {dest}"]
+            if mode is not None:
+                lines.append(f"chmod {mode} {dest}")
+            return lines
+    return []
+
+
+def _stage_content(content: str, cleanup: list[Path]) -> Path:  # pragma: no cover - live_vm
+    """Write ``content`` to a delete-on-cleanup host tempfile for guestfish upload."""
+    with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+        handle.write(content)
+        staged = Path(handle.name)
+    cleanup.append(staged)
+    return staged
+
+
+def _inject_offline_script(
+    file_ops: list[Step], firstboot_script: str, firstboot_unit: str, cleanup: list[Path]
+) -> str:  # pragma: no cover - live_vm
+    """Render the guestfish script that offline-injects + enables the firstboot customization."""
+    unit_path = f"/etc/systemd/system/{CUSTOMIZE_UNIT}"
+    wants_link = f"/etc/systemd/system/multi-user.target.wants/{CUSTOMIZE_UNIT}"
+    lines: list[str] = []
+    for step in file_ops:
+        lines += _guestfish_file_op(step, cleanup)
+    lines += [
+        f"upload {_stage_content(firstboot_script, cleanup)} {CUSTOMIZE_SCRIPT_PATH}",
+        f"chmod 0755 {CUSTOMIZE_SCRIPT_PATH}",
+        f"upload {_stage_content(firstboot_unit, cleanup)} {unit_path}",
+        "mkdir-p /etc/systemd/system/multi-user.target.wants",
+        f"ln-s ../{CUSTOMIZE_UNIT} {wants_link}",
+        "rm-f /etc/cloud/cloud-init.disabled",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _real_inject_offline(
+    qcow2: Path, file_ops: list[Step], firstboot_script: str, firstboot_unit: str
+) -> None:  # pragma: no cover - live_vm
+    """Offline-inject the file-ops, firstboot script/unit, and bootstrap symlink via guestfish.
+
+    Applies the partitioned file-ops, writes the firstboot script (mode ``0755``) and its systemd
+    unit, enables the unit **offline** with a ``multi-user.target.wants`` symlink (no in-guest
+    ``systemctl`` — arch-safe under a cross-arch appliance), and removes
+    ``/etc/cloud/cloud-init.disabled`` so cloud-init runs and DHCPs the egress NIC (ADR-0345).
+    """
+    cleanup: list[Path] = []
+    script = _inject_offline_script(file_ops, firstboot_script, firstboot_unit, cleanup)
+    try:
+        run_guestfs_tool(
+            ["guestfish", "--rw", "-a", str(qcow2), "-i"],
+            stage="customize-inject",
+            timeout_s=_INJECT_TIMEOUT_S,
+            missing_message="guestfish is not installed; cannot inject the firstboot customization",
+            failure_message="offline firstboot injection failed",
+            input_text=script,
+        )
+    finally:
+        for path in cleanup:
+            path.unlink(missing_ok=True)
+
+
+def _real_run_customization_boot(
+    build_id: UUID, domain_xml: str, *, accel: str
+) -> None:  # pragma: no cover - live_vm
+    """Boot the transient customization domain with the live host seams (ADR-0345)."""
+    _run_customization_boot(
+        build_id, domain_xml, accel=accel, seams=CustomizationBootSeams.from_env()
+    )
+
+
+def _real_seal_customized_image(
+    qcow2: Path, *, unit_name: str, selinux: bool
+) -> None:  # pragma: no cover - live_vm
+    """Offline-seal the customized image with the live guestfish runner (ADR-0345)."""
+    seal_customized_image(
+        qcow2, unit_name=unit_name, selinux=selinux, run_guestfish=_real_run_guestfish
+    )
 
 
 def _real_verify_cloud_init(qcow2: Path) -> None:  # pragma: no cover - live_vm
@@ -203,6 +358,11 @@ class RootfsBuildTools:
     probe_os_release: OsReleaseProbeSeam = DEFAULT_OS_RELEASE_PROBE
     probe_kernel_config: KernelConfigProbeSeam = DEFAULT_KERNEL_CONFIG_PROBE
     verify_cloud_init: VerifyCloudInit = _real_verify_cloud_init
+    inject_offline: InjectOffline = _real_inject_offline
+    run_customization_boot: RunCustomizationBoot = _real_run_customization_boot
+    seal_customized_image: SealCustomizedImage = _real_seal_customized_image
+    extract_baseline_kernel: ExtractBaselineKernel = _real_extract_baseline_kernel
+    resolve_accel: ResolveAccel = _real_resolve_accel
 
 
 def _resolve_entry(spec: RootfsBuildSpec) -> RootfsCatalogEntry:
@@ -261,16 +421,16 @@ class LocalLibvirtRootfsBuildPlane:
                 virt_builder=self._tools.virt_builder,
                 downloader=self._tools.downloader,
             )
-            self._customize(scratch, family, spec=spec, entry=entry)
             staged = work_dir / f"{spec.name}.qcow2"
-            self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
-            family.normalize(staged)
-            self._tools.verify_cloud_init(staged)
-            installed = self._inspect_installed(scratch)
+            probe_src = self._customize_and_stage(
+                scratch, staged, family, work_dir, spec=spec, entry=entry
+            )
+            installed = self._inspect_installed(probe_src)
             package_versions = {n: installed[n] for n in spec.packages if n in installed}
-            makedumpfile_version = self._capture_makedumpfile(scratch, installed)
-            drgn_version = self._capture_drgn(scratch, installed)
-            boot_facts = self._capture_boot_facts(scratch)
+            makedumpfile_version = self._capture_makedumpfile(probe_src, installed)
+            drgn_version = self._capture_drgn(probe_src, installed)
+            boot_facts = self._capture_boot_facts(probe_src)
+            os_release = self._capture_os_release(probe_src)
             qcow2 = publish_qcow2(self._workspace, image_name=spec.name, scratch=staged)
         digest = digest_file(qcow2)
         return RootfsBuildOutput(
@@ -289,9 +449,119 @@ class LocalLibvirtRootfsBuildPlane:
                 drgn_version=drgn_version,
                 boot_kernel_count=boot_facts.boot_kernel_count,
                 default_kernel_version=boot_facts.default_kernel_version,
-                os_release=self._capture_os_release(scratch),
+                os_release=os_release,
             ).to_dict(),
         )
+
+    def _customize_and_stage(
+        self,
+        scratch: Path,
+        staged: Path,
+        family: FamilyCustomizer,
+        work_dir: Path,
+        *,
+        spec: RootfsBuildSpec,
+        entry: RootfsCatalogEntry,
+    ) -> Path:
+        """Customize + stage the image per the family's ``customize_via``; return the probe source.
+
+        ``virt_customize`` (debian) keeps the historical order and probes provenance from the
+        customized ``scratch``; ``boot`` (rhel) repacks + normalizes first, then boots the image to
+        self-customize and seals it, so provenance is probed from the ``staged`` image (ADR-0345).
+        """
+        if family.customize_via == "boot":
+            return self._build_via_boot(scratch, staged, family, work_dir, spec=spec, entry=entry)
+        return self._build_via_virt_customize(scratch, staged, family, spec=spec, entry=entry)
+
+    def _build_via_virt_customize(
+        self,
+        scratch: Path,
+        staged: Path,
+        family: FamilyCustomizer,
+        *,
+        spec: RootfsBuildSpec,
+        entry: RootfsCatalogEntry,
+    ) -> Path:
+        """The virt-customize path: customize the scratch, repack, normalize; probe from scratch."""
+        self._customize(scratch, family, spec=spec, entry=entry)
+        self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
+        family.normalize(staged)
+        self._tools.verify_cloud_init(staged)
+        return scratch
+
+    def _build_via_boot(
+        self,
+        scratch: Path,
+        staged: Path,
+        family: FamilyCustomizer,
+        work_dir: Path,
+        *,
+        spec: RootfsBuildSpec,
+        entry: RootfsCatalogEntry,
+    ) -> Path:
+        """The boot path: repack + normalize (no relabel), boot to self-customize, seal.
+
+        Provenance is probed from ``staged`` (the returned path), not ``scratch``.
+        The order is reversed from the virt-customize path: the base is repacked to whole-disk ext4
+        and normalized (leaving ``/.autorelabel`` to the seal) *before* customization, then the
+        image boots its own kernel to install packages and run the firstboot script (ADR-0345).
+        """
+        self._tools.repack_whole_disk_ext4(scratch=scratch, qcow2=staged, size=self._size)
+        family.normalize(staged, relabel=False)
+        self._boot_customize(staged, family, work_dir, spec=spec, entry=entry)
+        self._tools.seal_customized_image(
+            staged,
+            unit_name=CUSTOMIZE_UNIT,
+            selinux=family.guest_mac.startswith("selinux"),
+        )
+        self._tools.verify_cloud_init(staged)
+        return staged
+
+    def _boot_customize(
+        self,
+        staged: Path,
+        family: FamilyCustomizer,
+        work_dir: Path,
+        *,
+        spec: RootfsBuildSpec,
+        entry: RootfsCatalogEntry,
+    ) -> None:
+        """Inject the firstboot customization offline, then boot the transient domain (ADR-0345)."""
+        cleanup: list[Path] = []
+        unit_path = self._render_readiness_unit(family, spec, cleanup)
+        try:
+            ctx = self._context(unit_path, cleanup, spec=spec, entry=entry)
+            file_ops, exec_ops = partition_steps(family.customize_steps(ctx))
+            script = render_firstboot_script(
+                exec_ops,
+                console_device=arch_traits(spec.arch).console_device,
+                unit_name=CUSTOMIZE_UNIT,
+                script_path=CUSTOMIZE_SCRIPT_PATH,
+                ok_marker=OK_MARKER,
+                fail_marker=FAIL_MARKER,
+            )
+            unit = render_firstboot_unit(script_path=CUSTOMIZE_SCRIPT_PATH)
+            self._tools.inject_offline(staged, file_ops, script, unit)
+            self._run_boot(staged, work_dir, spec.arch)
+        finally:
+            for path in cleanup:
+                path.unlink(missing_ok=True)
+
+    def _run_boot(self, staged: Path, work_dir: Path, arch: str) -> None:
+        """Extract the baseline kernel, render the build domain XML, and drive the boot to ok."""
+        baseline = self._tools.extract_baseline_kernel(staged, work_dir / "baseline", None)
+        accel, emulator = self._tools.resolve_accel(arch)
+        build_id = uuid4()
+        xml = render_customization_domain_xml(
+            build_id,
+            arch=arch,
+            disk_path=str(staged),
+            kernel_path=baseline.kernel,
+            initrd_path=baseline.initrd,
+            accel=accel,
+            emulator=emulator,
+        )
+        self._tools.run_customization_boot(build_id, xml, accel=accel)
 
     def _inspect_installed(self, scratch: Path) -> dict[str, str]:
         """The full installed ``{name: version}`` map; ``{}`` (logged) on inspector failure.
@@ -429,25 +699,43 @@ class LocalLibvirtRootfsBuildPlane:
     ) -> None:
         """Render the kdive-ready unit and the family steps to argv, then run ``virt-customize``."""
         cleanup: list[Path] = []
-        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
-            unit.write(_readiness_unit(family.kdump_unit, arch_traits(spec.arch).console_device))
-            unit_path = Path(unit.name)
-        cleanup.append(unit_path)
+        unit_path = self._render_readiness_unit(family, spec, cleanup)
         try:
-            ctx = CustomizeContext(
-                kind=entry.kind,
-                packages=spec.packages,
-                readiness_unit_path=unit_path,
-                is_cloud_image=isinstance(entry.source, CloudImageSource),
-                cleanup=cleanup,
-                distro=entry.distro,
-                version=entry.version,
-            )
+            ctx = self._context(unit_path, cleanup, spec=spec, entry=entry)
             argv = render_argv(family.customize_steps(ctx), cleanup=cleanup)
             self._tools.customize(scratch, argv)
         finally:
             for path in cleanup:
                 path.unlink(missing_ok=True)
+
+    def _render_readiness_unit(
+        self, family: FamilyCustomizer, spec: RootfsBuildSpec, cleanup: list[Path]
+    ) -> Path:
+        """Render the kdive-ready serial-readiness unit to a host tempfile (appended to cleanup)."""
+        with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as unit:
+            unit.write(_readiness_unit(family.kdump_unit, arch_traits(spec.arch).console_device))
+            unit_path = Path(unit.name)
+        cleanup.append(unit_path)
+        return unit_path
+
+    def _context(
+        self,
+        unit_path: Path,
+        cleanup: list[Path],
+        *,
+        spec: RootfsBuildSpec,
+        entry: RootfsCatalogEntry,
+    ) -> CustomizeContext:
+        """Build the :class:`CustomizeContext` both customize paths feed the family."""
+        return CustomizeContext(
+            kind=entry.kind,
+            packages=spec.packages,
+            readiness_unit_path=unit_path,
+            is_cloud_image=isinstance(entry.source, CloudImageSource),
+            cleanup=cleanup,
+            distro=entry.distro,
+            version=entry.version,
+        )
 
 
 _OS_RELEASE_KEYS = {"ID": "id", "VERSION_ID": "version_id", "PRETTY_NAME": "pretty_name"}

@@ -136,12 +136,15 @@ class RhelFamily:
         steps.append(RunCommand(_SELINUX_PERMISSIVE_SED))
         return steps
 
-    def normalize(self, qcow2: Path) -> None:
-        """Normalize fstab/crypttab/SELinux and force a first-boot SELinux relabel via guestfish.
+    def normalize(self, qcow2: Path, *, relabel: bool = True) -> None:
+        """Normalize fstab/crypttab/SELinux, optionally forcing a first-boot relabel via guestfish.
 
         The tar->ext4 repack drops SELinux xattrs, so ``/.autorelabel`` forces a first-boot
         ``restorecon``; combined with SELINUX=permissive the guest boots and relabels rather than
-        denying the host-written authorized_keys.
+        denying the host-written authorized_keys. The boot path passes ``relabel=False`` to skip
+        the touch here — the customization boot runs before the relabel would, so the offline seal
+        does the touch afterward instead (ADR-0345); the fstab/crypttab/SELINUX=permissive edits
+        are unconditional.
         """
         with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as fstab_handle:
             fstab_handle.write(FSTAB)
@@ -153,8 +156,9 @@ class RhelFamily:
             f"upload {fstab_path} /etc/fstab\n"
             f"upload {selinux_path} /etc/selinux/config\n"
             "rm-f /etc/crypttab\n"
-            "touch /.autorelabel\n"
         )
+        if relabel:
+            script += "touch /.autorelabel\n"
         try:
             run_guestfs_tool(
                 ["guestfish", "--rw", "-a", str(qcow2), "-i"],

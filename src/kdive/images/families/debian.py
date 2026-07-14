@@ -128,14 +128,18 @@ class DebianFamily:
         steps.append(RunCommand(f"systemctl enable {READINESS_MARKER}.service"))
         return steps
 
-    def normalize(self, qcow2: Path, *, _run_guestfs: RunGuestfs = run_guestfs_tool) -> None:
+    def normalize(
+        self, qcow2: Path, *, relabel: bool = True, _run_guestfs: RunGuestfs = run_guestfs_tool
+    ) -> None:
         """Normalize fstab to a lone ``/`` and drop crypttab via guestfish (#824).
 
         Unlike the rhel family there is no SELinux relabel: Debian's AppArmor is profile-based
         (loaded from ``/etc/apparmor.d/`` at boot, not from xattrs the tar->ext4 repack strips), its
         default policy leaves sshd unconfined so the injected authorized_keys is not blocked, and
-        the genericcloud base ships no ``/etc/selinux/config`` to edit.
+        the genericcloud base ships no ``/etc/selinux/config`` to edit. ``relabel`` is accepted for
+        the shared :class:`FamilyCustomizer` signature but ignored (no SELinux, ADR-0345).
         """
+        del relabel
         with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as fstab_handle:
             fstab_handle.write(FSTAB)
             fstab_path = Path(fstab_handle.name)
