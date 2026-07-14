@@ -21,9 +21,10 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.domain.profile_documents import SerializedBuildProfile
 from kdive.profiles._schema import schema_version_validator
 from kdive.profiles.types import BuildProfileInput
@@ -32,7 +33,8 @@ from kdive.profiles.types import BuildProfileInput
 class BuildProfile(BaseModel):
     """External-build profile: a thin, versioned document with no source-tree fields.
 
-    It carries only its schema version; the artifact set is delivered through the upload lane
+    It carries its schema version and the target ``arch`` (default ``x86_64``, validated against
+    ``arch_traits.SUPPORTED_ARCHES``); the artifact set is delivered through the upload lane
     (``artifacts.expected_uploads`` -> ``artifacts.create_run_upload`` -> ``runs.complete_build``),
     not named here. It remains the persisted ``build_profile`` jsonb envelope, and :meth:`parse`
     is the boundary that maps a structural ``ValidationError`` onto ``configuration_error`` and
@@ -42,8 +44,25 @@ class BuildProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1]
+    arch: str = Field(
+        default="x86_64",
+        description=(
+            "Target CPU architecture the uploaded kernel is built for. One of "
+            f"{', '.join(sorted(SUPPORTED_ARCHES))}; defaults to x86_64. Selects the "
+            "boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF "
+            "vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md."
+        ),
+    )
 
     _reject_coerced_version = schema_version_validator
+
+    @field_validator("arch")
+    @classmethod
+    def _known_arch(cls, value: str) -> str:
+        if value not in SUPPORTED_ARCHES:
+            supported = ", ".join(sorted(SUPPORTED_ARCHES))
+            raise ValueError(f"unsupported arch; expected one of {supported}")
+        return value
 
     @classmethod
     def parse(cls, data: BuildProfileInput) -> BuildProfile:

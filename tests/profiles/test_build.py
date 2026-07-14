@@ -123,3 +123,39 @@ def test_dump_build_profile_round_trips() -> None:
     dumped = dump_build_profile(profile)
     reparsed = BuildProfile.parse(dumped)
     assert reparsed.schema_version == profile.schema_version
+
+
+def test_arch_defaults_to_x86_64() -> None:
+    # An omitted arch is the documented x86_64 default (back-compat: every existing
+    # {"schema_version": 1} profile stays valid and x86 behavior is unchanged).
+    profile = BuildProfile.parse(_valid())
+    assert profile.arch == "x86_64"
+
+
+def test_ppc64le_arch_parses() -> None:
+    data = _valid()
+    data["arch"] = "ppc64le"
+    assert BuildProfile.parse(data).arch == "ppc64le"
+
+
+def test_unsupported_arch_rejected_as_configuration_error() -> None:
+    data = _valid()
+    data["arch"] = "s390x"
+    _expect_configuration_error(data)
+
+
+def test_arch_error_details_do_not_leak_submitted_value() -> None:
+    # The unsupported-arch rejection names the supported set, never the submitted value.
+    data = _valid()
+    data["arch"] = "S3CRET-ARCH"
+    with pytest.raises(CategorizedError) as caught:
+        BuildProfile.parse(data)
+    assert "S3CRET-ARCH" not in str(caught.value.details)
+
+
+def test_dump_build_profile_carries_arch() -> None:
+    profile = BuildProfile.parse({"schema_version": 1, "arch": "ppc64le"})
+    dumped = dump_build_profile(profile)
+    assert dumped["arch"] == "ppc64le"
+    # The default profile dumps the explicit x86_64 arch, not an absent field.
+    assert dump_build_profile(BuildProfile.parse(_valid()))["arch"] == "x86_64"

@@ -1960,7 +1960,7 @@ def test_create_first_run_flips_investigation_active(migrated_url: str) -> None:
                 )
                 flip = await cur.fetchone()
         assert run_row is not None and run_row["state"] == "created"
-        assert run_row["build_profile"] == {"schema_version": 1}
+        assert run_row["build_profile"] == {"schema_version": 1, "arch": "x86_64"}
         assert inv_row is not None and inv_row["state"] == "active"
         assert inv_row["last_run_at"] is not None
         assert flip is not None and flip["n"] == 1
