@@ -79,26 +79,22 @@ class FormatContract:
 class LayoutMember:
     """One member inside a container artifact (e.g. a path inside the combined kernel tar).
 
-    A member carries at most one of ``format`` (a single arch-neutral byte contract) or
-    ``formats_by_arch`` (a per-arch contract, e.g. the ``boot/vmlinuz`` bzImage-vs-ELF split of
-    #1145). They are mutually exclusive in ``to_json``.
+    ``formats_by_arch`` gives a member a per-arch byte contract (e.g. the ``boot/vmlinuz``
+    bzImage-vs-ELF split of #1145); a member with no format constraint leaves it unset.
     """
 
     path: str
     required: bool
     note: str
-    format: FormatContract | None = None
     formats_by_arch: Mapping[str, FormatContract] | None = None
 
     def to_json(self) -> dict[str, JsonValue]:
-        """Return a JSON-safe view; nested format(s) appear only when the member declares them."""
+        """Return a JSON-safe view; ``formats_by_arch`` appears only when the member declares it."""
         data: dict[str, JsonValue] = {
             "path": self.path,
             "required": self.required,
             "note": self.note,
         }
-        if self.format is not None:
-            data["format"] = self.format.to_json()
         if self.formats_by_arch is not None:
             data["formats_by_arch"] = {
                 arch: fmt.to_json() for arch, fmt in self.formats_by_arch.items()
