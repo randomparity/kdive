@@ -45,8 +45,19 @@ before push. Tasks that touch tool docstrings/`Field`s must regenerate the tool 
 **Tests to touch:** `tests/profiles/test_build.py` (BuildProfile),
 `tests/providers/local_libvirt/test_validate_external_artifacts.py` (validator),
 `tests/mcp/lifecycle/test_complete_build_tool.py` + `test_runs_tools.py` (handler),
+`tests/mcp/complete_build_support.py` (shared `FakeValidator`),
+`tests/services/runs/test_complete_build.py` (+ its `unexpected_validator`),
+`tests/adversarial/test_complete_build_concurrency.py` (inline validator wrapper),
 `tests/build_artifacts/test_upload_contract.py` + `tests/mcp/catalog/test_expected_uploads_tool.py`
 (advertisement), `tests/mcp/core/test_tool_docs.py` (every-parameter-has-a-description).
+
+**`CompleteBuildValidation` test doubles (Task 3 breaks these if unlisted).** The callable is
+realized by 3-arg doubles: `tests/mcp/complete_build_support.py` `FakeValidator.__call__`
+(used ~20× across the complete_build suites), the inline wrapper in
+`tests/adversarial/test_complete_build_concurrency.py:35` (which both receives and forwards 3
+positional args), and `unexpected_validator` in `tests/services/runs/test_complete_build.py`.
+Task 3 makes `arch` **keyword-only with an `x86_64` default** on the type and every double, so
+unrelated cases need no per-call edit and none raise `TypeError`.
 
 ---
 
@@ -65,7 +76,10 @@ loop keys off; rejects an unknown arch at `runs.create` (parse) before any uploa
   `"arch": "ppc64le"`; the default profile dumps `"arch": "x86_64"`.
 
 **Code (`src/kdive/profiles/build.py`):**
-- Add `arch: str = "x86_64"`.
+- Add `arch: str = Field(default="x86_64", description=...)` where the description names the
+  allowed values (from sorted `SUPPORTED_ARCHES`) and the `x86_64` default — this is the
+  agent-facing text that serializes into the runs.create nested schema (AC#6), since the
+  parameter-description test does **not** recurse into nested models (see Task 5).
 - Add a `field_validator("arch")` that raises `ValueError` when `value not in
   SUPPORTED_ARCHES` (imported from `kdive.domain.platform.arch_traits`), so `.parse`'s
   existing `ValidationError → CONFIGURATION_ERROR` mapping applies. Message names the
@@ -100,11 +114,18 @@ machine-strict gate, with the cap-reached message fix and the table-coverage inv
   would miss). Assert each message names the arch.
 - **Unknown arch to the validator:** `validate_external_artifacts(..., arch="s390x")` →
   `CONFIGURATION_ERROR` (defensive fail-fast; caller does not trust its input).
-- **Cap-reached message (AC#5):** a small boot-only tar (valid boot member, **no** modules,
-  under the cap) → the plain `no lib/modules member within the scan bound`; a tar whose boot
-  member is padded past the 128 MiB cap before any modules header → the oversized-boot-member
-  message. (Construct the oversized case with a compressible pad so the gzip stays small but
-  decompresses past `max_out`.)
+- **Cap-reached message (AC#5):** **monkeypatch `_KERNEL_TAR_SCAN_MAX_BYTES` to a small
+  value** for these two cases (precedent: `test_validate_external_artifacts.py:196` already
+  does `monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 256)`) — do
+  **not** build a real 128 MiB fixture. The patched cap must be **large enough** to hold the
+  boot member's 512-byte tar header plus its magic extent (~`0x206` bytes for x86, ~`0x14` for
+  ppc64le) so `boot_ok` becomes `True`, yet **smaller** than the padded boot-member content so
+  `cap_reached` fires before any `lib/modules` header (256 is too small for `boot_ok`; size it
+  to e.g. a few KB above the boot member's magic extent, below the padded content). Then: a
+  small boot-only tar under the patched cap (valid boot member, **no** modules) → the plain
+  `no lib/modules member within the scan bound`; a tar whose boot member is padded past the
+  patched cap before any modules header → the oversized-boot-member message. Use a
+  compressible pad so the gzip stays small.
 - **Coverage invariant (AC#4a):** `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES`.
 - **ppc64le `vmlinux` build-id (AC#2):** `extract_build_id_ranged` already requires ELF64-LE;
   add a ppc64le-flavored case (a synthetic ELF64-LE with a GNU build-id note) to confirm it
@@ -140,8 +161,9 @@ machine-strict gate, with the cap-reached message fix and the table-coverage inv
 coverage assert holds; `just lint`/`just type`/`just test` green.
 
 **Notes:** keep messages BUILD_FAILURE for payload-shape failures (matches the existing
-taxonomy); reserve CONFIGURATION_ERROR for the unknown-arch defensive path. Do not touch
-`_KERNEL_TAR_SCAN_MAX_BYTES` (spec AC#5).
+taxonomy); reserve CONFIGURATION_ERROR for the unknown-arch defensive path. Do not change the
+**production default** of `_KERNEL_TAR_SCAN_MAX_BYTES` (spec AC#5) — a per-test
+`monkeypatch` of it is fine and is the established way to exercise the scan bound cheaply.
 
 ---
 
@@ -163,12 +185,21 @@ at finalize (decouples finalize-ability from `SUPPORTED_ARCHES` evolution).
 **Code:**
 - `src/kdive/services/runs/complete_build.py`: extend the `CompleteBuildValidation` callable
   type and `CompleteBuildFinalizer._validate_complete_build` / `_validate_uploads` to take
-  and forward `arch`. Read `arch` from the persisted profile in `_prepare` (or `complete`):
+  and forward `arch` as a **keyword-only argument with an `x86_64` default**
+  (`arch: str = "x86_64"`, keyword-only) — so the default calls
+  `validate_external_artifacts(..., arch=arch)` and every test double can accept it without a
+  per-call edit. Read `arch` from the persisted profile in `_prepare` (or `complete`):
   `arch = str(run.build_profile.get("arch", "x86_64"))` — `run.build_profile` is the
-  serialized jsonb mapping; **do not** call `BuildProfile.parse` here (spec §3). Pass `arch`
-  into `validate_external_artifacts` in `_validate_complete_build`.
+  serialized jsonb mapping; **do not** call `BuildProfile.parse` here (spec §3).
 - `src/kdive/mcp/tools/lifecycle/runs/complete_build.py`: the injected-validator seam
-  (`validate_complete_build`) signature gains `arch`; no new MCP parameter on the wrapper.
+  (`validate_complete_build`) signature gains the keyword-only `arch`; no new MCP parameter on
+  the wrapper.
+- **Update every `CompleteBuildValidation` double** (see the "Tests to touch" note):
+  `tests/mcp/complete_build_support.py` `FakeValidator.__call__` gains `*, arch: str =
+  "x86_64"`; the inline wrapper in `tests/adversarial/test_complete_build_concurrency.py:35`
+  gains it on both its `__call__` and its forwarding call to `self._inner(...)`;
+  `unexpected_validator` in `tests/services/runs/test_complete_build.py` gains it. Existing
+  cases that ignore arch keep working unchanged.
 
 **Acceptance:** the handler/service tests pass; a persisted ppc64le profile threads
 `arch="ppc64le"`; an absent arch threads `x86_64`; `just test` green.
@@ -219,8 +250,11 @@ contract (AGENTS.md: the wrapper docstring is what the agent sees) and must name
 payload expectation in the same PR as the behavior.
 
 **Test first:**
-- `tests/mcp/core/test_tool_docs.py::test_every_parameter_has_a_description` already asserts
-  every parameter (including the new nested `arch`) has a description — it must pass.
+- `test_every_parameter_has_a_description` iterates only **top-level** params (`request`), so
+  it does **not** guard the nested `build_profile.arch` description — Task 1 supplies that via
+  an explicit `Field(description=...)`. Add a direct assertion (here or in `test_tool_docs.py`)
+  that the runs.create schema's nested `build_profile.arch` carries a non-empty description and
+  names the allowed values, so AC#6 discoverability is actually guarded.
 - If a test asserts the `external-build-upload.md` content or the runs.create `Field` text,
   update it; otherwise the generated-reference `just docs-check` is the guard.
 
