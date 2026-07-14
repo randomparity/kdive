@@ -32,9 +32,13 @@
   `CONFIGURATION_ERROR` on the first iteration — no separate preflight is needed (and none can
   work: before boot the log does not exist, so `read_console_log` returns `b""`, not a permission
   error). `run_customization_boot` must let that `CategorizedError` propagate (force-off + close
-  in `finally`, then re-raise). Task 11 documents the remediation (run the worker as root, use
-  `KDIVE_LIBVIRT_URI=qemu:///session`, or grant the worker group read). (This dev host runs
-  `qemu:///system` — build-fs live proof runs the worker as root or grants group read.)
+  in `finally`, then re-raise). Remediation (verified live, #1147 proof record): run the reader as
+  **root** (the deployment worker's identity) or use `KDIVE_LIBVIRT_URI=qemu:///session` (session
+  virtlogd writes the log worker-owned). On libvirt 12 the pre-touch + a `default:user:<worker>:r`
+  ACL do **not** work — virtlogd unlinks+recreates the log `root:0600` and the `0600` create mode
+  zeroes the ACL mask, masking the named-user entry; a non-root reader cannot then re-permission a
+  root-owned file. (This dev host runs `qemu:///system`; the build-fs live proof used
+  `qemu:///session`.)
 - **Base image shape.** Boot-path customization requires a **cloud-init-enabled** base with no
   `network:{config:disabled}` drop-in (the injected `99-kdive.cfg` is the primary network config;
   `/etc/cloud/cloud-init.disabled` is removed offline pre-boot). Shipped Fedora Cloud Base rows
