@@ -35,7 +35,7 @@ from kdive.serialization import JsonValue
 # default) the kernel relocates to a random base, so a breakpoint set by symbol resolves to the
 # wrong address over the gdbstub and never fires (#711).
 _GDBSTUB_NOKASLR = "nokaslr"
-_PLATFORM_OWNED_CMDLINE_TOKENS = ("root=", "console=", "crashkernel=")
+_PLATFORM_OWNED_CMDLINE_TOKENS = ("root=", "console=", "crashkernel=", "fadump=")
 
 
 def _optional_str(value: object) -> str | None:
@@ -361,16 +361,22 @@ def system_required_cmdline(
 
     ``crashkernel`` is the per-install reservation size (ADR-0300, #989): when set it replaces the
     per-arch default (``arch_traits(arch).default_crashkernel`` — 256M on x86_64, 512M on ppc64le;
-    ADR-0346) in the ``crashkernel=<size>`` token. It is honored **only** on the ``KDUMP`` path — a
-    non-kdump method never emits the token, so a supplied value there is inert (the tool boundary
-    rejects that request; this stays a pure composition function).
+    ADR-0346) in the ``crashkernel=<size>`` token. It is honored on the ``KDUMP`` **and** ``FADUMP``
+    paths (both reserve boot memory via ``crashkernel=``) — a method that reserves nothing never
+    emits the token, so a supplied value there is inert (the tool boundary rejects that request;
+    this stays a pure composition function). ``FADUMP`` additionally appends ``fadump=on`` after the
+    reservation to enable the firmware-assisted path on pseries (ADR-0349).
     """
     traits = arch_traits(arch)
     tokens = [f"console={traits.console_device}"]
     if root_cmdline:
         tokens.append(root_cmdline)
-    if method is CaptureMethod.KDUMP:
+    if method in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
         tokens.append(f"crashkernel={crashkernel or traits.default_crashkernel}")
+        if method is CaptureMethod.FADUMP:
+            # fadump reads the crashkernel= reservation for its boot-memory and needs fadump=on to
+            # enable the firmware-assisted path (ADR-0349 §3); the flag is last.
+            tokens.append("fadump=on")
     elif method is CaptureMethod.GDBSTUB:
         tokens.append(_GDBSTUB_NOKASLR)
     return " ".join(tokens)
