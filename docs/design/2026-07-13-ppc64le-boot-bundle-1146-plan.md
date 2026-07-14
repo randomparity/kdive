@@ -24,8 +24,10 @@ green at each commit — `just lint` (ruff), `just type` (ty, whole tree), `just
   existing domain. None branch on arch.
 - **x86-literal prose to fix:** `kernel_bundle.py:27-28` — "libvirt's direct-kernel `<kernel>`
   element needs a raw **bzImage** path" (false for ppc64le). Adjacent x86-flavored *examples* in
-  `install.py` docstrings ("a bzImage with an embedded initramfs") at lines 10, 260, 414 — these
-  are examples of the initrd-optional case, generalize wording, keep the case.
+  `install.py` docstrings ("a bzImage with an embedded initramfs") at the module docstring (line 10)
+  and the `install()` docstring (lines 259-260) — generalize the wording, keep the initrd-optional
+  case. Note: `_render_direct_kernel_xml`'s docstring (line 414) is **already** arch-neutral
+  ("embedded-initramfs kernel") — no edit there.
 - **No dedicated test file for `kernel_bundle.py`** — `extract_boot_vmlinuz` is exercised only
   implicitly through `tests/providers/local_libvirt/test_install.py`, whose helper
   `_combined_kernel_tar_bytes(*, with_modules=True, version=_MODULES_VERSION)`
@@ -39,9 +41,13 @@ green at each commit — `just lint` (ruff), `just type` (ty, whole tree), `just
   → `_stage_vmlinux` (uploads + checks `size>0`, lines 159-169). A `depmod` fault collapses to one
   `INFRASTRUCTURE_FAILURE` carrying only `type(exc).__name__` (lines 134-137, 192-198).
 - **Install cmdline override seam** for the proof token: `install_run(..., cmdline: str | None =
-  None)` (`src/kdive/services/runs/steps.py:65`) applies an optional boot-cmdline override
-  (ADR-0299/#988), re-staging the domain `<cmdline>`. Passing a unique token here and reading it
-  from the booted guest's `/proc/cmdline` is the discriminating live assertion.
+  None)` (`src/kdive/mcp/tools/lifecycle/runs/steps.py:65`) applies an optional boot-cmdline
+  override (ADR-0299/#988), re-staging the domain `<cmdline>`. Passing a unique token here and
+  reading it from the booted guest's `/proc/cmdline` is the discriminating live assertion.
+  **Guard:** `install_run` rejects a cmdline carrying a platform-owned token
+  (`platform_owned_cmdline_token` → `root=`/`console=`/`crashkernel=`) with
+  `cmdline_overrides_platform_args`, and rejects a blank cmdline — so the proof token must be a
+  benign non-platform key, e.g. `kdive_proof_token=<uuid>`, not `console=…`.
 - **ppc64le live harness (from #1144)** in `tests/integration/test_live_stack.py`:
   `_ppc64le_reachability_preflight()` (line 801, gates on `qemu-system-ppc64` +
   `KDIVE_GUEST_IMAGE_PPC64LE` + stack/db), `test_ppc64le_guest_is_ssh_reachable_over_the_wire`
@@ -61,8 +67,9 @@ so a future reader meets the arch-opaque contract where the code lives — the t
 
 **Files:** `src/kdive/providers/local_libvirt/lifecycle/boot/kernel_bundle.py` (the
 `extract_boot_vmlinuz` docstring); `src/kdive/providers/local_libvirt/lifecycle/install.py`
-(the "e.g. a bzImage with an embedded initramfs" example prose at the module docstring and the
-`install`/`_render_direct_kernel_xml` docstrings — generalize to "an embedded-initramfs kernel").
+(the "e.g. a bzImage with an embedded initramfs" example prose at the module docstring, line 10,
+and the `install()` docstring, lines 259-260 — generalize to "an embedded-initramfs kernel").
+`_render_direct_kernel_xml`'s docstring (line 414) is already arch-neutral — do not touch it.
 
 **Do:** Rewrite `extract_boot_vmlinuz`'s docstring to state the `<kernel>` element needs a raw
 kernel image extracted host-side — a bzImage on x86_64, an ELF `vmlinux` on ppc64le (powerpc has
@@ -157,7 +164,9 @@ narrowly-scoped pseries accommodation in code + a test (spec §3, ADR-0344).
    Determine the exact upload wiring by reading `artifacts.expected_uploads` /
    `artifacts.create_system_upload` / `runs.complete_build` at proof time.
 3. `runs.install` with a **unique cmdline token** (the `install_run` cmdline override,
-   `services/runs/steps.py:65`) → `runs.boot`.
+   `mcp/tools/lifecycle/runs/steps.py:65`) → `runs.boot`. The token must be a benign non-platform
+   key (e.g. `kdive_proof_token=<uuid>`) — `install_run` rejects `root=`/`console=`/`crashkernel=`
+   and blank cmdlines.
 4. **Assert + attribute (discriminating, criterion 3):** the running domain's `<kernel>`/`<initrd>`
    (via `virsh dumpxml`) resolve to the per-Run staged paths (`{staging}/{system_id}/{run_id}/…`);
    and the unique token appears in the guest's `/proc/cmdline` over SSH.
@@ -167,12 +176,18 @@ narrowly-scoped pseries accommodation in code + a test (spec §3, ADR-0344).
    initramfs-stage failure token (`VFS: Unable to mount root fs` / `dracut:` FATAL / `Cannot open
    root device`) → "quirk," land the accommodation + test and attribute via the offline `virsh`
    per-Run-path check; anything else → indeterminate (do **not** retire), iterate.
-6. **Writer verdict (criterion 5):** a second `runs.install` with a **stub** (any non-empty)
-   `debuginfo_ref` (`method != KDUMP`) to trigger `_RealGuestKernelWriter.inject` on the ppc64le
-   overlay. If it completes → writer verified. If `depmod` fails, read the chained `__cause__` /
+6. **Writer verdict (criterion 5):** a second `runs.install` with a **stub** `debuginfo_ref`
+   (`method != KDUMP`) to trigger `_RealGuestKernelWriter.inject` on the ppc64le overlay. The stub
+   must be an **actually-uploaded, resolvable object-store artifact carrying non-empty bytes**:
+   `_inject_built_modules` *fetches* `debuginfo_ref` (install.py:401) **before** `inject()`, and
+   `_stage_vmlinux` size-checks it (`size>0`, guest_kernel_writer.py:169) — a made-up ref string
+   raises `STALE_HANDLE` at fetch and depmod never runs, and a zero-length blob fails the size
+   check *after* depmod. The bytes' arch is irrelevant (they are not executed; depmod runs first).
+   If inject completes → writer verified. If `depmod` fails, read the chained `__cause__` /
    libguestfs log for `exec format error` / binfmt → record the cross-arch constraint, defer the
-   `qemu-user`/`binfmt` accommodation to issue 9. UNVERIFIED only if the stub inject cannot run at
-   all (e.g. libguestfs absent).
+   `qemu-user`/`binfmt` accommodation to issue 9. **A fetch/resolve failure is a proof-wiring error
+   to fix, NOT the UNVERIFIED case** — UNVERIFIED applies only if the writer's inject itself cannot
+   run on the host (e.g. libguestfs absent), never because a ref was mis-supplied.
 
 **Do — the record:** Write the proof-record doc with the console evidence (the `hvc0` capture),
 the per-Run-path attribution, the initrd finding, and the writer verdict. Append the definitive
