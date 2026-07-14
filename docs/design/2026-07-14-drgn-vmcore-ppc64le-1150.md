@@ -143,11 +143,18 @@ regression guard, not a one-shot artifact.
   runner cannot masquerade as "no core," and the pinned-digest assertion ties the bytes
   tested to the recorded artifact.
 - **The #1148 vmcore artifact is lost / not reproducible.** A fresh TCG re-capture is slow
-  and need not reproduce the same bytes. *Mitigation:* the core is retained at a stable path
-  with its SHA-256 (`bd322c68…`) recorded in the proof record; the test reads it from
-  `KDIVE_PPC64LE_VMCORE`. Re-capture via the #1148 `live_stack` test
-  (`test_ppc64le_kdump_captures_a_vmcore_under_tcg`) is the last resort, and the proof record
-  states which core (by digest) the run used.
+  and need not reproduce the same bytes — and because AC1a asserts digest equality, a
+  re-captured core would fail the guard exactly as a corrupt one does. *Mitigation:* the core
+  is retained at a stable path with its SHA-256 (`bd322c68…`) recorded; the test reads it from
+  `KDIVE_PPC64LE_VMCORE`. **The pin lives in one authoritative place — the `live_vm` test
+  constant — and the proof record carries a human-readable copy.** If the artifact is lost,
+  the recovery runbook is: re-capture via the #1148 `live_stack` test
+  (`test_ppc64le_kdump_captures_a_vmcore_under_tcg`), recompute the new core's SHA-256, and
+  **update the pin in the test (authoritative) and the proof-record copy** in one commit. The
+  digest-mismatch failure message must distinguish the two cases — *"unexpected digest: if you
+  just re-captured the core, recompute and update the pinned constant; otherwise the core at
+  this path is swapped or corrupt"* — so a recovering operator is never left guessing whether
+  a mismatch means "re-pin" or "corruption."
 - **Default-arg regression risk on the fakes.** *Mitigation:* the `arch` knob defaults to
   `"x86_64"`; the existing x86_64 assertions are the guard that the default is inert.
 - **`Architecture.PPC64` API drift across drgn versions.** *Mitigation:* AC1a asserts equality

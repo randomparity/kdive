@@ -103,7 +103,10 @@ Concretely:
   guard runs in `just test-live` on the host holding the retained core; a green PR does not
   assert this AC. The proof record names that host, the drgn version last verified (0.2.0), the
   core's digest + retained path, and a re-run-on-drgn-bump trigger, so re-exercise is a recorded
-  procedure rather than unstated discipline.
+  procedure rather than unstated discipline. The pinned digest is authoritative **in the test
+  constant** (the proof record holds a human-readable copy); if the core is lost and re-captured,
+  the runbook is to recompute the SHA-256 and update both in one commit, and the digest-mismatch
+  message distinguishes "just re-captured — re-pin" from "core swapped/corrupt."
 - **The full structural read on real ppc64le bytes is DEFERRED, not faked.** Reading the
   task list and by-name symbols out of a real ppc64le core requires a DWARF-bearing
   `vmlinux`. The epic ships only stripped `vmlinuz` and no ppc64le `kernel-debuginfo` (a
