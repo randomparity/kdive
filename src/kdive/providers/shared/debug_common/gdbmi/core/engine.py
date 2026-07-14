@@ -24,6 +24,7 @@ attachment and the next op gets ``no_live_session``.
 from __future__ import annotations
 
 import contextlib
+import platform
 import shutil
 import time
 from collections.abc import Callable
@@ -57,6 +58,11 @@ from kdive.providers.shared.debug_common.gdbmi.core.mi_protocol import (
 )
 from kdive.providers.shared.debug_common.gdbmi.core.transcript import (
     append_transcript as write_transcript,
+)
+from kdive.providers.shared.debug_common.gdbmi.policy.arch import (
+    arch_from_elf,
+    gdb_target_arch_name,
+    select_gdb_binary,
 )
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import (
     ModuleDebuginfo,
@@ -119,6 +125,7 @@ class GdbMiEngine(
         *,
         controller_factory: Callable[[list[str]], GdbController] | None = None,
         gdb_path_finder: Callable[[str], str | None] = shutil.which,
+        host_arch_finder: Callable[[], str] = platform.machine,
         redactor: Redactor | None = None,
         redactor_factory: Callable[[], Redactor] | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -129,6 +136,7 @@ class GdbMiEngine(
             lambda command: PygdbmiController(command)
         )
         self._gdb_path_finder = gdb_path_finder
+        self._host_arch_finder = host_arch_finder
         self._redactor_factory = _redactor_factory(redactor, redactor_factory)
         self._sleep = sleep
         self._host_policy = host_policy
@@ -137,6 +145,26 @@ class GdbMiEngine(
 
     def _redactor(self) -> Redactor:
         return self._redactor_factory()
+
+    @staticmethod
+    def _missing_gdb_error(*, is_cross_arch: bool, guest_arch: str | None) -> CategorizedError:
+        """Build the ``MISSING_DEPENDENCY`` error for an unresolvable gdb binary.
+
+        A cross-arch attach names the multiarch prerequisite so the fix is actionable; a native
+        attach keeps the original "missing required gdb" contract.
+        """
+        if is_cross_arch:
+            return CategorizedError(
+                f"missing a multiarch-capable gdb for a {guest_arch} guest on a non-{guest_arch} "
+                "host; install gdb-multiarch (Debian/Ubuntu) or a multiarch gdb build",
+                category=ErrorCategory.MISSING_DEPENDENCY,
+                details={"missing_tools": ["gdb-multiarch", "gdb"], "guest_arch": guest_arch},
+            )
+        return CategorizedError(
+            "missing required gdb tool",
+            category=ErrorCategory.MISSING_DEPENDENCY,
+            details={"missing_tools": ["gdb"]},
+        )
 
     # --- attach (live_vm) -----------------------------------------------------------------
 
@@ -149,13 +177,6 @@ class GdbMiEngine(
         module ``.ko`` via the injected resolver (ADR-0278).
         """
         self._host_policy(host)
-        gdb_path = self._gdb_path_finder("gdb")
-        if gdb_path is None:
-            raise CategorizedError(
-                "missing required gdb tool",
-                category=ErrorCategory.MISSING_DEPENDENCY,
-                details={"missing_tools": ["gdb"]},
-            )
         resolved_vmlinux = vmlinux_path.expanduser().resolve()
         if not resolved_vmlinux.is_file():
             raise _config_error(
@@ -163,6 +184,12 @@ class GdbMiEngine(
                 code="bad_vmlinux_path",
                 details={"vmlinux_path": str(vmlinux_path)},
             )
+        guest_arch = arch_from_elf(resolved_vmlinux)
+        host_arch = self._host_arch_finder()
+        is_cross_arch = guest_arch is not None and guest_arch != host_arch
+        gdb_path = select_gdb_binary(host_arch, guest_arch, self._gdb_path_finder)
+        if gdb_path is None:
+            raise self._missing_gdb_error(is_cross_arch=is_cross_arch, guest_arch=guest_arch)
         controller = self._controller_factory([gdb_path, "--nx", "--quiet", "--interpreter=mi3"])
         attachment = GdbMiAttachment(
             controller=controller,
@@ -178,6 +205,10 @@ class GdbMiEngine(
             self.execute_mi_command(
                 attachment, f"-file-exec-and-symbols {self._mi_path(resolved_vmlinux)}"
             )
+            if is_cross_arch:
+                gdb_arch = gdb_target_arch_name(guest_arch)  # type: ignore[arg-type]
+                if gdb_arch is not None:
+                    self.execute_mi_command(attachment, f"-gdb-set architecture {gdb_arch}")
             self.execute_mi_command(attachment, f"-gdb-set remotetimeout {RSP_REMOTE_TIMEOUT_SEC}")
             self._connect_with_retry(attachment, host, port)
         except CategorizedError as exc:
