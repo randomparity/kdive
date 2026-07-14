@@ -91,6 +91,15 @@ the ADR-0300 per-install override still wins.
   rebuild the `crashkernel` `Field` description to name the per-arch defaults via
   `default_crashkernel_summary()` (not a hardcoded `256M`): e.g. "reverts … to the platform
   per-arch default ({summary})".
+- **Generated agent-doc fallout** (the `Field` is the source of these): regenerate
+  `docs/guide/reference/runs.md` (and `systems.md` if it shifts) via the repo's doc generator
+  (`just docs` / the generator `just docs-check` verifies) and commit the regenerated output.
+  `tests/mcp/core/test_install_cmdline_docs.py:55` asserts the doc contains the literal
+  `crashkernel=256M` — keep the **x86 example** intact (x86's default is still 256M) so the token
+  survives, or update the test to assert the per-arch summary; decide by what the regenerated doc
+  actually renders. `tests/mcp/lifecycle/test_runs_tools.py` cases that assert `crashkernel=256M`
+  are x86 Systems (`console=ttyS0`) and stay valid; confirm none provision `arch=ppc64le` expecting
+  256M.
 
 **Do (tests first):**
 1. `tests/domain/platform/test_arch_traits.py`: assert `arch_traits("x86_64").default_crashkernel
@@ -107,9 +116,10 @@ the ADR-0300 per-install override still wins.
    hardcoded-256M default-fallback.
 
 **Acceptance:** `just lint`, `just type`, `just test`, `just docs-check` green (docs-check because
-the `Field` text — the tool schema — changed). x86 cmdline byte-identical; ppc64le default is 512M;
-explicit override wins on both arches; `DEFAULT_CRASHKERNEL` gone; agent `Field` text names the
-per-arch defaults from the single-source summary. Migration: none.
+the `Field` text — the tool schema — changed; regenerate `docs/guide/reference/*.md` first). x86
+cmdline byte-identical; ppc64le default is 512M; explicit override wins on both arches;
+`DEFAULT_CRASHKERNEL` gone (grep-confirmed, incl. tests); `test_install_cmdline_docs.py` reconciled;
+agent `Field` text names the per-arch defaults from the single-source summary. Migration: none.
 
 **Rollback:** revert the commit; self-contained (no persistence/schema).
 
@@ -167,11 +177,17 @@ reservation, and the pseries VMCOREINFO/fw_cfg verdict. Runs on this x86_64 dev 
 preflight idiom).
 
 **Step 0 — precondition: a kdump-enabled ppc64le rootfs.** Confirm or prepare a ppc64le rootfs
-with kexec-tools + `kdump.service` enabled + the dracut kdump module (mirror the x86 kdive-ready
-kdump config-fragment, PR#330), published where `KDIVE_GUEST_IMAGE_PPC64LE` points. If the #1146
-scaffold lacks it, extend the scaffold build recipe (arch-safe file-op injection of the kdump
-config fragment + enabling the unit) — file operations are arch-safe under libguestfs; no guest
-execution. **This is a hard precondition of the capture** — record in the proof that it was met.
+with `kexec-tools` + `kdump.service` enabled + the dracut kdump module (mirror the x86 kdive-ready
+kdump config-fragment, PR#330), published where `KDIVE_GUEST_IMAGE_PPC64LE` points. **Installing
+`kexec-tools`/dracut-kdump is a package install, not a file op** — the Fedora ppc64le Cloud base
+does not ship kdump — so it **cannot** be done by cross-arch libguestfs file injection. Use
+**#1147's customization boot (ADR-0345)** — a declared dependency of this issue — to boot the
+ppc64le image once under TCG and `dnf install kexec-tools` + enable `kdump.service` in-guest, then
+seal; the pure file steps (the kdump config fragment) ride the same offline injector. (Only if the
+base image already carries kexec-tools may the config fragment go in file-only.) **This is a hard
+precondition of the capture** — record in the proof that it was met and how (customization-boot vs.
+base-image). If it cannot be met, that is a rootfs gap to close first, not an indeterminate
+capture verdict.
 
 **Files:**
 - `tests/integration/test_live_stack.py` — a new `@pytest.mark.live_stack`
