@@ -10,6 +10,7 @@ import pytest
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.shared.runtime_paths import (
     WORKER_READABILITY_REMEDIATION,
+    build_domain_name,
     console_log_path,
     domain_name_for,
     read_console_log,
@@ -34,6 +35,14 @@ def test_system_id_from_domain_name_round_trips_domain_name_for() -> None:
 def test_system_id_from_domain_name_excludes_build_vm_form() -> None:
     # kdive-build-<uuid> belongs to the ephemeral build-VM reaper, not the System sweep.
     assert system_id_from_domain_name("kdive-build-11111111-1111-1111-1111-111111111111") is None
+
+
+def test_build_domain_name_is_reconciler_safe() -> None:
+    # The transient customization-boot domain carries the build UUID under a distinct prefix so
+    # the System name-fallback reaper never mistakes it for a System (ADR-0345).
+    name = build_domain_name(_SYSTEM_ID)
+    assert name == f"kdive-build-{_SYSTEM_ID}"
+    assert system_id_from_domain_name(name) is None
 
 
 @pytest.mark.parametrize(
