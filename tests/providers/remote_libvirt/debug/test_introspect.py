@@ -646,24 +646,6 @@ def test_helper_sysinfo_maps_uts_and_counters():
     }
 
 
-@pytest.mark.parametrize("arch", ["x86_64", "ppc64le"])
-def test_helper_sysinfo_reports_guest_arch(arch):
-    """The offline sysinfo helper reports the guest arch verbatim on the remote path too (#1150).
-
-    Mirrors the local-libvirt arch parameterization: `machine` is the only arch-observable value,
-    so a ppc64le core yields the same-shaped sysinfo section through the remote offline path.
-    """
-    from kdive.providers.shared.debug_common.introspect import helper_sysinfo
-
-    prog = _ProgramFromLists(
-        uts={"release": "6.1.0", "version": "#1 SMP", "machine": arch, "nodename": "host-a"}
-    )
-    out = helper_sysinfo(prog)
-    assert out["machine"] == arch
-    assert out["release"] == "6.1.0"
-    assert out["boot_cmdline"] == "ro quiet"
-
-
 def test_helper_sysinfo_defaults_missing_uts_fields_to_empty_string():
     from kdive.providers.shared.debug_common.introspect import helper_sysinfo
 
