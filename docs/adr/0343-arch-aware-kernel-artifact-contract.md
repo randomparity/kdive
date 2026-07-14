@@ -49,40 +49,59 @@ parameter, threaded from `run.build_profile.arch` by `runs.complete_build`. The
 (`BOOT_MEMBER_FORMATS: Mapping[str, FormatContract]`) owned by `validation.py`:
 
 - `x86_64` → bzImage `HdrS` magic at offset `0x202` (unchanged).
-- `ppc64le` → ELF64-LE prefix `\x7fELF\x02\x01` at offset `0` (magic, class = 64-bit,
-  data = little-endian).
+- `ppc64le` → ELF64-LE prefix `\x7fELF\x02\x01` at offset `0` **and** `e_machine == EM_PPC64`
+  (`21`) at the 16-bit little-endian field at offset `0x12` — two `MagicPin`s, both required.
+
+The `e_machine` pin is load-bearing. The ELF64-LE prefix alone matches *every* 64-bit LE ELF
+(an x86_64, aarch64, or riscv64 `vmlinux` all begin `\x7fELF\x02\x01`), so without it a
+non-ppc64 ELF misplaced into the boot slot under `arch: ppc64le` would pass — the same
+"misplaced vmlinux" leak the x86 bzImage magic forecloses. Pinning `EM_PPC64` makes the
+ppc64le gate exactly one machine format, symmetric with the x86 side (a bzImage is inherently
+x86). The boot-member check requires **all** pins for the declared arch (the multi-pin
+generalization of today's single-pin `_member_is_bzimage`).
 
 A boot member that does not match the declared arch's format is rejected `BUILD_FAILURE`
-with an arch-naming message (e.g. `kernel combined tar boot/vmlinuz is not an ELF kernel
-for ppc64le`). This is the "arch mismatch vs profile" rejection: an x86 bzImage uploaded
-under a `ppc64le` profile, or a ppc64le ELF under an `x86_64` profile, fails the format
-gate for its declared arch. An unknown arch reaching the validator fails fast
-`CONFIGURATION_ERROR` (the `arch_traits()` rule — never a silent x86 fallback), though the
-profile-parse gate makes this unreachable in the normal path.
+with an arch-naming message (e.g. `kernel combined tar boot/vmlinuz is not a ppc64le ELF
+kernel`). This is the "arch mismatch vs profile" rejection: an x86 bzImage (or any non-ppc64
+ELF) under a `ppc64le` profile, or an ELF under an `x86_64` profile, fails the gate for its
+declared arch. An unknown arch reaching the validator fails fast `CONFIGURATION_ERROR` (the
+`arch_traits()` rule — never a silent x86 fallback), though the profile-parse gate makes this
+unreachable in the normal path.
 
 **The optional `vmlinux` debug ELF and the shape-scan bounds are already arch-neutral.**
 `extract_build_id_ranged` requires ELF64-**LE** (magic, class 2, data 1) — ppc64le
 `vmlinux` is 64-bit little-endian, so it already fits; only the tests need an arch
 dimension. The 128 MiB decompressed-scan cap (`_KERNEL_TAR_SCAN_MAX_BYTES`) is a
-gzip-bomb guard on decompressed *output* and is arch-neutral; it is unchanged. The ppc64le
-boot member (a stripped, bootable `vmlinuz`) is tens of MB, so `boot/vmlinuz`-first
-ordering still reaches the first `lib/modules` header inside the cap.
+gzip-bomb guard on decompressed *output* and is arch-neutral; it is unchanged. The
+contract's ppc64le boot member is the *stripped* bootable ELF Fedora/RHEL install as
+`/boot/vmlinuz` (tens of MB), **not** the unstripped build-tree `vmlinux` (full DWARF,
+500 MB–1 GB+); the documented recipe strips explicitly, and the unstripped ELF belongs in
+the optional `vmlinux` artifact. So `boot/vmlinuz`-first ordering still reaches the first
+`lib/modules` header inside the cap; an unstripped boot member hits the existing scan-bound
+rejection, which is reworded to name the oversized-boot-member cause.
 
 **The advertisement cannot drift from the validator.** `BOOT_MEMBER_FORMATS` is the single
 source; `EXTERNAL_BUILD_CONTRACTS["kernel"]` advertises the boot member's format **per
 arch** from that same table, so `artifacts.expected_uploads` shows both the x86_64 bzImage
-and the ppc64le ELF expectation. The agent-facing surface updates in this PR: the
-`runs.create` build-profile `Field` (the new `arch`), the `runs.complete_build` wrapper
-docstring (the per-arch boot-member expectation), and the
-`external-build-upload.md` resource (a per-arch boot-member table plus a ppc64le `tar`
-recipe).
+and the ppc64le ELF expectation. This changes the advertised JSON: the boot member's single
+`format` object is **replaced** by `formats_by_arch: {arch: {container, magic:[…]}}` (no dual
+`format`+`formats_by_arch` shim — per "replace, don't deprecate"), so its snapshot/no-drift
+test is updated deliberately. The "x86_64 unchanged" claim scopes to validator *behavior*,
+not the advertisement shape. The agent-facing surface updates in this PR: the `runs.create`
+build-profile `Field` (the new `arch`), the `runs.complete_build` wrapper docstring (the
+per-arch boot-member expectation), and the `external-build-upload.md` resource (a per-arch
+boot-member table plus a stripped-ELF ppc64le `tar` recipe).
 
 ## Consequences
 
 - A ppc64le kernel tar with an ELF `boot/vmlinuz` validates; an x86_64 upload is unchanged
   (default arch, same bzImage gate, same messages).
-- The declared arch and the payload format are cross-checked: a bzImage under `ppc64le` or
-  an ELF under `x86_64` is rejected `BUILD_FAILURE` naming the arch.
+- The declared arch and the payload format are cross-checked: a bzImage (or any non-ppc64
+  ELF, via the `e_machine` pin) under `ppc64le`, or an ELF under `x86_64`, is rejected
+  `BUILD_FAILURE` naming the arch.
+- The `expected_uploads` advertised JSON for the `kernel` boot member changes shape (single
+  `format` → `formats_by_arch`); its snapshot/no-drift test is updated. Agents that read the
+  boot member's format move from `layout[…].format` to `layout[…].formats_by_arch[arch]`.
 - An unknown/unsupported arch is rejected at `runs.create`, before any upload — cheaper
   than a post-upload rejection.
 - `runs.complete_build` on an unbound Run works unchanged: the arch comes from the build
