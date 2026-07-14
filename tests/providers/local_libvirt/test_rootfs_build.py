@@ -14,6 +14,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -75,7 +76,7 @@ class _FakeFamily:
     family: str = "rhel"
     kdump_unit: str = "kdump.service"
     guest_mac: str = "selinux-permissive"
-    customize_via: str = "virt_customize"
+    customize_via: Literal["boot", "virt_customize"] = "virt_customize"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)
@@ -688,7 +689,6 @@ def _rhel_argv(
         packages=packages,
         readiness_unit_path=tmp_path / "kdive-ready.service",
         is_cloud_image=is_cloud_image,
-        cleanup=[],
         distro=distro,
         version=version,
     )
@@ -753,7 +753,7 @@ class _RecordingBootFamily:
     family: str = "rhel"
     kdump_unit: str = "kdump.service"
     guest_mac: str = "selinux-permissive"
-    customize_via: str = "boot"
+    customize_via: Literal["boot", "virt_customize"] = "boot"
 
     def packages(self, kind: str, distro: str, version: str) -> tuple[str, ...]:
         return ("marker-pkg",)

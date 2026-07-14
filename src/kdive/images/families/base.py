@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families.steps import Step
@@ -34,7 +34,6 @@ class CustomizeContext:
         readiness_unit_path: Host path of the rendered kdive-ready systemd unit to upload.
         is_cloud_image: True when the base is a cloud-image (needs cloud-init masking and a
             seeded ``/etc/machine-id``); False for a virt-builder scratch.
-        cleanup: Mutable list the customizer appends tempfiles to for the caller to unlink.
         distro: The base-OS distro (e.g. ``fedora`` / ``rocky`` / ``centos-stream``); with
             ``version`` it drives the family's EL-major package and EPEL decisions (#823).
         version: The base-OS release (e.g. ``44`` / ``8`` / ``10``).
@@ -44,7 +43,6 @@ class CustomizeContext:
     packages: tuple[str, ...]
     readiness_unit_path: Path
     is_cloud_image: bool
-    cleanup: list[Path]
     distro: str
     version: str
 
@@ -64,7 +62,7 @@ class FamilyCustomizer(Protocol):
     #: How the build plane applies this family's ``customize_steps`` (ADR-0345): ``"boot"`` (rhel —
     #: boot the image and let it self-customize) or ``"virt_customize"`` (debian — render the steps
     #: to ``virt-customize`` argv and apply them offline).
-    customize_via: str
+    customize_via: Literal["boot", "virt_customize"]
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the package set this family installs for ``kind`` on ``distro``/``version``."""

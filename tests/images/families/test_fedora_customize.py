@@ -104,7 +104,6 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
         packages=("openssh-server",),
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
-        cleanup=[],
         distro="fedora",
         version="44",
     )

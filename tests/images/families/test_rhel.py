@@ -34,7 +34,6 @@ def _ctx(
         packages=fam.packages("debug", distro, version),
         readiness_unit_path=tmp_path / "u.service",
         is_cloud_image=is_cloud_image,
-        cleanup=[],
         distro=distro,
         version=version,
     )

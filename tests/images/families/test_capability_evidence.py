@@ -98,7 +98,6 @@ def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) 
                     packages=family.packages(kind, name, version),
                     readiness_unit_path=readiness,
                     is_cloud_image=True,
-                    cleanup=[],
                     distro=name,
                     version=version,
                 )

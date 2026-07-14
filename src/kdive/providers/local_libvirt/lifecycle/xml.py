@@ -343,21 +343,38 @@ def _append_ssh_forward(
             "SSH port",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    commandline = _qemu_commandline(domain)
     restrict = "off" if guest_egress else "on"
     netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    _append_virtio_nic(
+        _qemu_commandline(domain),
+        netdev_value=netdev,
+        netdev_id="kdivessh",
+        pin_nic_slot=pin_nic_slot,
+    )
+
+
+def _append_virtio_nic(
+    commandline: ET.Element, *, netdev_value: str, netdev_id: str, pin_nic_slot: bool
+) -> None:
+    """Append a ``-netdev``/``-device virtio-net-pci`` pair to the qemu commandline (ADR-0281).
+
+    Both the System SSH forward and the customization-boot egress NIC render the same shape — a
+    ``-netdev <value>`` followed by a ``-device virtio-net-pci,netdev=<id>`` — differing only in the
+    netdev value and id; this owns that rendering (and the q35 slot-pin) once.
+
+    On q35 (``pin_nic_slot``) the device pins an explicit PCI slot. Without ``addr=`` QEMU
+    auto-assigns the first free slot (0x1 on the ``pcie.0`` root complex), which collides with a
+    libvirt-managed ``pcie-root-port``: because this NIC is added via raw ``-device`` on the qemu
+    commandline, libvirt's PCI allocator cannot see it and routes its own devices over the same
+    slot, so ``define``/``start`` fails (``slot 1 function 0 not available``). Slot 0x10 sits in the
+    gap between libvirt's low-numbered root-ports and its high-numbered integrated devices
+    (LPC/USB/SATA at 0x1a-0x1f). The pseries spapr-pci-host-bridge assigns addresses itself, so a
+    pinned slot is left off there and QEMU/libvirt allocate.
+    """
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev)
+    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=netdev_value)
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
-    # On q35 (``pin_nic_slot``) pin an explicit PCI slot. Without ``addr=`` QEMU auto-assigns the
-    # first free slot (0x1 on the ``pcie.0`` root complex), which collides with a libvirt-managed
-    # ``pcie-root-port``: because this NIC is added via raw ``-device`` on the qemu commandline,
-    # libvirt's PCI allocator cannot see it and routes its own devices over the same slot, so
-    # ``define``/``start`` fails (``slot 1 function 0 not available``). Slot 0x10 sits in the gap
-    # between libvirt's low-numbered root-ports and its high-numbered integrated devices
-    # (LPC/USB/SATA at 0x1a-0x1f). The pseries spapr-pci-host-bridge assigns addresses itself, so a
-    # pinned slot is left off there and QEMU/libvirt allocate.
-    device = "virtio-net-pci,netdev=kdivessh"
+    device = f"virtio-net-pci,netdev={netdev_id}"
     if pin_nic_slot:
         device = f"{device},addr=0x10"
     ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=device)
@@ -425,15 +442,11 @@ def _append_egress_nic(domain: ET.Element, *, pin_nic_slot: bool) -> None:
     there is **no** ``hostfwd`` (no inbound SSH), no gdbstub, and no preserve-on-crash.
 
     On q35 (``pin_nic_slot``) the raw ``-device virtio-net-pci`` must pin ``addr=0x10`` — exactly
-    as :func:`_append_ssh_forward` — because libvirt's PCI allocator cannot see a NIC added via the
-    raw qemu commandline and otherwise routes its own devices over slot 1, failing ``define``/
-    ``start``. The pseries spapr-pci-host-bridge assigns addresses itself, so the pin is left off.
+    as :func:`_append_ssh_forward`; :func:`_append_virtio_nic` owns that slot-pin rationale.
     """
-    commandline = _qemu_commandline(domain)
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-netdev")
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="user,id=kdivebuild,restrict=off")
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value="-device")
-    device = "virtio-net-pci,netdev=kdivebuild"
-    if pin_nic_slot:
-        device = f"{device},addr=0x10"
-    ET.SubElement(commandline, f"{{{QEMU_NS}}}arg", value=device)
+    _append_virtio_nic(
+        _qemu_commandline(domain),
+        netdev_value="user,id=kdivebuild,restrict=off",
+        netdev_id="kdivebuild",
+        pin_nic_slot=pin_nic_slot,
+    )

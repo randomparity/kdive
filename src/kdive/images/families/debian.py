@@ -17,6 +17,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
@@ -77,7 +78,7 @@ class DebianFamily:
     family = "debian"
     kdump_unit = "kdump-tools.service"
     guest_mac = "apparmor"
-    customize_via = "virt_customize"
+    customize_via: Literal["boot", "virt_customize"] = "virt_customize"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         del distro, version

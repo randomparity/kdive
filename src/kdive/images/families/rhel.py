@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 from kdive.domain.catalog.images import Capability
 from kdive.images.families._fedora_customize import (
@@ -74,7 +75,7 @@ class RhelFamily:
     family = "rhel"
     kdump_unit = "kdump.service"
     guest_mac = "selinux-permissive"
-    customize_via = "boot"
+    customize_via: Literal["boot", "virt_customize"] = "boot"
 
     def packages(self, kind: RootfsImageKind, distro: str, version: str) -> tuple[str, ...]:
         """Return the dnf package set for ``kind`` on ``distro``/``version``.

@@ -42,7 +42,7 @@ from kdive.domain.catalog.resource_capabilities import (
     ResourceCapabilities,
     resolve_accel_emulator,
 )
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.images.drgn_support import DrgnVersion
 from kdive.images.families import family_for
@@ -200,13 +200,26 @@ def _real_resolve_accel(arch: str) -> tuple[str, str | None]:  # pragma: no cove
 
     Mirrors the provisioning resolver: reads ``getCapabilities``, routes it through the shared
     :func:`resolve_accel_emulator` branch, and fails **open** to ``("kvm", None)`` when the host
-    advertises no guest arches (not re-discovered since ADR-0338) — the legacy x86-KVM path.
+    advertises no guest arches (not re-discovered since ADR-0338) — the legacy x86-KVM path. A
+    connection / ``getCapabilities`` ``libvirtError`` is categorized ``INFRASTRUCTURE_FAILURE``
+    (mirroring the provisioning resolver) rather than propagating raw.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a libvirt fault connecting to or reading
+            capabilities from the host.
     """
-    conn = libvirt.open(config.require(LIBVIRT_URI))
     try:
-        caps_xml = conn.getCapabilities()
-    finally:
-        conn.close()
+        conn = libvirt.open(config.require(LIBVIRT_URI))
+        try:
+            caps_xml = conn.getCapabilities()
+        finally:
+            conn.close()
+    except libvirt.libvirtError as exc:
+        raise CategorizedError(
+            "libvirt error reading host capabilities to resolve the customization-boot accelerator",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "resolve_accel"},
+        ) from exc
     guest_arches = ResourceCapabilities.from_mapping(
         {GUEST_ARCHES_KEY: parse_guest_arches(caps_xml, SUPPORTED_ARCHES)}
     ).guest_arches()
@@ -219,9 +232,7 @@ def _guestfish_file_op(step: Step, cleanup: list[Path]) -> list[str]:  # pragma:
     match step:
         case Mkdir(path):
             return [f"mkdir-p {path}"]
-        case WriteFile(path, content):
-            return [f"upload {_stage_content(content, cleanup)} {path}"]
-        case StageFile(path, content):
+        case WriteFile(path, content) | StageFile(path, content):
             return [f"upload {_stage_content(content, cleanup)} {path}"]
         case UploadFile(host_src, dest, mode):
             lines = [f"upload {host_src} {dest}"]
@@ -530,7 +541,7 @@ class LocalLibvirtRootfsBuildPlane:
         cleanup: list[Path] = []
         unit_path = self._render_readiness_unit(family, spec, cleanup)
         try:
-            ctx = self._context(unit_path, cleanup, spec=spec, entry=entry)
+            ctx = self._context(unit_path, spec=spec, entry=entry)
             file_ops, exec_ops = partition_steps(family.customize_steps(ctx))
             script = render_firstboot_script(
                 exec_ops,
@@ -701,7 +712,7 @@ class LocalLibvirtRootfsBuildPlane:
         cleanup: list[Path] = []
         unit_path = self._render_readiness_unit(family, spec, cleanup)
         try:
-            ctx = self._context(unit_path, cleanup, spec=spec, entry=entry)
+            ctx = self._context(unit_path, spec=spec, entry=entry)
             argv = render_argv(family.customize_steps(ctx), cleanup=cleanup)
             self._tools.customize(scratch, argv)
         finally:
@@ -721,7 +732,6 @@ class LocalLibvirtRootfsBuildPlane:
     def _context(
         self,
         unit_path: Path,
-        cleanup: list[Path],
         *,
         spec: RootfsBuildSpec,
         entry: RootfsCatalogEntry,
@@ -732,7 +742,6 @@ class LocalLibvirtRootfsBuildPlane:
             packages=spec.packages,
             readiness_unit_path=unit_path,
             is_cloud_image=isinstance(entry.source, CloudImageSource),
-            cleanup=cleanup,
             distro=entry.distro,
             version=entry.version,
         )
