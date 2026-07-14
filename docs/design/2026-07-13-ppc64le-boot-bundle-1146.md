@@ -155,29 +155,43 @@ without its initramfs." So the uploaded bundle proof **must** stage an `<initrd>
 no-initrd boot of this modular kernel would simply fail to mount root and is not attempted. The real
 unknown is therefore whether pseries/SLOF direct-kernel boot needs any special `<initrd>` *addressing*
 (load address / device-tree `linux,initrd-start`) beyond what QEMU's `-initrd` supplies. The expected
-outcome is none — QEMU sets the device-tree initrd properties and the kernel reads them — and the
-proof **records the finding either way in ADR-0344**: "no addressing quirk" if it boots as-is, or the
-accommodation (in code + a test) with its rationale if one is required.
+outcome is none — QEMU sets the device-tree initrd properties and the kernel reads them.
 
-**Guest kernel writer (module injection) — live-verified or explicitly deferred.** The plain proof
-above does not exercise `_RealGuestKernelWriter` (§1), so the libguestfs cross-arch `depmod` question
-stays open after it. This issue resolves it one of two ways, decided during the build by what the
-host can actually do:
-- **(a) Verify live if a ppc64le DWARF `vmlinux` is obtainable.** A second `runs.install` with a
-  `debuginfo_ref` set triggers `_RealGuestKernelWriter.inject` (module tree + vmlinux) on the ppc64le
-  overlay, live-testing whether libguestfs runs the guest's ppc64le `depmod` in its x86_64 appliance.
-  If it works, ADR-0344 records the writer verified for ppc64le; if it fails with an exec-format /
-  binfmt error, that *is* the discovered constraint.
-- **(b) Otherwise, flag UNVERIFIED and defer to the kdump sub-issue (9).** If no ppc64le debuginfo is
-  practically available on the proof host, the proof documents the real writer's in-guest `depmod` as
-  **UNVERIFIED on ppc64le**, records the libguestfs same-arch `command` constraint in ADR-0344, and
-  defers its live proof + any `qemu-user`/`binfmt` appliance accommodation to issue 9 (where module
-  injection is load-bearing for kdump). This is honest scoping, not a silent gap — the writer is not
-  claimed arch-neutral.
+**The finding must be falsifiable in both directions — readiness alone is not the signal.** A modular
+ppc64le kernel can miss readiness for reasons unrelated to initrd addressing (TCG slowness beyond the
+scaled deadline → `BOOT_TIMEOUT`; the SSH readiness probe failing → `READINESS_FAILURE`; a bad `root=`
+cmdline; SLOF declining the ELF; a mismatched module tree). So the initrd-addressing conclusion is
+tied to a **positive console marker on `hvc0`**, not to overall readiness:
+- **"No addressing quirk"** requires the boot console to show the kernel reached early boot *and*
+  unpacked/mounted the initramfs (e.g. the dracut/initramfs stage runs and pivots to the real root) —
+  then reaches readiness. Only that positive marker retires the issue-7 item (criterion 4).
+- **"Addressing quirk found"** requires the console to show the kernel started but failed
+  specifically at finding/mounting the initramfs (vs. never starting, or panicking *after* root
+  mount). The accommodation then lands in code + a test, and ADR-0344 documents it.
+- **Indeterminate** — a boot failure with *no* such initramfs-stage console signal (e.g. a bare
+  `BOOT_TIMEOUT` with no early-boot output) — is recorded as indeterminate and **does not** retire
+  issue 7; the proof is iterated (more deadline, console capture) until it yields one of the two
+  definitive signals. "Reaches readiness" is necessary but not sufficient for the initrd verdict.
 
-The console record, the initrd-addressing finding, and the writer verdict (verified or deferred) are
-written to `docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`, mirroring #1144's proof
-record.
+**Guest kernel writer (module injection) — live-verified with a stub, or deferred only if unrunnable.**
+The plain boot above injects no modules (§1), so the libguestfs cross-arch `depmod` question is
+answered by a *second* `runs.install` on the same ppc64le System with a `debuginfo_ref` set and
+`method != KDUMP` (no kdump preflight): that triggers `_RealGuestKernelWriter.inject`, whose
+`_extract_and_index` runs the guest's ppc64le `depmod` inside libguestfs's x86_64 appliance **before**
+and independently of vmlinux staging (`_stage_vmlinux` only uploads bytes and checks `size>0`). So the
+cross-arch `depmod` verdict needs only a **stub** (any non-empty) `debuginfo_ref` — a real ppc64le
+DWARF `vmlinux` is *not* required (that matters only for drgn usefulness, issues 10/11, out of scope).
+- If the stub-triggered inject completes, ADR-0344 records the writer's in-guest `depmod`
+  **verified** for ppc64le under an x86_64 appliance.
+- If it fails with an exec-format / binfmt error, that *is* the discovered libguestfs same-arch
+  constraint — captured in ADR-0344, with the `qemu-user`/`binfmt` appliance accommodation scoped to
+  issue 9 (where module injection is load-bearing for kdump).
+- **UNVERIFIED/defer** applies only if the stub inject cannot even run on the proof host (e.g.
+  libguestfs absent) — not merely because production-grade debuginfo is unavailable. The writer is
+  never claimed arch-neutral on the strength of the fake-writer unit tests.
+
+The console record, the initrd-addressing finding, and the writer verdict are written to
+`docs/design/2026-07-13-ppc64le-boot-bundle-proof-record-1146.md`, mirroring #1144's proof record.
 
 ## Acceptance criteria
 
@@ -196,13 +210,18 @@ record.
    `<kernel>`/`<initrd>` resolve to the per-Run staged paths and a unique install cmdline token
    appears in the guest's `/proc/cmdline`. The proof record captures the console evidence and the
    initrd-addressing finding.
-4. **No tribal knowledge.** Any pseries direct-boot quirk (initrd addressing or its absence) is
-   recorded in ADR-0344 (and in code + a test if it needs an accommodation), and the epic's
-   "SLOF direct-kernel boot … (issue 7)" Known-unverified item is retired.
+4. **No tribal knowledge; the initrd verdict is falsifiable both ways.** The initrd-addressing
+   conclusion is tied to a positive `hvc0` console marker (initramfs unpacked/mounted → "no quirk,"
+   retire issue 7; kernel started but failed at the initramfs → "quirk," accommodation in code + a
+   test), not to readiness alone; a boot failure with no initramfs-stage signal is **indeterminate**
+   and does **not** retire the epic's "SLOF direct-kernel boot … (issue 7)" item. The finding
+   (whichever) is recorded in ADR-0344.
 5. **Guest kernel writer verdict, not assumption.** The real `_RealGuestKernelWriter`'s in-guest
-   `depmod` on a ppc64le overlay is either live-verified (a `debuginfo_ref` install exercises it) or
-   explicitly recorded UNVERIFIED with the libguestfs cross-arch `command` constraint and deferred to
-   issue 9 — never asserted "arch-neutral" on the strength of the fake-writer unit tests.
+   `depmod` on a ppc64le overlay is live-exercised with a **stub** (non-empty) `debuginfo_ref`
+   install (`method != KDUMP`) — no real DWARF required — and recorded verified, or its exec-format
+   failure captured as the libguestfs cross-arch constraint (accommodation scoped to issue 9).
+   UNVERIFIED/defer applies only if the stub inject cannot run on the proof host at all; the writer
+   is never asserted "arch-neutral" on the strength of the fake-writer unit tests.
 6. **De-x86-ed prose.** `extract_boot_vmlinuz` (and adjacent install docstrings) no longer assert
    a bzImage-only `<kernel>`; the arch-opaque contract is stated where a reader meets it.
 

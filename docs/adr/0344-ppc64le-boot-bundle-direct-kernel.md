@@ -80,18 +80,21 @@ Concretely:
   paths and a unique install cmdline token reaches the guest's `/proc/cmdline` — so the boot is
   attributable to the install plane, not confounded with #1144's baseline boot of the same bytes.
   Because the kernel is modular it *must* boot with a staged `<initrd>`; a no-initrd boot is not
-  attempted. **The initrd-addressing finding is recorded here** — whether pseries/SLOF needs any
-  special initrd *addressing* beyond QEMU's `-initrd` (expected: none) — code + ADR, not tribal
-  knowledge; any required accommodation lands in code with a test and its rationale appended here.
-- **Guest kernel writer — verified or explicitly deferred.** The plain proof injects no modules,
-  so the libguestfs cross-arch `depmod` question is resolved separately: **(a)** a second
-  `runs.install` with a `debuginfo_ref` triggers `_RealGuestKernelWriter.inject` on the ppc64le
-  overlay and live-tests whether libguestfs runs the guest's ppc64le `depmod` (recorded verified, or
-  the exec-format failure captured as the constraint); or **(b)** if no ppc64le debuginfo is
-  practically available on the proof host, the writer's in-guest `depmod` is recorded **UNVERIFIED
-  on ppc64le** with the libguestfs same-arch `command` constraint documented and its live proof +
-  any `qemu-user`/`binfmt` appliance accommodation deferred to issue 9 (kdump). It is never claimed
-  arch-neutral on the strength of the fake-writer unit tests.
+  attempted. **The initrd-addressing finding is tied to a positive `hvc0` console marker**, not to
+  readiness alone (which a TCG boot can miss for unrelated reasons): initramfs unpacked/mounted →
+  "no addressing quirk" (retires issue 7); kernel started but failed at the initramfs → "quirk"
+  (accommodation in code + a test); a boot failure with no initramfs-stage signal is *indeterminate*
+  and does not retire issue 7. Whichever finding is recorded here (code + ADR, not tribal knowledge).
+- **Guest kernel writer — verified with a stub, deferred only if unrunnable.** The plain proof
+  injects no modules, so the libguestfs cross-arch `depmod` question is answered by a second
+  `runs.install` with a `debuginfo_ref` (`method != KDUMP`): `_RealGuestKernelWriter.inject` runs the
+  guest's ppc64le `depmod` in the x86_64 appliance (`_extract_and_index`) *before* and independently
+  of vmlinux staging (`_stage_vmlinux` only uploads bytes + checks `size>0`), so a **stub** non-empty
+  `debuginfo_ref` suffices — a real ppc64le DWARF is not required (that is drgn-scoped, issues 10/11).
+  The verdict is recorded verified, or the exec-format failure captured as the libguestfs same-arch
+  constraint with the `qemu-user`/`binfmt` appliance accommodation scoped to issue 9. **UNVERIFIED**
+  applies only if the stub inject cannot run on the proof host at all (e.g. libguestfs absent) — never
+  merely for lack of production debuginfo, and never "arch-neutral" on the fake-writer unit tests.
 
 ## Consequences
 
