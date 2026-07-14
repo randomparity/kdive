@@ -940,11 +940,21 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                             "ppc64le:await_ssh_reachable",
                         )
                         done = await drain_job(op, "ppc64le:await_ssh_reachable", probe.object_id)
-                        verdict = json.loads(done.refs["result"])
+                        verdict_json = done.refs.get("result")
+                        assert verdict_json is not None, (
+                            f"check_ssh_reachable succeeded with no result verdict: {done!r}"
+                        )
+                        verdict = json.loads(verdict_json)
                         if verdict.get("reachable"):
                             break
+                        # On an unreachable verdict the probe attaches a redacted console tail
+                        # (ADR-0306) — the boot-stall evidence a timeout most needs; surface it so a
+                        # guest that never boots (e.g. a future ISA/CPU regression) self-diagnoses.
+                        detail = verdict.get("detail")
+                        tail = verdict.get("console_tail")
                         assert time.monotonic() < deadline, (
-                            f"guest never became SSH-reachable under TCG: {verdict.get('detail')!r}"
+                            f"guest never became SSH-reachable under TCG ({detail!r}); "
+                            f"console tail: {tail!r}"
                         )
                         await asyncio.sleep(_PPC64LE_REACHABLE_POLL_S)
             finally:
