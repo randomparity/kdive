@@ -86,14 +86,14 @@ Add to `tests/integration/live_stack/conftest.py`, beside `require_issuer` / `re
 def require_guest_arch(
     arch: str,
     *,
-    host_arch: str | None = None,          # default platform.machine()
+    host_arch: str | None = None,               # default platform.machine()
     which: Callable[[str], str | None] = shutil.which,
-    kvm_present: Callable[[], bool] = lambda: os.path.exists("/dev/kvm"),
+    kvm_present: Callable[[], bool] | None = None,  # default: the #1153 URI-selected probe
 ) -> str:
     """Skip unless this host can boot ``arch`` guests; return the resolved accelerator.
 
     Reuses the #1153 ``qemu_system_binary`` map (single source). Returns ``"kvm"`` when ``arch``
-    is the host's native arch and ``/dev/kvm`` is present, else ``"tcg"``. Skips (never errors)
+    is the host's native arch and the host KVM probe passes, else ``"tcg"``. Skips (never errors)
     when the arch's system emulator is not on PATH — the acceptance "skips cleanly when the host
     lacks the foreign qemu binary" gate.
     """
@@ -102,12 +102,19 @@ def require_guest_arch(
 Behavior:
 
 1. `binary = qemu_system_binary(arch)`; if `binary is None` or `which(binary) is None`
-   → `pytest.skip(...)` naming the missing emulator and the install hint.
-2. accel = `"kvm"` if `arch == (host_arch or platform.machine())` **and** `kvm_present()`, else
-   `"tcg"`. The KVM signal is `/dev/kvm` **presence** (`os.path.exists`), the same definition the
-   #1153 default-URI probe uses (`guest_arch_accel.py`), so the two cannot drift. For the four
-   foreign-arch proofs on the x86_64 validation host, `arch != host_arch`, so this branch never
-   consults `/dev/kvm` and always yields `"tcg"`.
+   → `pytest.skip(...)` naming the missing emulator and the install hint. This bootability
+   decision is deliberately **URI-blind** (a foreign emulator on PATH is bootable regardless of
+   the libvirt URI).
+2. accel = `"kvm"` if `arch == (host_arch or platform.machine())` **and** the host KVM probe
+   passes, else `"tcg"`. When `kvm_present` is not injected, it resolves at call time to the
+   **#1153 URI-selected probe** — `kvm_probe_for_uri(resolved_libvirt_uri())` from
+   `guest_arch_accel.py` — which is the *identical* signal the provider path uses to persist the
+   System's accel (`os.access` R+W under `qemu:///session`, `os.path.exists` otherwise). Reusing
+   it (not a bare `os.path.exists`) is what makes the gate's accel and the persisted accel
+   genuinely single-sourced, so AC9's `persisted == expected` equality holds under any URI —
+   including a native host under session-mode libvirt. For the four foreign-arch proofs on the
+   x86_64 validation host, `arch != host_arch`, so this branch never runs the KVM probe and
+   always yields `"tcg"`.
 3. return the accel string.
 
 **The returned accel is load-bearing, not cosmetic.** The four proofs' shared preflight
@@ -190,15 +197,18 @@ other exit codes propagating. `just test-live` changes its selector to
 - **AC8.** `require_guest_arch` has unit coverage for all four branches — unsupported/absent
   emulator → skip, native+`/dev/kvm` present → `"kvm"`, native+absent → `"tcg"`, foreign →
   `"tcg"` — via injected `host_arch`/`which`/`kvm_present`, mirroring
-  `tests/diagnostics/test_guest_arch_accel.py`. The `/dev/kvm` signal is `os.path.exists`
-  presence, matching the #1153 default-URI probe.
+  `tests/diagnostics/test_guest_arch_accel.py`. The default (un-injected) KVM signal reuses the
+  #1153 URI-selected probe (`kvm_probe_for_uri(resolved_libvirt_uri())`), so it matches the
+  provider's persisted-accel signal under any libvirt URI.
 - **AC9.** The #1144 reachability proof asserts the persisted `systems.get` accel equals the
-  host-resolved `expected_accel` from the gate (not a hardcoded `"tcg"`), so it is correct on
-  both an x86_64 host (`tcg`) and a POWER host (`kvm`).
+  host-resolved `expected_accel` from the gate (not a hardcoded `"tcg"`), so it is correct on an
+  x86_64 host (`tcg`) and on a POWER host under any URI (`kvm` under `qemu:///system`; `tcg`
+  under `qemu:///session` when the worker uid cannot open `/dev/kvm` — matching the provider,
+  because the gate reuses the same URI-selected probe).
 
 ## Non-goals
 
-- Parametrizing the seven native `live_vm` tests with an arch fixture (they operate on one
+- Parametrizing the native `live_vm` boot tests with an arch fixture (they operate on one
   pre-provisioned System; a per-arch matrix would emit instances that cannot boot — see ADR
   rejected alternatives).
 - A stack-free foreign-arch provision→boot harness (the stack is the only provision path).

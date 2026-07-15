@@ -51,9 +51,12 @@ orthogonal:
 **Reroute the emulator gate through a discovery-driven `require_guest_arch(arch)` helper**
 (added to `tests/integration/live_stack/conftest.py`, the ADR-0035 §4 idiom). It reuses
 `qemu_system_binary` (single source), `pytest.skip`s when the arch's emulator is not on PATH,
-and returns the resolved accelerator (`"kvm"` when `arch` is the host's native arch and
-`/dev/kvm` is **present** — `os.path.exists`, the same signal the #1153 default-URI probe uses
-— else `"tcg"`). It takes injected `host_arch`/`which`/`kvm_present` seams (mirroring
+and returns the resolved accelerator (`"kvm"` when `arch` is the host's native arch and the host
+KVM probe passes, else `"tcg"`). The default KVM signal reuses the #1153 **URI-selected** probe
+(`kvm_probe_for_uri(resolved_libvirt_uri())`) — the identical signal the provider uses to persist
+the System's accel (`os.access` R+W under `qemu:///session`, `os.path.exists` otherwise) — so the
+gate's accel and the persisted accel cannot drift under any URI. The bootability skip itself stays
+URI-blind. It takes injected `host_arch`/`which`/`kvm_present` seams (mirroring
 `default_guest_arch_accel_probe`) so all four branches are unit-tested with no real host. The
 four proofs funnel their emulator check through one shared preflight
 (`_ppc64le_reachability_preflight`), so a single edit reroutes all four and retires the
@@ -88,7 +91,7 @@ and the operator install/lifecycle docs. Test-only + docs — no production code
 
 ## Rejected alternatives
 
-- **Parametrize the seven native `live_vm` tests with an arch fixture over discovered
+- **Parametrize the native `live_vm` boot tests with an arch fixture over discovered
   `guest_arches`.** Rejected: native `live_vm` tests operate on one already-provisioned System
   (single arch, env-configured); a `@parametrize(arch=…)` matrix would emit instances that
   cannot boot the other arches and would all skip except the operator's provisioned one —
@@ -107,8 +110,11 @@ and the operator install/lifecycle docs. Test-only + docs — no production code
   Rejected: it duplicates and would drift from the #1153 `qemu_system_binary` map; the gate
   reuses that single source.
 - **Reuse the full async `default_guest_arch_accel_probe()` in the skip gate.** Rejected: it is
-  async and does URI-based `/dev/kvm` selection irrelevant to a bootability skip; a sync helper
-  reusing just the binary map is what the gate needs.
+  async (awkward from a synchronous `pytest.skip` gate) and bundles the per-arch loop the gate
+  does not need. The gate instead reuses the probe's *component* helpers directly —
+  `qemu_system_binary` for bootability and `kvm_probe_for_uri(resolved_libvirt_uri())` for the
+  accel — which single-sources both signals against the provider without pulling in the async
+  loop.
 
 ## Rollout
 
