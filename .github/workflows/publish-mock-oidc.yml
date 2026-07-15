@@ -1,0 +1,116 @@
+name: publish-mock-oidc
+
+# Build and publish the in-repo mock OIDC mirror (deploy/mock-oidc, ADR-0357) as a
+# linux/amd64,linux/ppc64le manifest on GHCR, so onboarding pulls a prebuilt image instead
+# of building the JVM image on every machine (#1184, ADR-0358). The compose `oidc` service
+# pins the published manifest by digest, with `build:` retained as a local fallback.
+#
+# Triggered only when the mirror source changes (a version/base bump under deploy/mock-oidc),
+# which is exactly when a NEW digest must be produced and re-pinned in docker-compose.yml, and
+# on manual dispatch. An unrelated push to main does not republish (no digest thrash).
+on:
+  push:
+    branches: [main]
+    paths:
+      - deploy/mock-oidc/**
+  workflow_dispatch:
+
+# Least privilege: read the source and write the GHCR package. No id-token/contents-write.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-mock-oidc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build · push · verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # No setup-qemu-action: the builder stage is $BUILDPLATFORM-pinned and the runtime
+      # stage only COPYs the arch-neutral jars onto a per-arch JRE base — no target-arch code
+      # executes at build, so the linux/ppc64le layer assembles on the amd64 runner without
+      # emulation (ADR-0357). Contrast release-image.yml, whose app build compiles ppc64le
+      # deps from source and therefore does need QEMU (ADR-0359).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: tags
+        # The one version pin lives in the Dockerfile ARG (kept in lockstep with pom.xml); read
+        # it here so the tag never drifts from the jar the image actually resolves. Publish an
+        # immutable `<version>-<short-sha>` plus the human-facing `<version>`; the compose pin
+        # uses the @sha256 digest (output below), so neither tag is load-bearing for resolution.
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version="$(grep -oP '^ARG MOCK_OAUTH2_SERVER_VERSION=\K.*' deploy/mock-oidc/Dockerfile)"
+          if [[ -z "${version}" ]]; then
+            echo "::error::could not read MOCK_OAUTH2_SERVER_VERSION from deploy/mock-oidc/Dockerfile" >&2
+            exit 1
+          fi
+          short="${SHA:0:12}"
+          image=ghcr.io/randomparity/mock-oauth2-server
+          {
+            echo "tags=${image}:${version},${image}:${version}-${short}"
+            echo "image=${image}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: deploy/mock-oidc
+          push: true
+          platforms: linux/amd64,linux/ppc64le
+          tags: ${{ steps.tags.outputs.tags }}
+          # Reproducibility of the mirror is driven by the pinned bases + checksum-verified
+          # Maven closure; SBOM/provenance attestations add non-deterministic layers and are
+          # unnecessary for a dev-tooling mirror, so keep the manifest lean.
+          provenance: false
+          sbom: false
+
+      - name: Verify the published manifest lists both arches
+        # Fail if the pushed manifest is missing a required platform (e.g. a base image that
+        # silently dropped ppc64le), so a broken publish never masquerades as green.
+        env:
+          IMAGE: ${{ steps.tags.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::build step produced no image digest" >&2
+            exit 1
+          fi
+          platforms="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')"
+          echo "published platforms: ${platforms}"
+          for want in linux/amd64 linux/ppc64le; do
+            case " ${platforms} " in
+              *" ${want} "*) ;;
+              *) echo "::error::published manifest is missing ${want}" >&2; exit 1 ;;
+            esac
+          done
+          {
+            echo "### mock-oidc mirror published"
+            echo ""
+            echo "- digest: \`${IMAGE}@${DIGEST}\`"
+            echo "- platforms: ${platforms}"
+            echo ""
+            echo "Pin this digest in \`docker-compose.yml\` (\`oidc\` service) to adopt the build."
+          } >> "$GITHUB_STEP_SUMMARY"
