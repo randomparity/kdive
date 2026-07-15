@@ -28,8 +28,9 @@ COPY --from=uv /uv /usr/local/bin/uv
 # needs a wider toolchain — arch-guarded so the amd64 layer's package set (and thus
 # image size/contents) is unchanged (ADR-0359). pydantic-core is NOT among them: it
 # publishes a cp314 ppc64le wheel, so no Rust toolchain is required. The source-builds
-# are all C/C++: grpcio (C++, needs g++); drgn (compiles libdrgn against elfutils, needs
-# libelf-dev/libdw-dev + autotools); libvirt-python/pyyaml/markupsafe (C, covered by gcc).
+# are all C/C++: grpcio (C++, needs g++ plus system OpenSSL/zlib headers — its vendored
+# BoringSSL has no ppc64le target, see the GRPC_* env below); drgn (compiles libdrgn against
+# elfutils, needs libelf-dev/libdw-dev + autotools); libvirt-python/pyyaml/markupsafe (C, gcc).
 # libkdumpfile-dev gives the source-built drgn kdump-core support: the amd64 wheel vendors
 # it, but a from-source drgn links the system lib, and without it ppc64le kdump capture
 # silently fails (ADR-0355) — so it is a hard build dep here, not optional.
@@ -38,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gcc libc6-dev libvirt-dev pkg-config \
     && if [ "${TARGETARCH}" = "ppc64le" ]; then \
          apt-get install -y --no-install-recommends \
-           g++ libelf-dev libdw-dev libkdumpfile-dev \
+           g++ libelf-dev libdw-dev libkdumpfile-dev libssl-dev zlib1g-dev \
            autoconf automake libtool autoconf-archive make gawk; \
        fi \
     && rm -rf /var/lib/apt/lists/*
@@ -46,6 +47,12 @@ WORKDIR /app
 # link-mode=copy: the uv cache mount and /opt/venv are on different filesystems, so
 # hardlinking falls back to a copy with a warning; ask for the copy explicitly.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+# Build the from-source grpcio against system OpenSSL/zlib (installed above for ppc64le):
+# grpcio's vendored BoringSSL has no ppc64le target (`target.h: #error "Unknown target CPU"`),
+# so the vendored TLS build fails on that arch. These knobs are inert on amd64/arm64, where
+# grpcio installs from a wheel and never compiles; the builder stage is discarded either way,
+# so the shipped image is unaffected.
+ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1 GRPC_PYTHON_BUILD_SYSTEM_ZLIB=1
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --group live --no-install-project
