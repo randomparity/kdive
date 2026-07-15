@@ -31,6 +31,25 @@ instead:
 - Both base images are pinned by their multi-arch **index** digest so a per-arch pull still
   resolves.
 
+## Published image (GHCR)
+
+kdive publishes this build as a `linux/amd64,linux/ppc64le` manifest at
+`ghcr.io/randomparity/mock-oauth2-server` (#1184, ADR-0358), so onboarding pulls a prebuilt
+image instead of building the JVM image on every machine. The repo-root `docker-compose.yml`
+`oidc` service pins the published manifest by immutable `@sha256:` digest and keeps
+`build: ./deploy/mock-oidc` as a fallback — `docker compose up` builds locally whenever the
+pull is unavailable (registry offline, the package still private, or an arch the mirror does
+not publish, e.g. arm64).
+
+The `.github/workflows/publish-mock-oidc.yml` workflow republishes on any change under
+`deploy/mock-oidc/` (and on manual dispatch), building both arches with buildx, asserting the
+manifest lists amd64 + ppc64le, and printing the new digest in its run summary. After a
+version or base bump, re-pin that digest in `docker-compose.yml` (and the ADR-0356 matrix row).
+
+The GHCR package must be **public** for unauthenticated pulls; if it is still private, flip its
+visibility in the GHCR package settings UI (GitHub exposes no REST endpoint for a user
+package). Until then the `build:` fallback keeps the stack working.
+
 ## Updating the mock issuer version
 
 1. Bump the `<version>` in `pom.xml`.
@@ -46,6 +65,9 @@ instead:
    ```
    skopeo inspect --raw docker://eclipse-temurin:21-jre | sha256sum
    ```
+
+4. Let `publish-mock-oidc.yml` republish (it fires on the `deploy/mock-oidc/` change), then
+   re-pin the new `@sha256:` digest in `docker-compose.yml` and the ADR-0356 matrix row.
 
 ## Configuration
 

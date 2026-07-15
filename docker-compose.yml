@@ -95,13 +95,19 @@ services:
         mc alias set local http://minio:9000 minioadmin minioadmin
         mc mb --ignore-existing local/kdive-artifacts
 
-  # Built in-repo (deploy/mock-oidc) so the issuer runs on ppc64le too — the upstream
-  # ghcr.io/navikt/mock-oauth2-server image is amd64/arm64 only, breaking `docker compose up`
-  # on a POWER host. Same jar version, so the token contract is byte-identical (#1183,
-  # ADR-0357). `image:` names the locally-built image (mirrors the kdive:dev pattern).
+  # Multi-arch mock OIDC issuer, pinned to the published GHCR mirror by immutable digest so
+  # `docker compose up` PULLS a prebuilt image instead of building the JVM image on every
+  # machine (#1184, ADR-0358). The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
+  # only; this mirror (deploy/mock-oidc, ADR-0357) publishes linux/amd64,linux/ppc64le from
+  # the same jar version, so the token contract stays byte-identical and POWER hosts work.
+  # `build: ./deploy/mock-oidc` stays as the documented local fallback: `docker compose up`
+  # builds it locally when the digest is unreachable (registry offline, private, or an arch
+  # the mirror does not publish, e.g. arm64), so the stack never hard-depends on the pull.
+  # Re-pin the digest whenever deploy/mock-oidc changes (the publish-mock-oidc workflow
+  # republishes on that change and prints the new digest).
   oidc:
+    image: ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6
     build: ./deploy/mock-oidc
-    image: kdive-mock-oidc:dev
     environment:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
       SERVER_PORT: "8080"
