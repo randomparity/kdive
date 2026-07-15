@@ -165,6 +165,45 @@ def test_unsupported_host_arch_skips_native_qemu_and_advisory(tmp_path: Path) ->
     assert "qemu-system-ppc" not in result.stderr
 
 
+def test_ppc64le_missing_rust_fails_with_rustup_hint(tmp_path: Path) -> None:
+    """On a wheel-less ppc64le host with no Rust toolchain, the required tier fails with rustup.
+
+    uv + pkg-config are stubbed present, so the only missing required item is the Rust
+    toolchain; the check must exit 1 and route the fix through the manual rustup hint (not a
+    distro package-manager line).
+    """
+    result = _run_with_uname("debian", "ppc64le", (), tmp_path)
+
+    assert result.returncode == 1, result.stdout
+    assert "Required dependencies missing" in result.stderr
+    # rustup is a manual hint (not a distro package line): label + rustup command together.
+    assert "Tooling not provided by your distribution" in result.stderr
+    assert "rustc/cargo: curl" in result.stderr
+    assert "sh.rustup.rs" in result.stderr
+    # It must not be routed to a distro package-manager install line.
+    assert "install rustc" not in result.stderr
+    assert "install cargo" not in result.stderr
+
+
+def test_ppc64le_with_rust_present_does_not_flag_rust(tmp_path: Path) -> None:
+    """With rustc + cargo on PATH, the ppc64le required tier no longer names a Rust toolchain."""
+    result = _run_with_uname("debian", "ppc64le", ("rustc", "cargo"), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Required dependencies missing" not in result.stderr
+    assert "sh.rustup.rs" not in result.stderr
+    assert "rustc/cargo" not in result.stderr
+
+
+def test_x86_64_never_requires_rust(tmp_path: Path) -> None:
+    """x86_64 has prebuilt wheels, so a missing Rust toolchain raises no requirement (unchanged)."""
+    result = _run_with_uname("debian", "x86_64", (), tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "sh.rustup.rs" not in result.stdout + result.stderr
+    assert "rustc/cargo" not in result.stdout + result.stderr
+
+
 def test_required_present_exits_zero(tmp_path: Path) -> None:
     """Stubbing uv + a permissive pkg-config satisfies the required tier."""
     bindir = tmp_path / "bin"
