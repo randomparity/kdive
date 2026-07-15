@@ -44,17 +44,25 @@ matrix here, and add a stdlib CI guard that fences the matrix against compose dr
    not stand up a POWER CI runner. Runtime validation on real POWER is the separate
    live-hardware track (ADR-0355).
 3. **Backends and the observability tier rely on upstream multi-arch images, fenced by a CI
-   guard.** Postgres, MinIO, `mc`, and Prometheus are used as-is (their pinned tags publish
-   ppc64le); Grafana is used as-is with a documented ppc64le gap in the opt-in tier. The guard
+   guard that makes the core-loop invariant machine-checkable.** Postgres, MinIO, `mc`, and
+   Prometheus are used as-is (their pinned tags publish ppc64le); Grafana is used as-is with a
+   knowingly-accepted ppc64le gap in the opt-in tier. The guard
    `scripts/check_container_arch_matrix.py` (recipe `just container-arch-check`, a member of
-   `just ci`) asserts, statically, that the compose image set equals the matrix image set and
-   that every row's handling is a known token — no live registry probe.
+   `just ci`) statically asserts: (a) the compose image set equals the matrix image set;
+   (b) every row's handling is a known token; (c) a `rely-on-upstream` row publishes ppc64le;
+   (d) an `accept-gap` row's image is used only by opt-in (profiled) compose services — no
+   live registry probe.
 
 ### Arch-support matrix
 
 Published architectures per image (probed 2026-07-15) and kdive's handling. Handling tokens:
-`rely-on-upstream` (use the upstream image), `mirror` (repackage as a kdive multi-arch image),
-`build-local` (built from the repo `Dockerfile`).
+
+| token | meaning |
+|---|---|
+| `rely-on-upstream` | use the upstream image as-is; the guard requires it to publish ppc64le |
+| `mirror` | upstream lacks ppc64le; kdive repackages it as a multi-arch image |
+| `build-local` | built from the repo `Dockerfile` (arch proven by the buildx job) |
+| `accept-gap` | knowingly unsupported on ppc64le; the guard permits it only behind an opt-in profile |
 
 <!-- arch-matrix:begin -->
 | Image | Role | amd64 | arm64 | ppc64le | Handling |
@@ -64,7 +72,7 @@ Published architectures per image (probed 2026-07-15) and kdive's handling. Hand
 | `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `ghcr.io/navikt/mock-oauth2-server:3.0.3` | core backend (OIDC mock) | ✅ | ✅ | ❌ | mirror |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
-| `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | rely-on-upstream |
+| `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
 | `kdive:dev` | app image (repo Dockerfile) | ✅ | — | base publishes ppc64le | build-local |
 <!-- arch-matrix:end -->
 
@@ -72,9 +80,10 @@ Notes on the two gap rows:
 
 - **`ghcr.io/navikt/mock-oauth2-server:3.0.3`** — handled by `mirror` (decision 1). It is a
   default-profile image, so its gap blocks the core ppc64le loop until the mirror lands.
-- **`grafana/grafana:13.0.3`** — handled `rely-on-upstream` with a known ppc64le gap. It is
-  opt-in (`obs` profile) and no upstream ppc64le image exists, so the ppc64le dashboard is
-  unavailable pending a follow-up. Prometheus (the metrics store) is unaffected.
+- **`grafana/grafana:13.0.3`** — handled `accept-gap`: no upstream ppc64le image exists and it
+  is opt-in (`obs` profile), so the ppc64le dashboard is unavailable pending a follow-up. The
+  guard permits `accept-gap` only because no un-profiled service uses grafana; the same shape
+  on a core-loop image would fail. Prometheus (the metrics store) is unaffected.
 
 The `kdive` row is `build-local`: it is built from `python:3.14.6-slim-bookworm`, whose base
 index publishes ppc64le, so the buildx multi-arch build path is available. Proving that build
@@ -85,17 +94,24 @@ in CI is a later epic sub-issue.
 - The epic's downstream sub-issues (OIDC mirror, buildx job) build against a written, verified
   contract instead of ad-hoc decisions.
 - A compose change that adds, removes, or retags a backing image fails `container-arch-check`
-  until the matrix row is updated, forcing a human to re-confirm the new reference's arch
-  coverage. The matrix cannot silently fall behind compose.
-- The guard is static: it does not detect an *upstream* arch regression (a tag that stops
-  publishing ppc64le at an unchanged pin). That risk is covered by the buildx build job (which
-  fails to build the missing arch) and by re-probing on the deliberate tag bumps the guard
-  forces.
+  until the matrix row is updated. A retag *prompts* a human re-probe of the new reference's
+  arch coverage; it does not by itself verify one. The enforcement teeth are in assertion (c):
+  a `rely-on-upstream` row recorded (or corrected) to ppc64le ❌ fails, forcing a `mirror` /
+  `build-local` / `accept-gap` handling or a real fix. A default-profile image can no longer
+  sit silently broken behind a `rely-on-upstream` label, and an `accept-gap` cannot be applied
+  to a core-loop image.
+- The guard is static: it does **not** detect an *upstream* arch regression (a tag that stops
+  publishing ppc64le at an unchanged pin) — that recorded ✅ would go stale invisibly. That
+  residual risk is covered by the buildx build job (which fails to build the missing arch) and
+  by re-probing on the deliberate tag bumps the guard forces. The guard is the
+  drift-and-labelling fence, not a registry probe.
 - Follow-ups this decision creates:
   - Build and publish the multi-arch OIDC mirror; repoint `docker-compose.yml` and
     `deploy/helm/kdive/values.yaml` at it.
   - Repoint the Helm demo OIDC (`values.yaml:127` → `templates/demo/oidc.yaml`) at the mirror;
     it inherits the identical ppc64le gap and would otherwise stay amd64-only on k8s.
+  - Fence the Helm `values.yaml` backing-image set (it pins the same images independently of
+    compose and is out of this guard's compose-only scope), beyond the OIDC repoint above.
   - Resolve or accept the Grafana ppc64le gap for the opt-in `obs` tier.
   - Keycloak (production-OIDC track #349/#350/#351) also lacks a ppc64le manifest
     (`quay.io/keycloak/keycloak:26.4`); that is a separate track's POWER gap, cross-referenced
@@ -113,6 +129,19 @@ in CI is a later epic sub-issue.
 - **Match matrix rows on the image name without the tag.** A tag bump would then pass the
   guard silently, defeating the re-confirmation the fence exists to force. Matching the full
   `repo:tag` reference makes every bump a prompted review.
+- **Guard checks only row existence + a valid handling token (no arch/profile coupling).**
+  This was the first cut; it fails the very regression the guard exists to prevent — a new
+  default-profile image with a `❌ rely-on-upstream` row passes green while the core ppc64le
+  loop is broken. Coupling the ppc64le cell and compose profile into assertions (c)/(d) makes
+  the one invariant that matters machine-checkable instead of a prose promise.
+- **Encode the Grafana gap as `rely-on-upstream` with a prose "it's opt-in" note.** Then a
+  broken default-profile image is byte-identical to an accepted opt-in gap, to both the guard
+  and a human scanner. A distinct `accept-gap` token, permitted only behind a profile, makes
+  the opt-in reasoning enforced rather than commentary.
+- **Fence the Helm `values.yaml` image set in the same guard now.** The Helm pins are
+  independently versioned from compose (a k8s deploy is a different target); folding them into
+  one matrix would couple two files that may legitimately diverge. Left as a recorded
+  follow-up with its own fence rather than force-coupled here.
 - **Emulate the upstream OIDC container on ppc64le via qemu-user instead of mirroring.** The
   JVM deadlocks / segfaults under qemu-user emulation (recorded in ADR-0355); a native
   multi-arch mirror is the working path.

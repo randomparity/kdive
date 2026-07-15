@@ -67,8 +67,9 @@ The container strategy the rest of the epic implements against:
    the separate live-hardware track (ADR-0355).
 3. **Backends and the observability tier rely on upstream multi-arch images, fenced by a CI
    guard.** postgres, minio, minio/mc, and prometheus are used as-is because their pinned
-   tags publish ppc64le. Grafana is used as-is with a documented ppc64le gap (opt-in tier).
-   A CI guard keeps the compose image set and the matrix from drifting apart.
+   tags publish ppc64le. Grafana is used as-is with a knowingly-accepted ppc64le gap in the
+   opt-in tier. A CI guard keeps the compose image set and the matrix from drifting apart
+   **and** makes the ppc64le-core-loop invariant machine-checkable (see below).
 
 ## The CI guard contract
 
@@ -81,36 +82,68 @@ block so the guard can locate it unambiguously:
 
 ```
 <!-- arch-matrix:begin -->
-| Image | ... | Handling |
-| `postgres:17` | ... | rely-on-upstream |
+| Image | Role | amd64 | arm64 | ppc64le | Handling |
+|---|---|:---:|:---:|:---:|---|
+| `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 ...
 <!-- arch-matrix:end -->
 ```
 
-The first column of each data row is the image reference in backticks; the last column is
-the handling token.
+**Row/column parsing (specified so a header row cannot cause an always-fail or vacuous
+pass).** Inside the marked block the guard reads the table's **header row** to locate the
+`ppc64le` and `Handling` columns by name (the first column is the Image column). A **data
+row** is one whose first cell is a backtick-wrapped token (`` `repo:tag` ``); the header row
+(first cell `Image`) and the `|---|` separator row (first cell `---`) are not data rows and
+are skipped. A block with no data rows, a missing marker, a missing `ppc64le`/`Handling`
+header, or a data row with too few cells is a hard error (fail loudly, never pass vacuously).
 
-**What the guard checks (static, no docker/network/POWER):**
+**Handling tokens.** Each data row's handling is one of a fixed set:
 
-1. **Set equality.** The set of `image:` references in `docker-compose.yml` (de-duplicated;
-   `kdive:dev` appears four times → one entry) equals the set of image refs in the matrix
-   block. It reports, by name, any image present in compose but missing from the matrix
-   (the regression case: a new/changed backing image slipped in), and any matrix row with no
-   corresponding compose image (a stale row).
-2. **Handling validity.** Every matrix row's handling token is one of a fixed set:
-   `rely-on-upstream`, `mirror`, `build-local`. An unknown token fails, so a row cannot claim
-   an undefined handling.
+| token | meaning |
+|---|---|
+| `rely-on-upstream` | use the upstream image as-is; it must publish ppc64le |
+| `mirror` | upstream lacks ppc64le; kdive repackages it as a multi-arch image |
+| `build-local` | built from the repo `Dockerfile` (arch proven by the buildx job) |
+| `accept-gap` | knowingly unsupported on ppc64le; permitted only behind an opt-in profile |
+
+**Compose profile parsing (stdlib, no pyyaml).** The guard scans `docker-compose.yml` with an
+indentation-aware pass over the `services:` block: each 2-space-indented `<name>:` starts a
+service; within it, `    image: <ref>` gives the image and the presence of a `    profiles:`
+key marks the service opt-in. An image is **default-profile** if at least one service that
+uses it has no `profiles:` key (i.e. `docker compose up` pulls it). `kdive:dev` appears on
+four default services → one default-profile entry.
+
+**What the guard asserts (static, no docker/network/POWER):**
+
+1. **Set equality.** The de-duplicated set of compose `image:` references equals the set of
+   matrix image refs. Reports, by name, any image in compose but missing from the matrix (the
+   regression case: a new/changed backing image slipped in) and any matrix row with no
+   compose image (a stale row).
+2. **Handling validity.** Every row's handling token is in the fixed set above.
+3. **`rely-on-upstream` ⟹ ppc64le published.** A `rely-on-upstream` row's ppc64le cell must
+   be ✅. This is the core fence: an image relied on as-is that does not (or no longer does)
+   publish ppc64le fails, forcing either a `mirror`/`build-local`/`accept-gap` handling or a
+   real arch fix — it can no longer sit silently broken with a `rely-on-upstream` label.
+4. **`accept-gap` ⟹ opt-in only.** An `accept-gap` row's image must not be default-profile
+   (no un-profiled service uses it). A knowingly-accepted gap therefore cannot mask a broken
+   *core-loop* image; moving such an image onto a default service fails the guard.
+
+Under these rules the current stack resolves as: postgres/minio/mc/prometheus =
+`rely-on-upstream` (ppc64le ✅); `oidc` = `mirror` (default-profile gap being fixed); grafana
+= `accept-gap` (opt-in `obs`); `kdive:dev` = `build-local`.
 
 **What the guard deliberately does not do:** it does not run `docker manifest inspect` or
 otherwise probe live registries. Live arch verification needs docker + network and cannot run
 in the standard offline CI test job; the buildx multi-arch *build* (epic sub-issue) is the
-live check, and re-confirming published arches on a tag bump is a human review step prompted
-by the guard failing when the pinned ref changes.
+live arch check.
 
-**Regression behavior.** Because the matrix column carries the full `repo:tag` reference, a
-compose tag bump (e.g. Dependabot) changes the compose ref and fails the guard until the
-matrix row is updated — forcing a human to re-confirm the new tag's arch coverage. This is
-the intended fence: the matrix cannot silently fall behind compose.
+**Regression behavior (stated to what is actually enforced).** Because the matrix column
+carries the full `repo:tag` reference, a compose tag bump (e.g. Dependabot) changes the
+compose ref and fails set-equality until the matrix row is edited to match — which *prompts*,
+but does not by itself *verify*, a human re-probe of the new tag's arches. The teeth are in
+assertion 3: if the human records the new tag as ppc64le ❌ (or a reviewer corrects a stale
+✅), a `rely-on-upstream` row fails and forces a handling decision. Static parsing cannot
+detect an upstream arch drop at an unchanged pin; the buildx build job covers that.
 
 ## Follow-ups recorded (not fixed here)
 
@@ -121,10 +154,18 @@ the intended fence: the matrix cannot silently fall behind compose.
   `deploy/helm/kdive/templates/demo/oidc.yaml`. The k8s demo path inherits the identical
   ppc64le gap and must be repointed at the mirror when it exists. Recorded as a follow-up so
   the demo is not silently left amd64-only.
+- **Helm `values.yaml` image set is not fenced by this guard.** `deploy/helm/kdive/values.yaml`
+  pins the same backing images (postgres, minio, minio/mc, oidc, prometheus) for the k8s
+  deploy path, outside the guard's compose-only scope. Those pins can legitimately differ from
+  compose (a k8s deploy is a different target), so folding them into the same matrix now would
+  couple two independently-versioned files. Recorded as a distinct follow-up: fence the Helm
+  image set (against its own matrix, or by asserting parity with compose) beyond the OIDC
+  repoint below. See Non-goals.
 - **Grafana ppc64le gap.** No upstream ppc64le image exists; the `obs` profile's dashboard is
-  unavailable on ppc64le. Recorded as a follow-up (options: a ppc64le-capable dashboard
-  alternative, or accepting the opt-in tier's gap). Prometheus (the metrics store) is
-  unaffected.
+  unavailable on ppc64le. Encoded as `accept-gap` (opt-in only) so the guard permits it while
+  forbidding the same shape on a core-loop image. Follow-up options: a ppc64le-capable
+  dashboard alternative, or continuing to accept the opt-in tier's gap. Prometheus (the
+  metrics store) is unaffected.
 - **Keycloak (production-OIDC track, #349/#350/#351) also lacks ppc64le**
   (`quay.io/keycloak/keycloak:26.4`). That is a separate track's POWER gap, noted for
   cross-reference only.
@@ -140,10 +181,15 @@ the intended fence: the matrix cannot silently fall behind compose.
    - passes against the current compose file + matrix;
    - fails (non-zero, with a named diff) when an image is added to / removed from compose
      without a matching matrix change;
-   - fails when a matrix row carries an unknown handling token.
+   - fails when a matrix row carries an unknown handling token;
+   - fails when a `rely-on-upstream` row's ppc64le cell is not ✅;
+   - fails when an `accept-gap` row's image is used by a default-profile (un-profiled) service;
+   - fails loudly (not vacuously) when the matrix block is missing, empty, or malformed.
 4. `just container-arch-check` is a recipe and is a member of the aggregate `just ci` recipe.
-5. The guard has unit tests covering: the happy path, an image-missing-from-matrix drift, a
-   matrix-row-missing-from-compose drift, and an invalid handling token.
+5. The guard has unit tests covering: the happy path; image-missing-from-matrix drift;
+   matrix-row-missing-from-compose drift; an invalid handling token; a `rely-on-upstream` row
+   with ppc64le ❌; an `accept-gap` row on a default-profile image; and a malformed/empty
+   matrix block (header/separator rows are not mistaken for data rows).
 6. Green: `just adr-status-check`, `just docs-links`, `just docs-paths`, `just check-mermaid`,
    `just container-arch-check`, and the full `just ci`.
 
@@ -152,10 +198,17 @@ the intended fence: the matrix cannot silently fall behind compose.
 - **Matrix parser brittleness.** A malformed matrix block (missing marker, missing column)
   must fail loudly, not pass vacuously. Mitigation: the guard errors if the marked block is
   absent or a row has too few columns, and a unit test asserts a vacuous/empty matrix fails.
-- **Compose image extraction misses a service.** Regex-based `image:` extraction could miss
-  an unusual line shape. Mitigation: a unit test pins the current full compose image set so a
-  parser change that drops a service is caught; the extractor targets the well-formed
-  `    image: <ref>` line shape compose uses throughout.
+- **Compose image extraction misses a service.** The indentation-aware `image:`/`profiles:`
+  scan could miss an unusual line shape. Mitigation: a unit test pins the current full compose
+  image set and the default/opt-in classification of each service, so a parser change that
+  drops a service or mis-reads a `profiles:` key is caught; the extractor targets the
+  well-formed `    image: <ref>` / `    profiles:` line shape compose uses throughout.
+- **Static guard cannot catch an upstream arch drop at an unchanged pin.** Accepted residual
+  risk: assertion 3 fences a `rely-on-upstream` row whose *recorded* ppc64le cell is not ✅,
+  but a tag that silently stops publishing ppc64le without a pin change is invisible to static
+  parsing. The buildx multi-arch build job (epic sub-issue) is the live arch check; the guard
+  is the drift-and-labelling fence, not a registry probe. This is stated in the ADR
+  consequences, not left implicit.
 - **ADR status timing.** Keeping the ADR **Proposed** while iterating is safe: the
   `adr-status-check` shipped-but-Proposed rule only fires on a `src/` citation, and this
   change cites the ADR only from `scripts/` and docs. The Proposed→Accepted flip happens in
@@ -166,4 +219,6 @@ the intended fence: the matrix cannot silently fall behind compose.
 - Building or publishing the OIDC mirror image (epic sub-issue).
 - Standing up a buildx multi-arch CI job (epic sub-issue).
 - Any live `docker manifest inspect` / registry probe in CI.
+- Fencing `deploy/helm/kdive/values.yaml` image drift — the guard is compose-only this issue;
+  Helm image-set fencing is a recorded follow-up (the Helm pins are independently versioned).
 - Fixing the Grafana or Keycloak ppc64le gaps.
