@@ -48,11 +48,39 @@ from kdive.images.rootfs.catalog import (
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.rootfs_build import (
+    _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
     _parse_os_release,
+    _repack_tool_argvs,
     family_for,
 )
+
+
+def test_repack_argvs_build_ext4_then_strip_orphan_file_then_convert() -> None:
+    """The repack builds the ext4 with virt-make-fs (to raw), strips the EL<=9-incompatible
+    ``orphan_file`` feature with tune2fs, then converts to the qcow2 the provider boots (ADR-0351).
+
+    Older-guest e2fsck (EL9 e2fsprogs 1.46.5) rejects the e2fsprogs-1.47 ``orphan_file`` the Fedora
+    appliance stamps by default, dropping the customize boot to emergency mode; the strip keeps the
+    filesystem checkable while leaving virt-make-fs's proven construction unchanged.
+    """
+    tar = Path("/w/root.tar")
+    raw = Path("/w/root.raw")
+    qcow2 = Path("/w/out.qcow2")
+    argvs = _repack_tool_argvs(tar_path=tar, raw_path=raw, qcow2=qcow2, size="6G")
+    assert [a[0] for a in argvs] == ["virt-make-fs", "tune2fs", "qemu-img"]
+    assert argvs[0] == [
+        "virt-make-fs",
+        "--type=ext4",
+        "--format=raw",
+        "--size=6G",
+        str(tar),
+        str(raw),
+    ]
+    assert _EXT4_INCOMPATIBLE_FEATURE == "orphan_file"
+    assert argvs[1] == ["tune2fs", "-O", "^orphan_file", str(raw)]
+    assert argvs[2] == ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", str(raw), str(qcow2)]
 
 
 def _spec(**overrides: object) -> RootfsBuildSpec:

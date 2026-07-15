@@ -106,7 +106,18 @@ different arch subtree); Fedora ppc64le lives in the `fedora-secondary` tree.
    the honest reading of the issue's "at minimum build-validated"; it is weaker than "the image
    builds," and that is stated, not hidden.
 
-## Live-proof risk 1 (primary): does a non-Fedora ppc64le image customize-boot at all?
+## Live-proof outcome for risk 1: fsck feature-skew found and fixed here (ADR-0351)
+
+The CentOS Stream 9 ppc64le customize boot **did** boot its kernel and dracut under TCG, then
+failed at `systemd-fsck-root` on `/dev/vda` → emergency mode. Root cause (confirmed on the produced
+image): the repack's ext4 carries `orphan_file`, an e2fsprogs-1.47 feature the Fedora-44 libguestfs
+appliance stamps by default, which EL9's 1.46.5 e2fsck rejects. It is distro-userspace skew, not
+arch (x86_64 EL9 would fail identically), latent because #1147 proved only Fedora. Per the issue
+owner's decision, this is **fixed in this issue** (not deferred): the repack strips `orphan_file`
+so any EL ≤ 9 guest can fsck the root — **[ADR-0351](../adr/0351-repack-ext4-older-guest-fsck-compat.md)**.
+The fallback below is retained only as the contingency had the fix proven infeasible.
+
+## Live-proof risk 1 (contingency): does a non-Fedora ppc64le image customize-boot at all?
 
 Every prior ppc64le boot proof (#1144/#1146) used **Fedora**. The customization boot direct-kernel-
 boots a baseline kernel extracted from the repacked image (ADR-0272/0345). Whether a **CentOS

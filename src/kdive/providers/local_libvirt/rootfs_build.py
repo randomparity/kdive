@@ -156,30 +156,51 @@ def _real_virt_customize(qcow2: Path, argv: list[str]) -> None:  # pragma: no co
     )
 
 
+# The e2fsprogs-1.47 ext4 feature the Fedora-appliance mke2fs stamps by default. An EL <= 9 guest
+# (e2fsprogs 1.46.5) runs its own e2fsck at boot (family FSTAB fsck passno 1) and rejects this
+# unknown feature, dropping the customization boot to emergency mode. Stripping it keeps the root
+# filesystem checkable by any older guest; it is distro-userspace skew, not arch (ADR-0351, #1152).
+_EXT4_INCOMPATIBLE_FEATURE = "orphan_file"
+
+
+def _repack_tool_argvs(
+    *, tar_path: Path, raw_path: Path, qcow2: Path, size: str
+) -> list[list[str]]:
+    """Ordered tool argvs that repack ``tar_path`` into a whole-disk ext4 qcow2 an older-guest
+    e2fsck can check (ADR-0351).
+
+    ``virt-make-fs`` builds the ext4 exactly as the proven path did, but to a raw image; ``tune2fs``
+    strips the e2fsprogs-1.47-only :data:`_EXT4_INCOMPATIBLE_FEATURE` (a host metadata operation on
+    the image file, arch-neutral — no guest code executes); ``qemu-img`` converts the stripped raw
+    to the qcow2 the direct-kernel boot provider consumes.
+    """
+    build_ext4 = ["virt-make-fs", "--type=ext4", "--format=raw", f"--size={size}"]
+    return [
+        [*build_ext4, str(tar_path), str(raw_path)],
+        ["tune2fs", "-O", f"^{_EXT4_INCOMPATIBLE_FEATURE}", str(raw_path)],
+        ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", str(raw_path), str(qcow2)],
+    ]
+
+
 def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> None:
-    """Repack the customized root tree into a no-partition-table whole-disk ext4 qcow2."""
-    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as handle:
-        tar_path = Path(handle.name)
-    try:
+    """Repack the customized root tree into a no-partition-table whole-disk ext4 qcow2.
+
+    The ext4 is built by ``virt-make-fs`` then has the EL <= 9-incompatible ``orphan_file`` feature
+    stripped before the qcow2 is produced (ADR-0351), so the customization boot's guest fsck passes
+    on older distros as well as Fedora.
+    """
+    with tempfile.TemporaryDirectory(prefix="kdive-repack-") as work:
+        tar_path = Path(work) / "root.tar"
+        raw_path = Path(work) / "root.raw"
         _run_libguestfs_tool(
             ["virt-tar-out", "-a", str(scratch), "/", str(tar_path)],
             stage="virt-tar-out",
             timeout_s=_REPACK_TIMEOUT_S,
         )
-        _run_libguestfs_tool(
-            [
-                "virt-make-fs",
-                "--type=ext4",
-                "--format=qcow2",
-                f"--size={size}",
-                str(tar_path),
-                str(qcow2),
-            ],
-            stage="virt-make-fs",
-            timeout_s=_REPACK_TIMEOUT_S,
-        )
-    finally:
-        tar_path.unlink(missing_ok=True)
+        for argv in _repack_tool_argvs(
+            tar_path=tar_path, raw_path=raw_path, qcow2=qcow2, size=size
+        ):
+            _run_libguestfs_tool(argv, stage=argv[0], timeout_s=_REPACK_TIMEOUT_S)
 
 
 def _grant_hypervisor_traversal(work_dir: Path) -> None:
