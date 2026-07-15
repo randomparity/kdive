@@ -31,7 +31,6 @@ import hashlib
 import json
 import os
 import platform
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -49,7 +48,11 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
-from tests.integration.live_stack.conftest import require_issuer, require_stack
+from tests.integration.live_stack.conftest import (
+    require_guest_arch,
+    require_issuer,
+    require_stack,
+)
 from tests.integration.live_stack.spine import (
     LOCAL_ALLOCATION_DISK_GB,
     SpinePhaseError,
@@ -78,9 +81,8 @@ _ARTIFACT_NAME = "accounting-report.json"
 _FAMILY_IMAGE_ENV = {"debian": "KDIVE_GUEST_IMAGE_DEBIAN", "rhel": "KDIVE_GUEST_IMAGE_RHEL"}
 # The ppc64le rootfs for the live TCG boot proof (#1144, epic #1139): a Fedora ppc64le image
 # published under rootfs/local/. Distinct from the x86_64 family images — it boots under TCG
-# emulation on the x86_64 host (qemu-system-ppc64), so it also gates on that emulator being present.
+# emulation on the x86_64 host, so the preflight also gates on that emulator via require_guest_arch.
 _PPC64LE_IMAGE_ENV = "KDIVE_GUEST_IMAGE_PPC64LE"
-_PPC64LE_EMULATOR = "qemu-system-ppc64"
 # A Fedora ppc64le guest under TCG boots far slower than a native KVM guest — the first boot
 # runs the SELinux relabel and reboots, then the second boot brings up cloud-init networking and
 # sshd (~several minutes wall-clock on the x86_64 host). Poll the reachability probe under a
@@ -820,11 +822,7 @@ def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
     ``qemu-system-ppc64`` cannot boot a pseries guest under TCG, so it skips this proof cleanly
     rather than erroring at define-time.
     """
-    if shutil.which(_PPC64LE_EMULATOR) is None:
-        pytest.skip(
-            f"{_PPC64LE_EMULATOR} not on PATH; a ppc64le guest boots under TCG emulation on the "
-            "x86_64 host — install qemu-system-ppc (the pseries emulator)"
-        )
+    require_guest_arch("ppc64le")
     image = os.environ.get(_PPC64LE_IMAGE_ENV)
     if not image or not Path(image).exists():
         pytest.skip(
@@ -846,6 +844,7 @@ def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
 
 
 @pytest.mark.live_stack
+@pytest.mark.live_vm_tcg
 def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
     """Prove a Fedora ppc64le guest boots end-to-end under TCG on the x86_64 host (#1144).
 
@@ -997,6 +996,7 @@ def _ppc64le_bundle_preflight() -> tuple[OidcIssuer, str, str, Path, Path]:
 
 
 @pytest.mark.live_stack
+@pytest.mark.live_vm_tcg
 def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
     """Prove an *uploaded* ppc64le bundle installs and direct-kernel-boots on pseries (#1146).
 
@@ -1198,6 +1198,7 @@ def _ppc64le_fadump_provision_profile(image: str) -> dict[str, object]:
 
 
 @pytest.mark.live_stack
+@pytest.mark.live_vm_tcg
 def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
     """Attempt a fadump capture on a ppc64le guest under TCG on the x86_64 host (#1151, ADR-0349).
 
@@ -1380,6 +1381,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
 
 
 @pytest.mark.live_stack
+@pytest.mark.live_vm_tcg
 def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
     """Prove kdump capture works on a ppc64le guest under TCG on the x86_64 host (#1148).
 
