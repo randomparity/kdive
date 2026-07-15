@@ -41,6 +41,10 @@ class LocalLibvirtProfilePolicy:
     def capture_method(self, profile: ProvisioningProfile) -> CaptureMethod:
         section = profile.provider.local_libvirt
         if section.crashkernel is not None:
+            # fadump is a firmware-assisted variant of the reserved-crashkernel path (ADR-0349):
+            # only ever resolved when the reservation is present, so it nests under this check.
+            if section.debug.fadump:
+                return CaptureMethod.FADUMP
             return CaptureMethod.KDUMP
         if section.debug.gdbstub:
             return CaptureMethod.GDBSTUB
@@ -53,3 +57,6 @@ class LocalLibvirtProfilePolicy:
 
     def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
         return profile.provider.local_libvirt.debug.preserve_on_crash
+
+    def fadump_provisioned(self, profile: ProvisioningProfile) -> bool:
+        return profile.provider.local_libvirt.debug.fadump

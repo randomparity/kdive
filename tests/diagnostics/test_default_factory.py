@@ -20,6 +20,7 @@ from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
+    PSERIES_FADUMP_ID,
     REACHABILITY_ID,
     SECRET_REF_ID,
     Check,
@@ -383,9 +384,14 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
     assert {SECRET_REF_ID, REACHABILITY_ID, BASE_IMAGE_STAGING_ID} <= runnable_ids
-    # local-libvirt's multiarch_gdb is also a worker-vantage check, so it joins the substituted
+    # local-libvirt's worker-vantage checks (multiarch_gdb + pseries_fadump) join the substituted
     # set with no pool wired.
-    assert {PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID} == unavailable_ids
+    assert {
+        PROVIDER_TLS_ID,
+        GDBSTUB_ACL_ID,
+        MULTIARCH_GDB_ID,
+        PSERIES_FADUMP_ID,
+    } == unavailable_ids
     assert PROVIDER_TLS_ID not in runnable_ids
     assert GDBSTUB_ACL_ID not in runnable_ids
     assert MULTIARCH_GDB_ID not in runnable_ids
@@ -535,7 +541,12 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
     service = _factory(None)
     assert isinstance(service._worker_mode, WorkerVantageSubstitutionMode)  # noqa: SLF001
     unavailable_ids = {c.id for c in service._worker_mode.checks}  # noqa: SLF001
-    assert unavailable_ids == {PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID}
+    assert unavailable_ids == {
+        PROVIDER_TLS_ID,
+        GDBSTUB_ACL_ID,
+        MULTIARCH_GDB_ID,
+        PSERIES_FADUMP_ID,
+    }
 
 
 def test_factory_substitutes_every_enabled_worker_contribution_without_pool(

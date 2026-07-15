@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
@@ -50,9 +50,10 @@ _TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
 # Idempotency-store kind for vmcore.fetch (the registered tool name); ADR-0193.
 _VMCORE_FETCH_KIND = "vmcore.fetch"
 
-# The core-producing methods valid for vmcore.fetch (excludes console/gdbstub).
+# The core-producing methods valid for vmcore.fetch (excludes console/gdbstub). fadump produces a
+# core through the shared kdump retrieve path (ADR-0349).
 _VMCORE_METHODS: frozenset[CaptureMethod] = frozenset(
-    {CaptureMethod.HOST_DUMP, CaptureMethod.KDUMP}
+    {CaptureMethod.HOST_DUMP, CaptureMethod.KDUMP, CaptureMethod.FADUMP}
 )
 
 
@@ -252,10 +253,12 @@ async def _fetch_vmcore(
                 return resolved
             capture_method = resolved
 
-            if capture_method is CaptureMethod.KDUMP:
-                # Kernel-config gate (ADR-0318): a kdump vmcore is produced by the guest kernel, so
-                # it needs the crash_capture symbols. host_dump is host-side (QEMU) and never gates.
-                # crash_capture_refusal fails open (None) on no upload / read error / degenerate.
+            if capture_method in KDUMP_FAMILY:
+                # Kernel-config gate (ADR-0318): a kdump/fadump vmcore is produced by the guest
+                # kernel, so it needs the crash_capture symbols (ADR-0349 shares the gate; it stays
+                # kdump-symbol-only — the fadump-active runtime signal, not a static config check,
+                # distinguishes fadump from a silent kdump fallback). host_dump is host-side (QEMU)
+                # and never gates. crash_capture_refusal fails open (None) on no upload / error.
                 refusal = await crash_capture_refusal(conn, uid)
                 if refusal is not None:
                     return _config_error(

@@ -476,6 +476,31 @@ def test_install_kdump_with_initrd_but_no_modules_proceeds(tmp_path: Path) -> No
     assert len(conn.defined_xml) == 1  # redefined once, no CONFIGURATION_ERROR raised
 
 
+def test_install_fadump_shares_the_kdump_capture_prerequisite(tmp_path: Path) -> None:
+    # fadump reuses the kdump capture environment (ADR-0349): a FADUMP install with no modules and
+    # no initrd hits the same absent-capture CONFIGURATION_ERROR as KDUMP, before any redefine.
+    conn = _conn_with_existing()
+    inst = _install(conn=conn, fetch=_Fetch(with_modules=False), staging_root=tmp_path)
+    with pytest.raises(CategorizedError) as caught:
+        inst.install(_request(method=CaptureMethod.FADUMP))
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert conn.defined_xml == []
+
+
+def test_install_fadump_injects_modules_like_kdump(tmp_path: Path) -> None:
+    # fadump's second kernel needs the module tree just as kdump does, so needs_modules fires and
+    # the injector runs for a FADUMP install (ADR-0349).
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer, fetch_modules=fetch)
+
+    inst.install(_request(method=CaptureMethod.FADUMP))
+
+    assert writer.injected
+
+
 # --- install: module injection (from-source kdump lane) ------------------------------
 
 

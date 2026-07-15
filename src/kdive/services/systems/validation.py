@@ -72,6 +72,29 @@ def resolve_accel(guest_arches: Mapping[str, GuestArch], arch: str) -> str | Non
     return resolved[0] if resolved is not None else None
 
 
+def require_fadump_supported(*, requested: bool, supported: bool) -> None:
+    """Reject a fadump-opted provision on a host that does not advertise pseries fadump (ADR-0349).
+
+    ``requested`` is the profile's fadump opt-in (``ProfilePolicy.fadump_provisioned``);
+    ``supported`` is the bound Resource's discovered ``pseries_fadump`` capability. Fail-closed:
+    when fadump is requested but the host does not support it, raises ``CONFIGURATION_ERROR``
+    naming the QEMU floor. The caller resolves ``supported`` to ``False`` for a missing resource or
+    a host not re-discovered since ADR-0349, so an unknown host denies fadump rather than hanging.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when ``requested`` and not ``supported``.
+    """
+    if not requested or supported:
+        return
+    raise CategorizedError(
+        "the bound host does not implement pseries fadump; it needs QEMU >= 10.2 "
+        "(the ibm,configure-kernel-dump RTAS). Re-run resource discovery if you recently "
+        "upgraded QEMU, provision on a fadump-capable host, or drop debug.fadump for kdump.",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        details={"reason": "pseries_fadump_unsupported", "qemu_floor": "10.2"},
+    )
+
+
 def validate_profile_for_provider(
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,

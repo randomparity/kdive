@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import shutil
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -25,6 +25,7 @@ from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     DISK_GB_KEY,
     GUEST_ARCHES_KEY,
+    PSERIES_FADUMP_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -33,6 +34,7 @@ from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
+from kdive.providers.shared.fadump_detect import detect_pseries_fadump
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
@@ -88,6 +90,7 @@ class _LibvirtConn(Protocol):
 
 
 type Connect = Callable[[], _LibvirtConn]
+type FadumpProbe = Callable[[Mapping[str, Mapping[str, str]]], bool]
 
 
 def _hex_id(raw: str) -> str:
@@ -153,10 +156,20 @@ def _compose_bdf(cap: ET.Element) -> str:
 class LocalLibvirtDiscovery:
     """The realized discovery port for the local libvirt host."""
 
-    def __init__(self, *, host_uri: str, connect: Connect, concurrent_allocation_cap: int) -> None:
+    def __init__(
+        self,
+        *,
+        host_uri: str,
+        connect: Connect,
+        concurrent_allocation_cap: int,
+        fadump_probe: FadumpProbe = detect_pseries_fadump,
+    ) -> None:
         self.host_uri = host_uri
         self._connect = connect
         self.concurrent_allocation_cap = concurrent_allocation_cap
+        # Injected so discovery stays hermetic in tests (the real probe spawns a bounded
+        # ``qemu-system-ppc64 --version`` subprocess only when a ppc64le arch is advertised).
+        self._fadump_probe = fadump_probe
 
     @classmethod
     def from_env(cls) -> LocalLibvirtDiscovery:
@@ -188,9 +201,13 @@ class LocalLibvirtDiscovery:
         conn = self._connect()
         info = conn.getInfo()
         caps_xml = conn.getCapabilities()
+        guest_arches = parse_guest_arches(caps_xml, SUPPORTED_ARCHES)
         capabilities: dict[str, Any] = {
             "arch": parse_capabilities_arch(caps_xml),
-            GUEST_ARCHES_KEY: parse_guest_arches(caps_xml, SUPPORTED_ARCHES),
+            GUEST_ARCHES_KEY: guest_arches,
+            # Whether this host's QEMU implements pseries fadump (ADR-0349); fail-closed, keyed off
+            # the discovered ppc64le emulator's version (no ppc64le arch → False, no subprocess).
+            PSERIES_FADUMP_KEY: self._fadump_probe(guest_arches),
             "vcpus": int(info[2]),
             "memory_mb": int(info[1]),
             DISK_GB_KEY: _host_disk_ceiling_gb(),

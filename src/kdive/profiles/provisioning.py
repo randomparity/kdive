@@ -88,11 +88,17 @@ class LibvirtDebugOptions(_ProfileBase):
 
     Bound at provision/boot; declare which capture methods the System is
     provisioned for. ``preserve_on_crash`` adds a pvpanic device +
-    ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
+    ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument;
+    ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the
+    boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
     """
 
     preserve_on_crash: bool = False
     gdbstub: bool = False
+    # Provenance: ADR-0349, #1151. Firmware-assisted dump on POWER pseries. Adds ``fadump=on`` to
+    # the boot cmdline alongside the ``crashkernel`` reservation; POWER-only and reservation-
+    # required (enforced by ``ProvisioningProfile._require_ppc64le_and_reservation_for_fadump``).
+    fadump: bool = False
 
 
 # Provenance: ADR-0024 decisions 1/2b/2c; rootfs ADR-0048 §3; destructive opt-in ADR-0028 §2;
@@ -296,6 +302,24 @@ class ProvisioningProfile(_ProfileBase):
                 "boot_method 'disk-image' and the remote-libvirt provider section "
                 "require each other (ADR-0080)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_ppc64le_and_reservation_for_fadump(self) -> ProvisioningProfile:
+        """fadump requires ``arch=ppc64le`` and a ``crashkernel`` reservation (ADR-0349).
+
+        fadump is POWER-specific (the ``ibm,configure-kernel-dump`` RTAS is pseries-only), and in
+        kdive's model a crash-capture System is defined by its reservation token — a ``fadump=on``
+        with no reservation would resolve to a non-capture method and silently drop the flag. Only
+        the local-libvirt section carries the flag; remote/fault-inject have no ``debug`` block.
+        """
+        section = self.provider.local_libvirt_section
+        if section is None or not section.debug.fadump:
+            return self
+        if self.arch != "ppc64le":
+            raise ValueError("debug.fadump is POWER-specific and requires arch 'ppc64le'")
+        if section.crashkernel is None:
+            raise ValueError("debug.fadump requires a crashkernel reservation")
         return self
 
     @model_validator(mode="after")

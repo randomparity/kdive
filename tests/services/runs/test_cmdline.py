@@ -85,6 +85,33 @@ def test_ppc64le_explicit_crashkernel_still_wins_over_the_arch_default() -> None
     )
 
 
+def test_fadump_appends_fadump_on_after_the_reservation() -> None:
+    # fadump reuses the crashkernel reservation and adds fadump=on (last), on ppc64le (ADR-0349).
+    assert (
+        system_required_cmdline(CaptureMethod.FADUMP, _LOCAL_ROOT, arch="ppc64le")
+        == "console=hvc0 root=/dev/vda crashkernel=512M fadump=on"
+    )
+
+
+def test_fadump_explicit_crashkernel_still_wins_then_fadump_on() -> None:
+    # An explicit reservation overrides the arch default on the fadump path too; fadump=on is last.
+    assert (
+        system_required_cmdline(CaptureMethod.FADUMP, _LOCAL_ROOT, arch="ppc64le", crashkernel="1G")
+        == "console=hvc0 root=/dev/vda crashkernel=1G fadump=on"
+    )
+
+
+def test_non_fadump_boots_never_carry_fadump_on() -> None:
+    # fadump=on is fadump-only: kdump and other methods never emit it (regression guard).
+    assert "fadump" not in system_required_cmdline(CaptureMethod.KDUMP, _LOCAL_ROOT, arch="ppc64le")
+    assert "fadump" not in system_required_cmdline(CaptureMethod.CONSOLE, _LOCAL_ROOT, arch=_X86)
+
+
+def test_fadump_is_a_platform_owned_cmdline_token() -> None:
+    # A caller install-cmdline override cannot inject a conflicting fadump= token (ADR-0349 §3).
+    assert platform_owned_cmdline_token("fadump=off other=1") == "fadump="
+
+
 def test_gdbstub_appends_nokaslr_so_vmlinux_symbols_match_running_base() -> None:
     # A gdbstub-debug System boots with -gdb; KASLR (CONFIG_RANDOMIZE_BASE=y) would relocate the
     # running kernel away from the fetched vmlinux's link base, so breakpoints set by symbol

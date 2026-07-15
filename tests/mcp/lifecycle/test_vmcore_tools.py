@@ -253,6 +253,67 @@ def test_fetch_vmcore_no_method_resolves_kdump_on_crashkernel_local(migrated_url
     asyncio.run(_run())
 
 
+async def _set_fadump_profile(pool: AsyncConnectionPool, sys_id: str) -> None:
+    """Rewrite the System's profile so capture_method(profile) resolves to FADUMP (ADR-0349)."""
+    from psycopg.types.json import Jsonb
+
+    profile = {
+        "schema_version": 1,
+        "arch": "ppc64le",
+        "vcpu": 4,
+        "memory_mb": 4096,
+        "disk_gb": 20,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": "/var/lib/kdive/rootfs/fedora-ppc64le.qcow2"},
+                "crashkernel": "512M",
+                "debug": {"fadump": True},
+            }
+        },
+    }
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE systems SET provisioning_profile = %s WHERE id = %s", (Jsonb(profile), sys_id)
+        )
+
+
+def test_fetch_vmcore_no_method_resolves_fadump_on_fadump_system(migrated_url: str) -> None:
+    # ADR-0349: a fadump System resolves capture_method(profile) -> FADUMP, which local now
+    # supports, so the no-method call is admitted and dedups under the resolved :fadump key.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            await _set_fadump_profile(pool, sys_id)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method=None)
+            assert resp.status == "queued", resp.data
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'capture_vmcore' "
+                    "AND dedup_key = %s",
+                    (f"{run_id}:capture_vmcore:fadump",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_fadump_admitted_explicit_on_local(migrated_url: str) -> None:
+    # An explicit method="fadump" is admitted on local (FADUMP is in the support set, Task 5).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            await _set_fadump_profile(pool, sys_id)
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="fadump")
+        assert resp.status == "queued", resp.data
+
+    asyncio.run(_run())
+
+
 async def _set_console_only_profile(pool: AsyncConnectionPool, sys_id: str) -> None:
     """Rewrite the System's profile so capture_method(profile) resolves to non-core CONSOLE."""
     from psycopg.types.json import Jsonb

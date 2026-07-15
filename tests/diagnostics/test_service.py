@@ -394,7 +394,12 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
 
     from psycopg_pool import AsyncConnectionPool
 
-    from kdive.diagnostics.checks import GDBSTUB_ACL_ID, MULTIARCH_GDB_ID, PROVIDER_TLS_ID
+    from kdive.diagnostics.checks import (
+        GDBSTUB_ACL_ID,
+        MULTIARCH_GDB_ID,
+        PROVIDER_TLS_ID,
+        PSERIES_FADUMP_ID,
+    )
     from kdive.diagnostics.service import _CompositeWorkerCheckDispatcher, default_service_factory
     from kdive.diagnostics.worker_dispatch import JobWorkerCheckDispatcher
     from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
@@ -420,4 +425,7 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
         PROVIDER_TLS_ID,
         GDBSTUB_ACL_ID,
     }
-    assert set(by_provider["local-libvirt"]._worker_check_ids) == {MULTIARCH_GDB_ID}  # noqa: SLF001
+    assert set(by_provider["local-libvirt"]._worker_check_ids) == {  # noqa: SLF001
+        MULTIARCH_GDB_ID,
+        PSERIES_FADUMP_ID,
+    }

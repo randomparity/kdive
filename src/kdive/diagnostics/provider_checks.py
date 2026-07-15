@@ -10,6 +10,7 @@ from kdive.diagnostics.checks import (
     GDBSTUB_ACL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
+    PSERIES_FADUMP_ID,
     REACHABILITY_ID,
     Check,
     CheckResult,
@@ -26,6 +27,12 @@ BASE_VOLUME_NOT_STAGED_FIX = (
 MULTIARCH_GDB_MISSING_FIX = (
     "no gdb on this host can target a supported foreign architecture; install gdb-multiarch "
     "(Debian/Ubuntu) or a multiarch-capable gdb build so cross-arch debug sessions can attach"
+)
+
+PSERIES_FADUMP_UNSUPPORTED_FIX = (
+    "this host's qemu-system-ppc64 predates QEMU 10.2, which added the pseries "
+    "ibm,configure-kernel-dump RTAS fadump implements; upgrade QEMU to >= 10.2 to provision "
+    "fadump systems here, or validate fadump on native POWER. kdump is unaffected."
 )
 
 _TRANSPORT_FAILURE = ErrorCategory.TRANSPORT_FAILURE
@@ -326,4 +333,63 @@ class MultiarchGdbCheck(Check):
             status=CheckStatus.ERROR,
             detail="could not run a candidate gdb to a multiarch verdict",
             provider=self._provider,
+        )
+
+
+class PseriesFadumpOutcome(StrEnum):
+    """The three observable outcomes of the host pseries-fadump prerequisite probe (ADR-0349)."""
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    NOT_APPLICABLE = "not_applicable"
+
+
+PseriesFadumpProbe = Callable[[], Awaitable[PseriesFadumpOutcome]]
+
+
+class PseriesFadumpCheck(Check):
+    """Worker-vantage: the host QEMU implements pseries firmware-assisted dump (ADR-0349).
+
+    fadump needs QEMU >= 10.2 (the ``ibm,configure-kernel-dump`` RTAS). This check reports a
+    host qemu-system-ppc64 below that floor as a ``fail`` with an upgrade hint, so a fadump
+    provision that admission would reject is legible at doctor time rather than only at
+    provision. A host with no qemu-system-ppc64 cannot run ppc64le guests at all, so fadump is
+    ``not_applicable`` there and the check passes.
+    """
+
+    def __init__(self, *, provider: str, probe: PseriesFadumpProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return PSERIES_FADUMP_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        outcome = await self._probe()
+        if outcome is PseriesFadumpOutcome.SUPPORTED:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="the host qemu-system-ppc64 implements pseries fadump (QEMU >= 10.2)",
+                provider=self._provider,
+            )
+        if outcome is PseriesFadumpOutcome.NOT_APPLICABLE:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.PASS,
+                detail="no qemu-system-ppc64 on this host; pseries fadump is not applicable",
+                provider=self._provider,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.FAIL,
+            detail="the host qemu-system-ppc64 predates QEMU 10.2 and does not implement fadump",
+            fix=PSERIES_FADUMP_UNSUPPORTED_FIX,
+            provider=self._provider,
+            failure_category=_MISSING_DEPENDENCY,
         )

@@ -6,8 +6,8 @@ domain (`kdive-{system_id}`, minted by the provisioning plane, ADR-0025):
 - `install(request)` stages the kernel
   (and optionally an initrd) to a **per-Run** host-local path
   (`{staging_root}/{system_id}/{run_id}/{kernel[,initrd]}`) via a temp-then-rename fetch.
-  The kdump capture prerequisite check fires only for `method=CaptureMethod.KDUMP`; non-kdump
-  boots skip it. When `initrd_ref` is ``None`` (e.g. an embedded-initramfs kernel) no
+  The kdump capture prerequisite check fires for the kdump family (`KDUMP`/`FADUMP`, ADR-0349);
+  non-capture boots skip it. When `initrd_ref` is ``None`` (e.g. an embedded-initramfs kernel) no
   initrd is fetched and no `<initrd>` element is emitted. `defineXML`s the domain with a
   direct-kernel `<os>` (`<kernel>`/[`<initrd>`]/`<cmdline>`). The `<os>` is built with
   `xml.etree.ElementTree` (no string interpolation), so a `cmdline` value cannot inject XML.
@@ -41,7 +41,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.config.core_settings import INSTALL_STAGING
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
@@ -258,7 +258,7 @@ class LocalLibvirtInstaller:
         repacks the tar's ``lib/modules/`` subtree and feeds it to the libguestfs injector. The
         initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None`` (e.g. an
         embedded-initramfs kernel). The kdump preflight is gated on
-        ``method == CaptureMethod.KDUMP`` — non-kdump boots do not require kdump prerequisites.
+        the kdump family (``KDUMP``/``FADUMP``) — non-capture boots need no kdump prerequisites.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the kdump capture path is absent
@@ -280,7 +280,7 @@ class LocalLibvirtInstaller:
                 details={"op": "mkdir", "dest": str(staging_dir)},
             ) from exc
         artifacts = self._stage_install_artifacts(request, staging_dir)
-        kdump_env_absent = request.method is CaptureMethod.KDUMP and not (
+        kdump_env_absent = request.method in KDUMP_FAMILY and not (
             artifacts.modules_injected or artifacts.initrd_path is not None
         )
         if kdump_env_absent:
@@ -336,7 +336,7 @@ class LocalLibvirtInstaller:
         modules_tar: Path,
         kernel_path: Path,
     ) -> bool:
-        needs_modules = request.method is CaptureMethod.KDUMP or request.debuginfo_ref is not None
+        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
         if not needs_modules or not repack_modules_subtree(combined_tar, modules_tar):
             return False
         self._inject_built_modules(

@@ -66,6 +66,37 @@ async def _set_resource_guest_arches(
             )
 
 
+async def _set_resource_pseries_fadump(
+    pool: AsyncConnectionPool, alloc_id: str, supported: bool
+) -> None:
+    """Set the backing Resource's ``pseries_fadump`` capability for the seeded allocation."""
+    async with pool.connection() as conn:
+        alloc = await ALLOCATIONS.get(conn, alloc_id)
+        assert alloc is not None and alloc.resource_id is not None
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT capabilities FROM resources WHERE id = %s", (alloc.resource_id,)
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            caps = dict(row["capabilities"])
+            caps["pseries_fadump"] = supported
+            await cur.execute(
+                "UPDATE resources SET capabilities = %s WHERE id = %s",
+                (Jsonb(caps), alloc.resource_id),
+            )
+
+
+def _fadump_profile() -> dict[str, Any]:
+    """A ppc64le fadump profile (opt-in + reservation), for the admission host gate (ADR-0349)."""
+    profile = _profile()
+    profile["arch"] = "ppc64le"
+    section = profile["provider"]["local-libvirt"]
+    section["crashkernel"] = "512M"
+    section["debug"] = {"fadump": True}
+    return profile
+
+
 async def _system_for_allocation(pool: AsyncConnectionPool, alloc_id: str) -> dict[str, Any] | None:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM systems WHERE allocation_id = %s", (alloc_id,))
@@ -201,6 +232,90 @@ def test_define_rejects_arch_host_does_not_advertise(migrated_url: str) -> None:
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
             assert resp.data.get("accepted_values") == ["ppc64le"]
             # All-or-nothing: no System minted, allocation stays granted (never flipped active).
+            assert await _system_for_allocation(pool, alloc_id) is None
+            async with pool.connection() as conn:
+                alloc = await ALLOCATIONS.get(conn, alloc_id)
+            assert alloc is not None and alloc.state is AllocationState.GRANTED
+
+    asyncio.run(_run())
+
+
+# The fadump host gate (ADR-0349) sits beside accel resolution at both mint sites: a fadump-opted
+# profile is admitted only when the bound host advertises pseries_fadump=True; otherwise it is
+# rejected before the granted->active flip (no System, capacity untouched — never a hang).
+
+
+def test_provision_admits_fadump_when_host_supports_it(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)  # ppc64le -> tcg
+            await _set_resource_pseries_fadump(pool, alloc_id, supported=True)
+
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_fadump_profile()
+            )
+
+            assert resp.error_category is None, resp.data
+            row = await _system_for_allocation(pool, alloc_id)
+            assert row is not None
+            assert row["accel"] == "tcg"
+
+    asyncio.run(_run())
+
+
+def test_provision_rejects_fadump_when_host_unsupported(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)
+            await _set_resource_pseries_fadump(pool, alloc_id, supported=False)
+
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_fadump_profile()
+            )
+
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+            assert "10.2" in str(resp.data)  # names the QEMU floor
+            # All-or-nothing: no System minted, allocation stays granted.
+            assert await _system_for_allocation(pool, alloc_id) is None
+            async with pool.connection() as conn:
+                alloc = await ALLOCATIONS.get(conn, alloc_id)
+            assert alloc is not None and alloc.state is AllocationState.GRANTED
+
+    asyncio.run(_run())
+
+
+def test_provision_rejects_fadump_when_host_signal_absent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            # ppc64le advertised (arch passes) but no pseries_fadump key: fail-closed (a host not
+            # re-discovered since ADR-0349 must not silently admit fadump).
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)
+
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_fadump_profile()
+            )
+
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+            assert await _system_for_allocation(pool, alloc_id) is None
+
+    asyncio.run(_run())
+
+
+def test_define_rejects_fadump_when_host_unsupported(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)
+            await _set_resource_pseries_fadump(pool, alloc_id, supported=False)
+
+            resp = await _HANDLERS.define_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_fadump_profile()
+            )
+
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
             assert await _system_for_allocation(pool, alloc_id) is None
             async with pool.connection() as conn:
                 alloc = await ALLOCATIONS.get(conn, alloc_id)

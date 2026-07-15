@@ -12,7 +12,7 @@ from psycopg import AsyncConnection
 from kdive.db.idempotency import claim_run_step, complete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.operations.jobs import Job
@@ -134,10 +134,11 @@ async def _validate_crashkernel(
 ) -> None:
     if crashkernel is None:
         return
-    if method is not CaptureMethod.KDUMP:
-        # Backstop for the tool-boundary gate (ADR-0300): a crashkernel reservation is a kdump-only
-        # token. Fail loudly rather than compose a cmdline that silently drops it — this covers a
-        # hand-crafted payload or an accept-then-reprovision skew after the boundary accepted it.
+    if method not in KDUMP_FAMILY:
+        # Backstop for the tool-boundary gate (ADR-0300): a crashkernel reservation is a
+        # kdump-family token (KDUMP/FADUMP, ADR-0349). Fail loudly rather than compose a cmdline
+        # that silently drops it — this covers a hand-crafted payload or an accept-then-reprovision
+        # skew after the boundary accepted it.
         raise CategorizedError(
             "crashkernel reservation requires a kdump-capture system",
             category=ErrorCategory.CONFIGURATION_ERROR,

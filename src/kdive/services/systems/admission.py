@@ -51,6 +51,7 @@ from kdive.serialization import safe_error_details
 from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.systems.validation import (
     RootfsValidator,
+    require_fadump_supported,
     resolve_accel,
     validate_profile_for_provider,
     validate_rootfs_for_provider,
@@ -270,6 +271,28 @@ async def _resolve_new_system_accel(
     if resource is None:
         return None
     return resolve_accel(resource.capability_view.guest_arches(), arch)
+
+
+async def _validate_fadump_supported(
+    conn: AsyncConnection,
+    resource_id: UUID | None,
+    profile: ProvisioningProfile,
+    profile_policy: ProfilePolicy,
+) -> None:
+    """Reject a fadump-opted provision on a host that does not advertise pseries fadump (ADR-0349).
+
+    Called at System mint alongside accel resolution, inside the same pre-flip ``try`` so a
+    rejection consumes no capacity and returns a typed envelope — never a hang. Fail-closed: a
+    fadump profile with no bound Resource, or a Resource whose capabilities do not advertise
+    ``pseries_fadump`` (including one never re-discovered since ADR-0349), resolves to
+    ``supported=False`` and is rejected ``CONFIGURATION_ERROR``.
+    """
+    requested = profile_policy.fadump_provisioned(profile)
+    supported = False
+    if requested and resource_id is not None:
+        resource = await RESOURCES.get(conn, resource_id)
+        supported = resource is not None and resource.capability_view.pseries_fadump()
+    require_fadump_supported(requested=requested, supported=supported)
 
 
 @dataclass(frozen=True, slots=True)
@@ -845,6 +868,7 @@ async def _insert_defined_system(
     # rejection writes no System and leaves the allocation granted (all-or-nothing).
     try:
         accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
+        await _validate_fadump_supported(conn, alloc.resource_id, profile, profile_policy)
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
@@ -880,6 +904,7 @@ async def _insert_provisioning_system(
         # Validate arch + resolve accel before the granted->active flip (ADR-0339): a mis-arch
         # rejection writes no System and leaves the allocation granted (all-or-nothing).
         accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
+        await _validate_fadump_supported(conn, alloc.resource_id, profile, profile_policy)
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)

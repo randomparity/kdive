@@ -66,12 +66,13 @@ def test_build_runtime_wires_local_ports_and_capabilities() -> None:
     assert isinstance(runtime.live_introspector, LocalLibvirtLiveIntrospect)
     assert runtime.rootfs is not None
     assert isinstance(runtime.rootfs.build_plane, LocalLibvirtRootfsBuildPlane)
-    # ADR-0208/0210/0211/0218/0219: local advertises both core-producing capture methods it can
-    # fetch — KDUMP (overlay harvest) and HOST_DUMP (libvirt domain core dump, B4) — both debug
-    # transports (gdbstub B1 #675, drgn-live-over-SSH #697/ADR-0218), and both introspection modes:
-    # offline-vmcore (B2 #676) and live (B3 #677/ADR-0219, drgn-live SSH-exec of in-guest helper).
+    # ADR-0208/0210/0211/0218/0219/0349: local advertises the core-producing capture methods it can
+    # fetch — KDUMP (overlay harvest), FADUMP (the pseries firmware-assisted variant sharing that
+    # harvest; host support gated at admission), and HOST_DUMP (libvirt domain core dump, B4) — both
+    # debug transports (gdbstub B1 #675, drgn-live-over-SSH #697/ADR-0218), and both introspection
+    # modes: offline-vmcore (B2 #676) and live (B3 #677/ADR-0219, drgn-live SSH-exec of in-guest).
     assert runtime.support.capture_methods == frozenset(
-        {CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}
+        {CaptureMethod.KDUMP, CaptureMethod.FADUMP, CaptureMethod.HOST_DUMP}
     )
     assert runtime.support.debug_transports == frozenset({"gdbstub", "drgn-live"})
     assert runtime.support.introspection == frozenset({"offline-vmcore", "live", "live-script"})

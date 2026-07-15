@@ -1,0 +1,17 @@
+command line: console=hvc0 root=/dev/vda crashkernel=512M fadump=on kdive_proof_token=[REDACTED]
+[    0.000000] fadump: Reserved 512MB of memory at 0x00000020000000 (System RAM: 2048MB)
+[    0.000000] Hardware name: IBM pSeries (emulated by qemu) POWER10 (architected) 0x801200 0xf000006 of:SLOF,HEAD pSeries
+[    0.000000] fadump: Initialized [0x20000000, 512MB] cma area from [0x20000000, 512MB] bytes of memory reserved for firmware-assisted dump
+[    0.000000] Kernel command line: console=hvc0 root=/dev/vda crashkernel=512M fadump=on kdive_proof_token=[REDACTED]
+[    0.359203] rtas fadump: Registration is successful!
+[  OK  ] Started sshd.service - OpenSSH server daemon.
+kdive login: [   94.590941] block vda: the capability attribute has been deprecated.
+[  246.247524] Unrecoverable FP Unavailable Exception 800 at 2fff0000
+[  246.250275] Oops: Unrecoverable FP Unavailable Exception, sig: 6 [#1]
+[  246.251433] CPU: 1 UID: 0 PID: 262 Comm: kworker/1:2 Not tainted 6.19.10-300.fc44.ppc64le #1 PREEMPT(voluntary)
+[  246.251520] Hardware name: IBM pSeries (emulated by qemu) POWER10 (architected) 0x801200 0xf000006 of:SLOF,HEAD pSeries
+[  246.251628] Workqueue: events rtas_event_scan
+[  246.253136] [c0000000114cbcd0] [c000000000046784] __do_enter_rtas_trace+0x64/0x370
+[  246.253184] [c0000000114cbd50] [c000000000047708] rtas_call+0x408/0x500
+[  246.253232] [c0000000114cbdd0] [c00000000004b2a8] rtas_event_scan+0x98/0x350
+[  246.253749] ---[ end trace 0000000000000000 ]---

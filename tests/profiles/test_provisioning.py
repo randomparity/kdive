@@ -198,7 +198,9 @@ def test_profile_digest_matches_known_canonical_value() -> None:
     # any change to key ordering or the item/key separators changes the digest and so
     # would break dedup-key stability across deploys.
     digest = profile_digest(ProvisioningProfile.parse(_valid()))
-    assert digest == "7816a75b88ec33507ca2416236a673b6a9a3ec06524c11739871ac13ef8b2f5f"
+    # Repinned when the ADR-0349 `debug.fadump` flag joined the serialized debug block (like the
+    # sibling `preserve_on_crash`/`gdbstub` flags, it dumps as `false` by default).
+    assert digest == "9852f2ce104e3b547ad585ca9dc55037c8d59d94037876bd6a50f5fcbbfff16a"
 
 
 def test_profile_digest_ignores_input_key_order() -> None:
@@ -527,6 +529,58 @@ def test_crashkernel_is_optional() -> None:
     del data["provider"]["local-libvirt"]["crashkernel"]
     profile = ProvisioningProfile.parse(data)
     assert profile.provider.local_libvirt.crashkernel is None
+
+
+def _fadump_profile() -> dict[str, Any]:
+    """A ppc64le fadump profile: fadump=on + a crashkernel reservation (ADR-0349)."""
+    data = _valid()
+    data["arch"] = "ppc64le"
+    section = data["provider"]["local-libvirt"]
+    section["crashkernel"] = "512M"
+    section["debug"] = {"fadump": True}
+    return data
+
+
+def test_fadump_flag_defaults_disabled() -> None:
+    profile = ProvisioningProfile.parse(_valid())
+    assert profile.provider.local_libvirt.debug.fadump is False
+
+
+def test_fadump_profile_parses_on_ppc64le_with_reservation() -> None:
+    # fadump=on requires arch=ppc64le + a crashkernel reservation (ADR-0349 §2).
+    profile = ProvisioningProfile.parse(_fadump_profile())
+    assert profile.provider.local_libvirt.debug.fadump is True
+    assert profile.provider.local_libvirt.crashkernel == "512M"
+    # fadump resolves to a distinct capture method, nested under the crashkernel signal.
+    assert capture_method(_LOCAL_POLICY, profile) is CaptureMethod.FADUMP
+
+
+def test_fadump_rejected_on_non_ppc64le_arch() -> None:
+    # fadump is POWER-specific (the RTAS is pseries-only); x86_64 + fadump is a config error.
+    data = _fadump_profile()
+    data["arch"] = "x86_64"
+    with pytest.raises(CategorizedError) as exc:
+        ProvisioningProfile.parse(data)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_fadump_rejected_without_crashkernel_reservation() -> None:
+    # A fadump System is defined by its reservation token; fadump with no crashkernel would
+    # resolve to a non-capture method and silently drop the flag (ADR-0349 §2).
+    data = _fadump_profile()
+    del data["provider"]["local-libvirt"]["crashkernel"]
+    with pytest.raises(CategorizedError) as exc:
+        ProvisioningProfile.parse(data)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_kdump_profile_unaffected_by_fadump_default() -> None:
+    # A crashkernel-only ppc64le System stays KDUMP (fadump defaults off).
+    data = _valid()
+    data["arch"] = "ppc64le"
+    data["provider"]["local-libvirt"]["crashkernel"] = "512M"
+    profile = ProvisioningProfile.parse(data)
+    assert capture_method(_LOCAL_POLICY, profile) is CaptureMethod.KDUMP
 
 
 def test_rootfs_upload_window_helpers_report_and_reject_upload_profiles() -> None:
