@@ -10,6 +10,7 @@ repo files.
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from scripts.check_container_arch_matrix import (
     ADR_PATH,
@@ -154,6 +155,23 @@ def test_accept_gap_on_default_profile_image_fails() -> None:
     )
     violations = evaluate(compose, GOOD_MATRIX)
     assert _has(violations, "grafana/grafana:13.0.3")
+
+
+def test_empty_profiles_list_is_default_profile() -> None:
+    # Docker Compose starts a `profiles: []` service on a bare `up` (len==0 == default), so an
+    # accept-gap image gated only by an empty profiles list must be flagged, not passed.
+    compose = GOOD_COMPOSE.replace(
+        '    image: grafana/grafana:13.0.3\n    profiles: ["obs"]\n',
+        "    image: grafana/grafana:13.0.3\n    profiles: []\n",
+    )
+    assert parse_compose(compose)["grafana/grafana:13.0.3"].default_profile
+    assert _has(evaluate(compose, GOOD_MATRIX), "grafana/grafana:13.0.3")
+
+
+def test_malformed_compose_yaml_propagates() -> None:
+    # A syntactically broken compose surfaces a YAMLError (main() catches it into a clean line).
+    with pytest.raises(yaml.YAMLError):
+        evaluate("services: {oidc: [unterminated\n", GOOD_MATRIX)
 
 
 def test_mirror_row_requires_issue_reference() -> None:

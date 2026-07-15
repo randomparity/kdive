@@ -82,7 +82,10 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
         image = svc.get("image")
         if not image:
             continue
-        default[image] = default.get(image, False) or "profiles" not in svc
+        # Docker Compose starts a service on a bare `up` when its profiles list is empty or
+        # absent (len==0). A falsy `profiles` (missing / None / []) therefore means
+        # default-profile; only a non-empty list gates it opt-in.
+        default[image] = default.get(image, False) or not svc.get("profiles")
         built[image] = built.get(image, False) or "build" in svc
     return {img: ImageInfo(default[img], built[img]) for img in default}
 
@@ -206,7 +209,7 @@ def main() -> int:
             COMPOSE_PATH.read_text(encoding="utf-8"),
             ADR_PATH.read_text(encoding="utf-8"),
         )
-    except ValueError as exc:
+    except (ValueError, yaml.YAMLError) as exc:
         print(f"container-arch-check: {exc}", file=sys.stderr)
         return 1
     for violation in violations:
