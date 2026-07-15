@@ -61,6 +61,15 @@ digest) goes to **stderr** (the logger). That split makes the command's stdout `
 > install surfaces the guest's error via the console tail rather than a silent timeout. The
 > `debian` family still uses the offline `virt-customize` path until its own follow-up (#1167).
 
+> **Building a foreign-arch image is slower (TCG).** When the target arch is not the build
+> host's arch (e.g. a `ppc64le` image on an `x86_64` host), the customization boot runs under
+> QEMU TCG emulation instead of KVM — roughly 10× slower. The host needs the foreign arch's QEMU
+> system emulator installed (`qemu-system-ppc` on Fedora/Debian, `qemu-ppc` on openSUSE; see the
+> [cross-architecture guests](../install.md#cross-architecture-guests) table for every distro).
+> The completion poll waits `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` (default `1800`, the
+> native-KVM base) scaled by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`) for a TCG
+> build, so raise the window if a large foreign-arch package set does not finish in time.
+
 > **Agent-selectable disk requires a rebuilt image (ADR-0312, #985).** An `allocations.request`
 > may size the guest disk via `disk_gb` (a custom triple or the `debug` shape). The platform grows
 > the per-System overlay to that size at provision, and cloud-init's `resize_rootfs` grows the
