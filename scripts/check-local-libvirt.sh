@@ -15,8 +15,9 @@ readonly PY="${KDIVE_PYTHON:-python3}"
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
 # libguestfs builds its supermin appliance from a host kernel under this dir; Debian/Ubuntu ship
 # /boot/vmlinuz-* root:0600, unreadable by a non-root worker, so build-fs fails (ADR-0222, #694).
-# Probe ALL present kernels — supermin selects by version-sort, not the running one. Override for
-# tests.
+# ppc64le names the kernel /boot/vmlinux-* (ELF, no 'z') instead — probe both patterns so a POWER
+# host is not passed vacuously (#1156). Probe ALL present kernels — supermin selects by
+# version-sort, not the running one. Override for tests.
 readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 # Worker connection URI + effective uid drive the non-root-readability advisory (ADR-0223, #699):
 # under qemu:///system, virtlogd/QEMU write root-owned files a non-root worker cannot read back.
@@ -80,7 +81,8 @@ _default_net_active() {
 _venv_imports_kdump_deps() { "${PY}" -c "import guestfs, drgn" >/dev/null 2>&1; }
 _host_kernels_readable() {
   local k found=0
-  for k in "${BOOT_DIR}"/vmlinuz-*; do
+  # vmlinuz-* on x86_64, vmlinux-* on ppc64le (#1156) — probe both so neither arch is missed.
+  for k in "${BOOT_DIR}"/vmlinuz-* "${BOOT_DIR}"/vmlinux-*; do
     [[ -e "$k" ]] || continue # no-match glob stays literal under no-nullglob; skip it
     found=1
     [[ -r "$k" ]] || return 1
