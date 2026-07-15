@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from kdive.providers.local_libvirt.fadump_probe import (
+from kdive.providers.shared.fadump_detect import (
     PSERIES_FADUMP_QEMU_FLOOR,
     VersionRunner,
     detect_pseries_fadump,

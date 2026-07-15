@@ -38,9 +38,9 @@ def register(
             CaptureMethod | None,
             Field(
                 description=(
-                    "Core-producing capture method (KDUMP/HOST_DUMP) the bound provider must "
-                    "advertise. Omit to resolve the System profile's method; a profile with no "
-                    "implicit core method requires an explicit one."
+                    "Core-producing capture method (KDUMP/FADUMP/HOST_DUMP) the bound provider "
+                    "must advertise. Omit to resolve the System profile's method; a profile with "
+                    "no implicit core method requires an explicit one."
                 )
             ),
         ] = None,

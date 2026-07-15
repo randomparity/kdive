@@ -19,7 +19,7 @@ from kdive.diagnostics.provider_checks import (
     PseriesFadumpProbe,
 )
 from kdive.diagnostics.provider_contracts import WorkerVantageDescriptor
-from kdive.providers.local_libvirt.fadump_probe import (
+from kdive.providers.shared.fadump_detect import (
     VersionRunner,
     detect_pseries_fadump,
 )

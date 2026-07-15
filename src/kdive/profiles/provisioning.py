@@ -88,7 +88,9 @@ class LibvirtDebugOptions(_ProfileBase):
 
     Bound at provision/boot; declare which capture methods the System is
     provisioned for. ``preserve_on_crash`` adds a pvpanic device +
-    ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument.
+    ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument;
+    ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the
+    boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
     """
 
     preserve_on_crash: bool = False

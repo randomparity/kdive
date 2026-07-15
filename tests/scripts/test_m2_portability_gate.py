@@ -18,14 +18,15 @@ from scripts.m2_portability_gate import (
 )
 
 
-def test_render_report_records_remote_full_and_local_dual_method_coverage() -> None:
+def test_render_report_records_remote_full_and_local_method_coverage() -> None:
     md = render_report({"src/kdive/domain/catalog/resources.py": 4})
     assert "## Capture-method coverage" in md
-    # Remote reaches 4/4 (M2.5 exit); local advertises kdump + host_dump (2/4) after ADR-0208
-    # narrowed its set to the core-producing methods it can fetch (kdump #115, host_dump B4).
-    assert "| `remote-libvirt` | 4 / 4 |" in md
-    assert "| `local-libvirt` | 2 / 4 |" in md
+    # Of the 5-method vocabulary (fadump added, ADR-0349): remote reaches 4/5 (no fadump — a local
+    # pseries opt-in); local advertises kdump + fadump + host_dump (3/5).
+    assert "| `remote-libvirt` | 4 / 5 |" in md
+    assert "| `local-libvirt` | 3 / 5 |" in md
     assert "kdump" in md
+    assert "fadump" in md
     assert "host_dump" in md
 
 
@@ -41,10 +42,13 @@ def test_capture_coverage_matches_the_real_advertised_provider_sets() -> None:
     local = build_local_runtime(secret_registry=registry).support.capture_methods
     assert CAPTURE_COVERAGE["remote-libvirt"] == frozenset(m.value for m in remote)
     assert CAPTURE_COVERAGE["local-libvirt"] == frozenset(m.value for m in local)
-    # Remote advertises all four methods; local advertises kdump + host_dump (ADR-0208 narrowed it
-    # to the core-producing methods it can fetch — #115/ADR-0203 overlay harvest, B4/ADR-0211 dump).
+    # Local advertises the core-producing methods it can fetch — kdump (#115/ADR-0203 overlay
+    # harvest), fadump (ADR-0349, shares that harvest), and host_dump (B4/ADR-0211). fadump is
+    # local-only (not remote).
     assert "kdump" in CAPTURE_COVERAGE["remote-libvirt"]
+    assert "fadump" not in CAPTURE_COVERAGE["remote-libvirt"]
     assert "kdump" in CAPTURE_COVERAGE["local-libvirt"]
+    assert "fadump" in CAPTURE_COVERAGE["local-libvirt"]
     assert "host_dump" in CAPTURE_COVERAGE["local-libvirt"]
 
 
