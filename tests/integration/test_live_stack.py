@@ -1168,6 +1168,205 @@ def _ppc64le_kdump_provision_profile(image: str) -> dict[str, object]:
     }
 
 
+def _ppc64le_fadump_provision_profile(image: str) -> dict[str, object]:
+    """A ppc64le FADUMP + force_crash provision profile for the #1151 capture proof (ADR-0349).
+
+    Mirrors the KDUMP profile but sets ``debug.fadump=True``: with the ``crashkernel`` reservation
+    present, ``capture_method`` resolves to ``FADUMP`` and the boot cmdline gains ``fadump=on``
+    alongside the arch-default ``crashkernel=512M``. Admission accepts it only because the live host
+    QEMU (>= 10.2) advertises ``pseries_fadump`` at discovery. The ``256M`` token is the same
+    method-signal sentinel the kdump proof uses (the value is never the reservation size).
+    """
+    return {
+        "schema_version": 1,
+        "arch": "ppc64le",
+        "vcpu": 2,
+        "memory_mb": 2048,
+        "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
+        "provider": {
+            "local-libvirt": {
+                "rootfs": {"kind": "local", "path": image},
+                "crashkernel": "256M",
+                "debug": {"fadump": True},
+                "destructive_ops": ["force_crash"],
+            }
+        },
+    }
+
+
+@pytest.mark.live_stack
+def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
+    """Attempt a fadump capture on a ppc64le guest under TCG on the x86_64 host (#1151, ADR-0349).
+
+    The feasibility-gate live proof for #1151 acceptance criterion 5. Mirrors the #1148 KDUMP
+    driver but provisions a **FADUMP** System (``debug.fadump=True`` + the reservation), so:
+
+    - admission accepts fadump only because the live host QEMU (10.2.2) advertises
+      ``pseries_fadump`` at discovery (the fail-closed gate, ADR-0349);
+    - the boot cmdline carries **``fadump=on``** alongside the arch-default ``crashkernel=512M``
+      (asserted in the running domain's ``<cmdline>`` — the divergence from the kdump proof);
+    - ``control.force_crash`` panics the guest; fadump's memory-preserving reboot (or the kdump
+      fallback if fadump cannot register) yields a ``/proc/vmcore`` the shared kdump userspace
+      saves; ``vmcore.fetch`` harvests it under the **``vmcore-fadump``** key.
+
+    The mechanism verdict — whether fadump actually ran or the kernel silently kdump-fell-back —
+    is assessed from the run's console/worker evidence and recorded in the proof-record doc
+    (``docs/design/2026-07-14-ppc64le-fadump-proof-record-1151.md``); ``fadump=on`` in the cmdline
+    and the ``vmcore-fadump`` key alone prove only that the fadump path was *configured*. Skips
+    cleanly without ``qemu-system-ppc64`` / the rootfs / the bundle. Self-cleans (release) on exit.
+    """
+    issuer, base_url, image, kernel_tar, initrd = _ppc64le_bundle_preflight()
+    operator_token = _token(issuer, role="operator")
+    admin_token = _token(issuer, role="admin")
+    proof_token = f"kdive_proof_token={uuid4().hex[:12]}"
+
+    async def _run() -> None:
+        op = LiveStackClient.over_http(base_url, operator_token)
+        admin = LiveStackClient.over_http(base_url, admin_token)
+        allocation_id = ""
+        async with op, admin:
+            try:
+                async with phase("ppc64le-fadump:allocate"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "allocations.request",
+                            project=_PROJECT,
+                            request={
+                                "vcpus": 2,
+                                "memory_gb": 2,
+                                "disk_gb": LOCAL_ALLOCATION_DISK_GB,
+                                "resource": {"mode": "kind"},
+                            },
+                        ),
+                        "ppc64le-fadump:allocate",
+                    )
+                    allocation_id = env.object_id
+                async with phase("ppc64le-fadump:provision"):
+                    profile = _ppc64le_fadump_provision_profile(image)
+                    env = ok(
+                        await scalar(
+                            op, "systems.provision", allocation_id=allocation_id, profile=profile
+                        ),
+                        "ppc64le-fadump:provision",
+                    )
+                    system_id = data_str(env, "system_id")
+                    await await_system_state(op, "ppc64le-fadump:provision", system_id, "ready")
+                async with phase("ppc64le-fadump:create-run"):
+                    env = ok(
+                        await scalar(
+                            op,
+                            "investigations.open",
+                            request={"project": _PROJECT, "title": "ppc64le-fadump-1151"},
+                        ),
+                        "ppc64le-fadump:create-run",
+                    )
+                    env = ok(
+                        await scalar(
+                            op,
+                            "runs.create",
+                            request={
+                                "investigation_id": env.object_id,
+                                "system_id": system_id,
+                                "build_profile": {"schema_version": 1, "arch": "ppc64le"},
+                            },
+                        ),
+                        "ppc64le-fadump:create-run",
+                    )
+                    run_id = env.object_id
+                async with phase("ppc64le-fadump:upload"):
+                    decls = [
+                        {
+                            "name": "kernel",
+                            "sha256": _sha256_b64(kernel_tar),
+                            "size_bytes": kernel_tar.stat().st_size,
+                        },
+                        {
+                            "name": "initrd",
+                            "sha256": _sha256_b64(initrd),
+                            "size_bytes": initrd.stat().st_size,
+                        },
+                    ]
+                    up = ok(
+                        await scalar(
+                            op, "artifacts.create_run_upload", run_id=run_id, artifacts=decls
+                        ),
+                        "ppc64le-fadump:upload",
+                    )
+                    by_name = {item.data.get("name"): item for item in up.items}
+                    await _put_presigned(by_name["kernel"], kernel_tar)
+                    await _put_presigned(by_name["initrd"], initrd)
+                    ok(
+                        await scalar(op, "runs.complete_build", run_id=run_id),
+                        "ppc64le-fadump:upload",
+                    )
+                async with phase("ppc64le-fadump:install"):
+                    env = ok(
+                        await scalar(op, "runs.install", run_id=run_id, cmdline=proof_token),
+                        "ppc64le-fadump:install",
+                    )
+                    await drain_job(op, "ppc64le-fadump:install", env.object_id)
+                async with phase("ppc64le-fadump:boot"):
+                    env = ok(await scalar(op, "runs.boot", run_id=run_id), "ppc64le-fadump:boot")
+                    await drain_job(
+                        op,
+                        "ppc64le-fadump:boot",
+                        env.object_id,
+                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                    )
+                async with phase("ppc64le-fadump:attribute"):
+                    xml = subprocess.run(
+                        ["virsh", "-c", "qemu:///system", "dumpxml", f"kdive-{system_id}"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout
+                    assert run_id in xml, "domain <kernel> not at the per-Run staged path"
+                    assert proof_token in xml, "install cmdline token did not reach <cmdline>"
+                    assert "pseries" in xml, "domain is not a pseries machine"
+                    # The FADUMP divergence: fadump=on rides alongside the arch-default reservation.
+                    assert "fadump=on" in xml, "fadump=on not in <cmdline> — fadump path not booted"
+                    assert "crashkernel=512M" in xml, (
+                        "arch-default crashkernel=512M not in <cmdline>"
+                    )
+                async with phase("ppc64le-fadump:crash"):
+                    ok(
+                        await scalar(admin, "control.force_crash", system_id=system_id),
+                        "ppc64le-fadump:crash",
+                    )
+                    await await_system_state(admin, "ppc64le-fadump:crash", system_id, "crashed")
+                async with phase("ppc64le-fadump:capture"):
+                    env = ok(
+                        await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-fadump:capture"
+                    )
+                    await drain_job(
+                        op,
+                        "ppc64le-fadump:capture",
+                        env.object_id,
+                        deadline_s=_PPC64LE_BOOT_DEADLINE_S,
+                    )
+                    listing = ok(
+                        await scalar(op, "vmcore.list", run_id=run_id), "ppc64le-fadump:capture"
+                    )
+                    refs = [v for item in listing.items for v in item.refs.values()]
+                    assert refs, "no vmcore artifact listed — fadump captured no core"
+                    # The core is keyed by the resolved method: vmcore-fadump (not vmcore-kdump).
+                    assert any("vmcore-fadump" in r for r in refs), (
+                        f"no vmcore-fadump artifact — got {refs!r}"
+                    )
+                    # Only the redacted core is exposed (raw vmcore-<method> must never surface).
+                    assert all(
+                        not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs
+                    ), "raw ppc64le vmcore leaked"
+            finally:
+                if allocation_id:
+                    await scalar(op, "allocations.release", allocation_id=allocation_id)
+
+    asyncio.run(_run())
+
+
 @pytest.mark.live_stack
 def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
     """Prove kdump capture works on a ppc64le guest under TCG on the x86_64 host (#1148).
