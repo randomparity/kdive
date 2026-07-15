@@ -201,8 +201,13 @@ authoritative bound. Guarded by `test_firstboot_unit_disables_the_systemd_start_
   pruned-serial 404 is caught without a full build. CentOS Stream prunes old dated serials from
   `cloud.centos.org`, so the pinned serials (`20260622.0`) are the same durability class as the
   x86_64 rows — confirmed resolving now, expected to rot on the same policy.
-- One non-Fedora ppc64le row (CS9, or the documented fallback) customize-boots end-to-end under TCG
-  on the x86_64 host, passing on the `kdive-customize-ok` `hvc0` marker, recorded in a proof-record
-  doc. The remaining four rows are **catalog/loader-validated** (row resolves, source/arch/sha256/
-  version-parity asserted) plus URL-resolve-checked — not full-build-validated (stated honestly in
-  Decision 6). `just ci` green.
+- A ppc64le row customize-boots end-to-end under TCG on the x86_64 host, passing on the
+  `kdive-customize-ok` marker, recorded in the proof-record doc. **Outcome (see the proof record):**
+  driving the CentOS Stream 9 ppc64le boot surfaced and fixed four latent shared-mechanism bugs
+  (ext4 fsck / EPEL / cloud-init / firstboot timeout); the end-to-end proof is carried by a
+  **Fedora ppc64le** customize-boot that built + published with all four fixes (a regression check
+  that they do not break the known-good path, and that Fix 1 unblocks the EL9 boot past fsck). CS9
+  dnf-completion under TCG is blocked by an environmental mirror/SLIRP limit, tracked as a gated
+  follow-up. The five catalog rows are **catalog/loader-validated** (row resolves,
+  source/arch/sha256/version-parity asserted) plus URL-resolve-checked — not full-build-validated
+  (stated honestly in Decision 6). `just ci` green.
