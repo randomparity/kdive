@@ -49,23 +49,24 @@ orthogonal:
   excluded through their `live_stack` marker.
 
 **Reroute the emulator gate through a discovery-driven `require_guest_arch(arch)` helper**
-(added to `tests/integration/live_stack/conftest.py`, the ADR-0035 §4 idiom). It reuses
-`qemu_system_binary` (single source), `pytest.skip`s when the arch's emulator is not on PATH,
-and returns the resolved accelerator (`"kvm"` when `arch` is the host's native arch and the host
-KVM probe passes, else `"tcg"`). The default KVM signal reuses the #1153 **URI-selected** probe
-(`kvm_probe_for_uri(resolved_libvirt_uri())`) — the identical signal the provider uses to persist
-the System's accel (`os.access` R+W under `qemu:///session`, `os.path.exists` otherwise) — so the
-gate's accel and the persisted accel cannot drift under any URI. The bootability skip itself stays
-URI-blind. It takes injected `host_arch`/`which`/`kvm_present` seams (mirroring
-`default_guest_arch_accel_probe`) so all four branches are unit-tested with no real host. The
-four proofs funnel their emulator check through one shared preflight
-(`_ppc64le_reachability_preflight`), so a single edit reroutes all four and retires the
-`_PPC64LE_EMULATOR` literal.
+(added to `tests/integration/live_stack/conftest.py`, the ADR-0035 §4 idiom). It is a **pure
+skip gate**: it reuses `qemu_system_binary` (single source) and `pytest.skip`s when the arch is
+unknown to the map or its emulator is not on PATH — nothing more. It resolves **no**
+accelerator. The accelerator is not a filesystem fact but libvirt's own capability
+advertisement: the provider derives it from `<domain type='kvm'>` in the capabilities XML
+(`parse_guest_arches` → `resolve_accel`, `admission._resolve_new_system_accel`) and persists it
+on the System. A locally-probed accel would be a *different signal* that could diverge from the
+persisted one (e.g. a native host whose libvirt advertises a KVM domain while the test-process
+uid cannot open `/dev/kvm`), so the gate stays out of the accel business. It takes a `which`
+injection seam so its branches are unit-tested with no real host. The four proofs funnel their
+emulator check through one shared preflight (`_ppc64le_reachability_preflight`), so a single edit
+reroutes all four and retires the `_PPC64LE_EMULATOR` literal.
 
-**The returned accel is consumed, not cosmetic.** The reachability preflight surfaces
-`expected_accel` in its return tuple, and the #1144 proof asserts the **persisted** accel from
-`systems.get` equals it — replacing a hardcoded `== "tcg"` that would latently fail on a native
-POWER host — giving the tier a falsifiable "booted under the host-implied accelerator" check.
+**The tier's TCG proof rides the persisted accel, not a probe.** The #1144 proof keeps its
+existing `assert persisted_accel == "tcg"` (from `systems.get`) — correct on the x86_64
+validation host, where a foreign-arch guest gets no KVM domain advertisement so the provider
+persists `tcg`. Native-POWER execution (persisted `kvm`) is epic issue 17 (hardware-gated) and
+revisits that assertion then.
 
 **Tier membership is CI-pinned.** Because `test-live-tcg` mirrors `test-live-stack`'s
 exit-5-is-a-clean-skip idiom, an emptied `-m live_vm_tcg` selection would read green. A
@@ -86,8 +87,9 @@ and the operator install/lifecycle docs. Test-only + docs — no production code
 - One qemu-binary map serves both the operator diagnostic and the test gate — they cannot
   drift. A future arch added to `SUPPORTED_ARCHES` + the map makes `require_guest_arch` work
   for it with no test-layer edit.
-- On a POWER host the gate resolves `ppc64le→kvm` and the proofs run natively; that path is
-  gated on hardware (epic issue 17), so this ADR does not assert it.
+- On a POWER host these proofs run under KVM (the provider persists `accel=kvm`), so #1144's
+  `assert persisted_accel == "tcg"` becomes POWER-aware then; that path is gated on hardware
+  (epic issue 17), so this ADR does not assert it.
 
 ## Rejected alternatives
 
@@ -109,12 +111,16 @@ and the operator install/lifecycle docs. Test-only + docs — no production code
 - **Keep the ad-hoc `shutil.which("qemu-system-ppc64")` gate (or add a fresh binary literal).**
   Rejected: it duplicates and would drift from the #1153 `qemu_system_binary` map; the gate
   reuses that single source.
+- **Have the gate resolve/return an accelerator (e.g. reuse the #1153 `/dev/kvm` probe) and
+  assert it equals the persisted accel.** Rejected: the persisted accel comes from libvirt's
+  capability advertisement (`<domain type='kvm'>` via `parse_guest_arches`/`resolve_accel`), not
+  a `/dev/kvm` filesystem probe; a locally-probed accel is a *different* signal that can diverge
+  (a native host whose libvirt advertises KVM while the test-process uid cannot open `/dev/kvm`),
+  so the equality would false-fail on native POWER. The gate stays a pure skip; the tier's TCG
+  proof rides the provider's persisted accel (#1144).
 - **Reuse the full async `default_guest_arch_accel_probe()` in the skip gate.** Rejected: it is
-  async (awkward from a synchronous `pytest.skip` gate) and bundles the per-arch loop the gate
-  does not need. The gate instead reuses the probe's *component* helpers directly —
-  `qemu_system_binary` for bootability and `kvm_probe_for_uri(resolved_libvirt_uri())` for the
-  accel — which single-sources both signals against the provider without pulling in the async
-  loop.
+  async (awkward from a synchronous `pytest.skip` gate) and bundles per-arch accel logic the
+  pure skip gate does not need — it reuses only `qemu_system_binary` for the bootability check.
 
 ## Rollout
 

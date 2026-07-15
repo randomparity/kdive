@@ -50,7 +50,7 @@ operator diagnostic in #1153 (`kdive.diagnostics.guest_arch_accel.qemu_system_bi
   foreign-arch guest proofs.
 - The four ppc64le TCG spine proofs selectable as one repeatable tier under that marker.
 - A discovery-driven skip gate `require_guest_arch(arch)` that reuses the #1153 qemu-binary
-  map, skips cleanly when the host cannot boot the arch, and returns the resolved accelerator.
+  map and skips cleanly when the host cannot boot the arch.
 - A `just test-live-tcg` recipe running that tier; `just test-live` stays native-only.
 - The three tiers documented in AGENTS.md and a live-VM test-tier operator note.
 
@@ -76,59 +76,56 @@ silently leak a slow TCG boot into the native tier (protecting the `test-live` a
 invariant). No change to `just test` — the proofs remain excluded through their `live_stack`
 marker.
 
-### `require_guest_arch(arch)` — the discovery-driven gate
+### `require_guest_arch(arch)` — the discovery-driven skip gate
+
+A **pure skip gate**: it decides only whether the host can boot `arch` guests, by whether the
+arch's system emulator is on PATH. It deliberately does **not** resolve or return an accelerator
+— the accelerator (kvm/tcg) is not a filesystem fact but libvirt's own capability advertisement,
+which the provider derives at provision time (`parse_guest_arches` reads `<domain type='kvm'>`
+from the capabilities XML, `admission._resolve_new_system_accel` → `resolve_accel` persists it).
+A locally-probed accel guess would be a *different signal* from that persisted value and could
+diverge (e.g. a native host whose libvirt advertises a KVM domain while the test-process uid
+cannot open `/dev/kvm`), so the gate stays out of the accel business entirely.
 
 Add to `tests/integration/live_stack/conftest.py`, beside `require_issuer` / `require_stack`
-(the ADR-0035 §4 skip idiom), with injection seams mirroring the #1153 probe
-(`default_guest_arch_accel_probe`) so its branches are unit-testable with no real host:
+(the ADR-0035 §4 skip idiom), with a `which` injection seam so its branches are unit-testable
+with no real host:
 
 ```python
 def require_guest_arch(
     arch: str,
     *,
-    host_arch: str | None = None,               # default platform.machine()
     which: Callable[[str], str | None] = shutil.which,
-    kvm_present: Callable[[], bool] | None = None,  # default: the #1153 URI-selected probe
-) -> str:
-    """Skip unless this host can boot ``arch`` guests; return the resolved accelerator.
+) -> None:
+    """Skip unless this host can boot ``arch`` guests (its system emulator is on PATH).
 
-    Reuses the #1153 ``qemu_system_binary`` map (single source). Returns ``"kvm"`` when ``arch``
-    is the host's native arch and the host KVM probe passes, else ``"tcg"``. Skips (never errors)
-    when the arch's system emulator is not on PATH — the acceptance "skips cleanly when the host
-    lacks the foreign qemu binary" gate.
+    Reuses the #1153 ``qemu_system_binary`` map (single source). Skips (never errors) when the
+    arch is unknown to the map or its emulator is not on PATH — the acceptance "skips cleanly
+    when the host lacks the foreign qemu binary" gate. It resolves no accelerator: the provider
+    persists that from libvirt capabilities, and the #1144 proof asserts the persisted value.
     """
 ```
 
 Behavior:
 
 1. `binary = qemu_system_binary(arch)`; if `binary is None` or `which(binary) is None`
-   → `pytest.skip(...)` naming the missing emulator and the install hint. This bootability
-   decision is deliberately **URI-blind** (a foreign emulator on PATH is bootable regardless of
-   the libvirt URI).
-2. accel = `"kvm"` if `arch == (host_arch or platform.machine())` **and** the host KVM probe
-   passes, else `"tcg"`. When `kvm_present` is not injected, it resolves at call time to the
-   **#1153 URI-selected probe** — `kvm_probe_for_uri(resolved_libvirt_uri())` from
-   `guest_arch_accel.py` — which is the *identical* signal the provider path uses to persist the
-   System's accel (`os.access` R+W under `qemu:///session`, `os.path.exists` otherwise). Reusing
-   it (not a bare `os.path.exists`) is what makes the gate's accel and the persisted accel
-   genuinely single-sourced, so AC9's `persisted == expected` equality holds under any URI —
-   including a native host under session-mode libvirt. For the four foreign-arch proofs on the
-   x86_64 validation host, `arch != host_arch`, so this branch never runs the KVM probe and
-   always yields `"tcg"`.
-3. return the accel string.
+   → `pytest.skip(...)` naming the missing emulator and the install hint.
+2. otherwise return (the host can boot this arch).
 
-**The returned accel is load-bearing, not cosmetic.** The four proofs' shared preflight
-(`_ppc64le_reachability_preflight`, through which `_ppc64le_bundle_preflight` and the
-kdump/fadump preflights already funnel) replaces its `shutil.which(_PPC64LE_EMULATOR)` block
-with `expected_accel = require_guest_arch("ppc64le")` and adds `expected_accel` to its return
-tuple. `_ppc64le_bundle_preflight`'s unpack of the reachability tuple is updated to drop the
-slot it does not consume. The #1144 reachability proof — which already reads the **persisted**
-accel from `systems.get` — asserts `persisted_accel == expected_accel` instead of the current
-hardcoded `== "tcg"`. This makes the return value consumed, gives the tier a falsifiable "the
-guest booted under the accelerator this host implies" check, and corrects a latent defect: the
-hardcoded `== "tcg"` would fail on a native POWER host, where the gate correctly resolves
-`"kvm"`. Because the gate is a single chokepoint, all four tests inherit the discovery-driven
-skip from one edit; the now-unused `_PPC64LE_EMULATOR` constant is removed.
+The four proofs' shared preflight (`_ppc64le_reachability_preflight`, through which
+`_ppc64le_bundle_preflight` and the kdump/fadump preflights already funnel) replaces its
+`shutil.which(_PPC64LE_EMULATOR)` block with a single `require_guest_arch("ppc64le")` call; the
+preflight return tuples are unchanged. Because the gate is a single chokepoint, all four tests
+inherit the discovery-driven skip from one edit; the now-unused `_PPC64LE_EMULATOR` constant is
+removed.
+
+**The tier still asserts TCG.** The #1144 reachability proof keeps its existing
+`assert persisted_accel == "tcg"` (read from `systems.get`) — the falsifiable "the ppc64le guest
+booted under TCG" check. That equality is correct on the x86_64 validation host, the only host
+this tier runs on: a foreign-arch guest gets no `<domain type='kvm'>` advertisement, so the
+provider persists `tcg`. Native-POWER execution — where the persisted accel would instead be
+`kvm` — is epic issue 17 (hardware-gated); when it lands, that assertion is revisited against
+the persisted value, not a locally-probed guess.
 
 The gate is a **skip**, never a hard failure: an x86_64-only host without `qemu-system-ppc64`
 skips the whole tier cleanly (acceptance criterion 2). The stack/issuer/image/kernel-tree
@@ -194,17 +191,13 @@ other exit codes propagating. `just test-live` changes its selector to
   named proofs carry both `live_stack` and `live_vm_tcg`, and no other test carries
   `live_vm_tcg`; dropping either marker from any of the four fails CI. Verifiable by deleting a
   marker and running `just test`.
-- **AC8.** `require_guest_arch` has unit coverage for all four branches — unsupported/absent
-  emulator → skip, native+`/dev/kvm` present → `"kvm"`, native+absent → `"tcg"`, foreign →
-  `"tcg"` — via injected `host_arch`/`which`/`kvm_present`, mirroring
-  `tests/diagnostics/test_guest_arch_accel.py`. The default (un-injected) KVM signal reuses the
-  #1153 URI-selected probe (`kvm_probe_for_uri(resolved_libvirt_uri())`), so it matches the
-  provider's persisted-accel signal under any libvirt URI.
-- **AC9.** The #1144 reachability proof asserts the persisted `systems.get` accel equals the
-  host-resolved `expected_accel` from the gate (not a hardcoded `"tcg"`), so it is correct on an
-  x86_64 host (`tcg`) and on a POWER host under any URI (`kvm` under `qemu:///system`; `tcg`
-  under `qemu:///session` when the worker uid cannot open `/dev/kvm` — matching the provider,
-  because the gate reuses the same URI-selected probe).
+- **AC8.** `require_guest_arch` has unit coverage for its branches — unknown arch → skip,
+  emulator absent (`which` returns `None`) → skip, emulator present → returns without skipping —
+  via an injected `which` (and, for the unknown-arch case, an arch outside the map), mirroring
+  the injection style of `tests/diagnostics/test_guest_arch_accel.py`.
+- **AC9.** The #1144 reachability proof asserts the persisted `systems.get` accel is `"tcg"` on
+  the x86_64 validation host (a ppc64le guest boots under TCG), the falsifiable TCG proof.
+  Native-POWER accel (`kvm`) is out of scope (epic issue 17) and revisited when that path lands.
 
 ## Non-goals
 
@@ -216,7 +209,8 @@ other exit codes propagating. `just test-live` changes its selector to
 
 ## Known unverified
 
-- On a POWER host, `require_guest_arch("ppc64le")` returns `"kvm"`; the four proofs would then
-  run natively rather than under TCG. This is correct (the marker names the emulated *class*,
-  and the arch gate resolves the actual accel), but native-POWER execution of these proofs is
-  gated on hardware (epic issue 17) and not exercised here.
+- On a POWER host these proofs would run under KVM rather than TCG (the provider would persist
+  `accel=kvm`), so the `live_vm_tcg` marker there names the emulated *class* the tier was built
+  for rather than the accel each run happens to use, and #1144's `assert persisted_accel ==
+  "tcg"` would need to become POWER-aware. Native-POWER execution is gated on hardware (epic
+  issue 17) and not exercised here.
