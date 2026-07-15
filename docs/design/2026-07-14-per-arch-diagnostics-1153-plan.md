@@ -89,18 +89,24 @@ contribution, modeled on `multiarch_gdb`/`pseries_fadump`.
   injected `access`/`exists` spies and a temp `node` → the returned callable calls
   `access(node, R|W)` and not `exists`; `uri="qemu:///system"` (and a bogus URI) → calls
   `exists(node)` and not `access`. Deterministic, no real `/dev/kvm`.
-- **Required existing-test updates (adding the third worker check breaks two exact-set
-  assertions):** the local-libvirt worker-check id set is asserted with `==` in two
-  places, both of which must gain `GUEST_ARCH_ACCEL_ID`:
-  - `tests/diagnostics/test_default_factory.py:389-394` — the
+- **Required existing-test updates (adding the third worker check breaks three exact-set
+  assertions):** the local-libvirt worker-check id set is asserted with `==` in **three**
+  places, all of which must gain `GUEST_ARCH_ACCEL_ID` (and its import):
+  - `tests/diagnostics/test_default_factory.py:389-394` (`test_default_factory_...`) —
     `{PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID, PSERIES_FADUMP_ID} ==
-    unavailable_ids` assertion (add `GUEST_ARCH_ACCEL_ID`, and its import).
-  - `tests/diagnostics/test_service.py:428-431` — the
+    unavailable_ids`.
+  - `tests/diagnostics/test_default_factory.py:544-549`
+    (`test_factory_keeps_substitution_when_no_pool`) — `unavailable_ids ==
+    {PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID, PSERIES_FADUMP_ID}` (same
+    substituted-set pattern).
+  - `tests/diagnostics/test_service.py:428-431` —
     `set(by_provider["local-libvirt"]._worker_check_ids) == {MULTIARCH_GDB_ID,
-    PSERIES_FADUMP_ID}` assertion (add `GUEST_ARCH_ACCEL_ID`, and its import).
-  These are exact set-equality, **not** membership, so they fail the moment the
+    PSERIES_FADUMP_ID}`.
+  These are exact set-equality, **not** membership, so each fails the moment the
   descriptor is registered. Both files are in Task 1's targeted pytest set below so the
-  regression is caught before push, not only at full `just ci`.
+  regression is caught before push, not only at full `just ci`. (The `check_id ==
+  MULTIARCH_GDB_ID` single-check assertions in `test_provider_checks.py:173` and
+  `test_result_codec.py:58` are unaffected — they assert one check's id, not the set.)
 - `test_guest_arch_accel_is_in_the_single_local_contribution` and
   `test_registered_in_assembly` mirror the `pseries_fadump` tests
   (`tests/diagnostics/test_pseries_fadump.py:79-93`): exactly one local-libvirt
@@ -272,7 +278,9 @@ doc-style-guard violations (no "robust"/"comprehensive"/etc.).
   `install.md`, `check-setup-deps.sh`, `image-lifecycle.md`).
 - Confirm the id string is unique before adding it: `rg -n '"guest_arch_accel"'
   src/kdive` should return **nothing** pre-implementation (it is new).
-- Locate any test enumerating worker checks by grepping an **existing** sibling id
-  (`rg -n 'multiarch_gdb|pseries_fadump' tests/integration tests/diagnostics`), then add
-  `guest_arch_accel` only if such a test asserts an exact id set. Do not grep for the id
-  you are introducing.
+- Locate every test enumerating worker checks by grepping the **uppercase id constants**
+  (`rg -n 'MULTIARCH_GDB_ID|PSERIES_FADUMP_ID' tests/integration tests/diagnostics`) —
+  the lowercase string form matches only comment prose and misses the `==` assertions.
+  The three exact-set sites named in Task 1 are the complete set today; add
+  `GUEST_ARCH_ACCEL_ID` to any further exact-set assertion the grep surfaces. Do not grep
+  for the id you are introducing.
