@@ -49,7 +49,9 @@ error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 - `just` and `prek` must be installed before `just setup` (it can't bootstrap its own
   runner): `uv tool install rust-just && uv tool install prek`. On arches without prebuilt
   wheels/binaries (e.g. `ppc64le`), these plus `pydantic-core` build from source, so a
-  Rust toolchain ([rustup](https://rustup.rs)) must be on `PATH` first.
+  Rust toolchain ([rustup](https://rustup.rs)) must be on `PATH` first. `just check-deps`
+  enforces this per-arch; the [cross-platform guide](docs/development/cross-platform.md)
+  covers the `ppc64le` prerequisites, container images, and POWER stack bring-up.
 - The db/integration tests need a reachable Docker daemon (disposable Postgres via
   testcontainers). They **skip** when Docker is absent — unless `KDIVE_REQUIRE_DOCKER=1`
   (set in CI), which turns the skip into a hard failure so a broken runner can't mask the
