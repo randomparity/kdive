@@ -41,7 +41,7 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact
 from kdive.config.core_settings import INSTALL_STAGING
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
@@ -65,10 +65,6 @@ from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
-
-# kdump and fadump share the guest-driven capture environment (injected modules + initrd, ADR-0349):
-# fadump reuses the kdump userspace to save the vmcore, so the install prerequisites are identical.
-_KDUMP_FAMILY = frozenset({CaptureMethod.KDUMP, CaptureMethod.FADUMP})
 
 _DEFAULT_BOOT_WINDOW_POLLS = 60
 
@@ -284,7 +280,7 @@ class LocalLibvirtInstaller:
                 details={"op": "mkdir", "dest": str(staging_dir)},
             ) from exc
         artifacts = self._stage_install_artifacts(request, staging_dir)
-        kdump_env_absent = request.method in _KDUMP_FAMILY and not (
+        kdump_env_absent = request.method in KDUMP_FAMILY and not (
             artifacts.modules_injected or artifacts.initrd_path is not None
         )
         if kdump_env_absent:
@@ -340,7 +336,7 @@ class LocalLibvirtInstaller:
         modules_tar: Path,
         kernel_path: Path,
     ) -> bool:
-        needs_modules = request.method in _KDUMP_FAMILY or request.debuginfo_ref is not None
+        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
         if not needs_modules or not repack_modules_subtree(combined_tar, modules_tar):
             return False
         self._inject_built_modules(

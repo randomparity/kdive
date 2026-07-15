@@ -12,7 +12,7 @@ from kdive.db.idempotency import delete_run_step
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState, RunState
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Run
 from kdive.domain.lifecycle.run_steps import RUN_STEP_RUNNING, RUN_STEP_SUCCEEDED
@@ -142,7 +142,7 @@ async def _reject_crashkernel_off_kdump(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(str(run.id), exc)
     method = install_method_for(system, binding.runtime.profile_policy)
-    if method not in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
+    if method not in KDUMP_FAMILY:
         return _config_error(
             str(run.id), data={"reason": "crashkernel_requires_kdump", "method": method.value}
         )

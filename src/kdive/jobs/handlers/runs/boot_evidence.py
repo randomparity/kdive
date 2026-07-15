@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import CONSOLE_CRASH_KINDS
@@ -241,7 +241,7 @@ def inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -
     if profile_policy.host_dump_provisioned(profile):
         methods.append(CaptureMethod.HOST_DUMP.value)
     resolved = profile_policy.capture_method(profile)
-    if resolved in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
+    if resolved in KDUMP_FAMILY:
         # Report the resolved method (fadump reports "fadump"), ADR-0349.
         methods.append(resolved.value)
     return methods

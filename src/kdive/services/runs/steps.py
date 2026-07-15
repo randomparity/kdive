@@ -11,7 +11,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.domain.capacity.state import JobState
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import (
@@ -371,7 +371,7 @@ def system_required_cmdline(
     tokens = [f"console={traits.console_device}"]
     if root_cmdline:
         tokens.append(root_cmdline)
-    if method in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
+    if method in KDUMP_FAMILY:
         tokens.append(f"crashkernel={crashkernel or traits.default_crashkernel}")
         if method is CaptureMethod.FADUMP:
             # fadump reads the crashkernel= reservation for its boot-memory and needs fadump=on to

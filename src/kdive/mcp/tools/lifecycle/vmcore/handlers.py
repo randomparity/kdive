@@ -10,7 +10,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.capture import CaptureMethod
+from kdive.domain.capture import KDUMP_FAMILY, CaptureMethod
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
@@ -253,7 +253,7 @@ async def _fetch_vmcore(
                 return resolved
             capture_method = resolved
 
-            if capture_method in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
+            if capture_method in KDUMP_FAMILY:
                 # Kernel-config gate (ADR-0318): a kdump/fadump vmcore is produced by the guest
                 # kernel, so it needs the crash_capture symbols (ADR-0349 shares the gate; it stays
                 # kdump-symbol-only — the fadump-active runtime signal, not a static config check,
