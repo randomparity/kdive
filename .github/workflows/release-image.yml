@@ -29,6 +29,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up QEMU
+        # Registers binfmt_misc handlers so buildx can build the linux/ppc64le layer
+        # under emulation on this amd64 runner (ADR-0359). No POWER runner is required.
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
@@ -62,6 +67,11 @@ jobs:
         with:
           context: .
           push: true
+          # Publish a multi-arch manifest (ADR-0359). ppc64le builds under QEMU emulation,
+          # which compiles the sdist-only deps (grpcio, drgn, libvirt-python) from source and
+          # is the slow leg of this job; the tradeoff and its alternatives are recorded in the
+          # ADR. amd64 builds natively and its layers are unchanged.
+          platforms: linux/amd64,linux/ppc64le
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # SBOM + max provenance are release artifacts; a per-commit (:edge) SBOM is
