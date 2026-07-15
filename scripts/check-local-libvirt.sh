@@ -38,6 +38,36 @@ note_warn() {
   printf "  fix: %s\n" "$2" >&2
 }
 
+# The arches KDIVE can provision. The qemu system-emulator binary is arch-named and NOT a plain
+# `uname -m`: ppc64le maps to `qemu-system-ppc64` (POWER has no `-ppc64le` binary). A host arch
+# outside this set has no native qemu KDIVE can name and is reported unsupported, not defaulted to
+# x86 (the prior hardcode). Kept in sync with scripts/check-setup-deps.sh and arch_traits.py.
+readonly SUPPORTED_ARCHES=(ppc64le x86_64)
+
+qemu_binary_for_arch() {
+  case "$1" in
+  ppc64le) printf "qemu-system-ppc64" ;;
+  x86_64) printf "qemu-system-x86_64" ;;
+  *) printf "" ;;
+  esac
+}
+
+arch_is_supported() {
+  local candidate
+  for candidate in "${SUPPORTED_ARCHES[@]}"; do
+    [[ "${candidate}" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+supported_arches_csv() {
+  local out="" arch
+  for arch in "${SUPPORTED_ARCHES[@]}"; do
+    out="${out:+${out}, }${arch}"
+  done
+  printf "%s" "${out}"
+}
+
 _has_kvm() { [[ -r "${KVM_NODE}" && -w "${KVM_NODE}" ]]; }
 _cmd() { command -v "$1" >/dev/null 2>&1; }
 _in_libvirt_group() { [[ " $(id -nG 2>/dev/null) " == *" libvirt "* ]]; }
@@ -71,9 +101,30 @@ _dir_writable() {
 
 _has_kvm || note_fail "${KVM_NODE} not readable/writable (KVM unavailable)" \
   "enable virtualization in BIOS and load kvm modules; ensure your user can access ${KVM_NODE}"
-for c in virsh qemu-system-x86_64 qemu-img; do
+for c in virsh qemu-img; do
   _cmd "$c" || note_fail "$c not found on PATH" "install it via your distribution (see scripts/check-setup-deps.sh hints)"
 done
+
+# Require the host's native qemu emulator (arch-derived, not the old x86 hardcode) only on a
+# supported host arch. An unsupported host arch cannot run native guests, so it is reported once
+# rather than failed for a missing x86 emulator. Each supported foreign arch whose emulator is
+# present is advertised as TCG-only (informational; the native arch runs under KVM).
+host_arch="$(uname -m 2>/dev/null || true)"
+if arch_is_supported "${host_arch}"; then
+  native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+  _cmd "${native_qemu}" || note_fail "${native_qemu} not found on PATH" \
+    "install it via your distribution (see scripts/check-setup-deps.sh hints)"
+  for guest_arch in "${SUPPORTED_ARCHES[@]}"; do
+    [[ "${guest_arch}" == "${host_arch}" ]] && continue
+    foreign_qemu="$(qemu_binary_for_arch "${guest_arch}")"
+    _cmd "${foreign_qemu}" && printf \
+      "guest arch %s available via TCG only (foreign emulator %s present; scaled by KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER)\n" \
+      "${guest_arch}" "${foreign_qemu}"
+  done
+else
+  printf "host arch %s is not a supported kdive provisioning arch (supported: %s)\n" \
+    "${host_arch}" "$(supported_arches_csv)"
+fi
 _in_libvirt_group || note_fail "invoking user is not in the 'libvirt' group" \
   "sudo usermod -aG libvirt \"\$USER\" and re-login"
 if _cmd virsh; then
