@@ -42,11 +42,13 @@ Enforcement has two layers:
 
 1. **Inverted-matrix behavioral tests** (unit level). A ppc64le host advertising
    `{ppc64le: kvm, x86_64: tcg}` is fed through the guest-facing seams and its output asserted:
-   admission records `accel=tcg` for an x86_64 guest; the domain renders q35 + `ttyS0` +
-   `type=qemu` + the x86_64 `<emulator>` with no `<cpu>`; the boot deadline scales. Because the
-   renderer takes `(profile, accel, emulator)` and never reads the host, these unit tests drive
-   the *identical* code path a real POWER host would — the proof is faithful, not a proxy.
-   Discovery's inverted matrix is already asserted by
+   admission records `accel=tcg` for an x86_64 guest, and the domain renders q35 + `ttyS0` +
+   `type=qemu` + the x86_64 `<emulator>` with no `<cpu>`. Because the renderer takes
+   `(profile, accel, emulator)` and never reads the host, these unit tests drive the *identical*
+   code path a real POWER host would — the proof is faithful, not a proxy. The deadline dimension
+   needs no new test: the deadline path takes only `accel` (no arch input), so it is arch-free by
+   construction and covered by the existing `test_tcg_uses_configured_multiplier`. Discovery's
+   inverted matrix is already asserted by
    `tests/providers/test_libvirt_xml.py::test_parse_guest_arches_synthetic_kvm_hv_ppc_host_is_kvm`.
 
 2. **A static confinement guard** (`tests/domain/platform/test_host_arch_confinement.py`,
@@ -56,12 +58,18 @@ Enforcement has two layers:
    comment mention is not a false positive. A future module that newly reads the host arch fails
    the guard with a message naming it and pointing here; the author either lands in an
    accel/tooling-selection module (extending the allowlist with a rationale) or learns the
-   invariant they are breaking. A companion non-vacuity assertion pins that the three known
-   reads *are* detected, so the walker cannot silently regress to matching nothing.
+   invariant they are breaking. The detection logic is a pure function unit-tested with synthetic
+   source fixtures — a positive fixture (a `platform.machine()` read is reported) proving
+   non-vacuity, and a negative fixture (a docstring-only mention is not) locking the AST-vs-grep
+   discrimination. Non-vacuity comes from the positive fixture, **not** from pinning the three
+   live reads, so the check never couples to which modules read the host today.
 
-The guard asserts `modules ⊆ allowlist` (subset, not equality): removing a read from an
-allowlisted module must not fail it. Live proof of the inverted matrix on real POWER hardware
-is deferred to #1157.
+The whole-tree assertion is `modules ⊆ allowlist` (subset, not equality): removing a read from an
+allowlisted module must not fail it. The deadline path reinforces the invariant structurally —
+`tcg_deadline_multiplier` and its caller `boot(accel=…)` take only the accelerator, never the
+arch, so boot-window scaling is arch-free by construction (the existing
+`test_tcg_uses_configured_multiplier` covers the accel dimension; no test can vary arch there).
+Live proof of the inverted matrix on real POWER hardware is deferred to #1157.
 
 ## Consequences
 

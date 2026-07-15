@@ -96,27 +96,41 @@ for the inverted matrix, the ADR references the existing test rather than duplic
 asserts `{ppc64le: kvm, x86_64: tcg}`, and `test_parse_guest_arches_ppc_host_no_kvm_domain_is_all_tcg`
 asserts the all-TCG POWER10 case. The ADR cites these; no new discovery test.
 
-**Admission (new).** Extend `tests/integration/test_systems_admission_arch.py` with an inverted
-host constant `_PPC_HOST_GUEST_ARCHES = {"ppc64le": {kvm…}, "x86_64": {tcg…}}` and a test that
-provisions the default (x86_64) profile against a Resource carrying it, asserting the System
-records **`accel == "tcg"`**. This is the real coverage gap: every current "records accel"
-admission test uses a host where x86_64 is native (`accel=kvm`), so an x86_64-guest-under-TCG
-admission has never been asserted. Uses the existing `_set_resource_guest_arches` helper and
-the real-DB harness already in the file.
+**Admission (new — inverted-key defense-in-depth).** Extend
+`tests/integration/test_systems_admission_arch.py` with an inverted host constant
+`_PPC_HOST_GUEST_ARCHES = {"ppc64le": {kvm…}, "x86_64": {tcg…}}` and a test that provisions the
+default (x86_64) profile against a Resource carrying it, asserting the System records
+**`accel == "tcg"`**. `accel == "tcg"` at admission is *already* asserted — but only for a
+ppc64le guest against an x86_64 host (the fadump tests, `test_provision_admits_fadump_when_host_supports_it`).
+Both cases flow through the same arch-agnostic dict lookup in `resolve_accel_emulator`
+(`entry["accel"]`, zero arch special-casing), so this test's marginal coverage is
+defense-in-depth against a *future* x86-specific special-case in the resolution path, not a
+currently-exercised hole. It is cheap (reuses `_set_resource_guest_arches` and the real-DB
+harness) and completes the inverted matrix symmetrically, which is the point of the suite.
 
-**Domain XML (new assertion on an existing matrix).** The
+**Domain XML (documents the invariant on an existing matrix cell).** The
 `test_render_domain_by_arch_and_accel` parametrization in
 `tests/providers/local_libvirt/test_provisioning.py` already includes the
-`("x86_64", "tcg", "/usr/bin/qemu-system-x86_64", "qemu", "q35", None, True)` cell — it asserts
-domain type, machine, `<cpu>` absence, emulator, and features, but **not the console device**.
-Extend that parametrization (or add a focused test) to assert `console=ttyS0` in the `<cmdline>`
-for the x86_64+tcg cell, closing the one named gap ("q35 + ttyS0 + type=qemu +
-qemu-system-x86_64 emulator"). The console is arch-derived from `arch_traits`, so this pins that
-an x86_64 guest keeps `ttyS0` regardless of accel or (implied) host.
+`("x86_64", "tcg", "/usr/bin/qemu-system-x86_64", "qemu", "q35", None, True)` cell — asserting
+domain type, machine, `<cpu>` absence, emulator, and features. It does not assert the console
+device *in that cell*, though `console=ttyS0` for x86_64 is already covered elsewhere
+(`_X86_KVM_GOLDEN`, and the cmdline assertion at `test_provisioning.py:366`). The console is
+arch-derived (`_baseline_cmdline(traits.console_device)`, an identical code path for kvm and
+tcg), so adding a `console=ttyS0` assertion to the tcg cell exercises no distinct branch — it
+**documents** the "q35 + ttyS0 + type=qemu + qemu-system-x86_64" matrix the issue names in one
+place, rather than closing an untested path. Add it for that completeness; do not bill it as a
+coverage gap.
 
-**Deadline (new).** Extend `tests/providers/local_libvirt/test_deadlines.py` to assert that an
-x86_64 guest with a persisted `accel="tcg"` scales by the configured multiplier (symmetry with
-the ppc64le-under-TCG case) — proving the deadline path keys off accel, not arch.
+**Deadline (structural — no new test).** The deadline dimension of the inverted matrix holds by
+construction and is already covered: `tcg_deadline_multiplier(accel: str | None)` and its sole
+caller `LocalLibvirtInstall.boot(system_id, *, accel)` take **only** the accelerator — arch is
+not an input at any level of the deadline path. "An x86_64 guest with `accel=tcg` scales"
+therefore *is* `tcg_deadline_multiplier("tcg")`, which `test_tcg_uses_configured_multiplier`
+(`test_deadlines.py`) already asserts. A new "x86_64 deadline" test would be a byte-for-byte
+duplicate whose arch-independence claim is unfalsifiable (arch cannot be varied). So the spec
+adds no deadline test; instead the ADR records that deadline scaling is arch-free by
+construction as one reason symmetry holds, and this spec cites the existing multiplier test as
+the matrix's deadline coverage.
 
 ### Static confinement guard (encodes AC#2)
 
@@ -140,44 +154,70 @@ so a future author who adds a host-arch read either lands in an accel/gdb-select
 extends the allowlist with a rationale in the same change) or learns the invariant they are
 about to break.
 
-The guard is a **subset** assertion (`modules ⊆ allowlist`), not equality: a refactor that
+The whole-tree assertion is a **subset** (`modules ⊆ allowlist`), not equality: a refactor that
 *removes* a read from an allowlisted module must not fail the guard. An allowlist entry that no
 longer reads the host is harmless (over-permissive by one line) and is caught by ordinary code
 review, not this test — the test's job is to catch *new* reads leaking into guest-facing paths.
 
-### Detection shape
+### Detection shape — a pure function, unit-tested by fixture (not by pinning live reads)
 
-The AST walk visits every module and records a hit when it sees either:
+The detection logic is a **pure function** `host_arch_reading_modules(tree_root) -> set[str]`
+(or, at the finest grain, `module_reads_host_arch(source: str) -> bool`) that AST-walks source
+and records a hit when it sees either:
 - `platform.machine` as an `ast.Attribute` (matches `platform.machine()` and the bare
   `platform.machine` default-argument reference in `engine.py`), or
 - `os.uname` as an `ast.Attribute`.
 
-It keys hits by repo-relative path (`kdive/...`) for a stable, readable allowlist. It does not
-resolve aliased imports (`from platform import machine`) — none exist in the tree and the guard
-would need an import-alias pass to catch them; that is a documented limitation, and a companion
-assertion pins that the three known reads *are* detected (so the walker cannot silently regress
-to matching nothing and passing vacuously).
+Factoring detection as a pure function lets the walker itself be **unit-tested with synthetic
+source fixtures**, which is what proves both non-vacuity and the AST-vs-grep discrimination
+ADR-0354 rests on — *without* coupling to which modules happen to read the host today:
+
+- **Positive fixture:** a synthetic source string containing `platform.machine()` (and one with
+  `os.uname()`) is reported. This proves the walker matches *something* — the non-vacuity
+  guarantee — independently of the live tree, so it does not re-introduce equality-guard
+  brittleness (removing a read from an allowlisted module does not fail a fixture test).
+- **Negative fixture:** a synthetic source whose only occurrence of `platform.machine()` is
+  inside a docstring/comment is **not** reported. This locks the reason AST was chosen over
+  grep, mirroring the real `provider_checks.py:409` docstring the whole-tree scan must ignore.
+
+The whole-tree guard then just applies this proven function over `src/kdive/**/*.py`, keys hits
+by repo-relative path (`kdive/...`) for a stable, readable allowlist, and asserts the subset.
+Because non-vacuity is proven by the positive fixture, the whole-tree assertion never needs to
+pin the three specific live reads — preserving the subset tolerance the design committed to.
+
+The function does not resolve aliased imports (`from platform import machine`) — none exist in
+the tree and catching them would need an import-alias pass; that is a documented limitation
+(the negative/positive fixtures guard the walker's *logic*, not import-alias coverage).
 
 ## Acceptance criteria
 
 - **AC1.** The inverted-matrix admission test provisions an x86_64 profile against a Resource
   advertising `{ppc64le: kvm, x86_64: tcg}` and asserts the System records `accel == "tcg"`.
-  Verifiable by running the test; it fails if admission ever derived accel from host arch.
-- **AC2.** The domain-XML test asserts an x86_64 + `accel="tcg"` domain renders `type="qemu"`,
+  Verifiable by running the test; it fails if the arch-agnostic resolution ever grows an
+  x86-specific special-case.
+- **AC2.** The domain-XML `x86_64 + accel="tcg"` matrix cell asserts `type="qemu"`,
   `machine="q35"`, `console=ttyS0` in the cmdline, `<emulator>` = the x86_64 emulator path, and
-  no `<cpu>` element. Verifiable by running the test.
-- **AC3.** The deadline test asserts an x86_64 guest with persisted `accel="tcg"` scales by the
-  configured multiplier (not `1.0`). Verifiable by running the test.
+  no `<cpu>` element — documenting the full inverted-matrix render in one place. Verifiable by
+  running the test.
+- **AC3.** The deadline dimension is covered structurally: the spec adds no new deadline test
+  (the deadline path takes only `accel`, so an "x86_64 deadline" test would duplicate
+  `test_tcg_uses_configured_multiplier`). Verifiable by confirming `test_deadlines.py` already
+  asserts `tcg_deadline_multiplier("tcg")` scales, and that the ADR records deadline
+  arch-independence.
 - **AC4.** `test_host_arch_confinement.py` runs in the ordinary `just test` suite and passes on
-  the current tree: the set of modules reading `platform.machine`/`os.uname` equals the
+  the current tree: the set of modules reading `platform.machine`/`os.uname` is a subset of the
   three-module allowlist. Verifiable by running `just test`.
-- **AC5.** The guard fails when a host-arch read is introduced outside the allowlist. Verifiable
-  by temporarily adding `platform.machine()` to a guest-facing module (e.g. `lifecycle/xml.py`)
-  and observing the test fail with a message naming that module.
-- **AC6.** The guard's walker is proven non-vacuous: a companion assertion confirms the three
-  known allowlisted reads are actually detected (the walker matches something, not nothing).
-- **AC7.** ADR-0354 records the invariant, the allowlist with a per-entry rationale, the
-  audit's finding of zero required production changes, and that live POWER proof is #1157.
+- **AC5.** The detection function is unit-tested with synthetic fixtures: a source with an
+  out-of-allowlist `platform.machine()` / `os.uname()` read is reported, and a source whose only
+  occurrence is in a docstring/comment is **not** reported (the AST-vs-grep discrimination).
+  This is a permanent shipped test, not a manual edit. Verifiable by running the test.
+- **AC6.** Non-vacuity is proven by AC5's positive fixture (the walker matches a synthetic read),
+  **not** by pinning the three live reads — so removing a read from an allowlisted module never
+  fails the guard. Verifiable by reading the test: no assertion references the specific
+  allowlisted modules' current reads.
+- **AC7.** ADR-0354 records the invariant, the allowlist with a per-entry rationale, that the
+  deadline path is arch-free by construction, the audit's finding of zero required production
+  changes, and that live POWER proof is #1157.
 - **AC8.** No production source file changes (test + docs + ADR only). Verifiable by
   `git diff --name-only <base>` showing only `tests/`, `docs/`, and the ADR index.
 
