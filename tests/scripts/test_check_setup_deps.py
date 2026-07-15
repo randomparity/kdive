@@ -106,6 +106,65 @@ def test_ppc64le_future_hint_names_the_power_qemu_package(tmp_path: Path) -> Non
     assert "qemu-system-x86" not in result.stderr
 
 
+def _run_with_uname(
+    distro_id: str, host_arch: str, present: tuple[str, ...], tmp_path: Path
+) -> subprocess.CompletedProcess[str]:
+    """Run the checker with a stubbed ``uname -m`` and a controlled set of present binaries.
+
+    ``uv`` + ``pkg-config`` are always stubbed present so the required tier is satisfied and the
+    cross-arch advisory (which runs regardless) is reached on a clean exit.
+    """
+    # A unique bindir per call so a test may invoke the checker more than once (e.g. the
+    # symmetric present/absent pair) without the second mkdir colliding on the first.
+    bindir = tmp_path / f"bin-{host_arch}-{'-'.join(present) or 'none'}"
+    bindir.mkdir()
+    _stub(bindir, "uname", f"#!/bin/sh\necho {host_arch}\n")
+    for tool in ("uv", "pkg-config", *present):
+        _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
+    return _run(distro_id, str(bindir), tmp_path)
+
+
+def test_cross_arch_advisory_names_foreign_package_when_absent_on_x86(tmp_path: Path) -> None:
+    """On x86_64 with no ppc64 emulator, the advisory names the exact ppc64 package (stdout)."""
+    result = _run_with_uname("debian", "x86_64", (), tmp_path)
+    assert "guest arch ppc64le: not available; install qemu-system-ppc" in result.stdout
+    # An informational advisory must not leak into the missing-dependency (stderr) channel.
+    assert "guest arch ppc64le" not in result.stderr
+
+
+def test_cross_arch_advisory_reports_tcg_available_when_foreign_qemu_present(
+    tmp_path: Path,
+) -> None:
+    """With the foreign qemu present, the advisory says 'available via TCG only', not install."""
+    result = _run_with_uname("debian", "x86_64", ("qemu-system-ppc64",), tmp_path)
+    assert "guest arch ppc64le: available via TCG only (qemu-system-ppc64)" in result.stdout
+    assert "install qemu-system-ppc" not in result.stdout
+
+
+def test_cross_arch_advisory_is_symmetric_on_ppc64le_host(tmp_path: Path) -> None:
+    """On a ppc64le host the foreign arch is x86_64; absent → name the x86 package (debian)."""
+    absent = _run_with_uname("debian", "ppc64le", (), tmp_path)
+    assert "guest arch x86_64: not available; install qemu-system-x86" in absent.stdout
+    present = _run_with_uname("debian", "ppc64le", ("qemu-system-x86_64",), tmp_path)
+    assert "guest arch x86_64: available via TCG only (qemu-system-x86_64)" in present.stdout
+
+
+def test_cross_arch_advisory_uses_opensuse_package_names(tmp_path: Path) -> None:
+    """openSUSE splits the packages differently (qemu-ppc), matching package_for."""
+    result = _run_with_uname("opensuse", "x86_64", (), tmp_path)
+    assert "guest arch ppc64le: not available; install qemu-ppc" in result.stdout
+
+
+def test_unsupported_host_arch_skips_native_qemu_and_advisory(tmp_path: Path) -> None:
+    """An aarch64 host is told it is unsupported; no x86 fallback, no cross-arch advisory."""
+    result = _run_with_uname("debian", "aarch64", (), tmp_path)
+    assert "host arch aarch64 is not a supported kdive provisioning arch" in result.stdout
+    assert "guest arch" not in result.stdout  # no cross-arch advisory
+    # The future tier must not demand a native qemu for an unsupported host arch.
+    assert "qemu-system-x86" not in result.stderr
+    assert "qemu-system-ppc" not in result.stderr
+
+
 def test_required_present_exits_zero(tmp_path: Path) -> None:
     """Stubbing uv + a permissive pkg-config satisfies the required tier."""
     bindir = tmp_path / "bin"
