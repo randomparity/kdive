@@ -45,6 +45,12 @@ x-backends: &backends
   KDIVE_S3_ENDPOINT_URL: http://minio:9000
   KDIVE_S3_BUCKET: kdive-artifacts
   KDIVE_S3_REGION: us-east-1
+  # kdive's object store signs with boto3's default credential chain (the standard AWS_*
+  # vars, objectstore.py), so the app tier authenticates to MinIO with its root creds —
+  # without these the server/worker /readyz MinIO check can never pass. Matches the
+  # minio service's MINIO_ROOT_USER / MINIO_ROOT_PASSWORD above.
+  AWS_ACCESS_KEY_ID: minioadmin  # pragma: allowlist secret — local dev only
+  AWS_SECRET_ACCESS_KEY: minioadmin  # pragma: allowlist secret — local dev only
 
 services:
   postgres:
@@ -101,9 +107,13 @@ services:
   # app services gate on its successful completion, so they never hit the DB before
   # migrations finish. The runner (ADR-0015) is locked, transactional, and idempotent,
   # so no extra coordination is needed. `build: .` builds the shared image once.
+  #
+  # KDIVE_IMAGE overrides the tag so the compose smoke (tests/image/test_compose_smoke.py,
+  # ADR-0359) drives a pre-built image (e.g. a multi-arch release image) instead of building
+  # from source; unset, it stays `kdive:dev` and `build: .` builds it, so local dev is unchanged.
   migrate:
     build: .
-    image: kdive:dev
+    image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["migrate"]
     environment:
       <<: *backends
@@ -112,7 +122,7 @@ services:
         condition: service_healthy
 
   server:
-    image: kdive:dev
+    image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["server"]
     environment:
       <<: *backends
@@ -157,7 +167,7 @@ services:
   # decision 3); server and reconciler need none. It writes vmcore/transcript
   # artifacts to the object store, so it also waits for the bucket to exist.
   worker:
-    image: kdive:dev
+    image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["worker"]
     environment:
       <<: *backends
@@ -187,7 +197,7 @@ services:
         condition: service_completed_successfully
 
   reconciler:
-    image: kdive:dev
+    image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["reconciler"]
     environment:
       <<: *backends

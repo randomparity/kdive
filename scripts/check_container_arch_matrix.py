@@ -45,6 +45,20 @@ HANDLING = frozenset({"rely-on-upstream", "mirror", "build-local", "accept-gap"}
 ARCHES = ("amd64", "arm64", "ppc64le")  # the three arch columns, one source for the checks
 ARCH_ALPHABET = frozenset({"✅", "❌", "—"})  # published / not published / not applicable
 _ISSUE_REF = re.compile(r"#\d+")
+# Compose default-substitution interpolation: ${VAR:-default} or ${VAR-default}.
+_ENV_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^}]*)\}")
+
+
+def _resolve_image_ref(image: str) -> str:
+    """Resolve compose ``${VAR:-default}`` / ``${VAR-default}`` interpolation to its default.
+
+    The guard is static, so it reads a service image as it resolves with the variable unset —
+    the default operator experience and the tag the matrix records. Only the default-
+    substitution forms are resolved; a bare ``${VAR}`` has no static value and is left as-is
+    (it would then fail set-equality, the right prompt to add a matrix row rather than a silent
+    pass).
+    """
+    return _ENV_DEFAULT.sub(lambda m: m.group(1), image)
 
 
 @dataclass(frozen=True)
@@ -82,6 +96,7 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
         image = svc.get("image")
         if not image:
             continue
+        image = _resolve_image_ref(image)
         # Docker Compose starts a service on a bare `up` when its profiles list is empty or
         # absent (len==0). A falsy `profiles` (missing / None / []) therefore means
         # default-profile; only a non-empty list gates it opt-in.

@@ -1,0 +1,17 @@
+# Compose override for the CI compose smoke (tests/image/test_compose_smoke.py, ADR-0359).
+#
+# Drops the host port publishing from every service the smoke starts. The smoke asserts the
+# server /readyz *inside* the compose network (via the container healthcheck), so it needs no
+# published host ports — and publishing them makes the smoke fail against any process already
+# bound to 5432 / 9000 / 9001 / 8090 / 8000 (e.g. a local live-stack). `!reset []` removes the
+# base service's list; a plain `ports: []` would *concatenate* with it, per compose-spec merge
+# rules, and leave the bindings in place.
+services:
+  postgres:
+    ports: !reset []
+  minio:
+    ports: !reset []
+  oidc:
+    ports: !reset []
+  server:
+    ports: !reset []
