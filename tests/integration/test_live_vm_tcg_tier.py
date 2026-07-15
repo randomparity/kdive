@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from functools import cache
 
 _TESTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
 _EXPECTED = {
@@ -58,12 +59,16 @@ def _module_markers(tree: ast.Module) -> set[str]:
     return set()
 
 
+@cache
 def _functions_with_marker(marker: str) -> dict[str, set[str]]:
     """Map every test function in the tree whose effective markers include ``marker``.
 
     Effective markers = module-level ``pytestmark`` ∪ the function's own decorators. Only functions
     named ``test*`` (pytest's collection convention) are considered, so helpers are ignored; both
     sync and async defs are walked so an async carrier cannot evade the guard.
+
+    ``@cache``d because every test in this module queries the same marker: the full-tree AST walk
+    runs once per marker, not once per test.
     """
     found: dict[str, set[str]] = {}
     for path in _TESTS_ROOT.rglob("test_*.py"):
