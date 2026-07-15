@@ -261,7 +261,7 @@ _EXPECTED = {
 }
 
 
-def _marker_names(func: ast.FunctionDef) -> set[str]:
+def _marker_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     """The `@pytest.mark.NAME` names on a function (with or without call args)."""
     names: set[str] = set()
     for dec in func.decorator_list:
@@ -281,7 +281,8 @@ def _functions_with_marker(marker: str) -> dict[str, set[str]]:
     for path in _TESTS_ROOT.rglob("test_*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
+            # Both sync and async test defs — an async stray carrier must not evade the guard.
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                 markers = _marker_names(node)
                 if marker in markers:
                     found[node.name] = markers
@@ -307,10 +308,15 @@ def test_each_live_vm_tcg_proof_is_also_live_stack() -> None:
 Run: `uv run python -m pytest tests/integration/test_live_vm_tcg_tier.py -q`
 Expected: PASS (2 passed).
 
-- [ ] **Step 3: Verify it FAILS when a marker is dropped (mutation check).** Temporarily delete one `@pytest.mark.live_vm_tcg` line from `test_live_stack.py`, rerun the meta-test, confirm FAIL, then restore.
+- [ ] **Step 3: Verify it FAILS when a marker is dropped (guaranteed-restore mutation check).** `test_live_stack.py` is already committed (Task 3), so a `git checkout --` restores it unconditionally — no manual re-typing, so the working tree cannot be left broken before the Task 4 commit:
 
-Run: `uv run python -m pytest tests/integration/test_live_vm_tcg_tier.py::test_exactly_the_four_proofs_carry_live_vm_tcg -q`
-Expected (with a marker removed): FAIL naming the missing proof. Restore the line and confirm PASS again.
+```bash
+sed -i '0,/@pytest.mark.live_vm_tcg/{/@pytest.mark.live_vm_tcg/d}' tests/integration/test_live_stack.py
+uv run python -m pytest tests/integration/test_live_vm_tcg_tier.py::test_exactly_the_four_proofs_carry_live_vm_tcg -q; echo "expect FAIL above"
+git checkout -- tests/integration/test_live_stack.py   # guaranteed restore
+uv run python -m pytest tests/integration/test_live_vm_tcg_tier.py -q   # confirm PASS again
+```
+Expected: the middle run FAILs naming the missing proof; after `git checkout`, `git status` shows `test_live_stack.py` clean and the final run PASSes.
 
 - [ ] **Step 4: Lint + type + commit.**
 
@@ -443,10 +449,23 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] `just docs-links && just adr-status-check` green.
 - [ ] Collections: `-m live_vm_tcg` = 4; `-m "live_vm and not live_vm_tcg"` = 11; `just test` selector unchanged vs `main`.
 - [ ] `just test-live-tcg` on this x86_64 host skips cleanly (exit 0), and — with the stack up + the ppc64le fixtures + `qemu-system-ppc64` present — the four proofs run (live proof, recorded per the epic's proof-record convention if executed).
-- [ ] No `"qemu-system-ppc64"` literal outside `guest_arch_accel.py` (AC5): `rg -n '"qemu-system-ppc64"' src tests`.
+- [ ] AC5 — the removed duplication is gone from the edited file: `rg -n '"qemu-system-ppc64"' tests/integration/test_live_stack.py` returns **zero** matches. (Do **not** grep the whole tree: `qemu-system-ppc64` legitimately appears in `src/kdive/diagnostics/pseries_fadump.py` (ADR-0349's own constant) and several `tests/scripts` / `tests/diagnostics` fixtures — those are not this task's concern.)
 
 ## Rollback / cleanup
 
-Every task is additive and independently revertible. The only deletions are the dead
-`_PPC64LE_EMULATOR` constant + `import shutil` in `test_live_stack.py` (Task 3); if reverted,
-restore both and the `shutil.which` gate. No migration, no schema, no production code.
+No migration, no schema, no production code — but the tasks are **not** all independent, so a
+revert must unwind them in the right order:
+
+- **Task 1 (marker registration) is the foundation.** Reverting it while Tasks 3/5 remain makes
+  `--strict-markers` collection error on the unknown `live_vm_tcg` marker. Revert Task 1 last.
+- **Task 4's meta-test depends on Task 3's markers.** Reverting Task 3 alone (removing the four
+  `@pytest.mark.live_vm_tcg` decorators) while Task 4's guard remains turns `just test` red
+  (`carriers` becomes empty ≠ `_EXPECTED`). To back out the tier, revert Task 4 **before or with**
+  Task 3.
+- **Task 5 modifies (not adds)** the `test-live` recipe selector; reverting it restores
+  `-m live_vm`.
+- **The only source deletions** are the dead `_PPC64LE_EMULATOR` constant + `import shutil` in
+  `test_live_stack.py` (Task 3); to restore, re-add both and the `shutil.which(...)` gate block.
+
+**Safe full-revert order:** Task 6 → Task 5 → Task 4 → Task 3 → Task 2 → Task 1 (reverse of
+application). Each task's own commit is a clean revert unit in that order.
