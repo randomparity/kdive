@@ -52,9 +52,9 @@ Enforcement has two layers:
    `tests/providers/test_libvirt_xml.py::test_parse_guest_arches_synthetic_kvm_hv_ppc_host_is_kvm`.
 
 2. **A static confinement guard** (`tests/domain/platform/test_host_arch_confinement.py`,
-   non-gated, runs in `just test`). It AST-walks `src/kdive` for host-arch reads
-   (`platform.machine` attribute access, `os.uname` calls) and asserts the set of modules doing
-   so is a subset of the three-module allowlist above. AST — not a text grep — so a docstring or
+   non-gated, runs in `just test`). It AST-walks `src/kdive` for the `platform`/`os` host-arch
+   idioms (`platform.machine`/`uname`/`processor`/`architecture`, `os.uname` attribute access)
+   and asserts the set of modules doing so is a subset of the three-module allowlist above. AST — not a text grep — so a docstring or
    comment mention is not a false positive. A future module that newly reads the host arch fails
    the guard with a message naming it and pointing here; the author either lands in an
    accel/tooling-selection module (extending the allowlist with a rationale) or learns the
