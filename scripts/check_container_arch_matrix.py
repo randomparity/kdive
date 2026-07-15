@@ -42,6 +42,7 @@ _BEGIN = "<!-- arch-matrix:begin -->"
 _END = "<!-- arch-matrix:end -->"
 
 HANDLING = frozenset({"rely-on-upstream", "mirror", "build-local", "accept-gap"})
+ARCHES = ("amd64", "arm64", "ppc64le")  # the three arch columns, one source for the checks
 ARCH_ALPHABET = frozenset({"✅", "❌", "—"})  # published / not published / not applicable
 _ISSUE_REF = re.compile(r"#\d+")
 
@@ -74,8 +75,7 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
     """
     data = yaml.safe_load(text) or {}
     services = data.get("services", {}) if isinstance(data, dict) else {}
-    default: dict[str, bool] = {}
-    built: dict[str, bool] = {}
+    infos: dict[str, ImageInfo] = {}
     for svc in services.values():
         if not isinstance(svc, dict):
             continue
@@ -85,9 +85,12 @@ def parse_compose(text: str) -> dict[str, ImageInfo]:
         # Docker Compose starts a service on a bare `up` when its profiles list is empty or
         # absent (len==0). A falsy `profiles` (missing / None / []) therefore means
         # default-profile; only a non-empty list gates it opt-in.
-        default[image] = default.get(image, False) or not svc.get("profiles")
-        built[image] = built.get(image, False) or "build" in svc
-    return {img: ImageInfo(default[img], built[img]) for img in default}
+        prev = infos.get(image, ImageInfo(False, False))
+        infos[image] = ImageInfo(
+            default_profile=prev.default_profile or not svc.get("profiles"),
+            built=prev.built or "build" in svc,
+        )
+    return infos
 
 
 def _matrix_block(adr_text: str) -> str:
@@ -119,7 +122,7 @@ def parse_matrix(adr_text: str) -> list[MatrixRow]:
     if header is None:
         raise ValueError("arch matrix: no header row with a 'Handling' column")
     index = {name: i for i, name in enumerate(_cells(header))}
-    for required in ("amd64", "arm64", "ppc64le", "Handling"):
+    for required in (*ARCHES, "Handling"):
         if required not in index:
             raise ValueError(f"arch matrix: header is missing the '{required}' column")
     rows: list[MatrixRow] = []
@@ -160,7 +163,8 @@ def _check_set_equality(images: dict[str, ImageInfo], rows: list[MatrixRow]) -> 
 
 def _check_arch_alphabet(row: MatrixRow) -> list[str]:
     out: list[str] = []
-    for label, cell in (("amd64", row.amd64), ("arm64", row.arm64), ("ppc64le", row.ppc64le)):
+    for label in ARCHES:
+        cell = getattr(row, label)
         if cell not in ARCH_ALPHABET:
             out.append(f"{row.image}: {label} cell {cell!r} not in {sorted(ARCH_ALPHABET)}")
     return out
