@@ -51,9 +51,12 @@ _GUESTFISH_TIMEOUT_S = 5 * 60
 # / ``kdump-utils`` packages); installing those names fails the build. The debug set there is just
 # the crash/introspection tools plus the live-attach ``openssh-server``.
 _EL8_EL9_DEBUG_PACKAGES = ("drgn", "kexec-tools", "keyutils", "openssh-server")
-# ``drgn`` is not in EL 8 BaseOS/AppStream; it ships in EPEL. ``epel-release`` is in Rocky 8's
-# default-enabled ``extras`` repo. Run as a separate transaction *before* the ``drgn`` install so
-# the EPEL repo metadata is present (ADR-0251, #823).
+# ``drgn`` is not in EL BaseOS/AppStream on any EL major (8/9/10); it ships in EPEL, so every EL
+# clone needs EPEL enabled before the ``drgn`` install (#1152 corrects this — it was EL8-only, which
+# left EL9/EL10 unable to install drgn; latent until the first EL9 customize boot). ``epel-release``
+# is in the default-enabled extras repo on Rocky (``extras``) and CentOS Stream (``extras-common``),
+# so installing it needs no prior repo enable. Run as a separate transaction *before* the ``drgn``
+# install so the EPEL repo metadata is present (ADR-0251, #823, ADR-0350).
 _ENABLE_EPEL_CMD = "dnf -y install epel-release"
 
 
@@ -105,7 +108,8 @@ class RhelFamily:
     def customize_steps(self, ctx: CustomizeContext) -> list[Step]:
         """Build the ordered steps that turn the base image into a kdive-ready rootfs."""
         steps: list[Step] = []
-        if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:
+        # Every EL clone (major is not None) takes drgn from EPEL; Fedora (None) ships it in base.
+        if _el_major(ctx.distro, ctx.version) is not None and "drgn" in ctx.packages:
             steps.append(RunCommand(_ENABLE_EPEL_CMD))
         steps.append(InstallPackages(ctx.packages))
         # Enable sshd exactly when this image declares the SSH capability, which ``capabilities()``

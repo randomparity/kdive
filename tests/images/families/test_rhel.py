@@ -125,19 +125,31 @@ def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> Non
     assert "final_action poweroff" in j
 
 
-def test_el8_debug_argv_enables_epel_before_installing_drgn(tmp_path: Path) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="rocky", version="8"))
-    assert "dnf -y install epel-release" in argv
-    epel_idx = argv.index("dnf -y install epel-release")
-    install_idx = next(i for i, a in enumerate(argv) if a.startswith("drgn,") or ",drgn" in a)
-    assert epel_idx < install_idx, "EPEL must be enabled before the drgn install transaction"
-    assert "systemctl enable kdump.service" in argv
-
-
-def test_el9_and_el10_do_not_enable_epel(tmp_path: Path) -> None:
-    for distro, version in (("rocky", "9"), ("rocky", "10"), ("centos-stream", "10")):
+def test_el_clones_enable_epel_before_installing_drgn(tmp_path: Path) -> None:
+    """Every EL clone (8/9/10) sources ``drgn`` from EPEL, so EPEL is enabled before the drgn
+    install transaction. EL9/EL10 were previously left out — the customize boot never ran a real EL9
+    image until the #1152 CentOS Stream 9 ppc64le proof, and EL10 takes drgn from EPEL 10 too
+    (ADR-0350, #1152).
+    """
+    for distro, version in (
+        ("rocky", "8"),
+        ("rocky", "9"),
+        ("centos-stream", "9"),
+        ("rocky", "10"),
+        ("centos-stream", "10"),
+    ):
         argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro=distro, version=version))
-        assert "dnf -y install epel-release" not in argv, (distro, version)
+        assert "dnf -y install epel-release" in argv, (distro, version)
+        epel_idx = argv.index("dnf -y install epel-release")
+        install_idx = next(i for i, a in enumerate(argv) if a.startswith("drgn,") or ",drgn" in a)
+        assert epel_idx < install_idx, (distro, version)
+        assert "systemctl enable kdump.service" in argv, (distro, version)
+
+
+def test_fedora_does_not_enable_epel(tmp_path: Path) -> None:
+    """Fedora ships ``drgn`` in its base repo (no EPEL), so the customizer must not enable EPEL."""
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="fedora", version="44"))
+    assert "dnf -y install epel-release" not in argv
 
 
 def test_rhel_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -> None:

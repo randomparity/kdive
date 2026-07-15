@@ -131,25 +131,25 @@ row boots) so the acceptance criterion cannot silently stall; the boot-blocking 
 its own follow-up. The five catalog rows and their tests ship regardless of which row carries the
 live proof.
 
-## Live-proof risk 2: EL9 EPEL for drgn
+## Live-proof risk 2, fixed: EPEL for drgn on every EL clone (not just EL8)
 
-`RhelFamily.customize_steps` runs `dnf -y install epel-release` **only** for `_el_major == 8`
-(`rhel.py:108`), but the EL9 debug package set (`_EL8_EL9_DEBUG_PACKAGES`, applied for
-`major <= 9`) includes `drgn`, which ships in **EPEL 9**, not EL9 BaseOS/AppStream. On Rocky 9,
-`epel-release` sits in the default-enabled `extras` repo so a bare `dnf install drgn` *may* resolve;
-on CentOS Stream 9 EPEL requires enabling CRB + installing `epel-release` first. This gap is
-**pre-existing** (it affects the x86_64 EL9 rows too) and latent because no EL9 rhel row has been
-customize-booted before. The CentOS Stream 9 live proof is the first exercise of that path.
+`RhelFamily.customize_steps` ran `dnf -y install epel-release` **only** for `_el_major == 8`, but
+the debug package set installs `drgn` on **every** EL major, and `drgn` ships in **EPEL** on all of
+them — EPEL 8/9/**10** — never in EL BaseOS/AppStream (the catalog rows record `EPEL 9`/`EPEL 10`
+sources). So EL9 **and EL10** rows could not install `drgn`; the gap was latent because no EL rhel
+row had been customize-booted before (only Fedora, in #1147). Investigating the CS9 proof made this
+concrete.
 
-Mitigation, decided in advance so the proof is not blocked:
-
-- If the CS9 customize boot fails installing `drgn` for want of EPEL, fix it by making the rhel
-  customizer enable EPEL for **every** EL major that installs `drgn` from EPEL (EL8 **and** EL9),
-  not only EL8. This is an arch-agnostic correctness fix that also repairs the x86_64 EL9 rows; it
-  is a legitimate "family customizer quirk surfaced by the proof" and stays in scope.
-- The fix is narrow (widen the `== 8` guard to `<= 9` and, for CentOS Stream, enable CRB before
-  `epel-release`). It does not alter the boot mechanism or any x86_64 byte contract beyond adding a
-  transaction the EL9 rows already needed.
+Fixed here (arch-agnostic; also repairs the latent x86_64 EL9/EL10 rows): the guard widens from
+`_el_major(...) == 8` to `_el_major(...) is not None` — i.e. **every EL clone enables EPEL before
+the drgn install; only Fedora (major `None`, base-repo drgn) does not**. `epel-release` sits in a
+default-enabled extras repo on both Rocky (`extras`) and CentOS Stream (`extras-common`), so the
+existing one-transaction `dnf -y install epel-release` needs no prior CRB enable to resolve
+`epel-release` itself. If the live proof shows a `drgn` dependency that additionally requires CRB,
+that is recorded from the proof output and added as a version-keyed step — not guessed here. The
+change touches no boot mechanism and no x86_64 byte contract beyond the EPEL transaction the EL rows
+always needed. Guarded by `test_el_clones_enable_epel_before_installing_drgn` /
+`test_fedora_does_not_enable_epel`.
 
 ## Non-goals
 
