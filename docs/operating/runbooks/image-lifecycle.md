@@ -150,6 +150,19 @@ Without `KDIVE_LIVE_SSH_TARGET` (and the guest image / kernel tree), the `live_s
 skips with an actionable reason — which is the correct outcome in CI. Do **not** un-gate these
 tests to make a run pass: the gate is what keeps the libguestfs/KVM dependency out of normal CI.
 
+#### Live test tiers
+
+| Tier | Selector | Needs |
+|------|----------|-------|
+| native | `just test-live` (`-m "live_vm and not live_vm_tcg"`) | a KVM/libvirt host + kdump guest image |
+| emulated (TCG) | `just test-live-tcg` (`-m live_vm_tcg`) | the foreign qemu emulator (e.g. `qemu-system-ppc64`) **and** a running stack (`just stack-up` + fixtures) |
+| wire | `just test-live-stack` (`-m live_stack`) | a running kdive stack + OIDC issuer |
+
+The emulated tier (ADR-0353) runs the ppc64le provision→boot→force-crash→kdump-retrieve spine
+under TCG on an x86_64 host and **skips cleanly** when the foreign emulator is absent. Confirm the
+emulator is present with the per-arch guest-accel doctor check (ADR-0352), which reports KVM-native
+vs TCG-only per schedulable guest arch.
+
 ### 3. (Optional) publish it to the catalog
 
 The same plane runs inside the `IMAGE_BUILD` job behind the operator verb; publishing promotes the

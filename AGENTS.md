@@ -28,7 +28,8 @@ run the same recipes locally rather than reinventing the underlying command:
 | `just format` | `ruff check --fix` + `ruff format` (mutating) |
 | `just type` | `ty check` — **whole tree (src + tests)**, not `src` alone |
 | `just test` | the suite, excluding the gated `live_vm` marker |
-| `just test-live` | the `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
+| `just test-live` | the native `live_vm` suite (needs a KVM/libvirt host + kdump guest image) |
+| `just test-live-tcg` | the emulated foreign-arch (`live_vm_tcg`) tier: the four ppc64le proofs; needs the foreign qemu emulator + a running stack, skips cleanly without either |
 | `just ci` | the full PR gate: lint, type, lint-shell, lint-workflows, check-mermaid, test |
 | `just compose-up` / `compose-down` | Postgres + MinIO + mock-OIDC backing services for a live run |
 | `just stack-up` | bring the live-stack backends up healthy + print host-process env (see runbook) |
@@ -166,6 +167,11 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   host `server`/`worker`/`reconciler` + the compose backends; operator bring-up is in
   [`docs/operating/runbooks/live-stack.md`](docs/operating/runbooks/live-stack.md) (ADR-0042). `just
   test-live-stack` skips cleanly when the stack/fixtures (or the marked suite) are absent.
+- **Three live tiers** (ADR-0353): `live_vm` (native, direct-provider ops against a
+  pre-provisioned System); `live_vm_tcg` (the emulated foreign-arch spine — the four ppc64le
+  proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
+  (full HTTP transport). `just test-live` is native-only (`-m "live_vm and not live_vm_tcg"`);
+  the TCG tier skips cleanly on a host without the foreign qemu emulator (`require_guest_arch`).
 - Tests mirror the package tree under `tests/`; `tests/adversarial/` holds concurrency /
   property-based (hypothesis) race tests, `tests/integration/` holds the end-to-end
   milestone exercises.
