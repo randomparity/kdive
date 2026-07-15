@@ -36,18 +36,37 @@ different arch subtree); Fedora ppc64le lives in the `fedora-secondary` tree.
 
 ## Decisions
 
-1. **Scope is the rhel family only.** All five new rows (Fedora 43-cloud, Rocky 9, Rocky 10,
-   CentOS Stream 9, CentOS Stream 10) are `family = "rhel"`, which already has
+1. **Scope is the rhel family only.** All five new rows are `family = "rhel"`, which already has
    `customize_via = "boot"` (ADR-0345). No family-customizer code change is required to *add*
    these rows — they ride the existing arch-agnostic boot path. The issue's "family customizer
    quirks … dual-render form" scope item was anticipating the debian family, which #1167 owns.
+   The naming rule is `<x86_64-row-name>-ppc64le`, matching the existing
+   `fedora-kdive-ready-44-ppc64le`. The exact five new row names are therefore:
 
-2. **Version fields mirror the x86_64 sibling.** `makedumpfile_version` and `drgn_version` are the
-   distro-repo package versions, which are arch-invariant within a release (the distro builds all
-   arches from one source package). Each ppc64le sibling therefore carries the **same** two version
-   values as its x86_64 sibling — the identical principle the existing `fedora-kdive-ready-44-ppc64le`
-   row already documents ("Fedora 44 ships the same makedumpfile/drgn across arches"). This is a
-   snapshot, not live upstream truth, exactly as for the x86_64 rows.
+   | new ppc64le row | x86_64 sibling (version-parity source) | pinned image |
+   |---|---|---|
+   | `fedora-kdive-ready-43-cloud-ppc64le` | `fedora-kdive-ready-43-cloud` | `Fedora-Cloud-Base-Generic-43-1.6.ppc64le.qcow2` |
+   | `rocky-kdive-ready-9-ppc64le` | `rocky-kdive-ready-9` | `Rocky-9-GenericCloud-Base-9.8-20260525.0.ppc64le.qcow2` |
+   | `rocky-kdive-ready-10-ppc64le` | `rocky-kdive-ready-10` | `Rocky-10-GenericCloud-Base-10.2-20260525.0.ppc64le.qcow2` |
+   | `centos-stream-kdive-ready-9-ppc64le` | `centos-stream-kdive-ready-9` | `CentOS-Stream-GenericCloud-9-20260622.0.ppc64le.qcow2` |
+   | `centos-stream-kdive-ready-10-ppc64le` | `centos-stream-kdive-ready-10` | `CentOS-Stream-GenericCloud-10-20260622.0.ppc64le.qcow2` |
+
+   The version-parity test maps ppc64le→x86_64 sibling by stripping the `-ppc64le` suffix, so the
+   naming rule is mechanical. (`fedora-kdive-ready-44-ppc64le` already follows it.)
+
+2. **Version fields mirror the x86_64 sibling — with one caveat for EPEL drgn.**
+   `makedumpfile_version` is a base-distro / `kexec-tools` package, arch-invariant within a release
+   (the distro builds all arches from one source package), so mirroring the x86_64 value is safe.
+   `drgn_version` is arch-invariant **for Fedora** (base repo), but on EL8/EL9 `drgn` comes from
+   **EPEL**, a separate per-arch build system whose ppc64le build can in principle lag or differ.
+   For the EL9 rows (Rocky 9, CentOS Stream 9) the mirrored `drgn_version` is therefore
+   **verified against the ppc64le EPEL index** (one index probe, exactly as the x86_64 rows were),
+   not merely copied; if the probe disagrees, the ppc64le row carries the ppc64le-index value and a
+   comment. Either way the CS9 live proof records the actually-installed drgn in the image
+   provenance, which reconciles against the row. This is a snapshot, not live upstream truth,
+   exactly as for the x86_64 rows. The existing `fedora-kdive-ready-44-ppc64le` row (Fedora, base
+   repo) already documents the arch-invariance ("Fedora 44 ships the same makedumpfile/drgn across
+   arches").
 
 3. **N/A gaps are documented in the catalog, and encoded as a test.** Rocky 8 (no ppc64le port)
    and Debian 12/13 (no `genericcloud` ppc64el + family blocked on #1167) get an explicit N/A
@@ -71,9 +90,37 @@ different arch subtree); Fedora ppc64le lives in the `fedora-secondary` tree.
 6. **Live proof: CentOS Stream 9 ppc64le, end-to-end under TCG.** The acceptance criterion "at least
    one non-Fedora family proven end-to-end via TCG customization boot" is met by customize-booting
    `centos-stream-kdive-ready-9-ppc64le` on the x86_64 host (the host has `qemu-system-ppc64` for
-   TCG, proven by #1144/#1146). The remaining new rows are build-validated (catalog + loader tests).
+   TCG, proven by #1144/#1146).
 
-## Live-proof risk: EL9 EPEL for drgn
+   **Falsifiable pass signal.** The proof PASSES iff the per-build `kdive-build-<uuid>` domain emits
+   the `kdive-customize-ok` marker on `hvc0` (not a mere readiness/SSH heuristic — the marker is the
+   authoritative completion signal per ADR-0345) and the sealed image is produced; it FAILS on the
+   `kdive-customize-failed` marker or the TCG-scaled deadline, with the `redacted_console_tail`
+   captured as evidence. Recorded in a proof-record doc alongside the other epic proofs.
+
+   **"Build-validated" for the other four rows means catalog/loader validation only** — the loader
+   test resolves the row, asserts the `cloud-image` source with a 64-char sha256 and the arch token
+   in the URL, and checks version parity. It does **not** fetch the image, run `build-fs`, or boot.
+   Full customize-boot is proven for exactly one row (CS9) because each TCG boot is slow; the plan
+   additionally HEAD/resolve-checks each pinned URL so a 404 is caught without a full build. This is
+   the honest reading of the issue's "at minimum build-validated"; it is weaker than "the image
+   builds," and that is stated, not hidden.
+
+## Live-proof risk 1 (primary): does a non-Fedora ppc64le image customize-boot at all?
+
+Every prior ppc64le boot proof (#1144/#1146) used **Fedora**. The customization boot direct-kernel-
+boots a baseline kernel extracted from the repacked image (ADR-0272/0345). Whether a **CentOS
+Stream 9 ppc64le** GenericCloud image yields a single extractable baseline kernel and boots on
+`pseries` under TCG through that machinery is the gating unknown for any non-Fedora ppc64le row — it
+is logically prior to the EPEL/drgn question below (EPEL only matters once the image boots and runs
+the firstboot script). Mitigation: the proof is a falsification gate. If CS9 does not boot under the
+customization machinery, the finding is recorded (with console tail) and the proof falls back to the
+next non-Fedora candidate (`rocky-kdive-ready-9-ppc64le`, or a Fedora ppc64le row if no non-Fedora
+row boots) so the acceptance criterion cannot silently stall; the boot-blocking finding then becomes
+its own follow-up. The five catalog rows and their tests ship regardless of which row carries the
+live proof.
+
+## Live-proof risk 2: EL9 EPEL for drgn
 
 `RhelFamily.customize_steps` runs `dnf -y install epel-release` **only** for `_el_major == 8`
 (`rhel.py:108`), but the EL9 debug package set (`_EL8_EL9_DEBUG_PACKAGES`, applied for
@@ -111,5 +158,12 @@ Mitigation, decided in advance so the proof is not blocked:
 - A test encodes the N/A decision (no debian/Rocky-8 ppc64le row).
 - N/A gaps enumerated in `rootfs_catalog.toml` comments (Rocky 8, Debian, and the build-host
   scope note).
-- CentOS Stream 9 ppc64le customize-boots end-to-end under TCG on the x86_64 host, recorded in a
-  proof-record doc; remaining rows build-validated. `just ci` green.
+- Each pinned ppc64le URL resolves at build time (HEAD/checksum check documented in the plan), so a
+  pruned-serial 404 is caught without a full build. CentOS Stream prunes old dated serials from
+  `cloud.centos.org`, so the pinned serials (`20260622.0`) are the same durability class as the
+  x86_64 rows — confirmed resolving now, expected to rot on the same policy.
+- One non-Fedora ppc64le row (CS9, or the documented fallback) customize-boots end-to-end under TCG
+  on the x86_64 host, passing on the `kdive-customize-ok` `hvc0` marker, recorded in a proof-record
+  doc. The remaining four rows are **catalog/loader-validated** (row resolves, source/arch/sha256/
+  version-parity asserted) plus URL-resolve-checked — not full-build-validated (stated honestly in
+  Decision 6). `just ci` green.
