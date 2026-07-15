@@ -89,11 +89,18 @@ contribution, modeled on `multiarch_gdb`/`pseries_fadump`.
   injected `access`/`exists` spies and a temp `node` → the returned callable calls
   `access(node, R|W)` and not `exists`; `uri="qemu:///system"` (and a bogus URI) → calls
   `exists(node)` and not `access`. Deterministic, no real `/dev/kvm`.
-- Verification for the doctor surface greps an **existing sibling** id, not the new one:
-  `rg -n 'multiarch_gdb|pseries_fadump' tests/integration tests/diagnostics` locates any
-  test enumerating/counting worker checks; add `guest_arch_accel` to it only if it
-  asserts an exact id set (the current contribution tests use `any(...)`/membership, so
-  they will not break — confirm, don't assume).
+- **Required existing-test updates (adding the third worker check breaks two exact-set
+  assertions):** the local-libvirt worker-check id set is asserted with `==` in two
+  places, both of which must gain `GUEST_ARCH_ACCEL_ID`:
+  - `tests/diagnostics/test_default_factory.py:389-394` — the
+    `{PROVIDER_TLS_ID, GDBSTUB_ACL_ID, MULTIARCH_GDB_ID, PSERIES_FADUMP_ID} ==
+    unavailable_ids` assertion (add `GUEST_ARCH_ACCEL_ID`, and its import).
+  - `tests/diagnostics/test_service.py:428-431` — the
+    `set(by_provider["local-libvirt"]._worker_check_ids) == {MULTIARCH_GDB_ID,
+    PSERIES_FADUMP_ID}` assertion (add `GUEST_ARCH_ACCEL_ID`, and its import).
+  These are exact set-equality, **not** membership, so they fail the moment the
+  descriptor is registered. Both files are in Task 1's targeted pytest set below so the
+  regression is caught before push, not only at full `just ci`.
 - `test_guest_arch_accel_is_in_the_single_local_contribution` and
   `test_registered_in_assembly` mirror the `pseries_fadump` tests
   (`tests/diagnostics/test_pseries_fadump.py:79-93`): exactly one local-libvirt
@@ -105,8 +112,9 @@ sits beside `MultiarchGdbCheck`/`PseriesFadumpCheck` in `provider_checks.py`; th
 
 **Guardrails:** `just lint`, `just type`, `uv run python -m pytest
 tests/diagnostics/test_guest_arch_accel.py tests/diagnostics/test_pseries_fadump.py
-tests/diagnostics/test_multiarch_gdb.py -q`, plus the sibling-id grep above to find any
-doctor integration surface to update.
+tests/diagnostics/test_multiarch_gdb.py tests/diagnostics/test_default_factory.py
+tests/diagnostics/test_service.py -q` (the last two carry the exact-set assertions above),
+plus the sibling-id grep to find any further enumerating surface.
 
 **Rollback:** delete the new module + test, revert the three edited files; no state.
 
