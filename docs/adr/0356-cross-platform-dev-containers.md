@@ -1,6 +1,6 @@
 # ADR 0356 — Cross-platform dev containers: arch-support matrix and drift guard
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-15
 - **Issue:** #1182
 - **Epic:** #1189 (cross-platform dev tooling)
