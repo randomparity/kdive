@@ -169,10 +169,16 @@ default. Do both once on the worker host:
    uv sync --group live
    ```
 
+   On an arch with no drgn wheel (e.g. `ppc64le`), drgn builds from source and needs
+   `libkdumpfile` to open kdump-**compressed** vmcores — without it, kdump capture fails
+   `drgn was built without libkdumpfile support` even though ELF cores read. Install
+   `libkdumpfile-dev` (Debian/Ubuntu) / `libkdumpfile-devel` (Fedora) **before** the build; see the
+   [POWER host bring-up runbook](power-host-bringup.md).
+
 2. Install the libguestfs Python binding as a system package:
 
    ```bash
-   sudo apt-get install python3-libguestfs   # Debian/Ubuntu
+   sudo apt-get install python3-guestfs      # Debian/Ubuntu
    sudo dnf install python3-libguestfs       # Fedora/RHEL
    ```
 
@@ -186,7 +192,11 @@ default. Do both once on the worker host:
      ```bash
      py=.venv/bin/python
      site=$("$py" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
-     sys_site=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+     # Debian/Ubuntu install the apt binding to the dpkg dist-packages dir, NOT the `purelib` path
+     # `/usr/bin/python3` reports (that is the pip-local `/usr/local/...` tree). Fedora/RHEL install
+     # to purelib, so prefer the dist-packages dir when it exists, else fall back to purelib:
+     sys_site=/usr/lib/python3/dist-packages
+     [[ -e "$sys_site/guestfs.py" ]] || sys_site=$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
      ln -s "$sys_site"/guestfs.py "$site"/
      ln -s "$sys_site"/libguestfsmod*.so "$site"/
      ```

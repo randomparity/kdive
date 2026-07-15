@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import urllib.error
 import urllib.request
@@ -10,7 +11,11 @@ from collections.abc import Callable
 
 import pytest
 
-from kdive.diagnostics.guest_arch_accel import qemu_system_binary
+from kdive.diagnostics.guest_arch_accel import (
+    kvm_probe_for_uri,
+    qemu_system_binary,
+    resolved_libvirt_uri,
+)
 from kdive.mcp.dev_harness import OidcIssuer, oidc_issuer_from_env
 
 
@@ -39,6 +44,28 @@ def require_stack() -> str:
     if not base_url:
         pytest.skip("KDIVE_STACK_BASE_URL unset; bring up the stack (see the live-stack runbook)")
     return base_url
+
+
+def expected_accel(
+    arch: str,
+    *,
+    host_arch: str | None = None,
+    kvm_present: Callable[[], bool] | None = None,
+) -> str:
+    """The accelerator admission persists for an ``arch`` guest on **this** host (#1156).
+
+    Mirrors the production probe (``guest_arch_accel``): the native guest arch under an available
+    KVM resolves to ``kvm``; a foreign arch — or a native arch with no ``/dev/kvm`` — resolves to
+    ``tcg``. The #1144 proofs assert the *persisted* accel, so the same proof reads ``tcg`` on the
+    x86_64 CI host (ppc64le is foreign → TCG) and ``kvm`` on a POWER host (ppc64le is native →
+    KVM-HV). ``host_arch``/``kvm_present`` are injected for unit tests; the defaults are
+    ``platform.machine()`` and the URI-selected ``/dev/kvm`` probe the worker actually uses.
+    """
+    resolved_host = host_arch if host_arch is not None else platform.machine()
+    if arch != resolved_host:
+        return "tcg"
+    kvm = kvm_present if kvm_present is not None else kvm_probe_for_uri(resolved_libvirt_uri())
+    return "kvm" if kvm() else "tcg"
 
 
 def require_guest_arch(

@@ -49,6 +49,7 @@ from kdive.mcp.dev_harness import (
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import (
+    expected_accel,
     require_guest_arch,
     require_issuer,
     require_stack,
@@ -846,12 +847,13 @@ def _ppc64le_reachability_preflight() -> tuple[OidcIssuer, str, str, str]:
 @pytest.mark.live_stack
 @pytest.mark.live_vm_tcg
 def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
-    """Prove a Fedora ppc64le guest boots end-to-end under TCG on the x86_64 host (#1144).
+    """Prove a Fedora ppc64le guest boots end-to-end over the wire (#1144; native KVM-HV #1156).
 
-    allocate → provision (``arch=ppc64le``: admission persists ``accel=tcg``, ADR-0339; the
-    provisioner renders a pseries/qemu/emulator domain, ADR-0340; the boot handler applies the
-    TCG-scaled deadline, ADR-0341, and direct-kernel-boots the rootfs's own baseline ppc64le
-    kernel under QEMU/SLOF, ADR-0272) → the System reaches ``ready`` (the domain is defined+started;
+    allocate → provision (``arch=ppc64le``: admission persists the host-resolved accel, ADR-0339 —
+    ``accel=tcg`` on the x86_64 CI host, ``accel=kvm`` on a POWER host; the provisioner renders a
+    pseries/qemu/emulator domain, ADR-0340; the boot handler applies the accel-scaled deadline,
+    ADR-0341, and direct-kernel-boots the rootfs's own baseline ppc64le kernel under QEMU/SLOF,
+    ADR-0272) → the System reaches ``ready`` (the domain is defined+started;
     the baseline boot is optimistic, ADR-0272) → poll ``systems.check_ssh_reachable`` until the
     guest answers an SSH banner. That reachable verdict is the load-bearing proof: it means the
     ppc64le kernel booted to userspace under TCG (no ISA/CPU fault), the virtio NIC leased its DHCP
@@ -864,8 +866,9 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
     reachability, not the marker.
 
     Vehicle note: ``live_stack`` is the repo's only end-to-end provision→boot path; this is a
-    live-VM-class proof under TCG. The distinct ``live_vm``/``live_vm_tcg`` marker split is
-    epic issue 15's scope, not here. Self-cleans (release) on exit.
+    live-VM-class proof under the host-resolved accelerator (TCG on x86_64, KVM-HV on a POWER host,
+    #1156). The distinct ``live_vm``/``live_vm_tcg`` marker split is epic issue 15's scope, not
+    here. Self-cleans (release) on exit.
     """
     issuer, base_url, db_url, image = _ppc64le_reachability_preflight()
     operator_token = _token(issuer, role="operator")
@@ -911,8 +914,13 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                         await scalar(op, "systems.get", system_id=system_id),
                         "ppc64le:systems_get",
                     )
-                    # The persisted accel is the recorded TCG fact the deadline scaling keyed off.
-                    assert data_str(got, "accel") == "tcg", f"expected accel=tcg: {got!r}"
+                    # The persisted accel is the recorded fact the deadline scaling keyed off. It
+                    # is host-resolved (ADR-0339): ``tcg`` for a foreign-arch guest (ppc64le on the
+                    # x86_64 CI host), ``kvm`` for a native guest (ppc64le on a POWER host, #1156).
+                    want_accel = expected_accel("ppc64le")
+                    assert data_str(got, "accel") == want_accel, (
+                        f"expected accel={want_accel}: {got!r}"
+                    )
                 async with phase("ppc64le:ssh_info"):
                     info = ok(
                         await scalar(op, "systems.ssh_info", system_id=system_id),
