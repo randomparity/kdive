@@ -48,21 +48,25 @@ matrix here, and add a stdlib CI guard that fences the matrix against compose dr
    Prometheus are used as-is (their pinned tags publish ppc64le); Grafana is used as-is with a
    knowingly-accepted ppc64le gap in the opt-in tier. The guard
    `scripts/check_container_arch_matrix.py` (recipe `just container-arch-check`, a member of
-   `just ci`) statically asserts: (a) the compose image set equals the matrix image set;
-   (b) every row's handling is a known token; (c) a `rely-on-upstream` row publishes ppc64le;
-   (d) an `accept-gap` row's image is used only by opt-in (profiled) compose services — no
-   live registry probe.
+   `just ci`) statically asserts, with no live registry probe: (a) the compose image set
+   equals the matrix image set; (b) every row's handling is a known token; (c) a
+   `rely-on-upstream` row's ppc64le cell is exactly ✅; (d) an `accept-gap` row's image is used
+   only by opt-in (profiled) compose services; (e) a `mirror` row cites a tracking issue; and
+   (f) a `build-local` row's image is built by a compose service (`build:`). Every token thus
+   carries a checked ppc64le obligation — none is an unconstrained escape hatch.
 
 ### Arch-support matrix
 
-Published architectures per image (probed 2026-07-15) and kdive's handling. Handling tokens:
+Published architectures per image (probed 2026-07-15) and kdive's handling. Arch columns use a
+fixed alphabet — `✅` published, `❌` not published, `—` not applicable (a `build-local` image
+is built, not pulled per-arch; arch notes live in the `Role` column). Handling tokens:
 
-| token | meaning |
-|---|---|
-| `rely-on-upstream` | use the upstream image as-is; the guard requires it to publish ppc64le |
-| `mirror` | upstream lacks ppc64le; kdive repackages it as a multi-arch image |
-| `build-local` | built from the repo `Dockerfile` (arch proven by the buildx job) |
-| `accept-gap` | knowingly unsupported on ppc64le; the guard permits it only behind an opt-in profile |
+| token | meaning | guard obligation |
+|---|---|---|
+| `rely-on-upstream` | use the upstream image as-is | ppc64le cell = ✅ |
+| `mirror` | upstream lacks ppc64le; kdive repackages it | row cites a tracking issue `#NNNN` |
+| `build-local` | built from the repo `Dockerfile` | a compose service that uses it has `build:` |
+| `accept-gap` | knowingly unsupported on ppc64le | image used only by opt-in (profiled) services |
 
 <!-- arch-matrix:begin -->
 | Image | Role | amd64 | arm64 | ppc64le | Handling |
@@ -70,24 +74,27 @@ Published architectures per image (probed 2026-07-15) and kdive's handling. Hand
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/minio:RELEASE.2025-04-22T22-12-26Z` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
-| `ghcr.io/navikt/mock-oauth2-server:3.0.3` | core backend (OIDC mock) | ✅ | ✅ | ❌ | mirror |
+| `ghcr.io/navikt/mock-oauth2-server:3.0.3` | core backend (OIDC mock; mirror tracked #1183) | ✅ | ✅ | ❌ | mirror |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
-| `kdive:dev` | app image (repo Dockerfile) | ✅ | — | base publishes ppc64le | build-local |
+| `kdive:dev` | app image (repo Dockerfile; base publishes ppc64le, buildx-proven in #1185) | — | — | — | build-local |
 <!-- arch-matrix:end -->
 
 Notes on the two gap rows:
 
-- **`ghcr.io/navikt/mock-oauth2-server:3.0.3`** — handled by `mirror` (decision 1). It is a
-  default-profile image, so its gap blocks the core ppc64le loop until the mirror lands.
+- **`ghcr.io/navikt/mock-oauth2-server:3.0.3`** — handled by `mirror` (decision 1); a
+  default-profile image, so its gap blocks the core ppc64le loop until the mirror lands. The
+  `Role` cell cites the tracking issue (#1183), which the guard requires for a `mirror` row so
+  the gap stays a visible follow-up rather than a silent green-forever bypass.
 - **`grafana/grafana:13.0.3`** — handled `accept-gap`: no upstream ppc64le image exists and it
   is opt-in (`obs` profile), so the ppc64le dashboard is unavailable pending a follow-up. The
   guard permits `accept-gap` only because no un-profiled service uses grafana; the same shape
   on a core-loop image would fail. Prometheus (the metrics store) is unaffected.
 
 The `kdive` row is `build-local`: it is built from `python:3.14.6-slim-bookworm`, whose base
-index publishes ppc64le, so the buildx multi-arch build path is available. Proving that build
-in CI is a later epic sub-issue.
+index publishes ppc64le, so the buildx multi-arch build path is available (proving that build
+in CI is a later epic sub-issue, #1185). Its arch cells are `—` because a locally-built image
+has no pulled per-arch manifest; the guard verifies instead that a compose service builds it.
 
 ## Consequences
 
@@ -100,11 +107,16 @@ in CI is a later epic sub-issue.
   `build-local` / `accept-gap` handling or a real fix. A default-profile image can no longer
   sit silently broken behind a `rely-on-upstream` label, and an `accept-gap` cannot be applied
   to a core-loop image.
-- The guard is static: it does **not** detect an *upstream* arch regression (a tag that stops
-  publishing ppc64le at an unchanged pin) — that recorded ✅ would go stale invisibly. That
-  residual risk is covered by the buildx build job (which fails to build the missing arch) and
-  by re-probing on the deliberate tag bumps the guard forces. The guard is the
-  drift-and-labelling fence, not a registry probe.
+- The guard is static, so two residuals remain, both stated rather than left implicit:
+  - It does **not** detect an *upstream* arch regression (a tag that stops publishing ppc64le
+    at an unchanged pin) — a recorded ✅ would go stale invisibly. Covered by the buildx build
+    job (which fails to build the missing arch) and by re-probing on the tag bumps the guard
+    forces.
+  - It cannot force a `mirror` to *complete*. A default-profile `mirror` gap is required to
+    cite a tracking issue (assertion e), so it is a visible, tracked follow-up rather than a
+    silent green-forever state — but the guard checks that the issue is *named*, not that it is
+    *closed*. Closing it is the follow-up sub-issue's job (#1183/#1184), not the guard's.
+  The guard is the drift-and-labelling fence, not a registry probe or a project tracker.
 - Follow-ups this decision creates:
   - Build and publish the multi-arch OIDC mirror; repoint `docker-compose.yml` and
     `deploy/helm/kdive/values.yaml` at it.
@@ -134,6 +146,12 @@ in CI is a later epic sub-issue.
   default-profile image with a `❌ rely-on-upstream` row passes green while the core ppc64le
   loop is broken. Coupling the ppc64le cell and compose profile into assertions (c)/(d) makes
   the one invariant that matters machine-checkable instead of a prose promise.
+- **Gate only `rely-on-upstream`/`accept-gap`, leave `mirror`/`build-local` unchecked.** That
+  leaves an escape hatch: a broken core-loop image relabelled `mirror` (or a pulled image
+  mislabelled `build-local`) would pass green forever. Assertions (e)/(f) bound both — a
+  `mirror` must name its tracking issue, a `build-local` must actually be built by a compose
+  service — so no token is an unconstrained bypass. A static guard still cannot force a
+  `mirror` to *complete*; that residual is stated in Consequences.
 - **Encode the Grafana gap as `rely-on-upstream` with a prose "it's opt-in" note.** Then a
   broken default-profile image is byte-identical to an accepted opt-in gap, to both the guard
   and a human scanner. A distinct `accept-gap` token, permitted only behind a profile, makes

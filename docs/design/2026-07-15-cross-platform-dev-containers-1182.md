@@ -97,21 +97,30 @@ row** is one whose first cell is a backtick-wrapped token (`` `repo:tag` ``); th
 are skipped. A block with no data rows, a missing marker, a missing `ppc64le`/`Handling`
 header, or a data row with too few cells is a hard error (fail loudly, never pass vacuously).
 
-**Handling tokens.** Each data row's handling is one of a fixed set:
+**Handling tokens.** Each data row's handling is one of a fixed set; every token carries a
+ppc64le obligation the guard checks, so no token is an unconstrained escape hatch:
 
-| token | meaning |
-|---|---|
-| `rely-on-upstream` | use the upstream image as-is; it must publish ppc64le |
-| `mirror` | upstream lacks ppc64le; kdive repackages it as a multi-arch image |
-| `build-local` | built from the repo `Dockerfile` (arch proven by the buildx job) |
-| `accept-gap` | knowingly unsupported on ppc64le; permitted only behind an opt-in profile |
+| token | meaning | guard obligation |
+|---|---|---|
+| `rely-on-upstream` | use the upstream image as-is | ppc64le cell = ✅ |
+| `mirror` | upstream lacks ppc64le; kdive repackages it | row cites a tracking issue `#NNNN` |
+| `build-local` | built from the repo `Dockerfile` | a compose service that uses it has a `build:` key |
+| `accept-gap` | knowingly unsupported on ppc64le | image is used only by opt-in (profiled) services |
 
-**Compose profile parsing (stdlib, no pyyaml).** The guard scans `docker-compose.yml` with an
-indentation-aware pass over the `services:` block: each 2-space-indented `<name>:` starts a
-service; within it, `    image: <ref>` gives the image and the presence of a `    profiles:`
-key marks the service opt-in. An image is **default-profile** if at least one service that
-uses it has no `profiles:` key (i.e. `docker compose up` pulls it). `kdive:dev` appears on
-four default services → one default-profile entry.
+**Arch-column alphabet.** The three arch columns (`amd64`, `arm64`, `ppc64le`) use a fixed
+alphabet: `✅` (published), `❌` (not published), `—` (not applicable — e.g. a `build-local`
+image is built, not pulled per-arch). Any other value in an arch column is a hard error, so
+free prose cannot hide in the column assertion 3 reads (arch notes go in the `Role` column).
+
+**Compose parsing (stdlib, no pyyaml).** The guard does an indentation-aware pass that enters
+service-scanning only inside the top-level `services:` mapping and terminates at the next
+column-0 key — so the top-level `x-*` anchor maps (before `services:`) and `volumes:` (after)
+are never read as services. Inside `services:`, each 2-space-indented `<name>:` starts a
+service; within it `    image: <ref>` gives the image, a `    profiles:` key marks the service
+opt-in, and a `    build:` key marks it locally built. An image is **default-profile** if at
+least one service using it has no `profiles:` key (`docker compose up` pulls it); it is
+**built** if at least one service using it has a `build:` key. `kdive:dev` appears on four
+default services (one has `build: .`) → one default-profile, built entry.
 
 **What the guard asserts (static, no docker/network/POWER):**
 
@@ -120,17 +129,26 @@ four default services → one default-profile entry.
    regression case: a new/changed backing image slipped in) and any matrix row with no
    compose image (a stale row).
 2. **Handling validity.** Every row's handling token is in the fixed set above.
-3. **`rely-on-upstream` ⟹ ppc64le published.** A `rely-on-upstream` row's ppc64le cell must
-   be ✅. This is the core fence: an image relied on as-is that does not (or no longer does)
-   publish ppc64le fails, forcing either a `mirror`/`build-local`/`accept-gap` handling or a
-   real arch fix — it can no longer sit silently broken with a `rely-on-upstream` label.
-4. **`accept-gap` ⟹ opt-in only.** An `accept-gap` row's image must not be default-profile
-   (no un-profiled service uses it). A knowingly-accepted gap therefore cannot mask a broken
-   *core-loop* image; moving such an image onto a default service fails the guard.
+3. **`rely-on-upstream` ⟹ ppc64le published.** The row's ppc64le cell is exactly `✅` (after
+   trim); any other value on such a row is a hard error (fail-closed, not a "contains" match).
+   This is the core fence: an image relied on as-is that does not (or no longer does) publish
+   ppc64le fails, forcing a `mirror`/`build-local`/`accept-gap` handling or a real fix — it
+   cannot sit silently broken with a `rely-on-upstream` label.
+4. **`accept-gap` ⟹ opt-in only.** The image must not be default-profile (no un-profiled
+   service uses it). A knowingly-accepted gap cannot mask a broken *core-loop* image; moving
+   such an image onto a default service fails the guard.
+5. **`mirror` ⟹ tracked.** The row must cite a tracking issue (`#NNNN`) so a default-profile
+   gap under a `mirror` label is a visible, tracked follow-up — not a silent, green-forever
+   bypass of assertion 3 (relabelling a broken `rely-on-upstream` image to `mirror` now
+   requires naming the issue that will fix it).
+6. **`build-local` ⟹ actually built.** At least one compose service using the image has a
+   `build:` key. `build-local` is exempt from the ppc64le-cell gate because its arch is proven
+   by the buildx build job, not a pulled manifest; assertion 6 stops the token being borrowed
+   by a pulled upstream image to dodge assertion 3.
 
 Under these rules the current stack resolves as: postgres/minio/mc/prometheus =
-`rely-on-upstream` (ppc64le ✅); `oidc` = `mirror` (default-profile gap being fixed); grafana
-= `accept-gap` (opt-in `obs`); `kdive:dev` = `build-local`.
+`rely-on-upstream` (ppc64le ✅); `oidc` = `mirror` (default-profile gap, tracked #1183);
+grafana = `accept-gap` (opt-in `obs`); `kdive:dev` = `build-local` (has `build: .`).
 
 **What the guard deliberately does not do:** it does not run `docker manifest inspect` or
 otherwise probe live registries. Live arch verification needs docker + network and cannot run
@@ -182,14 +200,21 @@ detect an upstream arch drop at an unchanged pin; the buildx build job covers th
    - fails (non-zero, with a named diff) when an image is added to / removed from compose
      without a matching matrix change;
    - fails when a matrix row carries an unknown handling token;
-   - fails when a `rely-on-upstream` row's ppc64le cell is not ✅;
+   - fails when a `rely-on-upstream` row's ppc64le cell is not exactly ✅ (including empty or
+     prose);
+   - fails when any arch column holds a value outside `{✅, ❌, —}`;
    - fails when an `accept-gap` row's image is used by a default-profile (un-profiled) service;
+   - fails when a `mirror` row cites no tracking issue (`#NNNN`);
+   - fails when a `build-local` row's image is not built by any compose service (`build:`);
    - fails loudly (not vacuously) when the matrix block is missing, empty, or malformed.
 4. `just container-arch-check` is a recipe and is a member of the aggregate `just ci` recipe.
 5. The guard has unit tests covering: the happy path; image-missing-from-matrix drift;
    matrix-row-missing-from-compose drift; an invalid handling token; a `rely-on-upstream` row
-   with ppc64le ❌; an `accept-gap` row on a default-profile image; and a malformed/empty
-   matrix block (header/separator rows are not mistaken for data rows).
+   with ppc64le ❌; a `rely-on-upstream` row with a malformed/empty/prose ppc64le cell; an
+   out-of-alphabet arch cell; an `accept-gap` row on a default-profile image; a `mirror` row
+   with no `#NNNN`; a `build-local` row whose image no service builds; a malformed/empty matrix
+   block (header/separator rows are not mistaken for data rows); and a fixture with a top-level
+   `volumes:` block proving its 2-space-indented children are not parsed as services.
 6. Green: `just adr-status-check`, `just docs-links`, `just docs-paths`, `just check-mermaid`,
    `just container-arch-check`, and the full `just ci`.
 
@@ -198,11 +223,17 @@ detect an upstream arch drop at an unchanged pin; the buildx build job covers th
 - **Matrix parser brittleness.** A malformed matrix block (missing marker, missing column)
   must fail loudly, not pass vacuously. Mitigation: the guard errors if the marked block is
   absent or a row has too few columns, and a unit test asserts a vacuous/empty matrix fails.
-- **Compose image extraction misses a service.** The indentation-aware `image:`/`profiles:`
-  scan could miss an unusual line shape. Mitigation: a unit test pins the current full compose
-  image set and the default/opt-in classification of each service, so a parser change that
-  drops a service or mis-reads a `profiles:` key is caught; the extractor targets the
-  well-formed `    image: <ref>` / `    profiles:` line shape compose uses throughout.
+- **Compose image extraction misses a service or over-reads a non-service block.** The
+  indentation-aware scan could miss a line shape or ingest a top-level `volumes:`/`x-*` child
+  as a service. Mitigation: the scan is bounded to inside the top-level `services:` mapping
+  (stops at the next column-0 key); a unit test pins the current full compose image set with
+  each service's default/opt-in and built/pulled classification, and a fixture with a
+  top-level `volumes:` block asserts its children are not counted as services.
+- **A handling token used as an escape hatch.** `mirror` and `build-local` are exempt from the
+  ppc64le-cell gate; without bounds they could be borrowed to dodge assertion 3. Mitigation:
+  assertion 5 requires a `mirror` row to cite a tracking issue and assertion 6 requires a
+  `build-local` image to actually be built by a compose service — so every token has a checked
+  obligation. Unit tests pin both failing cases.
 - **Static guard cannot catch an upstream arch drop at an unchanged pin.** Accepted residual
   risk: assertion 3 fences a `rely-on-upstream` row whose *recorded* ppc64le cell is not ✅,
   but a tag that silently stops publishing ppc64le without a pin change is invisible to static
