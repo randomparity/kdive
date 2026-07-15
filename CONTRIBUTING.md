@@ -22,7 +22,10 @@ just setup   # check host deps, sync the locked venv, install and run git hooks
 `libvirt-python` has no prebuilt wheels and compiles against the system libvirt
 headers, so install `libvirt-dev` (or your distro's equivalent) before `just
 setup`; `just check-deps` reports any missing host packages. See the
-[README](README.md) for the full host-prerequisite list.
+[README](README.md) for the full host-prerequisite list. On `ppc64le` (POWER),
+`just check-deps` also requires a Rust toolchain — see the
+[cross-platform development guide](docs/development/cross-platform.md) for the
+per-arch prerequisites, container images, and POWER stack bring-up.
 
 ## The development loop
 

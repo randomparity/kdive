@@ -37,7 +37,9 @@ installing anything. On architectures without prebuilt wheels (e.g. `ppc64le`) a
 Rust toolchain ([rustup](https://rustup.rs)) is also required, since `pydantic-core`,
 `just`, and `prek` build from source. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the
 development loop and [`docs/operating/install.md`](docs/operating/install.md) for the
-full host-prerequisite list.
+full host-prerequisite list. Developing or running on `ppc64le` (POWER)? The
+[cross-platform guide](docs/development/cross-platform.md) covers the per-arch
+prerequisites, container images, and stack bring-up.
 
 ## Test environments
 

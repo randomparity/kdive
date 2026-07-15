@@ -35,6 +35,7 @@ processes against your backends.
 | Page | What it covers |
 |---|---|
 | [Contributing](../CONTRIBUTING.md) | Dev loop, branch and commit conventions, the PR gate |
+| [Cross-platform (x86_64 + ppc64le)](development/cross-platform.md) | Per-arch prerequisites, container images, POWER stack bring-up |
 | [Releasing](development/releasing.md) | Versioning policy and the release process |
 | [Architecture](../ARCHITECTURE.md) | Summary of the authoritative design |
 
