@@ -128,9 +128,12 @@ _CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
-def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
-    """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error."""
-    run_guestfs_tool(
+def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> str:
+    """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error.
+
+    Returns the tool's stdout; callers that only run for effect ignore it.
+    """
+    return run_guestfs_tool(
         argv,
         stage=stage,
         timeout_s=timeout_s,
@@ -156,30 +159,75 @@ def _real_virt_customize(qcow2: Path, argv: list[str]) -> None:  # pragma: no co
     )
 
 
+# The e2fsprogs-1.47 ext4 feature the build-host appliance mke2fs stamps by default. An EL <= 9
+# guest (e2fsprogs 1.46.5) runs its own e2fsck at boot (family FSTAB fsck passno 1) and rejects this
+# unknown feature, dropping the customization boot to emergency mode. Stripping it keeps the root
+# filesystem checkable by any older guest; it is distro-userspace skew, not arch (ADR-0351, #1152).
+_EXT4_INCOMPATIBLE_FEATURE = "orphan_file"
+
+
+def _feature_strip_needed(tune2fs_l_output: str) -> bool:
+    """Whether the built ext4 carries :data:`_EXT4_INCOMPATIBLE_FEATURE` and must be stripped.
+
+    The build host's libguestfs appliance is built from the host's own e2fsprogs, so the mke2fs
+    that builds the ext4 and the ``tune2fs`` that strips it are the **same** version. On a host with
+    e2fsprogs < 1.47 the feature is never stamped (and that older ``tune2fs`` would reject the
+    unknown ``^orphan_file`` token, failing the repack). Gating the strip on the feature actually
+    being present — parsed from ``tune2fs -l`` — keeps the repack correct on any build-host
+    e2fsprogs version: strip on >= 1.47 (where the incompatible feature exists), skip on older.
+
+    Args:
+        tune2fs_l_output: The stdout of ``tune2fs -l <raw-image>``.
+    """
+    for line in tune2fs_l_output.splitlines():
+        if line.lower().startswith("filesystem features:"):
+            return _EXT4_INCOMPATIBLE_FEATURE in line.split()
+    return False
+
+
 def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> None:
-    """Repack the customized root tree into a no-partition-table whole-disk ext4 qcow2."""
-    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as handle:
-        tar_path = Path(handle.name)
-    try:
+    """Repack the customized root tree into a no-partition-table whole-disk ext4 qcow2.
+
+    ``virt-make-fs`` builds the ext4 (as the proven path did) to a raw image; if the build host's
+    e2fsprogs stamped the EL <= 9-incompatible ``orphan_file`` feature it is stripped with
+    ``tune2fs`` (arch-neutral host metadata op) so the customization boot's guest fsck passes on
+    older distros; ``qemu-img`` converts the raw to the qcow2 the direct-kernel boot consumes
+    (ADR-0351).
+    """
+    # Stage the tar + whole-disk raw intermediate on the *workspace* volume (next to the final
+    # qcow2), not the default TMPDIR: TMPDIR is a memory-backed tmpfs on many hosts, and the raw is
+    # a whole-rootfs-sized image (default 6G), so writing it to /tmp risks ENOSPC/OOM on every
+    # build. The tar is unlinked as soon as virt-make-fs consumes it, so peak workspace usage is the
+    # concurrent scratch + raw + destination qcow2, not also the tar.
+    with tempfile.TemporaryDirectory(prefix="kdive-repack-", dir=qcow2.parent) as work:
+        tar_path = Path(work) / "root.tar"
+        raw_path = Path(work) / "root.raw"
         _run_libguestfs_tool(
             ["virt-tar-out", "-a", str(scratch), "/", str(tar_path)],
             stage="virt-tar-out",
             timeout_s=_REPACK_TIMEOUT_S,
         )
+        make_fs = ["virt-make-fs", "--type=ext4", "--format=raw", f"--size={size}"]
         _run_libguestfs_tool(
-            [
-                "virt-make-fs",
-                "--type=ext4",
-                "--format=qcow2",
-                f"--size={size}",
-                str(tar_path),
-                str(qcow2),
-            ],
+            [*make_fs, str(tar_path), str(raw_path)],
             stage="virt-make-fs",
             timeout_s=_REPACK_TIMEOUT_S,
         )
-    finally:
-        tar_path.unlink(missing_ok=True)
+        tar_path.unlink(missing_ok=True)  # virt-make-fs (sole consumer) done; free before convert
+        features = _run_libguestfs_tool(
+            ["tune2fs", "-l", str(raw_path)], stage="tune2fs-l", timeout_s=_REPACK_TIMEOUT_S
+        )
+        if _feature_strip_needed(features):
+            _run_libguestfs_tool(
+                ["tune2fs", "-O", f"^{_EXT4_INCOMPATIBLE_FEATURE}", str(raw_path)],
+                stage="tune2fs",
+                timeout_s=_REPACK_TIMEOUT_S,
+            )
+        _run_libguestfs_tool(
+            ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", str(raw_path), str(qcow2)],
+            stage="qemu-img",
+            timeout_s=_REPACK_TIMEOUT_S,
+        )
 
 
 def _grant_hypervisor_traversal(work_dir: Path) -> None:

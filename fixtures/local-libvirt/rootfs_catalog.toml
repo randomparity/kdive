@@ -52,6 +52,21 @@ drgn_version = "0.2.0"  # Fedora 43 repos as of the cloud build (0.2.0); the vir
                         # was built earlier and shipped 0.1.0 — both are >= the 0.0.31 BTF threshold
 source = { kind = "cloud-image", url = "https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2", sha256 = "846574c8a97cd2d8dc1f231062d73107cc85cbbbda56335e264a46e3a6c8ab2f" }  # pragma: allowlist secret
 
+# ppc64le sibling of fedora-kdive-ready-43-cloud (fedora-secondary tree). Same Fedora 43 Generic
+# cloud base, ppc64le arch; rides the rhel-family customize_via="boot" path (ADR-0345) for
+# cross-arch customization under TCG. makedumpfile/drgn mirror the x86_64 sibling — Fedora ships
+# arch-identical package versions (ADR-0350, #1152, epic #1139).
+[[image]]
+name = "fedora-kdive-ready-43-cloud-ppc64le"
+distro = "fedora"
+version = "43"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.8"  # mirrors fedora-kdive-ready-43-cloud (arch-invariant)
+drgn_version = "0.2.0"  # mirrors fedora-kdive-ready-43-cloud (Fedora 43 repos)
+source = { kind = "cloud-image", url = "https://dl.fedoraproject.org/pub/fedora-secondary/releases/43/Cloud/ppc64le/images/Fedora-Cloud-Base-Generic-43-1.6.ppc64le.qcow2", sha256 = "50c51fb73f01722b737031c333e92c0fe5bd0c3760421fe104bd888941cd41bb" }  # pragma: allowlist secret
+
 [[image]]
 name = "fedora-kdive-ready-44"
 distro = "fedora"
@@ -100,6 +115,10 @@ makedumpfile_version = "1.7.2"  # bundled in kexec-tools 2.0.26
 drgn_version = "0.0.32"  # EPEL 8 (0.0.32-1.el8)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/8/images/x86_64/Rocky-8-GenericCloud-Base-8.10-20240528.0.x86_64.qcow2", sha256 = "e56066c58606191e96184de9a9183a3af33c59bcbd8740d8b10ca054a7a89c14" }  # pragma: allowlist secret
 
+# N/A (ppc64le): Rocky 8 publishes no ppc64le port — its images/ppc64le/ tree is empty (Rocky 8 is
+# x86_64 + aarch64 only). No rocky-kdive-ready-8-ppc64le row; guarded by test_rootfs_catalog.py
+# (ADR-0350, #1152).
+
 [[image]]
 name = "rocky-kdive-ready-9"
 distro = "rocky"
@@ -110,6 +129,17 @@ kind = "debug"
 makedumpfile_version = "1.7.6"  # bundled in kexec-tools 2.0.29
 drgn_version = "0.0.33"  # EPEL 9 (python-drgn 0.0.33-2.el9)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2", sha256 = "92c206cc6f790c61583247eefe87890f8828420662c17cacf247cec78ab4eec8" }  # pragma: allowlist secret
+
+[[image]]
+name = "rocky-kdive-ready-9-ppc64le"
+distro = "rocky"
+version = "9"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.6"  # mirrors rocky-kdive-ready-9 (bundled in kexec-tools 2.0.29)
+drgn_version = "0.0.33"  # mirrors rocky-kdive-ready-9 (EPEL 9 python-drgn 0.0.33-2.el9, ppc64le)
+source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/9/images/ppc64le/Rocky-9-GenericCloud-Base-9.8-20260525.0.ppc64le.qcow2", sha256 = "811376d2a8126b0ebbf649179da8e0075a619e6208d3e14932da7f9a782f83bc" }  # pragma: allowlist secret
 
 [[image]]
 name = "rocky-kdive-ready-10"
@@ -123,6 +153,17 @@ drgn_version = "0.0.33"  # EPEL 10 (python-drgn 0.0.33-1.el10)
 source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.2-20260525.0.x86_64.qcow2", sha256 = "9fc9e9ff16888bb68ac39b0392e25c9c92684d50c85f1cce6ab549363bbc4b48" }  # pragma: allowlist secret
 
 [[image]]
+name = "rocky-kdive-ready-10-ppc64le"
+distro = "rocky"
+version = "10"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.8"  # mirrors rocky-kdive-ready-10 (separate pkg, el10)
+drgn_version = "0.0.33"  # mirrors rocky-kdive-ready-10 (EPEL 10 python-drgn 0.0.33-1.el10, ppc64le)
+source = { kind = "cloud-image", url = "https://dl.rockylinux.org/pub/rocky/10/images/ppc64le/Rocky-10-GenericCloud-Base-10.2-20260525.0.ppc64le.qcow2", sha256 = "06ab97a625392776028dde8ef5d663550ca6e6e162efc5993fd398f59477bd42" }  # pragma: allowlist secret
+
+[[image]]
 name = "centos-stream-kdive-ready-9"
 distro = "centos-stream"
 version = "9"
@@ -134,6 +175,17 @@ drgn_version = "0.0.33"  # EPEL 9 (python-drgn 0.0.33-2.el9)
 source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20260622.0.x86_64.qcow2", sha256 = "ed8421c7ce25d0e21cbeb561c906f52b2eed2a99aa3df88ec7616773ae1ebd1a" }  # pragma: allowlist secret
 
 [[image]]
+name = "centos-stream-kdive-ready-9-ppc64le"
+distro = "centos-stream"
+version = "9"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.6"  # mirrors centos-stream-kdive-ready-9 (bundled in kexec-tools 2.0.29)
+drgn_version = "0.0.33"  # mirrors centos-stream-kdive-ready-9 (EPEL 9 python-drgn 0.0.33-2.el9, ppc64le)
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/9-stream/ppc64le/images/CentOS-Stream-GenericCloud-9-20260622.0.ppc64le.qcow2", sha256 = "11f12407e0f19f067fd90692f66b5c0c9e75fce8503c3e1d5cfe20268b8e0ec8" }  # pragma: allowlist secret
+
+[[image]]
 name = "centos-stream-kdive-ready-10"
 distro = "centos-stream"
 version = "10"
@@ -143,6 +195,17 @@ kind = "debug"
 makedumpfile_version = "1.7.8"  # separate pkg, el10
 drgn_version = "0.0.33"  # EPEL 10 (python-drgn 0.0.33-1.el10)
 source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260622.0.x86_64.qcow2", sha256 = "508a48761d1a28c98046256e8f77b0ea34d751791a5629bb216743ef98526d0b" }  # pragma: allowlist secret
+
+[[image]]
+name = "centos-stream-kdive-ready-10-ppc64le"
+distro = "centos-stream"
+version = "10"
+family = "rhel"
+arch = "ppc64le"
+kind = "debug"
+makedumpfile_version = "1.7.8"  # mirrors centos-stream-kdive-ready-10 (separate pkg, el10)
+drgn_version = "0.0.33"  # mirrors centos-stream-kdive-ready-10 (EPEL 10 python-drgn 0.0.33-1.el10, ppc64le)
+source = { kind = "cloud-image", url = "https://cloud.centos.org/centos/10-stream/ppc64le/images/CentOS-Stream-GenericCloud-10-20260622.0.ppc64le.qcow2", sha256 = "6d1ac346df9931c54fc8e88f496427d1123f1f5018b3ce8cd5ff307b835d217b" }  # pragma: allowlist secret
 
 # Debian-family entries (Debian 12 bookworm + 13 trixie, ADR-0251 / #824), built via
 # `build-fs --image <name>` from their sha256-pinned genericcloud bases (versioned serial paths, not
@@ -169,3 +232,13 @@ kind = "debug"
 makedumpfile_version = "1.7.6"  # trixie
 drgn_version = "0.0.31"  # trixie (python3-drgn 0.0.31-1); at the BTF-capability threshold
 source = { kind = "cloud-image", url = "https://cloud.debian.org/images/cloud/trixie/20260623-2518/debian-13-genericcloud-amd64-20260623-2518.qcow2", sha256 = "e32d03ec8f05b0b3a4c16e8cc0a5424efa78514141a60a2656623cf422cc6416" }  # pragma: allowlist secret
+
+# N/A (ppc64le, deferred to #1167): Debian publishes only the `generic`/`nocloud` ppc64el variant,
+# not the `genericcloud` variant these x86_64 rows pin, and the debian family is still
+# customize_via="virt_customize" — it cannot cross-arch customize-boot on an x86_64 host until the
+# debian->boot migration (#1167) lands. Debian ppc64le rows are added there, not here; guarded by
+# test_rootfs_catalog.py (ADR-0350, #1152).
+#
+# Scope note (ppc64le): fedora-kdive-build-44 (build-host toolchain) gets no ppc64le sibling — a
+# ppc64le build host only matters for compiling ppc64le kernels, a lane unproven in epic #1139;
+# shipping one would be a speculative, unusable row (ADR-0350).

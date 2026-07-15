@@ -123,3 +123,16 @@ def test_firstboot_unit_orders_after_network_and_wants_multiuser() -> None:
     assert "Type=oneshot" in unit
     assert "ExecStart=/usr/local/sbin/kdive-customize" in unit
     assert "WantedBy=multi-user.target" in unit
+
+
+def test_firstboot_unit_disables_the_systemd_start_timeout() -> None:
+    """The oneshot must set ``TimeoutStartSec=infinity`` (#1152).
+
+    A customization that installs packages can easily exceed systemd's default 90s
+    ``DefaultTimeoutStartSec`` (a slow dnf under TCG, or a large native install); without this,
+    systemd SIGTERMs the service mid-install, the script's EXIT trap fires the ``-failed`` marker,
+    and the build fails for a reason unrelated to the customization. The host orchestration's
+    TCG-scaled window is the authoritative deadline, so the unit must not impose a shorter one.
+    """
+    unit = render_firstboot_unit(script_path="/usr/local/sbin/kdive-customize")
+    assert "TimeoutStartSec=infinity" in unit

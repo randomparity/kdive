@@ -48,11 +48,47 @@ from kdive.images.rootfs.catalog import (
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.baseline_kernel import BaselineKernel
 from kdive.providers.local_libvirt.rootfs_build import (
+    _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
+    _feature_strip_needed,
     _parse_os_release,
     family_for,
 )
+
+
+def test_feature_strip_needed_true_when_orphan_file_present() -> None:
+    """The EL<=9-incompatible ``orphan_file`` (e2fsprogs 1.47) triggers the strip (ADR-0351).
+
+    Older-guest e2fsck (EL9 e2fsprogs 1.46.5) rejects the feature the build-host appliance stamps
+    by default, dropping the customize boot to emergency mode; the strip keeps the fs checkable.
+    """
+    assert _EXT4_INCOMPATIBLE_FEATURE == "orphan_file"
+    out = (
+        "Filesystem volume name:   <none>\n"
+        "Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file "
+        "filetype extent 64bit flex_bg metadata_csum_seed sparse_super metadata_csum\n"
+    )
+    assert _feature_strip_needed(out) is True
+
+
+def test_feature_strip_needed_false_when_absent() -> None:
+    """A pre-1.47 build host never stamps ``orphan_file``; the strip is skipped (and its older
+    ``tune2fs`` would reject the ``^orphan_file`` token), so the repack works on any e2fsprogs.
+    """
+    out = (
+        "Filesystem features:      has_journal ext_attr resize_inode dir_index filetype extent "
+        "64bit flex_bg metadata_csum_seed sparse_super metadata_csum\n"
+    )
+    assert _feature_strip_needed(out) is False
+
+
+def test_feature_strip_needed_false_on_malformed_or_substring() -> None:
+    # No features line at all -> skip (fail-safe: don't strip what we can't confirm is present).
+    assert _feature_strip_needed("Inode count: 12345\n") is False
+    # Guard against a naive substring match: a feature merely containing the token is not it.
+    other = "Filesystem features: has_orphan_file_backup metadata_csum\n"
+    assert _feature_strip_needed(other) is False
 
 
 def _spec(**overrides: object) -> RootfsBuildSpec:
