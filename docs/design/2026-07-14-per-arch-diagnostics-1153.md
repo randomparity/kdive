@@ -45,10 +45,17 @@ operators so a TCG-only guest arch is legible rather than a silent surprise at b
   when it is the host's native arch **and** the host has KVM; otherwise **TCG**. The
   authoritative per-provision accel is what libvirt reports in its capabilities
   (`parse_guest_arches` reads `<domain type='kvm'>`), persisted on the System at
-  provision time. The host-KVM signal libvirt itself gates that on is the **presence**
-  of `/dev/kvm` — a stat that succeeds regardless of the *worker* process's uid, so a
-  presence probe does not diverge from libvirt for a non-root worker under
-  `qemu:///system` (the way a worker-uid `/dev/kvm` R+W probe would).
+  provision time. **The right host-KVM probe is URI-dependent**, because
+  `<domain type='kvm'>` is gated on *which uid runs qemu*:
+  - Under `qemu:///system` (the default) qemu runs as the privileged qemu/libvirtd uid,
+    so the signal is `/dev/kvm` **presence** (`os.path.exists`) — succeeds regardless of
+    the *worker* uid, matching libvirt for a non-root worker (a R+W probe would falsely
+    report TCG).
+  - Under `qemu:///session` qemu runs as the **worker** uid, so the signal is worker-uid
+    **openability** (`os.access(/dev/kvm, R_OK|W_OK)`) — presence alone would falsely
+    report KVM when the worker uid cannot open the node and libvirt advertises only TCG.
+
+  `KDIVE_LIBVIRT_URI` (`settings.LIBVIRT_URI`, default `qemu:///system`) selects which.
 - `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`) scales boot-readiness
   deadlines for TCG guests; `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` (default 1800s)
   is the native base for the customization boot, TCG-scaled by the same multiplier.
@@ -68,27 +75,40 @@ TCG-only. Modeled on `pseries_fadump` / `multiarch_gdb`:
   (`qemu_system_binary(arch)`); if `which(binary)` is present, record
   `accel = "kvm"` iff `arch == host_arch and kvm_present()` else `"tcg"`. Injected
   seams (`host_arch=platform.machine()`, `supported=SUPPORTED_ARCHES`,
-  `which=shutil.which`, `kvm_present` = `/dev/kvm` **presence** probe —
-  `os.path.exists`, *not* a worker-uid R+W test, per the accel rule above) so it is
-  unit-tested with no real host. Returns the accel map plus whether the host's own
-  native arch is schedulable here (its emulator present).
+  `which=shutil.which`, `kvm_present` = the URI-selected `/dev/kvm` probe from the rule
+  above — presence for `qemu:///system`, worker-uid openability for `qemu:///session`,
+  built once from the resolved `LIBVIRT_URI`) so it is unit-tested with no real host.
+  Returns the accel map plus whether the host's own native arch is schedulable here (its
+  emulator present).
 - **Check** `GuestArchAccelCheck` maps the probe result to a `CheckResult`:
   - **FAIL** when the host's own native arch is a supported arch **and** its emulator
     is absent — the host cannot schedule even its native guests, which `doctor` (the
-    only post-deploy surface) must surface. `fix` names the exact native qemu package;
-    `failure_category=MISSING_DEPENDENCY`. This is the one schedulability floor the
-    check gates.
-  - **PASS** otherwise, `data` = the accel map, `detail` naming the distinction, e.g.
-    `"schedulable guest arches: x86_64 (KVM native), ppc64le (TCG-only)"`. A host whose
-    own arch is **not** a supported arch (kdive cannot provision natively there anyway)
-    also PASSes, reporting only whatever foreign emulators are present — no native
-    expectation, no crash, no silent x86 assumption.
+    only post-deploy surface) must surface. `fix` names the **qemu binary** for the
+    native arch plus a generic "install it via your distribution package manager (see
+    `scripts/check-setup-deps.sh` for per-distro hints)" — matching the
+    `MULTIARCH_GDB_MISSING_FIX`/`PSERIES_FADUMP_UNSUPPORTED_FIX` style; the Python check
+    has no distro detection, so per-distro package names stay in the shell dep-checker
+    and the docs. `failure_category=MISSING_DEPENDENCY`. This is the one schedulability
+    floor the check gates.
+  - **PASS** otherwise, `data` = the accel map, `detail` naming the distinction. When
+    the host's **native** arch resolves to `tcg` (its emulator is present but KVM is
+    unavailable — `/dev/kvm` absent, or unopenable under `qemu:///session`), the
+    `detail` calls that out explicitly, e.g. `"native arch x86_64 is TCG-only (host KVM
+    unavailable); ppc64le TCG-only"` — so the ~10× degradation is legible in the
+    human-readable line, not buried in `data`, even though the host still provisions
+    (slowly) and so does not FAIL. A host whose own arch is **not** a supported arch
+    (kdive cannot provision natively there anyway) also PASSes, reporting only whatever
+    foreign emulators are present — no native expectation, no crash, no silent x86
+    assumption.
   - **ERROR** only if the probe itself leaks an exception (the framework's `run_check`
     maps it), so no explicit error branch is authored.
 
   The accel map is **data** (the distinction Acceptance-1 requires); the native-arch
   floor is the **pass/fail** — one coherent check: "which guest arches are schedulable
-  and at what accel, and can the host schedule its own native arch."
+  and at what accel, and can the host schedule its own native arch." The distinction
+  between the FAIL and the native-TCG PASS is *broken vs degraded*: no native emulator
+  means the host cannot provision its arch **at all** (FAIL); native-under-TCG still
+  provisions, only slower (PASS, but flagged in `detail`).
 - **Wiring**: added to the single local-libvirt contribution in
   `diagnostics/multiarch_gdb.py` (`_worker_checks` + `_unavailable_worker_checks`), so
   it rides the one local dispatcher alongside the other two worker checks — no second
@@ -118,6 +138,13 @@ Acceptance-1 (doctor distinguishes native-KVM vs TCG-only) is met by the `detail
   natively there) and prints one explicit line — `host arch <X> is not a supported
   kdive provisioning arch (supported: ppc64le, x86_64)` — rather than falling back to
   the x86 emulator. It still lists any supported-arch emulators present as TCG-only.
+- **Left unchanged**: the existing `_has_kvm` gate (`[[ -r && -w /dev/kvm ]]` →
+  `note_fail`). This is an operator-vantage, pre-deploy *readiness* check ("can the user
+  who will run the worker use KVM"), a deliberately stricter, different question than the
+  doctor check's URI-selected worker-uid accel probe. Harmonizing the two KVM semantics
+  is out of scope for this issue; this issue only adds the per-arch emulator probe and
+  the TCG advisory to the script. The divergence is intentional and noted here so the
+  two surfaces are not mistaken for answering the identical question.
 
 ### C. `scripts/check-setup-deps.sh` — per-arch qemu probes + advisory
 
@@ -156,12 +183,17 @@ and the dep-checker cannot disagree.
 
 ## Success criteria (falsifiable)
 
-1. `doctor --json` on a host with both emulators and `/dev/kvm` present yields a
+1. `doctor --json` on a host with both emulators and KVM available yields a
    `guest_arch_accel` row, `status=pass`, with `data` mapping the native arch to `kvm`
-   and the foreign arch to `tcg`, and a `detail` naming both. On a host with `/dev/kvm`
-   **absent**, the native arch maps to `tcg`. On a host missing its **native** arch's
-   emulator, the row is `status=fail` with a fix naming the native qemu package. (unit
-   + a `test_provider_checks`-style assertion)
+   and the foreign arch to `tcg`, and a `detail` naming both. On a host where the native
+   arch's KVM is unavailable (`/dev/kvm` absent under `qemu:///system`, or unopenable by
+   the worker uid under `qemu:///session`), the native arch maps to `tcg` and the
+   `detail` says so explicitly ("native arch … is TCG-only (host KVM unavailable)"). On
+   a host missing its **native** arch's emulator, the row is `status=fail` with a fix
+   naming the native qemu **binary** (e.g. `qemu-system-ppc64`) and the generic
+   distribution hint. The URI-dependent KVM probe is unit-tested for both
+   `qemu:///system` (presence) and `qemu:///session` (worker-uid openability). (unit +
+   a `test_provider_checks`-style assertion)
 2. `check-setup-deps.sh` under a stubbed `uname -m=ppc64le` names `qemu-system-ppc`
    for the native tier and, with no `qemu-system-x86_64` on PATH, advises the x86
    package for cross-arch; under `uname -m=x86_64` it symmetrically advises
@@ -189,7 +221,18 @@ and the dep-checker cannot disagree.
   under `qemu:///system`): the presence probe still sees the node, so the native arch
   stays `kvm` — matching libvirt, which runs the domain as the qemu uid and gates
   `<domain type='kvm'>` on `/dev/kvm` presence, not on the worker's access. A worker-uid
-  R+W probe would falsely report `tcg` here; the presence probe deliberately does not.
+  R+W probe would falsely report `tcg` here; presence deliberately does not.
+- **`qemu:///session` with a worker uid that cannot open `/dev/kvm`**: qemu runs as the
+  worker uid, so libvirt advertises only TCG; the URI-selected openability probe returns
+  false → native arch maps to `tcg`, matching libvirt. Presence alone would over-report
+  `kvm` here — the inverse of the `qemu:///system` case — which is why the probe is
+  URI-selected, not fixed to presence.
+- **Native KVM lost post-deploy** (kvm module unloaded, virtualization toggled off,
+  `/dev/kvm` removed): the native emulator is still present, so the host still provisions
+  — under TCG, ~10× slower. This is a **degradation, not a break**, so it is a PASS, but
+  the `detail` flags "native arch … is TCG-only (host KVM unavailable)" so an operator
+  watching `doctor` sees the silent TCG fallback rather than a bare green. Contrast the
+  native-emulator-*absent* case, which cannot provision the native arch at all → FAIL.
 - **qemu binary asymmetry**: `qemu_binary_for_arch(ppc64le)` must be `qemu-system-ppc64`
   in both shell and Python; a regression test pins the mapping.
 

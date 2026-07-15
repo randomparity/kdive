@@ -27,16 +27,23 @@ and the TCG-only story is unstated.
 
 Three facts constrain the decision:
 
-1. **The accel facts already exist.** Discovery derives them from libvirt capabilities
-   (`parse_guest_arches` reads `<domain type='kvm'>`, the qemu/libvirtd view), persisted
-   on the System at provision. A diagnostic that re-observes the host must not diverge
-   from that for a benign reason. The host-KVM signal libvirt gates `<domain
-   type='kvm'>` on is the **presence** of `/dev/kvm`; a guest arch is KVM when it is the
-   host's native arch and `/dev/kvm` is present, else TCG. Presence (not a *worker*-uid
-   R+W test) is the right probe: a non-root worker under `qemu:///system` — an
-   explicitly-supported deployment — cannot R+W `/dev/kvm`, yet qemu (the qemu uid) still
-   KVM-accelerates the domain, so a R+W probe would falsely report a real KVM arch as
-   TCG. `os.path.exists('/dev/kvm')` succeeds regardless of the worker's uid.
+1. **The accel facts already exist, and the right KVM probe is URI-dependent.**
+   Discovery derives accel from libvirt capabilities (`parse_guest_arches` reads
+   `<domain type='kvm'>`, the qemu/libvirtd view), persisted on the System at provision.
+   A diagnostic that re-observes the host must not diverge from that for a benign reason.
+   libvirt advertises `<domain type='kvm'>` based on **whether the uid that runs qemu can
+   use `/dev/kvm`**, and that uid depends on the connection URI (`KDIVE_LIBVIRT_URI`, both
+   `qemu:///system` and `qemu:///session` are supported):
+   - `qemu:///system` (default): qemu runs as the privileged qemu/libvirtd uid → the
+     host signal is `/dev/kvm` **presence** (`os.path.exists`), which succeeds regardless
+     of the *worker* uid. A worker-uid R+W probe would falsely report a real KVM arch as
+     TCG for a non-root worker.
+   - `qemu:///session`: qemu runs as the **worker** uid → the signal is worker-uid
+     **openability** (`os.access(/dev/kvm, R_OK|W_OK)`). Presence alone would falsely
+     report KVM when the worker uid cannot open the node and libvirt advertises only TCG.
+
+   A guest arch is KVM when it is the host's native arch and the URI-selected KVM signal
+   holds, else TCG.
 2. **The doctor model forbids self-oracle checks.** ADR-0091 says a check observes the
    host, not kdive's own recorded state. The two prior local worker-vantage checks
    (`multiarch_gdb`, `pseries_fadump`) both probe the worker's PATH with no DB/libvirt
@@ -54,18 +61,23 @@ per-arch model.
 
 - **`guest_arch_accel` check** reports, per schedulable guest arch (its qemu emulator is
   on the worker's PATH), whether it runs under KVM or is TCG-only. It probes PATH +
-  `/dev/kvm` **presence** directly (`host_arch`, `supported`, `which`, `kvm_present` are
-  injected), so it needs no DB or libvirt call and cannot diverge from a stale
-  inventory. It carries the accel map in `CheckResult.data` (serialized into `doctor
-  --json`) and names the distinction in `detail`.
+  the URI-selected `/dev/kvm` signal directly (`host_arch`, `supported`, `which`,
+  `kvm_present` are injected), so it needs no DB or libvirt call and cannot diverge from
+  a stale inventory. It carries the accel map in `CheckResult.data` (serialized into
+  `doctor --json`) and names the distinction in `detail`, explicitly flagging when the
+  **native** arch is TCG-only (host KVM unavailable) so the ~10× degradation is legible.
 - **The check FAILs on exactly one condition — the host cannot schedule its own native
   arch.** When the host's own arch is a supported arch and its qemu emulator is absent,
   the host cannot run even native guests; `doctor` is the only post-deploy surface, so
-  it FAILs with a `MISSING_DEPENDENCY` fix naming the native qemu package. Otherwise the
-  check PASSes, carrying the accel map. A **foreign** arch's absence never fails
-  (cross-arch is optional), and a host whose own arch kdive does not support PASSes with
-  no native expectation. The accel map is the *data*; native schedulability is the
-  *pass/fail* — one coherent check, not two responsibilities.
+  it FAILs with a `MISSING_DEPENDENCY` fix naming the native qemu **binary** (e.g.
+  `qemu-system-ppc64`) plus a generic "install via your distribution package manager"
+  hint — matching the `multiarch_gdb`/`pseries_fadump` fix style; the Python check has no
+  distro detection, so per-distro package names live in the shell dep-checker and docs.
+  Otherwise the check PASSes, carrying the accel map. A **foreign** arch's absence never
+  fails (cross-arch is optional); native-arch-under-TCG PASSes (still provisions, only
+  slower — *degraded, not broken*) but is flagged in `detail`; and a host whose own arch
+  kdive does not support PASSes with no native expectation. The accel map is the *data*;
+  native schedulability is the *pass/fail* — one coherent check, not two.
 - **`check-local-libvirt.sh`** probes the **host-native** qemu binary (arch-derived,
   fixing the x86 hardcode) as its required check, and prints an informational
   "guest arch X available via TCG only" line when a foreign emulator is present.
@@ -87,11 +99,14 @@ No migration, no new dependency, no schema or state change.
   the service is running), and the exact foreign-arch package at dep-check/install time,
   on either host arch.
 - The accel rule is re-observed by this check independently of discovery, but both key
-  off the same host fact (`/dev/kvm` presence = what libvirt gates `<domain type='kvm'>`
-  on), so they agree for the supported deployments — including a non-root worker under
-  `qemu:///system`. The residual case where libvirt could still refuse KVM despite
-  `/dev/kvm` being present (e.g. a per-domain restriction) is rare and is not treated as
-  a defect by this informational map. Both paths are pinned by tests.
+  off the same host fact — whether the uid that runs qemu can use `/dev/kvm` — via the
+  URI-selected probe, so they agree for both supported deployments (`qemu:///system`
+  presence, `qemu:///session` worker-uid openability), including a non-root worker under
+  `qemu:///system`. Both paths are pinned by tests.
+- `check-local-libvirt.sh` keeps its stricter operator-vantage `_has_kvm` R+W readiness
+  gate unchanged; that pre-deploy question ("can the user who runs the worker use KVM")
+  is deliberately distinct from the URI-selected worker-uid accel probe, and harmonizing
+  the two is out of this issue's scope. The divergence is noted, not silently left.
 - The arch→qemu-binary asymmetry now has a Python home and a regression test, closing a
   latent `qemu-system-$(uname -m)` trap for a future arch.
 - Adding a future arch is one `SUPPORTED_ARCHES` row plus one qemu-binary-map entry (and
@@ -107,10 +122,19 @@ No migration, no new dependency, no schema or state change.
   that cannot provision its own arch. The pre-deploy scripts do not "gate" a post-deploy
   fault they never run for. Failing only on the native-arch floor (never on optional
   foreign arches) closes that blind spot without turning the accel map into a gate.
-- **Probe worker-uid `/dev/kvm` read/write instead of presence.** Rejected: a non-root
-  worker under `qemu:///system` cannot R+W `/dev/kvm`, yet qemu KVM-accelerates the
-  domain — a R+W probe would falsely report a real KVM arch as TCG at the exact surface
-  meant to make accel legible. Presence matches libvirt's own KVM gating.
+- **Fix the KVM probe to a single semantic (always presence, or always worker-uid
+  R+W).** Rejected: neither is correct for both supported URIs. Always-presence
+  over-reports KVM under `qemu:///session` (qemu runs as the worker uid; presence stays
+  true even when that uid cannot open the node and libvirt advertises TCG); always-R+W
+  under-reports KVM under `qemu:///system` (a non-root worker cannot R+W `/dev/kvm`, yet
+  the privileged qemu uid KVM-accelerates). Both are false reports at the exact surface
+  meant to make accel legible, so the probe is URI-selected to match libvirt.
+- **Name the exact per-distro package in the doctor FAIL fix.** Rejected: `package_for`
+  is shell-only and needs os-release distro detection the Python check does not have;
+  duplicating it in Python invites drift. The sibling worker checks name generic tooling
+  for the same reason. The FAIL names the qemu binary + a generic hint; per-distro
+  packages stay in the shell dep-checker and the install docs (where distro detection
+  actually lives).
 - **Fail on an absent *foreign* emulator.** Rejected: cross-arch (TCG) guests are
   optional; their absence is a normal single-arch host, not a defect.
 - **Read the accel map from the persisted `guest_arches` inventory instead of probing.**
