@@ -211,7 +211,7 @@ uv run python -m pytest -m live_vm_tcg --collect-only -q | tail -1
 uv run python -m pytest -m "live_vm and not live_vm_tcg" --collect-only -q | tail -1
 uv run python -m pytest -m "not live_vm and not live_stack" --collect-only -q | tail -1
 ```
-Expected: `4 ... tests collected` (tcg tier); `11 ... tests collected` (native `live_vm`, unchanged); the `just test` selector count unchanged from `main` (the four stay excluded via `live_stack`).
+Expected: `4 ... tests collected` (tcg tier); `11 ... tests collected` (native `live_vm`, unchanged). The four proofs stay **deselected** from the `just test` selector (`-m "not live_vm and not live_stack"`), still excluded via their `live_stack` marker — confirm none of the four names appear in that collection. (The total `just test` count is *not* expected to match `main`: Task 2 already added the gate's unit tests and Task 4 will add the meta-test — both non-live, so they intentionally join the `just test` suite, a +5 delta by the end of Task 4.)
 
 - [ ] **Step 5: Lint + type (catches the removed-import / unused-`shutil` cleanup).**
 
