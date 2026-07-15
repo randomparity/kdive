@@ -97,6 +97,19 @@ def test_merge_key_service_still_carries_its_image() -> None:
     assert images["postgres:17"].default_profile
 
 
+def test_env_default_interpolation_resolves_to_default() -> None:
+    """The app image is parameterized `${KDIVE_IMAGE:-kdive:dev}` so the compose smoke can drive
+    a pre-built tag (ADR-0359); the guard must read it as its default `kdive:dev` — matching the
+    matrix — not as the literal interpolation string. Its `build:` usage is preserved."""
+    compose = GOOD_COMPOSE.replace(
+        "    image: kdive:dev\n", "    image: ${KDIVE_IMAGE:-kdive:dev}\n"
+    )
+    images = parse_compose(compose)
+    assert "kdive:dev" in images
+    assert images["kdive:dev"].built
+    assert evaluate(compose, GOOD_MATRIX) == []
+
+
 def test_image_in_compose_missing_from_matrix() -> None:
     compose = GOOD_COMPOSE.replace("  app:\n", "  cache:\n    image: redis:7\n  app:\n", 1)
     violations = evaluate(compose, GOOD_MATRIX)

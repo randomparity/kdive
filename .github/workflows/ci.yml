@@ -190,10 +190,14 @@ jobs:
       - name: Image smoke test
         # The job never runs `uv sync`, so kdive is not importable; --no-project keeps it
         # that way and --noconftest skips the root conftest (which imports kdive.config).
-        # The smoke test needs no fixtures — only stdlib + pytest + `docker run`.
+        # The whole tests/image/ dir needs no fixtures — only stdlib + pytest, `docker run`
+        # (test_image_smoke), and the compose v2 plugin (test_compose_smoke, which brings up
+        # the app tier against real backends and waits for the server /readyz healthcheck).
+        # This runs on amd64: the server /readyz gates on the OIDC mock, which has no ppc64le
+        # image (ADR-0356/0359), so the ppc64le runtime proof is deferred to that mirror.
         run: >-
           uv run --no-project --with pytest
-          pytest --noconftest tests/image/test_image_smoke.py -q
+          pytest --noconftest tests/image/ -q
         env:
           KDIVE_IMAGE: kdive:ci
 
