@@ -198,6 +198,7 @@ print_cross_arch_advisory() {
   for arch in "${SUPPORTED_ARCHES[@]}"; do
     [[ "${arch}" == "${host}" ]] && continue
     binary="$(qemu_binary_for_arch "${arch}")"
+    [[ -z "${binary}" ]] && continue # a supported arch with no binary mapping: skip, don't advise ""
     if command_exists "${binary}"; then
       printf "\nguest arch %s: available via TCG only (%s)\n" "${arch}" "${binary}"
     else
@@ -235,8 +236,9 @@ require_command recommended npm "${distro}"
 future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
 # Require the host's native qemu emulator only on a supported host arch (an unsupported arch has
 # no native qemu KDIVE can name; the cross-arch advisory below reports that instead).
-if arch_is_supported "${host_arch}"; then
-  future_cmds+=("$(qemu_binary_for_arch "${host_arch}")")
+native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
+  future_cmds+=("${native_qemu}")
 fi
 for cmd in "${future_cmds[@]}"; do
   require_command future "${cmd}" "${distro}"

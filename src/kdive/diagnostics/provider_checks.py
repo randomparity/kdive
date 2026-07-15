@@ -411,6 +411,10 @@ class GuestArchAccelReport:
         native_emulator_present: Whether the qemu emulator for ``native_arch`` is on PATH.
         native_qemu_binary: The qemu system-emulator binary name for ``native_arch``, or
             ``None`` when the host arch is unsupported (so no native binary is expected).
+        target_is_local: Whether the configured libvirt URI runs guests on this worker (a local
+            hypervisor). ``False`` for a transport URI (``qemu+ssh://…``) whose guests run on
+            another host, where the worker's PATH/``/dev/kvm`` do not describe the target — so the
+            native-emulator FAIL is suppressed and the accel map is scoped as worker-local.
     """
 
     accel_by_arch: Mapping[str, str]
@@ -418,6 +422,7 @@ class GuestArchAccelReport:
     native_supported: bool
     native_emulator_present: bool
     native_qemu_binary: str | None
+    target_is_local: bool = True
 
 
 GuestArchAccelProbe = Callable[[], Awaitable[GuestArchAccelReport]]
@@ -430,11 +435,19 @@ def _accel_phrase(arch: str, accel: str) -> str:
 def _describe_accel(report: GuestArchAccelReport) -> str:
     """Render the human-readable accel summary, flagging a native arch that fell to TCG."""
     if not report.accel_by_arch:
-        return "no qemu system emulator found on PATH; no guest arch is schedulable here"
-    parts = [_accel_phrase(a, report.accel_by_arch[a]) for a in sorted(report.accel_by_arch)]
-    detail = "schedulable guest arches: " + ", ".join(parts)
-    if report.accel_by_arch.get(report.native_arch) == "tcg":
-        detail = f"native arch {report.native_arch} is TCG-only (host KVM unavailable); " + detail
+        detail = "no qemu system emulator found on PATH; no guest arch is schedulable here"
+    else:
+        parts = [_accel_phrase(a, report.accel_by_arch[a]) for a in sorted(report.accel_by_arch)]
+        detail = "schedulable guest arches: " + ", ".join(parts)
+        if report.accel_by_arch.get(report.native_arch) == "tcg":
+            detail = (
+                f"native arch {report.native_arch} is TCG-only (host KVM unavailable); " + detail
+            )
+    if not report.target_is_local:
+        detail += (
+            " (probing the local worker host; the configured libvirt URI targets a remote host, "
+            "so guests may run elsewhere)"
+        )
     return detail
 
 
@@ -463,7 +476,14 @@ class GuestArchAccelCheck(Check):
     async def run(self) -> CheckResult:
         report = await self._probe()
         data = dict(report.accel_by_arch) or None
-        if report.native_supported and not report.native_emulator_present:
+        # Only gate native schedulability for a local target: for a remote/transport URI the
+        # emulator lives on another host this worker-vantage probe cannot see, so a missing local
+        # emulator is not a real schedulability failure (never a confident wrong FAIL).
+        if (
+            report.native_supported
+            and not report.native_emulator_present
+            and report.target_is_local
+        ):
             return CheckResult(
                 check_id=self.id,
                 status=CheckStatus.FAIL,

@@ -110,13 +110,14 @@ done
 # rather than failed for a missing x86 emulator. Each supported foreign arch whose emulator is
 # present is advertised as TCG-only (informational; the native arch runs under KVM).
 host_arch="$(uname -m 2>/dev/null || true)"
-if arch_is_supported "${host_arch}"; then
-  native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
   _cmd "${native_qemu}" || note_fail "${native_qemu} not found on PATH" \
     "install it via your distribution (see scripts/check-setup-deps.sh hints)"
   for guest_arch in "${SUPPORTED_ARCHES[@]}"; do
     [[ "${guest_arch}" == "${host_arch}" ]] && continue
     foreign_qemu="$(qemu_binary_for_arch "${guest_arch}")"
+    [[ -z "${foreign_qemu}" ]] && continue
     _cmd "${foreign_qemu}" && printf \
       "guest arch %s available via TCG only (foreign emulator %s present; scaled by KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER)\n" \
       "${guest_arch}" "${foreign_qemu}"

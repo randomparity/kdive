@@ -107,6 +107,16 @@ No migration, no new dependency, no schema or state change.
   gate unchanged; that pre-deploy question ("can the user who runs the worker use KVM")
   is deliberately distinct from the URI-selected worker-uid accel probe, and harmonizing
   the two is out of this issue's scope. The divergence is noted, not silently left.
+- The check is a **local-worker** probe, so it gates the native-emulator FAIL only when the
+  libvirt URI is local (`qemu:///system`/`session`). A transport URI (`qemu+ssh://…`) —
+  which the local provider may use — runs guests on another host the worker cannot observe,
+  so the FAIL is suppressed (never a confident wrong blocker) and the accel map's detail is
+  scoped as worker-local; remote hosts have the remote-libvirt provider's own diagnostics.
+- The arch→qemu-binary map is a hand-maintained sibling of `arch_traits.SUPPORTED_ARCHES`
+  (Python and both shell scripts). A test invariant asserts every supported arch has a
+  binary entry, and a supported-but-unmapped arch degrades to "unsupported host" rather than
+  a `None`-interpolating FAIL, so a future arch addition that misses one map fails a test,
+  not an operator's `doctor`.
 - The arch→qemu-binary asymmetry now has a Python home and a regression test, closing a
   latent `qemu-system-$(uname -m)` trap for a future arch.
 - Adding a future arch is one `SUPPORTED_ARCHES` row plus one qemu-binary-map entry (and

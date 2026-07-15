@@ -65,6 +65,17 @@ def resolved_libvirt_uri() -> str:
     return env_snapshot().get(_LIBVIRT_URI_ENV, _DEFAULT_URI)
 
 
+def uri_is_local(uri: str) -> bool:
+    """Whether the libvirt URI targets this worker (a local hypervisor), not a remote host.
+
+    ``qemu:///system`` and ``qemu:///session`` (three slashes, no host part) run on this worker;
+    a transport URI such as ``qemu+ssh://host/system`` runs guests on another machine, where the
+    worker's PATH and ``/dev/kvm`` say nothing about the target. The accel probe measures the
+    worker, so it only gates a native-emulator FAIL for a local target (see the check).
+    """
+    return uri.strip().startswith("qemu:///")
+
+
 def kvm_probe_for_uri(
     uri: str,
     *,
@@ -91,21 +102,30 @@ def default_guest_arch_accel_probe(
     supported: frozenset[str] = SUPPORTED_ARCHES,
     which: Callable[[str], str | None] = shutil.which,
     kvm_present: Callable[[], bool] | None = None,
+    target_is_local: bool | None = None,
 ) -> GuestArchAccelProbe:
     """Build the probe that observes the per-arch guest accelerator on the worker host.
 
-    ``host_arch``/``supported``/``which``/``kvm_present`` are injected (defaults are the real host,
-    ``arch_traits.SUPPORTED_ARCHES``, ``shutil.which``, and the URI-selected ``/dev/kvm`` probe) so
-    the probe is unit-tested with no real host. When ``kvm_present`` is ``None`` the URI is resolved
-    at call time from the config snapshot (defaulting to ``qemu:///system`` when unset) — call-time
-    resolution sidesteps config-load ordering.
+    ``host_arch``/``supported``/``which``/``kvm_present``/``target_is_local`` are injected (defaults
+    are the real host, ``arch_traits.SUPPORTED_ARCHES``, ``shutil.which``, and the URI-selected
+    ``/dev/kvm`` probe) so the probe is unit-tested with no real host. When ``kvm_present`` is
+    ``None`` the URI is resolved at call time from the config snapshot (defaulting to
+    ``qemu:///system`` when unset) — call-time resolution sidesteps config-load ordering — and
+    ``target_is_local`` is derived from it. When ``kvm_present`` is injected, ``target_is_local``
+    defaults to ``True`` (the local case) unless set explicitly.
     """
     resolved_host = host_arch if host_arch is not None else platform.machine()
 
     async def _probe() -> GuestArchAccelReport:
         kvm = kvm_present
+        local = target_is_local
         if kvm is None:
-            kvm = kvm_probe_for_uri(resolved_libvirt_uri())
+            uri = resolved_libvirt_uri()
+            kvm = kvm_probe_for_uri(uri)
+            if local is None:
+                local = uri_is_local(uri)
+        if local is None:
+            local = True
         accel_by_arch: dict[str, str] = {}
         for arch in sorted(supported):
             binary = qemu_system_binary(arch)
@@ -114,12 +134,16 @@ def default_guest_arch_accel_probe(
             accel_by_arch[arch] = "kvm" if arch == resolved_host and kvm() else "tcg"
         native_binary = qemu_system_binary(resolved_host)
         native_present = native_binary is not None and which(native_binary) is not None
+        # A supported arch with no binary-map entry (a future arch added to arch_traits but not
+        # here — guarded by test) is treated as unsupported rather than yielding a "None not found"
+        # FAIL. The test invariant keeps the maps in sync; this is the defensive floor.
         return GuestArchAccelReport(
             accel_by_arch=accel_by_arch,
             native_arch=resolved_host,
-            native_supported=resolved_host in supported,
+            native_supported=resolved_host in supported and native_binary is not None,
             native_emulator_present=native_present,
             native_qemu_binary=native_binary,
+            target_is_local=local,
         )
 
     return _probe

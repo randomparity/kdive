@@ -15,14 +15,17 @@ import os
 from kdive import config
 from kdive.diagnostics.checks import CheckStatus
 from kdive.diagnostics.guest_arch_accel import (
+    _QEMU_SYSTEM_BINARY,
     default_guest_arch_accel_probe,
     kvm_probe_for_uri,
     qemu_system_binary,
     resolved_libvirt_uri,
+    uri_is_local,
 )
 from kdive.diagnostics.multiarch_gdb import diagnostic_contribution as local_diagnostics
 from kdive.diagnostics.provider_checks import GuestArchAccelCheck
 from kdive.domain.errors import ErrorCategory
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.providers.assembly.diagnostics import diagnostic_provider_contributions
 
 _SUPPORTED = frozenset({"x86_64", "ppc64le"})
@@ -51,6 +54,27 @@ def test_qemu_system_binary_is_arch_asymmetric() -> None:
     assert qemu_system_binary("x86_64") == "qemu-system-x86_64"
     assert qemu_system_binary("ppc64le") == "qemu-system-ppc64"
     assert qemu_system_binary("aarch64") is None
+
+
+def test_every_supported_arch_has_a_qemu_binary() -> None:
+    # Invariant: a new arch added to arch_traits.SUPPORTED_ARCHES must also gain a qemu-binary
+    # map entry here, or a native host of that arch would produce a nonsensical "None" FAIL.
+    missing = SUPPORTED_ARCHES - _QEMU_SYSTEM_BINARY.keys()
+    assert missing == set(), f"SUPPORTED_ARCHES without a qemu-binary map entry: {sorted(missing)}"
+
+
+def test_arch_supported_but_unmapped_is_treated_unsupported_not_none_fail() -> None:
+    # Defensive floor: if the maps ever diverge, a supported-but-unmapped native arch degrades to
+    # "unsupported host" (PASS), never a FAIL rendering the literal string "None".
+    probe = default_guest_arch_accel_probe(
+        host_arch="s390x",
+        supported=frozenset({"s390x"}),  # in `supported` but absent from the binary map
+        which=_which({}),
+        kvm_present=lambda: True,
+    )
+    result = _run_check(_check_for(probe))
+    assert result.status is CheckStatus.PASS
+    assert "None" not in result.detail
 
 
 # --- kvm_probe_for_uri (the URI-selected filesystem seam) ---------------------------
@@ -97,6 +121,30 @@ def test_kvm_probe_unknown_uri_defaults_to_presence() -> None:
 
 
 # --- resolved_libvirt_uri (the config-snapshot glue) --------------------------------
+
+
+def test_uri_is_local_distinguishes_transport_uris() -> None:
+    assert uri_is_local("qemu:///system") is True
+    assert uri_is_local("qemu:///session") is True
+    assert uri_is_local("  qemu:///system  ") is True  # whitespace-tolerant
+    assert uri_is_local("qemu+ssh://host/system") is False
+    assert uri_is_local("qemu+tls://host/system") is False
+    assert uri_is_local("qemu+tcp://host/system") is False
+
+
+def test_remote_target_does_not_fail_on_missing_local_emulator() -> None:
+    # A transport URI runs guests on another host; a missing *local* emulator is not a real
+    # schedulability failure, so the check must PASS and scope its detail — never a spurious FAIL.
+    probe = default_guest_arch_accel_probe(
+        host_arch="x86_64",
+        supported=_SUPPORTED,
+        which=_which({}),  # no local emulator at all
+        kvm_present=lambda: True,
+        target_is_local=False,
+    )
+    result = _run_check(_check_for(probe))
+    assert result.status is CheckStatus.PASS
+    assert "targets a remote host" in result.detail
 
 
 def test_resolved_libvirt_uri_reads_snapshot_then_restores() -> None:
