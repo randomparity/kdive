@@ -104,13 +104,11 @@ def _package_root() -> Path:
     return root
 
 
-def test_detects_platform_machine_call() -> None:
+def test_detects_platform_machine_call_and_bare_reference() -> None:
+    # Both real forms resolve to the same `platform.machine` Attribute node, so one predicate
+    # branch catches both: the `platform.machine()` call (the diagnostics probes) and the bare
+    # `= platform.machine` default-argument reference (the gdb engine, engine.py:128).
     assert module_reads_host_arch("import platform\nx = platform.machine()\n")
-
-
-def test_detects_platform_machine_bare_default_arg() -> None:
-    # The engine's `host_arch_finder: Callable[[], str] = platform.machine` reference — a bare
-    # attribute, not a call — must still count.
     assert module_reads_host_arch("import platform\ndef f(g=platform.machine):\n    return g\n")
 
 
