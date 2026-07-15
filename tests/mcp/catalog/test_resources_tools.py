@@ -278,6 +278,30 @@ def test_describe_projects_local_partial_capability(migrated_url: str) -> None:
     assert resp.data["supported_introspection"] == ["offline-vmcore"]
 
 
+def test_describe_surfaces_fadump_in_supported_capture_methods(migrated_url: str) -> None:
+    # ADR-0349: a runtime advertising FADUMP surfaces "fadump" in supported_capture_methods, so an
+    # agent sees the method vocabulary (per-host support is gated at admission, not surfaced here).
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            runtime = _descriptor_runtime(
+                capture=frozenset(
+                    {CaptureMethod.KDUMP, CaptureMethod.FADUMP, CaptureMethod.HOST_DUMP}
+                ),
+                transports=frozenset(),
+                introspection=frozenset(),
+            )
+            return await catalog_resources_tools.describe_resource(
+                pool,
+                CTX,
+                res_id,
+                resolver=_resolver_with_descriptor(ResourceKind.LOCAL_LIBVIRT, runtime),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.data["supported_capture_methods"] == ["fadump", "host_dump", "kdump"]
+
+
 def test_describe_projects_remote_full_capability(migrated_url: str) -> None:
     async def _run() -> ToolResponse:
         async with _pool(migrated_url) as pool:
