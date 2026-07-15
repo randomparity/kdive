@@ -206,8 +206,11 @@ authoritative bound. Guarded by `test_firstboot_unit_disables_the_systemd_start_
   driving the CentOS Stream 9 ppc64le boot surfaced and fixed four latent shared-mechanism bugs
   (ext4 fsck / EPEL / cloud-init / firstboot timeout); the end-to-end proof is carried by a
   **Fedora ppc64le** customize-boot that built + published with all four fixes (a regression check
-  that they do not break the known-good path, and that Fix 1 unblocks the EL9 boot past fsck). CS9
-  dnf-completion under TCG is blocked by an environmental mirror/SLIRP limit, tracked as a gated
-  follow-up. The five catalog rows are **catalog/loader-validated** (row resolves,
+  that they do not break the known-good path, and that Fix 1 unblocks the EL9 boot past fsck). **No
+  EL9 customize-boot reached `kdive-customize-ok`** — CS9 ppc64le stalls on the TCG/SLIRP mirror CDN,
+  and a Rocky 9 x86_64/KVM attempt (native network, to decouple from the stall) exited post-metadata
+  with no captured error (the identical commands succeed in a `rockylinux:9` container, so it is a
+  guest-environment issue). Both are gated behind follow-up **#1174**; the EL9 rows ship
+  catalog/loader-validated only. The five catalog rows are **catalog/loader-validated** (row resolves,
   source/arch/sha256/version-parity asserted) plus URL-resolve-checked — not full-build-validated
   (stated honestly in Decision 6). `just ci` green.

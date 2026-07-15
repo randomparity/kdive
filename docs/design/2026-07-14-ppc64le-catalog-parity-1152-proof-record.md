@@ -10,10 +10,11 @@ The #1152 acceptance criterion is "at least one non-Fedora family proven end-to-
 customization boot; remaining families at minimum build-validated." Driving the **CentOS Stream 9
 ppc64le** customization boot surfaced four real, previously-latent bugs in the shared
 customization-boot mechanism (ADR-0345, #1147) — each fixed and unit-tested. The mechanism now runs
-end-to-end through boot → fsck → cloud-init → network → dnf-start on a non-Fedora EL9 ppc64le image.
-The dnf **completion** on CentOS Stream 9 is blocked by an environmental limit (below), so the
-end-to-end live proof is carried by a **Fedora ppc64le** customize-boot that exercises all four
-shared fixes; the five catalog rows are build-validated by the loader tests + `just ci`.
+end-to-end through boot → fsck → cloud-init → network → dnf-start on a non-Fedora EL9 image, but **no
+EL9 customize boot has reached `kdive-customize-ok`** (two distinct blockers, below, tracked in
+#1174). The end-to-end live proof is therefore carried by a **Fedora ppc64le** customize-boot that
+exercises all four shared fixes; the five catalog rows are build-validated by the loader tests +
+`just ci`, and the EL9 rows' live customize-boot is gated behind #1174.
 
 ## Environment
 
@@ -66,22 +67,42 @@ Because Fixes 1/3/4 are in the arch/family-neutral shared mechanism, a passing F
 customize-boot is a direct regression check that they do not break the known-good path (#1147), and
 Fix 1 is additionally proven to have unblocked the CS9 boot past fsck.
 
-## Known environmental limit (gated follow-up): CentOS Stream 9 dnf under TCG
+## No EL9 customize-boot reached `kdive-customize-ok` — gated follow-up #1174
 
-With all four fixes, the CentOS Stream 9 ppc64le customize boot runs through boot → fsck →
-cloud-init → network → dnf-start, but the dnf4 metadata download from the CentOS Stream mirror CDN
-**stalls at 0 B/s** under the TCG/SLIRP emulated network (one run drew 11 MB/s, most stall), so dnf
-exhausts its mirrors and the firstboot exits. This is emulated-network/mirror-CDN connectivity, not
-kdive code — Fedora's dnf5 + CDN are reliable under the same SLIRP, which is why #1147 passed and
-the Fedora ppc64le proof here passes. A native POWER10 host (real network, native dnf speed) or a
-faster/cached mirror removes the limit. Tracked as gated follow-up **#1174**; the CentOS/Rocky
-ppc64le rows ship catalog/loader-validated.
+The end-to-end proof above is **Fedora only**. No EL9 (CentOS Stream / Rocky) customize boot has
+reached `kdive-customize-ok` on any arch; two distinct blockers were observed, both tracked in
+**#1174**:
+
+- **CentOS Stream 9 ppc64le (TCG):** runs through boot → fsck → cloud-init → network → dnf-start,
+  then the `dnf4` metadata download from the CentOS mirror CDN **stalls at 0 B/s** under the
+  TCG/SLIRP emulated network (one run drew 11 MB/s; most stall) → dnf exhausts its mirrors → the
+  firstboot exits. Emulated-network / mirror-CDN connectivity, not kdive code (Fedora's `dnf5` + CDN
+  are reliable under the same SLIRP, which is why #1147 and the Fedora proof here pass).
+- **Rocky 9 x86_64 (KVM, native network):** driven to decouple the composed EL9 path from the TCG
+  mirror stall. dnf metadata (BaseOS + AppStream) downloaded **fast and fully**, then the firstboot
+  exited with **no dnf install output and no error** on the console. Fix 4's
+  `TimeoutStartSec=infinity` is confirmed wired into the injected unit (`_inject_offline_script`
+  uploads the `render_firstboot_unit` output verbatim), so it is not the 90s systemd timeout. The
+  identical rendered firstboot command sequence (both dnf installs + the systemctl/sed steps)
+  **succeeds in a `rockylinux:9` container**, so the commands are valid on EL9 userspace — the
+  failure is a guest-cloud-image / customization-boot-environment issue that needs interactive boot
+  + guest-log inspection to diagnose. Deferred to #1174 rather than diagnosed in this catalog-parity
+  PR.
+
+So the four fixes are each verified to the checkpoint they unblock (Fix 1 → fsck passes on CS9;
+Fix 3 → cloud-init + network on CS9/Rocky; Fix 2 → the drgn/EPEL install resolves in a Rocky 9
+container; Fix 4 → wired), and the **composed** shared mechanism is proven end-to-end on Fedora
+ppc64le, but the **composed EL9 self-customize has not been observed to reach `customize-ok`**. The
+CentOS/Rocky EL9 rows (ppc64le and the pre-existing x86_64) therefore ship **catalog/loader-validated
+only**; their live customize-boot proof is gated behind #1174.
 
 ## Reproduction
 
 ```
-# non-Fedora bugs surfaced/fixed against, and environmental limit observed on:
+# non-Fedora bugs surfaced/fixed against, and the TCG dnf-stall limit observed on (#1174):
 KDIVE_LIBVIRT_URI=qemu:///session python -m kdive build-fs --image centos-stream-kdive-ready-9-ppc64le
+# composed EL9 path attempted on native KVM (undiagnosed post-metadata firstboot exit, #1174):
+KDIVE_LIBVIRT_URI=qemu:///session python -m kdive build-fs --image rocky-kdive-ready-9
 # end-to-end live proof (all four fixes), built + published:
 KDIVE_LIBVIRT_URI=qemu:///session python -m kdive build-fs --image fedora-kdive-ready-44-ppc64le
 ```

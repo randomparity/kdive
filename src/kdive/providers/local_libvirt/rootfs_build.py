@@ -189,7 +189,11 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
     stripped before the qcow2 is produced (ADR-0351), so the customization boot's guest fsck passes
     on older distros as well as Fedora.
     """
-    with tempfile.TemporaryDirectory(prefix="kdive-repack-") as work:
+    # Stage the tar + whole-disk raw intermediate on the *workspace* volume (next to the final
+    # qcow2), not the default TMPDIR: TMPDIR is a memory-backed tmpfs on many hosts, and the raw is
+    # a whole-rootfs-sized image (default 6G), so writing it to /tmp would risk ENOSPC/OOM on every
+    # build. The qcow2's directory already holds a full image and is sized for it.
+    with tempfile.TemporaryDirectory(prefix="kdive-repack-", dir=qcow2.parent) as work:
         tar_path = Path(work) / "root.tar"
         raw_path = Path(work) / "root.raw"
         _run_libguestfs_tool(

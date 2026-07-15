@@ -177,7 +177,12 @@ def render_firstboot_unit(*, script_path: str) -> str:
     install), and a timeout would SIGTERM the service mid-install, fire the script's ``-failed``
     marker, and fail the build for a reason unrelated to the customization (#1152). The host
     orchestration's TCG-scaled window is the authoritative deadline; the unit must not impose a
-    shorter one.
+    shorter one. Deliberately not a large *finite* value matched to that window: the guest cannot
+    know the host's config-driven, TCG-scaled deadline, so a finite guess would either re-introduce
+    the false-fail (if too short) or duplicate the host bound (if too long). The trade-off is that a
+    genuinely *hung* (non-exiting) customization self-reports no marker and instead surfaces as the
+    host's ``BOOT_TIMEOUT`` when the window expires; the common failure (a command exits non-zero)
+    still fires the ``-failed`` marker promptly via the script's ``ERR``/``EXIT`` trap.
 
     Args:
         script_path: The firstboot script's guest path, used as ``ExecStart``; must match
