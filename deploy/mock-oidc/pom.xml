@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Dependency-resolution POM for the in-repo multi-arch mock OIDC image (#1183, ADR-0357).
+
+  This POM exists only so the Docker build's Maven builder stage can resolve the exact
+  runtime closure of `no.nav.security:mock-oauth2-server` from Maven Central (arch-independent
+  JVM bytecode) into a lib/ directory. It is never installed or deployed; there is no source
+  to compile. The single dependency version is the one pin that drives the whole image — bump
+  it (and the sha256 in the Dockerfile) to update the mock issuer. See README.md.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.kdive.deploy</groupId>
+  <artifactId>mock-oidc</artifactId>
+  <version>0.0.0</version>
+  <packaging>pom</packaging>
+
+  <dependencies>
+    <dependency>
+      <groupId>no.nav.security</groupId>
+      <artifactId>mock-oauth2-server</artifactId>
+      <version>3.0.3</version>
+    </dependency>
+  </dependencies>
+</project>

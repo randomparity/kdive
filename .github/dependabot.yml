@@ -23,10 +23,14 @@ updates:
           - "*"
 
   # The root Dockerfile and docker-compose.yml pin base images (python, postgres,
-  # minio, mock-oauth2-server). The docker ecosystem keeps those FROM/image pins
-  # current on the same weekly, grouped, 7-day-cooldown cadence as the product code.
+  # minio), and deploy/mock-oidc pins its JRE + Maven builder bases by digest. The
+  # docker ecosystem keeps those FROM/image pins current on the same weekly, grouped,
+  # 7-day-cooldown cadence as the product code (dependabot does not recurse, so the
+  # subdirectory is listed explicitly).
   - package-ecosystem: "docker"
-    directory: "/"
+    directories:
+      - "/"
+      - "/deploy/mock-oidc"
     schedule:
       interval: "weekly"
     cooldown:
