@@ -161,7 +161,7 @@ deploy inserts the row *with* the key. It is **not** a #1151 regression, and it 
 kdive is pre-first-release, so there are no deployments to upgrade in place. Remediation (used here
 to run the proof): re-register the host through the existing upsert path,
 `register_discovered_resource`, which refreshes `capabilities` in place (UUID/FKs preserved).
-**Follow-up:** a periodic/deploy capability *refresh* (wiring the upsert path to onboarding or the
-reconciler discovery pass) is worth a separate issue against the epic — it would let a new
-capability key roll out to existing hosts without a row recreation. Deliberately out of scope for
-#1151, which follows the established set-at-creation pattern.
+**Follow-up: #1172** — a periodic/deploy capability *refresh* (wiring the upsert path to onboarding
+or the reconciler discovery pass) so a new capability key rolls out to existing hosts without a row
+recreation. Deliberately out of scope for #1151, which follows the established set-at-creation
+pattern.
