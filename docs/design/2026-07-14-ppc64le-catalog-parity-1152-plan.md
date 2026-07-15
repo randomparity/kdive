@@ -193,16 +193,17 @@ uv run python -m pytest tests/images/test_rootfs_catalog.py -q -k \
 Expected: FAIL — the five new names raise `KeyError` in `load_rootfs_catalog()`-backed lookups
 (rows do not exist yet). The N/A-guard test PASSES already (no such rows yet); that is fine.
 
-- [ ] **Step 4: Commit the red tests**
+- [ ] **Step 4: Do NOT commit yet — leave the tests red in the working tree**
 
-```bash
-git add tests/images/test_rootfs_catalog.py
-git commit -m "test(1152): expect ppc64le rhel-family sibling rows + N/A guard"
-```
+The `/work-issue` contract requires guardrails green **at every commit**. Committing the red tests
+alone would leave `just test` red between this task and Task 3 (and break bisect). The local
+red→green TDD cycle is preserved (tests written and observed failing here), but the *commit* happens
+in Task 3 Step 5, which stages the tests **and** the rows together so the committed tree is green.
+Keep the edited `tests/images/test_rootfs_catalog.py` in the working tree and proceed to Task 3.
 
 ---
 
-## Task 3: Add the five ppc64le rows + N/A comments (TDD green)
+## Task 3: Add the five ppc64le rows + N/A comments (TDD green, single committed change)
 
 **Files:**
 - Modify: `fixtures/local-libvirt/rootfs_catalog.toml`
@@ -320,12 +321,21 @@ capability-iteration tests).
 Run: `just lint && just type`
 Expected: clean (the TOML change is caught by `check toml`; no Python type surface changed).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit the rows AND the Task 2 tests together (one green commit)**
 
+Stage both the catalog rows (this task) and the test additions left in the working tree from Task 2,
+so the committed tree is green:
 ```bash
-git add fixtures/local-libvirt/rootfs_catalog.toml
-git commit -m "feat(1152): add ppc64le rhel-family catalog rows + N/A gaps"
+git add fixtures/local-libvirt/rootfs_catalog.toml tests/images/test_rootfs_catalog.py
+git commit -m "feat(1152): add ppc64le rhel-family catalog rows + N/A gaps
+
+Five sha256-pinned ppc64le siblings (Fedora 43-cloud, Rocky 9/10, CentOS
+Stream 9/10), versions mirrored from the x86_64 sibling; N/A gaps (Rocky 8,
+Debian->#1167) documented and guarded by tests. ADR-0350."
 ```
+Rationale: catalog rows and their expectation tests are one logical change; committing them
+together keeps every commit green (and still bisectable — the rows and the tests that assert them
+never split across commits).
 
 ---
 
@@ -353,6 +363,12 @@ git add -A && git commit -m "chore(1152): regenerate docs after catalog rows"
 ---
 
 ## Task 5: Live TCG customize-boot proof (CentOS Stream 9 ppc64le)
+
+> **Runs in the main session, not a context-free subagent.** This task needs the host's KVM/libvirt
+> + `qemu-system-ppc64` and interactive console watching (`host-runs-live-vm-tests`,
+> `host-libvirt-modular-daemons`). The concrete entrypoint is the `build-fs --image <name>`
+> customization build — the same path #1147 drove for the Fedora rhel proof; Step 1 pins the exact
+> invocation from that proof record before running.
 
 **Files:**
 - Create: `docs/design/2026-07-14-ppc64le-catalog-parity-1152-proof-record.md`
@@ -416,21 +432,33 @@ Run **only** if Task 5 Step 3 hit the EPEL-drgn failure.
 - Consumes: `RhelFamily.customize_steps`, `_el_major`, `_ENABLE_EPEL_CMD` (rhel.py).
 - Produces: EPEL enabled for EL8 **and** EL9 (arch-agnostic; repairs the latent x86_64 EL9 rows).
 
-- [ ] **Step 1: Write the failing test** — assert `customize_steps` for an EL9 rhel debug context
+- [ ] **Step 1: Enumerate existing EL8/EL9 customizer expectations that the guard change flips**
+
+Widening `== 8` to `<= 9` changes `customize_steps` output for **every** EL9 rhel context (the
+x86_64 Rocky 9 / CentOS Stream 9 rows too). Before editing, find every test that asserts the
+EL8/EL9 step list so an intended flip is not mistaken for a regression:
+```bash
+rg -n "epel|EPEL|_el_major|== 8|<= 9|customize_steps|_ENABLE_EPEL" tests/
+```
+Any test asserting that EL9 currently emits **no** EPEL step must be updated in this task's commit
+(it is now expected to emit one) — update the expectation, do not weaken the assertion.
+
+- [ ] **Step 2: Write the failing test** — assert `customize_steps` for an EL9 rhel debug context
   (distro `centos-stream`, version `9`, packages including `drgn`) contains an EPEL-enable
   `RunCommand` before the `drgn` `InstallPackages`. Mirror the existing EL8 EPEL test.
 
-- [ ] **Step 2: Run it, verify FAIL** (`rg`-found test path, `-q`).
+- [ ] **Step 3: Run it, verify FAIL** (`rg`-found test path, `-q`).
 
-- [ ] **Step 3: Widen the guard** — in `rhel.py:customize_steps`, change the EL8-only guard
+- [ ] **Step 4: Widen the guard** — in `rhel.py:customize_steps`, change the EL8-only guard
   `if _el_major(ctx.distro, ctx.version) == 8 and "drgn" in ctx.packages:` to fire for every EL
   major that installs `drgn` from EPEL (`major is not None and major <= 9`). If CentOS Stream 9
   needs CRB enabled before `epel-release`, extend `_ENABLE_EPEL_CMD` accordingly (record the exact
   command the live proof required — do not guess; the proof output is the source of truth).
 
-- [ ] **Step 4: Run the rhel-family tests + the catalog tests, verify PASS.**
+- [ ] **Step 5: Run the rhel-family tests (incl. the Step 1 updated expectations) + the catalog
+  tests, verify PASS.**
 
-- [ ] **Step 5: `just ci`, then commit**
+- [ ] **Step 6: `just ci`, then commit**
 
 ```bash
 git add src/kdive/images/families/rhel.py tests/images/
