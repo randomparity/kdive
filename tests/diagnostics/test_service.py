@@ -396,6 +396,7 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
 
     from kdive.diagnostics.checks import (
         GDBSTUB_ACL_ID,
+        GUEST_ARCH_ACCEL_ID,
         MULTIARCH_GDB_ID,
         PROVIDER_TLS_ID,
         PSERIES_FADUMP_ID,
@@ -428,4 +429,5 @@ def test_factory_dispatcher_carries_pool_provider_and_worker_check_ids(
     assert set(by_provider["local-libvirt"]._worker_check_ids) == {  # noqa: SLF001
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
+        GUEST_ARCH_ACCEL_ID,
     }

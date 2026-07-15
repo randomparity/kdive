@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     GDBSTUB_ACL_ID,
+    GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     PSERIES_FADUMP_ID,
@@ -392,4 +394,96 @@ class PseriesFadumpCheck(Check):
             fix=PSERIES_FADUMP_UNSUPPORTED_FIX,
             provider=self._provider,
             failure_category=_MISSING_DEPENDENCY,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GuestArchAccelReport:
+    """The per-arch guest-accelerator facts observed on the worker host (ADR-0352).
+
+    Attributes:
+        accel_by_arch: ``{arch: "kvm"|"tcg"}`` for every supported arch whose qemu
+            emulator is present on the worker's PATH (arch-sorted at construction). A guest
+            arch is ``kvm`` only when it is the host's native arch and the URI-selected KVM
+            signal holds, else ``tcg``.
+        native_arch: The worker host's own architecture (``platform.machine()``).
+        native_supported: Whether ``native_arch`` is an arch kdive can provision.
+        native_emulator_present: Whether the qemu emulator for ``native_arch`` is on PATH.
+        native_qemu_binary: The qemu system-emulator binary name for ``native_arch``, or
+            ``None`` when the host arch is unsupported (so no native binary is expected).
+    """
+
+    accel_by_arch: Mapping[str, str]
+    native_arch: str
+    native_supported: bool
+    native_emulator_present: bool
+    native_qemu_binary: str | None
+
+
+GuestArchAccelProbe = Callable[[], Awaitable[GuestArchAccelReport]]
+
+
+def _accel_phrase(arch: str, accel: str) -> str:
+    return f"{arch} (KVM native)" if accel == "kvm" else f"{arch} (TCG-only)"
+
+
+def _describe_accel(report: GuestArchAccelReport) -> str:
+    """Render the human-readable accel summary, flagging a native arch that fell to TCG."""
+    if not report.accel_by_arch:
+        return "no qemu system emulator found on PATH; no guest arch is schedulable here"
+    parts = [_accel_phrase(a, report.accel_by_arch[a]) for a in sorted(report.accel_by_arch)]
+    detail = "schedulable guest arches: " + ", ".join(parts)
+    if report.accel_by_arch.get(report.native_arch) == "tcg":
+        detail = f"native arch {report.native_arch} is TCG-only (host KVM unavailable); " + detail
+    return detail
+
+
+class GuestArchAccelCheck(Check):
+    """Worker-vantage: which guest arches are schedulable here, and at what accelerator (ADR-0352).
+
+    Reports the KVM-vs-TCG accel map (in ``data``, so it reaches ``doctor --json``) and
+    FAILs on exactly one condition — the host cannot schedule even its own native arch (its
+    qemu emulator is absent). Native-arch-under-TCG is a *degraded, not broken* state
+    (still provisions, only slower), so it PASSes but is flagged in ``detail``; a foreign
+    arch's absence never fails (cross-arch is optional).
+    """
+
+    def __init__(self, *, provider: str, probe: GuestArchAccelProbe) -> None:
+        self._provider = provider
+        self._probe = probe
+
+    @property
+    def id(self) -> str:
+        return GUEST_ARCH_ACCEL_ID
+
+    @property
+    def vantage(self) -> Vantage:
+        return Vantage.WORKER
+
+    async def run(self) -> CheckResult:
+        report = await self._probe()
+        data = dict(report.accel_by_arch) or None
+        if report.native_supported and not report.native_emulator_present:
+            return CheckResult(
+                check_id=self.id,
+                status=CheckStatus.FAIL,
+                detail=(
+                    f"host cannot schedule its own native arch {report.native_arch}: "
+                    f"{report.native_qemu_binary} not found on PATH"
+                ),
+                fix=(
+                    f"{report.native_qemu_binary} not found on PATH; install it via your "
+                    "distribution package manager (see scripts/check-setup-deps.sh for "
+                    "per-distro hints)"
+                ),
+                provider=self._provider,
+                failure_category=_MISSING_DEPENDENCY,
+                data=data,
+            )
+        return CheckResult(
+            check_id=self.id,
+            status=CheckStatus.PASS,
+            detail=_describe_accel(report),
+            provider=self._provider,
+            data=data,
         )

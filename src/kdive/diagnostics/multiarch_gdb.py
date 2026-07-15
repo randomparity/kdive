@@ -18,6 +18,10 @@ import shutil
 from collections.abc import Awaitable, Callable
 
 from kdive.diagnostics.checks import MULTIARCH_GDB_ID, Check
+from kdive.diagnostics.guest_arch_accel import (
+    guest_arch_accel_worker_check,
+    guest_arch_accel_worker_descriptor,
+)
 from kdive.diagnostics.provider_checks import (
     MultiarchGdbCheck,
     MultiarchGdbOutcome,
@@ -127,6 +131,7 @@ def _worker_checks() -> list[Check]:
     return [
         MultiarchGdbCheck(provider=_LOCAL_PROVIDER, probe=default_multiarch_gdb_probe()),
         pseries_fadump_worker_check(),
+        guest_arch_accel_worker_check(),
     ]
 
 
@@ -134,6 +139,7 @@ def _unavailable_worker_checks() -> list[WorkerVantageDescriptor]:
     return [
         WorkerVantageDescriptor(id=MULTIARCH_GDB_ID, provider=_LOCAL_PROVIDER),
         pseries_fadump_worker_descriptor(),
+        guest_arch_accel_worker_descriptor(),
     ]
 
 

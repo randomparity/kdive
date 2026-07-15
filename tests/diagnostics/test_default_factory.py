@@ -18,6 +18,7 @@ import kdive.config as config
 from kdive.diagnostics.checks import (
     BASE_IMAGE_STAGING_ID,
     GDBSTUB_ACL_ID,
+    GUEST_ARCH_ACCEL_ID,
     MULTIARCH_GDB_ID,
     PROVIDER_TLS_ID,
     PSERIES_FADUMP_ID,
@@ -391,6 +392,7 @@ def test_factory_includes_reachability_and_tls_acl_metadata_when_remote_configur
         GDBSTUB_ACL_ID,
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
+        GUEST_ARCH_ACCEL_ID,
     } == unavailable_ids
     assert PROVIDER_TLS_ID not in runnable_ids
     assert GDBSTUB_ACL_ID not in runnable_ids
@@ -546,6 +548,7 @@ def test_factory_keeps_substitution_when_no_pool(monkeypatch, tmp_path: Path) ->
         GDBSTUB_ACL_ID,
         MULTIARCH_GDB_ID,
         PSERIES_FADUMP_ID,
+        GUEST_ARCH_ACCEL_ID,
     }
 
 
