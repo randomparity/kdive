@@ -31,6 +31,12 @@ pinned in `docker-compose.yml`. Published arches for the pinned tags:
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ |
 | `kdive:dev` (repo `Dockerfile`) | app image (built locally) | ✅ | — | base supports ppc64le |
 
+This table is pre-decision narration — what `docker buildx imagetools inspect` reported. The
+**authoritative, guard-read** matrix is the marker-delimited block in ADR-0356, which renders
+the `kdive:dev` arch cells as `— | — | —` (a `build-local` image is built, not pulled per-arch;
+its arch note lives in the `Role` column) per the fixed arch-column alphabet defined below. Do
+not copy this narration row as the matrix format.
+
 Two findings correct the issue's stated assumptions:
 
 1. **`minio/mc` is multi-arch at its pin** (the issue listed it only as an audit item):
@@ -73,9 +79,11 @@ The container strategy the rest of the epic implements against:
 
 ## The CI guard contract
 
-A new stdlib-only guard, `scripts/check_container_arch_matrix.py`, wired into `just ci` as
-its own recipe (`container-arch-check`) so CI gates it individually (per this repo's
-per-recipe CI invocation).
+A new guard, `scripts/check_container_arch_matrix.py`, wired into `just ci` as its own recipe
+(`container-arch-check`) so CI gates it individually (per this repo's per-recipe CI
+invocation). It runs via `uv run` and parses compose with `yaml.safe_load` (PyYAML, already a
+hard dependency) — the recipe shape of `config-guard`/`env-docs-check`, not the plain-`python3`
+stdlib guards.
 
 **Source of truth.** The arch-support matrix lives in ADR-0356 inside an HTML-comment-marked
 block so the guard can locate it unambiguously:
@@ -112,15 +120,20 @@ alphabet: `✅` (published), `❌` (not published), `—` (not applicable — e.
 image is built, not pulled per-arch). Any other value in an arch column is a hard error, so
 free prose cannot hide in the column assertion 3 reads (arch notes go in the `Role` column).
 
-**Compose parsing (stdlib, no pyyaml).** The guard does an indentation-aware pass that enters
-service-scanning only inside the top-level `services:` mapping and terminates at the next
-column-0 key — so the top-level `x-*` anchor maps (before `services:`) and `volumes:` (after)
-are never read as services. Inside `services:`, each 2-space-indented `<name>:` starts a
-service; within it `    image: <ref>` gives the image, a `    profiles:` key marks the service
-opt-in, and a `    build:` key marks it locally built. An image is **default-profile** if at
-least one service using it has no `profiles:` key (`docker compose up` pulls it); it is
-**built** if at least one service using it has a `build:` key. `kdive:dev` appears on four
-default services (one has `build: .`) → one default-profile, built entry.
+**Compose parsing (`yaml.safe_load`).** The guard parses `docker-compose.yml` with
+`yaml.safe_load` (PyYAML is already a hard project dependency), run via `uv run python
+scripts/check_container_arch_matrix.py` — the same recipe shape as `config-guard` /
+`env-docs-check`, not the plain-`python3` stdlib guards. Using the real YAML parser correctly
+resolves the file's anchors (`&backends`), merge keys (`<<: *backends`), and block-scalar
+`test:` healthchecks for free, instead of a hand-rolled indentation scanner that would have to
+special-case each. It reads only the top-level `services:` mapping, so top-level `x-*` anchor
+maps and `volumes:` are ignored by construction. For each service it reads `image`, whether a
+`profiles` key is present, and whether a `build` key is present. An image is **default-profile**
+if at least one service using it has no `profiles` key (`docker compose up` pulls it); it is
+**built** if at least one service using it has a `build` key. `kdive:dev` appears on four
+default services (one has `build: .`) → one default-profile, built entry. (The matrix block
+itself is Markdown, parsed per "Row/column parsing" above — YAML applies only to the compose
+file.)
 
 **What the guard asserts (static, no docker/network/POWER):**
 
@@ -137,10 +150,12 @@ default services (one has `build: .`) → one default-profile, built entry.
 4. **`accept-gap` ⟹ opt-in only.** The image must not be default-profile (no un-profiled
    service uses it). A knowingly-accepted gap cannot mask a broken *core-loop* image; moving
    such an image onto a default service fails the guard.
-5. **`mirror` ⟹ tracked.** The row must cite a tracking issue (`#NNNN`) so a default-profile
-   gap under a `mirror` label is a visible, tracked follow-up — not a silent, green-forever
-   bypass of assertion 3 (relabelling a broken `rely-on-upstream` image to `mirror` now
-   requires naming the issue that will fix it).
+5. **`mirror` ⟹ tracked.** The row must cite a tracking issue: an `#NNNN` token appears
+   somewhere in the row (the `Role` cell, by convention — e.g. "OIDC mock; mirror tracked
+   #1183"). The match is deliberately whole-row and loose — its purpose is to make a
+   default-profile `mirror` gap a visible, tracked follow-up, not to validate that the number
+   is the *right* issue — so relabelling a broken `rely-on-upstream` image to `mirror` at least
+   forces naming an issue rather than silently bypassing assertion 3.
 6. **`build-local` ⟹ actually built.** At least one compose service using the image has a
    `build:` key. `build-local` is exempt from the ppc64le-cell gate because its arch is proven
    by the buildx build job, not a pulled manifest; assertion 6 stops the token being borrowed
@@ -195,7 +210,9 @@ detect an upstream arch drop at an unchanged pin; the buildx build job covers th
    and the follow-ups. It opens **Proposed** and is flipped to **Accepted** (both the ADR
    `Status` line and its `docs/adr/README.md` index row) in the merging PR.
 2. `docs/adr/README.md` has an index row for 0356.
-3. `scripts/check_container_arch_matrix.py` exists, is stdlib-only, and:
+3. `scripts/check_container_arch_matrix.py` exists, parses compose with `yaml.safe_load`
+   (PyYAML, already a hard dependency) and runs via `uv run` (recipe shape of `config-guard`),
+   and:
    - passes against the current compose file + matrix;
    - fails (non-zero, with a named diff) when an image is added to / removed from compose
      without a matching matrix change;
@@ -212,9 +229,11 @@ detect an upstream arch drop at an unchanged pin; the buildx build job covers th
    matrix-row-missing-from-compose drift; an invalid handling token; a `rely-on-upstream` row
    with ppc64le ❌; a `rely-on-upstream` row with a malformed/empty/prose ppc64le cell; an
    out-of-alphabet arch cell; an `accept-gap` row on a default-profile image; a `mirror` row
-   with no `#NNNN`; a `build-local` row whose image no service builds; a malformed/empty matrix
-   block (header/separator rows are not mistaken for data rows); and a fixture with a top-level
-   `volumes:` block proving its 2-space-indented children are not parsed as services.
+   with no `#NNNN`; a `build-local` row whose image no service builds; and a malformed/empty
+   matrix block (header/separator rows are not mistaken for data rows). A fixture whose compose
+   uses anchors/merge-keys (like the real file) plus a top-level `volumes:` block confirms
+   `safe_load` reads only `services:` and resolves merges — the parser handles the shapes the
+   live compose file actually contains.
 6. Green: `just adr-status-check`, `just docs-links`, `just docs-paths`, `just check-mermaid`,
    `just container-arch-check`, and the full `just ci`.
 
@@ -223,12 +242,12 @@ detect an upstream arch drop at an unchanged pin; the buildx build job covers th
 - **Matrix parser brittleness.** A malformed matrix block (missing marker, missing column)
   must fail loudly, not pass vacuously. Mitigation: the guard errors if the marked block is
   absent or a row has too few columns, and a unit test asserts a vacuous/empty matrix fails.
-- **Compose image extraction misses a service or over-reads a non-service block.** The
-  indentation-aware scan could miss a line shape or ingest a top-level `volumes:`/`x-*` child
-  as a service. Mitigation: the scan is bounded to inside the top-level `services:` mapping
-  (stops at the next column-0 key); a unit test pins the current full compose image set with
-  each service's default/opt-in and built/pulled classification, and a fixture with a
-  top-level `volumes:` block asserts its children are not counted as services.
+- **Compose parsing misreads a service.** Mitigation: `yaml.safe_load` is the real parser, so
+  anchors, merge keys, and block scalars resolve correctly rather than needing a hand-rolled
+  special case; the guard reads only `data["services"]`, so top-level `x-*`/`volumes:` keys are
+  ignored by construction. A unit test pins the current full compose image set with each
+  service's default/opt-in and built/pulled classification against an anchors+merge-keys+volumes
+  fixture, so a parsing regression is caught.
 - **A handling token used as an escape hatch.** `mirror` and `build-local` are exempt from the
   ppc64le-cell gate; without bounds they could be borrowed to dodge assertion 3. Mitigation:
   assertion 5 requires a `mirror` row to cite a tracking issue and assertion 6 requires a

@@ -33,7 +33,8 @@ default-profile images, the OIDC mock is the only ppc64le gap.
 ## Decision
 
 We will record the container arch strategy in this ADR, carry the authoritative arch-support
-matrix here, and add a stdlib CI guard that fences the matrix against compose drift.
+matrix here, and add a CI guard (`yaml.safe_load` over compose; PyYAML is already a hard
+dependency) that fences the matrix against compose drift.
 
 1. **Mirror the OIDC mock as a multi-arch image** by repackaging the upstream standalone jar
    onto a multi-arch JRE base — no Kotlin rebuild. The upstream HTTP contract (token / JWKS /
