@@ -163,6 +163,11 @@ under TCG on an x86_64 host and **skips cleanly** when the foreign emulator is a
 emulator is present with the per-arch guest-accel doctor check (ADR-0352), which reports KVM-native
 vs TCG-only per schedulable guest arch.
 
+The `live_vm_tcg` tier is a **strict subset** of `live_stack`: the four proofs carry both markers,
+so `just test-live-stack` already runs them and `just test-live-tcg` is the focused re-selection of
+just those four. Run one or the other — not both — to avoid double-executing the multi-minute TCG
+boots.
+
 ### 3. (Optional) publish it to the catalog
 
 The same plane runs inside the `IMAGE_BUILD` job behind the operator verb; publishing promotes the
