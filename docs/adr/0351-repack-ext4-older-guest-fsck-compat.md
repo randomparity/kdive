@@ -36,10 +36,18 @@ building the filesystem exactly as before and then stripping the 1.47-only `orph
 before the qcow2 the provider boots is produced.**
 
 `_real_repack_whole_disk_ext4` becomes: `virt-tar-out` → `virt-make-fs --type=ext4 --format=raw`
-(the proven construction, to a raw image) → `tune2fs -O ^orphan_file <raw>` (strip the incompatible
-feature; a host e2fsprogs metadata operation on the image file, arch-neutral — no guest code runs)
-→ `qemu-img convert -f raw -O qcow2` (to the qcow2 the direct-kernel boot consumes). The disabled
-feature is a single named constant with a comment tying it to the EL9 e2fsck floor.
+(the proven construction, to a raw image) → **conditionally** `tune2fs -O ^orphan_file <raw>` (strip
+the incompatible feature; a host e2fsprogs metadata operation on the image file, arch-neutral — no
+guest code runs) → `qemu-img convert -f raw -O qcow2` (to the qcow2 the direct-kernel boot consumes).
+The disabled feature is a single named constant with a comment tying it to the EL9 e2fsck floor.
+
+**The strip is gated on the feature actually being present** (`tune2fs -l` parsed by
+`_feature_strip_needed`), not run unconditionally. The build host's libguestfs appliance is built
+from the host's own e2fsprogs, so the mke2fs that builds the ext4 and the `tune2fs` that strips it
+are the **same** version: on a build host with e2fsprogs < 1.47 the feature is never stamped, and
+that older `tune2fs` would reject the unknown `^orphan_file` token and fail the repack. Probing
+first keeps the repack correct on **any** build-host e2fsprogs version — strip on ≥ 1.47 (where the
+guest-incompatible feature exists), skip on older — so no build-host version floor is introduced.
 
 `virt-make-fs`'s construction and sizing are unchanged; the fix is one surgical strip plus a
 format conversion, keeping the proven primitive rather than replacing it with a hand-rolled

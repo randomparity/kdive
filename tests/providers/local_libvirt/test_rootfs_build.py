@@ -51,36 +51,44 @@ from kdive.providers.local_libvirt.rootfs_build import (
     _EXT4_INCOMPATIBLE_FEATURE,
     LocalLibvirtRootfsBuildPlane,
     RootfsBuildTools,
+    _feature_strip_needed,
     _parse_os_release,
-    _repack_tool_argvs,
     family_for,
 )
 
 
-def test_repack_argvs_build_ext4_then_strip_orphan_file_then_convert() -> None:
-    """The repack builds the ext4 with virt-make-fs (to raw), strips the EL<=9-incompatible
-    ``orphan_file`` feature with tune2fs, then converts to the qcow2 the provider boots (ADR-0351).
+def test_feature_strip_needed_true_when_orphan_file_present() -> None:
+    """The EL<=9-incompatible ``orphan_file`` (e2fsprogs 1.47) triggers the strip (ADR-0351).
 
-    Older-guest e2fsck (EL9 e2fsprogs 1.46.5) rejects the e2fsprogs-1.47 ``orphan_file`` the Fedora
-    appliance stamps by default, dropping the customize boot to emergency mode; the strip keeps the
-    filesystem checkable while leaving virt-make-fs's proven construction unchanged.
+    Older-guest e2fsck (EL9 e2fsprogs 1.46.5) rejects the feature the build-host appliance stamps
+    by default, dropping the customize boot to emergency mode; the strip keeps the fs checkable.
     """
-    tar = Path("/w/root.tar")
-    raw = Path("/w/root.raw")
-    qcow2 = Path("/w/out.qcow2")
-    argvs = _repack_tool_argvs(tar_path=tar, raw_path=raw, qcow2=qcow2, size="6G")
-    assert [a[0] for a in argvs] == ["virt-make-fs", "tune2fs", "qemu-img"]
-    assert argvs[0] == [
-        "virt-make-fs",
-        "--type=ext4",
-        "--format=raw",
-        "--size=6G",
-        str(tar),
-        str(raw),
-    ]
     assert _EXT4_INCOMPATIBLE_FEATURE == "orphan_file"
-    assert argvs[1] == ["tune2fs", "-O", "^orphan_file", str(raw)]
-    assert argvs[2] == ["qemu-img", "convert", "-f", "raw", "-O", "qcow2", str(raw), str(qcow2)]
+    out = (
+        "Filesystem volume name:   <none>\n"
+        "Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file "
+        "filetype extent 64bit flex_bg metadata_csum_seed sparse_super metadata_csum\n"
+    )
+    assert _feature_strip_needed(out) is True
+
+
+def test_feature_strip_needed_false_when_absent() -> None:
+    """A pre-1.47 build host never stamps ``orphan_file``; the strip is skipped (and its older
+    ``tune2fs`` would reject the ``^orphan_file`` token), so the repack works on any e2fsprogs.
+    """
+    out = (
+        "Filesystem features:      has_journal ext_attr resize_inode dir_index filetype extent "
+        "64bit flex_bg metadata_csum_seed sparse_super metadata_csum\n"
+    )
+    assert _feature_strip_needed(out) is False
+
+
+def test_feature_strip_needed_false_on_malformed_or_substring() -> None:
+    # No features line at all -> skip (fail-safe: don't strip what we can't confirm is present).
+    assert _feature_strip_needed("Inode count: 12345\n") is False
+    # Guard against a naive substring match: a feature merely containing the token is not it.
+    other = "Filesystem features: has_orphan_file_backup metadata_csum\n"
+    assert _feature_strip_needed(other) is False
 
 
 def _spec(**overrides: object) -> RootfsBuildSpec:
