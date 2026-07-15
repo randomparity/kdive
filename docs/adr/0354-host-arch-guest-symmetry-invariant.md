@@ -17,7 +17,7 @@ structurally: guest-facing behavior is derived from `profile.arch` (a lookup in
 
 But nothing *verified* that. Every arch-parameterized test runs on the x86_64 validation host,
 so a latent `host == x86_64` assumption in a guest-facing path (discovery, admission, domain
-XML, deadline, diagnostics) would stay invisible until POWER10 bring-up (#1157). #1155 audits
+XML, deadline, diagnostics) would stay invisible until POWER10 bring-up (#1156). #1155 audits
 those seams and locks the invariant against regression.
 
 The audit finding: **no guest-facing path reads the host arch.** The host arch
@@ -69,7 +69,7 @@ allowlisted module must not fail it. The deadline path reinforces the invariant 
 `tcg_deadline_multiplier` and its caller `boot(accel=…)` take only the accelerator, never the
 arch, so boot-window scaling is arch-free by construction (the existing
 `test_tcg_uses_configured_multiplier` covers the accel dimension; no test can vary arch there).
-Live proof of the inverted matrix on real POWER hardware is deferred to #1157.
+Live proof of the inverted matrix on real POWER hardware is deferred to #1156.
 
 ## Consequences
 
@@ -112,4 +112,4 @@ Live proof of the inverted matrix on real POWER hardware is deferred to #1157.
   Rejected.
 - **A live x86_64-guest-under-TCG proof in this issue.** The x86_64 host runs x86_64 guests
   under KVM, not TCG, so the live inverted matrix needs POWER hardware. Rejected here; it is
-  epic issue #1157.
+  epic issue #1156.

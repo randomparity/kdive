@@ -15,12 +15,12 @@ fall out **structurally** — the provider derives guest behavior from `profile.
 libvirt-advertised accelerator, never from the host arch — but *nothing verifies* the
 codebase actually holds no `host == x86_64` assumption. Every existing arch-parameterized
 test runs on the x86_64 host, so a latent host-arch dependency in a guest-facing path would
-be invisible until POWER10 bring-up (#1157).
+be invisible until POWER10 bring-up (#1156).
 
 This issue is a **unit-level audit plus an inverted host/guest matrix test suite**: prove no
 guest-facing path reads the host arch, lock that invariant against regression, and fix any
 assumption the audit surfaces. Live proof on real POWER hardware is explicitly deferred to
-#1157.
+#1156.
 
 ## Audit result (ground truth)
 
@@ -63,7 +63,7 @@ binary-selection:
   that carve-out; the guard test (below) encodes the boundary.
 - **The x86_64 validation host cannot run the inverted matrix live.** An x86_64 guest under KVM
   is native there, not TCG, so proving "x86_64 guest under TCG on a POWER host" end-to-end
-  needs POWER hardware (#1157). This issue verifies the inverted matrix at the **unit level**:
+  needs POWER hardware (#1156). This issue verifies the inverted matrix at the **unit level**:
   the code paths are fed a ppc64le-host `guest_arches` mapping and an x86_64 `profile.arch`, and
   their guest-facing output is asserted — no host, no boot.
 - **Symmetry is a data-flow property, not a host property.** Because the renderer takes
@@ -235,13 +235,13 @@ unchanged.
   allowlisted modules' current reads.
 - **AC7.** ADR-0354 records the invariant, the allowlist with a per-entry rationale, that the
   deadline path is arch-free by construction, the audit's finding of zero required production
-  changes, and that live POWER proof is #1157.
+  changes, and that live POWER proof is #1156.
 - **AC8.** No production source file changes (test + docs + ADR only). Verifiable by
   `git diff --name-only <base>` showing only `tests/`, `docs/`, and the ADR index.
 
 ## Non-goals
 
-- Live proof of an x86_64 guest booting under TCG on real POWER hardware (epic #1157).
+- Live proof of an x86_64 guest booting under TCG on real POWER hardware (epic #1156).
 - Changing any production code path — the audit found none reads the host arch for guest
   behavior; introducing an abstraction "to be safe" would be premature.
 - An import-alias-resolving AST pass in the guard (no aliased host-arch imports exist; the
@@ -253,7 +253,7 @@ unchanged.
 
 - On real POWER hardware an x86_64 guest under TCG would exercise the *identical* renderer/
   admission/deadline code these unit tests drive, but the end-to-end provision→boot has never
-  run there. #1157 (POWER10 bring-up) is the live falsification gate; this issue proves the
+  run there. #1156 (POWER10 bring-up) is the live falsification gate; this issue proves the
   data flow, not the hardware.
 - The confinement guard detects the `platform`/`os` host-arch idioms
   (`platform.machine`/`uname`/`processor`/`architecture`, `os.uname`). A future host-arch signal
