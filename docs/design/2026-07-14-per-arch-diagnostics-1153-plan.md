@@ -42,14 +42,28 @@ contribution, modeled on `multiarch_gdb`/`pseries_fadump`.
   whose emulator is present, values `"kvm"`/`"tcg"`), `native_arch: str`,
   `native_supported: bool`, `native_emulator_present: bool`, `native_qemu_binary: str |
   None`.
-- KVM probe is **URI-selected** (spec §Background):
-  `qemu:///session` → `lambda: os.access("/dev/kvm", os.R_OK | os.W_OK)`;
-  any other URI (incl. default `qemu:///system`) → `lambda: os.path.exists("/dev/kvm")`.
+- KVM probe is **URI-selected** (spec §Background), extracted as a directly-testable
+  module-level seam:
+  `kvm_probe_for_uri(uri, *, node="/dev/kvm", access=os.access, exists=os.path.exists)
+  -> Callable[[], bool]` returns `lambda: access(node, os.R_OK | os.W_OK)` when
+  `uri.strip() == "qemu:///session"`, else `lambda: exists(node)` (default
+  `qemu:///system` and any other URI). `access`/`exists`/`node` are injected so the
+  URI-selected branch is unit-tested deterministically **without touching the real
+  `/dev/kvm`**.
 - `default_guest_arch_accel_probe(*, host_arch=platform.machine(),
-  supported=SUPPORTED_ARCHES, which=shutil.which, kvm_present=None, uri=None)`: when
-  `kvm_present` is None, resolve `uri` (default from `kdive.config.get(LIBVIRT_URI)`) and
-  build the URI-selected probe; loop `sorted(supported)`, record accel per present
+  supported=SUPPORTED_ARCHES, which=shutil.which, kvm_present=None)`: when `kvm_present`
+  is None, the async closure resolves the URI at **call time** via
+  `kdive.config.get(LIBVIRT_URI) or "qemu:///system"` and builds `kvm_probe_for_uri(uri)`
+  (call-time resolution sidesteps config-load ordering; the `or` makes the None fallback
+  — treat an unresolved URI as `qemu:///system` presence, the conservative default —
+  explicit, not accidental). Then loop `sorted(supported)`, record accel per present
   emulator; assemble the report. All seams injectable for tests.
+- **Coupling note:** this neutral-diagnostics module imports `LIBVIRT_URI` from
+  `kdive.providers.local_libvirt.settings` — a deliberate, acceptable departure from the
+  two sibling checks' "no local-libvirt internals" rule, because accel is genuinely
+  URI-dependent and the settings module is dependency-light (imports only `Setting`, no
+  libvirt C-extension, no cycle). Reading the setting object avoids duplicating its
+  `KDIVE_LIBVIRT_URI` name/default (which would drift).
 - `GuestArchAccelCheck.run()`:
   - **FAIL** iff `native_supported and not native_emulator_present`; `fix` =
     `f"{native_qemu_binary} not found on PATH; install it via your distribution package
@@ -71,9 +85,15 @@ contribution, modeled on `multiarch_gdb`/`pseries_fadump`.
   contains `qemu-system-ppc64`.
 - `host_arch="aarch64"` (unsupported), only `qemu-system-x86_64` present → PASS, data
   `{"x86_64": "tcg"}`, no FAIL.
-- URI selection: `uri="qemu:///session"` builds an `os.access`-based probe;
-  `qemu:///system` builds `os.path.exists` — assert by injecting a fake `os` seam or by
-  constructing the probe and checking behavior against a stubbed node.
+- URI selection tested directly on `kvm_probe_for_uri`: `uri="qemu:///session"` with
+  injected `access`/`exists` spies and a temp `node` → the returned callable calls
+  `access(node, R|W)` and not `exists`; `uri="qemu:///system"` (and a bogus URI) → calls
+  `exists(node)` and not `access`. Deterministic, no real `/dev/kvm`.
+- Verification for the doctor surface greps an **existing sibling** id, not the new one:
+  `rg -n 'multiarch_gdb|pseries_fadump' tests/integration tests/diagnostics` locates any
+  test enumerating/counting worker checks; add `guest_arch_accel` to it only if it
+  asserts an exact id set (the current contribution tests use `any(...)`/membership, so
+  they will not break — confirm, don't assume).
 - `test_guest_arch_accel_is_in_the_single_local_contribution` and
   `test_registered_in_assembly` mirror the `pseries_fadump` tests
   (`tests/diagnostics/test_pseries_fadump.py:79-93`): exactly one local-libvirt
@@ -85,8 +105,8 @@ sits beside `MultiarchGdbCheck`/`PseriesFadumpCheck` in `provider_checks.py`; th
 
 **Guardrails:** `just lint`, `just type`, `uv run python -m pytest
 tests/diagnostics/test_guest_arch_accel.py tests/diagnostics/test_pseries_fadump.py
-tests/diagnostics/test_multiarch_gdb.py -q`, then a doctor integration smoke if one
-exists (`rg -l guest_arch_accel tests/integration`).
+tests/diagnostics/test_multiarch_gdb.py -q`, plus the sibling-id grep above to find any
+doctor integration surface to update.
 
 **Rollback:** delete the new module + test, revert the three edited files; no state.
 
@@ -113,12 +133,22 @@ without the foreign qemu package.
   `guest arch <arch>: available via TCG only (<binary>)`; if absent → `guest arch
   <arch>: not available; install <pkg> for TCG guests` where `<pkg>` = `package_for
   "$(qemu_binary_for_arch "${arch}")" "${distro}"`.
+- **Output stream — stdout.** The advisory is informational, like the script's final
+  "…dependencies are present" lines (stdout), *not* a missing-dependency report (the
+  tier reports use `>&2`). Routing it to **stdout** keeps the existing
+  `test_ppc64le_future_hint_names_the_power_qemu_package` negative assertion
+  (`"qemu-system-x86" not in result.stderr`, line 106) true — the advisory's
+  `install qemu-system-x86` line lands on stdout, not stderr. Pin this explicitly; the
+  new advisory-acceptance tests assert the advisory lines on **stdout**.
 - Keep it report-only (never fail on cross-arch); shellcheck-clean; `shfmt -i 2`.
 
 **Acceptance:**
-- Existing `test_ppc64le_future_hint_names_the_power_qemu_package` still passes
-  (native ppc64le → `qemu-system-ppc`).
-- New tests (parametrized over host arch × foreign-qemu present/absent):
+- Existing `test_ppc64le_future_hint_names_the_power_qemu_package` still passes —
+  *because* the advisory is on stdout, so its `install qemu-system-x86` line does not
+  appear in stderr (the assertion the test makes). This is a consequence of the stdout
+  routing above, not an "unchanged" claim; verify it explicitly when the advisory lands.
+- New tests (parametrized over host arch × foreign-qemu present/absent), all asserting
+  advisory lines on **stdout** (`result.stdout`):
   - `uname=x86_64`, no `qemu-system-ppc64` on PATH, debian → advisory `guest arch
     ppc64le: not available; install qemu-system-ppc`.
   - `uname=x86_64`, `qemu-system-ppc64` stubbed present → `guest arch ppc64le: available
@@ -141,15 +171,32 @@ tests/scripts/test_check_setup_deps.py -q`.
 **Where it fits:** Acceptance-1's preflight complement; fixes the x86 hardcode.
 
 **Files:** `scripts/check-local-libvirt.sh`, and its test if one exists (`fd
-check_local_libvirt tests/`); else add `tests/scripts/test_check_local_libvirt.py`
-mirroring the dep-checker test harness (PATH + `uname` stubs, `KDIVE_KVM_NODE`/env
-overrides already supported).
+check_local_libvirt tests/`); else add `tests/scripts/test_check_local_libvirt.py`.
+
+**Test-harness reality (do not "mirror the dep-checker"):** `check-local-libvirt.sh` is
+much heavier than the dep-checker — to *fully* pass it stubs `_has_kvm`
+(`KDIVE_KVM_NODE` at a writable temp node), a `virsh` connect + `net-info default`
+active probe, `id -nG` (libvirt group), `${KDIVE_PYTHON} -c 'import guestfs, drgn'`, a
+`${KDIVE_BOOT_DIR}` kernel-readability scan, and a `${KDIVE_INSTALL_STAGING}`
+writability probe. **But these tests do not need a fully-green run:** the script
+accumulates `fail` and runs *every* check before exiting, so unrelated checks may FAIL
+without suppressing the qemu lines. Assert on the **specific** qemu FAIL / advisory
+lines (present/absent) and tolerate other failures; the only stubs required to reach and
+control those lines are `uname` and a controlled PATH (for `virsh`, `qemu-img`, and the
+arch qemu binaries). Set `KDIVE_BOOT_DIR` to an empty temp dir to silence the kernel
+scan if its FAIL adds noise. Reuse the `_stub`/`_run`-style helpers from
+`tests/scripts/test_check_setup_deps.py`.
 
 **Changes (spec §B):**
-- Replace the hardcoded `qemu-system-x86_64` in the required-command loop (line ~74)
-  with the **host-native** binary (`qemu_binary_for_arch "$(uname -m)"`), so a POWER host
-  is not failed for the x86 emulator and *is* failed for a missing `qemu-system-ppc64`.
-- Add a `SUPPORTED_ARCHES` list + `qemu_binary_for_arch()` (same mapping as Task 2).
+- Add a `SUPPORTED_ARCHES` list + `qemu_binary_for_arch()` (same mapping as Task 2) near
+  the top.
+- **Restructure the required-command loop** (currently `for c in virsh qemu-system-x86_64
+  qemu-img; do _cmd ... done`, line ~74) so the qemu emulator is **pulled out of the
+  fixed list** and gated by arch: always require `virsh` and `qemu-img`; require the
+  native qemu binary `qemu_binary_for_arch "$(uname -m)"` **only when** the host arch ∈
+  `SUPPORTED_ARCHES`. A single-token substitution cannot express the unsupported-arch
+  skip — the loop must be split (fixed tools looped as before; native qemu a separate
+  arch-gated `_cmd || note_fail`).
 - **Foreign-arch advisory:** for each supported non-host arch whose binary is present,
   print an informational line (the `OK:`/`printf` vocabulary — **not** `note_fail`/
   `note_warn`): `guest arch <X> available via TCG only (foreign emulator <binary>
@@ -215,6 +262,9 @@ doc-style-guard violations (no "robust"/"comprehensive"/etc.).
 - Full `just ci` green.
 - Confirm the three surfaces agree on package names (grep `qemu-system-ppc` across
   `install.md`, `check-setup-deps.sh`, `image-lifecycle.md`).
-- Confirm no new check id collision: `rg -n 'guest_arch_accel' src/kdive/diagnostics`.
-- The new check appears in the doctor verdict: if a doctor integration test enumerates
-  check ids, add `guest_arch_accel` to its expected set.
+- Confirm the id string is unique before adding it: `rg -n '"guest_arch_accel"'
+  src/kdive` should return **nothing** pre-implementation (it is new).
+- Locate any test enumerating worker checks by grepping an **existing** sibling id
+  (`rg -n 'multiarch_gdb|pseries_fadump' tests/integration tests/diagnostics`), then add
+  `guest_arch_accel` only if such a test asserts an exact id set. Do not grep for the id
+  you are introducing.
