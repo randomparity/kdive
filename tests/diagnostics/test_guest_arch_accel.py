@@ -132,19 +132,32 @@ def test_uri_is_local_distinguishes_transport_uris() -> None:
     assert uri_is_local("qemu+tcp://host/system") is False
 
 
+def test_uri_constants_mirror_the_provider_setting() -> None:
+    # The env name + default are duplicated (to respect the provider import boundary); a test —
+    # not boundary-gated — pins them to the source of truth so a provider default change is caught.
+    from kdive.diagnostics.guest_arch_accel import _DEFAULT_URI, _LIBVIRT_URI_ENV
+    from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+
+    assert LIBVIRT_URI.name == _LIBVIRT_URI_ENV
+    assert LIBVIRT_URI.default == _DEFAULT_URI
+
+
 def test_remote_target_does_not_fail_on_missing_local_emulator() -> None:
     # A transport URI runs guests on another host; a missing *local* emulator is not a real
     # schedulability failure, so the check must PASS and scope its detail — never a spurious FAIL.
     probe = default_guest_arch_accel_probe(
         host_arch="x86_64",
         supported=_SUPPORTED,
-        which=_which({}),  # no local emulator at all
+        which=_which({"qemu-system-x86_64": "/u/x"}),  # a local emulator that is the wrong host
         kvm_present=lambda: True,
         target_is_local=False,
     )
     result = _run_check(_check_for(probe))
     assert result.status is CheckStatus.PASS
     assert "targets a remote host" in result.detail
+    # The machine-readable data must not present a confident (wrong-host) accel map for a remote
+    # target — only the marker, so a --json consumer is not misled.
+    assert result.data == {"target_is_local": "false"}
 
 
 def test_resolved_libvirt_uri_reads_snapshot_then_restores() -> None:

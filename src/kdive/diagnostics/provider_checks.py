@@ -475,7 +475,12 @@ class GuestArchAccelCheck(Check):
 
     async def run(self) -> CheckResult:
         report = await self._probe()
+        # The accel map describes the worker host. For a remote/transport URI that is the wrong
+        # host, so emit a machine-readable marker instead of a confidently-wrong per-arch map (the
+        # human detail is scoped too); a local target carries the real accel map.
         data = dict(report.accel_by_arch) or None
+        if not report.target_is_local:
+            data = {"target_is_local": "false"}
         # Only gate native schedulability for a local target: for a remote/transport URI the
         # emulator lives on another host this worker-vantage probe cannot see, so a missing local
         # emulator is not a real schedulability failure (never a confident wrong FAIL).
