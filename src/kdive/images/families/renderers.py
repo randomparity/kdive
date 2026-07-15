@@ -172,6 +172,13 @@ def render_firstboot_unit(*, script_path: str) -> str:
     (that would run in the very firstboot it is trying to trigger), so ``inject_offline`` enables
     it offline via a guestfish symlink into ``multi-user.target.wants``.
 
+    ``TimeoutStartSec=infinity`` disables systemd's default 90s ``DefaultTimeoutStartSec``: a
+    customization that installs packages can exceed it (a slow dnf under TCG, or a large native
+    install), and a timeout would SIGTERM the service mid-install, fire the script's ``-failed``
+    marker, and fail the build for a reason unrelated to the customization (#1152). The host
+    orchestration's TCG-scaled window is the authoritative deadline; the unit must not impose a
+    shorter one.
+
     Args:
         script_path: The firstboot script's guest path, used as ``ExecStart``; must match
             ``render_firstboot_script``'s ``script_path`` (the caller passes the shared constant).
@@ -186,6 +193,7 @@ def render_firstboot_unit(*, script_path: str) -> str:
         "Wants=network-online.target\n"
         "[Service]\n"
         "Type=oneshot\n"
+        "TimeoutStartSec=infinity\n"
         f"ExecStart={script_path}\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"

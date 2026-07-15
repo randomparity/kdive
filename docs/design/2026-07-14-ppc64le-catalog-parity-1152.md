@@ -165,6 +165,20 @@ Fixed here (shared seed, ADR-0288, all families): the baked `user-data` becomes 
 which parses to an empty **dict**, so cloud-init's unguarded membership check is safe. Inert on
 Fedora (already guarded). Guarded by `test_nocloud_user_data_parses_to_a_mapping_not_none`.
 
+## Live-proof risk 4, fixed: firstboot oneshot hits systemd's default 90s start-timeout
+
+With Fixes 1–3, cloud-init + network + dnf all ran, but the customization still failed at a fixed
+~90s wall-clock point regardless of dnf speed (once at 1% of a slow download, once at 64% of an
+11 MB/s one). Root cause: `render_firstboot_unit` set no `TimeoutStartSec`, so the
+`kdive-customize.service` oneshot inherited systemd's default `DefaultTimeoutStartSec` (90s). Any
+package-installing customization that runs longer — a dnf install under TCG, or a large native
+install — is SIGTERM'd mid-run, firing the script's `-failed` marker. Fedora's fast dnf5 finished
+under 90s and masked it; CentOS Stream 9's dnf4 does not.
+
+Fixed here (mechanism, ADR-0345/#1147): the oneshot gets `TimeoutStartSec=infinity`, deferring the
+deadline to the host orchestration's TCG-scaled window (`_await_customize_ok`), which is the single
+authoritative bound. Guarded by `test_firstboot_unit_disables_the_systemd_start_timeout`.
+
 ## Non-goals
 
 - Debian ppc64le rows and the debian→boot migration (#1167).
