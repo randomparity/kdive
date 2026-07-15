@@ -151,6 +151,20 @@ change touches no boot mechanism and no x86_64 byte contract beyond the EPEL tra
 always needed. Guarded by `test_el_clones_enable_epel_before_installing_drgn` /
 `test_fedora_does_not_enable_epel`.
 
+## Live-proof risk 3, fixed: cloud-init empty user-data crash on EL9
+
+With Fixes 1 and 2 in place, the CS9 boot reached userspace but the firstboot customization failed:
+cloud-init 24.4 crashed at init-local, so the guest never got a network address and the firstboot
+`dnf` stalled at 0 B/s. Root cause (traced to the exact cloud-init line): the baked NoCloud
+`user-data` was `#cloud-config\n`, which `yaml.safe_load` parses to **None**, and cloud-init 24.4's
+`_should_wait_via_user_data` runs `"write_files" in yaml.safe_load(user_data)` with no None guard →
+`TypeError: argument of type 'NoneType' is not iterable` → `failed stage init-local` → no network.
+Fedora's cloud-init build guards None, so #1147 never hit it; EL9's `cloud-init 24.4-8.el9` does not.
+
+Fixed here (shared seed, ADR-0288, all families): the baked `user-data` becomes `#cloud-config\n{}\n`,
+which parses to an empty **dict**, so cloud-init's unguarded membership check is safe. Inert on
+Fedora (already guarded). Guarded by `test_nocloud_user_data_parses_to_a_mapping_not_none`.
+
 ## Non-goals
 
 - Debian ppc64le rows and the debian→boot migration (#1167).

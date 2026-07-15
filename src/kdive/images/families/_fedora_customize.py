@@ -77,7 +77,13 @@ resize_rootfs: true
 """
 NOCLOUD_SEED_DIR = "/var/lib/cloud/seed/nocloud"
 _NOCLOUD_META_DATA = "instance-id: kdive-rootfs\nlocal-hostname: kdive\n"
-_NOCLOUD_USER_DATA = "#cloud-config\n"
+# The body MUST yaml-parse to a mapping, not None. cloud-init 24.4's `_should_wait_via_user_data`
+# does `"write_files" in yaml.safe_load(user_data)` with no None guard; a bare `#cloud-config\n`
+# parses to None and crashes it (`argument of type 'NoneType' is not iterable`), failing the
+# init-local stage → no network → the customization boot's dnf can never reach a mirror. The `{}`
+# keeps a valid, empty cloud-config that parses to a dict. EL9's cloud-init 24.4-8 has this bug;
+# Fedora's build guards None, so #1147 never hit it (#1152, ADR-0288).
+_NOCLOUD_USER_DATA = "#cloud-config\n{}\n"
 # Best-effort strip of any base drop-in that disables cloud-init network management; the build
 # self-check (rootfs_build.py) is the guard that asserts none remain.
 _STRIP_NET_DISABLE_CMD = (

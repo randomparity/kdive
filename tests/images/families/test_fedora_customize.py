@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.families import _fedora_customize
@@ -142,6 +143,20 @@ def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path) -> None:
     assert uploads[f"{NOCLOUD_SEED_DIR}/meta-data"].startswith("instance-id:")
     assert uploads[f"{NOCLOUD_SEED_DIR}/user-data"].startswith("#cloud-config")
     assert "--mkdir" in argv and NOCLOUD_SEED_DIR in argv
+
+
+def test_nocloud_user_data_parses_to_a_mapping_not_none(tmp_path: Path) -> None:
+    """The baked NoCloud user-data must yaml-parse to a mapping, never None (#1152, ADR-0288).
+
+    cloud-init 24.4's ``_should_wait_via_user_data`` does ``"write_files" in yaml.safe_load(ud)``
+    with no None guard. A bare ``#cloud-config\\n`` parses to None and crashes init-local on EL9
+    (``argument of type 'NoneType' is not iterable``) → no network → the customization boot's
+    dnf never reaches a mirror. This reproduces that guard so a regression to an empty body fails.
+    """
+    user_data = _uploads(_ci_argv(tmp_path, is_cloud_image=True))[f"{NOCLOUD_SEED_DIR}/user-data"]
+    parsed = yaml.safe_load(user_data)
+    assert isinstance(parsed, dict), parsed
+    assert "write_files" not in parsed  # the exact check cloud-init 24.4 performs unguarded
 
 
 def test_cloud_init_helper_undisables_and_seeds_machine_id(tmp_path: Path) -> None:
