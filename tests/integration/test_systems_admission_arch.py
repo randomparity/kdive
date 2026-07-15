@@ -43,6 +43,12 @@ _X86_GUEST_ARCHES = {
 _PPC_ONLY_GUEST_ARCHES = {
     "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"},
 }
+# The inverted (POWER-host) matrix: ppc64le is native (kvm), x86_64 is the foreign guest (tcg).
+# Mirrors the x86-host `_X86_GUEST_ARCHES` with the arches' accelerators swapped (#1155, ADR-0354).
+_PPC_HOST_GUEST_ARCHES = {
+    "ppc64le": {"accel": "kvm", "emulator": "/usr/bin/qemu-system-ppc64"},
+    "x86_64": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-x86_64"},
+}
 
 
 async def _set_resource_guest_arches(
@@ -117,6 +123,29 @@ def test_provision_records_accel_when_host_advertises_arch(migrated_url: str) ->
             row = await _system_for_allocation(pool, alloc_id)
             assert row is not None
             assert row["accel"] == "kvm"  # x86_64 is native on this advertised host
+
+    asyncio.run(_run())
+
+
+def test_provision_records_tcg_accel_for_x86_guest_on_ppc_host(migrated_url: str) -> None:
+    # The inverted host/guest matrix (#1155, ADR-0354): on a ppc64le host advertising
+    # {ppc64le: kvm, x86_64: tcg}, the default (x86_64) profile is admitted and records accel=tcg
+    # — the symmetric counterpart to the ppc64le-guest-on-x86-host case. `accel=="tcg"` is already
+    # asserted for a ppc64le guest (the fadump tests); this pins the x86_64-guest-under-TCG key,
+    # so a future x86-specific special-case in the arch-agnostic resolution would fail here.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_guest_arches(pool, alloc_id, _PPC_HOST_GUEST_ARCHES)
+
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_profile()
+            )
+
+            assert resp.error_category is None, resp.data
+            row = await _system_for_allocation(pool, alloc_id)
+            assert row is not None
+            assert row["accel"] == "tcg"  # x86_64 is the foreign (TCG) guest on this ppc64le host
 
     asyncio.run(_run())
 
