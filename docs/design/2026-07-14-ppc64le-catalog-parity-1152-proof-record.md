@@ -74,8 +74,8 @@ cloud-init → network → dnf-start, but the dnf4 metadata download from the Ce
 exhausts its mirrors and the firstboot exits. This is emulated-network/mirror-CDN connectivity, not
 kdive code — Fedora's dnf5 + CDN are reliable under the same SLIRP, which is why #1147 passed and
 the Fedora ppc64le proof here passes. A native POWER10 host (real network, native dnf speed) or a
-faster/cached mirror removes the limit. Tracked as a gated follow-up; the CentOS/Rocky ppc64le rows
-ship catalog/loader-validated.
+faster/cached mirror removes the limit. Tracked as gated follow-up **#1174**; the CentOS/Rocky
+ppc64le rows ship catalog/loader-validated.
 
 ## Reproduction
 
