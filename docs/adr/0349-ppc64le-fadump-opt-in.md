@@ -144,6 +144,20 @@ be made to work after honest iteration, the verdict is documented (this QEMU 10.
 native-POWER validation deferred to #1152), which is the issue's explicit feasibility-gate
 fallback — not shipped as indeterminate.
 
+**Live-proof outcome (2026-07-14 — DOCUMENTED, native-POWER required).** The live run drove the
+full lifecycle on build `gaa97e8dae`: admission accepted fadump on the QEMU-10.2.2 host (and denied
+it on a stale-capability host — both gate directions exercised), the domain booted with
+`crashkernel=512M fadump=on`, and the guest kernel logged **`rtas fadump: Registration is
+successful!`** — the mechanism (`registered==1`), confirming QEMU 10.2's `ibm,configure-kernel-dump`
+RTAS *accepts* registration under TCG, not a silent kdump fallback. The fadump guest then hit a
+recurring `rtas_event_scan` RTAS `Oops` (dispatch into the fadump-reserved region) under TCG and
+never reached readiness; the identical rootfs+kernel booted ready and captured under **kdump**
+(#1148), isolating `fadump=on` as the cause. Because the crash→capture path rides the same Oopsing
+RTAS, no boot-window tuning recovers it under emulation. **Verdict:** fadump end-to-end capture
+requires native-POWER (KVM) validation (carried by the POWER10 bring-up); the QEMU **10.2** floor is
+confirmed live. The `live_stack` driver now skips on non-ppc64le hosts and serves as the
+native-POWER driver. Full evidence: `docs/design/2026-07-14-ppc64le-fadump-proof-record-1151.md`.
+
 ## Consequences
 
 - A ppc64le System opts into fadump with `debug.fadump=True` + a `crashkernel` reservation;
