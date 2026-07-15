@@ -75,7 +75,7 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/minio:RELEASE.2025-04-22T22-12-26Z` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
-| `ghcr.io/navikt/mock-oauth2-server:3.0.3` | core backend (OIDC mock; mirror tracked #1183) | ✅ | ✅ | ❌ | mirror |
+| `kdive-mock-oidc:dev` | core backend (OIDC mock; built in-repo from the upstream jar, #1183 / ADR-0357) | — | — | — | build-local |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
 | `kdive:dev` | app image (repo Dockerfile; base publishes ppc64le, buildx-proven in #1185) | — | — | — | build-local |
@@ -119,8 +119,10 @@ has no pulled per-arch manifest; the guard verifies instead that a compose servi
     *closed*. Closing it is the follow-up sub-issue's job (#1183/#1184), not the guard's.
   The guard is the drift-and-labelling fence, not a registry probe or a project tracker.
 - Follow-ups this decision creates:
-  - Build and publish the multi-arch OIDC mirror; repoint `docker-compose.yml` and
-    `deploy/helm/kdive/values.yaml` at it.
+  - ~~Build the multi-arch OIDC mirror; repoint `docker-compose.yml` at it.~~ Done in #1183
+    (ADR-0357): `deploy/mock-oidc` builds the upstream jar on a multi-arch JRE and the compose
+    `oidc` service is now `build-local`. The Helm `values.yaml` repoint stays open below — a
+    k8s deploy pulls, so it needs a *published* image, not a compose `build:`.
   - Repoint the Helm demo OIDC (`values.yaml:127` → `templates/demo/oidc.yaml`) at the mirror;
     it inherits the identical ppc64le gap and would otherwise stay amd64-only on k8s.
   - Fence the Helm `values.yaml` backing-image set (it pins the same images independently of
