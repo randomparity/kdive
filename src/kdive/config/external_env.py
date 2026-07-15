@@ -158,6 +158,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Container image ref under test for the image smoke test; unset → the smoke test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_OIDC_IMAGE",
+        "test",
+        None,
+        "docker-compose oidc override: set to the published GHCR mirror digest to PULL it "
+        "(ADR-0358); unset → compose builds deploy/mock-oidc locally as kdive-mock-oidc:dev.",
+    ),
+    ExternalEnvVar(
         "KDIVE_STACK_BASE_URL",
         "test",
         None,

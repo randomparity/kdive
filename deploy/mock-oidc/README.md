@@ -31,6 +31,34 @@ instead:
 - Both base images are pinned by their multi-arch **index** digest so a per-arch pull still
   resolves.
 
+## Published image (GHCR)
+
+kdive publishes this build as a `linux/amd64,linux/ppc64le` manifest at
+`ghcr.io/randomparity/mock-oauth2-server` (#1184, ADR-0358), so a developer can pull a prebuilt
+image instead of building the JVM image. The repo-root `docker-compose.yml` `oidc` service is
+`image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}` with `build: ./deploy/mock-oidc`: unset, it
+builds the mirror locally (works offline, any arch whose bases publish); set to the published
+digest, it pulls instead:
+
+```
+export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:<digest>
+docker compose up
+```
+
+This parallels `KDIVE_IMAGE` for the app image (ADR-0359). A digest reference cannot also be a
+`build:` target (buildkit cannot tag a local build to a caller-specified digest), so the pull
+is the override and the local build is the default — never both at once.
+
+The `.github/workflows/publish-mock-oidc.yml` workflow republishes on any change under
+`deploy/mock-oidc/` (and on manual dispatch), building both arches with buildx, asserting the
+manifest lists amd64 + ppc64le, and printing the digest in its run summary — copy that digest
+into `KDIVE_OIDC_IMAGE`.
+
+For an unauthenticated `docker pull` to succeed, the GHCR package must be **public**; if it is
+still private, flip its visibility in the GHCR package settings UI (GitHub exposes no REST
+endpoint for a user package). An authenticated pull, or the default local build, works
+meanwhile.
+
 ## Updating the mock issuer version
 
 1. Bump the `<version>` in `pom.xml`.
@@ -46,6 +74,9 @@ instead:
    ```
    skopeo inspect --raw docker://eclipse-temurin:21-jre | sha256sum
    ```
+
+4. Let `publish-mock-oidc.yml` republish (it fires on the `deploy/mock-oidc/` change); it
+   prints the new `@sha256:` digest to export via `KDIVE_OIDC_IMAGE` (see above).
 
 ## Configuration
 

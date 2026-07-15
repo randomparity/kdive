@@ -95,13 +95,21 @@ services:
         mc alias set local http://minio:9000 minioadmin minioadmin
         mc mb --ignore-existing local/kdive-artifacts
 
-  # Built in-repo (deploy/mock-oidc) so the issuer runs on ppc64le too — the upstream
-  # ghcr.io/navikt/mock-oauth2-server image is amd64/arm64 only, breaking `docker compose up`
-  # on a POWER host. Same jar version, so the token contract is byte-identical (#1183,
-  # ADR-0357). `image:` names the locally-built image (mirrors the kdive:dev pattern).
+  # Multi-arch mock OIDC issuer. The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
+  # only, breaking `docker compose up` on a POWER host, so kdive mirrors it (deploy/mock-oidc,
+  # ADR-0357) on a multi-arch JRE — same jar version, byte-identical token contract. By default
+  # `build:` builds that mirror locally and tags it kdive-mock-oidc:dev (mirrors the kdive:dev
+  # app-image pattern), so `docker compose up` works offline and on any arch whose bases publish.
+  #
+  # KDIVE_OIDC_IMAGE overrides the reference so an operator PULLS the published GHCR mirror
+  # (#1184, ADR-0358) — digest-pinned for reproducibility — instead of building it, e.g.
+  #   export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6
+  # It parallels KDIVE_IMAGE for the app image (ADR-0359). A digest ref cannot coexist with a
+  # taggable local build, so the override is the pull path and the unset default is the build
+  # path — never both. The publish-mock-oidc workflow prints the digest to pin on each republish.
   oidc:
+    image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}
     build: ./deploy/mock-oidc
-    image: kdive-mock-oidc:dev
     environment:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
       SERVER_PORT: "8080"
