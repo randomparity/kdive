@@ -183,6 +183,21 @@ arch_is_supported() {
   return 1
 }
 
+# Arches PyPI ships no prebuilt wheels for. Their Python C/Rust extension deps
+# (pydantic-core) and the just/prek tools build from source, so a Rust toolchain is
+# required. x86_64 gets wheels and needs no Rust; an empty/unknown host arch (e.g. a
+# restricted-PATH environment without `uname`) is treated as wheel-ful, so no false
+# Rust requirement is raised where the arch cannot be determined.
+readonly WHEELLESS_ARCHES=(ppc64le)
+
+arch_needs_rust() {
+  local candidate
+  for candidate in "${WHEELLESS_ARCHES[@]}"; do
+    [[ "${candidate}" == "$1" ]] && return 0
+  done
+  return 1
+}
+
 # Report cross-arch guest availability (report-only): the native arch runs under KVM, every
 # foreign arch under TCG. For each supported arch other than the host's, say whether its qemu
 # emulator is present (TCG guests available here) or name the exact package that enables it. An
@@ -219,6 +234,12 @@ require_header required libvirt-headers libvirt "${distro}"
 # libvirt-python and any wheel-less C/Rust extension (e.g. pydantic-core, grpcio on
 # arches without prebuilt wheels) compile against the Python development headers.
 require_header required python-headers python3 "${distro}"
+# On wheel-less arches (ppc64le) pydantic-core and the just/prek tools build from source,
+# so a Rust toolchain is required. rustup provides both rustc and cargo, so a single hint
+# covers either being absent. x86_64 has prebuilt wheels and needs no Rust toolchain.
+if arch_needs_rust "${host_arch}" && { ! command_exists rustc || ! command_exists cargo; }; then
+  note_manual required "rustc/cargo" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+fi
 
 # RECOMMENDED — needed to reproduce the full local CI gate.
 require_command recommended git "${distro}"
