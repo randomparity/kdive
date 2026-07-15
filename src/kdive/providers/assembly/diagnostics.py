@@ -10,4 +10,6 @@ from kdive.providers.remote_libvirt.diagnostics.contribution import (
 
 
 def diagnostic_provider_contributions() -> tuple[DiagnosticProviderContribution, ...]:
+    # local-libvirt has a single contribution (one dispatcher per contribution, keyed by
+    # provider); it carries every local worker-vantage check — multiarch-gdb and pseries-fadump.
     return (local_diagnostics(), remote_diagnostics())

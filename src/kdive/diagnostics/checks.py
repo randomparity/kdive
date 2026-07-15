@@ -27,6 +27,7 @@ GDBSTUB_ACL_ID = "gdbstub_acl"
 REACHABILITY_ID = "remote_libvirt_reachability"
 BASE_IMAGE_STAGING_ID = "remote_libvirt_base_image_staging"
 MULTIARCH_GDB_ID = "multiarch_gdb"
+PSERIES_FADUMP_ID = "pseries_fadump"
 
 _log = logging.getLogger(__name__)
 

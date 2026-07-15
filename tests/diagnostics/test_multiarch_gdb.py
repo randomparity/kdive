@@ -111,10 +111,11 @@ def test_contribution_shape() -> None:
     assert contribution.provider == "local-libvirt"
     assert contribution.enabled() is True
     worker_checks = list(contribution.worker_checks())
-    assert len(worker_checks) == 1
-    assert isinstance(worker_checks[0], MultiarchGdbCheck)
-    descriptors = list(contribution.unavailable_worker_checks())
-    assert [d.id for d in descriptors] == ["multiarch_gdb"]
+    # The single local contribution carries the multiarch-gdb check (and, since #1151, the
+    # pseries-fadump check); one dispatcher per contribution keeps all local checks together.
+    assert any(isinstance(c, MultiarchGdbCheck) for c in worker_checks)
+    descriptors = [d.id for d in contribution.unavailable_worker_checks()]
+    assert "multiarch_gdb" in descriptors
 
 
 def test_registered_in_assembly() -> None:

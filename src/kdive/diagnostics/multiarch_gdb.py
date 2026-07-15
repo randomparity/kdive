@@ -28,6 +28,10 @@ from kdive.diagnostics.provider_contracts import (
     WorkerVantageDescriptor,
     no_checks,
 )
+from kdive.diagnostics.pseries_fadump import (
+    pseries_fadump_worker_check,
+    pseries_fadump_worker_descriptor,
+)
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
 from kdive.providers.shared.debug_common.gdbmi.policy.arch import (
     gdb_target_arch_name,
@@ -118,11 +122,19 @@ def default_multiarch_gdb_probe(
 
 
 def _worker_checks() -> list[Check]:
-    return [MultiarchGdbCheck(provider=_LOCAL_PROVIDER, probe=default_multiarch_gdb_probe())]
+    # The single local-libvirt contribution carries every local worker-vantage check (one
+    # dispatcher is built per contribution, keyed by provider, so all local checks share one).
+    return [
+        MultiarchGdbCheck(provider=_LOCAL_PROVIDER, probe=default_multiarch_gdb_probe()),
+        pseries_fadump_worker_check(),
+    ]
 
 
 def _unavailable_worker_checks() -> list[WorkerVantageDescriptor]:
-    return [WorkerVantageDescriptor(id=MULTIARCH_GDB_ID, provider=_LOCAL_PROVIDER)]
+    return [
+        WorkerVantageDescriptor(id=MULTIARCH_GDB_ID, provider=_LOCAL_PROVIDER),
+        pseries_fadump_worker_descriptor(),
+    ]
 
 
 def diagnostic_contribution() -> DiagnosticProviderContribution:

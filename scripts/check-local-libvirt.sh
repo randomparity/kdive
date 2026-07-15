@@ -83,6 +83,23 @@ if _cmd virsh; then
     "virsh -c qemu:///system net-start default && virsh -c qemu:///system net-autostart default"
 fi
 
+# Advisory (ADR-0349): fadump on POWER pseries needs QEMU >= 10.2 (the ibm,configure-kernel-dump
+# RTAS). Report-only — an absent/old qemu-system-ppc64 does not fail this host (kdump is the spine
+# and x86 is unaffected); it only tells an operator whether fadump systems can be provisioned here.
+if _cmd qemu-system-ppc64; then
+  _ppc_ver="$(qemu-system-ppc64 --version 2>/dev/null |
+    sed -n 's/^QEMU emulator version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')"
+  read -r _ppc_maj _ppc_min <<<"${_ppc_ver:-0 0}"
+  if ((_ppc_maj > 10 || (_ppc_maj == 10 && _ppc_min >= 2))); then
+    printf "OK: qemu-system-ppc64 %s.%s implements pseries fadump (>= 10.2)\n" \
+      "${_ppc_maj}" "${_ppc_min}"
+  else
+    note_warn \
+      "qemu-system-ppc64 ${_ppc_maj}.${_ppc_min} predates QEMU 10.2, so pseries fadump is unavailable" \
+      "upgrade QEMU to >= 10.2 to provision fadump systems here, or validate fadump on native POWER; kdump is unaffected"
+  fi
+fi
+
 _venv_imports_kdump_deps || note_fail \
   "worker venv (${PY}) cannot 'import guestfs, drgn' (local-libvirt kdump capture, ADR-0203)" \
   "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
