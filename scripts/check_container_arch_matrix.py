@@ -8,7 +8,7 @@ per-handling-token obligation on every matrix row:
 1. **Set equality** — the compose `image:` set equals the matrix image set (drift in either
    direction is named).
 2. **Handling validity** — every row's handling is one of ``rely-on-upstream`` / ``mirror`` /
-   ``publish-mirror`` / ``build-local`` / ``accept-gap``.
+   ``build-local`` / ``accept-gap``.
 3. **Arch alphabet + ``rely-on-upstream`` ⟹ ppc64le** — each arch cell is one of ``✅`` / ``❌``
    / ``—``, and a ``rely-on-upstream`` row's ppc64le cell is exactly ``✅`` (fail-closed).
 4. **``accept-gap`` ⟹ opt-in only** — the image is used by no default-profile (un-profiled)
@@ -17,10 +17,6 @@ per-handling-token obligation on every matrix row:
    gap under a ``mirror`` label is a visible follow-up, not a silent bypass of assertion 3.
 6. **``build-local`` ⟹ actually built** — a compose service using the image has a ``build:``
    key, so the token cannot be borrowed by a pulled upstream image to dodge assertion 3.
-7. **``publish-mirror`` ⟹ ppc64le ✅ + digest-pinned** — kdive builds and publishes the mirror
-   as a multi-arch manifest (#1184, ADR-0358), so its ppc64le cell is exactly ``✅`` (like
-   ``rely-on-upstream``, fail-closed) and the compose reference is pinned by an immutable
-   ``@sha256:`` digest, not a floating tag.
 
 Compose is parsed with ``yaml.safe_load`` (PyYAML is a hard dependency), which resolves the
 file's anchors, merge keys, and block scalars; the guard reads only the ``services`` mapping.
@@ -45,7 +41,7 @@ ADR_PATH = _ROOT / "docs" / "adr" / "0356-cross-platform-dev-containers.md"
 _BEGIN = "<!-- arch-matrix:begin -->"
 _END = "<!-- arch-matrix:end -->"
 
-HANDLING = frozenset({"rely-on-upstream", "mirror", "publish-mirror", "build-local", "accept-gap"})
+HANDLING = frozenset({"rely-on-upstream", "mirror", "build-local", "accept-gap"})
 ARCHES = ("amd64", "arm64", "ppc64le")  # the three arch columns, one source for the checks
 ARCH_ALPHABET = frozenset({"✅", "❌", "—"})  # published / not published / not applicable
 _ISSUE_REF = re.compile(r"#\d+")
@@ -196,16 +192,6 @@ def _check_obligation(row: MatrixRow, images: dict[str, ImageInfo]) -> list[str]
         ]
     if row.handling == "rely-on-upstream" and row.ppc64le != "✅":
         return [f"{row.image}: rely-on-upstream requires ppc64le ✅, found {row.ppc64le!r}"]
-    if row.handling == "publish-mirror":
-        # kdive publishes this mirror as a multi-arch manifest (verified at publish time by the
-        # workflow's imagetools check): assert ppc64le ✅ fail-closed, and require the compose
-        # reference — identical to row.image by set-equality — to be pinned by @sha256 digest.
-        out: list[str] = []
-        if row.ppc64le != "✅":
-            out.append(f"{row.image}: publish-mirror requires ppc64le ✅, found {row.ppc64le!r}")
-        if "@sha256:" not in row.image:
-            out.append(f"{row.image}: publish-mirror must be pinned by an @sha256 digest")
-        return out
     info = images.get(row.image)
     if info is None:  # drift already reported by set-equality; skip usage-based checks
         return []

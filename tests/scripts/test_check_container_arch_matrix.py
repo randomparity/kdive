@@ -22,10 +22,7 @@ from scripts.check_container_arch_matrix import (
 # A minimal-but-representative compose: a YAML anchor + merge key, an opt-in `obs` profile, a
 # locally-built app image, and a top-level `volumes:` block whose child must NOT be read as a
 # service. Image set matches GOOD_MATRIX below.
-#: A digest-pinned kdive-published mirror reference, used by the publish-mirror fixtures.
-_PUB_MIRROR = "ghcr.io/randomparity/mock-oauth2-server@sha256:" + "a" * 64
-
-GOOD_COMPOSE = f"""\
+GOOD_COMPOSE = """\
 x-common: &common
   restart: unless-stopped
 services:
@@ -34,9 +31,6 @@ services:
     <<: *common
   oidc:
     image: ghcr.io/navikt/mock-oauth2-server:3.0.3
-  oidcpub:
-    image: {_PUB_MIRROR}
-    build: ./deploy/mock-oidc
   prometheus:
     image: prom/prometheus:v3.12.0
     profiles: ["obs"]
@@ -50,17 +44,15 @@ volumes:
   postgres_data:
 """
 
-# All five handling tokens exercised: rely-on-upstream (ppc64le published), mirror (cites an
-# issue), publish-mirror (digest-pinned, ppc64le ✅), accept-gap (opt-in only), build-local
-# (— arch cells, built by a service).
-GOOD_MATRIX = f"""\
+# All four handling tokens exercised: rely-on-upstream (ppc64le published), mirror (cites an
+# issue), accept-gap (opt-in only), build-local (— arch cells, built by a service).
+GOOD_MATRIX = """\
 intro prose
 <!-- arch-matrix:begin -->
 | Image | Role | amd64 | arm64 | ppc64le | Handling |
 |---|---|:---:|:---:|:---:|---|
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `ghcr.io/navikt/mock-oauth2-server:3.0.3` | oidc #1183 | ✅ | ✅ | ❌ | mirror |
-| `{_PUB_MIRROR}` | oidc published #1184 | ✅ | ❌ | ✅ | publish-mirror |
 | `prom/prometheus:v3.12.0` | obs | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | obs | ✅ | ✅ | ❌ | accept-gap |
 | `kdive:dev` | app image | — | — | — | build-local |
@@ -92,7 +84,6 @@ def test_top_level_volumes_child_is_not_a_service() -> None:
     assert set(images) == {
         "postgres:17",
         "ghcr.io/navikt/mock-oauth2-server:3.0.3",
-        _PUB_MIRROR,
         "prom/prometheus:v3.12.0",
         "grafana/grafana:13.0.3",
         "kdive:dev",
@@ -200,26 +191,6 @@ def test_mirror_row_requires_issue_reference() -> None:
     matrix = GOOD_MATRIX.replace("oidc #1183", "oidc")
     violations = evaluate(GOOD_COMPOSE, matrix)
     assert _has(violations, "ghcr.io/navikt/mock-oauth2-server:3.0.3")
-
-
-def test_publish_mirror_requires_published_ppc64le() -> None:
-    # Flip the publish-mirror row's ppc64le ✅ -> ❌: a kdive-published mirror must assert ppc64le.
-    matrix = GOOD_MATRIX.replace(
-        f"| `{_PUB_MIRROR}` | oidc published #1184 | ✅ | ❌ | ✅ | publish-mirror |",
-        f"| `{_PUB_MIRROR}` | oidc published #1184 | ✅ | ❌ | ❌ | publish-mirror |",
-    )
-    violations = evaluate(GOOD_COMPOSE, matrix)
-    assert _has(violations, _PUB_MIRROR)
-
-
-def test_publish_mirror_requires_digest_pin() -> None:
-    # Repoint both compose and matrix at a floating tag (set-equality still holds): the
-    # publish-mirror obligation rejects it because the reference is not @sha256-pinned.
-    floating = "ghcr.io/randomparity/mock-oauth2-server:3.0.3"
-    compose = GOOD_COMPOSE.replace(_PUB_MIRROR, floating)
-    matrix = GOOD_MATRIX.replace(_PUB_MIRROR, floating)
-    violations = evaluate(compose, matrix)
-    assert _has(violations, "@sha256")
 
 
 def test_build_local_requires_a_building_service() -> None:

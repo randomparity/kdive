@@ -66,7 +66,6 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 |---|---|---|
 | `rely-on-upstream` | use the upstream image as-is | ppc64le cell = ✅ |
 | `mirror` | upstream lacks ppc64le; kdive repackages it | row cites a tracking issue `#NNNN` |
-| `publish-mirror` | kdive builds + publishes a multi-arch mirror (#1184, ADR-0358) | ppc64le cell = ✅ and compose pins it by an `@sha256:` digest |
 | `build-local` | built from the repo `Dockerfile` | a compose service that uses it has `build:` |
 | `accept-gap` | knowingly unsupported on ppc64le | image used only by opt-in (profiled) services |
 
@@ -76,7 +75,7 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 | `postgres:17` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/minio:RELEASE.2025-04-22T22-12-26Z` | core backend | ✅ | ✅ | ✅ | rely-on-upstream |
 | `minio/mc:RELEASE.2025-04-16T18-13-26Z` | core (bucket-init one-shot) | ✅ | ✅ | ✅ | rely-on-upstream |
-| `ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6` | core backend (OIDC mock; kdive-published multi-arch mirror of the upstream jar, #1183/#1184 · ADR-0357/0358; compose keeps `build: ./deploy/mock-oidc` as a local fallback) | ✅ | ❌ | ✅ | publish-mirror |
+| `kdive-mock-oidc:dev` | core backend (OIDC mock; built in-repo from the upstream jar, #1183 / ADR-0357) | — | — | — | build-local |
 | `prom/prometheus:v3.12.0` | observability (`obs` profile) | ✅ | ✅ | ✅ | rely-on-upstream |
 | `grafana/grafana:13.0.3` | observability (`obs` profile) | ✅ | ✅ | ❌ | accept-gap |
 | `kdive:dev` | app image (repo Dockerfile; base publishes ppc64le, buildx-proven in #1185) | — | — | — | build-local |
@@ -84,12 +83,10 @@ is built, not pulled per-arch; arch notes live in the `Role` column). Handling t
 
 Notes on the two gap rows:
 
-- **OIDC mock** — the ppc64le gap is now closed. The upstream `ghcr.io/navikt/mock-oauth2-server:3.0.3`
-  (amd64/arm64 only) was first repackaged as an in-repo `build-local` image (#1183, ADR-0357),
-  then built and published by kdive as a `linux/amd64,linux/ppc64le` GHCR manifest that compose
-  pins by digest (#1184, ADR-0358) — handling `publish-mirror`. The row is fail-closed like
-  `rely-on-upstream` (ppc64le ✅) and additionally requires the compose `@sha256:` digest pin;
-  `build: ./deploy/mock-oidc` is retained as the documented local fallback.
+- **`ghcr.io/navikt/mock-oauth2-server:3.0.3`** — handled by `mirror` (decision 1); a
+  default-profile image, so its gap blocks the core ppc64le loop until the mirror lands. The
+  `Role` cell cites the tracking issue (#1183), which the guard requires for a `mirror` row so
+  the gap stays a visible follow-up rather than a silent green-forever bypass.
 - **`grafana/grafana:13.0.3`** — handled `accept-gap`: no upstream ppc64le image exists and it
   is opt-in (`obs` profile), so the ppc64le dashboard is unavailable pending a follow-up. The
   guard permits `accept-gap` only because no un-profiled service uses grafana; the same shape
@@ -123,11 +120,9 @@ has no pulled per-arch manifest; the guard verifies instead that a compose servi
   The guard is the drift-and-labelling fence, not a registry probe or a project tracker.
 - Follow-ups this decision creates:
   - ~~Build the multi-arch OIDC mirror; repoint `docker-compose.yml` at it.~~ Done in #1183
-    (ADR-0357) + #1184 (ADR-0358): `deploy/mock-oidc` builds the upstream jar on a multi-arch
-    JRE, the `publish-mock-oidc` workflow publishes it as an amd64/ppc64le GHCR manifest, and
-    the compose `oidc` service pins that manifest by digest (`publish-mirror`) with a local
-    `build:` fallback. The Helm `values.yaml` repoint stays open below — a k8s deploy pulls,
-    so it can now consume this same published mirror.
+    (ADR-0357): `deploy/mock-oidc` builds the upstream jar on a multi-arch JRE and the compose
+    `oidc` service is now `build-local`. The Helm `values.yaml` repoint stays open below — a
+    k8s deploy pulls, so it needs a *published* image, not a compose `build:`.
   - Repoint the Helm demo OIDC (`values.yaml:127` → `templates/demo/oidc.yaml`) at the mirror;
     it inherits the identical ppc64le gap and would otherwise stay amd64-only on k8s.
   - Fence the Helm `values.yaml` backing-image set (it pins the same images independently of

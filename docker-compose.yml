@@ -95,18 +95,20 @@ services:
         mc alias set local http://minio:9000 minioadmin minioadmin
         mc mb --ignore-existing local/kdive-artifacts
 
-  # Multi-arch mock OIDC issuer, pinned to the published GHCR mirror by immutable digest so
-  # `docker compose up` PULLS a prebuilt image instead of building the JVM image on every
-  # machine (#1184, ADR-0358). The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
-  # only; this mirror (deploy/mock-oidc, ADR-0357) publishes linux/amd64,linux/ppc64le from
-  # the same jar version, so the token contract stays byte-identical and POWER hosts work.
-  # `build: ./deploy/mock-oidc` stays as the documented local fallback: `docker compose up`
-  # builds it locally when the digest is unreachable (registry offline, private, or an arch
-  # the mirror does not publish, e.g. arm64), so the stack never hard-depends on the pull.
-  # Re-pin the digest whenever deploy/mock-oidc changes (the publish-mock-oidc workflow
-  # republishes on that change and prints the new digest).
+  # Multi-arch mock OIDC issuer. The upstream ghcr.io/navikt/mock-oauth2-server is amd64/arm64
+  # only, breaking `docker compose up` on a POWER host, so kdive mirrors it (deploy/mock-oidc,
+  # ADR-0357) on a multi-arch JRE — same jar version, byte-identical token contract. By default
+  # `build:` builds that mirror locally and tags it kdive-mock-oidc:dev (mirrors the kdive:dev
+  # app-image pattern), so `docker compose up` works offline and on any arch whose bases publish.
+  #
+  # KDIVE_OIDC_IMAGE overrides the reference so an operator PULLS the published GHCR mirror
+  # (#1184, ADR-0358) — digest-pinned for reproducibility — instead of building it, e.g.
+  #   export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6
+  # It parallels KDIVE_IMAGE for the app image (ADR-0359). A digest ref cannot coexist with a
+  # taggable local build, so the override is the pull path and the unset default is the build
+  # path — never both. The publish-mock-oidc workflow prints the digest to pin on each republish.
   oidc:
-    image: ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6
+    image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}
     build: ./deploy/mock-oidc
     environment:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
