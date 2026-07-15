@@ -73,9 +73,26 @@ type:
 test:
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack" -n auto -q
 
-# Run the live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
+# The emulated foreign-arch tier is `just test-live-tcg`, excluded here so the native run stays fast.
+# Run the native live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
 test-live:
-    uv run python -m pytest -m live_vm -q
+    uv run python -m pytest -m "live_vm and not live_vm_tcg" -q
+
+# --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
+# clean skip, other codes propagate. Needs the foreign qemu emulator (e.g. qemu-system-ppc64) AND a
+# running stack (`just stack-up` + fixtures); the tests skip cleanly without either.
+#
+# Run the emulated foreign-arch (TCG) tier: the four ppc64le provision→boot→crash→retrieve proofs.
+test-live-tcg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    uv run python -m pytest -m live_vm_tcg --strict-markers -q || rc=$?
+    if [[ "$rc" -eq 5 ]]; then
+      echo "no live_vm_tcg tests collected — skipping cleanly (marked suite absent)"
+      exit 0
+    fi
+    exit "$rc"
 
 # Apply database migrations using the live-stack default environment.
 stack-migrate:

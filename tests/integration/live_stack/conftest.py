@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 import pytest
 
+from kdive.diagnostics.guest_arch_accel import qemu_system_binary
 from kdive.mcp.dev_harness import OidcIssuer, oidc_issuer_from_env
 
 
@@ -36,3 +39,26 @@ def require_stack() -> str:
     if not base_url:
         pytest.skip("KDIVE_STACK_BASE_URL unset; bring up the stack (see the live-stack runbook)")
     return base_url
+
+
+def require_guest_arch(
+    arch: str,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+) -> None:
+    """Skip unless this host can boot ``arch`` guests (its system emulator is on PATH).
+
+    A pure skip gate (ADR-0353): it reuses the #1153 ``qemu_system_binary`` map (single source)
+    and resolves **no** accelerator — the provider persists that from libvirt capabilities, and
+    the #1144 proof asserts the persisted value. Skips (never errors) when the arch is unknown to
+    the map or its emulator is not on PATH — the acceptance "skips cleanly when the host lacks the
+    foreign qemu binary" gate.
+    """
+    binary = qemu_system_binary(arch)
+    if binary is None:
+        pytest.skip(f"no qemu system emulator known for guest arch {arch!r}")
+    if which(binary) is None:
+        pytest.skip(
+            f"{binary} not on PATH; a {arch} guest boots under TCG emulation on a foreign-arch "
+            f"host — install the {arch} qemu system emulator"
+        )
