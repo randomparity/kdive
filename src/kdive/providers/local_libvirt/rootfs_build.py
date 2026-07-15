@@ -128,9 +128,12 @@ _CUSTOMIZE_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 _REPACK_TIMEOUT_S = SLOW_BUILD_TOOL_TIMEOUT_S
 
 
-def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> None:
-    """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error."""
-    run_guestfs_tool(
+def _run_libguestfs_tool(argv: list[str], *, stage: str, timeout_s: int) -> str:
+    """Run a fixed-argv libguestfs tool, mapping failure onto a categorized error.
+
+    Returns the tool's stdout; callers that only run for effect ignore it.
+    """
+    return run_guestfs_tool(
         argv,
         stage=stage,
         timeout_s=timeout_s,
@@ -211,11 +214,8 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
             timeout_s=_REPACK_TIMEOUT_S,
         )
         tar_path.unlink(missing_ok=True)  # virt-make-fs (sole consumer) done; free before convert
-        features = run_guestfs_tool(
-            ["tune2fs", "-l", str(raw_path)],
-            stage="tune2fs-l",
-            timeout_s=_REPACK_TIMEOUT_S,
-            missing_message="tune2fs is not installed; cannot build the rootfs image",
+        features = _run_libguestfs_tool(
+            ["tune2fs", "-l", str(raw_path)], stage="tune2fs-l", timeout_s=_REPACK_TIMEOUT_S
         )
         if _feature_strip_needed(features):
             _run_libguestfs_tool(
