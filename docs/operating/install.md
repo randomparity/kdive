@@ -166,6 +166,38 @@ use. The preflight reports what is missing without changing the host:
 See [local-libvirt](providers/local-libvirt.md) and
 [remote-libvirt](providers/remote-libvirt.md) for what each provider needs.
 
+### Cross-architecture guests
+
+The local-libvirt provider can run a foreign-architecture guest (a `ppc64le` guest on an
+`x86_64` host, or the reverse) under QEMU's TCG emulation. The host's **native** arch runs
+under KVM; every **foreign** arch runs under **TCG**, which is emulated and roughly 10×
+slower. Cross-arch guests are optional — a single-arch host needs none of this.
+
+To enable foreign-arch guests, install the foreign arch's QEMU system emulator. The package
+name is distro-specific (and matches what `scripts/check-setup-deps.sh` reports):
+
+| distro | ppc64le emulator (`qemu-system-ppc64`) | x86_64 emulator (`qemu-system-x86_64`) |
+|--------|----------------------------------------|----------------------------------------|
+| Fedora / RHEL / CentOS | `qemu-system-ppc` | `qemu-system-x86` |
+| Debian / Ubuntu | `qemu-system-ppc` | `qemu-system-x86` |
+| Arch | `qemu-system-ppc` | `qemu-system-x86` |
+| openSUSE | `qemu-ppc` | `qemu-x86` |
+
+For example, to enable ppc64le guests on an x86_64 Fedora host: `dnf install qemu-system-ppc`.
+
+Two diagnostics report the per-arch accelerator once the emulator is present:
+
+- `scripts/check-setup-deps.sh` prints a cross-arch line per foreign arch — "available via
+  TCG only" when its emulator is present, or the exact package to install when it is not.
+- The service `doctor` (`kdivectl doctor --json`) carries a `guest_arch_accel` check whose
+  `data` maps each schedulable arch to `kvm` or `tcg`, and which fails only when the host
+  lacks its own native-arch emulator.
+
+Because TCG guests boot far slower than KVM guests, the provider scales boot-readiness
+deadlines for them by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`; must be
+`>= 1.0`; set `1.0` to disable scaling). KVM guests are never scaled. Tune the multiplier
+if your host's TCG throughput differs markedly from the default assumption.
+
 ## Run modes
 
 Pick one of the three deployment shapes:

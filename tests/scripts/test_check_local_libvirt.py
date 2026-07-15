@@ -279,3 +279,67 @@ def test_root_worker_on_system_uri_suppresses_advisory(tmp_path: Path) -> None:
     result = _run(env)
     assert result.returncode == 0, result.stderr
     assert "boot-confirmation" not in result.stderr.lower()
+
+
+def _bin_for_arch(
+    tmp_path: Path, host_arch: str, qemu_binaries: tuple[str, ...]
+) -> tuple[Path, Path]:
+    """A healthy bindir with a stubbed ``uname -m`` and exactly the given qemu emulators present."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uname", f"echo {host_arch}")
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-img", "exit 0")
+    # A present qemu-system-ppc64 triggers the fadump version probe, which shells out to real
+    # `sed`; expose it (only) so the probe runs, without leaking the host's other emulators.
+    real_sed = shutil.which("sed")
+    if real_sed is not None:
+        (bindir / "sed").symlink_to(real_sed)
+    for binary in qemu_binaries:
+        _stub(bindir, binary, "exit 0")
+    py = _stub_python(bindir, "venv-python", imports_ok=True)
+    return bindir, py
+
+
+def test_ppc64le_host_does_not_require_x86_emulator(tmp_path: Path) -> None:
+    """On a ppc64le host the native emulator is qemu-system-ppc64; a missing x86 one is no FAIL."""
+    bindir, py = _bin_for_arch(tmp_path, "ppc64le", ("qemu-system-ppc64",))  # no x86 emulator
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+    assert result.returncode == 0, result.stderr
+    assert "qemu-system-x86_64 not found" not in result.stderr
+
+
+def test_ppc64le_host_fails_for_missing_native_ppc_emulator(tmp_path: Path) -> None:
+    """A ppc64le host lacking qemu-system-ppc64 fails, naming the ppc emulator (not the x86 one)."""
+    bindir, py = _bin_for_arch(tmp_path, "ppc64le", ())  # no ppc emulator either
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+    assert result.returncode == 1
+    assert "qemu-system-ppc64 not found" in result.stderr
+    assert "qemu-system-x86_64 not found" not in result.stderr
+
+
+def test_x86_host_with_ppc_emulator_prints_tcg_advisory(tmp_path: Path) -> None:
+    """With the foreign ppc emulator present on an x86 host, the TCG-only advisory prints."""
+    bindir, py = _bin_for_arch(tmp_path, "x86_64", ("qemu-system-x86_64", "qemu-system-ppc64"))
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+    out = result.stdout + result.stderr
+    assert "guest arch ppc64le available via TCG only" in out
+    assert "KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER" in out
+
+
+def test_x86_host_without_ppc_emulator_prints_no_advisory(tmp_path: Path) -> None:
+    """Absent foreign emulator → no advisory line (cross-arch is optional)."""
+    bindir, py = _bin_for_arch(tmp_path, "x86_64", ("qemu-system-x86_64",))
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+    assert "available via TCG only" not in (result.stdout + result.stderr)
+
+
+def test_unsupported_host_arch_reports_unsupported_and_skips_native_qemu(tmp_path: Path) -> None:
+    """An aarch64 host is told it is unsupported; no x86 fallback FAIL for a native emulator."""
+    bindir, py = _bin_for_arch(tmp_path, "aarch64", ())
+    result = _run(_healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path)))
+    out = result.stdout + result.stderr
+    assert "host arch aarch64 is not a supported kdive provisioning arch" in out
+    assert "qemu-system-x86_64 not found" not in result.stderr
+    assert "qemu-system-ppc64 not found" not in result.stderr

@@ -160,18 +160,57 @@ report_tier() {
   fi
 }
 
+# The arches KDIVE can provision. A host arch outside this set has no native qemu KDIVE knows how
+# to name, so it is reported as unsupported rather than defaulted to x86.
+readonly SUPPORTED_ARCHES=(ppc64le x86_64)
+
 # The QEMU system-emulator binary is arch-named, and the name is not a plain `uname -m`:
-# ppc64le maps to `qemu-system-ppc64` (not `-ppc64le`). Report the binary for the running host
-# so a POWER box is not told to install the x86 emulator. Only the arches KDIVE actually
-# provisions (x86_64, ppc64le) are mapped; others fall back to the x86 default.
-qemu_system_binary() {
-  case "$(uname -m)" in
-  ppc64le | ppc64) printf "qemu-system-ppc64" ;;
-  *) printf "qemu-system-x86_64" ;;
+# ppc64le maps to `qemu-system-ppc64` (not `-ppc64le`; POWER has no such binary). Only the
+# provisionable arches are mapped; an unknown arch yields the empty string.
+qemu_binary_for_arch() {
+  case "$1" in
+  ppc64le) printf "qemu-system-ppc64" ;;
+  x86_64) printf "qemu-system-x86_64" ;;
+  *) printf "" ;;
   esac
 }
 
+arch_is_supported() {
+  local candidate
+  for candidate in "${SUPPORTED_ARCHES[@]}"; do
+    [[ "${candidate}" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# Report cross-arch guest availability (report-only): the native arch runs under KVM, every
+# foreign arch under TCG. For each supported arch other than the host's, say whether its qemu
+# emulator is present (TCG guests available here) or name the exact package that enables it. An
+# unsupported host arch gets one explicit line instead of an x86 fallback. Prints to stdout — it
+# is informational, not a missing-dependency report.
+print_cross_arch_advisory() {
+  local host="$1" distro="$2" arch binary pkg
+  if ! arch_is_supported "${host}"; then
+    printf "\nhost arch %s is not a supported kdive provisioning arch (supported: %s)\n" \
+      "${host}" "$(join_by_comma "${SUPPORTED_ARCHES[@]}")"
+    return
+  fi
+  for arch in "${SUPPORTED_ARCHES[@]}"; do
+    [[ "${arch}" == "${host}" ]] && continue
+    binary="$(qemu_binary_for_arch "${arch}")"
+    [[ -z "${binary}" ]] && continue # a supported arch with no binary mapping: skip, don't advise ""
+    if command_exists "${binary}"; then
+      printf "\nguest arch %s: available via TCG only (%s)\n" "${arch}" "${binary}"
+    else
+      pkg="$(package_for "${binary}" "${distro}")"
+      printf "\nguest arch %s: not available; install %s for TCG guests\n" "${arch}" "${pkg}"
+    fi
+  done
+}
+
 distro="$(load_distro_id)"
+# Guard the substitution so an absent `uname` (restricted-PATH tests) does not trip `set -e`.
+host_arch="$(uname -m 2>/dev/null || true)"
 
 # REQUIRED — `uv sync` and the core dev loop fail without these.
 require_tool required uv "curl -LsSf https://astral.sh/uv/install.sh | sh"
@@ -194,8 +233,14 @@ command_exists node || command_exists nodejs ||
 require_command recommended npm "${distro}"
 
 # FUTURE — live_vm and kernel-build milestones; warn only, never block setup.
-for cmd in "$(qemu_system_binary)" virsh gdb crash virt-builder virt-tar-out \
-  virt-make-fs guestfish qemu-img bc flex bison; do
+future_cmds=(virsh gdb crash virt-builder virt-tar-out virt-make-fs guestfish qemu-img bc flex bison)
+# Require the host's native qemu emulator only on a supported host arch (an unsupported arch has
+# no native qemu KDIVE can name; the cross-arch advisory below reports that instead).
+native_qemu="$(qemu_binary_for_arch "${host_arch}")"
+if arch_is_supported "${host_arch}" && [[ -n "${native_qemu}" ]]; then
+  future_cmds+=("${native_qemu}")
+fi
+for cmd in "${future_cmds[@]}"; do
   require_command future "${cmd}" "${distro}"
 done
 command_exists gcc || command_exists clang ||
@@ -205,6 +250,8 @@ require_header future libelf-headers libelf "${distro}"
 report_tier "Required dependencies" required "${distro}"
 report_tier "Recommended dependencies (full local CI)" recommended "${distro}"
 report_tier "Future dependencies (live_vm / kernel build)" future "${distro}"
+
+print_cross_arch_advisory "${host_arch}" "${distro}"
 
 if ((${#manual_hints[@]} > 0)); then
   printf "\nTooling not provided by your distribution:\n" >&2
