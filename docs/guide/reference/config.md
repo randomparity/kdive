@@ -212,6 +212,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIVE_VM_VMCORE` | — | Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips. |
 | `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) postmortem test (#816). Unset → that test skips. |
 | `KDIVE_OIDC_CLIENT_ID` | `kdive-test` | OIDC client id the live_stack harness presents to the mock issuer. |
+| `KDIVE_OIDC_IMAGE` | — | docker-compose oidc override: set to the published GHCR mirror digest to PULL it (ADR-0358); unset → compose builds deploy/mock-oidc locally as kdive-mock-oidc:dev. |
 | `KDIVE_PPC64LE_BUNDLE` | — | Directory holding kernel.tar.gz (the ADR-0343 combined tar: ELF boot/vmlinuz + lib/modules/<ver>/) and initrd.img for the #1146 uploaded-bundle boot proof live_stack test (epic #1139); unset → that test skips. |
 | `KDIVE_PPC64LE_VMCORE` | — | Path to the retained real #1148 ppc64le vmcore for the live_vm drgn-open proof (#1150, ADR-0348, epic #1139); unset → that test skips (a set-but-missing/mismatched path fails). |
 | `KDIVE_REMOTE_BASE_IMAGE_VOLUME` | — | Name of the prebuilt remote-libvirt base-image storage volume for the remote live_stack test; unset → that test skips. |
