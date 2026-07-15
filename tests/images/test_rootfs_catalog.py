@@ -36,6 +36,11 @@ _EXPECTED_MAKEDUMPFILE: dict[str, str] = {
     "centos-stream-kdive-ready-9": "1.7.6",
     "debian-kdive-ready-12": "1.7.2",
     "debian-kdive-ready-13": "1.7.6",
+    "fedora-kdive-ready-43-cloud-ppc64le": "1.7.8",
+    "rocky-kdive-ready-9-ppc64le": "1.7.6",
+    "rocky-kdive-ready-10-ppc64le": "1.7.8",
+    "centos-stream-kdive-ready-9-ppc64le": "1.7.6",
+    "centos-stream-kdive-ready-10-ppc64le": "1.7.8",
 }
 
 # The curated build-time drgn version per release (verified against distro package indexes
@@ -55,6 +60,11 @@ _EXPECTED_DRGN: dict[str, str] = {
     "centos-stream-kdive-ready-10": "0.0.33",
     "debian-kdive-ready-12": "0.0.22",
     "debian-kdive-ready-13": "0.0.31",
+    "fedora-kdive-ready-43-cloud-ppc64le": "0.2.0",
+    "rocky-kdive-ready-9-ppc64le": "0.0.33",
+    "rocky-kdive-ready-10-ppc64le": "0.0.33",
+    "centos-stream-kdive-ready-9-ppc64le": "0.0.33",
+    "centos-stream-kdive-ready-10-ppc64le": "0.0.33",
 }
 
 
@@ -150,6 +160,57 @@ def test_ppc64le_row_drgn_version_is_capability_meaningful() -> None:
     assert row.drgn_version  # non-empty / non-placeholder
     cap = live_drgn_capability(drgn_version=row.drgn_version, drgn_tooling=True)
     assert cap.status == "capable"
+
+
+# The #1152 ppc64le rhel-family sibling rows (fedora-kdive-ready-44-ppc64le predates this issue and
+# is covered by the dedicated tests above). Each is `<x86_64-row-name>-ppc64le` (ADR-0350).
+_NEW_PPC64LE_ROWS = (
+    "fedora-kdive-ready-43-cloud-ppc64le",
+    "rocky-kdive-ready-9-ppc64le",
+    "rocky-kdive-ready-10-ppc64le",
+    "centos-stream-kdive-ready-9-ppc64le",
+    "centos-stream-kdive-ready-10-ppc64le",
+)
+
+
+def test_new_ppc64le_rows_are_rhel_cloud_images() -> None:
+    """Every new ppc64le sibling is an rhel-family sha256-pinned cloud image with the arch token."""
+    cat = load_rootfs_catalog()
+    for name in _NEW_PPC64LE_ROWS:
+        entry = cat[name]
+        assert entry.arch == "ppc64le", name
+        assert entry.family == "rhel", name
+        assert entry.kind == "debug", name
+        src = entry.source
+        assert isinstance(src, CloudImageSource), name
+        assert src.url.endswith(".qcow2"), name
+        assert "ppc64le" in src.url, name
+        assert len(src.sha256) == 64, name
+
+
+def test_ppc64le_rows_mirror_their_x86_64_sibling_versions() -> None:
+    """A ppc64le row's makedumpfile/drgn versions equal its x86_64 sibling's (arch-invariant).
+
+    Distro package versions are built once per release across arches (ADR-0350 Decision 2), so a
+    ppc64le row that drifts from its x86_64 sibling is a data error, not a real arch difference.
+    """
+    cat = load_rootfs_catalog()
+    for name in _NEW_PPC64LE_ROWS:
+        sibling = name.removesuffix("-ppc64le")
+        assert cat[name].makedumpfile_version == cat[sibling].makedumpfile_version, name
+        assert cat[name].drgn_version == cat[sibling].drgn_version, name
+
+
+def test_no_ppc64le_row_for_deferred_or_unported_distros() -> None:
+    """N/A decision, executable (ADR-0350): no ppc64le row for the debian family (deferred to
+    #1167) or for Rocky 8 (no ppc64le port). A future addition of an un-buildable row fails here
+    loudly. When #1167 adds a debian ppc64le row it must update this guard deliberately.
+    """
+    cat = load_rootfs_catalog()
+    ppc = [e for e in cat.values() if e.arch == "ppc64le"]
+    assert ppc, "expected ppc64le rows in the catalog"
+    assert not [e for e in ppc if e.family == "debian"], "debian ppc64le is deferred to #1167"
+    assert "rocky-kdive-ready-8-ppc64le" not in cat, "Rocky 8 has no ppc64le port"
 
 
 _CAPABLE_ROWS = {"fedora-kdive-ready-44", "fedora-kdive-ready-44-ppc64le"}
