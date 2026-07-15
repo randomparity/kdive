@@ -52,9 +52,24 @@ orthogonal:
 (added to `tests/integration/live_stack/conftest.py`, the ADR-0035 §4 idiom). It reuses
 `qemu_system_binary` (single source), `pytest.skip`s when the arch's emulator is not on PATH,
 and returns the resolved accelerator (`"kvm"` when `arch` is the host's native arch and
-`/dev/kvm` is usable, else `"tcg"`). The four proofs funnel their emulator check through one
-shared preflight (`_ppc64le_reachability_preflight`), so a single edit reroutes all four and
-retires the `_PPC64LE_EMULATOR` literal.
+`/dev/kvm` is **present** — `os.path.exists`, the same signal the #1153 default-URI probe uses
+— else `"tcg"`). It takes injected `host_arch`/`which`/`kvm_present` seams (mirroring
+`default_guest_arch_accel_probe`) so all four branches are unit-tested with no real host. The
+four proofs funnel their emulator check through one shared preflight
+(`_ppc64le_reachability_preflight`), so a single edit reroutes all four and retires the
+`_PPC64LE_EMULATOR` literal.
+
+**The returned accel is consumed, not cosmetic.** The reachability preflight surfaces
+`expected_accel` in its return tuple, and the #1144 proof asserts the **persisted** accel from
+`systems.get` equals it — replacing a hardcoded `== "tcg"` that would latently fail on a native
+POWER host — giving the tier a falsifiable "booted under the host-implied accelerator" check.
+
+**Tier membership is CI-pinned.** Because `test-live-tcg` mirrors `test-live-stack`'s
+exit-5-is-a-clean-skip idiom, an emptied `-m live_vm_tcg` selection would read green. A
+**non-gated** meta-test (in the ordinary `just test` suite, beside the existing
+`test_exit_criteria.py` marker pins) asserts exactly the four named proofs carry both
+`live_stack` and `live_vm_tcg` and no other test carries `live_vm_tcg`, so a dropped or stray
+marker fails CI at the source rather than only under a manual `--collect-only`.
 
 Register `live_vm_tcg` in `pyproject.toml` `markers`; document the three tiers in AGENTS.md
 and the operator install/lifecycle docs. Test-only + docs — no production code, no migration.
