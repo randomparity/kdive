@@ -163,10 +163,19 @@ review, not this test — the test's job is to catch *new* reads leaking into gu
 
 The detection logic is a **pure function** `host_arch_reading_modules(tree_root) -> set[str]`
 (or, at the finest grain, `module_reads_host_arch(source: str) -> bool`) that AST-walks source
-and records a hit when it sees either:
-- `platform.machine` as an `ast.Attribute` (matches `platform.machine()` and the bare
-  `platform.machine` default-argument reference in `engine.py`), or
-- `os.uname` as an `ast.Attribute`.
+and records a hit when it sees, as an `ast.Attribute`, any of the host-arch/platform reads in
+the `platform` and `os` modules:
+- `platform.machine` (matches `platform.machine()` and the bare `platform.machine`
+  default-argument reference in `engine.py`),
+- `platform.uname` (the `platform.uname().machine` sibling idiom — the single most likely
+  alternative a developer reaches for), `platform.processor`, `platform.architecture`, and
+- `os.uname`.
+
+None of the `platform.uname`/`processor`/`architecture` idioms occur in the current tree, so
+including them tightens the guard against the closest in-family alternatives without creating a
+new violation. The set still omits `/proc/cpuinfo` reads and aliased imports (`from platform
+import machine`) — none exist in the tree and catching aliases would need an import-alias pass;
+that stays a documented limitation.
 
 Factoring detection as a pure function lets the walker itself be **unit-tested with synthetic
 source fixtures**, which is what proves both non-vacuity and the AST-vs-grep discrimination
@@ -180,14 +189,19 @@ ADR-0354 rests on — *without* coupling to which modules happen to read the hos
   inside a docstring/comment is **not** reported. This locks the reason AST was chosen over
   grep, mirroring the real `provider_checks.py:409` docstring the whole-tree scan must ignore.
 
-The whole-tree guard then just applies this proven function over `src/kdive/**/*.py`, keys hits
-by repo-relative path (`kdive/...`) for a stable, readable allowlist, and asserts the subset.
+The whole-tree guard then applies this proven function over `src/kdive/**/*.py`, keys hits by
+repo-relative path (`kdive/...`) for a stable, readable allowlist, and asserts the subset.
 Because non-vacuity is proven by the positive fixture, the whole-tree assertion never needs to
 pin the three specific live reads — preserving the subset tolerance the design committed to.
 
-The function does not resolve aliased imports (`from platform import machine`) — none exist in
-the tree and catching them would need an import-alias pass; that is a documented limitation
-(the negative/positive fixtures guard the walker's *logic*, not import-alias coverage).
+**The whole-tree scan carries its own non-vacuity guard.** A subset assertion holds trivially
+over an empty scanned set, so if the `src/kdive/**/*.py` glob ever resolved empty (a src-layout
+or packaging change, a wrong base dir), the guard would pass green while enforcing nothing —
+silently voiding the "fails CI at the source" guarantee. The whole-tree test therefore also
+asserts the walk enumerated a **plausible file count** (a floor well below the real ~636, e.g.
+`>= 100` `.py` files under the package root), so an empty or misrooted glob fails loudly. This
+floor is subset-tolerant: removing a read from an allowlisted module leaves the file count
+unchanged.
 
 ## Acceptance criteria
 
@@ -205,8 +219,12 @@ the tree and catching them would need an import-alias pass; that is a documented
   asserts `tcg_deadline_multiplier("tcg")` scales, and that the ADR records deadline
   arch-independence.
 - **AC4.** `test_host_arch_confinement.py` runs in the ordinary `just test` suite and passes on
-  the current tree: the set of modules reading `platform.machine`/`os.uname` is a subset of the
+  the current tree: the set of modules reading a `platform`/`os` host-arch idiom
+  (`platform.machine`/`uname`/`processor`/`architecture`, `os.uname`) is a subset of the
   three-module allowlist. Verifiable by running `just test`.
+- **AC4b.** The whole-tree test asserts the scan enumerated a plausible file count (`>= 100`
+  `.py` files under the package root), so an empty/misrooted glob fails rather than passing a
+  vacuous subset. Verifiable by running the test; it fails if the walk sees no source files.
 - **AC5.** The detection function is unit-tested with synthetic fixtures: a source with an
   out-of-allowlist `platform.machine()` / `os.uname()` read is reported, and a source whose only
   occurrence is in a docstring/comment is **not** reported (the AST-vs-grep discrimination).
@@ -237,7 +255,16 @@ the tree and catching them would need an import-alias pass; that is a documented
   admission/deadline code these unit tests drive, but the end-to-end provision→boot has never
   run there. #1157 (POWER10 bring-up) is the live falsification gate; this issue proves the
   data flow, not the hardware.
-- The confinement guard detects only `platform.machine` / `os.uname` attribute reads. A future
-  host-arch signal read through a different API (e.g. reading `/proc/cpuinfo`, a new
-  `os.*` call) would not be caught until the allowlist's detection set is extended. The ADR
-  notes the guard covers the known host-arch APIs and must grow with any new one.
+- The confinement guard detects the `platform`/`os` host-arch idioms
+  (`platform.machine`/`uname`/`processor`/`architecture`, `os.uname`). A future host-arch signal
+  read through a *different* API (reading `/proc/cpuinfo`, another `os.*` call, an aliased
+  `from platform import machine`) would not be caught until the detection set is extended. The
+  ADR notes the guard covers the known host-arch APIs and must grow with any new one.
+- The guard confines host-arch **read sites**, not host-arch **value flow**. An allowlisted probe
+  exposes its result as a public field (e.g. `GuestArchAccelReport.native_arch`), so a future
+  guest-facing module could import that value and branch on it without ever naming a
+  `platform`/`os` read — passing the guard while violating the invariant's spirit. Read-site
+  confinement is a strong, cheap proxy (the host arch has to *enter* the process somewhere), but
+  guest-facing *consumption* of an allowlisted module's host-arch-derived output is out of the
+  guard's reach and relies on code review. The ADR's "executable invariant" claim is scoped to
+  read-site location accordingly.

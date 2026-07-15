@@ -73,16 +73,23 @@ Live proof of the inverted matrix on real POWER hardware is deferred to #1157.
 
 ## Consequences
 
-- The symmetry invariant is now executable, not just asserted in prose: any new guest-facing
-  host-arch read fails CI at the source.
+- A guest-facing host-arch **read site** is now executable to catch: a new `platform`/`os`
+  host-arch read outside the allowlist fails CI at the source. The guard confines *where the host
+  arch may be read*, which is a strong, cheap proxy for the full invariant (the host arch must
+  enter the process somewhere) — but it does not enforce host-arch **value flow**: an allowlisted
+  probe exposes its result publicly (e.g. `GuestArchAccelReport.native_arch`), so a future
+  guest-facing module could branch on that value without a read the guard sees. That consumption
+  path relies on code review; the "executable" claim is scoped to read-site location.
 - The allowlist is a small, reviewed enumeration of the legitimate accelerator/tooling-selection
   sites. Adding an arch or a new host-side tool means a deliberate allowlist edit with a
   rationale, not a silent leak.
 - No production behavior changes; no migration (test + docs + ADR only).
-- The guard covers the known host-arch APIs (`platform.machine`, `os.uname`). A future host-arch
-  signal read through a different API (`/proc/cpuinfo`, another `os.*` call, an aliased import)
-  is not caught until the guard's detection set grows — a documented limitation, noted in the
-  spec's Known-unverified.
+- The guard covers the `platform`/`os` host-arch idioms
+  (`platform.machine`/`uname`/`processor`/`architecture`, `os.uname`). A host-arch signal read
+  through a different API (`/proc/cpuinfo`, another `os.*` call, an aliased import) is not caught
+  until the detection set grows — a documented limitation, noted in the spec's Known-unverified.
+- The whole-tree scan carries a file-count floor so an empty/misrooted `src/kdive` glob fails
+  loudly rather than passing a vacuous subset assertion.
 
 ## Considered & rejected
 
