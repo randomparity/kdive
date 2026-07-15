@@ -108,8 +108,11 @@ already has `_X86_GUEST_ARCHES`, `_PPC_ONLY_GUEST_ARCHES`, `_set_resource_guest_
 
 **Implement:**
 1. Add a module constant `_PPC_HOST_GUEST_ARCHES = {"ppc64le": {"accel": "kvm", "emulator":
-   "/usr/bin/qemu-system-ppc64le"}, "x86_64": {"accel": "tcg", "emulator":
-   "/usr/bin/qemu-system-x86_64"}}` — the inverted (POWER-host) matrix.
+   "/usr/bin/qemu-system-ppc64"}, "x86_64": {"accel": "tcg", "emulator":
+   "/usr/bin/qemu-system-x86_64"}}` — the inverted (POWER-host) matrix. Use
+   `/usr/bin/qemu-system-ppc64` to match the module's existing `_X86_GUEST_ARCHES` /
+   `_PPC_ONLY_GUEST_ARCHES` convention (the emulator value is not load-bearing — the test asserts
+   only `accel`).
 2. Add `test_provision_records_tcg_accel_for_x86_guest_on_ppc_host(migrated_url)` modeled on the
    existing `test_provision_records_accel_when_host_advertises_arch`: seed the allocation, set the
    Resource's `guest_arches` to `_PPC_HOST_GUEST_ARCHES` via `_set_resource_guest_arches`,
@@ -121,9 +124,17 @@ already has `_X86_GUEST_ARCHES`, `_PPC_ONLY_GUEST_ARCHES`, `_set_resource_guest_
 - It asserts `accel == "tcg"` for an x86_64 profile — the inverted-key case not previously
   asserted (existing tcg-recording tests use a ppc64le profile).
 
-**Guardrails:** `just lint && just type && uv run python -m pytest
-tests/integration/test_systems_admission_arch.py -q` (needs Docker/testcontainers; skips cleanly
-without unless `KDIVE_REQUIRE_DOCKER=1`).
+**Verification (must force execution — this test skips without Docker).** The module depends on
+the `migrated_url`→Postgres testcontainers fixture, which `pytest.skip()`s when Docker is
+unreachable; a **skip is not a pass** and does not satisfy AC1. Run the single test with
+`KDIVE_REQUIRE_DOCKER=1` and confirm the summary shows it `PASSED` (not `SKIPPED`) — both after a
+transient mutation that must make it **FAIL** (e.g. flip the asserted accel to `"kvm"`, confirm
+red, revert) and in its final form (green). If Docker is unavailable in the build environment,
+this observability step is deferred to CI, where `KDIVE_REQUIRE_DOCKER=1` is set — note that in
+the PR so a reviewer knows the local run skipped.
+
+**Guardrails:** `just lint && just type && KDIVE_REQUIRE_DOCKER=1 uv run python -m pytest
+tests/integration/test_systems_admission_arch.py -q` (needs Docker/testcontainers).
 
 **Rollback:** remove the constant + test function; the file is otherwise unchanged.
 
