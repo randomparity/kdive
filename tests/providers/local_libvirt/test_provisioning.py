@@ -193,6 +193,11 @@ def test_render_x86_kvm_drops_native_emulator_by_accel_not_none() -> None:
     assert _render(accel="kvm", emulator="/usr/bin/qemu-system-x86_64") == _X86_KVM_GOLDEN
 
 
+# The arch-derived serial console the cmdline must carry — ttyS0 on x86, hvc0 on pseries. Kept as
+# the test's own oracle (independent of arch_traits) so the render is pinned to a literal.
+_EXPECTED_CONSOLE = {"x86_64": "ttyS0", "ppc64le": "hvc0"}
+
+
 @pytest.mark.parametrize(
     ("arch", "accel", "emulator", "exp_type", "exp_machine", "exp_cpu_mode", "exp_features"),
     [
@@ -212,7 +217,9 @@ def test_render_domain_by_arch_and_accel(
     exp_features: bool,
 ) -> None:
     # AC#1: all four (arch x accel) cells — domain type, emulator presence/path, machine,
-    # <cpu> presence/mode, and the x86-only <features> block (ADR-0340).
+    # <cpu> presence/mode, the x86-only <features> block, and the arch-derived serial console
+    # (ADR-0340). The console is arch-, not accel-derived, so ttyS0 holds for an x86_64 guest
+    # under TCG too — documenting the inverted-matrix "q35 + ttyS0 + type=qemu" render (#1155).
     root = _safe_fromstring(_render(profile=_arch_profile(arch), accel=accel, emulator=emulator))
     assert root.get("type") == exp_type
     os_type = root.find("os/type")
@@ -228,6 +235,7 @@ def test_render_domain_by_arch_and_accel(
     else:
         assert emu is not None and emu.text == emulator
     assert (root.find("features") is not None) is exp_features
+    assert root.findtext("os/cmdline") == f"root=/dev/vda console={_EXPECTED_CONSOLE[arch]} rw"
 
 
 def test_render_machine_override_wins_for_ppc64le() -> None:
