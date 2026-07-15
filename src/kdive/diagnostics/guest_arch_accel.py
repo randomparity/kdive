@@ -133,15 +133,15 @@ def default_guest_arch_accel_probe(
                 continue
             accel_by_arch[arch] = "kvm" if arch == resolved_host and kvm() else "tcg"
         native_binary = qemu_system_binary(resolved_host)
-        native_present = native_binary is not None and which(native_binary) is not None
-        # A supported arch with no binary-map entry (a future arch added to arch_traits but not
-        # here — guarded by test) is treated as unsupported rather than yielding a "None not found"
-        # FAIL. The test invariant keeps the maps in sync; this is the defensive floor.
+        # The accel loop already PATH-probed the native emulator, so read presence off its result
+        # rather than a second which() walk. A supported arch with no binary-map entry (a future
+        # arch added to arch_traits but not here — guarded by test) is treated as unsupported
+        # rather than yielding a "None not found" FAIL; that is the defensive floor.
         return GuestArchAccelReport(
             accel_by_arch=accel_by_arch,
             native_arch=resolved_host,
             native_supported=resolved_host in supported and native_binary is not None,
-            native_emulator_present=native_present,
+            native_emulator_present=resolved_host in accel_by_arch,
             native_qemu_binary=native_binary,
             target_is_local=local,
         )
