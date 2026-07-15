@@ -146,8 +146,9 @@ def build_runtime(
         vmcore_introspector=vmcore_introspector,
         live_introspector=live_introspector,
         # ADR-0208: advertise the core-producing capture methods local can actually fetch a vmcore
-        # for — KDUMP (host-side overlay harvest, #115/ADR-0203) and HOST_DUMP (libvirt domain core
-        # dump, B4/ADR-0211); both debug transports the connector resolves from the live domain XML
+        # for — KDUMP (host-side overlay harvest, #115/ADR-0203), FADUMP (the pseries firmware-
+        # assisted variant sharing that harvest, ADR-0349; host support is gated at admission), and
+        # HOST_DUMP (libvirt domain core dump, B4/ADR-0211); both debug transports from the domain
         # — gdbstub (#675/ADR-0210) and drgn-live over a loopback-forwarded guest SSH port
         # (#697/ADR-0218); and both introspection modes — offline-vmcore (B2 #676/ADR-0210 §2) and
         # live (B3 #677/ADR-0219, drgn-live SSH-exec of the in-guest kdive-drgn helper). All these
@@ -155,7 +156,9 @@ def build_runtime(
         # `debug.*` and `introspect.run` tool maturity is `implemented` (ADR-0218 §6 / ADR-0219).
         support=ProviderSupport(
             component_sources=_component_sources(),
-            capture_methods=frozenset({CaptureMethod.KDUMP, CaptureMethod.HOST_DUMP}),
+            capture_methods=frozenset(
+                {CaptureMethod.KDUMP, CaptureMethod.FADUMP, CaptureMethod.HOST_DUMP}
+            ),
             debug_transports=frozenset({"gdbstub", "drgn-live"}),
             introspection=frozenset({"offline-vmcore", "live", "live-script"}),
         ),

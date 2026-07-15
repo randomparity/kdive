@@ -3390,6 +3390,37 @@ def test_install_accepts_crashkernel_and_enqueues_payload(migrated_url: str) -> 
     asyncio.run(_run())
 
 
+def _fadump_run(pool: AsyncConnectionPool) -> Any:
+    """A built, fadump-provisioned ppc64le Run (crashkernel reservation + debug.fadump)."""
+    return _seed_succeeded_run(
+        pool,
+        build_profile={"schema_version": 1},
+        provisioning_profile=_fadump_profile_dump(),
+    )
+
+
+def test_install_accepts_crashkernel_on_fadump_system(migrated_url: str) -> None:
+    # fadump is a kdump-family capture method (ADR-0349), so the boundary crashkernel guard accepts
+    # a reservation on a FADUMP System just as it does for KDUMP (not the console rejection path).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _fadump_run(pool)
+            resp = await install_run(
+                pool,
+                _ctx(),
+                run_id,
+                crashkernel="512M",
+                resolver=provider_resolver(profile_policy=_LOCAL_POLICY),
+            )
+            assert resp.error_category is None, resp.data
+            async with pool.connection() as conn:
+                job = await queue.get_by_dedup_key(conn, f"{run_id}:install")
+        assert job is not None
+        assert job.payload["crashkernel"] == "512M"
+
+    asyncio.run(_run())
+
+
 def test_install_rejects_crashkernel_on_non_kdump_system(migrated_url: str) -> None:
     # A crashkernel on a console-capture System is rejected synchronously at the boundary (#989).
     async def _run() -> None:
@@ -4952,6 +4983,30 @@ def _profile_dump(**local_libvirt: Any) -> dict[str, Any]:
             "boot_method": "direct-kernel",
             "kernel_source_ref": "git+https://git.kernel.org#v6.9",
             "provider": {"local-libvirt": section},
+        }
+    ).model_dump(by_alias=True)
+
+
+def _fadump_profile_dump() -> dict[str, Any]:
+    """A real ppc64le fadump profile dump (crashkernel reservation + debug.fadump, ADR-0349)."""
+    from kdive.profiles.provisioning import ProvisioningProfile
+
+    return ProvisioningProfile.model_validate(
+        {
+            "schema_version": 1,
+            "arch": "ppc64le",
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 10,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "git+https://git.kernel.org#v6.9",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "local", "path": "/img"},
+                    "crashkernel": "512M",
+                    "debug": {"fadump": True},
+                }
+            },
         }
     ).model_dump(by_alias=True)
 

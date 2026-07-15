@@ -233,8 +233,11 @@ _PROFILE_DICT: dict[str, object] = {
 class _Pol:
     """Fake ProfilePolicy carrying just the predicates the recording path reads."""
 
-    def __init__(self, *, gdbstub: bool, host_dump: bool, kdump: bool = False) -> None:
+    def __init__(
+        self, *, gdbstub: bool, host_dump: bool, kdump: bool = False, fadump: bool = False
+    ) -> None:
         self._gdbstub, self._host_dump, self._kdump = gdbstub, host_dump, kdump
+        self._fadump = fadump
 
     def gdbstub_provisioned(self, _profile: object) -> bool:
         return self._gdbstub
@@ -243,6 +246,8 @@ class _Pol:
         return self._host_dump
 
     def capture_method(self, _profile: object) -> CaptureMethod:
+        if self._fadump:
+            return CaptureMethod.FADUMP
         return CaptureMethod.KDUMP if self._kdump else CaptureMethod.CONSOLE
 
 
@@ -301,6 +306,13 @@ def test_inert_capture_kdump_only_when_crashkernel_set() -> None:
     pol = cast(ProfilePolicy, _Pol(gdbstub=False, host_dump=False, kdump=True))
     out = boot_evidence.inert_capture(pol, cast(ProvisioningProfile, object()))
     assert out == ["kdump"]
+
+
+def test_inert_capture_reports_fadump_for_a_fadump_system() -> None:
+    # A fadump System resolves to FADUMP; inert_capture reports the resolved method (ADR-0349).
+    pol = cast(ProfilePolicy, _Pol(gdbstub=False, host_dump=False, fadump=True))
+    out = boot_evidence.inert_capture(pol, cast(ProvisioningProfile, object()))
+    assert out == ["fadump"]
 
 
 def test_gdbstub_reachable_true_when_open_succeeds() -> None:

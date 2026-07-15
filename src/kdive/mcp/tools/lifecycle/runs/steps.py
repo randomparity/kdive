@@ -123,7 +123,10 @@ async def install_run(
 async def _reject_crashkernel_off_kdump(
     conn: AsyncConnection, run: Run, resolver: ProviderResolver
 ) -> ToolResponse | None:
-    """Reject a crashkernel reservation on a non-kdump System, else ``None`` (ADR-0300).
+    """Reject a crashkernel reservation on a non-kdump-family System, else ``None`` (ADR-0300).
+
+    The kdump family is ``KDUMP`` and ``FADUMP`` (both reserve boot memory via ``crashkernel=``,
+    ADR-0349); any other method rejects the reservation.
 
     Resolves the System's capture method (a cheap ``(kind, name)`` lookup plus in-process runtime
     construction — no libvirt round-trip). A resolution failure is mapped to ``configuration_error``
@@ -139,7 +142,7 @@ async def _reject_crashkernel_off_kdump(
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(str(run.id), exc)
     method = install_method_for(system, binding.runtime.profile_policy)
-    if method is not CaptureMethod.KDUMP:
+    if method not in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
         return _config_error(
             str(run.id), data={"reason": "crashkernel_requires_kdump", "method": method.value}
         )

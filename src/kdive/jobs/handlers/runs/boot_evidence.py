@@ -240,8 +240,10 @@ def inert_capture(profile_policy: ProfilePolicy, profile: ProvisioningProfile) -
         methods.append(CaptureMethod.GDBSTUB.value)
     if profile_policy.host_dump_provisioned(profile):
         methods.append(CaptureMethod.HOST_DUMP.value)
-    if profile_policy.capture_method(profile) is CaptureMethod.KDUMP:
-        methods.append(CaptureMethod.KDUMP.value)
+    resolved = profile_policy.capture_method(profile)
+    if resolved in (CaptureMethod.KDUMP, CaptureMethod.FADUMP):
+        # Report the resolved method (fadump reports "fadump"), ADR-0349.
+        methods.append(resolved.value)
     return methods
 
 

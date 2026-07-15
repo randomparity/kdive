@@ -153,6 +153,18 @@ def test_capture_streams_raw_core_and_returns_build_id(tmp_path: Path) -> None:
     assert b"hunter2" not in redacted_data and b"[REDACTED]" in redacted_data
 
 
+def test_capture_fadump_shares_the_overlay_harvest_and_keys_the_core(tmp_path: Path) -> None:
+    # "Retrieve is shared" (ADR-0349): FADUMP is not host_dump, so capture() falls through to the
+    # same overlay harvest as kdump (the _kdump_retriever fails if the host_dump seam is touched),
+    # and the core is stored under the method-keyed vmcore-fadump name.
+    core = _spooled_core(tmp_path, b"FADUMPCORE")
+    store = _FakeStore()
+    out = _kdump_retriever(store, core_path=core).capture(_SYS, _RUN, CaptureMethod.FADUMP)
+    assert out.raw.key == f"{_TENANT}/runs/{_RUN}/vmcore-fadump"
+    assert out.redacted.key == f"{_TENANT}/runs/{_RUN}/vmcore-fadump-redacted"
+    assert [name for _, name, _, _ in store.streams] == ["vmcore-fadump"]
+
+
 def test_capture_removes_the_spool_dir_on_success(tmp_path: Path) -> None:
     core = _spooled_core(tmp_path, b"RAWCORE")
     _kdump_retriever(_FakeStore(), core_path=core).capture(_SYS, _RUN, CaptureMethod.KDUMP)
