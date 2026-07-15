@@ -191,8 +191,9 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
     """
     # Stage the tar + whole-disk raw intermediate on the *workspace* volume (next to the final
     # qcow2), not the default TMPDIR: TMPDIR is a memory-backed tmpfs on many hosts, and the raw is
-    # a whole-rootfs-sized image (default 6G), so writing it to /tmp would risk ENOSPC/OOM on every
-    # build. The qcow2's directory already holds a full image and is sized for it.
+    # a whole-rootfs-sized image (default 6G), so writing it to /tmp risks ENOSPC/OOM on every
+    # build. The tar is unlinked as soon as virt-make-fs consumes it (below), so peak workspace
+    # usage is the concurrent scratch + raw + destination qcow2, not also the tar.
     with tempfile.TemporaryDirectory(prefix="kdive-repack-", dir=qcow2.parent) as work:
         tar_path = Path(work) / "root.tar"
         raw_path = Path(work) / "root.raw"
@@ -205,6 +206,8 @@ def _real_repack_whole_disk_ext4(*, scratch: Path, qcow2: Path, size: str) -> No
             tar_path=tar_path, raw_path=raw_path, qcow2=qcow2, size=size
         ):
             _run_libguestfs_tool(argv, stage=argv[0], timeout_s=_REPACK_TIMEOUT_S)
+            if argv[0] == "virt-make-fs":
+                tar_path.unlink(missing_ok=True)  # sole consumer done; free it before the convert
 
 
 def _grant_hypervisor_traversal(work_dir: Path) -> None:
