@@ -331,6 +331,11 @@ config-guard:
 env-docs-check:
     uv run python scripts/check_env_documented.py
 
+# Drift guard: the docker-compose image set matches the ADR-0356 arch-support matrix, and each
+# handling token meets its ppc64le obligation (ADR-0356). Parses compose via yaml.safe_load.
+container-arch-check:
+    uv run python scripts/check_container_arch_matrix.py
+
 # Assert the Helm chart's appVersion tracks the pyproject version (spec A3). A drift
 # would let a cut release point the chart's default image tag at a tag that was never
 # published. Run in CI and `just ci`.
@@ -347,4 +352,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check resources-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check container-arch-check resources-docs-check chart-version-check test
