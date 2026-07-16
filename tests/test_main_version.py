@@ -152,13 +152,15 @@ def test_categorized_error_surfaces_message_details_and_exit_code(monkeypatch, c
 
 
 def test_categorized_error_emits_error_level_structured_record(monkeypatch, caplog) -> None:
-    """The categorized failure also lands on the structured-log floor as an ERROR record
-    naming the command and category, so a log-scraping deployment sees the cause on-channel
-    and not only as plain stderr text (ADR-0090 observability)."""
+    """The categorized failure also lands on the structured-log floor as an ERROR record naming
+    the command, category, message, AND its actionable details, so a log-scraping deployment sees
+    the whole cause on-channel and not only as plain stderr text (ADR-0090 observability)."""
 
     def _boom(_args: object) -> None:
         raise CategorizedError(
-            "failed to read console log", category=ErrorCategory.CONFIGURATION_ERROR
+            "failed to read console log",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": "/var/lib/kdive/console/abc.log", "remediation": "run as root"},
         )
 
     monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
@@ -171,6 +173,29 @@ def test_categorized_error_emits_error_level_structured_record(monkeypatch, capl
     assert "build-fs" in message
     assert "configuration_error" in message
     assert "failed to read console log" in message
+    # The actionable details must ride the structured record, not only stderr.
+    assert "/var/lib/kdive/console/abc.log" in message
+    assert "run as root" in message
+
+
+def test_categorized_error_redacts_secret_pattern_on_stderr(monkeypatch, capsys) -> None:
+    """A credential accidentally embedded in a detail value is scrubbed on stderr by the same
+    Redactor floor the log path uses (defense-in-depth over the secret-free details contract)."""
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError(
+            "connect failed",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"dsn": "token=hunter2"},
+        )
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with pytest.raises(SystemExit):
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    err = capsys.readouterr().err
+    assert "hunter2" not in err
+    assert "dsn:" in err  # the key is preserved; only the secret value is masked
 
 
 def test_reconcile_systems_object_store_misconfig_routes_through_central_handler(

@@ -31,6 +31,7 @@ from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker
+from kdive.security.secrets.redaction import Redactor
 from kdive.version import full_version
 
 if TYPE_CHECKING:
@@ -329,31 +330,41 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _COMMAND_BY_NAME[args.command].handler(args, secret_registry, telemetry)
     except CategorizedError as error:
-        # Land the failure on the structured-log floor (ADR-0090) for the long-running
-        # commands a deployment scrapes, then print the actionable details to the operator's
-        # stderr. The JSON formatter renders a fixed field schema, so the category and message
-        # go in the record's message rather than as dropped `extra=` fields.
-        _log.error("%s command failed (%s): %s", args.command, error.category, error)
-        _emit_categorized_error(error)
+        # Land the failure on the structured-log floor (ADR-0090) for the long-running commands a
+        # deployment scrapes, then print the actionable details to the operator's stderr. The JSON
+        # formatter renders a fixed field schema, so the category, message, AND details go in the
+        # record's message (not dropped `extra=` fields); the handler's SecretRedactionFilter
+        # scrubs that message before it is exported.
+        details_suffix = f" {error.details}" if error.details else ""
+        _log.error(
+            "%s command failed (%s): %s%s", args.command, error.category, error, details_suffix
+        )
+        _emit_categorized_error(error, Redactor(registry=secret_registry))
         raise SystemExit(exit_code_for_category(error.category)) from error
 
 
-def _emit_categorized_error(error: CategorizedError) -> None:
+def _emit_categorized_error(error: CategorizedError, redactor: Redactor) -> None:
     """Surface a categorized failure's message and structured details to stderr.
 
     The raise site already computed the actionable context (operation, path, remediation) in
     ``details``; printing it here turns a bare one-line message behind a traceback into an
     operator-readable cause. The caller maps ``error.category`` to a stable exit code.
 
-    This is the local operator-CLI surface, so it intentionally does *not* apply the ADR-0123
-    ``suppressed_detail()`` no-leak seam that the remote tool-response envelope applies to
-    ``authorization_denied``/``not_found``. That seam guards remote clients from resource-existence
-    leaks; an operator invoking ``python -m kdive`` already has host access and needs the full,
-    unredacted reason. Do not reuse this printer on a remote-client path.
+    Two orthogonal redaction concerns:
+
+    - ADR-0123 existence-leak seam (``suppressed_detail()``): intentionally *not* applied. That
+      seam guards remote tool-response clients from resource-existence leaks on
+      ``authorization_denied``/``not_found``; an operator invoking ``python -m kdive`` already has
+      host access and needs the full, unredacted reason. Do not reuse this printer on a
+      remote-client path.
+    - Value-redaction floor (``Redactor``): applied as defense-in-depth, matching the logging
+      path. ``details`` is contractually secret-free, but stderr commonly lands in the systemd
+      journal or a CI log with broader read scope, so an accidentally-embedded credential is
+      scrubbed here just as the ``SecretRedactionFilter`` scrubs the log record.
     """
-    print(f"error: {error}", file=sys.stderr)
+    print(f"error: {redactor.redact_text(str(error))}", file=sys.stderr)
     for key, value in error.details.items():
-        print(f"  {key}: {value}", file=sys.stderr)
+        print(f"  {key}: {redactor.redact_value(value)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
