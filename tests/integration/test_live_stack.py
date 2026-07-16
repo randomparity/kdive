@@ -1,7 +1,7 @@
 """The phase-structured local-libvirt live-stack spine driver (#100, ADR-0042 §1/§4/§5, ADR-0045).
 
-Drives the full kdive spine — allocate → provision → open-investigation → create-run → build →
-install → boot → attach → crash → capture → introspect → release → (reconciler) teardown → report
+Drives the full kdive spine — allocate → provision → open-investigation → create-run → upload-build
+→ install → boot → attach → crash → capture → introspect → release → (reconciler) teardown → report
 — over the **live MCP HTTP transport** via the merged harness (``mint_token`` + ``LiveStackClient``)
 — each step a tool call under a specific OIDC role token, the async job kinds drained by the real
 host ``worker`` + ``reconciler``. The provider-agnostic spine scaffolding (phase naming, drain /
@@ -32,6 +32,7 @@ import json
 import os
 import platform
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
@@ -192,11 +193,13 @@ def _provision_profile() -> dict[str, object]:
 
 
 def _build_profile() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
-        "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
-    }
+    """The Run build profile for the x86_64 spine (upload-only lane, ADR-0337).
+
+    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
+    target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
+    (see ``_build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
+    """
+    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _live_script_provision_profile() -> dict[str, object]:
@@ -222,6 +225,118 @@ def _live_script_provision_profile() -> dict[str, object]:
             }
         },
     }
+
+
+# --- external-build upload lane (shared; ADR-0234/0337) -------------------------------------
+
+
+def _sha256_b64(path: Path) -> str:
+    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+async def _put_presigned(item: ToolResponse, path: Path) -> None:
+    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
+    url = item.refs["upload_url"]
+    raw_headers = item.data.get("required_headers", {})
+    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+    async with httpx.AsyncClient(timeout=180.0) as http:
+        resp = await http.put(url, content=path.read_bytes(), headers=headers)
+        resp.raise_for_status()
+
+
+def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
+    """Cut the ADR-0234 combined ``kernel`` artifact from a built x86_64 kernel tree.
+
+    Reproduces the ``external-build-upload`` recipe (mirrors ``scripts/live-debug.py`` after #1219):
+    stage the module tree with ``make modules_install`` into ``dest_dir`` and tar
+    ``arch/x86/boot/bzImage`` (renamed to ``boot/vmlinuz``, listed first so ``lib/modules`` lands
+    inside the validator's decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping
+    the ``build``/``source`` back-symlinks.
+
+    Args:
+        kernel_src: A *built* x86_64 kernel tree (must contain ``arch/x86/boot/bzImage``).
+        dest_dir: A scratch directory to stage modules and write ``kernel.tar.gz`` into.
+
+    Returns:
+        The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
+
+    Raises:
+        RuntimeError: If ``kernel_src`` holds no built bzImage.
+    """
+    bzimage = kernel_src / "arch/x86/boot/bzImage"
+    if not bzimage.is_file():
+        raise RuntimeError(
+            f"no built bzImage at {bzimage}; build the kernel tree at {kernel_src} first"
+        )
+    modstage = dest_dir / "modstage"
+    subprocess.run(
+        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        check=True,
+    )
+    tar_path = dest_dir / "kernel.tar.gz"
+    subprocess.run(
+        [
+            "tar",
+            "-czf",
+            str(tar_path),
+            "--exclude=*/build",
+            "--exclude=*/source",
+            "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|",
+            "-C",
+            str(kernel_src),
+            "arch/x86/boot/bzImage",
+            "-C",
+            str(modstage),
+            "lib/modules",
+        ],
+        check=True,
+    )
+    return tar_path
+
+
+def _accepted_run_upload_names(contract: ToolResponse) -> set[str]:
+    """The ``run`` owner-kind's accepted names from an ``artifacts.expected_uploads`` contract."""
+    for item in contract.items:
+        data = item.data or {}
+        if data.get("owner_kind") == "run":
+            names = data.get("accepted_names", [])
+            return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+    return set()
+
+
+async def _build_and_upload_kernel(op: LiveStackClient, *, run_id: str) -> None:
+    """Build the x86_64 kernel tar from ``KDIVE_KERNEL_SRC`` and drive the external-upload lane.
+
+    Replaces the removed server-build lane (``runs.build``): discover the contract
+    (``artifacts.expected_uploads``), cut the combined ``kernel`` tar, declare + PUT it via
+    ``artifacts.create_run_upload``, then ``runs.complete_build``. The Run goes CREATED → SUCCEEDED
+    with ``steps.build == succeeded`` (set by construction in steps.py), ready for ``runs.install``.
+    """
+    contract = ok(await scalar(op, "artifacts.expected_uploads"), "upload-build")
+    accepted = _accepted_run_upload_names(contract)
+    if "kernel" not in accepted:
+        raise SpinePhaseError(
+            "upload-build", f"upload contract no longer accepts 'kernel': {accepted}"
+        )
+    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
+        kernel_tar = _combined_kernel_tar(Path(os.environ[_KERNEL_TREE_ENV]), Path(scratch))
+        decls = [
+            {
+                "name": "kernel",
+                "sha256": _sha256_b64(kernel_tar),
+                "size_bytes": kernel_tar.stat().st_size,
+            }
+        ]
+        up = ok(
+            await scalar(op, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
+            "upload-build",
+        )
+        by_name = {item.data.get("name"): item for item in up.items}
+        if "kernel" not in by_name:
+            raise SpinePhaseError("upload-build", "create_run_upload returned no 'kernel' item")
+        await _put_presigned(by_name["kernel"], kernel_tar)
+    ok(await scalar(op, "runs.complete_build", run_id=run_id), "upload-build")
 
 
 # --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
@@ -399,7 +514,9 @@ def test_spine_over_the_wire() -> None:
                     "create-run",
                 )
                 run_id = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build"):
+                await _build_and_upload_kernel(op, run_id=run_id)
+            for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
@@ -463,12 +580,12 @@ def test_spine_over_the_wire() -> None:
 
 @pytest.mark.live_stack
 def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
-    """#988 acceptance: sweep two boot cmdlines against one built kernel, no rebuild (ADR-0299).
+    """#988 acceptance: sweep two boot cmdlines, one uploaded kernel, no re-upload (ADR-0299).
 
-    allocate → provision → build (once) → install(dhash_entries=1) → boot →
+    allocate → provision → upload-build (once) → install(dhash_entries=1) → boot →
     install(dhash_entries=2) → boot. Asserts each install's ``runs.get`` ``installed_cmdline``
-    reflects the swept value and that the ``build`` step is only ever driven once (install
-    re-stages, boot re-runs — no rebuild). Self-cleans (release).
+    reflects the swept value and that the ``build`` step stays ``succeeded`` across the sweep
+    (install re-stages, boot re-runs — no re-upload). Self-cleans (release).
     """
     issuer, base_url, _ = _spine_preflight()
     operator_token = _token(issuer, role="operator")
@@ -526,9 +643,8 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                     "create-run",
                 )
                 run_id = env.object_id
-            async with phase("build"):
-                env = ok(await scalar(op, "runs.build", run_id=run_id), "build")
-                await drain_job(op, "build", env.object_id)
+            async with phase("upload-build"):
+                await _build_and_upload_kernel(op, run_id=run_id)
 
             for variant in ("dhash_entries=1", "dhash_entries=2"):
                 async with phase(f"install:{variant}"):
@@ -543,7 +659,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                 assert data_str(got, "installed_cmdline") == variant, (
                     f"runs.get installed_cmdline must reflect the swept variant {variant}"
                 )
-                # The build step never re-runs across the sweep (no rebuild).
+                # The build step stays succeeded across the sweep (no re-upload).
                 steps = data_mapping(got, "steps")
                 assert steps["build"] == "succeeded"
 
@@ -620,7 +736,9 @@ def test_spine_live_script_over_the_wire() -> None:
                     "create-run",
                 )
                 run_id = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build"):
+                await _build_and_upload_kernel(op, run_id=run_id)
+            for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
@@ -971,21 +1089,6 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
 
 
 # --- #1146: uploaded ppc64le kernel bundle boots via the install plane (epic #1139) ----------
-
-
-def _sha256_b64(path: Path) -> str:
-    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
-    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
-
-
-async def _put_presigned(item: ToolResponse, path: Path) -> None:
-    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
-    url = item.refs["upload_url"]
-    raw_headers = item.data.get("required_headers", {})
-    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
-    async with httpx.AsyncClient(timeout=180.0) as http:
-        resp = await http.put(url, content=path.read_bytes(), headers=headers)
-        resp.raise_for_status()
 
 
 def _ppc64le_bundle_preflight() -> tuple[OidcIssuer, str, str, Path, Path]:
