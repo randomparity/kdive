@@ -198,6 +198,30 @@ def test_categorized_error_redacts_secret_pattern_on_stderr(monkeypatch, capsys)
     assert "dsn:" in err  # the key is preserved; only the secret value is masked
 
 
+def test_categorized_error_redacts_url_userinfo_on_both_surfaces(monkeypatch, capsys, caplog):
+    """A credential in URL basic-auth userinfo — the common DSN/endpoint shape the Redactor
+    key/value patterns miss — is stripped from both stderr and the structured record."""
+    endpoint = "https://AKIAKEY:s3cr3tPazz@s3.example.com/bucket"  # pragma: allowlist secret
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError(
+            "object store unreachable",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"endpoint": endpoint},
+        )
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with caplog.at_level(logging.ERROR, logger="kdive.__main__"), pytest.raises(SystemExit):
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    err = capsys.readouterr().err
+    assert "s3cr3tPazz" not in err
+    assert "AKIAKEY" not in err
+    assert "s3.example.com" in err  # the host is preserved; only userinfo is stripped
+    log_message = next(r for r in caplog.records if r.levelno == logging.ERROR).getMessage()
+    assert "s3cr3tPazz" not in log_message
+
+
 def test_reconcile_systems_object_store_misconfig_routes_through_central_handler(
     monkeypatch, capsys
 ) -> None:
