@@ -53,6 +53,14 @@ class _LibvirtConn(Protocol):
 
     def getInfo(self) -> list[Any]: ...  # noqa: N802 - libvirt binding name
     def getCapabilities(self) -> str: ...  # noqa: N802 - libvirt binding name
+    def getDomainCapabilities(  # noqa: N802 - libvirt binding name
+        self,
+        emulatorbin: str | None = None,
+        arch: str | None = None,
+        machine: str | None = None,
+        virttype: str | None = None,
+        flags: int = 0,
+    ) -> str: ...
     def close(self) -> None: ...
 
 
