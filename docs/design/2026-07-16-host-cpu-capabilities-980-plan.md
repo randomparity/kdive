@@ -35,6 +35,7 @@
 | `src/kdive/db/repositories.py` (modify) | add `resolved_cpu` to SYSTEMS `json_columns` | 6 |
 | `src/kdive/services/systems/admission.py` (modify) | single-load mint resolution of accel + `resolved_cpu` + fadump | 7 |
 | `src/kdive/mcp/tools/lifecycle/systems/view.py` (modify) | surface `resolved_cpu` in `system_envelope` | 7 |
+| `src/kdive/mcp/tools/lifecycle/systems/registrar.py` (modify) | `systems.get` wrapper docstring — agent contract for `resolved_cpu` | 7 |
 | `tests/...` (create/modify) | unit/service/live tests per task | all |
 | operator docs (modify) | host-registration rollout note | 8 |
 
@@ -495,7 +496,7 @@ class _LibvirtConn(Protocol):
 
 In `conftest.py` add to `FakeConn` a `getDomainCapabilities` returning a host-model domcaps string (make the payload/raise configurable per test, e.g. `self.domcaps_xml` / `self.domcaps_error`).
 
-In `discovery.py`: import `libvirt` (with the scoped ignore), `parse_host_cpu`, `baseline_level`, `HOST_CPU_KEY`, and a module logger. Inside the `with remote_connection(...) as conn:` block (conn closes after), after reading `info`/`arch`, capture the host_cpu guardedly:
+In `discovery.py`: import `libvirt` (with the scoped `# ty: ignore[unresolved-import]`), `_LibvirtConn` from `kdive.providers.remote_libvirt.connection.transport` (the connection-slice Protocol the helper receives — **not** `OpenConnection`, which is the opener `Callable`), `parse_host_cpu` + `ParsedHostCpu` from `kdive.providers.shared.libvirt_xml`, `baseline_level` from `kdive.domain.platform.cpu_baseline`, `HOST_CPU_KEY` from `kdive.domain.catalog.resource_capabilities`, and a module logger (`_log = logging.getLogger(__name__)`). Inside the `with remote_connection(...) as conn:` block (conn closes after), after reading `info`/`arch`, capture the host_cpu guardedly:
 
 ```python
 host_cpu = _discover_host_cpu(conn, arch, self._config.machine)
@@ -504,7 +505,7 @@ host_cpu = _discover_host_cpu(conn, arch, self._config.machine)
 where a module helper (kept small, complexity ≤8):
 
 ```python
-def _discover_host_cpu(conn: OpenConnection, arch: str, machine: str) -> dict[str, Any] | None:
+def _discover_host_cpu(conn: _LibvirtConn, arch: str, machine: str) -> dict[str, Any] | None:
     """Advertise the host-model guest CPU baseline (ADR-0368), or ``None`` on any fault.
 
     Parameterized to match the renderer (``render_domain_xml``): ``virttype='kvm'``,
@@ -668,7 +669,7 @@ In `records.py`, add to `System` (after `accel`):
     resolved_cpu: dict[str, JsonValue] | None = None
 ```
 
-Ensure `JsonValue` is imported in `records.py` (it is used elsewhere; add the import if not). In `repositories.py`, extend SYSTEMS:
+`JsonValue` is **not** currently imported in `records.py` — add `from kdive.serialization import JsonValue` (whole-tree `ty check` flags the deferred annotation string otherwise). In `repositories.py`, extend SYSTEMS:
 
 ```python
 SYSTEMS = StatefulRepository(
@@ -697,9 +698,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `src/kdive/services/systems/admission.py`
-- Modify: `src/kdive/mcp/tools/lifecycle/systems/view.py`
-- Modify: `src/kdive/mcp/tools/lifecycle/systems/*.py` wrapper (systems.get docstring — agent contract)
+- Modify: `src/kdive/mcp/tools/lifecycle/systems/view.py` (envelope `data` only)
+- Modify: `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — the `systems.get` `@app.tool` wrapper is `_register_systems_get` (registrar.py:109); its wrapper docstring / `Field` text is the **agent-facing contract** for the new `resolved_cpu` field (repo gotcha: agents see only the wrapper docstring, not the handler). Update it here, not only `view.py`.
 - Test: `tests/services/systems/test_admission_*.py` (mint resolution), `tests/mcp/.../test_systems_view*.py` (envelope)
+
+**Note on helper naming:** spec AC#7 and ADR-0368 §2 illustrate the mint resolution as a `_resolve_new_system_cpu` helper "alongside `_resolve_new_system_accel`". This plan instead folds accel + host_cpu + fadump into one `_resolve_new_system_bindings` and removes the two old helpers — which the spec's Surface 2 explicitly sanctions ("resolve accel **and** `resolved_cpu` from a single Resource load … or fold both into one helper"). AC#7 is a behavioral claim (a mint records `host_cpu` / NULL), satisfied regardless of the helper name; the illustrative names in the ADR are superseded by `_resolve_new_system_bindings`.
 
 **Interfaces:**
 - Consumes: `ResourceCapabilities.host_cpu()` (Task 3), `System.resolved_cpu` (Task 6).
@@ -732,7 +735,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement the single-load mint resolution + envelope**
 
-In `admission.py`, replace the two separate helpers' per-call `RESOURCES.get` with one load. Introduce:
+In `admission.py`, first add `from kdive.serialization import JsonValue` (it is **not** currently imported there, and the new signatures below annotate `dict[str, JsonValue]`; whole-tree `ty check` resolves the deferred annotation string and fails without it). Then replace the two separate helpers' per-call `RESOURCES.get` with one load. Introduce:
 
 ```python
 async def _resolve_new_system_bindings(
@@ -777,7 +780,7 @@ In `view.py::system_envelope`, after the `accel` line in `data`:
         data["resolved_cpu"] = system.resolved_cpu
 ```
 
-Update the `systems.get` **wrapper** docstring to name `resolved_cpu`: "`resolved_cpu` (remote Systems): the `{model, vendor?, arch, baseline_level?}` CPU baseline the System was minted against; absent when the host advertised none. `baseline_level` is a nominal upper bound (see resources.describe)."
+Update the `systems.get` **wrapper** docstring in `registrar.py::_register_systems_get` (the `@app.tool`, the agent-facing contract — not `view.py`) to name `resolved_cpu`: "`resolved_cpu` (remote Systems): the `{model, vendor?, arch, baseline_level?}` CPU baseline the System was minted against; absent when the host advertised none. `baseline_level` is a nominal upper bound (see resources.describe)."
 
 - [ ] **Step 4: Run tests + regression to verify they pass**
 
@@ -787,7 +790,7 @@ Expected: PASS (new + existing admission/view tests — the single-load refactor
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/kdive/services/systems/admission.py src/kdive/mcp/tools/lifecycle/systems/view.py tests/services/systems tests/mcp/tools/lifecycle/systems
+git add src/kdive/services/systems/admission.py src/kdive/mcp/tools/lifecycle/systems/view.py src/kdive/mcp/tools/lifecycle/systems/registrar.py tests/services/systems tests/mcp/tools/lifecycle/systems
 git commit -m "feat(980): resolve resolved_cpu at mint (single load) + surface on systems.get
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
