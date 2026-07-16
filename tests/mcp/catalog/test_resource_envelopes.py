@@ -68,6 +68,18 @@ def test_resource_capability_data_drops_non_coercible_numeric() -> None:
     assert data["memory_mb"] == 16384
 
 
+def test_resource_capability_data_includes_selectable_cpus() -> None:
+    data = resource_capability_data(
+        _resource(selectable_cpus={"x86_64": ["qemu64", "x86-64-v2"], "ppc64le": ["POWER10"]})
+    )
+    assert data["selectable_cpus"] == {"x86_64": ["qemu64", "x86-64-v2"], "ppc64le": ["POWER10"]}
+
+
+def test_resource_capability_data_omits_selectable_cpus_when_absent() -> None:
+    data = resource_capability_data(_resource(arch="x86_64"))
+    assert "selectable_cpus" not in data
+
+
 def test_resource_envelope_uses_resource_status_and_next_actions() -> None:
     response = resource_envelope(_resource(arch="x86_64"), next_actions=["resources.get"])
 
