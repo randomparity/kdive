@@ -949,6 +949,31 @@ def test_watch_for_crash_is_capped_to_one_in_flight_per_system(migrated_url: str
     asyncio.run(_run())
 
 
+def test_watch_for_crash_re_issue_after_cancel_recycles(migrated_url: str) -> None:
+    # A canceled watch must not wedge the stable dedup key: recycle_canceled lets a re-issue
+    # reclaim the slot with a fresh queued watch, so cancel does not brick the tool on that System.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            first = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'canceled' WHERE id = %s", (first.object_id,)
+                )
+            second = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            assert second.status == "queued"  # fresh watch, not the dead canceled job
+            assert second.object_id == first.object_id  # recycled in place (same row)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state FROM jobs WHERE dedup_key = %s", (f"{sys_id}:watch_for_crash",)
+                )
+                rows = await cur.fetchall()
+        assert [r["state"] for r in rows] == ["queued"]  # one row, reclaimed
+
+    asyncio.run(_run())
+
+
 def test_watch_for_crash_clamps_deadline_above_max(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

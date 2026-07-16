@@ -295,6 +295,44 @@ def test_enqueue_recycle_terminal_resets_succeeded_job_with_new_payload(migrated
     asyncio.run(_run())
 
 
+def test_enqueue_recycle_canceled_reclaims_only_when_opted_in(migrated_url: str) -> None:
+    # A stable-dedup-key caller re-issued after an explicit cancel (control.watch_for_crash,
+    # ADR-0367) reclaims the wedged slot only with recycle_canceled; recycle_terminal alone keeps
+    # the no-resurrection-of-canceled default.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            job = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-cancel"
+            )
+            await conn.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (job.id,))
+
+            kept = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-cancel",
+                recycle_terminal=True,
+            )
+            assert kept.id == job.id and kept.state is JobState.CANCELED  # invariant preserved
+
+            reclaimed = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-cancel",
+                recycle_terminal=True,
+                recycle_canceled=True,
+            )
+            assert reclaimed.id == job.id  # reset in place, not a duplicate
+            assert reclaimed.state is JobState.QUEUED
+            assert reclaimed.attempt == 0
+            assert await _count_jobs(conn) == 1
+
+    asyncio.run(_run())
+
+
 def test_enqueue_default_leaves_succeeded_job_untouched(migrated_url: str) -> None:
     # Without the flag, a succeeded job is never resurrected (no-resurrection default holds).
     async def _run() -> None:

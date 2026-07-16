@@ -49,6 +49,7 @@ async def enqueue(
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     recycle_terminal: bool = False,
+    recycle_canceled: bool = False,
     dispatch_lane: str = DEFAULT_JOB_DISPATCH_LANE,
 ) -> Job:
     """Admit a job, returning the existing one on a ``dedup_key`` conflict.
@@ -65,8 +66,14 @@ async def enqueue(
     (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
     the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
     case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
-    row is what selects ``recycle_terminal``). The ``state IN ('failed','succeeded')`` fence leaves
-    an in-flight ``queued``/``running`` job and a ``canceled`` job untouched, so in-flight dedup and
+    row is what selects ``recycle_terminal``). ``recycle_canceled`` additionally admits a
+    ``canceled`` row into that reset (only alongside ``recycle_terminal``): a caller whose dedup
+    key is a stable per-resource slot re-issued after an explicit cancel
+    (``control.watch_for_crash``, ADR-0367) wants a fresh run, not the dead canceled job wedged in
+    the slot forever. It stays **off** by default, so the install/boot re-stage keeps
+    ``no-resurrection-of-canceled``. The ``state IN ('failed','succeeded')`` fence leaves an
+    in-flight ``queued``/``running`` job and (unless ``recycle_canceled``) a ``canceled`` job
+    untouched, so in-flight dedup and
     no-resurrection-of-canceled hold. It is opt-in: the default off keeps a failed ``provision`` job
     ``failed`` so admission can surface its original reason (ADR-0149), and never resurrects a
     succeeded job.
@@ -101,6 +108,9 @@ async def enqueue(
             ),
         )
         if recycle_terminal:
+            recyclable = [JobState.FAILED.value, JobState.SUCCEEDED.value]
+            if recycle_canceled:
+                recyclable.append(JobState.CANCELED.value)
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
@@ -110,7 +120,7 @@ async def enqueue(
                     JobState.QUEUED.value,
                     Jsonb(payload_json),
                     dedup_key,
-                    [JobState.FAILED.value, JobState.SUCCEEDED.value],
+                    recyclable,
                 ),
             )
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
