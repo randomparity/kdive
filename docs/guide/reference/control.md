@@ -48,3 +48,26 @@ workflow). Enqueues a power job.
 | `action` | string | yes | Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` (leaseholder control over your transient VM). Use `reset`/`cycle` to recover a wedged but READY guest. Admitted only on a READY System; refused on a CRASHED or CRASHING (mid-force_crash) System. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `system_id` | string | yes | The READY System to act on. |
+
+## `control.watch_for_crash`
+
+`implemented`
+
+Watch a ready local-libvirt guest's serial console out-of-band for a kernel-crash
+signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on
+the first hit. Use this to catch a crash your own reproducer provokes: drive the
+repeat-until-crash loop over your root SSH, and this watches the console — which survives
+the panic that drops SSH. Requires contributor; enqueues a job and returns
+`{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
+`refs.result`. The verdict's `outcome` is `fired` (a signature appeared: carries
+`signature`, a redacted matched `matched` slice, and `elapsed_s`), `not_fired` (the guest
+was still live at the deadline), or `exited_no_signature` (the guest died with no
+signature in the watched window — read the full console with the `artifacts` tools). A
+non-local-libvirt or non-ready System, or a non-positive `deadline_s`, is a
+`configuration_error`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `deadline_s` | number | no | Seconds to watch the guest's serial console before returning a 'not fired' verdict; defaults to 60 and is clamped to 300. Size it to the reproducer batch you are about to run; re-issue the watch for a longer campaign. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `system_id` | string | yes | The ready local-libvirt System whose console to watch. |
