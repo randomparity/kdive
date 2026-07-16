@@ -191,7 +191,8 @@ def test_core_redacts_secret_straddling_the_byte_cap() -> None:
 
 
 def test_verdict_to_json_shapes() -> None:
-    fired = WatchVerdict("fired", True, "Kernel panic", "slice", 1.5, _NOW)
+    fired = WatchVerdict("fired", "Kernel panic", "slice", 1.5, _NOW)
+    assert fired.fired is True  # derived from outcome
     doc = json.loads(fired.to_json())
     assert doc == {
         "outcome": "fired",
@@ -201,7 +202,8 @@ def test_verdict_to_json_shapes() -> None:
         "signature": "Kernel panic",
         "matched": "slice",
     }
-    not_fired = WatchVerdict("not_fired", False, None, None, 10.0, _NOW)
+    not_fired = WatchVerdict("not_fired", None, None, 10.0, _NOW)
+    assert not_fired.fired is False
     assert json.loads(not_fired.to_json()) == {
         "outcome": "not_fired",
         "fired": False,

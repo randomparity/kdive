@@ -48,7 +48,7 @@ from kdive.domain.lifecycle.crash_signatures import first_crash_signature
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import WATCH_MAX_DEADLINE_S, WatchForCrashPayload, load_payload
+from kdive.jobs.payloads import WatchForCrashPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
@@ -75,11 +75,15 @@ class WatchVerdict:
     """The console-watch outcome, serialized inline into the job's ``result_ref`` (ADR-0164)."""
 
     outcome: Outcome
-    fired: bool
     signature: str | None
     matched: str | None
     elapsed_s: float
     observed_at: str
+
+    @property
+    def fired(self) -> bool:
+        """The agent-facing boolean, derived from ``outcome`` (not stored, so it cannot drift)."""
+        return self.outcome == "fired"
 
     def to_json(self) -> str:
         doc: dict[str, JsonValue] = {
@@ -158,9 +162,9 @@ async def watch_console_for_crash(
         elapsed = clock() - start
         if match is not None:
             slice_text = _redacted_slice(text, match.start(), redact, context_lines, max_bytes)
-            return WatchVerdict("fired", True, match.group(0), slice_text, elapsed, now())
+            return WatchVerdict("fired", match.group(0), slice_text, elapsed, now())
         if elapsed >= deadline_s:
-            return WatchVerdict("not_fired", False, None, None, elapsed, now())
+            return WatchVerdict("not_fired", None, None, elapsed, now())
         await sleep(min(poll_interval, deadline_s - elapsed))
 
 
@@ -212,7 +216,9 @@ async def watch_for_crash_handler(
         redactor.redact_text,
         _observed_at,
         mark=mark,
-        deadline_s=min(payload.deadline_s, WATCH_MAX_DEADLINE_S),
+        # deadline_s is already clamped to WATCH_MAX_DEADLINE_S by WatchForCrashPayload's
+        # validator (the worker-side backstop), so the payload value is authoritative here.
+        deadline_s=payload.deadline_s,
         poll_interval=POLL_INTERVAL_S,
         context_lines=CONTEXT_LINES,
         max_bytes=MATCHED_MAX_BYTES,
