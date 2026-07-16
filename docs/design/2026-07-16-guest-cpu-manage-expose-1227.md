@@ -179,11 +179,21 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   mint and is filled **only** by this Phase-C live read. This keeps the "no unpinned behavior
   change" non-goal honest (an unpinned local System's `resolved_cpu` is NULL until the live read,
   never a wrong native snapshot) and makes Phase C the only local writer (finding-driven).
-- **Read.** `virDomainGetXMLDesc(VIR_DOMAIN_XML_UPDATE_CPU)` on the running domain asks libvirt to
-  expand host-passthrough / host-model / a `custom` pin to a concrete `<model>`. A new
-  `parse_domain_resolved_cpu(domain_xml)` (defusedxml) extracts `{model, vendor?, arch,
-  baseline_level?}` (level via the existing x86 table; omitted non-x86). The read happens once, at
-  the local worker's post-provision boundary, after the domain is running.
+- **Read (three-way, honest per mode).** `virDomainGetXMLDesc(VIR_DOMAIN_XML_UPDATE_CPU)` on the
+  running domain reliably expands **host-model** and a **`custom` pin** to a concrete `<model>`; a
+  new `parse_domain_resolved_cpu(domain_xml)` (defusedxml) extracts `{model, vendor?, arch,
+  baseline_level?}` (level via the existing x86 table; omitted non-x86). Two modes do **not** reliably
+  carry a concrete `<model>` and are handled explicitly rather than assumed to expand:
+  - **host-passthrough** (the default local-x86 mode — the flagship "no visibility today" case) is
+    commonly left as `<cpu mode='host-passthrough'/>`. But a passthrough guest's CPU **is** the
+    host's CPU by definition, so when the expanded XML still shows `mode='host-passthrough'` with no
+    concrete `<model>`, Phase C resolves `resolved_cpu` from the **host's `getCapabilities()`
+    `<host><cpu>`** (the exact source Phase A reads for `host_cpu`) — an exact, non-NULL live value
+    for the default case, not a dependence on libvirt expanding passthrough.
+  - **TCG machine-default** with no concrete `<model>` and no host-CPU equivalence (the guest is not
+    the host CPU) → best-effort NULL (below).
+
+  The read happens once, at the local worker's post-provision boundary, after the domain is running.
 - **Persist — bound to the readiness-completion write (a NEW guarded repository method).** There is
   no existing "write a non-state column only when state ∈ {set}" helper — `StatefulRepository.update_
   state` guards the *state transition* itself, not a payload column. Phase C therefore adds a **new**
@@ -207,10 +217,11 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   worse than NULL). The "nothing is clobbered" property is thus scoped to **first provision** (where
   mint left it NULL); on reprovision the overwrite is intended. `reprovisioning`'s exact placement in
   the guarded-write state set is pinned in the plan so the reprovision write lands.
-- **Best-effort / never blocks.** Any `libvirt.libvirtError`, a parse fault, or an unexpanded
-  `<cpu mode='host-model'/>` / TCG machine-default with no concrete `<model>` → write NULL, log the
-  reason at info/warning, and **do not fail provisioning**. The provisioning result is independent
-  of the CPU read (mirrors ADR-0368's "observability never fails the primary path").
+- **Best-effort / never blocks.** Any `libvirt.libvirtError`, a parse fault, or a TCG machine-default
+  with no concrete `<model>` and no host-CPU equivalence → write NULL, log the reason at
+  info/warning, and **do not fail provisioning**. (An unexpanded **host-passthrough** domain does
+  *not* fall here — it resolves from the host `<cpu>` per the Read step.) The provisioning result is
+  independent of the CPU read (mirrors ADR-0368's "observability never fails the primary path").
 - **Contract.** `resolved_cpu` becomes *live-verified for local, mint-snapshot for remote, NULL when
   unrecorded/unreadable* — stated in the `systems.get` wrapper docstring/field text and ADR-0369.
   Remote keeps ADR-0368's `_resolve_new_system_bindings` mint path unchanged (its snapshot is now
@@ -280,6 +291,11 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
 12. `live_vm` (x86, native KVM): provision with `cpu.model = x86-64-v2` (a `selectable_cpus` rung),
     assert the running domain resolves to it and `systems.get.resolved_cpu` reflects it. Skips
     cleanly without the KVM host.
+12a. `live_vm` (x86, native KVM, **unpinned host-passthrough** — the default case): provision with
+    **no** `cpu` pin; assert `resolved_cpu` is non-NULL and equals the host's `getCapabilities`
+    `<cpu>` model (whether via a UPDATE_CPU-expanded `<model>` or the host-`<cpu>` fallback). The
+    proof records which path produced it. This falsifiably pins the flagship default case rather than
+    assuming passthrough expands. Skips cleanly without the KVM host.
 13. `live_vm_tcg` (ppc64le, TCG on the epic-#1139 box): provision a ppc64le System; assert
     `resources.describe` advertised `selectable_cpus["ppc64le"]`. For the Phase-C TCG resolved read,
     the proof records a **definite outcome** with the box's QEMU/libvirt version: **either** a
@@ -370,6 +386,7 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   NULL and is proven on the epic-#1139 dev box. #980's AC#11 already prototyped
   `VIR_DOMAIN_XML_UPDATE_CPU` as a test-only reconcile read — Phase C promotes that read to a
   best-effort product path for local only.
-- The exact post-provision write point and the precise `VIR_DOMAIN_XML_UPDATE_CPU` behavior for the
-  local TCG machine-default are pinned in the implementation plan against the real code / a dev-box
-  spike, not assumed here.
+- The exact post-provision write point and the precise `VIR_DOMAIN_XML_UPDATE_CPU` behavior are
+  pinned in the implementation plan against the real code / a dev-box spike, not assumed here — the
+  spike covers **both** the local TCG machine-default **and** host-passthrough (whether libvirt
+  expands passthrough to a concrete `<model>` or leaves it, which selects the host-`<cpu>` fallback).

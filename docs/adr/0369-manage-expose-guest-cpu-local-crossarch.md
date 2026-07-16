@@ -109,11 +109,14 @@ image-declared floor is a tracked follow-up.
 ### 4. `resolved_cpu` is live-verified for local, mint-snapshot for remote
 
 Post-provision, the local worker reads the *running* domain's resolved `<cpu>` (via
-`virDomainGetXMLDesc(VIR_DOMAIN_XML_UPDATE_CPU)`, which asks libvirt to expand host-passthrough /
-host-model / a `custom` pin to a concrete `<model>`) and persists it to the existing
-`systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no new migration**). This is the
-honest observation for the local cases: it closes the invisible-TCG-machine-default gap, and it
-cannot be stale (it is read from the domain that actually booted).
+`virDomainGetXMLDesc(VIR_DOMAIN_XML_UPDATE_CPU)`) and persists it to the existing
+`systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no new migration**). The read is
+honest per mode rather than assuming every mode expands: **host-model** and a **`custom` pin** expand
+to a concrete `<model>`; an unexpanded **host-passthrough** domain resolves from the host's
+`getCapabilities` `<cpu>` (the passthrough guest *is* the host CPU — the default local-x86 case is
+reliably non-NULL, not dependent on libvirt expanding passthrough); a **TCG machine-default** with no
+concrete `<model>` degrades to best-effort NULL. This closes the invisible-guest-CPU gap for the
+local cases and cannot be stale (it is read from the domain that actually booted).
 
 - **The local mint snapshot is suppressed — Phase C is the sole writer of local `resolved_cpu`.**
   ADR-0368's `_resolve_new_system_bindings` snapshots `host_cpu_json(caps)` into `resolved_cpu` for
