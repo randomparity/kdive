@@ -151,6 +151,28 @@ def test_categorized_error_surfaces_message_details_and_exit_code(monkeypatch, c
     assert "run the worker as root, or grant it group read access" in err
 
 
+def test_categorized_error_emits_error_level_structured_record(monkeypatch, caplog) -> None:
+    """The categorized failure also lands on the structured-log floor as an ERROR record
+    naming the command and category, so a log-scraping deployment sees the cause on-channel
+    and not only as plain stderr text (ADR-0090 observability)."""
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError(
+            "failed to read console log", category=ErrorCategory.CONFIGURATION_ERROR
+        )
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with caplog.at_level(logging.ERROR, logger="kdive.__main__"), pytest.raises(SystemExit):
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors, "expected an ERROR-level record for the categorized failure"
+    message = errors[0].getMessage()
+    assert "build-fs" in message
+    assert "configuration_error" in message
+    assert "failed to read console log" in message
+
+
 def test_categorized_error_unmapped_category_exits_generic(monkeypatch, capsys) -> None:
     """A category with no dedicated exit code maps to the generic failure code (1), and the
     message still reaches stderr rather than a traceback."""
