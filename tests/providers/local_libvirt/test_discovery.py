@@ -13,7 +13,9 @@ from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     DISK_GB_KEY,
     GUEST_ARCHES_KEY,
+    HOST_CPU_KEY,
     PSERIES_FADUMP_KEY,
+    SELECTABLE_CPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -394,3 +396,74 @@ def test_from_env_connect_opens_configured_host_uri(monkeypatch: pytest.MonkeyPa
 
     assert conn is sentinel
     assert opened == ["qemu+ssh://host/system"]
+
+
+# --- #1227: local host_cpu + per-arch selectable_cpus ---
+
+_CAPS_XML_WITH_HOST_CPU = (
+    "<capabilities><host><cpu>"
+    "<arch>x86_64</arch><model>SapphireRapids</model><vendor>Intel</vendor>"
+    "</cpu></host>"
+    "<guest><os_type>hvm</os_type><arch name='x86_64'>"
+    "<emulator>/usr/bin/qemu-system-x86_64</emulator>"
+    "<domain type='qemu'/><domain type='kvm'/></arch></guest>"
+    "<guest><os_type>hvm</os_type><arch name='ppc64le'>"
+    "<emulator>/usr/bin/qemu-system-ppc64</emulator>"
+    "<domain type='qemu'/></arch></guest>"
+    "</capabilities>"
+)
+
+
+def _custom_domcaps(*models: str) -> str:
+    rows = "".join(f"<model usable='yes'>{m}</model>" for m in models)
+    return (
+        f"<domainCapabilities><cpu><mode name='custom' supported='yes'>{rows}"
+        f"</mode></cpu></domainCapabilities>"
+    )
+
+
+def _multi_arch_conn(domcaps_error_arches: set[str] | None = None) -> FakeLibvirtConn:
+    return FakeLibvirtConn(
+        caps_xml=_CAPS_XML_WITH_HOST_CPU,
+        domcaps_by_arch={
+            "x86_64": _custom_domcaps("qemu64", "x86-64-v2", "SapphireRapids"),
+            "ppc64le": _custom_domcaps("POWER9", "POWER10"),
+        },
+        domcaps_error_arches=domcaps_error_arches or set(),
+    )
+
+
+def test_list_resources_advertises_native_host_cpu() -> None:
+    caps = _discovery(_multi_arch_conn()).list_resources()[0]["capabilities"]
+    assert caps[HOST_CPU_KEY] == {
+        "model": "SapphireRapids",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v4",
+    }
+
+
+def test_list_resources_advertises_per_arch_selectable_cpus() -> None:
+    caps = _discovery(_multi_arch_conn()).list_resources()[0]["capabilities"]
+    assert caps[SELECTABLE_CPUS_KEY] == {
+        "x86_64": ["SapphireRapids", "qemu64", "x86-64-v2"],
+        "ppc64le": ["POWER10", "POWER9"],
+    }
+
+
+def test_list_resources_omits_host_cpu_when_host_cpu_block_absent() -> None:
+    # The guests-only caps XML has a host <cpu> with only <arch>, no <model> -> host_cpu omitted.
+    conn = _multi_arch_conn()
+    conn.caps_xml = _CAPS_XML_WITH_GUESTS
+    caps = _discovery(conn).list_resources()[0]["capabilities"]
+    assert HOST_CPU_KEY not in caps
+    assert caps["arch"] == "x86_64"
+    assert SELECTABLE_CPUS_KEY in caps  # selectable_cpus is independent of the host <cpu> block
+
+
+def test_list_resources_omits_selectable_arch_on_getdomaincapabilities_raise() -> None:
+    conn = _multi_arch_conn(domcaps_error_arches={"ppc64le"})
+    caps = _discovery(conn).list_resources()[0]["capabilities"]
+    assert "ppc64le" not in caps[SELECTABLE_CPUS_KEY]
+    assert caps[SELECTABLE_CPUS_KEY]["x86_64"] == ["SapphireRapids", "qemu64", "x86-64-v2"]
+    assert HOST_CPU_KEY in caps  # host_cpu (native x86) still advertised

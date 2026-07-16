@@ -156,12 +156,28 @@ class FakeLibvirtConn:
     lookup: dict[str, FakeDomain] = field(default_factory=dict)  # name -> domain for control ops
     defined_xml: list[str] = field(default_factory=list)  # captures defineXML payloads in order
     define_error: int | None = None  # libvirt error code defineXML raises, if set
+    domcaps_by_arch: dict[str, str] = field(
+        default_factory=dict
+    )  # arch -> getDomainCapabilities XML
+    domcaps_error_arches: set[str] = field(default_factory=set)  # arches whose domcaps read raises
 
     def getInfo(self) -> list[object]:
         return self.info
 
     def getCapabilities(self) -> str:
         return self.caps_xml
+
+    def getDomainCapabilities(  # noqa: N802 - mirrors the libvirt binding name
+        self,
+        emulatorbin: str | None = None,
+        arch: str | None = None,
+        machine: str | None = None,
+        virttype: str | None = None,
+        flags: int = 0,
+    ) -> str:
+        if arch in self.domcaps_error_arches:
+            raise libvirt_error(libvirt.VIR_ERR_NO_SUPPORT)
+        return self.domcaps_by_arch.get(arch or "", "")
 
     def listAllDevices(self, flags: int = 0) -> list[FakeNodeDevice]:  # noqa: N802
         return self.node_devices
