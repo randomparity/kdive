@@ -189,7 +189,7 @@
 
 # Test, tooling, and guest-helper variables
 
-Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, and the in-guest capture/install helpers. Catalogued in `src/kdive/config/external_env.py`.
+Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest capture/install helpers, and the image/wheel build. Catalogued in `src/kdive/config/external_env.py`.
 
 ## Test (gated suites)
 
@@ -264,3 +264,11 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DMESG_CAP_BYTES` | `1048576` | Byte cap on the inline dmesg `kdive-capture-vmcore` emits (default 1 MiB). |
 | `KDIVE_TITLE` | `kdive` | grub menu title the `kdive-install-kernel` helper assigns the kdive boot slot. |
 | `KDIVE_VMCORE_PATH` | `/var/crash/*/vmcore` | Override the vmcore path `kdive-capture-vmcore` reads (default: the kdump-utils path). |
+
+## Build-time (image/wheel provenance)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KDIVE_BUILDINFO_COMMIT` | — | Short commit SHA `scripts/stamp-buildinfo.sh` bakes into `_buildinfo.py` when set — the container build passes it in, having no `.git`; unset → derived from live git (ADR-0370). |
+| `KDIVE_COMMIT` | — | Docker build arg carrying the short commit SHA the image bakes as provenance; passed by ci.yml and release-image.yml. Empty → the stamp is skipped, image reports X.Y.Z-dev (ADR-0370). |
+| `KDIVE_RELEASE` | `false` | Docker build arg: `true` on a `vX.Y.Z` tag build (image reports X.Y.Z+g<sha>), `false` otherwise (X.Y.Z-dev+g<sha>) (ADR-0370). |
