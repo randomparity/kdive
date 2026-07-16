@@ -41,13 +41,15 @@ and the watch must share one `_CRASH_SIGNATURE` definition; the watch cannot imp
 name.
 
 **Files:**
-- `src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py` — add
-  `def first_crash_signature(text: str) -> re.Match[str] | None` returning
-  `_CRASH_SIGNATURE.search(text)`; refactor `classify_console` to call it instead of the inline
-  `_CRASH_SIGNATURE.search(region)`. `_CRASH_SIGNATURE` stays module-private; only the helper is
-  public.
-- `tests/providers/local_libvirt/lifecycle/boot/test_readiness.py` (or the existing readiness
-  test module) — new cases.
+- `src/kdive/domain/lifecycle/crash_signatures.py` — **relocate** `_CRASH_SIGNATURE` (the readiness
+  regex) here and add `def first_crash_signature(text: str) -> re.Match[str] | None` returning
+  `_CRASH_SIGNATURE.search(text)`. The domain layer is the boundary-safe home both boot readiness
+  (a provider) and the watch (a jobs handler) can import — a jobs handler may not import
+  `providers/local_libvirt` internals (provider-boundary guard).
+- `src/kdive/providers/local_libvirt/lifecycle/boot/readiness.py` — drop the inline
+  `_CRASH_SIGNATURE`; import and call `first_crash_signature` in `classify_console`.
+- `tests/providers/local_libvirt/test_install.py` — the existing `classify_console` test module;
+  new `first_crash_signature` cases.
 
 **Test first:**
 - `first_crash_signature` returns a match for each signature family (`Kernel panic`, `BUG:`,
@@ -118,19 +120,18 @@ This is the correctness core and the bulk of the tests.
     `WATCH_MAX_DEADLINE_S`) are imported from `jobs.payloads` (single source; the tool imports the
     same, so no MCP→handler import edge).
   - `@dataclass(frozen=True, slots=True) class WatchVerdict` with fields
-    `outcome: Literal["fired","not_fired","exited_no_signature"]`, `fired: bool`,
-    `signature: str | None`, `matched: str | None`, `domain_live: bool | None`,
-    `elapsed_s: float`, `observed_at: str`; `to_json() -> str` emits compact JSON
-    (`json.dumps(..., separators=(",", ":"))`) omitting `None` fields for `not_fired`/fired shape
-    parity with the spec's three forms.
+    `outcome: Literal["fired","not_fired"]`, `fired: bool`, `signature: str | None`,
+    `matched: str | None`, `elapsed_s: float`, `observed_at: str`; `to_json() -> str` emits compact
+    JSON (`json.dumps(..., separators=(",", ":"))`) omitting `None` `signature`/`matched` on the
+    `not_fired` shape.
   - **Pure core** (no I/O, fully injectable — the unit-test seam):
     ```
     async def watch_console_for_crash(
         read_console: Callable[[], Awaitable[bytes]],
         sleep: Callable[[float], Awaitable[None]],
         clock: Callable[[], float],           # monotonic
-        probe_exited: Callable[[], Awaitable[bool]],
         redact: Callable[[str], str],
+        now: Callable[[], str],
         *, mark: int, deadline_s: float,
         poll_interval: float, context_lines: int, max_bytes: int,
     ) -> WatchVerdict
@@ -138,31 +139,30 @@ This is the correctness core and the bulk of the tests.
     Loop: snapshot suffix `body[mark:]`; if `first_crash_signature` matches, build the redacted
     bounded slice (matched line ± `context_lines`, then truncate to `max_bytes`) and return
     `fired`. Handle `len(body) < mark` → reset `mark = 0` (truncation guard, logged). At the
-    deadline, `await probe_exited()`; return `exited_no_signature` (domain_live=False) if it
-    exited, else `not_fired` (domain_live=True). `elapsed_s = clock() - start`.
+    deadline return `not_fired`. `elapsed_s = clock() - start`. **No liveness probe** — the agent
+    holds the authoritative SSH-drop signal (spec §The missed-crash window); a virsh probe would
+    also cross the provider boundary.
   - `watch_for_crash_handler(conn, job, *, resolver, secret_registry) -> str | None`: load
     `WatchForCrashPayload`; `SYSTEMS.get`; raise `CategorizedError(CONFIGURATION_ERROR,
     reason="system_not_ready")` if not `READY`; resolve `binding` and raise
     `reason="not_local_libvirt"` if not local-libvirt; snapshot
     `mark = len(read_console_log(console_log_path(system_id)))`; build real seams
-    (`read_console` via `asyncio.to_thread(read_console_log, …)`; `probe_exited` via
-    `asyncio.to_thread` over `_domain_exit_probe(domain_name_for(system_id)).exited` from
-    `readiness.py`; `redact` via `Redactor(registry=secret_registry).redact_text`;
-    `observed_at` from module-level `datetime.now(UTC)` — tests monkeypatch); call the core; audit
-    the outcome; return `verdict.to_json()`.
+    (`read_console` via `asyncio.to_thread(read_console_log, …)`; `redact` via
+    `Redactor(registry=secret_registry).redact_text`; `observed_at` from module-level
+    `datetime.now(UTC)`); call the core; audit the outcome; return `verdict.to_json()`.
+    **Boundary note:** the handler imports `first_crash_signature` from
+    `domain.lifecycle.crash_signatures` (Task 1 relocation), never from `providers/local_libvirt`.
   - `register_handlers(registry, *, resolver, secret_registry)`.
 - `tests/jobs/handlers/control/test_watch_for_crash.py` (new).
 
-**Test first (deterministic, no VM — inject fake `read_console`/`sleep`/`clock`/`probe_exited`):**
+**Test first (deterministic, no VM — inject fake `read_console`/`sleep`/`clock`/`redact`/`now`):**
 - **Fired, first hit past mark:** a console whose suffix gains `Kernel panic - not syncing` on
   poll N returns `fired`, `signature=="Kernel panic"`, `elapsed_s` within `[0, deadline+poll]`,
   and `matched` contains the panic line.
 - **Deterministic first hit:** two signatures present; the earlier (lower offset) one is reported.
 - **Pre-mark panic ignored:** `mark` set past an existing panic line → not matched → `not_fired`.
-- **Not-fired, live:** no signature, `probe_exited()` → False → `outcome="not_fired"`,
-  `domain_live is True`, `elapsed_s ∈ [deadline, deadline+poll]`.
-- **Exited-no-signature:** no signature, `probe_exited()` → True → `outcome="exited_no_signature"`,
-  `domain_live is False`.
+- **Not-fired:** no signature by the deadline → `outcome="not_fired"`, `fired is False`,
+  `elapsed_s ∈ [deadline, deadline+poll]`.
 - **Truncation guard:** console length drops below `mark` mid-watch, then a panic appears →
   matched (mark reset to 0), no crash.
 - **Redaction applied:** a registered secret in the context lines is masked in `matched` (inject a
@@ -229,12 +229,10 @@ admission + enqueue.
     does (watches the READY local-libvirt guest's serial console out-of-band for a kernel-crash
     signature until `deadline_s`, returns on the first hit); that the **agent drives its own
     reproducer loop over SSH** — this only watches the console, which survives the panic that
-    drops SSH; the returned `refs.result` verdict fields (`outcome` one of
-    `fired`/`not_fired`/`exited_no_signature`, `fired`, `signature`, `matched`, `domain_live`,
-    `elapsed_s`); that `not_fired` means the guest was still live at the deadline and
-    `exited_no_signature` means "the guest died with no signature in the watched window — read the
-    full console"; contributor-level, non-destructive; enqueues a job → poll `jobs.wait`. No ADR/
-    issue numbers.
+    drops SSH; the returned `refs.result` verdict fields (`outcome` one of `fired`/`not_fired`,
+    `fired`, `signature`, `matched`, `elapsed_s`); that a `not_fired` paired with a dropped
+    reproducer-SSH means "the crash was outside the watched window — read the full console";
+    contributor-level, non-destructive; enqueues a job → poll `jobs.wait`. No ADR/issue numbers.
 - `src/kdive/mcp/exposure.py` — add `"control.watch_for_crash": _CONTRIBUTOR` in the `# control`
   block; if `CLASSIFIED_TOOLS`/`PUBLIC_TOOLS` are hand-maintained sets rather than derived from
   the scope map, add the tool to the correct one (a `_CONTRIBUTOR` tool is classified).

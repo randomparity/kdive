@@ -90,10 +90,11 @@ Most real investigation time is spent here, not in the setup stages. After
 whatever you were watching over SSH is gone. The **serial-console is the durable record** — it
 persists across the crash. For a repeat-until-crash race, start `control.watch_for_crash` on the
 system first, then run the loop over SSH: it watches the console out-of-band for the crash
-signature and returns on the first hit (`fired` with the matched slice + elapsed, or
-`exited_no_signature` if the guest died silently — then read the full console). Poll it with
-`jobs.wait`. Read the console directly with `runs.get` (console access) and the `artifacts`
-tools. Do not rely on SSH output as your capture of a panic; rely on the console.
+signature and returns on the first hit (`fired` with the matched slice + elapsed, or `not_fired`
+if none appeared). Poll it with `jobs.wait`. If your SSH loop dies but the watch says `not_fired`,
+the crash was outside the watched window — read the console directly with `runs.get` (console
+access) and the `artifacts` tools. Do not rely on SSH output as your capture of a panic; rely on
+the console.
 
 ## Decide before you provision
 

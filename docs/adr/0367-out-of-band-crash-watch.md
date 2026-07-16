@@ -41,13 +41,18 @@ the matched signature, and elapsed-to-signal, and otherwise returns a "not fired
 the deadline. It returns the verdict inline in the job's `result_ref` (the ADR-0164 pattern,
 as `check_ssh_reachable` does), with no new artifact row.
 
-Because the start offset is snapshotted at worker pickup (queue latency and at-least-once
-retries can both put a real panic *before* it), the deadline path probes domain liveness and
-**never reports a healthy guest unless the domain is actually live**: a domain that exited with
-no matching signature returns a distinct `exited_no_signature` verdict that routes the agent to
-the full console. `deadline_s` is clamped to a modest cap (default 60s, max 300s) so a
-pure-wait watch cannot hold a worker slot long enough to starve short lifecycle jobs on the
-shared dispatch lane.
+The start offset is snapshotted at worker pickup, so queue latency or an at-least-once retry can
+put a real panic *before* it, yielding `not_fired`. kdive does **not** add a liveness probe to
+disambiguate this: the agent driving the reproducer over root SSH already holds the authoritative
+liveness signal — its SSH channel drops the instant the kernel panics — so a kdive-side probe
+would be redundant with better information the agent already has, and a virsh probe would cross
+the provider boundary from a jobs handler (only composition wires provider internals; the crash
+matcher itself is therefore relocated to the domain layer, `domain/lifecycle/crash_signatures.py`,
+so both boot readiness and the watch import it boundary-cleanly). The verdict is `fired` or
+`not_fired`; the tool and the race-debugging guide document that a `not_fired` paired with a
+dropped reproducer-SSH means "the crash was outside the watched window — read the full console."
+`deadline_s` is clamped to a modest cap (default 60s, max 300s) so a pure-wait watch cannot hold
+a worker slot long enough to starve short lifecycle jobs on the shared dispatch lane.
 
 kdive does **not** run agent-supplied commands in the guest. The agent drives its own
 reproducer loop over root SSH (ADR-0366); kdive supplies the one thing SSH cannot: catching the
@@ -95,6 +100,15 @@ observing) a guest that SSH can no longer reach.
   run console evidence and reachable via the `artifacts` tools. An inline, bounded, redacted
   matched slice (the `check_ssh_reachable` verdict pattern) answers "did it crash, on what
   signature, when" without duplicating console storage or adding a row and a store transaction.
+- **A kdive-side liveness probe on the `not_fired` path** (virsh `domstate`, or an SSH-reachability
+  probe, returning a distinct `exited_no_signature` outcome). Considered as a hardening so a
+  `not_fired` verdict could never silently hide a crash that landed before the start offset.
+  Rejected: the agent driving the reproducer over root SSH already holds the authoritative
+  liveness signal (its SSH drops on the panic), so the probe is redundant with better information;
+  a virsh probe additionally crosses the provider boundary from a jobs handler, and a port method
+  for it adds cross-provider surface for a narrow, redundant case. The missed-crash window is
+  covered instead by documenting that a `not_fired` with a dropped reproducer-SSH means "read the
+  full console."
 - **A caller-supplied / custom signature pattern.** Deferred, not built: no user need is
   established, and the readiness matcher is the single source of truth the issue names. Adding a
   pattern knob now would be a speculative surface.

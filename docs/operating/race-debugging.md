@@ -108,15 +108,17 @@ reproducer loop itself, so you never see which run crashed from inside the guest
 **serial-console is the durable, out-of-band record** — it survives the panic.
 
 `control.watch_for_crash` is the primitive that reads it for you: start the watch on the ready
-system, then drive your reproducer loop over SSH; the watch polls the console for the crash
-signature (the same `panic`/`BUG`/`Oops`/`GPF`/`KASAN`/`KFENCE`/soft-lockup set boot readiness
-uses) until its deadline and returns on the first hit — `fired` with the matched console slice
-and elapsed-to-signal, `not_fired` if the guest stayed live, or `exited_no_signature` if the
-guest died with no signature in the watched window (then read the full console with the
-`artifacts` tools). It is contributor-level and non-destructive; it earns a tool because it
-watches the console when SSH is gone, which your own loop structurally cannot. Poll it with
-`jobs.wait` and read the verdict from `refs.result`. The reproducer loop stays yours over SSH —
-the watch only catches the crash. Do not rely on SSH output as your capture of a panic.
+system **before** you begin the loop, then drive your reproducer over SSH; the watch polls the
+console for the crash signature (the same `panic`/`BUG`/`Oops`/`GPF`/`KASAN`/`KFENCE`/soft-lockup
+set boot readiness uses) until its deadline and returns on the first hit — `fired` with the
+matched console slice and elapsed-to-signal, or `not_fired` if no signature appeared. It is
+contributor-level and non-destructive; it earns a tool because it watches the console when SSH is
+gone, which your own loop structurally cannot. Poll it with `jobs.wait` and read the verdict from
+`refs.result`. The reproducer loop stays yours over SSH — the watch only catches the crash. You
+hold the authoritative liveness signal: if your reproducer's SSH drops but the watch returns
+`not_fired`, the crash landed outside the watched window (a pre-watch crash, or a very fast one) —
+read the full console with the `artifacts` tools rather than trusting `not_fired`. Do not rely on
+SSH output as your capture of a panic.
 
 ## When you _do_ need an out-of-band tool: a dead or hung guest
 

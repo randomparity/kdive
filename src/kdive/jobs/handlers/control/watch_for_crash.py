@@ -10,9 +10,11 @@ The console is polled lock-free: each poll snapshots the log and scans the suffi
 watch's start offset (``mark``); the local serial log only grows while the guest is up
 (``append="off"`` truncates only on power-cycle, ADR-0258), so concurrent growth between polls is
 harmless. Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue
-latency, or an at-least-once retry) is outside the scanned suffix — so a not-fired deadline probes
-the domain's liveness and reports ``exited_no_signature`` rather than falsely claiming a healthy
-guest.
+latency, or an at-least-once retry) is outside the scanned suffix and returns ``not_fired``. That
+window is covered without a provider-crossing liveness probe: the agent driving the reproducer
+over SSH already holds the authoritative liveness signal — its SSH channel drops the instant the
+kernel panics — so a ``not_fired`` verdict paired with a dropped SSH loop means "read the full
+console" (documented on the tool and in the race-debugging guide).
 """
 
 from __future__ import annotations
@@ -33,25 +35,14 @@ from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.crash_signatures import first_crash_signature
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import (
-    WATCH_MAX_DEADLINE_S,
-    WatchForCrashPayload,
-    load_payload,
-)
+from kdive.jobs.payloads import WATCH_MAX_DEADLINE_S, WatchForCrashPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
-    _domain_exit_probe,
-    first_crash_signature,
-)
-from kdive.providers.shared.runtime_paths import (
-    console_log_path,
-    domain_name_for,
-    read_console_log,
-)
+from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -60,14 +51,13 @@ from kdive.serialization import JsonValue
 _log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 1.0
-"""Seconds between console reads. Set to the resolution of the missed-window bound: a fired/
-not-fired verdict is accurate to within one poll interval."""
+"""Seconds between console reads. The fired/not-fired verdict is accurate to within one poll."""
 CONTEXT_LINES = 3
 """Lines of surrounding console kept on each side of the matched line in the returned slice."""
 MATCHED_MAX_BYTES = 4096
 """Hard cap on the (redacted) matched-slice field so the inline verdict stays compact."""
 
-Outcome = Literal["fired", "not_fired", "exited_no_signature"]
+Outcome = Literal["fired", "not_fired"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +68,6 @@ class WatchVerdict:
     fired: bool
     signature: str | None
     matched: str | None
-    domain_live: bool | None
     elapsed_s: float
     observed_at: str
 
@@ -93,8 +82,6 @@ class WatchVerdict:
             doc["signature"] = self.signature
         if self.matched is not None:
             doc["matched"] = self.matched
-        if self.domain_live is not None:
-            doc["domain_live"] = self.domain_live
         return json.dumps(doc, separators=(",", ":"))
 
 
@@ -115,7 +102,6 @@ async def watch_console_for_crash(
     read_console: Callable[[], Awaitable[bytes]],
     sleep: Callable[[float], Awaitable[None]],
     clock: Callable[[], float],
-    probe_exited: Callable[[], Awaitable[bool]],
     redact: Callable[[str], str],
     now: Callable[[], str],
     *,
@@ -128,11 +114,10 @@ async def watch_console_for_crash(
     """Poll the console suffix past ``mark`` for a crash signature until the first hit or deadline.
 
     Pure and fully injectable: ``read_console`` yields the current console bytes, ``clock`` is a
-    monotonic time source, ``probe_exited`` reports domain liveness, ``redact`` masks the returned
-    slice, and ``now`` stamps ``observed_at``. Returns ``fired`` on the first
-    ``first_crash_signature`` match past ``mark``; at the deadline returns ``exited_no_signature``
-    (domain gone) or ``not_fired`` (domain live). A read shorter than ``mark`` (a power-cycle
-    truncation) resets ``mark`` to 0.
+    monotonic time source, ``redact`` masks the returned slice, and ``now`` stamps
+    ``observed_at``. Returns ``fired`` on the first ``first_crash_signature`` match past ``mark``,
+    else ``not_fired`` at the deadline. A read shorter than ``mark`` (a power-cycle truncation)
+    resets ``mark`` to 0.
     """
     start = clock()
     current_mark = mark
@@ -146,17 +131,10 @@ async def watch_console_for_crash(
         elapsed = clock() - start
         if match is not None:
             slice_text = redact(_bounded_slice(text, match.start(), context_lines, max_bytes))
-            return WatchVerdict("fired", True, match.group(0), slice_text, None, elapsed, now())
+            return WatchVerdict("fired", True, match.group(0), slice_text, elapsed, now())
         if elapsed >= deadline_s:
-            if await probe_exited():
-                return WatchVerdict("exited_no_signature", False, None, None, False, elapsed, now())
-            return WatchVerdict("not_fired", False, None, None, True, elapsed, now())
+            return WatchVerdict("not_fired", False, None, None, elapsed, now())
         await sleep(min(poll_interval, deadline_s - elapsed))
-
-
-def _domain_exited(domain_name: str) -> bool:  # pragma: no cover - live_vm
-    """True iff ``virsh domstate`` reports the domain in a terminal (crashed/shut-off) state."""
-    return _domain_exit_probe(domain_name).exited
 
 
 def _observed_at() -> str:
@@ -172,9 +150,9 @@ async def watch_for_crash_handler(
 ) -> str | None:
     """Watch a ready local-libvirt System's console for a crash signature; return the JSON verdict.
 
-    Outcomes (fired / not_fired / exited_no_signature) are all successful runs — only an inability
-    to run raises. A rising failure rate for ``kind=watch_for_crash`` in the worker's per-kind job
-    telemetry surfaces a silently-broken console read.
+    Both outcomes (fired / not_fired) are successful runs — only an inability to run raises. A
+    rising failure rate for ``kind=watch_for_crash`` in the worker's per-kind job telemetry
+    surfaces a silently-broken console read.
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
@@ -197,20 +175,17 @@ async def watch_for_crash_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
         )
-    domain_name = system.domain_name or domain_name_for(system_id)
     log_path = console_log_path(system_id)
     mark = len(await asyncio.to_thread(read_console_log, log_path))
     redactor = Redactor(registry=secret_registry)
-    deadline_s = min(payload.deadline_s, WATCH_MAX_DEADLINE_S)
     verdict = await watch_console_for_crash(
         lambda: asyncio.to_thread(read_console_log, log_path),
         asyncio.sleep,
         time.monotonic,
-        lambda: asyncio.to_thread(_domain_exited, domain_name),
         redactor.redact_text,
         _observed_at,
         mark=mark,
-        deadline_s=deadline_s,
+        deadline_s=min(payload.deadline_s, WATCH_MAX_DEADLINE_S),
         poll_interval=POLL_INTERVAL_S,
         context_lines=CONTEXT_LINES,
         max_bytes=MATCHED_MAX_BYTES,

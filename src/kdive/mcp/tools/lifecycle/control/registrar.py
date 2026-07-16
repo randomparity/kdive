@@ -486,11 +486,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         the panic that drops SSH. Requires contributor; enqueues a job and returns
         `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
         `refs.result`. The verdict's `outcome` is `fired` (a signature appeared: carries
-        `signature`, a redacted matched `matched` slice, and `elapsed_s`), `not_fired` (the guest
-        was still live at the deadline), or `exited_no_signature` (the guest died with no
-        signature in the watched window — read the full console with the `artifacts` tools). A
-        non-local-libvirt or non-ready System, or a non-positive `deadline_s`, is a
-        `configuration_error`."""
+        `signature`, a redacted matched `matched` slice, and `elapsed_s`) or `not_fired` (no
+        signature before the deadline). Start the watch **before** you begin the reproducer loop
+        so it does not miss an early crash; if your reproducer's SSH channel drops but the verdict
+        is `not_fired`, the crash landed outside the watched window — read the full console with
+        the `artifacts` tools. A non-local-libvirt or non-ready System, or a non-positive
+        `deadline_s`, is a `configuration_error`."""
         return await watch_for_crash_system(
             pool,
             current_context(),

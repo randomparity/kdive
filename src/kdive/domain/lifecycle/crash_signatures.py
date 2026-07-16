@@ -20,6 +20,36 @@ common arches:
 
 from __future__ import annotations
 
+import re
+
+#: The console crash-signature matcher shared by boot readiness and the ``watch_for_crash`` console
+#: watch (#984, ADR-0367). A crash-window scan gate, distinct from the ``|``-OR literal presets
+#: below (which drive ``expected_boot_failure``): this catches the common kernel crash headers the
+#: readiness probe already keys off. Word boundaries keep the bare ``BUG:``/``Oops:`` tokens from
+#: matching benign substrings (``DEBUG:``).
+_CRASH_SIGNATURE = re.compile(
+    r"Kernel panic"
+    r"|(?<![A-Za-z])BUG:"
+    r"|(?<![A-Za-z])Oops:"
+    r"|general protection fault"
+    r"|[Uu]nable to handle kernel"
+    r"|KASAN:"
+    r"|KFENCE:"
+    r"|detected stall"
+)
+
+
+def first_crash_signature(text: str) -> re.Match[str] | None:
+    """Return the first kernel-crash-signature match in ``text``, or ``None``.
+
+    The single source of truth for the crash-signature matcher shared by boot readiness and the
+    ``watch_for_crash`` console watch (#984). ``match.group(0)`` is the matched literal (e.g.
+    ``"Kernel panic"``, ``"KASAN:"``). Case-sensitive, word-boundaried where the bare tokens
+    (``BUG:``/``Oops:``) would otherwise match benign substrings (``DEBUG:``).
+    """
+    return _CRASH_SIGNATURE.search(text)
+
+
 #: The custom-pattern kind: the caller supplies the literal ``pattern`` verbatim.
 CONSOLE_CRASH_KIND = "console_crash"
 

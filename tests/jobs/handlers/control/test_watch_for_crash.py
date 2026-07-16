@@ -70,20 +70,12 @@ async def _noop_sleep(_seconds: float) -> None:
     return None
 
 
-def _exited(value: bool) -> Callable[[], Awaitable[bool]]:
-    async def probe() -> bool:
-        return value
-
-    return probe
-
-
 async def _run_core(
     states: list[bytes],
     times: list[float],
     *,
     mark: int = 0,
     deadline_s: float = 10.0,
-    exited: bool = False,
     redact: Callable[[str], str] = lambda s: s,
     context_lines: int = CONTEXT_LINES,
     max_bytes: int = MATCHED_MAX_BYTES,
@@ -92,7 +84,6 @@ async def _run_core(
         _reader(states),
         _noop_sleep,
         _clock(times),
-        _exited(exited),
         redact,
         lambda: _NOW,
         mark=mark,
@@ -130,18 +121,11 @@ def test_core_ignores_pre_mark_panic() -> None:
     assert verdict.fired is False
 
 
-def test_core_not_fired_when_domain_live_at_deadline() -> None:
-    verdict = asyncio.run(_run_core([b"[1] still booting\n"], [0.0, 11.0], exited=False))
+def test_core_not_fired_at_deadline() -> None:
+    verdict = asyncio.run(_run_core([b"[1] still booting\n"], [0.0, 11.0]))
     assert verdict.outcome == "not_fired"
-    assert verdict.domain_live is True
-    assert verdict.signature is None and verdict.matched is None
-
-
-def test_core_exited_no_signature_when_domain_died() -> None:
-    verdict = asyncio.run(_run_core([b"[1] quiet\n"], [0.0, 11.0], exited=True))
-    assert verdict.outcome == "exited_no_signature"
     assert verdict.fired is False
-    assert verdict.domain_live is False
+    assert verdict.signature is None and verdict.matched is None
 
 
 def test_core_truncation_resets_mark_and_still_matches() -> None:
@@ -154,9 +138,9 @@ def test_core_truncation_resets_mark_and_still_matches() -> None:
     assert verdict.signature == "general protection fault"
 
 
-def test_core_non_halting_signature_fires_without_exit() -> None:
+def test_core_non_halting_signature_fires() -> None:
     states = [b"[1] rcu: INFO: rcu_sched self-detected stall on CPU\n"]
-    verdict = asyncio.run(_run_core(states, [0.0, 0.5], exited=False))
+    verdict = asyncio.run(_run_core(states, [0.0, 0.5]))
     assert verdict.outcome == "fired"
     assert verdict.signature == "detected stall"
 
@@ -189,7 +173,7 @@ def test_core_caps_matched_bytes() -> None:
 
 
 def test_verdict_to_json_shapes() -> None:
-    fired = WatchVerdict("fired", True, "Kernel panic", "slice", None, 1.5, _NOW)
+    fired = WatchVerdict("fired", True, "Kernel panic", "slice", 1.5, _NOW)
     doc = json.loads(fired.to_json())
     assert doc == {
         "outcome": "fired",
@@ -199,13 +183,12 @@ def test_verdict_to_json_shapes() -> None:
         "signature": "Kernel panic",
         "matched": "slice",
     }
-    not_fired = WatchVerdict("not_fired", False, None, None, True, 10.0, _NOW)
+    not_fired = WatchVerdict("not_fired", False, None, None, 10.0, _NOW)
     assert json.loads(not_fired.to_json()) == {
         "outcome": "not_fired",
         "fired": False,
         "elapsed_s": 10.0,
         "observed_at": _NOW,
-        "domain_live": True,
     }
 
 
@@ -330,14 +313,13 @@ def test_handler_not_ready_raises_configuration_error(
     assert excinfo.value.details["reason"] == "system_not_ready"
 
 
-def test_handler_not_fired_probes_domain_liveness(
+def test_handler_not_fired_at_deadline(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
     log = tmp_path / "console.log"
     log.write_bytes(b"[1] still booting\n")
     monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
-    monkeypatch.setattr(watch_for_crash, "_domain_exited", lambda _name: True)
 
     async def _go() -> str | None:
         async with _pool(migrated_url) as pool:
@@ -348,5 +330,5 @@ def test_handler_not_fired_probes_domain_liveness(
     result_ref = asyncio.run(_go())
     assert result_ref is not None
     doc = json.loads(result_ref)
-    assert doc["outcome"] == "exited_no_signature"
-    assert doc["domain_live"] is False
+    assert doc["outcome"] == "not_fired"
+    assert doc["fired"] is False

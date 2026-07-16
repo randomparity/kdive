@@ -11,6 +11,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 import kdive.config as config
+from kdive.domain.lifecycle.crash_signatures import first_crash_signature
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 
@@ -20,16 +21,6 @@ _TERMINAL_DOMSTATES = frozenset({"shut off", "crashed"})
 _VIRSH = "virsh"
 
 _READINESS_MARKER = "kdive-ready"
-_CRASH_SIGNATURE = re.compile(
-    r"Kernel panic"
-    r"|(?<![A-Za-z])BUG:"
-    r"|(?<![A-Za-z])Oops:"
-    r"|general protection fault"
-    r"|[Uu]nable to handle kernel"
-    r"|KASAN:"
-    r"|KFENCE:"
-    r"|detected stall"
-)
 
 
 class ConsoleVerdict(StrEnum):
@@ -51,17 +42,6 @@ class _DomainExitProbe(NamedTuple):
 
     exited: bool
     error: str | None = None
-
-
-def first_crash_signature(text: str) -> re.Match[str] | None:
-    """Return the first kernel-crash-signature match in ``text``, or ``None``.
-
-    The single source of truth for the crash-signature matcher shared by boot readiness and the
-    ``watch_for_crash`` console watch (#984). ``match.group(0)`` is the matched literal (e.g.
-    ``"Kernel panic"``, ``"KASAN:"``). Case-sensitive, word-boundaried where the bare tokens
-    (``BUG:``/``Oops:``) would otherwise match benign substrings (``DEBUG:``).
-    """
-    return _CRASH_SIGNATURE.search(text)
 
 
 def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:

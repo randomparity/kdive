@@ -22,10 +22,11 @@ each tool's own description.
   reproduction: you drive the reproducer loop over your own root SSH, and this watches the
   console — which survives the panic that drops your SSH channel. It enqueues a job; poll
   `jobs.wait`, then read the verdict from `refs.result`. The `outcome` is `fired` (with the
-  matched `signature`, a redacted `matched` slice, and `elapsed_s`), `not_fired` (the guest was
-  still live at the deadline), or `exited_no_signature` (the guest died with no signature in the
-  watched window — read the full console with the `artifacts` tools). Contributor-level,
-  non-destructive. See the [race-debugging guide](../../operating/race-debugging.md).
+  matched `signature`, a redacted `matched` slice, and `elapsed_s`) or `not_fired` (no signature
+  before the deadline). Start the watch before you begin the loop; if your reproducer's SSH drops
+  but the verdict is `not_fired`, the crash landed outside the watched window — read the full
+  console with the `artifacts` tools. Contributor-level, non-destructive. See the
+  [race-debugging guide](../../operating/race-debugging.md).
 
 ## Power
 
