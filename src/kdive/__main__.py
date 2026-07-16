@@ -31,7 +31,7 @@ from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker
-from kdive.security.secrets.redaction import Redactor
+from kdive.security.secrets.redaction import Redactor, redact_url_credentials
 from kdive.version import full_version
 
 if TYPE_CHECKING:
@@ -330,25 +330,18 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _COMMAND_BY_NAME[args.command].handler(args, secret_registry, telemetry)
     except CategorizedError as error:
-        # Land the failure on the structured-log floor (ADR-0090) for the long-running commands a
-        # deployment scrapes, then print the actionable details to the operator's stderr. The JSON
-        # formatter renders a fixed field schema, so the category, message, AND details go in the
-        # record's message (not dropped `extra=` fields); the handler's SecretRedactionFilter
-        # scrubs that message before it is exported.
-        details_suffix = f" {error.details}" if error.details else ""
-        _log.error(
-            "%s command failed (%s): %s%s", args.command, error.category, error, details_suffix
-        )
-        _emit_categorized_error(error, Redactor(registry=secret_registry))
+        _report_categorized_error(args.command, error, Redactor(registry=secret_registry))
         raise SystemExit(exit_code_for_category(error.category)) from error
 
 
-def _emit_categorized_error(error: CategorizedError, redactor: Redactor) -> None:
-    """Surface a categorized failure's message and structured details to stderr.
+def _report_categorized_error(command: str, error: CategorizedError, redactor: Redactor) -> None:
+    """Log a categorized failure and print its actionable details, both surfaces redacted.
 
-    The raise site already computed the actionable context (operation, path, remediation) in
-    ``details``; printing it here turns a bare one-line message behind a traceback into an
-    operator-readable cause. The caller maps ``error.category`` to a stable exit code.
+    Turns a bare one-line message behind a traceback into an operator-readable cause: an ERROR
+    record on the structured-log floor (ADR-0090) that a deployment scrapes — carrying the
+    command, category, message, details, and stack (``exc_info``) so an unexpected category is
+    still diagnosable — plus the message and details on the operator's stderr. The caller maps
+    ``error.category`` to a stable exit code.
 
     Two orthogonal redaction concerns:
 
@@ -357,14 +350,37 @@ def _emit_categorized_error(error: CategorizedError, redactor: Redactor) -> None
       ``authorization_denied``/``not_found``; an operator invoking ``python -m kdive`` already has
       host access and needs the full, unredacted reason. Do not reuse this printer on a
       remote-client path.
-    - Value-redaction floor (``Redactor``): applied as defense-in-depth, matching the logging
-      path. ``details`` is contractually secret-free, but stderr commonly lands in the systemd
-      journal or a CI log with broader read scope, so an accidentally-embedded credential is
-      scrubbed here just as the ``SecretRedactionFilter`` scrubs the log record.
+    - Value-redaction floor: applied as defense-in-depth, matching the logging path. ``details`` is
+      contractually secret-free, but stderr and the scraped log commonly land in the systemd
+      journal or a CI log with broader read scope, so registered secrets, ``secret=value`` pairs
+      (``Redactor``), and URL-userinfo credentials (``redact_url_credentials``) are stripped here.
     """
-    print(f"error: {redactor.redact_text(str(error))}", file=sys.stderr)
-    for key, value in error.details.items():
-        print(f"  {key}: {redactor.redact_value(value)}", file=sys.stderr)
+    message = _redact(str(error), redactor)
+    details = {key: _redact(value, redactor) for key, value in error.details.items()}
+    details_suffix = f" {details}" if details else ""
+    _log.error(
+        "%s command failed (%s): %s%s",
+        command,
+        error.category,
+        message,
+        details_suffix,
+        exc_info=error,
+    )
+    print(f"error: {message}", file=sys.stderr)
+    for key, value in details.items():
+        print(f"  {key}: {value}", file=sys.stderr)
+
+
+def _redact(value: object, redactor: Redactor) -> object:
+    """Strip registered secrets, ``secret=value`` pairs, and URL-userinfo credentials from a value.
+
+    URL basic-auth userinfo — a ``user``/``password`` pair before an ``@`` host — is the common way
+    a credential lands in a DSN or endpoint detail, and the ``Redactor`` key/value patterns alone do
+    not catch it, so a string is run through :func:`redact_url_credentials` first.
+    """
+    if isinstance(value, str):
+        return redactor.redact_text(redact_url_credentials(value))
+    return redactor.redact_value(value)
 
 
 if __name__ == "__main__":
