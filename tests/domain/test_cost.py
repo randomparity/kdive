@@ -15,10 +15,12 @@ from uuid import uuid4
 import pytest
 
 from kdive.domain.accounting.cost import (
+    ACCEL_WEIGHT,
     KCU_QUANTUM,
     W_CPU,
     W_MEM,
     Selector,
+    accel_factor,
     cost,
     quantize_kcu,
     rate,
@@ -67,6 +69,35 @@ def test_rate_scales_with_coefficient() -> None:
 def test_rate_is_exact_decimal_not_float() -> None:
     # 0.25 * 3 = 0.75 exactly; a float path would drift.
     assert rate(Decimal("1.0"), vcpus=0, memory_gb=3) == Decimal("0.75")
+
+
+def test_accel_factor_kvm_is_native_baseline() -> None:
+    assert accel_factor("kvm") == Decimal("1.0")
+
+
+def test_accel_factor_tcg_prices_emulation_above_native() -> None:
+    assert accel_factor("tcg") == Decimal("4.0")
+    assert accel_factor("tcg") == ACCEL_WEIGHT["tcg"]
+
+
+def test_accel_factor_none_and_unknown_fail_open_to_baseline() -> None:
+    # No accel (remote-libvirt / fault-inject / pre-ADR-0338 host) prices at the native
+    # baseline, and a stale/hand-edited value fails OPEN rather than closed (ADR-0362).
+    assert accel_factor(None) == Decimal("1.0")
+    assert accel_factor("bogus") == Decimal("1.0")
+
+
+def test_rate_default_accel_is_byte_identical_to_pre_adr() -> None:
+    # A caller that does not price an accelerator gets exactly the size-weighted rate.
+    assert rate(Decimal("1.0"), vcpus=2, memory_gb=4) == rate(
+        Decimal("1.0"), vcpus=2, memory_gb=4, accel=None
+    )
+    assert rate(Decimal("1.0"), vcpus=2, memory_gb=4, accel="kvm") == Decimal("3.0")
+
+
+def test_rate_tcg_multiplies_the_whole_size_weighted_rate() -> None:
+    # TCG multiplies coeff × size, not just one term: 4 × (1.0*(1.0*2 + 0.25*4)) = 12.0.
+    assert rate(Decimal("1.0"), vcpus=2, memory_gb=4, accel="tcg") == Decimal("12.0")
 
 
 def test_cost_is_rate_times_hours() -> None:

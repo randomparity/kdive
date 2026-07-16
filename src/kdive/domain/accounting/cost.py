@@ -46,6 +46,19 @@ if TYPE_CHECKING:
 W_CPU = Decimal("1.0")
 W_MEM = Decimal("0.25")
 
+# Global accelerator reference weights (ADR-0362, amending ADR-0007 §1). Pinned and
+# fleet-uniform like W_CPU/W_MEM: a property of the accelerator technology, not a per-host
+# knob. `kvm` is the native baseline; `tcg` (full emulation of a foreign guest arch) reserves
+# host compute at a large multiple of native, priced at 4× (the same reference scale as the
+# "one vcpu-hour ≈ four GB-hours" ratio). A `None`/unknown accel fails OPEN to the native
+# baseline — a resource that advertises no `guest_arches` (remote-libvirt, fault-inject, a host
+# not re-discovered since ADR-0338) resolves no accel and is priced exactly as before ADR-0362.
+ACCEL_WEIGHT = {
+    "kvm": Decimal("1.0"),
+    "tcg": Decimal("4.0"),
+}
+_ACCEL_BASELINE = Decimal("1.0")
+
 # Every recorded/reported kcu value quantizes to this scale with banker's rounding, so
 # estimate / reserve / reconcile that price the same selector agree to the last place.
 KCU_QUANTUM = Decimal("0.0001")
@@ -69,6 +82,7 @@ class Selector(BaseModel):
     vcpus: int
     memory_gb: int
     cost_class: str = "local"
+    accel: str | None = None
 
 
 def quantize_kcu(value: Decimal) -> Decimal:
@@ -98,13 +112,28 @@ def quantize_kcu(value: Decimal) -> Decimal:
         ) from None
 
 
-def rate(coeff: Decimal, *, vcpus: int, memory_gb: int) -> Decimal:
-    """Return the exact (unquantized) kcu/hr rate for ``coeff`` and a size.
+def accel_factor(accel: str | None) -> Decimal:
+    """Return the pinned kcu rate multiplier for an accelerator (ADR-0362).
 
-    ``rate = coeff × (W_CPU × vcpus + W_MEM × memory_gb)``. Exact so callers quantize
+    ``kvm`` is the native baseline (``1.0``); ``tcg`` prices at :data:`ACCEL_WEIGHT`'s
+    emulation multiplier. A ``None`` or unknown accelerator fails OPEN to the native
+    baseline (``1.0``) — a resource that advertises no ``guest_arches`` resolves no accel and
+    must price exactly as before ADR-0362, never fail closed on a stale/hand-edited value.
+    """
+    if accel is None:
+        return _ACCEL_BASELINE
+    return ACCEL_WEIGHT.get(accel, _ACCEL_BASELINE)
+
+
+def rate(coeff: Decimal, *, vcpus: int, memory_gb: int, accel: str | None = None) -> Decimal:
+    """Return the exact (unquantized) kcu/hr rate for ``coeff``, a size, and an accelerator.
+
+    ``rate = coeff × A(accel) × (W_CPU × vcpus + W_MEM × memory_gb)`` (ADR-0007 §1 as amended
+    by ADR-0362). ``accel`` defaults to ``None`` — a ``1.0`` factor — so a caller that does not
+    price an accelerator gets the pre-ADR-0362 rate byte-identically. Exact so callers quantize
     once at the reporting/recording boundary; never rounds here.
     """
-    return coeff * (W_CPU * vcpus + W_MEM * memory_gb)
+    return coeff * accel_factor(accel) * (W_CPU * vcpus + W_MEM * memory_gb)
 
 
 def cost(rate_kcu_per_hr: Decimal, hours: Decimal) -> Decimal:
