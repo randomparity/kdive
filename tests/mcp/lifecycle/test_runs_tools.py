@@ -4988,7 +4988,11 @@ def _profile_dump(**local_libvirt: Any) -> dict[str, Any]:
 
 
 def _fadump_profile_dump() -> dict[str, Any]:
-    """A real ppc64le fadump profile dump (crashkernel reservation + debug.fadump, ADR-0349)."""
+    """A real ppc64le fadump profile dump (crashkernel reservation + debug.fadump, ADR-0349).
+
+    ``memory_mb`` is 4096 — the fadump RAM floor (ADR-0363, #1181); a smaller size is rejected at
+    validation, so this fixture must sit at or above it.
+    """
     from kdive.profiles.provisioning import ProvisioningProfile
 
     return ProvisioningProfile.model_validate(
@@ -4996,7 +5000,7 @@ def _fadump_profile_dump() -> dict[str, Any]:
             "schema_version": 1,
             "arch": "ppc64le",
             "vcpu": 2,
-            "memory_mb": 2048,
+            "memory_mb": 4096,
             "disk_gb": 10,
             "boot_method": "direct-kernel",
             "kernel_source_ref": "git+https://git.kernel.org#v6.9",

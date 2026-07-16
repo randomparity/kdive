@@ -19,6 +19,7 @@ from kdive.profiles.provider_policy import (
     rootfs_upload_window_allowed,
 )
 from kdive.profiles.provisioning import (
+    FADUMP_MIN_MEMORY_MB,
     BootMethod,
     ProvisioningProfile,
     dump_profile,
@@ -572,6 +573,33 @@ def test_fadump_rejected_without_crashkernel_reservation() -> None:
     with pytest.raises(CategorizedError) as exc:
         ProvisioningProfile.parse(data)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_fadump_rejected_below_memory_floor() -> None:
+    # fadump reserves a boot-memory region on top of crashkernel; below the floor the guest
+    # cannot reach readiness (ADR-0363, #1181). A concrete under-floor size is a config error.
+    data = _fadump_profile()
+    data["memory_mb"] = FADUMP_MIN_MEMORY_MB - 1024
+    with pytest.raises(CategorizedError) as exc:
+        ProvisioningProfile.parse(data)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_fadump_accepts_memory_at_floor() -> None:
+    # Exactly the floor is admitted (the boundary is inclusive).
+    data = _fadump_profile()
+    data["memory_mb"] = FADUMP_MIN_MEMORY_MB
+    profile = ProvisioningProfile.parse(data)
+    assert profile.memory_mb == FADUMP_MIN_MEMORY_MB
+
+
+def test_fadump_memory_floor_deferred_when_sizing_omitted() -> None:
+    # A shape-sized allocation omits memory_mb; the floor cannot fire before reconciliation
+    # fills it (the sizing fields stay optional at parse, ADR-0067/0024 delta).
+    data = _fadump_profile()
+    del data["memory_mb"]
+    profile = ProvisioningProfile.parse(data)
+    assert profile.memory_mb is None
 
 
 def test_kdump_profile_unaffected_by_fadump_default() -> None:

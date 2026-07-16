@@ -1185,12 +1185,17 @@ def _ppc64le_fadump_provision_profile(image: str) -> dict[str, object]:
     alongside the arch-default ``crashkernel=512M``. Admission accepts it only because the live host
     QEMU (>= 10.2) advertises ``pseries_fadump`` at discovery. The ``256M`` token is the same
     method-signal sentinel the kdump proof uses (the value is never the reservation size).
+
+    ``memory_mb`` is **4096** — the fadump RAM floor (ADR-0363, #1181), not the kdump proof's 2048.
+    On POWER, fadump reserves a boot-memory region on top of crashkernel; at 2 GiB the guest never
+    reaches run-readiness under native KVM (kdump on the same guest passes at 2 GiB). The paired
+    ``allocations.request`` reserves ``memory_gb=4`` so the reconciled size matches this floor.
     """
     return {
         "schema_version": 1,
         "arch": "ppc64le",
         "vcpu": 2,
-        "memory_mb": 2048,
+        "memory_mb": 4096,
         "disk_gb": LOCAL_ALLOCATION_DISK_GB,
         "boot_method": "direct-kernel",
         "kernel_source_ref": os.environ[_KERNEL_TREE_ENV],
@@ -1255,9 +1260,11 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                             op,
                             "allocations.request",
                             project=_PROJECT,
+                            # memory_gb=4 is the fadump RAM floor (ADR-0363, #1181); the reconciled
+                            # profile size must not fall below it, unlike the kdump proof's 2 GiB.
                             request={
                                 "vcpus": 2,
-                                "memory_gb": 2,
+                                "memory_gb": 4,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
                                 "resource": {"mode": "kind"},
                             },

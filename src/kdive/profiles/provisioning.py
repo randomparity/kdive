@@ -49,6 +49,12 @@ type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_l
 
 SUPPORTED_DOMAIN_XML_PARAMS = frozenset({"machine"})
 
+# fadump minimum guest RAM (ADR-0363, #1181). On POWER, fadump reserves a boot-memory region on
+# top of the crashkernel reservation and re-registers on first boot; at 2 GiB the reservation plus
+# crashkernel leaves too little for userspace to reach the kdive-ready marker (kdump on the same
+# guest passes at 2 GiB, #1156). 4 GiB is the floor the native-POWER fadump proof provisions at.
+FADUMP_MIN_MEMORY_MB = 4096
+
 
 # Provenance: ADR-0024 decision 2a, ADR-0080; disk-image lane ADR-0078.
 class BootMethod(StrEnum):
@@ -320,6 +326,28 @@ class ProvisioningProfile(_ProfileBase):
             raise ValueError("debug.fadump is POWER-specific and requires arch 'ppc64le'")
         if section.crashkernel is None:
             raise ValueError("debug.fadump requires a crashkernel reservation")
+        return self
+
+    @model_validator(mode="after")
+    def _require_fadump_memory_floor(self) -> ProvisioningProfile:
+        """fadump requires at least ``FADUMP_MIN_MEMORY_MB`` guest RAM (ADR-0363, #1181).
+
+        fadump reserves a boot-memory region on top of the crashkernel reservation; below the
+        floor the guest cannot reach run-readiness (kdump, which reserves only the crashkernel,
+        succeeds at the same size). The check fires only on a *concrete* ``memory_mb`` — a
+        shape-sized profile omits it and is reconciled to a concrete size before it is stored, so
+        the floor is enforced on the size that actually boots (admission re-parses the reconciled
+        profile). This is the direct root-cause fix; a slower readiness deadline cannot recover a
+        genuine memory shortage.
+        """
+        section = self.provider.local_libvirt_section
+        if section is None or not section.debug.fadump:
+            return self
+        if self.memory_mb is not None and self.memory_mb < FADUMP_MIN_MEMORY_MB:
+            raise ValueError(
+                f"debug.fadump requires at least {FADUMP_MIN_MEMORY_MB} MiB of guest memory "
+                "(fadump reserves a boot-memory region on top of crashkernel)"
+            )
         return self
 
     @model_validator(mode="after")
