@@ -58,8 +58,9 @@ CUSTOMIZE_UNIT = "kdive-customize.service"
 CUSTOMIZE_SCRIPT_PATH = "/usr/local/sbin/kdive-customize"
 
 # Genuine kernel-fatal patterns, used ONLY as a backstop for a guest that dies without emitting
-# the (authoritative) ERR-trap fail marker — e.g. a panic that kills the shell before the trap
-# runs. This scan runs over the WHOLE customization console, which (unlike a quiet provision boot)
+# the (authoritative) fail marker — e.g. a panic that kills the shell before the firstboot script
+# writes its verdict. This scan runs over the WHOLE customization console, which (unlike a quiet
+# provision boot)
 # carries `dnf` transaction + scriptlet output, so the broad `BUG:` alternative is deliberately
 # EXCLUDED: a package changelog or scriptlet line containing `BUG:` would false-fail an otherwise
 # good build. The retained patterns are kernel-log-specific and do not appear in package output.
