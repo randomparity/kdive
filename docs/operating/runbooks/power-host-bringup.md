@@ -205,6 +205,10 @@ set +a
 uv run python -m pytest -m live_vm_tcg -o addopts="" -q -rA
 ```
 
-Expected on native POWER (see the proof record): the ssh-reachability and kdump-capture proofs pass
-under KVM-HV; fadump boots `fadump=on` under KVM but needs more than the profile's 2 GiB guest RAM
-to pass readiness (a documented native-POWER limitation, not a regression).
+Expected on native POWER (see the proof records): the ssh-reachability and kdump-capture proofs
+pass under KVM-HV. The fadump proof provisions the guest at the **4 GiB** fadump RAM floor
+(ADR-0363, #1181) — fadump reserves a boot-memory region on top of `crashkernel`, so at the kdump
+proof's 2 GiB the guest fails run-readiness; the floor is enforced at admission, so a fadump profile
+below it is rejected `configuration_error` rather than booting to a readiness failure. The
+native-POWER fadump crash→capture status and the target host's fadump readiness are recorded in
+`docs/design/2026-07-15-power-native-fadump-ram-floor-1181-proof-record.md`.
