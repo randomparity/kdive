@@ -198,6 +198,27 @@ def test_categorized_error_redacts_secret_pattern_on_stderr(monkeypatch, capsys)
     assert "dsn:" in err  # the key is preserved; only the secret value is masked
 
 
+def test_categorized_error_masks_secret_keyed_detail_value(monkeypatch, capsys) -> None:
+    """A plain value under a secret-named key (password/token/api_key) — which carries no
+    recognizable secret pattern of its own — is masked on stderr by the mapping-level key-name
+    signal, matching Redactor.redact_value."""
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError(
+            "auth failed",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"password": "hunter2plain"},  # pragma: allowlist secret
+        )
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with pytest.raises(SystemExit):
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    err = capsys.readouterr().err
+    assert "hunter2plain" not in err
+    assert "password:" in err  # the key is still shown; only its value is masked
+
+
 def test_categorized_error_redacts_url_userinfo_on_both_surfaces(monkeypatch, capsys, caplog):
     """A credential in URL basic-auth userinfo — the common DSN/endpoint shape the Redactor
     key/value patterns miss — is stripped from both stderr and the structured record."""
