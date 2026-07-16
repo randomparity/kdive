@@ -272,3 +272,38 @@ def test_resource_capabilities_filters_malformed_pcie_descriptors() -> None:
     )
 
     assert caps.pcie_descriptors() == [_DESCRIPTOR]
+
+
+def test_host_cpu_reads_full_shape() -> None:
+    caps = ResourceCapabilities.from_mapping(
+        {
+            "host_cpu": {
+                "model": "Skylake-Client-IBRS",
+                "vendor": "Intel",
+                "arch": "x86_64",
+                "baseline_level": "x86-64-v3",
+            }
+        }
+    )
+    assert caps.host_cpu() == {
+        "model": "Skylake-Client-IBRS",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v3",
+    }
+
+
+def test_host_cpu_absent_is_none() -> None:
+    assert ResourceCapabilities.from_mapping({}).host_cpu() is None
+
+
+def test_host_cpu_malformed_is_none() -> None:
+    assert ResourceCapabilities.from_mapping({"host_cpu": {"vendor": "Intel"}}).host_cpu() is None
+    assert ResourceCapabilities.from_mapping({"host_cpu": "nope"}).host_cpu() is None
+
+
+def test_host_cpu_drops_non_string_optional_fields() -> None:
+    caps = ResourceCapabilities.from_mapping(
+        {"host_cpu": {"model": "EPYC", "arch": "x86_64", "vendor": 7, "baseline_level": None}}
+    )
+    assert caps.host_cpu() == {"model": "EPYC", "arch": "x86_64"}
