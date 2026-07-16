@@ -142,6 +142,53 @@ def parse_host_cpu(dom_caps_xml: str) -> ParsedHostCpu | None:
     return None
 
 
+def parse_host_capabilities_cpu(caps_xml: str) -> ParsedHostCpu | None:
+    """Read the host's own ``<host><cpu>`` from a ``getCapabilities`` document (ADR-0369).
+
+    The passthrough-honest host CPU: a ``host-passthrough`` guest gets exactly this CPU, so it is
+    the correct local-x86 ``host_cpu`` source (the host-model block under-reports a passthrough
+    guest). Returns ``None`` on a parse fault or a block with no concrete ``<model>``;
+    ``disabled_features`` is always empty (the host block carries no disable feature).
+    """
+    try:
+        root: ET.Element = _safe_fromstring(caps_xml)
+    except (ET.ParseError, DefusedXmlException) as _exc:
+        _log.warning("could not parse host capabilities for host cpu", exc_info=True)
+        return None
+    cpu = root.find("./host/cpu")
+    if cpu is None:
+        return None
+    model = (cpu.findtext("model") or "").strip()
+    if not model:
+        return None
+    vendor = (cpu.findtext("vendor") or "").strip() or None
+    arch = (cpu.findtext("arch") or "").strip() or None
+    return ParsedHostCpu(model=model, vendor=vendor, arch=arch, disabled_features=frozenset())
+
+
+def parse_selectable_cpus(dom_caps_xml: str) -> list[str]:
+    """Sorted, de-duplicated ``custom``-mode ``usable='yes'`` model names (ADR-0369).
+
+    The exact set libvirt accepts in a ``<cpu mode='custom'><model>`` for this ``(arch, machine,
+    virttype)`` — the host-derived allow-list for a guest CPU pin. Returns ``[]`` on a parse fault,
+    an unsupported custom mode, or an empty usable set (discovery omits the key rather than
+    advertising ``[]``). Parsed with ``defusedxml`` (crosses the libvirtd trust boundary).
+    """
+    try:
+        root: ET.Element = _safe_fromstring(dom_caps_xml)
+    except (ET.ParseError, DefusedXmlException) as _exc:
+        _log.warning("could not parse domain capabilities for selectable cpus", exc_info=True)
+        return []
+    models = {
+        name.strip()
+        for mode in root.findall("./cpu/mode")
+        if mode.get("name") == "custom" and mode.get("supported") != "no"
+        for model in mode.findall("model")
+        if model.get("usable") == "yes" and (name := (model.text or "")).strip()
+    }
+    return sorted(models)
+
+
 def parse_metadata_system_id(meta_xml: str) -> str | None:
     """Read the System id from a kdive metadata XML element; ``None`` if empty/malformed."""
     try:
