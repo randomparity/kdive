@@ -46,3 +46,9 @@ Step-by-step procedures for live runs and operational tasks.
 | [kdivectl](runbooks/kdivectl.md) | Operating the admin CLI |
 | [Doctor exit criterion](runbooks/doctor-exit-criterion.md) | The doctor readiness check |
 | [MCP coverage campaign rerun](runbooks/mcp-coverage-campaign-rerun.md) | Re-running the MCP tool coverage sweep |
+
+## Investigation
+
+| Guide | What it covers |
+|---|---|
+| [Race debugging](race-debugging.md) | Observing a kernel value under race load without halting the VM — drgn-live + tracepoints over root SSH |
