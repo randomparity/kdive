@@ -30,8 +30,9 @@ We will bake `_buildinfo.py` into the container image during the Docker build fr
 arguments**, reusing `scripts/stamp-buildinfo.sh` as the single source of the file's format:
 
 - `stamp-buildinfo.sh` accepts an explicit commit via the `KDIVE_BUILDINFO_COMMIT` environment
-  variable, falling back to `git rev-parse` when unset (today's behavior, unchanged for the
-  wheel path and every existing caller).
+  variable, falling back to git when unset, and pins the git-derived abbreviation to
+  `--short=12` so the SHA is deterministic across shallow and full clones (the only change to the
+  existing wheel path is the now-fixed SHA width).
 - The `Dockerfile` builder stage declares `ARG KDIVE_COMMIT` / `ARG KDIVE_RELEASE=false` (placed
   after the dependency-sync layers so a changing commit never busts the `uv sync` cache) and runs
   the stamp only when `KDIVE_COMMIT` is non-empty. The generated `/app/src/kdive/_buildinfo.py`
@@ -44,16 +45,18 @@ arguments**, reusing `scripts/stamp-buildinfo.sh` as the single source of the fi
 
 ## Consequences
 
-- A published image reports the same self-describing version as the wheel for the same tag, and
-  the same short `<sha>` (both from `git rev-parse --short HEAD` at that ref). Provenance is
-  honest for the artifact operators run.
+- A published image reports the same self-describing version as the wheel for the same tag,
+  byte-identical short `<sha>` included (both from `git rev-parse --short=12 HEAD` at that ref).
+  Provenance is honest for the artifact operators run.
 - One `_buildinfo.py` format, one stamp script, for both artifact paths.
 - A local `docker build` (or the ci.yml push-less PR build) with no build-arg is unchanged — the
   stamp is skipped and the image reports `X.Y.Z-dev`, exactly as today, rather than a misleading
   `unknown` commit.
 - New obligation: the Dockerfile ↔ workflow wiring is a silent-failure surface (dropping the
-  build-args would quietly restore the bug), so a structural guard test asserts both ends stay
-  wired. The unit gate cannot build an image, so this guard is load-bearing.
+  build-args or breaking the final-stage copy would quietly restore the bug). The existing CI
+  image-smoke job (which already builds `kdive:ci` and runs it via `docker run`) gains a
+  `--version` assertion that catches this end-to-end; a cheaper structural test guards the wiring
+  without a build.
 
 ## Alternatives considered
 

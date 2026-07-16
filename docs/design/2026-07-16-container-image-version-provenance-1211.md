@@ -47,8 +47,16 @@ The published container image reports the same self-describing version as the wh
 - an image built from a `vX.Y.Z` tag reports `X.Y.Z+g<sha>`;
 - an `:edge` / main-branch image reports `X.Y.Z-dev+g<sha>`;
 
-where `<sha>` is the short commit the image was built from — identical to the wheel's `<sha>` for
-the same tag (both derive from `git rev-parse --short HEAD` at that ref).
+where `<sha>` is the short commit the image was built from — the same commit prefix the wheel
+reports for that tag.
+
+The short SHA is pinned to a fixed abbreviation length so it renders the same across build
+environments. Git's default `--short` auto-grows the abbreviation to stay unambiguous across the
+objects present, so a **shallow** clone (`release-image.yml`) and a **full** clone (`release.yml`)
+could abbreviate the same commit to different lengths. Both paths use `git rev-parse --short=12
+HEAD`; `--short=N` is a minimum length that git extends only on a hex-prefix collision — negligibly
+unlikely at 12 hex in this repo — so in practice the wheel and image render the identical string,
+and always the same commit prefix.
 
 Out of scope: the operator-performed `v0.3.0` tag event itself; the post-release
 `begin <next>-dev` bump; any change to the `full_version()` rendering rules or the wheel/sdist
@@ -62,10 +70,12 @@ no `.git` (intentionally — excluding it keeps the context small and cache stab
 and release flag are conveyed in from the workflow, which knows the ref.
 
 1. **`scripts/stamp-buildinfo.sh`** — accept an explicit commit override via the
-   `KDIVE_BUILDINFO_COMMIT` environment variable, falling back to `git rev-parse` (today's
-   behavior) when it is unset. The `RELEASE` arg (`$1`) is unchanged. This keeps one script and
-   one `_buildinfo.py` format for both the wheel path (git-derived) and the container path
-   (arg-derived); it does not change any existing caller.
+   `KDIVE_BUILDINFO_COMMIT` environment variable, falling back to git when it is unset. Pin the
+   git-derived abbreviation to `git rev-parse --short=12 HEAD` (was `--short`, auto length) so the
+   stamped SHA is deterministic across shallow and full clones. The `RELEASE` arg (`$1`) is
+   unchanged. This keeps one script and one `_buildinfo.py` format for both the wheel path
+   (git-derived) and the container path (arg-derived); the only change to existing callers is the
+   now-fixed SHA width.
 
 2. **`Dockerfile`** — in the *builder* stage (which already has `scripts/` and `src/` via
    `COPY . .`), after the project sync, declare `ARG KDIVE_COMMIT` and `ARG KDIVE_RELEASE=false`
@@ -96,7 +106,7 @@ and release flag are conveyed in from the workflow, which knows the ref.
 
    ```yaml
    build-args: |
-     KDIVE_COMMIT=<short sha of the built ref>
+     KDIVE_COMMIT=<git rev-parse --short=12 HEAD>
      KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}
    ```
 
@@ -125,10 +135,16 @@ and release flag are conveyed in from the workflow, which knows the ref.
   and each `RELEASE` value in a throwaway tree, then asserts the generated `_buildinfo.py`
   drives `full_version()` to `X.Y.Z+g<sha>` (release) and `X.Y.Z-dev+g<sha>` (dev). This
   exercises the exact code path the container uses, minus the container.
-- **Wiring (regression guard)** — a structural test parses the `Dockerfile` and
+- **End-to-end (CI image smoke)** — CI already builds `kdive:ci` (amd64, `load: true`) on every
+  PR and runs `tests/image/` over it via `docker run` (`ci.yml`). Extend that build to pass
+  `KDIVE_COMMIT`/`KDIVE_RELEASE` (RELEASE=false for a PR) and add a `tests/image/` case asserting
+  `docker run kdive:ci python -m kdive --version` matches `^kdive X.Y.Z-dev\+g[0-9a-f]{12}$`. This
+  exercises the real multi-stage `COPY` and the `PYTHONPATH` import in the actual image — catching
+  a broken final-stage copy or a lost `_buildinfo.py` that the structural guard below cannot see.
+- **Wiring (cheap regression guard)** — a structural test parses the `Dockerfile` and
   `release-image.yml` and asserts the build-arg stamp step exists and the workflow passes
-  `KDIVE_COMMIT` + `KDIVE_RELEASE`. The wiring is only observable by building an image (too heavy
-  for the unit gate), so this guards the silent-failure mode that unit tests cannot.
+  `KDIVE_COMMIT` + `KDIVE_RELEASE`. Belt-and-suspenders over the end-to-end smoke: it fails fast,
+  without a build, if either end of the wiring is deleted.
 - **Backward compatibility** — the existing `stamp-buildinfo.sh` git-derived path and all
   `tests/test_version.py` cases stay green (the env override is additive).
 - Guardrails: `just lint`, `just type`, `just lint-shell`, `just test` (whole-tree), plus the
@@ -138,7 +154,8 @@ and release flag are conveyed in from the workflow, which knows the ref.
 
 - A container image built from a `vX.Y.Z` tag reports `X.Y.Z+g<sha>` from `python -m kdive
   --version` and the startup log; an `:edge` image reports `X.Y.Z-dev+g<sha>`.
-- The wheel and the tag image report the **same** `<sha>` for the same tag.
+- The CI image smoke test asserts the built PR image reports `X.Y.Z-dev+g<12 hex>`.
+- The wheel and the tag image report the same commit prefix `<sha>` for the same tag.
 - `stamp-buildinfo.sh` keeps its current git-derived behavior when `KDIVE_BUILDINFO_COMMIT` is
   unset.
 - `just ci` green, including the new behavior + wiring tests.
