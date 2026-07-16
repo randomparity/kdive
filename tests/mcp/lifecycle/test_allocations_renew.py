@@ -19,11 +19,11 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES
+from kdive.db.repositories import ALLOCATIONS, BUDGETS, RESOURCES, SYSTEMS
 from kdive.domain.accounting.records import Budget
-from kdive.domain.capacity.state import AllocationState, ResourceStatus
+from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
-from kdive.domain.lifecycle.records import Allocation
+from kdive.domain.lifecycle.records import Allocation, System
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import renew_allocation
 from kdive.security.authz.rbac import AuthorizationError, Role
@@ -143,6 +143,43 @@ async def _spent(pool: AsyncConnectionPool) -> Decimal:
         budget = await BUDGETS.get(conn, "proj")
     assert budget is not None
     return budget.spent_kcu
+
+
+async def _bind_system(pool: AsyncConnectionPool, alloc_id: UUID, *, accel: str) -> None:
+    async with pool.connection() as conn:
+        await SYSTEMS.insert(
+            conn,
+            System(
+                id=uuid4(),
+                created_at=_DT,
+                updated_at=_DT,
+                principal="user-1",
+                project="proj",
+                allocation_id=alloc_id,
+                state=SystemState.READY,
+                provisioning_profile={},
+                accel=accel,
+            ),
+        )
+
+
+def test_renew_prices_tcg_extension_at_emulation_rate(migrated_url: str) -> None:
+    # A renewal of a TCG-emulated lease reserves the added window at 4× the native rate, keyed
+    # off the System's persisted accel — consistent with the original reserve (ADR-0362).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _seed_resource(pool)
+            alloc_id, _ = await _seed_metered_alloc(
+                pool, res_id, lease_hours_from_now=2.0, estimate="36.0000"
+            )
+            await _bind_system(pool, alloc_id, accel="tcg")
+            resp = await renew_allocation(pool, _ctx(), str(alloc_id), extend=3)
+            assert resp.status == "granted"
+            rows = await _ledger_rows(pool, alloc_id)
+            # native 3.0/hr × A(tcg)=4 × 3h = 36.0 for the extension.
+            assert rows[1][1] == Decimal("36.0000")
+
+    asyncio.run(_run())
 
 
 def test_renew_extends_lease_and_writes_incremental_reserved(migrated_url: str) -> None:

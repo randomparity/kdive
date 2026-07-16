@@ -61,6 +61,7 @@ class Allocation(DomainModel, Attribution):
     requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
     requested_pool: str | None = None
+    requested_arch: str | None = None
     failure_category: ErrorCategory | None = None
 
 

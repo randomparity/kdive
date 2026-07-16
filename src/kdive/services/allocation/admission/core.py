@@ -48,6 +48,7 @@ from kdive.domain.accounting.cost import (
     validate_size,
 )
 from kdive.domain.capacity.state import AllocationState
+from kdive.domain.catalog.resource_capabilities import resolve_accel_emulator
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.lease import resolve_window_hours
@@ -132,6 +133,7 @@ class AllocationRequest:
     requested_kind: ResourceKind | None = None
     requested_resource_id: UUID | None = None
     requested_pool: str | None = None
+    arch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -232,13 +234,35 @@ async def price_window_and_estimate(
     validate_against_resource(request.selector, request.resource)
     validate_disk_against_resource(request.disk_gb, request.resource)
     coeff = await resolve_coeff(conn, request.resource.cost_class)
+    accel = _reserve_accel(request)
     estimate = quantize_kcu(
         cost(
-            rate(coeff, vcpus=request.selector.vcpus, memory_gb=request.selector.memory_gb),
+            rate(
+                coeff,
+                vcpus=request.selector.vcpus,
+                memory_gb=request.selector.memory_gb,
+                accel=accel,
+            ),
             window_hours,
         )
     )
     return window_hours, estimate
+
+
+def _reserve_accel(request: AllocationRequest) -> str | None:
+    """Resolve the accelerator the reserve is priced at (ADR-0362), or ``None`` for baseline.
+
+    An arch-blind request (``arch is None``) or a resource that advertises no ``guest_arches``
+    prices at the native baseline — the pre-ADR-0362 rate. Otherwise the accelerator is the one
+    the host advertises for that arch (``kvm``/``tcg``), so a TCG-emulated guest reserves above a
+    native one. The chosen host already passed the placement arch filter, so a non-empty
+    ``guest_arches`` advertises the arch; a stale row that does not would raise a
+    ``configuration_error`` here — the same fail-closed resolution as System mint (ADR-0339).
+    """
+    if request.arch is None:
+        return None
+    resolved = resolve_accel_emulator(request.resource.capability_view.guest_arches(), request.arch)
+    return resolved[0] if resolved is not None else None
 
 
 @dataclass(frozen=True)
@@ -500,6 +524,7 @@ async def _grant(
             requested_vcpus=request.selector.vcpus,
             requested_memory_gb=request.selector.memory_gb,
             requested_disk_gb=request.disk_gb,
+            requested_arch=request.arch,
             shape=request.shape,
             pcie_claim=claimed_devices,
         ),
@@ -705,6 +730,7 @@ async def _enqueue(conn: AsyncConnection, request: AllocationRequest) -> Admissi
             requested_vcpus=request.selector.vcpus,
             requested_memory_gb=request.selector.memory_gb,
             requested_disk_gb=request.disk_gb,
+            requested_arch=request.arch,
             shape=request.shape,
             pcie_claim=[],
             requested_pcie_specs=list(request.pcie_specs),

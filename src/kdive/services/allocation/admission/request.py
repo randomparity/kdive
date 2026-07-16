@@ -45,6 +45,7 @@ class AdmissionRequestSpec:
     window: object | None
     pcie_devices: tuple[str, ...]
     on_capacity: Literal["deny", "queue"]
+    arch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ async def request_admission(
             shape=sizing.shape,
             pcie_specs=pcie_specs,
             on_capacity=spec.on_capacity,
+            arch=spec.arch,
             requested_kind=spec.kind if selector == "kind" else None,
             requested_resource_id=spec.resource_id,
             requested_pool=spec.pool if selector == "pool" else None,
@@ -180,6 +182,7 @@ async def _select_target(
             pool=spec.pool,
             pcie_specs=specs,
             project=project,
+            arch=spec.arch,
         ),
     )
     if candidates.resources:

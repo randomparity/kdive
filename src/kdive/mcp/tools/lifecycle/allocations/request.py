@@ -111,6 +111,7 @@ def _spec_from_payload(payload: AllocationRequestPayload) -> AdmissionRequestSpe
         window=payload.window,
         pcie_devices=tuple(payload.pcie_devices),
         on_capacity=payload.on_capacity,
+        arch=payload.arch,
     )
 
 

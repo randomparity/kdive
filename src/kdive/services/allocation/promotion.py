@@ -333,6 +333,7 @@ async def _candidate_hosts(conn: AsyncConnection, alloc: Allocation) -> list[Res
             pool=alloc.requested_pool,
             pcie_specs=tuple(alloc.requested_pcie_specs),
             project=alloc.project,
+            arch=alloc.requested_arch,
         ),
     )
     return candidates.resources
@@ -364,6 +365,7 @@ def _request_from_queued(alloc: Allocation, resource: Resource) -> AllocationReq
         requested_kind=alloc.requested_kind,
         requested_resource_id=alloc.requested_resource_id,
         requested_pool=alloc.requested_pool,
+        arch=alloc.requested_arch,
     )
 
 
