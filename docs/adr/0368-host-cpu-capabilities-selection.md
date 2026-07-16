@@ -70,8 +70,17 @@ host_cpu = {"model": str, "vendor": str?, "arch": str, "baseline_level": "x86-64
   empty model (mirrors `parse_capabilities_arch`/`parse_guest_arches`). `supported` arch set is
   **not** needed here (this is a single host CPU, not a guest-arch enumeration).
 - **`baseline_level`** from a curated x86-64 model→level table in `domain/platform/` (a small
-  module-level mapping keyed on the libvirt/QEMU model name). An unmapped or non-x86 model omits
-  `baseline_level` but keeps `model`/`vendor`/`arch`.
+  module-level mapping keyed on the libvirt/QEMU model name), **disable-guarded**: `parse_host_cpu`
+  also reads the host-model block's `<feature policy='disable'>` names, and the mapper omits the
+  level when a feature that *defines* the mapped level is disabled (host-model subtracts
+  non-migratable/host-absent features, so a `Skylake` with AVX2 stripped must not read `v3`). The
+  guard checks only the fixed level-boundary features (v2 `sse4.2`/`popcnt`; v3 `avx2`/`bmi2`/`avx`;
+  v4 `avx512f`) — a targeted disable check, **not** the full feature expansion rejected below. An
+  unmapped or non-x86 model, or a disabled defining feature, omits `baseline_level` but keeps
+  `model`/`vendor`/`arch`. The level is a **nominal, name-derived upper bound**: a base-model-implied
+  feature the host silently lacks is not enumerated and cannot be caught, so a present level is not
+  a guaranteed floor — the agent-facing field text says so and directs a hard extension requirement
+  to a running-guest check.
 - **Typed reader** `host_cpu()` + `HOST_CPU_KEY` + `_KNOWN_KEYS` in
   `domain/catalog/resource_capabilities.py`, returning a `HostCpu` TypedDict or `None`,
   dropping malformed values (mirrors `guest_arches()`).
@@ -143,9 +152,14 @@ is handed (`install.py` `del accel`) and never writes the systems row.
   that is the *host* CPU, not the guest-under-host-model CPU (host-model omits non-migratable
   features). `getDomainCapabilities` host-model is the exact predictor. (`getCapabilities` arch
   parsing stays as-is for the `arch` key.)
-- **Derive `baseline_level` by expanding the feature set.** Rejected: needs a fully expanded
-  feature list and libvirt-version-specific feature naming; a curated model→level table is
-  offline-testable and honest (unmapped → omit, never guess).
+- **Derive `baseline_level` by fully expanding the feature set.** Rejected: computing the level
+  bottom-up from a fully expanded feature list needs the base-model feature closure and
+  libvirt-version-specific feature naming. The curated model→level table plus the targeted
+  disable-guard (adopted above) is offline-testable and honest: it maps the name, then omits the
+  level only when an explicitly-disabled *level-defining* feature contradicts the name — reacting
+  to data already in the parsed block without reconstructing the whole feature set. It does not
+  catch a silently-absent base-model feature, which is why the field is documented as a nominal
+  upper bound rather than a floor.
 - **Advertise `host_cpu` for local-libvirt / fault-inject.** Rejected: local is a single
   co-located `host-passthrough` host (no selection ambiguity); fault-inject is a fake. Scoped to
   remote exactly as ADR-0338 scoped `guest_arches` to local.

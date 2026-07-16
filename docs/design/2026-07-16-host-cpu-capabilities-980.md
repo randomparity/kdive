@@ -59,9 +59,14 @@ capabilities.host_cpu = {
   "model": "Skylake-Client-IBRS",   # libvirt CPU model name (host-model resolves to this)
   "vendor": "Intel",                # host CPU vendor, when libvirt reports it
   "arch": "x86_64",                 # host arch (already advertised separately; echoed for locality)
-  "baseline_level": "x86-64-v3",    # normalized level, or omitted for a model with no mapping
+  "baseline_level": "x86-64-v3",    # nominal name-derived level; omitted if unmapped OR a
+                                    # level-defining feature is disabled in the host-model block
 }
 ```
+
+The four fields are the persisted, agent-facing shape. `parse_host_cpu` additionally reads the
+host-model block's `<feature policy='disable'>` names to compute the disable-guard below, but
+that raw feature list is **not** stored — only the guarded `baseline_level` result is.
 
 - **Populated** by `RemoteLibvirtDiscovery.list_resources` from the connection's
   domain-capabilities host-model block (the exact model libvirt synthesizes for a
@@ -91,15 +96,28 @@ capabilities.host_cpu = {
   defusedxml over the libvirtd trust boundary, returning `None` on any parse fault, empty XML,
   or a host-model block with no concrete `<model>` (never crashes discovery — mirrors
   `parse_capabilities_arch` / `parse_guest_arches`).
-- **`baseline_level`** is derived by a shared, curated x86-64 model→level table in
-  `domain/platform/` (see Open questions → resolved). A model with no table entry (an unknown
-  or non-x86 model) omits `baseline_level` but still carries `model`/`vendor`/`arch`. **Agent
-  contract for an absent level:** absent means *unknown* (the model is present but not in the
-  table), **not** "below v1" or "unsupported" — an agent that needs a specific baseline must fall
-  back to comparing the raw `model` (or treat the host as unverified for that requirement), never
-  read absence as a capability floor. As new CPUs appear faster than the table is maintained,
-  "present model, absent level" is an expected steady-state case on new hardware, not an error.
-  The wrapper docstring / field text states this so the contract is visible to the agent.
+- **`baseline_level`** starts from a shared, curated x86-64 model→level table in
+  `domain/platform/` (see Open questions → resolved) keyed on the model name, then is
+  **disable-guarded** against the host-model block: `parse_host_cpu` also reads the block's
+  `<feature policy='disable'>` names, and the level mapper **omits** `baseline_level` when any
+  feature that *defines* the candidate level is explicitly disabled (host-model subtracts
+  non-migratable / host-absent features, so a `Skylake` guest with AVX2 stripped must not
+  advertise `v3`). The guard is a targeted check over the small, fixed set of level-boundary
+  features (v2: `sse4.2`/`popcnt`; v3: `avx2`/`bmi2`/`avx`; v4: `avx512f`), **not** a full feature
+  expansion (that alternative was rejected in ADR-0368 for needing the whole expanded feature list
+  and version-specific naming); it only reacts to an explicit disable already present in the XML.
+- **`baseline_level` is a nominal, name-derived upper bound, not a guaranteed floor.** Even
+  disable-guarded, the level reflects the named model's spec minus explicitly-disabled features;
+  a feature the base model implies but that the host silently lacks is not enumerated and cannot
+  be caught here. **Agent contract:**
+  - *Absent level* means *unknown* (model present, not in table, or a defining feature was
+    disabled), **not** "below v1"/"unsupported" — fall back to comparing the raw `model` or treat
+    the host as unverified. "Present model, absent level" is an expected steady state on new
+    hardware, not an error.
+  - *A present level* is the **nominal** level of the named model; for a hard instruction-set
+    requirement an agent must confirm against the running guest, never treat the level as a
+    guaranteed floor. This is stated in the wrapper docstring / field text so the contract is
+    visible at call time.
 - **Typed read** via a defensive `host_cpu()` reader + `HOST_CPU_KEY` + `_KNOWN_KEYS` entry in
   `domain/catalog/resource_capabilities.py`, returning a `HostCpu` TypedDict or `None`
   (mirrors `guest_arches()` — a stale/hand-edited row never crashes a consumer).
@@ -148,8 +166,10 @@ that exact path — there is no new worker→DB write-back, and no dependency on
 3. `parse_host_cpu` returns `None` on malformed/empty XML and a populated `HostCpu` on a real
    host-model capabilities document. Property/edge unit tests cover empty, malformed, missing
    `<model>`, and non-x86 arch (level omitted).
-4. The x86-64 level mapper returns `x86-64-v{1..4}` for representative named models and `None`
-   for an unknown model. Unit-tested against a table of known models.
+4. The x86-64 level mapper returns `x86-64-v{1..4}` for representative named models, `None` for an
+   unknown model, and `None` when a level-defining feature for the mapped level is present with
+   `policy='disable'` in the host-model block (the disable-guard). Unit-tested against a table of
+   known models and a disable case (e.g. a `v3` model with `avx2` disabled → `None`).
 5. `resources.describe` on **local-libvirt** and **fault-inject** hosts is unchanged (no
    `host_cpu`) — a regression test asserts the key is absent.
 6. When `getDomainCapabilities` **raises** `libvirtError`, the resource still discovers with its
@@ -170,10 +190,15 @@ that exact path — there is no new worker→DB write-back, and no dependency on
     that `baseline_level` is absent (never a wrong level). Skips cleanly without the remote host env.
 11. A `live_vm`-gated **reconcile** test closes the prediction-vs-reality loop (test-only — not a
     product read path): it provisions (or inspects an operator-provided) domain on the same host
-    and asserts the discovery-advertised `host_cpu.model` **equals** the concrete `<cpu><model>`
-    the running domain reports in its host-model-expanded XML. This is the falsifiable proof that
-    the `getDomainCapabilities` arguments predict the configuration the renderer actually builds;
-    a mispinned `machine`/`virttype`/`arch` fails it. Skips cleanly without the remote host/image.
+    and reads the running domain's CPU with libvirt's CPU-expand flag
+    (`VIR_DOMAIN_XML_UPDATE_CPU`), which asks libvirt to resolve `host-model` to a concrete
+    `<model>`. **Deterministic outcome:** (a) if the expanded XML carries a concrete `<model>`,
+    assert it **equals** the discovery-advertised `host_cpu.model` — the falsifiable proof that
+    the `getDomainCapabilities` `machine`/`virttype`/`arch` pinning predicts what the renderer
+    builds (a mispin fails it); (b) if the XML still carries `<cpu mode='host-model'/>` with **no**
+    concrete `<model>` (a libvirt/host that does not expand it — the case the spec flags as not
+    guaranteed), the test **skips with an explicit recorded reason**, never silently passes or
+    fails. Skips cleanly without the remote host/image env.
 12. `just ci` is green (lint, type, lint-shell, lint-workflows, check-mermaid, test), including
     regenerated generated docs.
 
@@ -190,6 +215,12 @@ that exact path — there is no new worker→DB write-back, and no dependency on
 - **Domain-capabilities reports `host-model` with no concrete `<model>`** (a host libvirt cannot
   model) → `host_cpu` omitted rather than advertising an empty model.
 - **Unknown/non-x86 CPU model** → `baseline_level` omitted, raw `model` still advertised.
+- **host-model disables a level-defining feature** (e.g. AVX2 stripped by microcode/mitigations on
+  a model the table maps to `v3`) → the disable-guard omits `baseline_level` rather than
+  advertising an overstated level; the raw `model` is still advertised.
+- **host-model omits a base-model-implied feature the host silently lacks** → not detectable from
+  the block (the feature is simply not enumerated), so `baseline_level` remains a nominal upper
+  bound; the agent contract documents that a present level is not a guaranteed floor.
 - **Bound Resource advertises no `host_cpu`** (local/fault host, or a remote host not
   re-registered since this feature shipped) → `_resolve_new_system_cpu` records NULL; `systems.get`
   omits `resolved_cpu`.
