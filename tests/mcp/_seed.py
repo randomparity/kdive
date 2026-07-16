@@ -51,8 +51,17 @@ _PROFILE: dict[str, Any] = {
 }
 
 
-async def seed_crashed_system(pool: AsyncConnectionPool, *, project: str = "proj") -> str:
-    """Insert a granted Allocation and a `crashed` System; return the System id."""
+async def seed_crashed_system(
+    pool: AsyncConnectionPool,
+    *,
+    project: str = "proj",
+    profile: dict[str, Any] | None = None,
+) -> str:
+    """Insert a granted Allocation and a `crashed` System; return the System id.
+
+    ``profile`` overrides the default ``local``-rootfs provisioning profile (e.g. to seed a
+    ``catalog``-rootfs System for the kdump-capability admission gate, ADR-0361).
+    """
     disc = LocalLibvirtDiscovery(
         host_uri="qemu:///system",
         connect=lambda: FakeLibvirtConn(),
@@ -84,7 +93,7 @@ async def seed_crashed_system(pool: AsyncConnectionPool, *, project: str = "proj
                 project=project,
                 allocation_id=alloc.id,
                 state=SystemState.CRASHED,
-                provisioning_profile=_PROFILE,
+                provisioning_profile=profile if profile is not None else _PROFILE,
                 domain_name="kdive-x",
             ),
         )

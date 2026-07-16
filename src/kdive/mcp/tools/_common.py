@@ -38,6 +38,7 @@ class ConfigErrorReason(StrEnum):
     INVALID_PCIE_MATCH = "invalid_pcie_match"
     INVALID_CURSOR = "invalid_cursor"
     INVALID_VERSION = "invalid_version"
+    KDUMP_INCAPABLE = "kdump_incapable"
 
 
 _MAX_ECHOED_ID = 64
@@ -224,6 +225,35 @@ def capability_unsupported(
     )
 
 
+def kdump_capability_refusal(object_id: str, *, capability: dict[str, JsonValue]) -> ToolResponse:
+    """Refuse a kdump capture on a confidently-incapable image (``configuration_error``, ADR-0361).
+
+    A kdump/fadump ``vmcore.fetch`` whose booted rootfs image's computed kdump capability is
+    confidently negative (``incapable`` — its ``makedumpfile`` is too old — or ``not_applicable``
+    — it ships no kdump tooling) is a caller/configuration mismatch, not a runtime dependency
+    fault, so it maps to ``configuration_error`` (mirroring ADR-0209 ``capability_unsupported``).
+    ``data.reason`` is the machine-readable ``kdump_incapable`` token; ``data.kdump_capability`` is
+    the full computed block (status, versions, note) so the refusal discloses exactly why, and
+    ``suggested_next_actions`` points at ``images.describe``, which renders the same signal. The
+    values are computed/provenance tokens (a status, a version string, a fixed note), never a
+    secret, hostname, or object-store key (ADR-0123), so they are safe to echo.
+    """
+    data: dict[str, JsonValue] = {
+        "reason": ConfigErrorReason.KDUMP_INCAPABLE.value,
+        "kdump_capability": capability,
+    }
+    return ToolResponse.failure(
+        object_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        detail=(
+            "the booted rootfs image cannot produce a kdump vmcore for this kernel; "
+            "call images.describe to read its computed kdump capability"
+        ),
+        data=data,
+        suggested_next_actions=["images.describe"],
+    )
+
+
 def not_found(object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
     """Build a ``not_found`` failure envelope for a valid-but-absent object id (ADR-0097).
 
@@ -280,6 +310,7 @@ __all__ = [
     "invalid_cursor_error",
     "invalid_uuid_error",
     "job_envelope",
+    "kdump_capability_refusal",
     "not_found",
     "paginate",
     "stale_handle",

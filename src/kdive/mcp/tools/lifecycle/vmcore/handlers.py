@@ -26,8 +26,10 @@ from kdive.mcp.tools._common import capability_unsupported as _capability_unsupp
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
+from kdive.mcp.tools._common import kdump_capability_refusal as _kdump_capability_refusal
 from kdive.mcp.tools._idempotency import keyed_mutation
 from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
+from kdive.mcp.tools._vmcore_kdump_gate import refusing_kdump_capability
 from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_target_failure
 from kdive.mcp.tools.lifecycle.vmcore.view import (
     console_crash_redirect,
@@ -266,6 +268,12 @@ async def _fetch_vmcore(
                         detail="uploaded kernel config lacks symbols required for a kdump vmcore",
                         data=refusal,
                     )
+                # Image-capability gate (ADR-0361): the booted rootfs image's own makedumpfile
+                # must be new enough for the kernel (or ship kdump tooling at all). Refuses only a
+                # confident negative (incapable/not_applicable); every uncertainty fails open.
+                capability = await refusing_kdump_capability(conn, system)
+                if capability is not None:
+                    return _kdump_capability_refusal(run_id, capability=capability)
 
             async def _enqueue() -> ToolResponse:
                 job = await queue.enqueue(
