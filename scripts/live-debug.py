@@ -28,17 +28,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import functools
+import hashlib
 import json
 import os
 import shutil
 import subprocess  # noqa: S404 - fixed dev-tool argv, no shell except reload  # nosec B404
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from kdive.mcp.dev_harness import (
     LiveStackClient,
@@ -50,6 +55,9 @@ from kdive.mcp.responses import ToolResponse
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")
 DEBUG_DIR = Path(os.environ.get("KDIVE_DEBUG_DIR", "/var/lib/kdive/debug"))
+# The built kernel tree the combined upload tar is cut from (bzImage + its module tree). Defaults
+# to the same warm tree scripts/live-stack uses; must already be built (arch/x86/boot/bzImage).
+KERNEL_SRC = Path(os.environ.get("KDIVE_KERNEL_SRC", str(Path.home() / "src" / "linux")))
 DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue stops at once
 _POLL_INTERVAL_SEC = 5.0
 
@@ -181,6 +189,118 @@ async def _wait_job(
         raise RuntimeError(f"{kind} job {job_id} ended {status!r}: {final.get('detail')}")
 
 
+# --- external build: combined kernel tar + upload ------------------------------------------
+
+
+def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
+    """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
+
+    Reproduces the ``external-build-upload`` recipe: stage the module tree with
+    ``make modules_install`` into ``dest_dir`` and tar ``arch/x86/boot/bzImage`` (renamed to
+    ``boot/vmlinuz``, listed first so ``lib/modules`` lands inside the validator's decompress scan
+    bound) plus ``lib/modules`` into one gzip tar, dropping the ``build``/``source`` back-symlinks.
+
+    Args:
+        kernel_src: A *built* x86_64 kernel tree (must contain ``arch/x86/boot/bzImage``).
+        dest_dir: A scratch directory to stage modules and write ``kernel.tar.gz`` into.
+
+    Returns:
+        The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
+
+    Raises:
+        RuntimeError: If ``kernel_src`` holds no built bzImage.
+    """
+    bzimage = kernel_src / "arch/x86/boot/bzImage"
+    if not bzimage.is_file():
+        raise RuntimeError(
+            f"no built bzImage at {bzimage}; build the kernel tree at {kernel_src} "
+            "(or point KDIVE_KERNEL_SRC at a built x86_64 tree) first"
+        )
+    modstage = dest_dir / "modstage"
+    subprocess.run(  # noqa: S603 - fixed make argv, no shell  # nosec B603
+        [
+            _required_executable("make"),
+            "-C",
+            str(kernel_src),
+            "modules_install",
+            f"INSTALL_MOD_PATH={modstage}",
+        ],
+        check=True,
+    )
+    tar_path = dest_dir / "kernel.tar.gz"
+    subprocess.run(  # noqa: S603 - fixed tar argv, no shell  # nosec B603
+        [
+            _required_executable("tar"),
+            "-czf",
+            str(tar_path),
+            "--exclude=*/build",
+            "--exclude=*/source",
+            "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|",
+            "-C",
+            str(kernel_src),
+            "arch/x86/boot/bzImage",
+            "-C",
+            str(modstage),
+            "lib/modules",
+        ],
+        check=True,
+    )
+    return tar_path
+
+
+def _sha256_b64(path: Path) -> str:
+    """The base64 SHA-256 the upload manifest declares (S3 ``x-amz-checksum-sha256``)."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+async def _put_presigned(item: dict[str, Any], path: Path) -> None:
+    """PUT ``path`` to a ``create_run_upload`` item's presigned URL with exactly its headers.
+
+    Sends only ``data.required_headers`` (the presign signs a fixed header set; any extra header —
+    a default ``Content-Type`` in particular — breaks the signature).
+    """
+    url = item["refs"]["upload_url"]
+    raw_headers = item.get("data", {}).get("required_headers", {})
+    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+    async with httpx.AsyncClient(timeout=180.0) as http:
+        resp = await http.put(url, content=path.read_bytes(), headers=headers)
+        resp.raise_for_status()
+
+
+async def _upload_kernel(
+    client: LiveStackClient,
+    schemas: dict[str, dict[str, Any]],
+    *,
+    run_id: str,
+    kernel_tar: Path,
+) -> None:
+    """Drive the external-upload lane for one Run: discover -> declare -> PUT -> complete_build."""
+    contract = await _call(client, "artifacts.expected_uploads", {}, schemas)
+    accepted: set[str] = set()
+    for item in contract.get("items", []):
+        data = item.get("data") or {}
+        if data.get("owner_kind") == "run":
+            accepted = set(data.get("accepted_names", []))
+            break
+    if "kernel" not in accepted:
+        raise RuntimeError(f"upload contract no longer accepts a 'kernel' run artifact: {accepted}")
+    decls = [
+        {
+            "name": "kernel",
+            "sha256": _sha256_b64(kernel_tar),
+            "size_bytes": kernel_tar.stat().st_size,
+        }
+    ]
+    upload = await _call(
+        client, "artifacts.create_run_upload", {"run_id": run_id, "artifacts": decls}, schemas
+    )
+    items = {(it.get("data") or {}).get("name"): it for it in upload.get("items", [])}
+    if "kernel" not in items:
+        raise RuntimeError("create_run_upload returned no 'kernel' upload item")
+    await _put_presigned(items["kernel"], kernel_tar)
+    await _call(client, "runs.complete_build", {"run_id": run_id}, schemas)
+
+
 # --- lifecycle to a stopped session --------------------------------------------------------
 
 
@@ -206,7 +326,7 @@ async def _find_booted_run(
 async def _provision_boot_run(
     client: LiveStackClient, schemas: dict[str, dict[str, Any]], *, project: str
 ) -> str:
-    """Full lifecycle: investigation -> allocation -> provision -> build/install/boot -> run_id."""
+    """Full lifecycle: investigation -> allocation -> provision -> upload/install/boot -> run_id."""
     resources = await _call(client, "resources.list", {}, schemas)
     resource_id = (resources["items"][0]["object_id"]) if resources.get("items") else None
     if not resource_id:
@@ -268,18 +388,17 @@ async def _provision_boot_run(
             "request": {
                 "investigation_id": inv_id,
                 "system_id": system_id,
-                "build_profile": {
-                    "schema_version": 1,
-                    "source": "server",
-                    "kernel_source_ref": "linux-live-debug",
-                    "build_host": "worker-local",
-                },
+                "build_profile": {"schema_version": 1, "arch": "x86_64"},
             }
         },
         schemas,
     )
     run_id = run["object_id"]
-    for step, terminal in (("runs.build", 3000), ("runs.install", 600), ("runs.boot", 600)):
+    with tempfile.TemporaryDirectory(prefix="kdive-live-debug-") as scratch:
+        kernel_tar = _combined_kernel_tar(KERNEL_SRC, Path(scratch))
+        print(f"  uploading {kernel_tar.name} ({kernel_tar.stat().st_size} bytes)", file=sys.stderr)
+        await _upload_kernel(client, schemas, run_id=run_id, kernel_tar=kernel_tar)
+    for step, terminal in (("runs.install", 600), ("runs.boot", 600)):
         kind = step.split(".")[1]
         await _call(client, step, {"run_id": run_id}, schemas)
         await _wait_job(client, schemas, kind=kind, timeout_sec=terminal)
