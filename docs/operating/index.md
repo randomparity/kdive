@@ -14,6 +14,7 @@ runbooks.
 | [Docker Compose](docker-compose.md) | App tier plus dev backends in one graph |
 | [Kubernetes (Helm)](kubernetes.md) | The chart for the three processes and the migrate Job |
 | [systemd](systemd.md) | Running the processes as host services |
+| [Platform and architecture support](platform-support.md) | Supported arches, accelerators, and per-distro customize-boot tiers |
 
 ## Providers
 
