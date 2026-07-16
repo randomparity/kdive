@@ -9,7 +9,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target="$repo_root/src/kdive/_buildinfo.py"
 
-commit="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+# COMMIT: an explicit KDIVE_BUILDINFO_COMMIT wins (the container build has no .git and no git
+# binary, so it passes the short SHA in); otherwise derive from live git. The ${VAR:-...} form
+# leaves the git subprocess unevaluated when the override is set. --short=12 pins the width so
+# the SHA is identical across shallow (release-image.yml) and full (release.yml) clones.
+commit="${KDIVE_BUILDINFO_COMMIT:-$(git -C "$repo_root" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)}"
 
 release="${1:-}"
 if [[ -z "$release" ]]; then

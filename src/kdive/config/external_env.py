@@ -3,9 +3,10 @@
 The 48 runtime settings the processes read flow through the config registry
 (:func:`kdive.config.all_settings`) and are auto-documented by
 ``scripts/gen_config_reference.py``. A second class of ``KDIVE_*`` variables is read **outside**
-the registry — by the gated test suites, the operator setup/live-stack shell scripts, and the
-in-guest capture/install helpers. Those cannot go through ``kdive.config`` (a bash helper has no
-Python import; a test fixture is not a process setting), so they are catalogued here by hand.
+the registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest
+capture/install helpers, and the image/wheel build. Those cannot go through ``kdive.config`` (a
+bash helper has no Python import; a build arg is not a process setting), so they are catalogued
+here by hand.
 
 This module is the single source of truth for that second class. The config-reference generator
 renders it into a second section of ``docs/guide/reference/config.md``, and
@@ -18,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-EnvScope = Literal["test", "script", "guest"]
+EnvScope = Literal["test", "script", "guest", "build"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,7 +29,8 @@ class ExternalEnvVar:
     Attributes:
         name: The environment variable name (``KDIVE_...``).
         scope: Where it is read — ``test`` (gated suites), ``script`` (operator shell scripts),
-            or ``guest`` (in-guest capture/install helpers).
+            ``guest`` (in-guest capture/install helpers), or ``build`` (image/wheel provenance
+            inputs consumed at build time).
         default: The fallback when unset, or ``None`` when unset means "skip / required".
         help: One line describing what reads it and what it controls.
     """
@@ -432,6 +434,29 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "BTF path the `kdive-drgn` helper passes to `drgn -s` when readable, so live symbol/type "
         "resolution does not depend on the guest drgn build's BTF auto-load (BBR F1, #1090); "
         "test-only override, unset on production guests.",
+    ),
+    # --- build-time provenance inputs (ADR-0370) ------------------------------------------
+    ExternalEnvVar(
+        "KDIVE_BUILDINFO_COMMIT",
+        "build",
+        None,
+        "Short commit SHA `scripts/stamp-buildinfo.sh` bakes into `_buildinfo.py` when set — the "
+        "container build passes it in, having no `.git`; unset → derived from live git (ADR-0370).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_COMMIT",
+        "build",
+        None,
+        "Docker build arg carrying the short commit SHA the image bakes as provenance; passed by "
+        "ci.yml and release-image.yml. Empty → the stamp is skipped, image reports X.Y.Z-dev "
+        "(ADR-0370).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_RELEASE",
+        "build",
+        "false",
+        "Docker build arg: `true` on a `vX.Y.Z` tag build (image reports X.Y.Z+g<sha>), `false` "
+        "otherwise (X.Y.Z-dev+g<sha>) (ADR-0370).",
     ),
 )
 
