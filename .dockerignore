@@ -4,6 +4,9 @@
 **/*.pyc
 .pytest_cache
 .ruff_cache
+# A developer's leftover local stamp (from `just build`, before its cleanup trap) must never be
+# copied by `COPY . .` and baked stale; the build-arg path is the authoritative source (ADR-0370).
+src/kdive/_buildinfo.py
 **/node_modules
 tests
 docs

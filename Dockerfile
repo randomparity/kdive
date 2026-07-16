@@ -59,6 +59,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --group live
 
+# Bake version provenance (ADR-0370): a hermetic build has no .git (and this slim stage has no
+# git binary), so the commit + release flag come in as build args and stamp _buildinfo.py, which
+# rides into the final image on the existing `COPY --from=builder /app/src`. Declared after the
+# uv-sync layers so a changing commit never busts that cache. Skipped when no arg is passed (a
+# local `docker build`, the ci.yml PR build passes it), leaving today's live-git-less
+# `X.Y.Z-dev` reporting rather than a misleading `unknown` commit.
+ARG KDIVE_COMMIT=""
+ARG KDIVE_RELEASE="false"
+RUN if [ -n "$KDIVE_COMMIT" ]; then \
+      KDIVE_BUILDINFO_COMMIT="$KDIVE_COMMIT" ./scripts/stamp-buildinfo.sh "$KDIVE_RELEASE"; \
+    fi
+
 # Final: slim base + worker toolchain (drives remote-libvirt over the network).
 FROM python:3.14.6-slim-bookworm@sha256:4ff4b92a68355dbdb52584ab3391dff8d371a61d4e063468bfd0130e3189c6d9
 # All real bookworm packages. drgn is installed from the locked `live`
