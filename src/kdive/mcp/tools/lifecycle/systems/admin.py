@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
@@ -40,6 +40,7 @@ from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
+from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.validation import (
     RootfsValidator,
     validate_profile_for_provider,
@@ -173,6 +174,18 @@ async def _reprovision_in_lock(
         return _stale_handle(str(system_id), current_status=system.state.value)
     try:
         await validate_rootfs_for_provider(profile, profile_policy, rootfs_validator)
+        # A reprovision can carry a new cpu.model pin; validate it against the bound host's
+        # selectable_cpus fail-closed BEFORE the ready->reprovisioning transition (ADR-0369), so an
+        # undeliverable pin is rejected pre-mutation exactly as on first provision — never destroy a
+        # working System by rendering a custom <cpu> the host cannot deliver.
+        resource = (
+            await RESOURCES.get(conn, allocation.resource_id)
+            if allocation.resource_id is not None
+            else None
+        )
+        require_pinned_cpu_selectable(
+            profile, resource.capability_view if resource is not None else None
+        )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(str(system_id), exc)
     envelope = await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)
@@ -235,8 +248,10 @@ async def _admit_reprovision(
 ) -> ToolResponse:
     """Transition ready->reprovisioning, write the new profile, enqueue the keyed job."""
     await SYSTEMS.update_state(conn, system.id, SystemState.REPROVISIONING)
+    # Clear the prior provision's resolved_cpu: the rebuilt domain has not booted yet, so the
+    # live-verified value is now unknown (ADR-0369). Phase C re-reads it at reprovision READY.
     await conn.execute(
-        "UPDATE systems SET provisioning_profile = %s WHERE id = %s",
+        "UPDATE systems SET provisioning_profile = %s, resolved_cpu = NULL WHERE id = %s",
         (Jsonb(dump_profile(profile)), system.id),
     )
     await audit.record(

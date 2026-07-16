@@ -1609,6 +1609,29 @@ def test_reprovision_transitions_ready_to_reprovisioning_and_enqueues_job(
     asyncio.run(_run())
 
 
+def test_reprovision_with_unselectable_cpu_pin_is_config_error(migrated_url: str) -> None:
+    # A reprovision carrying a cpu.model the bound host does not advertise in selectable_cpus is
+    # rejected pre-mutation (ADR-0369), leaving the System READY — never a reprovisioning->failed
+    # that destroys a working System with a late libvirt-define error.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            new_profile = _active_allocation_profile()
+            new_profile["provider"]["local-libvirt"]["cpu"] = {"model": "qemu64"}
+            resp = await _reprovision(pool, _ctx(), sys_id, new_profile)
+            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                row = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                jobs = await cur.fetchone()
+        assert row is not None and row["state"] == "ready"  # unchanged, no mutation
+        assert jobs is not None and jobs["n"] == 0  # no reprovision job enqueued
+
+    asyncio.run(_run())
+
+
 def test_reprovision_same_profile_dedups(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
