@@ -19,6 +19,29 @@ same host as the worker, driving QEMU/KVM guests through libvirt.
 
 All host-facing settings are in [the config reference](../../guide/reference/config.md).
 
+## Architecture and acceleration
+
+The provider runs on both `x86_64` and `ppc64le` (POWER9/POWER10) hosts. A guest whose arch
+matches the host runs under **KVM**; a foreign-arch guest runs under **TCG** software emulation
+(roughly 10× slower). So an `x86_64` host runs `x86_64` guests native and can run `ppc64le`
+guests under TCG, while a POWER host runs `ppc64le` guests native under KVM-HV. The domain XML
+— machine type, console device, CPU model — is derived from the profile arch, so the same
+lifecycle drives both; see
+[Cross-architecture guests](../install.md#cross-architecture-guests) for the per-arch QEMU
+emulator packages and the accelerator diagnostics.
+
+Because TCG guests boot far slower than KVM guests, the provider scales boot-readiness
+deadlines for them by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`; set `1.0` to
+disable). KVM guests are never scaled.
+
+**ppc64le host build note.** A venv-on-host deployment on a POWER host builds a few wheel-less
+dependencies (`pydantic-core`, and the `just`/`prek` CLIs) from source, so a **Rust toolchain**
+(`rustc`/`cargo`, via [rustup](https://rustup.rs)) must be on `PATH` before `uv sync`; `x86_64`
+needs none. `scripts/check-setup-deps.sh` is arch-aware and prints the exact rustup hint when
+it is missing ([ADR-0360](../../adr/0360-arch-aware-rust-dep-check.md)); the runtime container
+image needs no Rust on either arch. Full detail is in the
+[cross-platform development guide](../../development/cross-platform.md).
+
 ## Preflight
 
 Before the first run, check the host with:

@@ -89,7 +89,9 @@ Ubuntu, and add your user to the `docker` group.
 On architectures without prebuilt Python wheels or tool release binaries — notably
 `ppc64le` — the components above build from source instead. This is mostly automatic once
 the toolchain is present, but four extra requirements apply. Validated on Ubuntu 26.04
-(`resolute`, ppc64el).
+(`resolute`, ppc64el). For the dev-loop view of the same divergences, see the
+[cross-platform development guide](../development/cross-platform.md); for a from-scratch
+POWER box, the [POWER host bring-up runbook](runbooks/power-host-bringup.md).
 
 - **A Rust toolchain is required.** `pydantic-core` (a `uv sync` dependency) and the
   `just` / `prek` CLIs have no `ppc64le` wheels or release binaries, so they compile from
@@ -144,14 +146,18 @@ the toolchain is present, but four extra requirements apply. Validated on Ubuntu
   export PYTEST_XDIST_AUTO_NUM_WORKERS=6   # tune to taste; 6-8 is comfortable
   ```
 
-- **VM provisioning is arch-aware but unproven on POWER.** A provisioned System's domain is
+- **VM provisioning is arch-aware and live-proven on POWER.** A provisioned System's domain is
   rendered from the profile architecture (`kdive.domain.platform`): ppc64le uses the `pseries`
   machine type, the `hvc0` serial console (there is no `ttyS0` on pseries, so the readiness
   marker and boot cmdline target `hvc0`), and lets libvirt assign the SSH NIC's PCI slot. The
   catalog ships a `fedora-kdive-ready-44-ppc64le` image (Fedora's ppc64le Cloud Base, from the
-  `fedora-secondary` tree). This path is unit-tested but has no live end-to-end proof: the POWER
-  host exposes `/dev/kvm`, but `qemu-system-ppc64`, `libvirt`, and `virt-builder` are not yet set
-  up, so booting a ppc64le guest has not been validated.
+  `fedora-secondary` tree). A ppc64le guest boots two ways, both with a live proof: cross-arch
+  on an `x86_64` host under TCG emulation
+  ([ADR-0342](../adr/0342-ppc64le-live-tcg-boot-proof.md)), and native under KVM-HV on a POWER
+  host — the full provision → boot → crash → kdump → retrieve spine is validated on POWER9
+  hardware ([ADR-0355](../adr/0355-power-native-kvm-hv-validation.md)). The
+  [POWER host bring-up runbook](runbooks/power-host-bringup.md) drives a from-scratch POWER box
+  to that point.
 
 Docker Engine's official apt repository publishes `ppc64el` packages for current Ubuntu
 releases, and the `postgres` and `minio/minio` test images are multi-arch (they include
