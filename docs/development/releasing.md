@@ -35,11 +35,23 @@ Never hand-edit the version: editing `pyproject.toml` alone desyncs `uv.lock` an
 
 ## Container image publishing
 
-`release-image.yml` publishes the image to `ghcr.io/randomparity/kdive`:
+`release-image.yml` publishes the app image to `ghcr.io/randomparity/kdive`. It runs on the
+**same `vX.Y.Z` tag** that drives `release.yml` (above) — so a single `just release` push
+produces both the wheel/sdist GitHub Release and the release image — and also on every push to
+`main`:
 
 - **Every push to `main`** → a rolling `:edge` tag and an immutable `:sha-<short>`.
-- **Every `vX.Y.Z` tag** → `:X.Y.Z`, `:X.Y`, `:latest`, with an SBOM, max provenance, and
-  a cosign keyless signature on the digest.
+- **Every `vX.Y.Z` tag** → `:X.Y.Z`, `:X.Y`, `:latest`, with an SBOM and max provenance.
+- **Every published digest** (main *and* tags) gets a cosign keyless/OIDC signature on the
+  immutable `@sha256` digest ([ADR-0088](../adr/0088-deployment-packaging.md) decision 8).
+  The SBOM and provenance are release-only; the signature is not.
+
+**Multi-arch.** Each push builds a `linux/amd64,linux/ppc64le` manifest ([ADR-0359](../adr/0359-multiarch-app-image.md)),
+so a POWER host pulls the same tag as an x86_64 host. amd64 builds natively; the ppc64le leg
+builds under QEMU emulation on the amd64 runner (`docker/setup-qemu-action`), compiling the
+sdist-only deps (`grpcio`, `drgn`, `libvirt-python`) from source — this is the slow leg of the
+job, and no POWER runner is required. The cosign signature and SBOM cover the multi-arch
+manifest digest.
 
 **One-time setup — make the package public.** GHCR packages are created private on first
 push and visibility cannot be set from the workflow. After the first `main` push publishes
@@ -49,6 +61,39 @@ clients and the chart needs an `imagePullSecret`.
 
 **Verify a release image** (not `:edge`, which floats):
 `cosign verify ghcr.io/randomparity/kdive:X.Y.Z --certificate-identity-regexp '^https://github\.com/randomparity/kdive/\.github/workflows/release-image\.yml@' --certificate-oidc-issuer https://token.actions.githubusercontent.com`
+
+## Mock-OIDC mirror publishing
+
+The developer compose stack (`docker-compose.yml`) needs an OpenID Connect issuer to validate
+bearer tokens locally. The upstream `mock-oauth2-server` image ships only amd64/arm64, so kdive
+publishes an in-repo multi-arch **mirror** — the same `no.nav.security:mock-oauth2-server` jar
+on a multi-arch JRE base — to `ghcr.io/randomparity/mock-oauth2-server`
+([#1184](https://github.com/randomparity/kdive/issues/1184), [ADR-0358](../adr/0358-publish-mock-oidc-image.md);
+build in [ADR-0357](../adr/0357-multi-arch-mock-oidc-image.md)). This is **dev tooling, not a release
+artifact** — it is decoupled from the `vX.Y.Z` tag flow.
+
+- **Workflow:** `publish-mock-oidc.yml`, triggered only by a change under `deploy/mock-oidc/**`
+  (a jar-version or base bump — exactly when a new digest must be produced) or manual
+  `workflow_dispatch`. An unrelated push to `main` does **not** republish, so there is no digest
+  thrash. It does not run on release tags.
+- **Build:** a `linux/amd64,linux/ppc64le` buildx manifest published as `:<version>` and an
+  immutable `:<version>-<short-sha>`. No QEMU is needed — the jars are arch-neutral and only
+  copied onto a per-arch JRE base, so the ppc64le layer assembles natively on the amd64 runner
+  (contrast the app image above). The workflow asserts the pushed manifest lists both arches and
+  prints the `@sha256` digest in its run summary. No SBOM/provenance/signature — it is a
+  dev-tooling mirror.
+- **Consume:** the compose `oidc` service is `image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}`
+  with a `build:` fallback. Unset, it builds the mirror locally (offline, any arch whose bases
+  publish); set to the published digest it pulls instead. After a republish, copy the digest
+  from the run summary into `KDIVE_OIDC_IMAGE` and pin it in `docker-compose.yml`:
+
+  ```
+  export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:<digest>
+  ```
+
+  This parallels `KDIVE_IMAGE` for the app image. See `deploy/mock-oidc/README.md` for the
+  jar-pinning and version-bump procedure. The GHCR package needs the same one-time
+  public-visibility flip as the app image for an unauthenticated pull.
 
 ## Commit conventions the changelog depends on
 
