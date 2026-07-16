@@ -22,7 +22,13 @@ from kdive.domain.operations.jobs import (
     JobKind,
 )
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, BuildPayload, InstallPayload, SystemPayload
+from kdive.jobs.payloads import (
+    Authorizing,
+    BuildPayload,
+    InstallPayload,
+    SystemPayload,
+    WatchForCrashPayload,
+)
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.tools import jobs as jobs_tools
@@ -272,6 +278,41 @@ def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind
         assert excinfo.value.held is Role.CONTRIBUTOR
         assert excinfo.value.required is Role.OPERATOR
         assert owned.status == "queued"
+
+    asyncio.run(_run())
+
+
+async def _enqueue_watch_for_crash(pool: AsyncConnectionPool, dedup: str) -> str:
+    """Enqueue a watch_for_crash job owned by ``proj`` (WatchForCrashPayload, #984)."""
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.WATCH_FOR_CRASH,
+            WatchForCrashPayload(system_id=str(uuid4()), deadline_s=30.0),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
+
+
+def test_cancel_watch_for_crash_allowed_to_contributor(migrated_url: str) -> None:
+    # The watch is leaseholder-owned control (a contributor observing its own System's console),
+    # so a contributor may cancel one it can itself enqueue (#984, ADR-0367).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_watch_for_crash(pool, "cancel-watch")
+            resp = await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
+        assert resp.status == "canceled"
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_accepts_watch_for_crash_kind(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_watch_for_crash(pool, "list-watch")
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, kind=JobKind.WATCH_FOR_CRASH)
+        assert [r.object_id for r in resp.items] == [job_id]
 
     asyncio.run(_run())
 
