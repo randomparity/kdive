@@ -115,9 +115,25 @@ host-model / a `custom` pin to a concrete `<model>`) and persists it to the exis
 honest observation for the local cases: it closes the invisible-TCG-machine-default gap, and it
 cannot be stale (it is read from the domain that actually booted).
 
+- **The local mint snapshot is suppressed — Phase C is the sole writer of local `resolved_cpu`.**
+  ADR-0368's `_resolve_new_system_bindings` snapshots `host_cpu_json(caps)` into `resolved_cpu` for
+  *both* providers, returning `None` for local only because local advertises no `host_cpu` today.
+  Once §1 makes local advertise `host_cpu`, that path would stamp the **native** host CPU onto every
+  local System — wrong for a pin, and arch-mismatched for a foreign-TCG guest. So the mint snapshot
+  is made **explicitly remote-only** (gated on the bound provider), leaving a local System's
+  `resolved_cpu` NULL at mint and filled only by the live read. This preserves the "no unpinned
+  behavior change" property and removes the emergent-coupling bug where two correct changes combine
+  into a wrong value.
 - **Best-effort.** If the expand does not yield a concrete `<model>` (a QEMU/libvirt that leaves the
   TCG machine-default unexpanded), the worker records NULL and logs the reason — never fabricates a
   value and never fails provisioning on the CPU read. The provisioning result does not depend on it.
+- **Guarded write resolves the teardown race.** The `resolved_cpu` write is a repository UPDATE
+  guarded by the System's lifecycle state (the existing conditional-write pattern): it lands only
+  while the System is still in its post-provision provisioning/ready lifecycle, so a System that
+  crashed / was NMI'd / reaped in the read window (a real path — kdive is a crash tool) takes a
+  no-op. This is why the local write, unlike ADR-0368's rejected remote write-back, does not race
+  teardown/reap: it cannot land on a terminal row. Because mint left local `resolved_cpu` NULL, a
+  failure-path NULL write clobbers nothing.
 - **Remote unchanged.** Remote `resolved_cpu` keeps ADR-0368's mint-time snapshot (the remote
   live-read objections — TLS round-trip, worker→DB race — still hold across the network). The
   contract is stated on the `systems.get` field text: *live-verified for local, mint-snapshot for

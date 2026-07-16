@@ -81,7 +81,8 @@ guest arch gets" are different concepts, so the two keys are scoped differently:
   (`host-passthrough`/`host-model`). There is exactly one physical host CPU; a foreign/TCG-only arch
   (ppc64le emulated on x86) has **no host CPU** — its unpinned guest gets a QEMU machine-default,
   visible only post-provision via `resolved_cpu` (Phase C) or by pinning from `selectable_cpus`. The
-  native arch is the one whose `arch_traits` default accel is `kvm` **and** the host's own arch
+  native arch is the discovered `guest_arches` entry whose **accel is `kvm`** (a per-host discovery
+  value — the same arch is KVM on one host and TCG on another) intersected with the host's own arch
   (`parse_capabilities_arch`); `host_cpu.arch` records it. Shape unchanged from ADR-0368 (flat).
   Sourced by the native default mode:
   - **native x86 host-passthrough** → parse the host's `getCapabilities()` `<host><cpu><model>`/
@@ -166,23 +167,43 @@ virttype)` (ADR-0368 lines 46–59 established this for remote):
 Post-provision, the **local** worker reads the running domain's resolved `<cpu>` and persists it to
 the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no new migration**).
 
+- **The local mint snapshot is suppressed — Phase C is the *sole* writer of local `resolved_cpu`.**
+  `_resolve_new_system_bindings` (`services/systems/admission.py`) is provider-agnostic: it returns
+  `host_cpu_json(caps)` as the mint `resolved_cpu` for *both* providers, returning `None` for local
+  only because local advertises no `host_cpu` **today**. The moment Phase A makes local advertise
+  `host_cpu`, the unchanged mint path would stamp the **native** host CPU onto every local System —
+  the wrong value for a pinned System, and an **arch-mismatched** value for a foreign-TCG guest
+  (a ppc64le System stamped with the x86 host CPU). So Phase A/C **must** make the mint snapshot
+  **remote-only**: gate `host_cpu_json(caps)` in `_resolve_new_system_bindings` on the bound
+  Resource / profile provider being remote-libvirt, so a local System's `resolved_cpu` is `NULL` at
+  mint and is filled **only** by this Phase-C live read. This keeps the "no unpinned behavior
+  change" non-goal honest (an unpinned local System's `resolved_cpu` is NULL until the live read,
+  never a wrong native snapshot) and makes Phase C the only local writer (finding-driven).
 - **Read.** `virDomainGetXMLDesc(VIR_DOMAIN_XML_UPDATE_CPU)` on the running domain asks libvirt to
   expand host-passthrough / host-model / a `custom` pin to a concrete `<model>`. A new
   `parse_domain_resolved_cpu(domain_xml)` (defusedxml) extracts `{model, vendor?, arch,
   baseline_level?}` (level via the existing x86 table; omitted non-x86). The read happens once, at
   the local worker's post-provision boundary, after the domain is running.
-- **Persist.** Write the parsed `HostCpu` (or NULL) to `systems.resolved_cpu` via the repository.
-  This is a new local-worker→systems write; scope it to the narrowest existing post-provision write
-  point (identified in the plan against `providers/local_libvirt/lifecycle/provisioning.py` +
-  `db/repositories.py`). It is on the provision path (not racing teardown/reap), and best-effort.
+- **Persist — one guarded, unconditional write.** Write the parsed `HostCpu` (concrete value) **or
+  NULL** (on any read failure) to `systems.resolved_cpu` via a repository update **guarded by the
+  System's lifecycle state**: the UPDATE affects the row only while the System is still in its
+  post-provision provisioning/ready lifecycle (the existing `can_transition`/conditional-write
+  pattern in `db/repositories.py`), so a System that **crashed, was NMI'd, or was reaped** in the
+  read window (kdive is a crash tool — this window is real, cf. #984) takes a **no-op** write rather
+  than resurrecting a value on a torn-down row. This resolves the ADR-0368 teardown-race objection
+  for the local case by construction (the write cannot land on a terminal row), and it is a **new**
+  local-worker→systems write scoped to the narrowest existing post-provision write point (pinned in
+  the plan against `providers/local_libvirt/lifecycle/provisioning.py` + `db/repositories.py`).
+  Because mint left local `resolved_cpu` NULL, the failure-path NULL write clobbers nothing.
 - **Best-effort / never blocks.** Any `libvirt.libvirtError`, a parse fault, or an unexpanded
-  `<cpu mode='host-model'/>` / TCG machine-default with no concrete `<model>` → record NULL, log the
+  `<cpu mode='host-model'/>` / TCG machine-default with no concrete `<model>` → write NULL, log the
   reason at info/warning, and **do not fail provisioning**. The provisioning result is independent
   of the CPU read (mirrors ADR-0368's "observability never fails the primary path").
 - **Contract.** `resolved_cpu` becomes *live-verified for local, mint-snapshot for remote, NULL when
   unrecorded/unreadable* — stated in the `systems.get` wrapper docstring/field text and ADR-0369.
-  Remote keeps ADR-0368's `_resolve_new_system_bindings` mint path unchanged. `systems.get` stays a
-  pure DB read (`system_envelope` reads the row; no live call on the polled path).
+  Remote keeps ADR-0368's `_resolve_new_system_bindings` mint path unchanged (its snapshot is now
+  explicitly remote-only). `systems.get` stays a pure DB read (`system_envelope` reads the row; no
+  live call on the polled path).
 
 ## Acceptance criteria
 
@@ -224,6 +245,16 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
     without, the field is absent/`null`. `systems.get` performs **no** libvirt call (pure row read).
 11. Remote `resolved_cpu` (ADR-0368 mint-snapshot) and remote `host_cpu` are unchanged — a
     regression test asserts the remote mint path still snapshots.
+11a. **Local mint does not snapshot `resolved_cpu`.** A local System minted against a Resource that
+    advertises `host_cpu` (Phase A) has `resolved_cpu` **NULL at mint** — asserted for an unpinned
+    x86 System (no native snapshot), a **pinned** x86 System (not the native host CPU), and a
+    ppc64le System on the x86 host (no arch-mismatched x86 snapshot). Proves the mint path is
+    remote-only and Phase C is the sole local writer. Service/unit level.
+11b. **Guarded Phase-C write / domain gone.** When the System row is no longer in its post-provision
+    provisioning/ready lifecycle (crashed/reaped) at the write, the guarded UPDATE is a **no-op** —
+    a test drives the System to a terminal state before the write and asserts `resolved_cpu` is
+    unchanged (NULL, never a stale/wrong value). The write is otherwise unconditional (parsed value
+    or NULL).
 12. `live_vm` (x86, native KVM): provision with `cpu.model = x86-64-v2` (a `selectable_cpus` rung),
     assert the running domain resolves to it and `systems.get.resolved_cpu` reflects it. Skips
     cleanly without the KVM host.
@@ -258,9 +289,14 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   `selectable_cpus` for the arch-default machine; the pin check tolerates this (the usable model set
   is machine-stable in practice, and a mismatch surfaces as a libvirt define error, not a silent
   wrong boot). Documented; a per-machine allow-list is out of scope.
-- **Unpinned profile** → byte-identical legacy render; no new failure mode.
+- **Unpinned profile** → byte-identical legacy render; `resolved_cpu` NULL at mint (local mint does
+  not snapshot), filled by the Phase C live read if it succeeds. No native-CPU snapshot.
 - **Phase C read raises / returns no concrete `<model>` / TCG machine-default unexpanded** →
-  `resolved_cpu` NULL, logged, provisioning succeeds (best-effort).
+  Phase C writes `resolved_cpu` NULL, logged, provisioning succeeds (best-effort). Since mint left it
+  NULL, nothing is clobbered.
+- **System crashes / is NMI'd / reaped before the Phase C write** → the lifecycle-guarded UPDATE is
+  a no-op on the terminal row; `resolved_cpu` stays NULL (never a stale/wrong native snapshot). kdive
+  is a crash tool, so this window is a real path, not theoretical.
 - **Non-x86 model** → `baseline_level` omitted; raw `model` advertised/persisted.
 - **Stale/hand-edited jsonb capabilities row** → defensive readers drop malformed values.
 - **Local host not re-discovered since #1227** → no `host_cpu`/`selectable_cpus`; unpinned
