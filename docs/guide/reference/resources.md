@@ -48,6 +48,12 @@ Deregister a runtime or config-owned remote-libvirt resource.
 
 Return one runtime resource visible to the caller.
 
+Remote-libvirt hosts carry ``data.host_cpu`` — the expected guest CPU under host-model:
+``{model, vendor?, arch, baseline_level?}``. ``baseline_level`` (``x86-64-vN``) is a
+nominal upper bound for selecting a host that meets a CPU baseline; it may be absent for a
+model not in the level table, and a present level is not a guaranteed floor (confirm a hard
+instruction-set requirement against the running guest). Absent on local hosts.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `resource_id` | string | yes | The Resource UUID to describe. |
@@ -72,6 +78,12 @@ List runtime resources visible to the caller.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
 ``cursor`` for the next page.
+
+Remote-libvirt hosts carry ``data.host_cpu`` — the expected guest CPU under host-model:
+``{model, vendor?, arch, baseline_level?}``. ``baseline_level`` (``x86-64-vN``) is a
+nominal upper bound for selecting a host that meets a CPU baseline; it may be absent for a
+model not in the level table, and a present level is not a guaranteed floor (confirm a hard
+instruction-set requirement against the running guest). Absent on local hosts.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

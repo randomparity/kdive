@@ -29,6 +29,7 @@ from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
+from kdive.domain.catalog.resource_capabilities import host_cpu_json
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
@@ -47,7 +48,7 @@ from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.serialization import safe_error_details
+from kdive.serialization import JsonValue, safe_error_details
 from kdive.services.idempotency.envelope import StoredResult
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -254,45 +255,38 @@ def _stored_profile_for(
     return parsed
 
 
-async def _resolve_new_system_accel(
-    conn: AsyncConnection, resource_id: UUID | None, arch: str
-) -> str | None:
-    """Validate ``arch`` against the bound Resource and resolve its accelerator (ADR-0339).
-
-    Loads the Resource named by the granted Allocation and delegates to
-    :func:`resolve_accel`. Returns ``None`` (fail-open, no accel) when there is no bound
-    Resource or its capabilities advertise no ``guest_arches``; raises ``CONFIGURATION_ERROR``
-    when the Resource advertises guest arches but not ``arch``. Called at System mint only,
-    before the ``granted -> active`` flip, so a rejection consumes no capacity.
-    """
-    if resource_id is None:
-        return None
-    resource = await RESOURCES.get(conn, resource_id)
-    if resource is None:
-        return None
-    return resolve_accel(resource.capability_view.guest_arches(), arch)
-
-
-async def _validate_fadump_supported(
+async def _resolve_new_system_bindings(
     conn: AsyncConnection,
     resource_id: UUID | None,
     profile: ProvisioningProfile,
     profile_policy: ProfilePolicy,
-) -> None:
-    """Reject a fadump-opted provision on a host that does not advertise pseries fadump (ADR-0349).
+) -> tuple[str | None, dict[str, JsonValue] | None]:
+    """Resolve the host-derived System bindings from the bound Resource, on a single load.
 
-    Called at System mint alongside accel resolution, inside the same pre-flip ``try`` so a
-    rejection consumes no capacity and returns a typed envelope — never a hang. Fail-closed: a
-    fadump profile with no bound Resource, or a Resource whose capabilities do not advertise
-    ``pseries_fadump`` (including one never re-discovered since ADR-0349), resolves to
-    ``supported=False`` and is rejected ``CONFIGURATION_ERROR``.
+    Consolidates the ADR-0339 accelerator resolution, the ADR-0368 CPU-baseline snapshot, and the
+    ADR-0349 fadump precondition onto one ``RESOURCES.get`` in the mint transaction (they all read
+    the same bound Resource's advertised capabilities). Called at System mint only, before the
+    ``granted -> active`` flip, so a rejection consumes no capacity.
+
+    Fail-open ``accel`` / ``resolved_cpu``: ``None`` when there is no bound Resource or its
+    capabilities advertise no ``guest_arches`` / ``host_cpu`` (remote/fault, or a host not
+    re-discovered since ADR-0338/0368). Fail-closed fadump: a fadump-opted profile on a Resource
+    that does not advertise ``pseries_fadump`` is rejected ``CONFIGURATION_ERROR``. Raises
+    ``CONFIGURATION_ERROR`` on an accel mis-arch or an unsupported fadump — accel first, matching
+    the prior ordering.
+
+    Returns:
+        ``(accel, resolved_cpu)`` — the accelerator name (``kvm``/``tcg``) or ``None``, and the
+        ``host_cpu`` baseline dict (``{model, vendor?, arch, baseline_level?}``) or ``None``.
     """
-    requested = profile_policy.fadump_provisioned(profile)
-    supported = False
-    if requested and resource_id is not None:
-        resource = await RESOURCES.get(conn, resource_id)
-        supported = resource is not None and resource.capability_view.pseries_fadump()
-    require_fadump_supported(requested=requested, supported=supported)
+    resource = await RESOURCES.get(conn, resource_id) if resource_id is not None else None
+    caps = resource.capability_view if resource is not None else None
+    accel = resolve_accel(caps.guest_arches(), profile.arch) if caps is not None else None
+    require_fadump_supported(
+        requested=profile_policy.fadump_provisioned(profile),
+        supported=caps is not None and caps.pseries_fadump(),
+    )
+    return accel, host_cpu_json(caps)
 
 
 @dataclass(frozen=True, slots=True)
@@ -806,6 +800,7 @@ async def _insert_system_and_activate(
     tool: str,
     transition: str,
     accel: str | None,
+    resolved_cpu: dict[str, JsonValue] | None,
     label: str | None = None,
 ) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
@@ -824,6 +819,7 @@ async def _insert_system_and_activate(
             shape=alloc.shape,
             label=label,
             accel=accel,
+            resolved_cpu=resolved_cpu,
         ),
     )
     await audit.record(
@@ -864,11 +860,12 @@ async def _insert_defined_system(
     timeout: PreMutationTimeout,
     label: str | None = None,
 ) -> AdmissionResult:
-    # Validate arch + resolve accel before the granted->active flip (ADR-0339): a mis-arch
-    # rejection writes no System and leaves the allocation granted (all-or-nothing).
+    # Validate arch + resolve host bindings before the granted->active flip (ADR-0339/0368): a
+    # mis-arch rejection writes no System and leaves the allocation granted (all-or-nothing).
     try:
-        accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
-        await _validate_fadump_supported(conn, alloc.resource_id, profile, profile_policy)
+        accel, resolved_cpu = await _resolve_new_system_bindings(
+            conn, alloc.resource_id, profile, profile_policy
+        )
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
@@ -884,6 +881,7 @@ async def _insert_defined_system(
         tool="systems.define",
         transition="->defined",
         accel=accel,
+        resolved_cpu=resolved_cpu,
         label=label,
     )
     return DefinedSystemAdmitted(system)
@@ -901,10 +899,11 @@ async def _insert_provisioning_system(
 ) -> AdmissionResult:
     try:
         reject_rootfs_upload_without_window(profile_policy, profile)
-        # Validate arch + resolve accel before the granted->active flip (ADR-0339): a mis-arch
-        # rejection writes no System and leaves the allocation granted (all-or-nothing).
-        accel = await _resolve_new_system_accel(conn, alloc.resource_id, profile.arch)
-        await _validate_fadump_supported(conn, alloc.resource_id, profile, profile_policy)
+        # Validate arch + resolve host bindings before the granted->active flip (ADR-0339/0368): a
+        # mis-arch rejection writes no System and leaves the allocation granted (all-or-nothing).
+        accel, resolved_cpu = await _resolve_new_system_bindings(
+            conn, alloc.resource_id, profile, profile_policy
+        )
     except CategorizedError as exc:
         return _failure_from_error(alloc.id, exc)
     blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
@@ -920,6 +919,7 @@ async def _insert_provisioning_system(
         tool="systems.provision",
         transition="->provisioning",
         accel=accel,
+        resolved_cpu=resolved_cpu,
         label=label,
     )
     return await _enqueue_provision_job(

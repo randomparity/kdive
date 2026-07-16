@@ -103,10 +103,74 @@ def _fadump_profile() -> dict[str, Any]:
     return profile
 
 
+async def _set_resource_host_cpu(
+    pool: AsyncConnectionPool, alloc_id: str, host_cpu: dict[str, Any]
+) -> None:
+    """Overwrite the backing Resource's ``host_cpu`` capability for the seeded allocation."""
+    async with pool.connection() as conn:
+        alloc = await ALLOCATIONS.get(conn, alloc_id)
+        assert alloc is not None and alloc.resource_id is not None
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "SELECT capabilities FROM resources WHERE id = %s", (alloc.resource_id,)
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            caps = dict(row["capabilities"])
+            caps["host_cpu"] = host_cpu
+            await cur.execute(
+                "UPDATE resources SET capabilities = %s WHERE id = %s",
+                (Jsonb(caps), alloc.resource_id),
+            )
+
+
 async def _system_for_allocation(pool: AsyncConnectionPool, alloc_id: str) -> dict[str, Any] | None:
     async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute("SELECT * FROM systems WHERE allocation_id = %s", (alloc_id,))
         return await cur.fetchone()
+
+
+_HOST_CPU = {
+    "model": "Skylake-Client-IBRS",
+    "vendor": "Intel",
+    "arch": "x86_64",
+    "baseline_level": "x86-64-v3",
+}
+
+
+def test_mint_records_resolved_cpu_from_bound_host(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            await _set_resource_host_cpu(pool, alloc_id, _HOST_CPU)
+
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_profile()
+            )
+
+            assert resp.error_category is None, resp.data
+            row = await _system_for_allocation(pool, alloc_id)
+            assert row is not None
+            assert row["resolved_cpu"] == _HOST_CPU
+
+    asyncio.run(_run())
+
+
+def test_mint_records_null_resolved_cpu_when_host_advertises_none(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            # Default seed: the fake host advertises no host_cpu capability.
+            resp = await _HANDLERS.provision_system(
+                pool, _ctx(), allocation_id=alloc_id, profile=_profile()
+            )
+
+            assert resp.error_category is None, resp.data
+            row = await _system_for_allocation(pool, alloc_id)
+            assert row is not None
+            assert row["resolved_cpu"] is None
+
+    asyncio.run(_run())
 
 
 def test_provision_records_accel_when_host_advertises_arch(migrated_url: str) -> None:

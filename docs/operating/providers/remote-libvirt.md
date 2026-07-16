@@ -36,3 +36,23 @@ The preflight reports reachability and TLS problems without changing either host
 The [remote-libvirt host setup runbook](../runbooks/remote-libvirt-host-setup.md) covers
 provisioning a target host end to end: the PKI, virtproxyd, the firewall ACL, and the guest
 image with its helpers.
+
+## Guest CPU advertisement
+
+Remote guests run with a `host-model` CPU (ADR-0297), so the guest ISA tracks the host each
+domain lands on. To make that visible before selection, discovery advertises each host's expected
+guest CPU as `host_cpu` on `resources.describe` — `{model, vendor, arch, baseline_level}`, where
+`baseline_level` is a normalized `x86-64-vN` level (ADR-0368). The CPU a specific System was minted
+against is echoed on `systems.get` as `resolved_cpu`.
+
+Two operational notes:
+
+- **Re-register to populate it.** The capabilities row refreshes only on registration, the same as
+  `vcpus`/`memory_mb`. A host registered before this feature shipped shows no `host_cpu` until it is
+  re-registered (`setup-remote-libvirt` / the reconcile pass over the config overlay); until then
+  `resources.describe` omits the field and a new System's `resolved_cpu` is null. This is expected —
+  the field degrades to absent, never to a wrong value.
+- **It is a registration-time snapshot.** If a host's CPU, microcode, or libvirt changes, re-register
+  the host so the advertised `host_cpu` tracks it. `baseline_level` is advisory: a present level is a
+  nominal upper bound, not a guaranteed floor, so confirm a hard instruction-set requirement against
+  the running guest.

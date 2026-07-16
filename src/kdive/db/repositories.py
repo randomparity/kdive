@@ -258,7 +258,10 @@ ALLOCATIONS = StatefulRepository(
     json_columns=frozenset({"pcie_claim", "requested_pcie_specs"}),
 )
 SYSTEMS = StatefulRepository(
-    System, "systems", SystemState, json_columns=frozenset({"provisioning_profile"})
+    System,
+    "systems",
+    SystemState,
+    json_columns=frozenset({"provisioning_profile", "resolved_cpu"}),
 )
 INVESTIGATIONS = StatefulRepository(
     Investigation, "investigations", InvestigationState, json_columns=frozenset({"external_refs"})

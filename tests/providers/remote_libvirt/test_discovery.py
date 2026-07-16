@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -183,3 +184,95 @@ def test_capabilities_omit_gdb_addr_when_unset(tmp_path: Path) -> None:
     assert caps["storage_pool"] == "default"
     assert caps["gdbstub_port_min"] == 47000
     assert caps["gdbstub_port_max"] == 47099
+
+
+def _discovery(conn: FakeConn, tmp_path: Path) -> RemoteLibvirtDiscovery:
+    return RemoteLibvirtDiscovery(
+        config=_config(),
+        secret_backend=RecordingBackend(),
+        open_connection=lambda _uri: conn,
+        pki_base_dir=tmp_path,
+    )
+
+
+def test_capabilities_advertise_host_cpu(tmp_path: Path) -> None:
+    conn = FakeConn()  # default host-model Skylake block, avx512f (v4) disabled -> v3 survives
+    record = _discovery(conn, tmp_path).list_resources()[0]
+    assert record["capabilities"]["host_cpu"] == {
+        "model": "Skylake-Client-IBRS",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v3",
+    }
+    # The getDomainCapabilities call is pinned to the renderer's config: kvm / machine / host arch.
+    assert conn.domcaps_call == (None, "x86_64", "pc", "kvm", 0)
+
+
+def test_host_cpu_absent_when_getdomaincapabilities_raises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    conn = FakeConn(domcaps_error=True)
+    with caplog.at_level(logging.WARNING, logger="kdive.providers.remote_libvirt.discovery"):
+        record = _discovery(conn, tmp_path).list_resources()[0]
+    assert "host_cpu" not in record["capabilities"]
+    # A raised advisory call never drops the pre-feature capabilities.
+    assert record["capabilities"]["arch"] == "x86_64"
+    assert record["capabilities"]["vcpus"] == 8
+    assert record["capabilities"]["memory_mb"] == 16384
+    # The RPC-fault NULL cause is WARNING-logged, distinct from the unmodelable-host INFO cause.
+    assert any(r.levelno == logging.WARNING and "host_cpu" in r.message for r in caplog.records)
+
+
+def test_host_cpu_absent_when_domcaps_has_no_model(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    conn = FakeConn(
+        domcaps_xml=(
+            "<domainCapabilities><cpu>"
+            "<mode name='host-model' supported='yes'/></cpu></domainCapabilities>"
+        )
+    )
+    with caplog.at_level(logging.INFO, logger="kdive.providers.remote_libvirt.discovery"):
+        record = _discovery(conn, tmp_path).list_resources()[0]
+    assert "host_cpu" not in record["capabilities"]
+    # A connected-but-unmodelable host is INFO-logged (not WARNING), so the NULL causes differ.
+    assert any(r.levelno == logging.INFO and "modelable" in r.message for r in caplog.records)
+
+
+def test_host_cpu_omits_baseline_level_for_unmapped_model(tmp_path: Path) -> None:
+    conn = FakeConn(
+        domcaps_xml=(
+            "<domainCapabilities><cpu>"
+            "<mode name='host-model' supported='yes'>"
+            "<model>SomeFutureModel-v9</model><vendor>Intel</vendor>"
+            "</mode></cpu></domainCapabilities>"
+        )
+    )
+    record = _discovery(conn, tmp_path).list_resources()[0]
+    assert record["capabilities"]["host_cpu"] == {
+        "model": "SomeFutureModel-v9",
+        "vendor": "Intel",
+        "arch": "x86_64",
+    }
+
+
+def test_host_cpu_disable_guard_omits_level_end_to_end(tmp_path: Path) -> None:
+    # A v3 model (Skylake) whose v3-defining `avx2` is host-model-disabled must not advertise v3.
+    # Pins the exact libvirt <feature policy='disable' name='avx2'> spelling through
+    # parse_host_cpu -> baseline_level, so a renamed token would fail here rather than silently
+    # advertising a level the host cannot deliver.
+    conn = FakeConn(
+        domcaps_xml=(
+            "<domainCapabilities><cpu>"
+            "<mode name='host-model' supported='yes'>"
+            "<model>Skylake-Client-IBRS</model><vendor>Intel</vendor>"
+            "<feature policy='disable' name='avx2'/>"
+            "</mode></cpu></domainCapabilities>"
+        )
+    )
+    record = _discovery(conn, tmp_path).list_resources()[0]
+    assert record["capabilities"]["host_cpu"] == {
+        "model": "Skylake-Client-IBRS",
+        "vendor": "Intel",
+        "arch": "x86_64",
+    }

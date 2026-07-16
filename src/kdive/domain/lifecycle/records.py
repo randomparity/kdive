@@ -26,6 +26,7 @@ from kdive.domain.profile_documents import (
     SerializedExpectedBootFailure,
     SerializedProvisioningProfile,
 )
+from kdive.serialization import JsonValue
 
 
 class Attribution(DomainBase):
@@ -81,6 +82,10 @@ class System(DomainModel, Attribution):
     #: `guest_arches` at admission (ADR-0339). NULL when the resource advertises none — not
     #: host-derived; downstream consumers must treat NULL as "unknown", never crash on it.
     accel: str | None = None
+    #: Host-derived guest CPU baseline resolved from the bound Resource's advertised `host_cpu`
+    #: at mint (ADR-0368): `{model, vendor?, arch, baseline_level?}`. NULL when the resource
+    #: advertises none (local/fault/un-refreshed remote) — treat NULL as unknown, never crash.
+    resolved_cpu: dict[str, JsonValue] | None = None
 
 
 class Investigation(DomainModel, Attribution):

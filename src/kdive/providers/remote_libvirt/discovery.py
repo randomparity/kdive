@@ -14,22 +14,29 @@ which creates the domains they would inspect.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
+import libvirt
+
 from kdive.domain.capacity.state import ResourceStatus
 from kdive.domain.catalog.discovery import ResourceRecord
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY, HOST_CPU_KEY
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.platform.cpu_baseline import baseline_level
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, remote_config_for_resource
 from kdive.providers.remote_libvirt.connection.transport import (
     OpenConnection,
+    _LibvirtConn,  # the connection slice yielded by remote_connection (host_cpu read)
     open_libvirt,
     remote_connection,
 )
-from kdive.providers.shared.libvirt_xml import parse_capabilities_arch
+from kdive.providers.shared.libvirt_xml import parse_capabilities_arch, parse_host_cpu
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_env
+
+_log = logging.getLogger(__name__)
 
 
 class RemoteLibvirtDiscovery:
@@ -84,6 +91,7 @@ class RemoteLibvirtDiscovery:
         ) as conn:
             info = conn.getInfo()
             arch = parse_capabilities_arch(conn.getCapabilities())
+            host_cpu = _discover_host_cpu(conn, arch, self._config.machine)
         refs = self._config.cert_refs
         capabilities: dict[str, Any] = {
             "arch": arch,
@@ -103,6 +111,8 @@ class RemoteLibvirtDiscovery:
         }
         if self._config.gdb_addr is not None:
             capabilities["gdbstub_addr"] = self._config.gdb_addr
+        if host_cpu is not None:
+            capabilities[HOST_CPU_KEY] = host_cpu
         return [
             ResourceRecord(
                 resource_id=self.host_uri,
@@ -111,3 +121,33 @@ class RemoteLibvirtDiscovery:
                 status=ResourceStatus.AVAILABLE,
             )
         ]
+
+
+def _discover_host_cpu(conn: _LibvirtConn, arch: str, machine: str) -> dict[str, Any] | None:
+    """Advertise the host-model guest CPU baseline (ADR-0368), or ``None`` on any fault.
+
+    Parameterized to match the renderer (``render_domain_xml``): ``virttype='kvm'``, ``machine``
+    from config, host ``arch``, default emulator. ``virttype='kvm'`` is exact, not a narrowing:
+    the remote renderer always emits ``<domain type='kvm'>`` — remote-libvirt is KVM-only, TCG is a
+    local-only concern (ADR-0341, ``install.py`` ``del accel``). A ``libvirtError`` (old libvirt
+    without the API, transient RPC fault) or an unparseable/absent host-model block yields ``None``
+    so a new advisory field never drops the host from discovery.
+    """
+    try:
+        dom_caps = conn.getDomainCapabilities(None, arch, machine, "kvm")
+    except libvirt.libvirtError:
+        _log.warning("getDomainCapabilities failed; omitting host_cpu", exc_info=True)
+        return None
+    parsed = parse_host_cpu(dom_caps)
+    if parsed is None:
+        # Connected, valid XML, but no modelable host-model CPU (unsupported mode / empty <model>).
+        # Log so an operator can tell this from a stale row or a never-discovered host (ADR-0368).
+        _log.info("host advertises no modelable host-model CPU; omitting host_cpu")
+        return None
+    result: dict[str, Any] = {"model": parsed.model, "arch": parsed.arch or arch}
+    if parsed.vendor is not None:
+        result["vendor"] = parsed.vendor
+    level = baseline_level(parsed.model, parsed.disabled_features)
+    if level is not None:
+        result["baseline_level"] = level
+    return result
