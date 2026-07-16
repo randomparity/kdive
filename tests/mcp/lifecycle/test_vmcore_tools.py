@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -15,8 +16,10 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
+from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
@@ -205,6 +208,183 @@ async def _job_count(pool: AsyncConnectionPool) -> int:
         row = await cur.fetchone()
     assert row is not None
     return int(row["n"])
+
+
+# --- kdump image-capability admission gate (ADR-0361, #958) ---------------------------------
+
+_CATALOG_IMAGE_NAME = "fedora-kdive-ready-43"
+_DT = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _catalog_profile() -> dict[str, Any]:
+    """A crashkernel local-libvirt profile whose rootfs is the ``catalog`` image below."""
+    return {
+        "schema_version": 1,
+        "arch": "x86_64",
+        "vcpu": 4,
+        "memory_mb": 4096,
+        "disk_gb": 20,
+        "boot_method": "direct-kernel",
+        "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v7.0",
+        "provider": {
+            "local-libvirt": {
+                "domain_xml_params": {"machine": "q35"},
+                "rootfs": {
+                    "kind": "catalog",
+                    "provider": "local-libvirt",
+                    "name": _CATALOG_IMAGE_NAME,
+                },
+                "crashkernel": "256M",
+            }
+        },
+    }
+
+
+def _catalog_entry(*, capabilities: list[str], provenance: dict[str, Any]) -> ImageCatalogEntry:
+    """A registered, public local-libvirt catalog row the gate resolves the booted image from."""
+    return ImageCatalogEntry.model_validate(
+        {
+            "id": uuid4(),
+            "created_at": _DT,
+            "updated_at": _DT,
+            "pending_since": _DT,
+            "provider": "local-libvirt",
+            "name": _CATALOG_IMAGE_NAME,
+            "arch": "x86_64",
+            "format": "qcow2",
+            "root_device": "/dev/vda",
+            "object_key": f"images/local-libvirt/{_CATALOG_IMAGE_NAME}/x86_64.qcow2",
+            "digest": "sha256:abc",
+            "capabilities": capabilities,
+            "provenance": provenance,
+            "visibility": ImageVisibility.PUBLIC,
+            "owner": None,
+            "expires_at": None,
+            "state": ImageState.REGISTERED,
+        }
+    )
+
+
+async def _catalog_rootfs_run(
+    pool: AsyncConnectionPool,
+    *,
+    capabilities: list[str],
+    provenance: dict[str, Any],
+    seed_image: bool = True,
+) -> str:
+    """Seed a crashed catalog-rootfs System (+ image) and a bound Run; return the run id."""
+    sys_id = await seed_crashed_system(pool, profile=_catalog_profile())
+    if seed_image:
+        async with pool.connection() as conn:
+            await IMAGE_CATALOG.insert(
+                conn, _catalog_entry(capabilities=capabilities, provenance=provenance)
+            )
+    return await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
+
+
+def test_fetch_vmcore_kdump_refused_when_image_makedumpfile_too_old(migrated_url: str) -> None:
+    # ADR-0361: a KDUMP capture on a catalog image whose shipped makedumpfile is provably too old
+    # for the characterized kernel is `incapable` — refused with images.describe as the next step.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(
+                pool, capabilities=["kdump"], provenance={"makedumpfile_version": "1.6.7"}
+            )
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "kdump_incapable"
+        block = cast(dict[str, Any], resp.data["kdump_capability"])
+        assert block["capability"] == "incapable"
+        assert resp.suggested_next_actions == ["images.describe"]
+        assert jobs == 0  # refused before enqueue
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_refused_when_image_lacks_kdump_tooling(migrated_url: str) -> None:
+    # ADR-0361: no `kdump` capability tag -> `not_applicable`, a kernel-independent confident
+    # negative. Refused before enqueue.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(
+                pool, capabilities=["agent"], provenance={"makedumpfile_version": "1.7.9"}
+            )
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "kdump_incapable"
+        block = cast(dict[str, Any], resp.data["kdump_capability"])
+        assert block["capability"] == "not_applicable"
+        assert jobs == 0
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_admitted_when_image_capable(migrated_url: str) -> None:
+    # A new-enough makedumpfile + kdump tooling is `capable`: the gate passes and one job enqueues.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(
+                pool, capabilities=["kdump"], provenance={"makedumpfile_version": "1.7.9"}
+            )
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.status == "queued"
+        assert jobs == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_admitted_when_makedumpfile_unrecorded(migrated_url: str) -> None:
+    # Fail open on uncertainty: kdump tooling present but no recorded makedumpfile version is
+    # `unverified`, never a confident negative — the capture is admitted.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(pool, capabilities=["kdump"], provenance={})
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.status == "queued"
+        assert jobs == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_kdump_admitted_when_no_catalog_row(migrated_url: str) -> None:
+    # Fail open when the catalog rootfs resolves to no visible registered row (nothing to gate on).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(
+                pool, capabilities=["kdump"], provenance={}, seed_image=False
+            )
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="kdump")
+            jobs = await _job_count(pool)
+        assert resp.status == "queued"
+        assert jobs == 1
+
+    asyncio.run(_run())
+
+
+def test_fetch_vmcore_host_dump_ungated_when_image_incapable(migrated_url: str) -> None:
+    # Method scope: host_dump is host-side (QEMU) and never in KDUMP_FAMILY, so the image-capability
+    # gate never fires for it even against a confidently incapable catalog image.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _catalog_rootfs_run(
+                pool, capabilities=["kdump"], provenance={"makedumpfile_version": "1.6.7"}
+            )
+            handlers = _real_local_handlers()
+            resp = await handlers.fetch_vmcore(pool, _ctx(), run_id=run_id, method="host_dump")
+            jobs = await _job_count(pool)
+        assert resp.status == "queued"
+        assert jobs == 1
+
+    asyncio.run(_run())
 
 
 def test_fetch_vmcore_host_dump_admitted_on_local_after_b4(migrated_url: str) -> None:
