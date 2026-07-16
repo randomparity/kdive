@@ -7,6 +7,7 @@ sharing raw dict key conventions across modules.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
@@ -183,6 +184,36 @@ class SysRqPayload(SystemPayload):
     command: SysRqCommand
 
 
+WATCH_DEFAULT_DEADLINE_S = 60.0
+"""Default wall-clock budget for a ``watch_for_crash`` console watch (#984, ADR-0367)."""
+WATCH_MAX_DEADLINE_S = 300.0
+"""Hard ceiling on a watch's wall-clock budget: a pure-wait watch holds a worker slot for its
+whole duration, so the cap bounds worker-pool contention on the shared dispatch lane (ADR-0367).
+The single source of truth — the tool boundary and this payload backstop both clamp to it."""
+
+
+class WatchForCrashPayload(SystemPayload):
+    """A ``watch_for_crash`` job: the System plus the wall-clock watch budget (ADR-0367).
+
+    ``deadline_s`` is how long the worker polls the serial console for the boot-readiness crash
+    matcher before returning a not-fired verdict. The tool boundary clamps and rejects with
+    per-reason ``configuration_error`` codes; this validator is the worker-side backstop — it
+    rejects a non-finite or non-positive value and clamps a value above
+    :data:`WATCH_MAX_DEADLINE_S` down to the cap.
+    """
+
+    deadline_s: float = WATCH_DEFAULT_DEADLINE_S
+
+    @field_validator("deadline_s")
+    @classmethod
+    def _bounded_deadline(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("deadline_s must be a finite number")
+        if value <= 0:
+            raise ValueError("deadline_s must be positive")
+        return min(value, WATCH_MAX_DEADLINE_S)
+
+
 class CaptureVmcorePayload(RunPayload):
     """A `capture_vmcore` job: the crashing Run + core method (ADR-0244).
 
@@ -239,6 +270,7 @@ type _ActivePayloadModel = (
     | type[InstallPayload]
     | type[PowerPayload]
     | type[SysRqPayload]
+    | type[WatchForCrashPayload]
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
@@ -253,6 +285,7 @@ type ActivePayloadModel = (
     | InstallPayload
     | PowerPayload
     | SysRqPayload
+    | WatchForCrashPayload
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
@@ -268,6 +301,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.FORCE_CRASH: SystemPayload,
     JobKind.POWER: PowerPayload,
     JobKind.DIAGNOSTIC_SYSRQ: SysRqPayload,
+    JobKind.WATCH_FOR_CRASH: WatchForCrashPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,

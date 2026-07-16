@@ -14,6 +14,7 @@ from kdive.domain.catalog.images import ImageVisibility
 from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.domain.operations.sysrq import SysRqCommand
 from kdive.jobs.payloads import (
+    WATCH_MAX_DEADLINE_S,
     Authorizing,
     BuildPayload,
     CaptureVmcorePayload,
@@ -24,6 +25,7 @@ from kdive.jobs.payloads import (
     ReprovisionPayload,
     SysRqPayload,
     SystemPayload,
+    WatchForCrashPayload,
     dump_authorizing,
     dump_payload,
     load_payload,
@@ -202,6 +204,35 @@ def test_dump_authorizing_accepts_plain_mapping() -> None:
 def test_payload_validation_rejects_wrong_shape_for_kind() -> None:
     with pytest.raises(PayloadValidationError, match="invalid install payload"):
         dump_payload(JobKind.INSTALL, {"system_id": str(uuid4())})
+
+
+def test_watch_for_crash_payload_round_trips() -> None:
+    system_id = uuid4()
+    payload = dump_payload(
+        JobKind.WATCH_FOR_CRASH,
+        WatchForCrashPayload(system_id=str(system_id), deadline_s=60.0),
+    )
+    assert payload == {"system_id": str(system_id), "deadline_s": 60.0}
+
+
+def test_watch_for_crash_payload_clamps_above_max() -> None:
+    system_id = uuid4()
+    payload = dump_payload(
+        JobKind.WATCH_FOR_CRASH,
+        WatchForCrashPayload(system_id=str(system_id), deadline_s=WATCH_MAX_DEADLINE_S + 9999),
+    )
+    assert payload["deadline_s"] == WATCH_MAX_DEADLINE_S
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
+def test_watch_for_crash_payload_rejects_non_positive_or_non_finite(bad: float) -> None:
+    with pytest.raises(PayloadValidationError, match="invalid watch_for_crash payload"):
+        dump_payload(JobKind.WATCH_FOR_CRASH, {"system_id": str(uuid4()), "deadline_s": bad})
+
+
+def test_watch_for_crash_payload_rejects_bad_system_id() -> None:
+    with pytest.raises(PayloadValidationError, match="invalid watch_for_crash payload"):
+        dump_payload(JobKind.WATCH_FOR_CRASH, {"system_id": "not-a-uuid", "deadline_s": 30.0})
 
 
 def test_run_id_from_payload_returns_uuid_for_run_jobs() -> None:

@@ -34,6 +34,7 @@ class JobKind(StrEnum):
     CONSOLE_ROTATE = "console_rotate"
     DIAGNOSTIC_SYSRQ = "diagnostic_sysrq"
     CHECK_SSH_REACHABLE = "check_ssh_reachable"
+    WATCH_FOR_CRASH = "watch_for_crash"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -65,6 +66,7 @@ CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
         JobKind.CAPTURE_VMCORE,
         JobKind.AUTHORIZE_SSH_KEY,
         JobKind.CHECK_SSH_REACHABLE,
+        JobKind.WATCH_FOR_CRASH,
     }
 )
 """Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower
