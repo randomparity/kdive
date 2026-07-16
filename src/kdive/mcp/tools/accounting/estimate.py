@@ -10,9 +10,11 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import Field, ValidationError
 
 from kdive.domain.accounting.cost import (
+    ACCEL_WEIGHT,
     W_CPU,
     W_MEM,
     Selector,
+    accel_factor,
     cost,
     parse_window_hours,
     quantize_kcu,
@@ -101,7 +103,10 @@ async def _estimate_inner(
     request: EstimateRequestPayload,
 ) -> ToolResponse:
     selector = Selector(
-        vcpus=request.vcpus, memory_gb=request.memory_gb, cost_class=request.cost_class
+        vcpus=request.vcpus,
+        memory_gb=request.memory_gb,
+        cost_class=request.cost_class,
+        accel=_validated_accel(request.accel),
     )
     validate_size(selector)
     window_hours = parse_window_hours(request.window)
@@ -111,13 +116,36 @@ async def _estimate_inner(
     return _estimate_response(coeff, selector, window_hours, project=project)
 
 
+def _validated_accel(accel: str | None) -> str | None:
+    """Accept ``None`` or a known accelerator; reject any other value fail-closed (ADR-0362).
+
+    Unlike the pricing-time :func:`~kdive.domain.accounting.cost.accel_factor` (which fails OPEN
+    on a stale persisted value), a direct estimate input is validated so a typo'd ``accel`` is a
+    ``configuration_error`` naming the accepted set, not a silent native-baseline price.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` if ``accel`` is not ``None`` or a known key.
+    """
+    if accel is None or accel in ACCEL_WEIGHT:
+        return accel
+    raise CategorizedError(
+        f"unknown accel {accel!r}",
+        category=ErrorCategory.CONFIGURATION_ERROR,
+        # `accepted_values` (ADR-0224) survives `safe_error_details` and reaches the agent.
+        details={"accel": accel, "accepted_values": sorted(ACCEL_WEIGHT)},
+    )
+
+
 def _estimate_response(
     coeff: Decimal, selector: Selector, window_hours: Decimal, *, project: str
 ) -> ToolResponse:
-    rate_kcu_per_hr = rate(coeff, vcpus=selector.vcpus, memory_gb=selector.memory_gb)
+    rate_kcu_per_hr = rate(
+        coeff, vcpus=selector.vcpus, memory_gb=selector.memory_gb, accel=selector.accel
+    )
     estimate_kcu = cost(rate_kcu_per_hr, window_hours)
-    vcpu_component = coeff * W_CPU * selector.vcpus
-    memory_component = coeff * W_MEM * selector.memory_gb
+    factor = accel_factor(selector.accel)
+    vcpu_component = coeff * factor * W_CPU * selector.vcpus
+    memory_component = coeff * factor * W_MEM * selector.memory_gb
     return ToolResponse.success(
         _ESTIMATE_OBJECT_ID,
         "ok",
@@ -125,6 +153,8 @@ def _estimate_response(
         data={
             "project": project,
             "cost_class": selector.cost_class,
+            "accel": selector.accel,
+            "accel_factor": str(factor),
             "estimate_kcu": str(quantize_kcu(estimate_kcu)),
             "rate_kcu_per_hr": str(quantize_kcu(rate_kcu_per_hr)),
             "breakdown_vcpu_kcu_per_hr": str(quantize_kcu(vcpu_component)),
@@ -145,7 +175,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         project: Annotated[str, Field(description="Project to price the estimate for.")],
         request: Annotated[
             EstimateRequestPayload,
-            Field(description="Estimate request payload: size, lease window in hours, cost class."),
+            Field(
+                description=(
+                    "Estimate request payload: size, lease window in hours, cost class, "
+                    "and optional accelerator (kvm/tcg) to price an architecture at."
+                )
+            ),
         ],
     ) -> ToolResponse:
         """Price a hypothetical selector over a window without writing anything. Requires viewer."""

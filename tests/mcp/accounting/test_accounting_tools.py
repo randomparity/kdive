@@ -29,10 +29,21 @@ def _ctx(
 
 
 def _request(
-    *, vcpus: int = 1, memory_gb: int = 1, window: object = 1, cost_class: str = "local"
+    *,
+    vcpus: int = 1,
+    memory_gb: int = 1,
+    window: object = 1,
+    cost_class: str = "local",
+    accel: str | None = None,
 ) -> EstimateRequestPayload:
     return EstimateRequestPayload.model_validate(
-        {"vcpus": vcpus, "memory_gb": memory_gb, "window": window, "cost_class": cost_class}
+        {
+            "vcpus": vcpus,
+            "memory_gb": memory_gb,
+            "window": window,
+            "cost_class": cost_class,
+            "accel": accel,
+        }
     )
 
 
@@ -62,6 +73,61 @@ def test_estimate_returns_rate_window_product_and_breakdown(migrated_url: str) -
         assert resp.data["rate_kcu_per_hr"] == "3.0000"
         assert resp.data["breakdown_vcpu_kcu_per_hr"] == "2.0000"
         assert resp.data["breakdown_memory_kcu_per_hr"] == "1.0000"
+
+    asyncio.run(_run())
+
+
+def test_estimate_defaults_to_native_baseline_accel(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await estimate(
+                pool, _ctx(), project="proj", request=_request(vcpus=2, memory_gb=4, window=3)
+            )
+        # No accel → native baseline, byte-identical to the pre-ADR-0362 estimate.
+        assert resp.data["accel"] is None
+        assert resp.data["accel_factor"] == "1.0"
+        assert resp.data["estimate_kcu"] == "9.0000"
+
+    asyncio.run(_run())
+
+
+def test_estimate_tcg_prices_above_native_kvm(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            kvm = await estimate(
+                pool,
+                _ctx(),
+                project="proj",
+                request=_request(vcpus=2, memory_gb=4, window=3, accel="kvm"),
+            )
+            tcg = await estimate(
+                pool,
+                _ctx(),
+                project="proj",
+                request=_request(vcpus=2, memory_gb=4, window=3, accel="tcg"),
+            )
+        assert kvm.data["accel"] == "kvm"
+        assert kvm.data["accel_factor"] == "1.0"
+        assert kvm.data["estimate_kcu"] == "9.0000"
+        # TCG multiplies the whole size-weighted rate by 4: rate 12.0, estimate 36.0, and the
+        # per-component breakdown scales too so an agent sees the differentiated price.
+        assert tcg.data["accel"] == "tcg"
+        assert tcg.data["accel_factor"] == "4.0"
+        assert tcg.data["rate_kcu_per_hr"] == "12.0000"
+        assert tcg.data["estimate_kcu"] == "36.0000"
+        assert tcg.data["breakdown_vcpu_kcu_per_hr"] == "8.0000"
+        assert tcg.data["breakdown_memory_kcu_per_hr"] == "4.0000"
+
+    asyncio.run(_run())
+
+
+def test_estimate_unknown_accel_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await estimate(pool, _ctx(), project="proj", request=_request(accel="wat"))
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["accepted_values"] == ["kvm", "tcg"]
 
     asyncio.run(_run())
 
