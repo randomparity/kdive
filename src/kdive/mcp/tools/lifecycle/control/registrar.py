@@ -330,15 +330,21 @@ async def watch_for_crash_system(
                 )
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
-            dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
 
             async def _enqueue() -> ToolResponse:
+                # Stable per-System dedup key caps in-flight watches to one per System: a second
+                # call while a watch is queued/running returns that same job (there is no reason to
+                # watch one console twice at once), so a contributor cannot flood the shared worker
+                # lane with unbounded pure-wait jobs — aggregate watch occupancy is bounded by the
+                # quota-gated count of READY Systems. `recycle_terminal` lets a re-issue after the
+                # prior watch completed start a fresh watch (a new reproducer batch) in place.
                 job = await queue.enqueue(
                     conn,
                     JobKind.WATCH_FOR_CRASH,
                     WatchForCrashPayload(system_id=system_id, deadline_s=clamped),
                     job_authorizing(ctx, system.project),
-                    f"{system_id}:watch_for_crash:{dedup_suffix}",
+                    f"{system_id}:watch_for_crash",
+                    recycle_terminal=True,
                 )
                 return job_envelope(job, "system_id", uid)
 

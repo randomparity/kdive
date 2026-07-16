@@ -52,7 +52,11 @@ so both boot readiness and the watch import it boundary-cleanly). The verdict is
 `not_fired`; the tool and the race-debugging guide document that a `not_fired` paired with a
 dropped reproducer-SSH means "the crash was outside the watched window — read the full console."
 `deadline_s` is clamped to a modest cap (default 60s, max 300s) so a pure-wait watch cannot hold
-a worker slot long enough to starve short lifecycle jobs on the shared dispatch lane.
+a worker slot long enough to starve short lifecycle jobs on the shared dispatch lane, and the
+watch's dedup key is **stable per System** (`{system_id}:watch_for_crash`, `recycle_terminal=True`)
+so at most one watch is in flight per System — aggregate worker occupancy from watches is bounded
+by the quota-gated count of READY Systems, not by how many times an agent calls the tool, closing
+what would otherwise be an unbounded free-idle-occupancy DoS on the shared worker lane.
 
 kdive does **not** run agent-supplied commands in the guest. The agent drives its own
 reproducer loop over root SSH (ADR-0366); kdive supplies the one thing SSH cannot: catching the

@@ -917,12 +917,34 @@ def test_watch_for_crash_enqueues_job_for_contributor(migrated_url: str) -> None
             assert resp.data["system_id"] == sys_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key LIKE %s",
-                    (f"{sys_id}:watch_for_crash:%",),
+                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
                 )
                 row = await cur.fetchone()
         assert row is not None
         assert row["payload"]["deadline_s"] == 45.0
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_is_capped_to_one_in_flight_per_system(migrated_url: str) -> None:
+    # Stable per-System dedup key: a second watch while one is in flight returns the same job,
+    # so a contributor cannot flood the shared worker lane with unbounded pure-wait jobs.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            first = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            second = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            assert first.object_id == second.object_id  # same job — in-flight cap
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'watch_for_crash' "
+                    "AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
 
     asyncio.run(_run())
 
@@ -940,8 +962,8 @@ def test_watch_for_crash_clamps_deadline_above_max(migrated_url: str) -> None:
             )
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key LIKE %s",
-                    (f"{sys_id}:watch_for_crash:%",),
+                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
                 )
                 row = await cur.fetchone()
         assert row is not None

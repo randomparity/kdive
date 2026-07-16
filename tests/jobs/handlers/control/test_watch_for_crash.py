@@ -172,6 +172,24 @@ def test_core_caps_matched_bytes() -> None:
     assert len(verdict.matched.encode("utf-8")) <= 256
 
 
+def test_core_redacts_secret_straddling_the_byte_cap() -> None:
+    # A secret that straddles max_bytes must be masked *before* the cut, else its surviving
+    # prefix would leak (redact-then-cap, not cap-then-redact).
+    line = "Kernel panic " + "A" * 4090 + "SECRETVALUE" + "B" * 100
+    verdict = asyncio.run(
+        _run_core(
+            [line.encode()],
+            [0.0, 0.5],
+            redact=lambda s: s.replace("SECRETVALUE", "[REDACTED]"),
+            context_lines=3,
+            max_bytes=4096,
+        )
+    )
+    assert verdict.matched is not None
+    assert "SECRET" not in verdict.matched
+    assert len(verdict.matched.encode("utf-8")) <= 4096
+
+
 def test_verdict_to_json_shapes() -> None:
     fired = WatchVerdict("fired", True, "Kernel panic", "slice", 1.5, _NOW)
     doc = json.loads(fired.to_json())

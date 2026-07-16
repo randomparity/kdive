@@ -9,8 +9,17 @@ cannot: catching the crash on the out-of-band console after the panic drops SSH.
 The console is polled lock-free: each poll snapshots the log and scans the suffix past the
 watch's start offset (``mark``); the local serial log only grows while the guest is up
 (``append="off"`` truncates only on power-cycle, ADR-0258), so concurrent growth between polls is
-harmless. Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue
-latency, or an at-least-once retry) is outside the scanned suffix and returns ``not_fired``. That
+harmless. A power-cycle *during* a watch (a ``panic=N`` auto-reboot, or ``control.power reset``)
+truncates the log; the watch resets ``mark`` to 0 when it observes the shrink (`len(body) <
+mark`). If the new boot regrows past the old ``mark`` within one poll interval the shrink is
+missed and a crash in the new boot's head could be skipped — a narrow gap that mainly affects
+auto-rebooting guests; the tool's target debug guests halt on panic (``panic=0``), preserving the
+console. A boot-identity check (``dev:ino:mtime``) is deliberately **not** used: serial-log mtime
+advances on every append (cf. ``console_rotate._boot_id``), so it would false-reset ``mark``
+mid-boot and resurface a pre-watch panic as a false ``fired``.
+
+Because ``mark`` is snapshotted at worker pickup, a panic that landed before it (queue latency,
+or an at-least-once retry) is outside the scanned suffix and returns ``not_fired``. That
 window is covered without a provider-crossing liveness probe: the agent driving the reproducer
 over SSH already holds the authoritative liveness signal — its SSH channel drops the instant the
 kernel panics — so a ``not_fired`` verdict paired with a dropped SSH loop means "read the full
@@ -55,7 +64,8 @@ POLL_INTERVAL_S = 1.0
 CONTEXT_LINES = 3
 """Lines of surrounding console kept on each side of the matched line in the returned slice."""
 MATCHED_MAX_BYTES = 4096
-"""Hard cap on the (redacted) matched-slice field so the inline verdict stays compact."""
+"""Byte cap applied to the matched slice **after** redaction, so a boundary-straddling secret is
+masked before it can be cut and the returned field still stays compact."""
 
 Outcome = Literal["fired", "not_fired"]
 
@@ -85,17 +95,34 @@ class WatchVerdict:
         return json.dumps(doc, separators=(",", ":"))
 
 
-def _bounded_slice(text: str, start_offset: int, context_lines: int, max_bytes: int) -> str:
-    """Return the matched line plus ``context_lines`` on each side, capped to ``max_bytes``."""
+def _context_window(text: str, start_offset: int, context_lines: int) -> str:
+    """Return the line at ``start_offset`` plus ``context_lines`` on each side (uncapped)."""
     line_index = text.count("\n", 0, start_offset)
     lines = text.split("\n")
     lo = max(0, line_index - context_lines)
     hi = min(len(lines), line_index + context_lines + 1)
-    window = "\n".join(lines[lo:hi])
-    encoded = window.encode("utf-8")
+    return "\n".join(lines[lo:hi])
+
+
+def _cap_bytes(value: str, max_bytes: int) -> str:
+    """Truncate ``value`` to at most ``max_bytes`` UTF-8 bytes on a codepoint boundary."""
+    encoded = value.encode("utf-8")
     if len(encoded) > max_bytes:
         return encoded[:max_bytes].decode("utf-8", "ignore")
-    return window
+    return value
+
+
+def _redacted_slice(
+    text: str, start_offset: int, redact: Callable[[str], str], context_lines: int, max_bytes: int
+) -> str:
+    """Build the returned matched slice: context window → redact → byte cap.
+
+    Redaction runs on the **full** window before the byte cap, so a registered secret straddling
+    ``max_bytes`` is masked before it can be cut (a cap-then-redact order would emit the secret's
+    surviving prefix verbatim). The cap then bounds the redacted result.
+    """
+    window = _context_window(text, start_offset, context_lines)
+    return _cap_bytes(redact(window), max_bytes)
 
 
 async def watch_console_for_crash(
@@ -130,7 +157,7 @@ async def watch_console_for_crash(
         match = first_crash_signature(text)
         elapsed = clock() - start
         if match is not None:
-            slice_text = redact(_bounded_slice(text, match.start(), context_lines, max_bytes))
+            slice_text = _redacted_slice(text, match.start(), redact, context_lines, max_bytes)
             return WatchVerdict("fired", True, match.group(0), slice_text, elapsed, now())
         if elapsed >= deadline_s:
             return WatchVerdict("not_fired", False, None, None, elapsed, now())
