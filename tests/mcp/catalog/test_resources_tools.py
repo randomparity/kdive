@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -1369,5 +1370,49 @@ def test_list_malformed_cursor_is_config_error(migrated_url: str) -> None:
             resp = await _list_resources(pool, CTX, kind=None, cursor="!!!")
         assert resp.status == "error"
         assert resp.data["reason"] == "invalid_cursor"
+
+    asyncio.run(_run())
+
+
+async def _set_host_cpu(pool: AsyncConnectionPool, res_id: str, host_cpu: dict[str, Any]) -> None:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE resources SET capabilities = capabilities || jsonb_build_object('host_cpu', "
+            "%s::jsonb) WHERE id = %s",
+            (json.dumps(host_cpu), UUID(res_id)),
+        )
+
+
+def test_describe_surfaces_host_cpu(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await _set_host_cpu(
+                pool,
+                res_id,
+                {
+                    "model": "Skylake-Client-IBRS",
+                    "vendor": "Intel",
+                    "arch": "x86_64",
+                    "baseline_level": "x86-64-v3",
+                },
+            )
+            resp = await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+        assert resp.data["host_cpu"] == {
+            "model": "Skylake-Client-IBRS",
+            "vendor": "Intel",
+            "arch": "x86_64",
+            "baseline_level": "x86-64-v3",
+        }
+
+    asyncio.run(_run())
+
+
+def test_describe_omits_host_cpu_when_absent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)  # local resource advertises no host_cpu
+            resp = await catalog_resources_tools.describe_resource(pool, CTX, res_id)
+        assert "host_cpu" not in resp.data
 
     asyncio.run(_run())
