@@ -173,6 +173,30 @@ def test_categorized_error_emits_error_level_structured_record(monkeypatch, capl
     assert "failed to read console log" in message
 
 
+def test_reconcile_systems_object_store_misconfig_routes_through_central_handler(
+    monkeypatch, capsys
+) -> None:
+    """A misconfigured object store on `reconcile-systems` flows through the central handler:
+    actionable details to stderr and the category's exit code (2) — not the prior bare
+    one-line message and exit 1 (#1220, ADR-0089). Pins the removed local try/except."""
+
+    def _raise() -> object:
+        raise CategorizedError(
+            "S3 endpoint not configured",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"setting": "KDIVE_S3_ENDPOINT_URL"},
+        )
+
+    monkeypatch.setattr("kdive.store.objectstore.object_store_from_env", _raise)
+    with pytest.raises(SystemExit) as exc:
+        main(["reconcile-systems"])
+
+    assert exc.value.code == exit_code_for_category("configuration_error")
+    err = capsys.readouterr().err
+    assert "S3 endpoint not configured" in err
+    assert "KDIVE_S3_ENDPOINT_URL" in err
+
+
 def test_categorized_error_unmapped_category_exits_generic(monkeypatch, capsys) -> None:
     """A category with no dedicated exit code maps to the generic failure code (1), and the
     message still reaches stderr rather than a traceback."""

@@ -344,6 +344,12 @@ def _emit_categorized_error(error: CategorizedError) -> None:
     The raise site already computed the actionable context (operation, path, remediation) in
     ``details``; printing it here turns a bare one-line message behind a traceback into an
     operator-readable cause. The caller maps ``error.category`` to a stable exit code.
+
+    This is the local operator-CLI surface, so it intentionally does *not* apply the ADR-0123
+    ``suppressed_detail()`` no-leak seam that the remote tool-response envelope applies to
+    ``authorization_denied``/``not_found``. That seam guards remote clients from resource-existence
+    leaks; an operator invoking ``python -m kdive`` already has host access and needs the full,
+    unredacted reason. Do not reuse this printer on a remote-client path.
     """
     print(f"error: {error}", file=sys.stderr)
     for key, value in error.details.items():
