@@ -46,10 +46,13 @@ host_cpu = {"model": str, "vendor": str?, "arch": str, "baseline_level": "x86-64
 - **Source = domain-capabilities host-model.** Read the connection's
   `getDomainCapabilities(emulator, arch, machine, virttype)` `<cpu><mode name='host-model'>`
   block — the exact model libvirt synthesizes for a `host-model` guest on this host, which is
-  what the renderer emits. The arguments are **pinned to match `render_domain_xml`**
-  (`virttype="kvm"`, `machine="pc"`, `arch=` the profile default arch, `emulator=` resolved the
-  same way), because host-model resolution is sensitive to `(emulator, arch, machine, virttype)`
-  — the no-arg form lets libvirt pick its own default (often `q35`, possibly TCG) and would
+  what the renderer emits. The arguments are **derived from the same sources the provisioner
+  uses** — `virttype="kvm"` (the renderer's `<domain type="kvm">`; host-model is meaningless
+  under TCG), `machine=config.machine` (the same `REMOTE_LIBVIRT_MACHINE`-or-default the renderer
+  reads, **not** a literal `"pc"` — an operator may set `q35`), `arch=` the host arch parsed at
+  discovery, and `emulator` **omitted** (the renderer emits no `<emulator>`, so libvirt picks the
+  same default for the query and the built domain). host-model resolution is sensitive to
+  `(arch, machine, virttype)`, so the no-arg form would let libvirt pick its own default and
   predict a CPU for a configuration the provisioner does not build. This widens the duck-typed
   `_LibvirtConn` protocol (`connection/transport.py`) with `getDomainCapabilities`, satisfied by
   the real binding and the test fake. Discovery is a cold path, so the extra libvirt call is
@@ -108,15 +111,19 @@ is handed (`install.py` `del accel`) and never writes the systems row.
 - `resources.describe` gains one guarded libvirt call at discovery (cold path). `systems.get`
   gains no libvirt call (the value is persisted at mint, read from the row).
 - The advertised `host_cpu` is the fleet-level baseline for planning; the persisted `resolved_cpu`
-  is that baseline frozen onto one System at mint. They are the same authoritative value from the
-  same source (`getDomainCapabilities` host-model), so no live-domain read is needed to reconcile
-  them — the split just lets an agent plan across the fleet and read one System cheaply.
+  is that same advertised value frozen onto one System at mint. Both come from the host's last
+  registration (`getDomainCapabilities` host-model), so the split lets an agent plan across the
+  fleet and read one System cheaply without a live-domain read. Both are a **registration-time
+  baseline, not a live-verified reading**: on a host whose CPU/microcode/libvirt changed after
+  registration they can lag the host's current host-model resolution, so an agent needing
+  certainty about a specific extension should confirm against the running guest.
 - The curated model→level table needs maintenance as new CPU models appear; an unmapped model
-  degrades to "raw model, no level" rather than a wrong level. Documented, not silent.
+  degrades to "raw model, no level" (absent = unknown, agent falls back to the raw model) rather
+  than a wrong level. Documented, not silent.
 - The remote capabilities row refreshes only on re-registration (existing behavior for
   `arch`/`vcpus`/`memory_mb`): existing hosts gain `host_cpu` only after re-registration, and a
-  host CPU/libvirt change is stale until then. Documented in the rollout note; `resolved_cpu`'s
-  mint-time snapshot deliberately does not chase later host changes.
+  host CPU/libvirt change is stale until then. Documented in the rollout note; a per-field
+  freshness timestamp is a possible follow-up, out of scope here.
 - Residual risk: the `live_vm` proof (that a real remote host advertises a non-empty `host_cpu`)
   is operator-run (CI has no remote host); the mint-time persist path itself is unit-tested
   without a live gate.

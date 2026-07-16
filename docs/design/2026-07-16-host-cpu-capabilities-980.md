@@ -66,11 +66,19 @@ capabilities.host_cpu = {
 - **Populated** by `RemoteLibvirtDiscovery.list_resources` from the connection's
   domain-capabilities host-model block (the exact model libvirt synthesizes for a
   `host-model` guest on this host). This is the honest predictor of the guest CPU, since the
-  renderer emits `host-model`. **The `getDomainCapabilities` call is parameterized to match the
-  renderer** (`render_domain_xml`, `xml.py`): `virttype="kvm"`, `machine="pc"`,
-  `arch=` the profile default arch, `emulator=` resolved the same way — so the advertised
-  prediction is for the configuration the provisioner actually builds, not a libvirt default
-  (which may pick `q35`/TCG and predict a different host-model block).
+  renderer emits `host-model`. **The `getDomainCapabilities` call is parameterized from the same
+  sources the provisioner uses**, not literals, because host-model resolution is sensitive to
+  `(arch, machine, virttype)`:
+  - `virttype="kvm"` — the renderer emits `<domain type="kvm">`; host-model is meaningless under
+    TCG, so this is load-bearing.
+  - `machine=config.machine` — the **same** `REMOTE_LIBVIRT_MACHINE`-or-default value the renderer
+    reads (`config.py`, `provisioning.py` passes `machine=config.machine`). Pinning a literal
+    `"pc"` would mispredict for an operator who set `q35`.
+  - `arch=` the host arch already parsed at discovery (`parse_capabilities_arch`,
+    `discovery.py`) — there is no profile at discovery time.
+  - `emulator=` **omitted** — the renderer emits no `<emulator>` element, so libvirt picks the
+    same default emulator for both the discovery query and the built domain; there is nothing to
+    "resolve the same way".
 - **The `getDomainCapabilities` RPC call is guarded.** The other capabilities (`arch`, `vcpus`,
   `memory_mb`, `transports`, connect refs) are computed **first**, from `getInfo()` /
   `getCapabilities()` exactly as today. The `getDomainCapabilities` call and its parse run in a
@@ -85,7 +93,13 @@ capabilities.host_cpu = {
   `parse_capabilities_arch` / `parse_guest_arches`).
 - **`baseline_level`** is derived by a shared, curated x86-64 model→level table in
   `domain/platform/` (see Open questions → resolved). A model with no table entry (an unknown
-  or non-x86 model) omits `baseline_level` but still carries `model`/`vendor`/`arch`.
+  or non-x86 model) omits `baseline_level` but still carries `model`/`vendor`/`arch`. **Agent
+  contract for an absent level:** absent means *unknown* (the model is present but not in the
+  table), **not** "below v1" or "unsupported" — an agent that needs a specific baseline must fall
+  back to comparing the raw `model` (or treat the host as unverified for that requirement), never
+  read absence as a capability floor. As new CPUs appear faster than the table is maintained,
+  "present model, absent level" is an expected steady-state case on new hardware, not an error.
+  The wrapper docstring / field text states this so the contract is visible to the agent.
 - **Typed read** via a defensive `host_cpu()` reader + `HOST_CPU_KEY` + `_KNOWN_KEYS` entry in
   `domain/catalog/resource_capabilities.py`, returning a `HostCpu` TypedDict or `None`
   (mirrors `guest_arches()` — a stale/hand-edited row never crashes a consumer).
@@ -111,10 +125,12 @@ that exact path — there is no new worker→DB write-back, and no dependency on
   means "no CPU baseline recorded" — a pre-migration System, a local/fault System, or a remote
   Resource that advertises no `host_cpu` because it has not been re-registered since this
   feature shipped). Mirrors `0067_system_accel.sql`.
-- **Resolved at mint** by a `_resolve_new_system_cpu` helper alongside `_resolve_new_system_accel`:
-  it reads the bound Resource's `capability_view.host_cpu()` and writes the resulting `HostCpu`
-  (or NULL) into the mint INSERT. No live libvirt call; the value is the same authoritative
-  `host_cpu` the host advertised at discovery, frozen onto this System.
+- **Resolved at mint** from the bound Resource's `capability_view.host_cpu()`, written as `HostCpu`
+  (or NULL) into the mint INSERT. `_resolve_new_system_accel` already loads that Resource
+  (`RESOURCES.get`) inside the same mint transaction; to avoid a second round-trip, resolve accel
+  **and** `resolved_cpu` from a **single** Resource load — fetch the Resource once and pass its
+  `capability_view` to both resolvers (or fold both into one helper). No live libvirt call; the
+  value is the `host_cpu` the host advertised at its last registration, frozen onto this System.
 - **Frozen per System.** Because it is a mint-time snapshot, a later host re-registration or
   hardware change does **not** retroactively alter a provisioned System's `resolved_cpu` — it
   records the baseline the System was minted against, which is the honest post-selection answer.
@@ -152,7 +168,13 @@ that exact path — there is no new worker→DB write-back, and no dependency on
     `host_cpu.model` is non-empty; for a model the test pins as known-in-table it also asserts
     `baseline_level` is ≥ `x86-64-v2` (the EL9 floor). For an unmapped model the assertion is only
     that `baseline_level` is absent (never a wrong level). Skips cleanly without the remote host env.
-11. `just ci` is green (lint, type, lint-shell, lint-workflows, check-mermaid, test), including
+11. A `live_vm`-gated **reconcile** test closes the prediction-vs-reality loop (test-only — not a
+    product read path): it provisions (or inspects an operator-provided) domain on the same host
+    and asserts the discovery-advertised `host_cpu.model` **equals** the concrete `<cpu><model>`
+    the running domain reports in its host-model-expanded XML. This is the falsifiable proof that
+    the `getDomainCapabilities` arguments predict the configuration the renderer actually builds;
+    a mispinned `machine`/`virttype`/`arch` fails it. Skips cleanly without the remote host/image.
+12. `just ci` is green (lint, type, lint-shell, lint-workflows, check-mermaid, test), including
     regenerated generated docs.
 
 ## Failure modes & edges
@@ -220,12 +242,19 @@ The remote-libvirt capabilities row is `insert-if-absent, refreshed only by re-r
 - **Existing remote hosts must be re-registered** (`resources.register_*` / `reconcile_resources`
   over the config overlay) to gain `host_cpu`; until then `resources.describe` omits it and a
   newly minted System's `resolved_cpu` is NULL. This is expected, not a defect: the feature is
-  additive and degrades to "absent", never to a wrong value. The rollout note is called out in
-  the operator docs delta (host-registration section).
-- **`host_cpu` is a registration-time snapshot.** If a host's CPU/microcode/libvirt changes, the
-  advertised `host_cpu` is stale until re-registration — identical to how `vcpus`/`memory_mb`
-  behave today. `resolved_cpu`, being a mint-time snapshot, deliberately freezes the value a
-  System was provisioned against and does not chase later host changes.
+  additive and, when unpopulated, degrades to **absent** rather than emitting a value. The rollout
+  note is called out in the operator docs delta (host-registration section).
+- **`host_cpu` is a registration-time snapshot, and can lag the host.** If a host's
+  CPU/microcode/libvirt changes after registration, the advertised `host_cpu` is stale until the
+  host is re-registered — identical to how `vcpus`/`memory_mb` behave today. `resolved_cpu`, being
+  a mint-time snapshot of that advertised value, can therefore record a baseline that lags the
+  host's *current* host-model resolution (e.g. a microcode update that disables a feature). It is
+  **the baseline advertised at the bound host's last registration, not a live-verified reading** —
+  honest for planning and for "what this host claimed", but an agent needing certainty about a
+  specific instruction-set extension should confirm against the running guest, and operators
+  should re-register a host after a CPU/microcode/libvirt change. This registration-driven
+  freshness model (no per-field `discovered_at` timestamp) is the existing capabilities contract;
+  adding a freshness marker is a possible follow-up, out of scope here.
 
 ## Notes
 
