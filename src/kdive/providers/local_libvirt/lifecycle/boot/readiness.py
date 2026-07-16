@@ -53,13 +53,24 @@ class _DomainExitProbe(NamedTuple):
     error: str | None = None
 
 
+def first_crash_signature(text: str) -> re.Match[str] | None:
+    """Return the first kernel-crash-signature match in ``text``, or ``None``.
+
+    The single source of truth for the crash-signature matcher shared by boot readiness and the
+    ``watch_for_crash`` console watch (#984). ``match.group(0)`` is the matched literal (e.g.
+    ``"Kernel panic"``, ``"KASAN:"``). Case-sensitive, word-boundaried where the bare tokens
+    (``BUG:``/``Oops:``) would otherwise match benign substrings (``DEBUG:``).
+    """
+    return _CRASH_SIGNATURE.search(text)
+
+
 def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
     """Classify a console capture as ready, crashed, or pending."""
     text = data.decode("utf-8", errors="replace")
     marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]
-    if _CRASH_SIGNATURE.search(region):
+    if first_crash_signature(region) is not None:
         return ConsoleVerdict.CRASHED
     return ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING
 
