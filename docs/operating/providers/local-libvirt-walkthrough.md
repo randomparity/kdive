@@ -44,6 +44,15 @@ sudo apt-get install -y \
   docker.io docker-compose-v2 gdb
 ```
 
+> **On a POWER (`ppc64le`) host** the set above targets an `x86_64` host. Swap `qemu-system-x86`
+> for `qemu-system-ppc` — the native POWER emulator, which `./scripts/check-setup-deps.sh` names
+> for you — and install a **Rust toolchain** before the `uv sync` below: `pydantic-core` and the
+> `just`/`prek` CLIs have no `ppc64le` wheels and build from source
+> ([rustup](https://rustup.rs); [ADR-0360](../../adr/0360-arch-aware-rust-dep-check.md)).
+> A ppc64le guest on a POWER host runs native under KVM-HV. The
+> [cross-platform development guide](../../development/cross-platform.md) and the
+> [POWER host bring-up runbook](../runbooks/power-host-bringup.md) cover the POWER path end to end.
+
 Add yourself to the `libvirt`, `kvm`, and `docker` groups, then **start a new login shell** so the
 membership takes effect:
 
@@ -428,6 +437,14 @@ inventory, but the path is invisible to an agent without host access):
   "provider": {"local-libvirt": {"rootfs":
     {"kind": "local", "path": "/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2"}}}
 ```
+
+> **On a POWER (`ppc64le`) host**, set `"arch": "ppc64le"` in the profile and boot the catalog's
+> `fedora-kdive-ready-44-ppc64le` image; the rest of the flow is identical. The domain's machine
+> type (`pseries`), console (`hvc0`), and CPU model are derived from the profile arch. The guest
+> runs native under KVM-HV on POWER. A **cross-arch** `ppc64le` guest on an `x86_64` host instead
+> runs under TCG emulation, where the provider scales boot-readiness deadlines by
+> `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10.0`) — see
+> [Cross-architecture guests](../install.md#cross-architecture-guests).
 
 A successful provision yields a running `kdive-<system-id>` domain (`virsh -c qemu:///system list`)
 and a System in state `ready`. For the deep build → boot → debug steps (the four capture methods
