@@ -329,6 +329,11 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _COMMAND_BY_NAME[args.command].handler(args, secret_registry, telemetry)
     except CategorizedError as error:
+        # Land the failure on the structured-log floor (ADR-0090) for the long-running
+        # commands a deployment scrapes, then print the actionable details to the operator's
+        # stderr. The JSON formatter renders a fixed field schema, so the category and message
+        # go in the record's message rather than as dropped `extra=` fields.
+        _log.error("%s command failed (%s): %s", args.command, error.category, error)
         _emit_categorized_error(error)
         raise SystemExit(exit_code_for_category(error.category)) from error
 
