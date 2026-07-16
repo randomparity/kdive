@@ -50,6 +50,11 @@ baseline instead of tracking the host. The CPU mode is currently hardcoded per-a
   the bound host only; it does not steer allocation to a host that can satisfy a pin.
 - A hard guarantee that the TCG machine-default always live-reads (best-effort by operator decision;
   NULL + logged where the libvirt expand does not resolve).
+- **Enforcing a CPU pin against the bound rootfs image's ISA floor.** kdive's image catalog carries
+  no declared per-image minimum ISA today, so admission validates only host-deliverability; a pin
+  below the image floor (e.g. sub-`x86-64-v2` under EL9) non-boots and is disclosed in the field
+  text as the agent's responsibility. Enforcing it is a tracked follow-up (requires an
+  image-declared floor), not this issue.
 - fault-inject CPU surfaces (a fake; unchanged).
 
 ## Design overview
@@ -57,39 +62,64 @@ baseline instead of tracking the host. The CPU mode is currently hardcoded per-a
 Three surfaces, composed so the control allow-list **is** the visibility surface. Structured as
 three phases (→ three commit groups in one PR).
 
-### Phase A — local discovery: `host_cpu` + `selectable_cpus`
+### Phase A — local discovery: `host_cpu` (native) + `selectable_cpus` (per-arch)
 
 `LocalLibvirtDiscovery.list_resources` advertises two additive `capabilities` jsonb keys (no
 migration), agent-facing via `resource_capability_data` (`mcp/tools/_resource_envelopes.py`):
 
 ```
-capabilities.host_cpu       = {model, vendor?, arch, baseline_level?}   # reuses ADR-0368 shape
-capabilities.selectable_cpus = ["<model-name>", ...]                    # sorted, usable models
+capabilities.host_cpu        = {model, vendor?, arch, baseline_level?}    # the host's NATIVE CPU
+capabilities.selectable_cpus = {"<arch>": ["<model-name>", ...], ...}     # per-arch, sorted usable
 ```
 
-- **`host_cpu` source is the default accel mode:**
-  - **x86 host-passthrough** → parse the host's `getCapabilities()` `<host><cpu><model>`/`<vendor>`.
-    A new `parse_host_capabilities_cpu(caps_xml)` in `providers/shared/libvirt_xml.py` (defusedxml).
-    ADR-0368's `getDomainCapabilities` host-model source would **under-report** a passthrough guest,
-    so passthrough reads the host block. `baseline_level` runs the existing
-    `cpu_baseline.baseline_level(model, disabled=())` (no disabled features in the host block).
-  - **ppc64le host-model** → reuse ADR-0368's `parse_host_cpu(getDomainCapabilities(...))`. Level
-    omitted (non-x86).
-- **`selectable_cpus` source** → `getDomainCapabilities` `<cpu><mode name='custom'>`
-  `<model usable='yes'>` names, parsed by a new `parse_selectable_cpus(dom_caps_xml)` (defusedxml),
-  returning a sorted, de-duplicated list; `None`/empty when the mode is unsupported or the parse
-  faults. This is the exact set libvirt will accept in a `custom`-mode `<model>`, so it is the
-  honest allow-list for Phase B.
-- **The libvirt reads (`getDomainCapabilities`, and `getCapabilities` for the x86 host `<cpu>`) are
-  guarded.** `arch`/`vcpus`/`memory_mb`/`transports` are computed first (unchanged); the CPU reads +
-  parse run in a `try` catching any `libvirt.libvirtError`, logging at warning and omitting the
-  field. A new advisory field never drops a host from discovery. (`_LibvirtConn` in local
-  `discovery.py` gains `getDomainCapabilities`; the test fake implements it — mirrors ADR-0368's
-  widening of the remote `_LibvirtConn`.)
+**Arch scoping (a local host is multi-arch).** Local discovery advertises `guest_arches` with
+possibly several entries and mixed default accel — the epic-#1139 box is an x86 host that advertises
+`{x86_64: kvm, ppc64le: tcg}` (AC#12/#13 target the same host). "The host's CPU" and "the CPU a given
+guest arch gets" are different concepts, so the two keys are scoped differently:
+
+- **`host_cpu` is the host's single *native* CPU** — the arch that runs under KVM
+  (`host-passthrough`/`host-model`). There is exactly one physical host CPU; a foreign/TCG-only arch
+  (ppc64le emulated on x86) has **no host CPU** — its unpinned guest gets a QEMU machine-default,
+  visible only post-provision via `resolved_cpu` (Phase C) or by pinning from `selectable_cpus`. The
+  native arch is the one whose `arch_traits` default accel is `kvm` **and** the host's own arch
+  (`parse_capabilities_arch`); `host_cpu.arch` records it. Shape unchanged from ADR-0368 (flat).
+  Sourced by the native default mode:
+  - **native x86 host-passthrough** → parse the host's `getCapabilities()` `<host><cpu><model>`/
+    `<vendor>`. A new `parse_host_capabilities_cpu(caps_xml)` in `providers/shared/libvirt_xml.py`
+    (defusedxml). ADR-0368's `getDomainCapabilities` host-model source would **under-report** a
+    passthrough guest, so passthrough reads the host block. `baseline_level` runs the existing
+    `cpu_baseline.baseline_level(model, disabled=())`.
+  - **native ppc64le host-model** → reuse ADR-0368's `parse_host_cpu(getDomainCapabilities(...))`.
+    Level omitted (non-x86).
+- **`selectable_cpus` is keyed by guest arch** (mirroring `guest_arches`' per-arch shape), because
+  the pinnable model set is arch- and virttype-sensitive and the knob (Phase B) must validate a
+  pin against the profile's own arch. For **each advertised guest arch**, discovery reads that
+  arch's `getDomainCapabilities` `<cpu><mode name='custom'>` `<model usable='yes'>` names via a new
+  `parse_selectable_cpus(dom_caps_xml)` (defusedxml) → sorted, de-duplicated list; the arch key is
+  omitted when the mode is unsupported or the parse faults. This is the exact set libvirt accepts in
+  a `custom`-mode `<model>` **for that arch/virttype**, so it is the honest per-arch allow-list.
+
+**`getDomainCapabilities` arguments are derived from the same sources the provisioner uses**, per
+arch — not literals — because custom/host-model resolution is sensitive to `(arch, machine,
+virttype)` (ADR-0368 lines 46–59 established this for remote):
+- `arch=` the guest arch being enumerated.
+- `machine=arch_traits(arch).machine` (the renderer's default — `q35`/`pseries`; a
+  `domain_xml_params["machine"]` override is a per-System profile value not known at discovery, so
+  discovery uses the arch default and the pin check tolerates that, see Phase B).
+- `virttype=` the arch's default accel (`"kvm"` for the native/KVM arch, `"qemu"`/TCG for a foreign
+  arch) — the same `<domain type>` the renderer emits.
+- `emulator=` **omitted** for KVM (libvirt's default binary, matching the renderer); the discovered
+  `qemu-system-<arch>` path for a TCG arch (matching `_append_emulator`).
+
+- **All libvirt reads are guarded.** `arch`/`vcpus`/`memory_mb`/`transports` are computed first
+  (unchanged); each CPU read + parse runs in a `try` catching any `libvirt.libvirtError`, logging at
+  warning and omitting *that* field (a per-arch `selectable_cpus` failure omits only that arch key).
+  A new advisory field never drops a host from discovery. (`_LibvirtConn` in local `discovery.py`
+  gains `getDomainCapabilities`; the test fake implements it — mirrors ADR-0368's remote widening.)
 - **Typed reads** in `domain/catalog/resource_capabilities.py`: reuse `host_cpu()` / `HOST_CPU_KEY`;
-  add `selectable_cpus()` reader + `SELECTABLE_CPUS_KEY` + `_KNOWN_KEYS` entry (defensive: drops a
-  malformed row to `None`/empty, mirrors `guest_arches()`). Add `selectable_cpus` to
-  `resource_capability_data` so it flows to `resources.describe`.
+  add `selectable_cpus()` reader (returns `dict[str, list[str]]`, empty on a malformed/absent key) +
+  `SELECTABLE_CPUS_KEY` + `_KNOWN_KEYS` entry (defensive, mirrors `guest_arches()`). Add
+  `selectable_cpus` to `resource_capability_data` so it flows to `resources.describe`.
 
 ### Phase B — agent-selectable CPU pin, validated against `selectable_cpus`
 
@@ -102,17 +132,34 @@ capabilities.selectable_cpus = ["<model-name>", ...]                    # sorted
   a pinned model is valid under both). When `None`, today's behavior exactly (host-passthrough /
   host-model under KVM, nothing under TCG) — **byte-identical unpinned output** (regression-tested).
   The provisioner threads `profile...cpu.model` into the render call.
-- **Admission validation.** At mint, when the profile pins `cpu.model`, validate it against the
-  bound Resource's `capability_view.selectable_cpus()`; reject `CONFIGURATION_ERROR` with an
-  actionable message (the pinned model + the advertised set) if absent. This is a new check in the
-  `_resolve_new_system_bindings` / profile-policy path (co-located with the accel mis-arch and
-  fadump checks, which already fail-closed there). A profile with no bound Resource advertising
-  `selectable_cpus` (local host not re-discovered) and a pin → `CONFIGURATION_ERROR` (fail-closed:
-  never render a pin the host cannot be shown to support).
+- **Admission validation (host-deliverability, per-arch).** At mint, when the profile pins
+  `cpu.model`, validate membership in the bound Resource's `capability_view.selectable_cpus()`
+  **entry for `profile.arch`** (`selectable_cpus().get(profile.arch)`); reject `CONFIGURATION_ERROR`
+  with an actionable message (the pinned model + `profile.arch` + that arch's advertised set) if
+  absent. This is a new check in the `_resolve_new_system_bindings` / profile-policy path
+  (co-located with the accel mis-arch and fadump checks, which already fail-closed there). A profile
+  with a pin but no bound Resource advertising `selectable_cpus[profile.arch]` (local host not
+  re-discovered) → `CONFIGURATION_ERROR` (fail-closed: never render a pin the host cannot be shown to
+  support for that arch).
+- **ISA-floor is the agent's responsibility, made honest — NOT enforced here.** `selectable_cpus` is
+  the host's full `usable` set, which on every x86 host includes sub-`x86-64-v2` models (`qemu64`,
+  `kvm64`, `Nehalem`, …). Pinning one under an EL9/RHEL-family rootfs reintroduces the ADR-0294
+  glibc PID-1 abort (a below-v2 CPU never reaches userspace) — through the new knob. This admission
+  check validates only that the **host can deliver** the model, **not** that the **bound rootfs
+  image can run on it**, because kdive's image catalog carries no declared per-image ISA floor to
+  check against (verified: no ISA-floor field in `domain/catalog/images`). Rather than silently
+  ship that footgun, the contract is made explicit at the surface the agent reads:
+  - The pin `Field(description=...)` and the `resources.describe` `selectable_cpus` field text state
+    that a model **below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a
+    non-booting System**, that admission validates host-deliverability only, and that the
+    `x86-64-vN` rungs (compared to the image's baseline) are the safe portable picks.
+  - Enforcing a pin against an image-declared ISA floor is a **follow-up** (needs the image catalog
+    to declare a floor); filed as a non-goal here so the gap is tracked, not hidden.
 - **Agent-facing contract.** Update the wrapper docstring + `Field(description=...)` for the pin
-  field and for `resources.describe`'s `selectable_cpus` (the FastMCP-serialized surface), pointing
-  the agent at `selectable_cpus` and the `x86-64-vN` portable rungs for deterministic-reproducer
-  pinning. Update the profile-schema / config docs the generated-doc guard covers.
+  field and for `resources.describe`'s `selectable_cpus` (the FastMCP-serialized surface), per the
+  ISA-floor contract above, pointing the agent at `selectable_cpus[arch]` and the `x86-64-vN`
+  portable rungs for deterministic-reproducer pinning. Update the profile-schema / config docs the
+  generated-doc guard covers.
 
 ### Phase C — live-verified `resolved_cpu` (local)
 
@@ -142,8 +189,11 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
 1. `resources.describe` on a local-libvirt x86 host returns `data.host_cpu` with `model`/`vendor`/
    `arch`/`baseline_level` sourced from the host `<host><cpu>` block (a `SapphireRapids` host →
    `x86-64-v4`). Unit test with an injected fake connection.
-2. `resources.describe` on a local-libvirt host returns `data.selectable_cpus` (sorted usable model
-   names from domain-capabilities custom mode). Unit test.
+2. `resources.describe` on a local-libvirt host returns `data.selectable_cpus` as a **per-arch map**
+   (`{arch: [sorted usable model names], ...}`) with an entry for each advertised guest arch, sourced
+   from that arch's domain-capabilities custom mode with the arch-derived `machine`/`virttype`/
+   `emulator` args. A multi-arch fake (x86 KVM + ppc64le TCG) asserts both entries and their args.
+   Unit test.
 3. `parse_host_capabilities_cpu` and `parse_selectable_cpus` return `None`/empty on malformed/empty
    XML and a populated result on a real capabilities document; edge tests cover missing `<model>`,
    no custom mode, and non-x86 (level omitted). Property/edge unit tests.
@@ -155,11 +205,17 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
 6. A `LibvirtProfile` with `cpu.model` set renders `<cpu mode='custom' check='partial'><model>…`;
    a profile without `cpu` renders **byte-identical** XML to the pre-#1227 renderer for x86-KVM,
    ppc64le-KVM, and TCG (three golden/regression assertions).
-7. Admission **accepts** a pin whose `cpu.model ∈ selectable_cpus` and **rejects** (`CONFIGURATION_
-   ERROR`, message names the model + advertised set) a pin not in the set, and a pin when the bound
-   Resource advertises no `selectable_cpus`. Service/unit tests for all three.
+7. Admission **accepts** a pin whose `cpu.model ∈ selectable_cpus[profile.arch]` and **rejects**
+   (`CONFIGURATION_ERROR`, message names the model + `profile.arch` + that arch's advertised set): a
+   pin absent from the arch's set, a pin present only in a *different* arch's set (wrong-arch), and a
+   pin when the bound Resource advertises no `selectable_cpus[profile.arch]`. Service/unit tests for
+   all four.
 8. A pinned System's provisioning end-to-end (renderer + admission) uses the pinned model; unit/
    service level (no `live_vm` gate needed to prove admission + render).
+8a. The pin `Field(description=...)` and the `selectable_cpus` field text state the ISA-floor
+    contract (a sub-`x86-64-v2` pin non-boots EL9; admission validates host-deliverability only).
+    A doc/schema test asserts the caveat text is present in the serialized tool schema, so the
+    footgun is disclosed at call time rather than silent.
 9. Phase C: given a running domain whose `VIR_DOMAIN_XML_UPDATE_CPU` XML carries a concrete
    `<model>`, `parse_domain_resolved_cpu` returns the `HostCpu`, and the post-provision path writes
    it to `systems.resolved_cpu`; given an unexpanded/`<model>`-less XML or a raising read, it writes
@@ -172,9 +228,13 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
     assert the running domain resolves to it and `systems.get.resolved_cpu` reflects it. Skips
     cleanly without the KVM host.
 13. `live_vm_tcg` (ppc64le, TCG on the epic-#1139 box): provision a ppc64le System; assert
-    `resources.describe` advertised `host_cpu`/`selectable_cpus`, and `resolved_cpu` is either the
-    live-read machine-default `<model>` **or** NULL-with-logged-reason (best-effort). Skips cleanly
-    without the foreign emulator.
+    `resources.describe` advertised `selectable_cpus["ppc64le"]`. For the Phase-C TCG resolved read,
+    the proof records a **definite outcome** with the box's QEMU/libvirt version: **either** a
+    concrete `<model>` (then `resolved_cpu` equals the running domain's actual resolved CPU — a
+    falsifiable match, closing the invisible-default gap on that platform) **or** a recorded
+    NULL-with-reason (the expand does not resolve the machine-default at that version — the
+    documented best-effort limitation). The test/proof-note must state which occurred; an untested
+    "either passes" is not acceptable. Skips cleanly without the foreign emulator.
 14. `just ci` green (lint, type, lint-shell, lint-workflows, check-mermaid, test), including
     regenerated generated docs.
 
@@ -184,10 +244,20 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   field is omitted; discovery succeeds.
 - **`getDomainCapabilities` / host-`<cpu>` read raises** (old libvirt, transient fault) → caught in
   `list_resources`, logged, field omitted, resource discovers intact.
-- **Host advertises no custom mode / empty usable set** → `selectable_cpus` omitted; a pin against
-  that host fails admission `CONFIGURATION_ERROR` (fail-closed).
-- **Pinned model not in `selectable_cpus`** → admission `CONFIGURATION_ERROR` (never render an
-  unbootable custom `<cpu>`).
+- **Host advertises no custom mode / empty usable set for an arch** → that arch's `selectable_cpus`
+  entry omitted; a pin for that arch fails admission `CONFIGURATION_ERROR` (fail-closed).
+- **Pinned model not in `selectable_cpus[profile.arch]`** (absent, or present only for another arch)
+  → admission `CONFIGURATION_ERROR` (never render a custom `<cpu>` the host can't deliver for that
+  arch).
+- **Pinned model is host-deliverable but below the rootfs image's ISA floor** (e.g. `qemu64` on an
+  EL9 System) → admission **accepts** it (host-deliverability holds); the System boots to a glibc
+  PID-1 abort (ADR-0294). This is disclosed in the pin/`selectable_cpus` field text as the agent's
+  responsibility; kdive has no per-image ISA floor to enforce (follow-up non-goal). Not a silent
+  admission bug — a documented contract.
+- **`domain_xml_params["machine"]` override differs from the arch default** → discovery advertised
+  `selectable_cpus` for the arch-default machine; the pin check tolerates this (the usable model set
+  is machine-stable in practice, and a mismatch surfaces as a libvirt define error, not a silent
+  wrong boot). Documented; a per-machine allow-list is out of scope.
 - **Unpinned profile** → byte-identical legacy render; no new failure mode.
 - **Phase C read raises / returns no concrete `<model>` / TCG machine-default unexpanded** →
   `resolved_cpu` NULL, logged, provisioning succeeds (best-effort).

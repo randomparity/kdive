@@ -42,23 +42,37 @@ default (unpinned) provisioning path is byte-identical to today.
 `LocalLibvirtDiscovery.list_resources` advertises two additive `capabilities` jsonb keys (no
 migration — jsonb is schema-less, as ADR-0338), both agent-facing via `resources.list/describe`:
 
-- **`host_cpu`** — the baseline the *default (unpinned)* guest gets, sourced by the default mode:
-  - **x86 host-passthrough** → the host's `getCapabilities()` `<host><cpu>` (model/vendor). This is
-    the passthrough-honest source (ADR-0368 rejected the host block for the *host-model* case; the
-    reverse holds here — host-model would under-report a passthrough guest).
-  - **ppc64le host-model** → `getDomainCapabilities` host-model block (ADR-0368's path).
-  - `baseline_level` stays x86-only (below); a POWER model carries `model`/`vendor`/`arch`, no level.
-- **`selectable_cpus`** — the sorted list of CPU model names this host can deliver, read from the
-  `getDomainCapabilities` `<cpu><mode name='custom'>` `<model usable='yes'>` enumeration. This is the
-  honest, host-derived allow-list for the control knob (§3).
+A local host is **multi-arch** (the epic-#1139 box advertises `{x86_64: kvm, ppc64le: tcg}`), and
+"the host's CPU" and "the CPU a guest arch gets" are different concepts, so the two keys are scoped
+differently:
 
-Both reads are **guarded**: `arch`/`vcpus`/`memory_mb`/`transports` are computed first (unchanged);
-the CPU reads + parse run in a `try` that catches any `libvirt.libvirtError`, logs at warning, and
-omits the field. A new advisory field never drops a host from discovery. Parsers live in
-`providers/shared/libvirt_xml.py` (defusedxml, domain-free), mirroring `parse_host_cpu` /
-`parse_guest_arches`. `host_cpu` reuses ADR-0368's `HostCpu` TypedDict, `host_cpu()` reader,
-`HOST_CPU_KEY`, and `host_cpu_json` serializer; `selectable_cpus` adds a sibling
-`SELECTABLE_CPUS_KEY` + defensive reader.
+- **`host_cpu`** (flat, ADR-0368 shape) — the host's single *native* CPU, i.e. the arch that runs
+  under KVM (`host-passthrough`/`host-model`) **and** is the host's own arch. A foreign/TCG-only arch
+  has no host CPU (its unpinned guest gets a QEMU machine-default, seen only post-provision via
+  `resolved_cpu` or by pinning). Sourced by the native default mode:
+  - **native x86 host-passthrough** → the host's `getCapabilities()` `<host><cpu>` (model/vendor).
+    This is the passthrough-honest source (ADR-0368 rejected the host block for the *host-model*
+    case; the reverse holds here — host-model would under-report a passthrough guest).
+  - **native ppc64le host-model** → `getDomainCapabilities` host-model block (ADR-0368's path).
+  - `baseline_level` stays x86-only (below); a POWER model carries `model`/`vendor`/`arch`, no level.
+- **`selectable_cpus`** (per-arch map, `{arch: [models]}`) — for **each** advertised guest arch, the
+  sorted usable model names from that arch's `getDomainCapabilities` `<cpu><mode name='custom'>`
+  `<model usable='yes'>` enumeration. Keyed by arch (mirroring `guest_arches`) because the pinnable
+  set is arch/virttype-sensitive and the knob (§3) validates a pin against the *profile's* arch.
+
+The `getDomainCapabilities` args are derived per arch from the same sources the provisioner uses
+(`arch=`guest arch, `machine=arch_traits(arch).machine`, `virttype=`the arch's default accel,
+`emulator=`omitted for KVM / the discovered path for TCG) — not literals — exactly as ADR-0368
+established for the remote read (host-model/custom resolution is `(arch, machine, virttype)`
+-sensitive).
+
+All reads are **guarded**: `arch`/`vcpus`/`memory_mb`/`transports` are computed first (unchanged);
+each CPU read + parse runs in a `try` that catches any `libvirt.libvirtError`, logs at warning, and
+omits *that* field (a per-arch `selectable_cpus` fault omits only that arch key). A new advisory
+field never drops a host from discovery. Parsers live in `providers/shared/libvirt_xml.py`
+(defusedxml, domain-free), mirroring `parse_host_cpu` / `parse_guest_arches`. `host_cpu` reuses
+ADR-0368's `HostCpu` TypedDict, `host_cpu()` reader, `HOST_CPU_KEY`, and `host_cpu_json` serializer;
+`selectable_cpus` adds a sibling `SELECTABLE_CPUS_KEY` + defensive per-arch reader.
 
 ### 2. `baseline_level` remains x86-only; non-x86 carries the raw model
 
@@ -74,16 +88,23 @@ frozen request input, ADR-0003): `cpu: {model: <name>}`.
 
 - **Omitted (default)** → today's per-arch `kvm_cpu_mode` (host-passthrough x86 / host-model
   ppc64le / no-`<cpu>` TCG). Operator default = host CPU. **Zero behavior change; byte-identical XML.**
-- **Pinned** → admission validates `cpu.model ∈` the bound Resource's advertised `selectable_cpus`
-  (fail-closed `CONFIGURATION_ERROR` if the host cannot deliver it — never render an unbootable
-  domain). The renderer emits `<cpu mode='custom' check='partial'><model>…</model></cpu>` (the
-  `custom`-mode block libvirt validates against the same `usable` set discovery read).
+- **Pinned** → admission validates `cpu.model ∈ selectable_cpus[profile.arch]` (fail-closed
+  `CONFIGURATION_ERROR` if that arch's set lacks it, or the arch advertises no set — never render an
+  undeliverable domain). The renderer emits `<cpu mode='custom' check='partial'><model>…</model></cpu>`
+  (the `custom`-mode block libvirt validates against the same `usable` set discovery read).
 
-The knob's allow-list is exactly the discovery `selectable_cpus` surface, so visibility and control
-are one contract: an agent reads `resources.describe` → `selectable_cpus`, picks a portable rung
-(e.g. drop a `SapphireRapids` host to `x86-64-v2`), and admission enforces the pick. The
-agent-facing wrapper docstring + `Field` text (the FastMCP-serialized contract) direct the agent to
-`selectable_cpus` for deterministic-reproducer CPU pinning.
+The knob's allow-list is exactly the per-arch discovery `selectable_cpus` surface, so visibility and
+control are one contract: an agent reads `resources.describe` → `selectable_cpus[arch]`, picks a
+portable rung (e.g. drop a `SapphireRapids` host to `x86-64-v2`), and admission enforces the pick.
+
+**The check is host-deliverability, not image-compatibility.** `selectable_cpus` is the host's full
+`usable` set, which includes sub-`x86-64-v2` models (`qemu64`, `kvm64`, …); pinning one under an
+EL9/RHEL-family rootfs reintroduces the ADR-0294 glibc PID-1 abort. kdive's image catalog declares
+no per-image ISA floor, so admission cannot check it. Rather than a silent footgun, the pin +
+`selectable_cpus` `Field` text (the FastMCP-serialized contract) states that a model below the
+image's ISA floor (x86-64-v2 for EL9) non-boots, that admission validates host-deliverability only,
+and points at the `x86-64-vN` rungs as the safe portable picks. Enforcing a pin against an
+image-declared floor is a tracked follow-up.
 
 ### 4. `resolved_cpu` is live-verified for local, mint-snapshot for remote
 
@@ -151,9 +172,21 @@ cannot be stale (it is read from the domain that actually booted).
   feature. A hard TCG-expand guarantee, if needed, is a follow-up.
 - **A new `resources.cpu` / `systems.cpu` tool.** Rejected: additive fields on existing reads match
   the envelope convention (ADR-0368); a new tool is unwarranted agent surface.
+- **Enforce a pin against the bound rootfs image's ISA floor at admission.** Deferred, not rejected
+  on merit: it is the right guard, but kdive's image catalog declares no per-image minimum ISA to
+  check against. Adding one is a distinct change; here the pin check validates host-deliverability
+  and the field text discloses the floor as the agent's responsibility. Tracked as a follow-up.
+- **One flat `host_cpu`/`selectable_cpus` per host.** Rejected: a local host is multi-arch (native
+  KVM + foreign TCG), so a single set cannot honestly describe both and admission would validate a
+  pin against the wrong arch. `host_cpu` is the single native host CPU; `selectable_cpus` is keyed
+  per guest arch.
 
 ## Notes
 
-The TCG live-read reliability is the one API-uncertain piece; it is proven on the epic-#1139 dev box
-(foreign qemu emulator) by the `live_vm` / `live_vm_tcg` proofs, and degrades to a logged NULL where
-the expand does not resolve. ADR-0368's remote surfaces and mint mechanism are unchanged.
+The TCG live-read reliability is the one API-uncertain piece. The `live_vm_tcg` proof on the
+epic-#1139 dev box (foreign qemu emulator) records a **definite** outcome with the box's
+QEMU/libvirt version — either a concrete resolved `<model>` (matched against the running domain, the
+gap-closing proof) or a logged NULL with the version and reason (the documented best-effort
+limitation on that version) — never an untested "either passes." Where the expand does not resolve,
+`resolved_cpu` degrades to a logged NULL. ADR-0368's remote surfaces and mint mechanism are
+unchanged.
