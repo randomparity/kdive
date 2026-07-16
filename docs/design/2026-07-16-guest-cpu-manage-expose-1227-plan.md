@@ -36,7 +36,7 @@
 | `src/kdive/providers/local_libvirt/lifecycle/xml.py` (modify) | `_append_guest_cpu` custom-mode `cpu_model` param; thread through both renderers | 7 |
 | `src/kdive/services/systems/admission.py` (modify) | per-arch pin validation against `selectable_cpus[arch]` | 8a |
 | `src/kdive/providers/local_libvirt/lifecycle/provisioning.py` (modify) | thread `cpu.model` into render; `read_resolved_cpu()` provider method | 7, 9 |
-| `src/kdive/db/repositories.py` (modify) | state-guarded `set_resolved_cpu()` write | 10 |
+| `src/kdive/db/repositories.py` (modify) | generic state-guarded `set_json_column()` write | 10 |
 | `src/kdive/jobs/handlers/systems.py` (modify) | persist `resolved_cpu` at the provision/reprovision READY boundary | 10 |
 | `src/kdive/mcp/tools/lifecycle/systems/registrar.py` (modify) | `systems.get` wrapper docstring — `resolved_cpu` split contract | 10 |
 | `tests/...` (create/modify) | unit/service/live tests per task | all |
@@ -94,12 +94,13 @@ In `_resolve_new_system_bindings`, decide remote-vs-local from the profile (`pro
     )
     # ADR-0369: the mint-time host_cpu snapshot is REMOTE-ONLY. Local resolved_cpu is a live read
     # (Phase C), not a mint snapshot of the native host CPU (wrong for a pin / a foreign-TCG guest).
-    is_remote = profile.provider.remote_libvirt is not None
+    # Use `remote_libvirt_section` (a plain optional field), NOT the `remote_libvirt` property —
+    # that property RAISES AttributeError for a local/fault profile (provisioning.py:257-261), and
+    # the caller's `except CategorizedError` would not catch it, aborting every local provision.
+    is_remote = profile.provider.remote_libvirt_section is not None
     resolved_cpu = host_cpu_json(caps) if is_remote else None
     return accel, resolved_cpu
 ```
-
-(Confirm the exact attribute name for the remote section on `profile.provider` against `profiles/provisioning.py` — `ProviderSection` uses `remote_libvirt_section`/`local_libvirt`; use the accessor the rest of the module already uses.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -553,7 +554,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 def test_cpu_pin_parsed():
     prof = ProvisioningProfile.model_validate({
         "arch": "x86_64",
-        "provider": {"local_libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
+        "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
                                        "cpu": {"model": "x86-64-v2"}}},
     })
     assert prof.provider.local_libvirt.cpu.model == "x86-64-v2"
@@ -562,7 +563,7 @@ def test_cpu_pin_parsed():
 def test_cpu_pin_defaults_none():
     prof = ProvisioningProfile.model_validate({
         "arch": "x86_64",
-        "provider": {"local_libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"}}},
+        "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"}}},
     })
     assert prof.provider.local_libvirt.cpu is None
 
@@ -572,12 +573,12 @@ def test_cpu_pin_rejects_empty_model():
     with pytest.raises(ValueError):
         ProvisioningProfile.model_validate({
             "arch": "x86_64",
-            "provider": {"local_libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
+            "provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "rocky9"},
                                            "cpu": {"model": ""}}},
         })
 ```
 
-(Use the profile dict shape the existing tests use; the exact provider-section alias — `local_libvirt` vs `local_libvirt_section` — must match the existing tests.)
+(The **wire** provider key is the hyphenated alias `local-libvirt` — `ResourceKind.LOCAL_LIBVIRT.value` — not the Python field name `local_libvirt_section`. `ProviderSection` has `extra="forbid"`, so the underscore key is rejected. The read-side accessor is `prof.provider.local_libvirt`. Copy an existing `test_provisioning.py` profile dict to be certain.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -639,7 +640,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `LibvirtProfile.cpu` (Task 6).
-- Produces: `_append_guest_cpu(domain, *, is_kvm, kvm_cpu_mode, cpu_model: str | None = None)` — when `cpu_model` is set, emit `<cpu mode='custom' check='partial'><model>NAME</model></cpu>` (KVM or TCG); when `None`, today's behaviour (byte-identical). `render_domain_xml` gains a `cpu_model: str | None = None` param threaded from the profile.
+- Produces: `_append_guest_cpu(domain, *, is_kvm, kvm_cpu_mode, cpu_model: str | None = None)` — when `cpu_model` is set, emit `<cpu mode='custom' check='partial'><model>NAME</model></cpu>` (KVM or TCG); when `None`, today's behaviour (byte-identical). `render_domain_xml`'s **public signature is unchanged** — it derives `cpu_model` internally from the profile (`section.cpu`) and threads it into `_build_baseline_domain`/`_append_guest_cpu`, so the provisioning call site is untouched.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -688,9 +689,7 @@ def _append_guest_cpu(
     ET.SubElement(domain, "cpu", mode=kvm_cpu_mode)
 ```
 
-Thread `cpu_model` through `_build_baseline_domain`/`render_domain_xml` (add `cpu_model: str | None = None` param). In `render_domain_xml`, read it from the profile: `cpu_model = section.cpu.model if section.cpu is not None else None`. Pass it in `_build_baseline_domain(... cpu_model=cpu_model)` → `_append_guest_cpu(... cpu_model=cpu_model)`. Leave `render_customization_domain_xml` unpinned (a build boot has no agent pin) — do **not** thread it there.
-
-In `provisioning.py`, `render_domain_xml` is called with the profile already, so reading `section.cpu` inside the renderer needs no change to the provisioning call site — but confirm the renderer reads `profile.provider.local_libvirt.cpu`, not a passed arg, to keep the call site stable.
+Do **not** add a `cpu_model` param to the public `render_domain_xml`. Inside `render_domain_xml`, after `section = profile.provider.local_libvirt`, derive `cpu_model = section.cpu.model if section.cpu is not None else None` and pass it into `_build_baseline_domain(... cpu_model=cpu_model)` (add the `cpu_model: str | None = None` param there) → `_append_guest_cpu(... cpu_model=cpu_model)`. The provisioning call site is unchanged (it already passes the profile). Leave `render_customization_domain_xml` unpinned (a build boot has no agent pin) — do **not** thread it there.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -858,23 +857,23 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 10: State-guarded persist + wire into the provision/reprovision READY boundary
 
 **Files:**
-- Modify: `src/kdive/db/repositories.py` (state-guarded `set_resolved_cpu`)
-- Modify: `src/kdive/jobs/handlers/systems.py` (call `read_resolved_cpu` + `set_resolved_cpu` at READY)
+- Modify: `src/kdive/db/repositories.py` (generic state-guarded `set_json_column`)
+- Modify: `src/kdive/jobs/handlers/systems.py` (call `read_resolved_cpu` + `set_json_column` at READY)
 - Modify: `src/kdive/mcp/tools/lifecycle/systems/registrar.py` (`systems.get` wrapper docstring)
 - Test: `tests/db/test_repositories*.py`, `tests/jobs/handlers/test_systems*.py`, `tests/mcp/.../test_systems_view*.py`
 
 **Interfaces:**
-- Consumes: `LocalLibvirtProvisioning.read_resolved_cpu` (Task 8), `System.resolved_cpu` (mig0070, #980).
-- Produces: `SYSTEMS.set_resolved_cpu(conn, system_id, value, allowed_states={PROVISIONING, REPROVISIONING, READY}) -> bool` — a `UPDATE systems SET resolved_cpu = %s WHERE id = %s AND state IN (...)`, serializing the jsonb like the base repo, returning whether a row was affected (no-op on a terminal row). The provision/reprovision handler reads the live CPU and writes it at the READY boundary, on both first provision and reprovision.
+- Consumes: `LocalLibvirtProvisioning.read_resolved_cpu` (Task 8), `System.resolved_cpu` (mig0070, #980), `ResourceKind.LOCAL_LIBVIRT`, `runtime.provisioner`.
+- Produces: a **generic** `StatefulRepository.set_json_column(conn, obj_id, column, value, allowed_states) -> bool` — `UPDATE {table} SET {column} = %s WHERE id = %s AND state = ANY(%s) RETURNING id`, serializing jsonb with `Jsonb` (the module's import — **not** `Json`), returning whether a row was affected (no-op on a terminal row). Generic (not a hardcoded `resolved_cpu`) so it is valid on any `StatefulRepository`; `column` is a caller-supplied `sql.Identifier`. The provision/reprovision handler, **after** the System reaches `READY`, reads the live CPU (via `asyncio.to_thread`) and calls `SYSTEMS.set_json_column(conn, system_id, "resolved_cpu", value, allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}))` — the same code path serves first provision and reprovision (both terminate at `READY`).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 # tests/db/test_repositories_resolved_cpu.py  (needs Docker; SKIPs without, KDIVE_REQUIRE_DOCKER=1 forces)
-async def test_set_resolved_cpu_writes_when_provisioning(...):
-    # System in PROVISIONING -> set_resolved_cpu writes the value, returns True.
-async def test_set_resolved_cpu_noop_when_terminal(...):
-    # System driven to CRASHED/TORN_DOWN -> set_resolved_cpu returns False, row unchanged (None).
+async def test_set_json_column_writes_when_ready(...):
+    # System in READY -> set_json_column('resolved_cpu', ...) writes the value, returns True.
+async def test_set_json_column_noop_when_terminal(...):
+    # System driven to CRASHED/TORN_DOWN -> set_json_column returns False, row unchanged (None).
 
 # tests/jobs/handlers/test_systems_resolved_cpu.py (fakes; no Docker)
 async def test_provision_persists_resolved_cpu_at_ready(...):
@@ -892,31 +891,50 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Add to `StatefulRepository` (so `SYSTEMS` gains it), serializing via the existing `_json_columns` machinery:
+Add a **generic** state-guarded payload write to `StatefulRepository` (so `SYSTEMS` gains it), using `Jsonb` (the module's existing import — there is no `Json` in scope) and a caller-supplied column identifier:
 
 ```python
-    async def set_resolved_cpu(
-        self, conn: AsyncConnection, obj_id: UUID, value: dict[str, JsonValue] | None,
-        allowed_states: frozenset[S],
+    async def set_json_column(
+        self, conn: AsyncConnection, obj_id: UUID, column: str,
+        value: dict[str, JsonValue] | None, allowed_states: frozenset[S],
     ) -> bool:
-        """Write ``resolved_cpu`` only while the row is in ``allowed_states`` (ADR-0369).
+        """Write a jsonb ``column`` only while the row is in ``allowed_states`` (ADR-0369).
 
         A state-guarded payload write (distinct from :meth:`update_state`, which transitions the
         state column). No-ops on a terminal row (crashed/reaped) so a post-provision live read
-        cannot resurrect a value on a torn-down System. Returns whether a row was updated.
+        cannot resurrect a value on a torn-down System. Returns whether a row was updated. Generic
+        (``column`` is any jsonb column) so it is valid on every ``StatefulRepository``.
         """
-        payload = Json(value) if value is not None else None
+        payload = Jsonb(value) if value is not None else None
         query = sql.SQL(
-            "UPDATE {table} SET resolved_cpu = %s WHERE id = %s AND state = ANY(%s) RETURNING id"
-        ).format(table=sql.Identifier(self._table))
+            "UPDATE {table} SET {column} = %s WHERE id = %s AND state = ANY(%s) RETURNING id"
+        ).format(table=sql.Identifier(self._table), column=sql.Identifier(column))
         async with conn.cursor() as cur:
             await cur.execute(query, (payload, obj_id, [s.value for s in allowed_states]))
             return await cur.fetchone() is not None
 ```
 
-(Match the module's existing `sql`/`Json` imports and cursor idioms; if `resolved_cpu` should honour `_json_columns` generically, factor a `set_json_column(column, ...)` — but a single named method is fine and clearer here.)
+**Wiring (finding-driven — this is the least-obvious part, pinned concretely).** `read_resolved_cpu` lives on `LocalLibvirtProvisioning`, **not** on the `Provisioner` protocol (`providers/ports/lifecycle.py` — it declares only `provision`/`teardown`/`reprovision`), and remote/fault-inject have no live local domain to read. So keep it local-only and narrow:
 
-In `jobs/handlers/systems.py`, at the provision **and** reprovision success path (where the System is driven to `READY`), for a local-libvirt System: call `resolved = provisioner.read_resolved_cpu(system_id)` then `await SYSTEMS.set_resolved_cpu(conn, system_id, resolved, allowed_states=frozenset({SystemState.PROVISIONING, SystemState.REPROVISIONING, SystemState.READY}))`. Guard the read in a `try/except (libvirt.libvirtError, CategorizedError) as _exc:` that logs and writes `None` — the read never fails the provision job. (Pin the exact success-transition line against the handler; the reprovision path is `reprovision_handler`.)
+1. Do the read+write in `_execute_system_lifecycle_call` (`jobs/handlers/systems.py`) **after** the successful commit that drives the System to `READY` — that is where `runtime` (hence `runtime.provisioner`) is in scope; the `_commit_*` callbacks are typed `Callable[..., ]` and never receive the provisioner, so they are the wrong hook.
+2. Gate on kind and narrow the type: only when `binding.kind is ResourceKind.LOCAL_LIBVIRT` **and** `isinstance(runtime.provisioner, LocalLibvirtProvisioning)` (satisfies ty-strict; skips remote/fault with no false attribute access).
+3. Run the blocking libvirt read off the event loop, matching the handler's existing idiom (`_provider_lifecycle_call` already uses `asyncio.to_thread` — a direct blocking libvirt call starves the worker loop, cf. #583):
+
+```python
+   if binding.kind is ResourceKind.LOCAL_LIBVIRT and isinstance(provisioner, LocalLibvirtProvisioning):
+       try:
+           resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system_id)
+       except (libvirt.libvirtError, CategorizedError) as _exc:
+           _log.warning("resolved_cpu read failed; recording null", exc_info=True)
+           resolved = None
+       async with pool.connection() as conn:
+           await SYSTEMS.set_json_column(
+               conn, system_id, "resolved_cpu", resolved,
+               allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
+           )
+```
+
+**State-set / ordering (finding-driven):** the write runs **after** the READY transition, so the row is `READY` at write time and the `{PROVISIONING, READY}` guard (the spec/ADR set) admits it; a guest that crashed/was reaped between the transition and the write has moved to `CRASHING`/`CRASHED`/`TORN_DOWN`, so the guard no-ops (no stale value). `REPROVISIONING` is **not** in the set because a reprovision also terminates at `READY` before this write — the state during reprovision is transient and never the write-time state. Confirm the exact post-commit line and that both `provision_handler` and `reprovision_handler` route through `_execute_system_lifecycle_call` (if reprovision has a separate commit path, add the same block there).
 
 Update the `systems.get` **wrapper** docstring in `registrar.py` for `resolved_cpu`:
 > `resolved_cpu` (`{model, vendor?, arch, baseline_level?}` or null): the guest CPU the System actually booted with — **live-verified for local Systems** (read from the running domain; passthrough resolves to the host CPU; a TCG machine-default the host does not expand reads null), and the **mint-time snapshot for remote Systems** (ADR-0368). Null means unrecorded/unreadable — treat as unknown.
@@ -990,6 +1008,6 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Placeholder scan:** live-test bodies (Task 11) and some handler/fixture wiring (Tasks 4, 8, 10) are specified against named existing tests/handlers to mirror, with exact assertions and the exact guard-state set — not `TBD`. The two genuinely deferred implementation details (the exact `jobs/handlers/systems.py` READY-transition line; the provider libvirt-connection helper name) are named by file and instructed to be pinned against the code, matching the spec's stated plan-time deferral.
 
-**Type consistency:** `ParsedHostCpu` (reused, #980) produced by `parse_host_capabilities_cpu`/`parse_selectable_cpus` (Task 2, the latter returns `list[str]`) and `parse_domain_resolved_cpu` (Task 8), consumed in Tasks 4, 8. `selectable_cpus() -> dict[str, list[str]]` (Task 3) consumed in Tasks 4 (build), 5 (surface), 8a (validate). `LibvirtCpuPin.model` (Task 6) read in Tasks 7 (render), 8a (validate). `set_resolved_cpu(...) -> bool` (Task 10) with `allowed_states` a `frozenset[SystemState]`. `read_resolved_cpu -> dict[str, JsonValue] | None` (Task 8) consumed in Task 10. Consistent.
+**Type consistency:** `ParsedHostCpu` (reused, #980) produced by `parse_host_capabilities_cpu`/`parse_selectable_cpus` (Task 2, the latter returns `list[str]`) and `parse_domain_resolved_cpu` (Task 8), consumed in Tasks 4, 8. `selectable_cpus() -> dict[str, list[str]]` (Task 3) consumed in Tasks 4 (build), 5 (surface), 8a (validate). `LibvirtCpuPin.model` (Task 6) read in Tasks 7 (render), 8a (validate). `set_json_column(conn, obj_id, column, value, allowed_states) -> bool` (Task 10) with `allowed_states` a `frozenset[SystemState]`. `read_resolved_cpu -> dict[str, JsonValue] | None` (Task 8) consumed in Task 10. Consistent.
 
 **Task ordering / bisect-safety:** Task 1 (remote-only mint gate) precedes Task 4 (local advertises `host_cpu`) so no intermediate commit stamps a wrong local `resolved_cpu`. Phase B renderer (Task 7) precedes admission validation (Task 8a) — a pin cannot reach an unrendered path since Task 8a rejects unknown pins. Phase C read (Task 8) precedes the handler wiring (Task 10).
