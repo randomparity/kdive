@@ -116,8 +116,8 @@ guest-arch capability. Expect a ``tcg`` System to boot and run notably slower.
 ``data.resolved_cpu`` is the ``{model, vendor?, arch, baseline_level?}`` guest CPU the
 System actually booted with — **live-verified** for local Systems (read from the running
 domain; a host-passthrough guest resolves to the host CPU, a TCG machine-default the host
-does not expand reads ``null``), and the **mint-time snapshot** for remote Systems
-(ADR-0368). ``null`` means unrecorded/unreadable — treat as unknown. ``baseline_level``
+does not expand reads ``null``), and the **mint-time snapshot** for remote Systems.
+``null`` means unrecorded/unreadable — treat as unknown. ``baseline_level``
 (``x86-64-vN``) is a nominal upper bound (see ``resources.describe``), not a guaranteed
 floor — confirm a hard instruction-set requirement against the guest.
 

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.fault_inject.inventory import FaultInjectInventory
+from kdive.serialization import JsonValue
 
 
 def domain_name(system_id: UUID) -> str:
@@ -36,6 +37,11 @@ class FaultInjectProvisioning:
 
     def teardown(self, domain_name: str) -> None:
         self._inventory.forget(domain_name)
+
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        """A synthetic domain has no live CPU to read (ADR-0369)."""
+        del system_id
+        return None
 
     def reprovision(
         self,

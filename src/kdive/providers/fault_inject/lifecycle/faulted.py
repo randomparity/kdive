@@ -29,6 +29,7 @@ from kdive.providers.fault_inject.faulting.engine import FaultDecision, FaultEng
 from kdive.providers.fault_inject.lifecycle.install import FaultInjectInstall
 from kdive.providers.fault_inject.lifecycle.provisioning import FaultInjectProvisioning
 from kdive.providers.ports.lifecycle import InstallRequest
+from kdive.serialization import JsonValue
 
 _FIRST_ATTEMPT: Callable[[UUID], int] = lambda _system_id: 1  # noqa: E731 - a tiny default port
 _SyncSleep = Callable[[float], None]
@@ -104,6 +105,10 @@ class FaultedProvisioning:
     def teardown(self, domain_name: str) -> None:
         # Teardown is compensation, not a perturbed op — it must always reap, so no draw.
         self._inner.teardown(domain_name)
+
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        """Delegate to the wrapped provisioner (a synthetic domain reads ``None``, ADR-0369)."""
+        return self._inner.read_resolved_cpu(system_id)
 
     def _draw(self, system_id: UUID, plane: FaultPlane) -> None:
         decision = self._engine.decide(

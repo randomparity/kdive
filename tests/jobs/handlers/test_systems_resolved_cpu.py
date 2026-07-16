@@ -20,7 +20,6 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.jobs.handlers.systems import _persist_local_resolved_cpu
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.serialization import JsonValue
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -31,13 +30,14 @@ _RESOLVED: dict[str, JsonValue] = {
 }
 
 
-class _FakeLocalProvisioner(LocalLibvirtProvisioning):
-    """A LocalLibvirtProvisioning (so ``isinstance`` holds) whose read is stubbed — no libvirt."""
+class _StubProvisioner:
+    """A provisioner stub exposing the ``read_resolved_cpu`` port method."""
 
     def __init__(self, resolved: dict[str, JsonValue] | None) -> None:
-        self._resolved = resolved  # deliberately skips the heavy base __init__
+        self._resolved = resolved
 
     def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        del system_id
         return self._resolved
 
 
@@ -113,7 +113,7 @@ def test_local_provisioner_persists_resolved_cpu(migrated_url: str) -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
             await _persist_local_resolved_cpu(
-                conn, sysm, _runtime(_FakeLocalProvisioner(_RESOLVED))
+                conn, sysm, _runtime(_StubProvisioner(_RESOLVED)), ResourceKind.LOCAL_LIBVIRT
             )
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
@@ -126,7 +126,9 @@ def test_local_read_failure_persists_null(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
-            await _persist_local_resolved_cpu(conn, sysm, _runtime(_FakeLocalProvisioner(None)))
+            await _persist_local_resolved_cpu(
+                conn, sysm, _runtime(_StubProvisioner(None)), ResourceKind.LOCAL_LIBVIRT
+            )
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
             assert reloaded.resolved_cpu is None
@@ -134,11 +136,15 @@ def test_local_read_failure_persists_null(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_non_local_provisioner_writes_nothing(migrated_url: str) -> None:
+def test_remote_binding_writes_nothing(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
             sysm = await _seed_ready_system(conn)
-            await _persist_local_resolved_cpu(conn, sysm, _runtime(object()))  # not local
+            # A remote binding must not write (it would clobber the mint snapshot with NULL); the
+            # stub returns a value but the kind gate skips the write entirely.
+            await _persist_local_resolved_cpu(
+                conn, sysm, _runtime(_StubProvisioner(_RESOLVED)), ResourceKind.REMOTE_LIBVIRT
+            )
             reloaded = await SYSTEMS.get(conn, sysm.id)
             assert reloaded is not None
             assert reloaded.resolved_cpu is None

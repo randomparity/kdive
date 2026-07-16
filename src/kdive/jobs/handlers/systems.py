@@ -19,6 +19,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
@@ -38,7 +39,6 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
-from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -295,6 +295,7 @@ async def _execute_system_lifecycle_call(
     failure_transition: str,
     tool: str,
     operation: str,
+    binding_kind: ResourceKind,
 ) -> str:
     profile = ProvisioningProfile.parse(system.provisioning_profile)
     customizers, pubkey = await _bootstrap_key_material(conn, system.id, runtime, secret_registry)
@@ -324,25 +325,27 @@ async def _execute_system_lifecycle_call(
         await asyncio.to_thread(runtime.provisioner.teardown, domain_name)
         _log.info("%s of system %s superseded by teardown; domain reaped", operation, system.id)
     else:
-        await _persist_local_resolved_cpu(conn, system, runtime)
+        await _persist_local_resolved_cpu(conn, system, runtime, binding_kind)
     return str(system.id)
 
 
 async def _persist_local_resolved_cpu(
-    conn: AsyncConnection, system: System, runtime: ProviderRuntime
+    conn: AsyncConnection, system: System, runtime: ProviderRuntime, binding_kind: ResourceKind
 ) -> None:
     """Persist the local domain's live-verified resolved CPU at the READY boundary (ADR-0369).
 
-    Local-libvirt only (remote keeps the ADR-0368 mint snapshot; fault-inject has no domain). The
-    read is best-effort (``read_resolved_cpu`` never raises, returns ``None`` on any fault) and runs
-    off the event loop (a blocking libvirt call would starve the worker, cf. #583). The write is
-    state-guarded to ``{PROVISIONING, READY}``, so a System that crashed / was reaped between the
-    READY transition and this write takes a no-op rather than a stale value.
+    Local-libvirt only (remote keeps the ADR-0368 mint snapshot; fault-inject has no domain). Gated
+    on the binding kind — not an ``isinstance`` on the concrete provisioner, which would cross the
+    provider boundary (``read_resolved_cpu`` is on the ``Provisioner`` port; remote/fault return
+    ``None``, so an unconditional write would clobber the remote snapshot with NULL). The read is
+    best-effort (``read_resolved_cpu`` never raises) and runs off the event loop (a blocking libvirt
+    call would starve the worker, cf. #583). The write is state-guarded to ``{PROVISIONING,
+    READY}``, so a System that crashed / was reaped between the READY transition and this write
+    takes a no-op rather than a stale value.
     """
-    provisioner = runtime.provisioner
-    if not isinstance(provisioner, LocalLibvirtProvisioning):
+    if binding_kind is not ResourceKind.LOCAL_LIBVIRT:
         return
-    resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system.id)
+    resolved = await asyncio.to_thread(runtime.provisioner.read_resolved_cpu, system.id)
     async with conn.transaction():
         await SYSTEMS.set_json_column(
             conn,
@@ -405,6 +408,7 @@ async def provision_handler(
         failure_transition="provisioning->failed",
         tool="systems.provision",
         operation="provision",
+        binding_kind=binding.kind,
     )
 
 
@@ -442,6 +446,7 @@ async def reprovision_handler(
         failure_transition="reprovisioning->failed",
         tool="systems.reprovision",
         operation="reprovision",
+        binding_kind=binding.kind,
     )
 
 

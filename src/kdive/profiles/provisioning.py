@@ -109,11 +109,12 @@ class LibvirtDebugOptions(_ProfileBase):
 
 # Provenance: ADR-0369, #1227.
 class LibvirtCpuPin(_ProfileBase):
-    """An agent-selected guest CPU model pin (ADR-0369).
+    """An agent-selected guest CPU model pin.
 
     ``model`` must be one of the bound host's advertised ``selectable_cpus[arch]`` (validated at
-    admission); the renderer emits ``<cpu mode='custom'><model>…</model></cpu>``. Omit ``cpu``
-    entirely for the operator default (host-passthrough x86 / host-model ppc64le / TCG default).
+    admission); the guest is then pinned to that CPU model. Omit ``cpu`` entirely for the operator
+    default (the host CPU: host-passthrough on x86, host-model on ppc64le, the machine default under
+    TCG emulation).
     """
 
     model: NonEmptyStr = Field(
