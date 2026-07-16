@@ -94,25 +94,65 @@ def test_firstboot_script_shape() -> None:
         ok_marker="kdive-customize-ok",
         fail_marker="kdive-customize-failed",
     )
-    assert script.startswith("#!/bin/sh\nset -e\n")
-    # Command output is routed to the console so a failed dnf/RunCommand's error lands in the
-    # captured console log (the failure-evidence path), before any exec step runs.
-    assert "exec > /dev/hvc0 2>&1" in script
-    assert script.index("exec > /dev/hvc0 2>&1") < script.index("dnf -y install")
-    assert "trap 'echo kdive-customize-failed > /dev/hvc0" in script
+    assert script.startswith("#!/bin/sh\n")
+    assert "console=/dev/hvc0" in script
     assert "dnf -y install drgn kexec-tools" in script
     assert "systemctl enable kdump.service" in script
     assert "rm -f /etc/systemd/system/kdive-customize.service" in script
     assert "multi-user.target.wants/kdive-customize.service" in script
     assert "/usr/local/sbin/kdive-customize" in script
-    assert "trap - EXIT" in script
     assert script.rstrip().endswith("systemctl poweroff")
-    assert "echo kdive-customize-ok > /dev/hvc0" in script
-    # Durability: the success sync must precede the ok marker, so the orchestration's
-    # force-destroy (fired on reading the marker) cannot truncate the customization writes.
+    assert 'echo kdive-customize-ok > "$console"' in script
+    assert 'echo kdive-customize-failed > "$console"' in script
+
+
+def test_firstboot_script_derives_verdict_from_captured_status_not_a_serial_write() -> None:
+    """The verdict is the captured exit status, and the steps run in a ``set -e`` subshell (#1174).
+
+    A large volume written straight to the serial *tty* can spuriously fail (a Python program
+    exits 120 on the failed shutdown-flush; even ``cat`` can error), so the steps' output is
+    captured to a plain file — which honours dnf's real exit code — and the ok/failed marker is
+    chosen from that captured ``$rc``. A serial-write error must never flip a good build to failed.
+    """
+    script = render_firstboot_script(
+        [InstallPackages(("drgn",))],
+        console_device="ttyS0",
+        unit_name="kdive-customize.service",
+        script_path="/usr/local/sbin/kdive-customize",
+        ok_marker="kdive-customize-ok",
+        fail_marker="kdive-customize-failed",
+    )
+    # The exec steps DO NOT write straight to the serial tty (that path false-fails), and the
+    # verdict marker is gated on the captured subshell status, not on a serial write succeeding.
+    assert "exec > /dev/ttyS0" not in script
+    assert "( set -e" in script
+    assert '> "$log" 2>&1' in script
+    assert "rc=$?" in script
+    assert 'if [ "$rc" -eq 0 ]; then' in script
+    # Failure evidence still reaches the console, best-effort — a serial-write error is swallowed
+    # so it cannot change the verdict.
+    assert 'cat "$log" > "$console" 2>/dev/null || true' in script
+    # The capture file lives on tmpfs so it never persists into the sealed, published image.
+    assert "log=/run/" in script
+
+
+def test_firstboot_script_syncs_before_the_ok_marker() -> None:
+    """Durability: the success sync must precede the ok marker (ADR-0345).
+
+    The orchestration force-destroys the domain the instant a poll reads the marker, so a marker
+    emitted before the flush completes would let the destroy truncate the customization writes.
+    """
+    script = render_firstboot_script(
+        [InstallPackages(("drgn",))],
+        console_device="hvc0",
+        unit_name="kdive-customize.service",
+        script_path="/usr/local/sbin/kdive-customize",
+        ok_marker="kdive-customize-ok",
+        fail_marker="kdive-customize-failed",
+    )
     body = script.splitlines()
     sync_idx = body.index("sync")
-    ok_idx = next(i for i, ln in enumerate(body) if ln == "echo kdive-customize-ok > /dev/hvc0")
+    ok_idx = next(i for i, ln in enumerate(body) if ln == 'echo kdive-customize-ok > "$console"')
     assert sync_idx < ok_idx
 
 

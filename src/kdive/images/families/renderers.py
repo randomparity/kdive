@@ -99,6 +99,18 @@ def partition_steps(steps: list[Step]) -> tuple[list[Step], list[Step]]:
     return file_ops, exec_ops
 
 
+# The firstboot script captures the customization steps' output to a guest file, then dumps that
+# file to the serial console — instead of pointing the steps' stdout straight at ``/dev/<console>``.
+# Under load the serial console is a lossy, error-prone sink: a Python program (dnf) that writes a
+# large volume directly to the serial *tty* fails its final stdout flush at interpreter shutdown
+# and exits ``120`` (a benign flush error, not a transaction failure), and even ``tee``/``cat``
+# writes to the tty can return an error. Deriving the ok/failed verdict from a serial write
+# therefore false-fails a customization that actually succeeded (#1174, live-diagnosed: a Rocky 9
+# ``dnf -y install epel-release`` that installs cleanly still exits 120 when its stdout is the
+# console). ``/run`` is tmpfs, so the capture file never persists into the sealed image.
+_CUSTOMIZE_LOG_PATH = "/run/kdive-customize.log"
+
+
 def render_firstboot_script(
     exec_steps: list[Step],
     *,
@@ -108,38 +120,39 @@ def render_firstboot_script(
     ok_marker: str,
     fail_marker: str,
 ) -> str:
-    """Render the ``/bin/sh`` firstboot script the guest runs to self-customize (ADR-0345).
+    """Render the ``/bin/sh`` firstboot script the guest runs to self-customize (ADR-0345, #1174).
 
-    The script installs packages, runs commands, self-removes the firstboot unit (and its
-    offline-created ``multi-user.target.wants`` symlink) plus itself, then reports completion via
-    a console marker before powering off. The ``trap ... EXIT`` fires the fail marker on any
-    non-zero exit (``set -e``) or early exit; the success path clears the trap before echoing ok.
+    The exec steps run in a ``( set -e … )`` subshell whose combined output is captured to a guest
+    log file; the subshell aborts on the first failing step and its exit status is the **verdict**.
+    The captured log is then best-effort dumped to the serial console (so a failed dnf/RunCommand's
+    error still lands in the console log — the failure-evidence path, #1147), and a single
+    ``ok``/``failed`` marker line is echoed to the console from the captured status. The verdict is
+    never derived from a serial-console write, because writing a large volume to the serial *tty*
+    can spuriously fail (a Python program exits 120 on the failed shutdown flush; even ``cat`` can
+    error) and would false-fail an otherwise-good customization (#1174).
 
     Args:
         exec_steps: The ``InstallPackages``/``RunCommand`` steps, in order (see
             :func:`partition_steps`).
-        console_device: The guest console device (e.g. ``hvc0``) markers are echoed to.
+        console_device: The guest console device (e.g. ``hvc0``) the log + markers are echoed to.
         unit_name: The firstboot systemd unit's file name; must match the value
             ``inject_offline`` writes (the caller passes ``CUSTOMIZE_UNIT``).
         script_path: This script's own guest path; must match the value ``inject_offline``
             writes (the caller passes ``CUSTOMIZE_SCRIPT_PATH``).
         ok_marker: The console line echoed on success.
-        fail_marker: The console line echoed on failure (via the ``EXIT`` trap).
+        fail_marker: The console line echoed on failure.
 
     Returns:
         The complete script body, including the ``#!/bin/sh`` shebang.
     """
     lines = [
         "#!/bin/sh",
-        "set -e",
-        # Route ALL command output to the serial console so a failed dnf/RunCommand's stderr lands
-        # in the captured console log (console_log_path) — the failure evidence path surfaces its
-        # tail (ADR-0345, #1147: "a failed in-guest dnf must not be a silent timeout"). Without this
-        # systemd's default StandardOutput=journal keeps the root cause inside the (discarded) guest
-        # journal. The marker echoes below stay on their own line, so interleaved output cannot
-        # false-match the anchored marker regex.
-        f"exec > /dev/{console_device} 2>&1",
-        f"trap 'echo {fail_marker} > /dev/{console_device}; sync; systemctl poweroff' EXIT",
+        f"console=/dev/{console_device}",
+        f"log={_CUSTOMIZE_LOG_PATH}",
+        # A subshell so ``set -e`` (stop on the first failing step, and NOT leak to the marker
+        # logic below) is confined here; its exit status is the customization verdict. Output is
+        # captured to $log (a plain file honours dnf's real exit code — the serial tty does not).
+        "( set -e",
     ]
     for step in exec_steps:
         match step:
@@ -147,19 +160,26 @@ def render_firstboot_script(
                 lines.append(f"dnf -y install {' '.join(names)}")
             case RunCommand(sh):
                 lines.append(sh)
-    lines.append(
-        f"rm -f /etc/systemd/system/{unit_name} "
-        f"/etc/systemd/system/multi-user.target.wants/{unit_name} {script_path}"
-    )
-    # Order matters: sync BEFORE echoing the ok marker. The orchestration force-destroys the
-    # domain the instant a poll reads the marker (10s cadence, slower under TCG), so a marker
-    # emitted before the flush completes would let the destroy truncate the customization writes
-    # (installed packages, version markers, the unit self-removal). Flushing first means the host
-    # can only ever observe ok after every write is durable (ADR-0345).
     lines += [
-        "trap - EXIT",
+        f"rm -f /etc/systemd/system/{unit_name} "
+        f"/etc/systemd/system/multi-user.target.wants/{unit_name} {script_path}",
+        ') > "$log" 2>&1',
+        "rc=$?",
+        # Best-effort: surface the captured output on the console for diagnosis. A serial-write
+        # error here must never change the verdict, so it is swallowed (``|| true``).
+        'cat "$log" > "$console" 2>/dev/null || true',
+        # Order matters: sync BEFORE echoing the ok marker. The orchestration force-destroys the
+        # domain the instant a poll reads the marker (10s cadence, slower under TCG), so a marker
+        # emitted before the flush completes would let the destroy truncate the customization
+        # writes (installed packages, version markers, the unit self-removal). Flushing first means
+        # the host can only ever observe ok after every write is durable (ADR-0345).
         "sync",
-        f"echo {ok_marker} > /dev/{console_device}",
+        'if [ "$rc" -eq 0 ]; then',
+        f'echo {ok_marker} > "$console"',
+        "else",
+        f'echo {fail_marker} > "$console"',
+        "fi",
+        "sync",
         "systemctl poweroff",
     ]
     return "\n".join(lines) + "\n"
@@ -181,8 +201,9 @@ def render_firstboot_unit(*, script_path: str) -> str:
     know the host's config-driven, TCG-scaled deadline, so a finite guess would either re-introduce
     the false-fail (if too short) or duplicate the host bound (if too long). The trade-off is that a
     genuinely *hung* (non-exiting) customization self-reports no marker and instead surfaces as the
-    host's ``BOOT_TIMEOUT`` when the window expires; the common failure (a command exits non-zero)
-    still fires the ``-failed`` marker promptly via the script's ``ERR``/``EXIT`` trap.
+    host's ``BOOT_TIMEOUT`` when the window expires; the common failure (a step exits non-zero)
+    still fires the ``-failed`` marker promptly (the script's ``set -e`` subshell aborts and its
+    non-zero status selects the fail marker).
 
     Args:
         script_path: The firstboot script's guest path, used as ``ExecStart``; must match
