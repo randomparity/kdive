@@ -331,6 +331,13 @@ config-guard:
 env-docs-check:
     uv run python scripts/check_env_documented.py
 
+# Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
+# (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);
+# a cosmetic edit breaks upgrades of any DB migrated by an earlier build (#1218). Diffs
+# against HEAD, so a clean tree passes and a staged edit fails. Stdlib-only (git only).
+schema-guard:
+    python3 scripts/schema_immutable_guard.py
+
 # Drift guard: the docker-compose image set matches the ADR-0356 arch-support matrix, and each
 # handling token meets its ppc64le obligation (ADR-0356). Parses compose via yaml.safe_load.
 container-arch-check:
@@ -355,4 +362,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check container-arch-check resources-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check chart-version-check test
