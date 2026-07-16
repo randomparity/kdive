@@ -29,6 +29,7 @@ from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
+from kdive.domain.catalog.resource_capabilities import host_cpu_json
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
@@ -285,11 +286,7 @@ async def _resolve_new_system_bindings(
         requested=profile_policy.fadump_provisioned(profile),
         supported=caps is not None and caps.pseries_fadump(),
     )
-    host_cpu = caps.host_cpu() if caps is not None else None
-    resolved_cpu: dict[str, JsonValue] | None = None
-    if host_cpu is not None:
-        resolved_cpu = {key: str(value) for key, value in host_cpu.items()}
-    return accel, resolved_cpu
+    return accel, host_cpu_json(caps)
 
 
 @dataclass(frozen=True, slots=True)

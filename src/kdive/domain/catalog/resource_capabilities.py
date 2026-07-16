@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.serialization import JsonValue
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -273,6 +274,18 @@ class ResourceCapabilities:
                 )
             )
         return descriptors
+
+
+def host_cpu_json(caps: ResourceCapabilities | None) -> dict[str, JsonValue] | None:
+    """The advertised ``host_cpu`` as a plain JSON dict (ADR-0368), or ``None`` when absent.
+
+    Shared by the mint-time ``resolved_cpu`` snapshot (admission) and the ``resources.*`` read
+    envelope, so the ``HostCpu`` -> JSON shape lives once beside its reader. A ``HostCpu`` is
+    already all-string (JSON-compatible), so this is a typed copy, not a value transform. Returns
+    ``None`` when ``caps`` is ``None`` or advertises no ``host_cpu``.
+    """
+    host_cpu = caps.host_cpu() if caps is not None else None
+    return None if host_cpu is None else cast("dict[str, JsonValue]", dict(host_cpu))
 
 
 def _non_negative_int(value: object) -> int | None:

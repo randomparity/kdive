@@ -6,6 +6,7 @@ from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     MEMORY_MB_KEY,
     VCPUS_KEY,
+    host_cpu_json,
 )
 from kdive.domain.catalog.resources import Resource
 from kdive.domain.errors import ErrorCategory
@@ -45,10 +46,9 @@ def resource_capability_data(resource: Resource) -> dict[str, JsonValue]:
         data["transports"] = ",".join(str(t) for t in transports)
     # The advertised guest CPU baseline (ADR-0368) — agent-facing, unlike guest_arches. Present
     # only on remote hosts that advertise a host-model CPU; omitted (never null) otherwise.
-    host_cpu = caps.host_cpu()
+    host_cpu = host_cpu_json(caps)
     if host_cpu is not None:
-        cpu_data: dict[str, JsonValue] = {key: str(value) for key, value in host_cpu.items()}
-        data["host_cpu"] = cpu_data
+        data["host_cpu"] = host_cpu
     return data
 
 
