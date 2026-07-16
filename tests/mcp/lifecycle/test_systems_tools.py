@@ -1632,6 +1632,29 @@ def test_reprovision_with_unselectable_cpu_pin_is_config_error(migrated_url: str
     asyncio.run(_run())
 
 
+def test_reprovision_clears_local_resolved_cpu(migrated_url: str) -> None:
+    # A local reprovision NULLs the prior resolved_cpu (the rebuilt domain has not booted, so the
+    # live-verified value is unknown until Phase C re-reads it) — systems.get must not report a
+    # stale CPU as live-verified during the rebuild (ADR-0369).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE systems SET resolved_cpu = %s WHERE id = %s",
+                    (Jsonb({"model": "SapphireRapids", "arch": "x86_64"}), UUID(sys_id)),
+                )
+            resp = await _reprovision(pool, _ctx(), sys_id, _active_allocation_profile())
+            assert resp.status == "queued"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT resolved_cpu FROM systems WHERE id = %s", (sys_id,))
+                row = await cur.fetchone()
+        assert row is not None and row["resolved_cpu"] is None
+
+    asyncio.run(_run())
+
+
 def test_reprovision_same_profile_dedups(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

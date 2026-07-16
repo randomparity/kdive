@@ -15,6 +15,7 @@ from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
@@ -248,12 +249,16 @@ async def _admit_reprovision(
 ) -> ToolResponse:
     """Transition ready->reprovisioning, write the new profile, enqueue the keyed job."""
     await SYSTEMS.update_state(conn, system.id, SystemState.REPROVISIONING)
-    # Clear the prior provision's resolved_cpu: the rebuilt domain has not booted yet, so the
-    # live-verified value is now unknown (ADR-0369). Phase C re-reads it at reprovision READY.
     await conn.execute(
-        "UPDATE systems SET provisioning_profile = %s, resolved_cpu = NULL WHERE id = %s",
+        "UPDATE systems SET provisioning_profile = %s WHERE id = %s",
         (Jsonb(dump_profile(profile)), system.id),
     )
+    # Clear a LOCAL System's prior resolved_cpu: the rebuilt domain has not booted, so the
+    # live-verified value is unknown until Phase C re-reads it at the reprovision READY boundary
+    # (ADR-0369). Remote/fault keep their mint-time snapshot — reprovision does not re-mint it and
+    # the bound host is unchanged, so NULLing it would drop the signal permanently.
+    if profile.provider.kind is ResourceKind.LOCAL_LIBVIRT:
+        await conn.execute("UPDATE systems SET resolved_cpu = NULL WHERE id = %s", (system.id,))
     await audit.record(
         conn,
         ctx,
