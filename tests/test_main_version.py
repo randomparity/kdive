@@ -14,6 +14,8 @@ from kdive.__main__ import (
     build_parser,
     main,
 )
+from kdive.cli.errors import exit_code_for_category
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 
 def test_version_flag_prints_and_exits(capsys):
@@ -118,6 +120,50 @@ def test_seed_project_overrides_and_int_coercion() -> None:
     assert isinstance(args.max_concurrent_allocations, int)
     assert args.max_concurrent_systems == 9
     assert isinstance(args.max_concurrent_systems, int)
+
+
+def test_categorized_error_surfaces_message_details_and_exit_code(monkeypatch, capsys) -> None:
+    """A CategorizedError raised by an operator command surfaces its message *and* the
+    already-computed details (path, error class, remediation) to stderr and exits with the
+    category's stable code — not a bare "failed to read console log" behind a traceback (#1220)."""
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError(
+            "failed to read console log",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "operation": "read_console_log",
+                "path": "/var/lib/kdive/console/abc.log",
+                "error": "PermissionError",
+                "remediation": "run the worker as root, or grant it group read access",
+            },
+        )
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    assert exc.value.code == exit_code_for_category("configuration_error")
+    err = capsys.readouterr().err
+    assert "failed to read console log" in err
+    assert "/var/lib/kdive/console/abc.log" in err
+    assert "PermissionError" in err
+    assert "run the worker as root, or grant it group read access" in err
+
+
+def test_categorized_error_unmapped_category_exits_generic(monkeypatch, capsys) -> None:
+    """A category with no dedicated exit code maps to the generic failure code (1), and the
+    message still reaches stderr rather than a traceback."""
+
+    def _boom(_args: object) -> None:
+        raise CategorizedError("infra broke", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    monkeypatch.setattr("kdive.__main__.run_build_fs", _boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["build-fs", "--image", "fedora-kdive-ready-44"])
+
+    assert exc.value.code == 1
+    assert "infra broke" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
