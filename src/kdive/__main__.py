@@ -12,17 +12,20 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import kdive.config as config
+from kdive.cli.errors import exit_code_for_category
 from kdive.config.core_settings import (
     HTTP_HOST,
     HTTP_PORT,
     LOG_LEVEL,
 )
 from kdive.db.pool import create_pool
+from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
 from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
@@ -217,13 +220,11 @@ def _handle_reconcile_systems(
     if args.check:
         raise SystemExit(validate_systems(args.path))
 
-    from kdive.domain.errors import CategorizedError
     from kdive.store.objectstore import object_store_from_env
 
-    try:
-        store = object_store_from_env()
-    except CategorizedError as error:
-        raise SystemExit(str(error)) from error
+    # A misconfigured object store raises a CategorizedError; the central handler in main()
+    # surfaces its details and maps it to the category's exit code (ADR-0089).
+    store = object_store_from_env()
     pool = create_pool(min_size=1)
 
     async def _run() -> int:
@@ -325,7 +326,23 @@ def main(argv: list[str] | None = None) -> None:
         # pipeline (which may construct an OTLP client) built and the floor handed over.
         telemetry = init_telemetry(args.command, secret_registry=secret_registry, level=level)
     _log.info("starting kdive %s (%s)", full_version(), args.command)
-    _COMMAND_BY_NAME[args.command].handler(args, secret_registry, telemetry)
+    try:
+        _COMMAND_BY_NAME[args.command].handler(args, secret_registry, telemetry)
+    except CategorizedError as error:
+        _emit_categorized_error(error)
+        raise SystemExit(exit_code_for_category(error.category)) from error
+
+
+def _emit_categorized_error(error: CategorizedError) -> None:
+    """Surface a categorized failure's message and structured details to stderr.
+
+    The raise site already computed the actionable context (operation, path, remediation) in
+    ``details``; printing it here turns a bare one-line message behind a traceback into an
+    operator-readable cause. The caller maps ``error.category`` to a stable exit code.
+    """
+    print(f"error: {error}", file=sys.stderr)
+    for key, value in error.details.items():
+        print(f"  {key}: {value}", file=sys.stderr)
 
 
 if __name__ == "__main__":
