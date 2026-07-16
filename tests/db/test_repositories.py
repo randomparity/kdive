@@ -410,3 +410,52 @@ def test_json_columns_match_schema(migrated_url: str) -> None:
                 )
 
     asyncio.run(_run_test())
+
+
+def test_set_json_column_writes_when_state_allowed(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id))
+            await SYSTEMS.update_state(conn, sysm.id, SystemState.PROVISIONING)
+
+            wrote = await SYSTEMS.set_json_column(
+                conn,
+                sysm.id,
+                "resolved_cpu",
+                {"model": "SapphireRapids", "arch": "x86_64"},
+                allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
+            )
+
+            assert wrote is True
+            reloaded = await SYSTEMS.get(conn, sysm.id)
+            assert reloaded is not None
+            assert reloaded.resolved_cpu == {"model": "SapphireRapids", "arch": "x86_64"}
+
+    asyncio.run(_run_test())
+
+
+def test_set_json_column_noop_when_state_not_allowed(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
+            # A freshly-inserted System is DEFINED — outside {PROVISIONING, READY} — modelling a
+            # System that crashed/was reaped before the post-provision write.
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id))
+
+            wrote = await SYSTEMS.set_json_column(
+                conn,
+                sysm.id,
+                "resolved_cpu",
+                {"model": "SapphireRapids", "arch": "x86_64"},
+                allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
+            )
+
+            assert wrote is False
+            reloaded = await SYSTEMS.get(conn, sysm.id)
+            assert reloaded is not None
+            assert reloaded.resolved_cpu is None  # never a stale/wrong value
+
+    asyncio.run(_run_test())

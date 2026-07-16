@@ -42,6 +42,7 @@ from kdive.domain.lifecycle.records import (
     SystemShape,
 )
 from kdive.domain.operations.jobs import Job
+from kdive.serialization import JsonValue
 
 # DB-authoritative columns, omitted from inserts so their defaults/trigger apply.
 _SERVER_GENERATED = ("created_at", "updated_at")
@@ -180,6 +181,40 @@ class StatefulRepository[M: DomainModel, S: StrEnum](Repository[M]):
         if updated is None:  # Invariant: the row was held under FOR UPDATE.
             raise RuntimeError(f"UPDATE of {self._table} id {obj_id} returned no row")
         return self._model.model_validate(updated)
+
+    async def set_json_column(
+        self,
+        conn: AsyncConnection,
+        obj_id: UUID,
+        column: str,
+        value: dict[str, JsonValue] | None,
+        allowed_states: frozenset[S],
+    ) -> bool:
+        """Write a jsonb ``column`` only while the row is in ``allowed_states`` (ADR-0369).
+
+        A state-guarded payload write, distinct from :meth:`update_state` (which transitions the
+        state column). The ``WHERE state = ANY(...)`` guard makes the write a no-op on a row that
+        has left ``allowed_states`` — e.g. a System that crashed / was reaped between a
+        post-provision live read and this write — so a stale value can never land on a terminal row.
+
+        Args:
+            column: The jsonb column to write. Serialized with ``Jsonb`` (``None`` writes SQL NULL).
+            allowed_states: The row states in which the write is permitted.
+
+        Returns:
+            ``True`` if a row was updated, ``False`` if the guard matched no row (a no-op).
+        """
+        payload = Jsonb(value) if value is not None else None
+        query = sql.SQL(
+            "UPDATE {table} SET {column} = %s WHERE id = %s AND {state} = ANY(%s) RETURNING id"
+        ).format(
+            table=sql.Identifier(self._table),
+            column=sql.Identifier(column),
+            state=sql.Identifier(self._state_column),
+        )
+        async with conn.cursor() as cur:
+            await cur.execute(query, (payload, obj_id, [s.value for s in allowed_states]))
+            return await cur.fetchone() is not None
 
 
 class KeyedRepository[M: BaseModel](Repository[M]):

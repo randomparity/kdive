@@ -38,6 +38,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtProvisioning
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -322,7 +323,34 @@ async def _execute_system_lifecycle_call(
     if current in TERMINAL_SYSTEM_STATES:
         await asyncio.to_thread(runtime.provisioner.teardown, domain_name)
         _log.info("%s of system %s superseded by teardown; domain reaped", operation, system.id)
+    else:
+        await _persist_local_resolved_cpu(conn, system, runtime)
     return str(system.id)
+
+
+async def _persist_local_resolved_cpu(
+    conn: AsyncConnection, system: System, runtime: ProviderRuntime
+) -> None:
+    """Persist the local domain's live-verified resolved CPU at the READY boundary (ADR-0369).
+
+    Local-libvirt only (remote keeps the ADR-0368 mint snapshot; fault-inject has no domain). The
+    read is best-effort (``read_resolved_cpu`` never raises, returns ``None`` on any fault) and runs
+    off the event loop (a blocking libvirt call would starve the worker, cf. #583). The write is
+    state-guarded to ``{PROVISIONING, READY}``, so a System that crashed / was reaped between the
+    READY transition and this write takes a no-op rather than a stale value.
+    """
+    provisioner = runtime.provisioner
+    if not isinstance(provisioner, LocalLibvirtProvisioning):
+        return
+    resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system.id)
+    async with conn.transaction():
+        await SYSTEMS.set_json_column(
+            conn,
+            system.id,
+            "resolved_cpu",
+            resolved,
+            allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
+        )
 
 
 async def provision_handler(
