@@ -184,17 +184,29 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
   `parse_domain_resolved_cpu(domain_xml)` (defusedxml) extracts `{model, vendor?, arch,
   baseline_level?}` (level via the existing x86 table; omitted non-x86). The read happens once, at
   the local worker's post-provision boundary, after the domain is running.
-- **Persist — one guarded, unconditional write.** Write the parsed `HostCpu` (concrete value) **or
-  NULL** (on any read failure) to `systems.resolved_cpu` via a repository update **guarded by the
-  System's lifecycle state**: the UPDATE affects the row only while the System is still in its
-  post-provision provisioning/ready lifecycle (the existing `can_transition`/conditional-write
-  pattern in `db/repositories.py`), so a System that **crashed, was NMI'd, or was reaped** in the
-  read window (kdive is a crash tool — this window is real, cf. #984) takes a **no-op** write rather
-  than resurrecting a value on a torn-down row. This resolves the ADR-0368 teardown-race objection
-  for the local case by construction (the write cannot land on a terminal row), and it is a **new**
-  local-worker→systems write scoped to the narrowest existing post-provision write point (pinned in
-  the plan against `providers/local_libvirt/lifecycle/provisioning.py` + `db/repositories.py`).
-  Because mint left local `resolved_cpu` NULL, the failure-path NULL write clobbers nothing.
+- **Persist — bound to the readiness-completion write (a NEW guarded repository method).** There is
+  no existing "write a non-state column only when state ∈ {set}" helper — `StatefulRepository.update_
+  state` guards the *state transition* itself, not a payload column. Phase C therefore adds a **new**
+  `SystemRepository` method (e.g. `set_resolved_cpu`) that writes `systems.resolved_cpu` **only for a
+  row whose state is in the post-provision live set** `{PROVISIONING, READY}` (the exact
+  `SystemState` members are pinned in the plan against `domain/capacity/state.py`; the intent is
+  "the domain is running / just became ready, not torn down"). It is invoked at the local worker's
+  readiness-completion boundary (the same point that drives the System to `READY`, in
+  `providers/local_libvirt/lifecycle/provisioning.py` + `db/repositories.py`). A System that
+  **crashed, was NMI'd, or was reaped** in the read window (kdive is a crash tool — this window is
+  real, cf. #984) is no longer in that set, so the `WHERE state IN (...)` UPDATE is a **no-op** — it
+  cannot land on a terminal row. This is the local answer to the ADR-0368 teardown-race objection: a
+  guard by construction, not an asserted absence of races. The write is a single, unconditional
+  write of the parsed value **or** NULL (see below) — not a read-modify-write.
+- **First provision vs reprovision.** The write fires on **both** the first-provision readiness
+  completion and the local **reprovision** completion (`reprovision_handler` →
+  `reprovisioning→ready`, `provisioning.py` reprovision-in-place), because a reprovision can apply a
+  new `cpu.model` pin and the resolved CPU of the rebuilt domain must be re-read, not left stale. The
+  reprovision write is **authoritative**: it overwrites with the fresh live-read value, or with NULL
+  when the re-read fails (the honest "unknown for the rebuilt domain" — a stale prior value would be
+  worse than NULL). The "nothing is clobbered" property is thus scoped to **first provision** (where
+  mint left it NULL); on reprovision the overwrite is intended. `reprovisioning`'s exact placement in
+  the guarded-write state set is pinned in the plan so the reprovision write lands.
 - **Best-effort / never blocks.** Any `libvirt.libvirtError`, a parse fault, or an unexpanded
   `<cpu mode='host-model'/>` / TCG machine-default with no concrete `<model>` → write NULL, log the
   reason at info/warning, and **do not fail provisioning**. The provisioning result is independent
@@ -241,6 +253,12 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
    `<model>`, `parse_domain_resolved_cpu` returns the `HostCpu`, and the post-provision path writes
    it to `systems.resolved_cpu`; given an unexpanded/`<model>`-less XML or a raising read, it writes
    NULL and does not fail provisioning. Unit tests with fake domain XML + a raising fake.
+9a. **The guarded write lands in the real post-provision state** — a CI-runnable (non-live)
+    service test drives a System to the actual state the worker holds at readiness completion
+    (`{PROVISIONING, READY}`) and asserts `set_resolved_cpu` **writes** the value (proving the
+    allowed-state set is not mis-specified into a silent permanent-NULL), and separately that the
+    same call on a System already driven to a terminal state is a **no-op** (AC#11b). Both run in CI
+    (no `live_vm` gate), so a wrong guard fails off the live path.
 10. `systems.get` on a System with a live-verified `resolved_cpu` returns `data.resolved_cpu`; on one
     without, the field is absent/`null`. `systems.get` performs **no** libvirt call (pure row read).
 11. Remote `resolved_cpu` (ADR-0368 mint-snapshot) and remote `host_cpu` are unchanged — a
@@ -255,6 +273,10 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
     a test drives the System to a terminal state before the write and asserts `resolved_cpu` is
     unchanged (NULL, never a stale/wrong value). The write is otherwise unconditional (parsed value
     or NULL).
+11c. **Reprovision refreshes `resolved_cpu`.** A local reprovision that applies a new `cpu.model`
+    pin overwrites `resolved_cpu` with the rebuilt domain's live-read value; a reprovision whose
+    re-read fails writes NULL (not the stale prior value). Service/unit test over the
+    `reprovisioning→ready` path asserts the value is replaced, not retained.
 12. `live_vm` (x86, native KVM): provision with `cpu.model = x86-64-v2` (a `selectable_cpus` rung),
     assert the running domain resolves to it and `systems.get.resolved_cpu` reflects it. Skips
     cleanly without the KVM host.
@@ -292,11 +314,16 @@ the existing `systems.resolved_cpu` column (ADR-0368 / migration 0070 — **no n
 - **Unpinned profile** → byte-identical legacy render; `resolved_cpu` NULL at mint (local mint does
   not snapshot), filled by the Phase C live read if it succeeds. No native-CPU snapshot.
 - **Phase C read raises / returns no concrete `<model>` / TCG machine-default unexpanded** →
-  Phase C writes `resolved_cpu` NULL, logged, provisioning succeeds (best-effort). Since mint left it
-  NULL, nothing is clobbered.
-- **System crashes / is NMI'd / reaped before the Phase C write** → the lifecycle-guarded UPDATE is
-  a no-op on the terminal row; `resolved_cpu` stays NULL (never a stale/wrong native snapshot). kdive
-  is a crash tool, so this window is a real path, not theoretical.
+  Phase C writes `resolved_cpu` NULL, logged, provisioning succeeds (best-effort). At first provision
+  mint left it NULL, so nothing is clobbered.
+- **System crashes / is NMI'd / reaped before the Phase C write** → the state-guarded UPDATE
+  (`WHERE state IN {PROVISIONING, READY}`) is a no-op on the terminal row; `resolved_cpu` stays NULL
+  (never a stale/wrong native snapshot). kdive is a crash tool, so this window is a real path.
+- **Local reprovision with a new pin** (`reprovisioning→ready`) → the readiness-completion write
+  fires again and **overwrites** `resolved_cpu` with the rebuilt domain's live-read value, or NULL
+  when the re-read fails (honest "unknown for the rebuilt domain"). The prior value is intentionally
+  replaced — the "clobbers nothing" property is first-provision-only; a reprovision must not leave a
+  stale CPU an agent would trust as live-verified.
 - **Non-x86 model** → `baseline_level` omitted; raw `model` advertised/persisted.
 - **Stale/hand-edited jsonb capabilities row** → defensive readers drop malformed values.
 - **Local host not re-discovered since #1227** → no `host_cpu`/`selectable_cpus`; unpinned

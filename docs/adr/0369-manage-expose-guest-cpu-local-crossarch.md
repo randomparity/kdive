@@ -127,13 +127,18 @@ cannot be stale (it is read from the domain that actually booted).
 - **Best-effort.** If the expand does not yield a concrete `<model>` (a QEMU/libvirt that leaves the
   TCG machine-default unexpanded), the worker records NULL and logs the reason — never fabricates a
   value and never fails provisioning on the CPU read. The provisioning result does not depend on it.
-- **Guarded write resolves the teardown race.** The `resolved_cpu` write is a repository UPDATE
-  guarded by the System's lifecycle state (the existing conditional-write pattern): it lands only
-  while the System is still in its post-provision provisioning/ready lifecycle, so a System that
-  crashed / was NMI'd / reaped in the read window (a real path — kdive is a crash tool) takes a
-  no-op. This is why the local write, unlike ADR-0368's rejected remote write-back, does not race
-  teardown/reap: it cannot land on a terminal row. Because mint left local `resolved_cpu` NULL, a
-  failure-path NULL write clobbers nothing.
+- **Guarded write resolves the teardown race.** There is no existing "write a payload column only
+  when state ∈ {set}" helper (`update_state` guards the state transition, not a payload column), so
+  Phase C adds a **new** `SystemRepository` method that UPDATEs `resolved_cpu` with a
+  `WHERE state IN {PROVISIONING, READY}` guard, invoked at the readiness-completion boundary. A
+  System that crashed / was NMI'd / reaped in the read window (a real path — kdive is a crash tool)
+  is no longer in that set, so the write is a no-op — it cannot land on a terminal row. This is why
+  the local write, unlike ADR-0368's rejected remote write-back, does not race teardown/reap: the
+  guard is by construction. The write fires on **both** first provision and local **reprovision**
+  (`reprovisioning→ready`, which may carry a new pin): the reprovision write is authoritative
+  (overwrites with the fresh live-read value, or NULL when the re-read fails — a stale value would be
+  worse). "Clobbers nothing" is thus first-provision-only (mint left it NULL); on reprovision the
+  overwrite is intended.
 - **Remote unchanged.** Remote `resolved_cpu` keeps ADR-0368's mint-time snapshot (the remote
   live-read objections — TLS round-trip, worker→DB race — still hold across the network). The
   contract is stated on the `systems.get` field text: *live-verified for local, mint-snapshot for
