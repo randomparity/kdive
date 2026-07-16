@@ -40,6 +40,13 @@ rate(kcu/hr) = coeff(cost_class) × (W_CPU × vcpus + W_MEM × memory_gb)
 cost(kcu)    = rate × hours
 ```
 
+> **Amended by [ADR-0362](0362-arch-accel-differential-cost.md) (#1176):** the rate
+> gains a pinned accelerator factor `A(accel)` — `rate = coeff(cost_class) × A(accel)
+> × (W_CPU × vcpus + W_MEM × memory_gb)` — so a TCG-emulated guest prices above a
+> same-size native KVM guest. `A(kvm) = 1.0`, `A(tcg) = 4.0`, unknown/absent → `1.0`
+> (fail-open, native baseline). No schema change: the factor reads the ADR-0339
+> persisted `accel`.
+
 - **`W_CPU` and `W_MEM` are global reference weights**, pinned here, not per-class:
   `W_CPU = 1.0` kcu per vcpu-hour, `W_MEM = 0.25` kcu per GB-hour. They define the
   *shape* of the normalized unit (one vcpu-hour ≈ four GB-hours of cost). The
