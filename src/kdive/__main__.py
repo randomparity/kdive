@@ -353,10 +353,11 @@ def _report_categorized_error(command: str, error: CategorizedError, redactor: R
     - Value-redaction floor: applied as defense-in-depth, matching the logging path. ``details`` is
       contractually secret-free, but stderr and the scraped log commonly land in the systemd
       journal or a CI log with broader read scope, so registered secrets, ``secret=value`` pairs
-      (``Redactor``), and URL-userinfo credentials (``redact_url_credentials``) are stripped here.
+      and secret-KEYED values (``Redactor``), and URL-userinfo credentials
+      (``redact_url_credentials``) are stripped here.
     """
-    message = _redact(str(error), redactor)
-    details = {key: _redact(value, redactor) for key, value in error.details.items()}
+    message = _redact_text(str(error), redactor)
+    details = _redact_details(error.details, redactor)
     details_suffix = f" {details}" if details else ""
     _log.error(
         "%s command failed (%s): %s%s",
@@ -371,16 +372,29 @@ def _report_categorized_error(command: str, error: CategorizedError, redactor: R
         print(f"  {key}: {value}", file=sys.stderr)
 
 
-def _redact(value: object, redactor: Redactor) -> object:
-    """Strip registered secrets, ``secret=value`` pairs, and URL-userinfo credentials from a value.
+def _redact_text(text: str, redactor: Redactor) -> str:
+    """Strip registered secrets, ``secret=value`` pairs, and URL-userinfo credentials from text.
 
     URL basic-auth userinfo — a ``user``/``password`` pair before an ``@`` host — is the common way
     a credential lands in a DSN or endpoint detail, and the ``Redactor`` key/value patterns alone do
-    not catch it, so a string is run through :func:`redact_url_credentials` first.
+    not catch it, so the text is run through :func:`redact_url_credentials` first.
     """
-    if isinstance(value, str):
-        return redactor.redact_text(redact_url_credentials(value))
-    return redactor.redact_value(value)
+    return redactor.redact_text(redact_url_credentials(text))
+
+
+def _redact_details(details: dict[str, object], redactor: Redactor) -> dict[str, object]:
+    """Redact a details mapping to match ``Redactor.redact_value``'s mapping semantics.
+
+    Strips URL-userinfo from string leaves first (which ``Redactor`` alone misses), then runs the
+    whole mapping through :meth:`Redactor.redact_value` so a value under a *secret-named* key
+    (``password``/``token``/``api_key``/...) is masked even when the value itself carries no
+    recognizable secret pattern — the key-name signal the codebase's mapping redaction relies on.
+    """
+    url_stripped = {
+        key: (redact_url_credentials(value) if isinstance(value, str) else value)
+        for key, value in details.items()
+    }
+    return redactor.redact_value(url_stripped)
 
 
 if __name__ == "__main__":
