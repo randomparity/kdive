@@ -65,6 +65,10 @@ class _RecordingProvisioner:
             )
         return f"kdive-{system_id}"
 
+    def read_resolved_cpu(self, system_id: object) -> None:
+        del system_id
+        return None
+
     def reprovision(
         self,
         system_id: UUID,

@@ -505,6 +505,10 @@ class _FakeProvisioner:
         del overlay_customizers, bootstrap_pubkey
         return domain_name_for(system_id)
 
+    def read_resolved_cpu(self, system_id: object) -> None:
+        del system_id
+        return None
+
     def reprovision(
         self,
         system_id: UUID,
@@ -1067,6 +1071,10 @@ class _RecordingProvisioner:
     ) -> str:
         del overlay_customizers, bootstrap_pubkey
         return domain_name_for(system_id)
+
+    def read_resolved_cpu(self, system_id: object) -> None:
+        del system_id
+        return None
 
     def reprovision(
         self,
