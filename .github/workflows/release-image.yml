@@ -61,12 +61,23 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
+      - name: Resolve build provenance
+        # The short SHA baked into the image (ADR-0370). --short=12 pins the width so it matches
+        # the wheel built by release.yml for the same tag; this shallow checkout still has HEAD.
+        id: prov
+        run: echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           push: true
+          # Bake honest version provenance into the running image (ADR-0370): a v* tag is a
+          # release (X.Y.Z+g<sha>), a main push is not (X.Y.Z-dev+g<sha>).
+          build-args: |
+            KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
+            KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}
           # Publish a multi-arch manifest (ADR-0359). ppc64le builds under QEMU emulation,
           # which compiles the sdist-only deps (grpcio, drgn, libvirt-python) from source and
           # is the slow leg of this job; the tradeoff and its alternatives are recorded in the
