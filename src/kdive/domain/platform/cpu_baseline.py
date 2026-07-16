@@ -56,6 +56,13 @@ X86_64_MODEL_LEVELS: dict[str, str] = {
 # The features that define each level; if the host-model block disables one for its mapped level,
 # the guest is below that level and the level is omitted. Only the level-boundary markers, not the
 # full set (ADR-0368: a targeted disable-guard, not full feature expansion).
+#
+# The tokens are libvirt/QEMU cpu-map feature names, matched verbatim against the
+# `<feature policy='disable' name=...>` spelling. These names are stable in the libvirt cpu-map
+# (dotted `sse4.2`, bare `avx2`/`bmi2`/`avx`/`avx512f`/`popcnt`) and were verified against a live
+# host (a SapphireRapids host reported `avx512f` and disabled `rtm`/`hle`/`taa-no` with these exact
+# spellings). `test_host_cpu_disable_guard_omits_level_end_to_end` pins `avx2` through the full
+# parse -> guard path so a rename fails a test rather than silently advertising a wrong level.
 LEVEL_DEFINING_FEATURES: dict[str, frozenset[str]] = {
     "x86-64-v2": frozenset({"sse4.2", "popcnt"}),
     "x86-64-v3": frozenset({"avx2", "bmi2", "avx"}),

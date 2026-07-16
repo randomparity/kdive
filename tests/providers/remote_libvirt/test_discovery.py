@@ -243,3 +243,25 @@ def test_host_cpu_omits_baseline_level_for_unmapped_model(tmp_path: Path) -> Non
         "vendor": "Intel",
         "arch": "x86_64",
     }
+
+
+def test_host_cpu_disable_guard_omits_level_end_to_end(tmp_path: Path) -> None:
+    # A v3 model (Skylake) whose v3-defining `avx2` is host-model-disabled must not advertise v3.
+    # Pins the exact libvirt <feature policy='disable' name='avx2'> spelling through
+    # parse_host_cpu -> baseline_level, so a renamed token would fail here rather than silently
+    # advertising a level the host cannot deliver.
+    conn = FakeConn(
+        domcaps_xml=(
+            "<domainCapabilities><cpu>"
+            "<mode name='host-model' supported='yes'>"
+            "<model>Skylake-Client-IBRS</model><vendor>Intel</vendor>"
+            "<feature policy='disable' name='avx2'/>"
+            "</mode></cpu></domainCapabilities>"
+        )
+    )
+    record = _discovery(conn, tmp_path).list_resources()[0]
+    assert record["capabilities"]["host_cpu"] == {
+        "model": "Skylake-Client-IBRS",
+        "vendor": "Intel",
+        "arch": "x86_64",
+    }

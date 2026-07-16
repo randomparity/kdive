@@ -127,9 +127,11 @@ def _discover_host_cpu(conn: _LibvirtConn, arch: str, machine: str) -> dict[str,
     """Advertise the host-model guest CPU baseline (ADR-0368), or ``None`` on any fault.
 
     Parameterized to match the renderer (``render_domain_xml``): ``virttype='kvm'``, ``machine``
-    from config, host ``arch``, default emulator. A ``libvirtError`` (old libvirt without the API,
-    transient RPC fault) or an unparseable/absent host-model block yields ``None`` so a new advisory
-    field never drops the host from discovery.
+    from config, host ``arch``, default emulator. ``virttype='kvm'`` is exact, not a narrowing:
+    the remote renderer always emits ``<domain type='kvm'>`` — remote-libvirt is KVM-only, TCG is a
+    local-only concern (ADR-0341, ``install.py`` ``del accel``). A ``libvirtError`` (old libvirt
+    without the API, transient RPC fault) or an unparseable/absent host-model block yields ``None``
+    so a new advisory field never drops the host from discovery.
     """
     try:
         dom_caps = conn.getDomainCapabilities(None, arch, machine, "kvm")
@@ -138,6 +140,9 @@ def _discover_host_cpu(conn: _LibvirtConn, arch: str, machine: str) -> dict[str,
         return None
     parsed = parse_host_cpu(dom_caps)
     if parsed is None:
+        # Connected, valid XML, but no modelable host-model CPU (unsupported mode / empty <model>).
+        # Log so an operator can tell this from a stale row or a never-discovered host (ADR-0368).
+        _log.info("host advertises no modelable host-model CPU; omitting host_cpu")
         return None
     result: dict[str, Any] = {"model": parsed.model, "arch": parsed.arch or arch}
     if parsed.vendor is not None:
