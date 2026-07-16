@@ -11,7 +11,7 @@ Price a hypothetical selector over a window without writing anything. Requires v
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `project` | string | yes | Project to price the estimate for. |
-| `request` | object | yes | Estimate request payload: size, lease window in hours, cost class. |
+| `request` | object | yes | Estimate request payload: size, lease window in hours, cost class, and optional accelerator (kvm/tcg) to price an architecture at. |
 
 `request` fields:
 
@@ -19,6 +19,7 @@ Price a hypothetical selector over a window without writing anything. Requires v
 - `memory_gb` (`integer`, required)
 - `window` (`number \| string`, required) — Lease window length in hours, e.g. 24.
 - `cost_class` (`string`, optional) — Hypothetical cost class to price against (default 'local'); selects the per-class pricing coefficient. This is a what-if input, not the class you are billed under: actual usage is billed under the persisted cost_class of the resource the allocation books. To get an estimate that matches the bill, pass the cost_class of the resource you intend to allocate on (read it from `catalog.resources`). An unknown class is a configuration_error.
+- `accel` (`string (nullable)`, optional) — Optional accelerator to price the estimate at: 'kvm' (native) or 'tcg' (foreign-arch emulation). Omit for the native baseline. A TCG guest is priced above a same-size KVM guest — price both to compare architectures before you allocate. This is a what-if input; the host resolves the real accelerator for your arch at provision. An unknown value is a configuration_error.
 
 ## `accounting.report_all_projects`
 

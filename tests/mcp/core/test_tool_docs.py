@@ -512,6 +512,7 @@ def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
 
     allocation_request = tools["allocations.request"].parameters["properties"]["request"]
     assert set(allocation_request["properties"]) == {
+        "arch",
         "disk_gb",
         "memory_gb",
         "on_capacity",
@@ -524,6 +525,7 @@ def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
 
     estimate_request = tools["accounting.estimate"].parameters["properties"]["request"]
     assert set(estimate_request["properties"]) == {
+        "accel",
         "cost_class",
         "memory_gb",
         "vcpus",
