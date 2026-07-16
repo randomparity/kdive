@@ -10,8 +10,10 @@ import pytest
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     QEMU_NS,
+    ParsedHostCpu,
     parse_capabilities_arch,
     parse_guest_arches,
+    parse_host_cpu,
     parse_metadata_system_id,
     recorded_gdb_port,
     recorded_ssh_port,
@@ -289,3 +291,61 @@ def test_register_kdive_namespace_is_idempotent(monkeypatch) -> None:
     register_kdive_namespace()
     register_kdive_namespace()
     assert calls == [("kdive", KDIVE_METADATA_NS)]
+
+
+_DOMCAPS_HOST_MODEL = """
+<domainCapabilities>
+  <cpu>
+    <mode name='host-passthrough' supported='yes'/>
+    <mode name='host-model' supported='yes'>
+      <model fallback='forbid'>Skylake-Client-IBRS</model>
+      <vendor>Intel</vendor>
+      <feature policy='require' name='ssse3'/>
+      <feature policy='disable' name='avx512f'/>
+    </mode>
+  </cpu>
+</domainCapabilities>
+"""
+
+
+def test_parse_host_cpu_reads_model_vendor_and_disabled() -> None:
+    parsed = parse_host_cpu(_DOMCAPS_HOST_MODEL)
+    assert parsed == ParsedHostCpu(
+        model="Skylake-Client-IBRS",
+        vendor="Intel",
+        arch=None,
+        disabled_features=frozenset({"avx512f"}),
+    )
+
+
+def test_parse_host_cpu_none_on_malformed() -> None:
+    assert parse_host_cpu("<not-valid") is None
+
+
+def test_parse_host_cpu_none_when_host_model_has_no_model() -> None:
+    xml = (
+        "<domainCapabilities><cpu>"
+        "<mode name='host-model' supported='yes'/></cpu></domainCapabilities>"
+    )
+    assert parse_host_cpu(xml) is None
+
+
+def test_parse_host_cpu_none_when_host_model_unsupported() -> None:
+    xml = (
+        "<domainCapabilities><cpu>"
+        "<mode name='host-model' supported='no'>"
+        "<model>Skylake-Client-IBRS</model></mode></cpu></domainCapabilities>"
+    )
+    assert parse_host_cpu(xml) is None
+
+
+def test_parse_host_cpu_no_disabled_features_is_empty_frozenset() -> None:
+    xml = (
+        "<domainCapabilities><cpu>"
+        "<mode name='host-model' supported='yes'>"
+        "<model>EPYC</model><vendor>AMD</vendor>"
+        "<feature policy='require' name='avx2'/></mode></cpu></domainCapabilities>"
+    )
+    parsed = parse_host_cpu(xml)
+    assert parsed is not None
+    assert parsed.disabled_features == frozenset()

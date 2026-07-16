@@ -6,6 +6,7 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Collection
+from dataclasses import dataclass
 
 from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
@@ -92,6 +93,53 @@ def parse_guest_arches(caps_xml: str, supported: Collection[str]) -> dict[str, d
             accel = "kvm" if arch.find("domain[@type='kvm']") is not None else "tcg"
             result[name] = {"accel": accel, "emulator": emulator}
     return result
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedHostCpu:
+    """The raw host-model CPU fields parsed from a domain-capabilities document (ADR-0368).
+
+    Domain-free: ``arch`` is whatever the block carries (usually absent — the caller supplies the
+    host arch parsed elsewhere); ``disabled_features`` are the ``<feature policy='disable'>`` names
+    the level disable-guard consumes. Baseline-level derivation lives in ``domain/platform`` and is
+    applied by the discovery layer, keeping this shared helper free of a ``providers/shared ->
+    domain`` dependency.
+    """
+
+    model: str
+    vendor: str | None
+    arch: str | None
+    disabled_features: frozenset[str]
+
+
+def parse_host_cpu(dom_caps_xml: str) -> ParsedHostCpu | None:
+    """Read the ``<cpu><mode name='host-model'>`` block from a domain-capabilities document.
+
+    Returns ``None`` on a parse fault, an unsupported/absent host-model mode, or a host-model block
+    with no concrete ``<model>`` text (a host libvirt cannot model) — discovery never crashes and
+    never advertises an empty model, mirroring :func:`parse_capabilities_arch`. Parsed with
+    ``defusedxml`` (the XML crosses the libvirtd trust boundary).
+    """
+    try:
+        root: ET.Element = _safe_fromstring(dom_caps_xml)
+    except (ET.ParseError, DefusedXmlException) as _exc:
+        _log.warning("could not parse domain capabilities for host cpu", exc_info=True)
+        return None
+    for mode in root.findall("./cpu/mode"):
+        if mode.get("name") != "host-model" or mode.get("supported") == "no":
+            continue
+        model = (mode.findtext("model") or "").strip()
+        if not model:
+            return None
+        vendor = (mode.findtext("vendor") or "").strip() or None
+        arch = (mode.findtext("arch") or "").strip() or None
+        disabled = frozenset(
+            name
+            for feat in mode.findall("feature")
+            if feat.get("policy") == "disable" and (name := feat.get("name")) is not None
+        )
+        return ParsedHostCpu(model=model, vendor=vendor, arch=arch, disabled_features=disabled)
+    return None
 
 
 def parse_metadata_system_id(meta_xml: str) -> str | None:
