@@ -82,7 +82,7 @@ Expected: `test_local_mint_does_not_snapshot_host_cpu` FAILS (today local resolv
 
 - [ ] **Step 3: Implement the remote-only gate**
 
-In `_resolve_new_system_bindings`, decide remote-vs-local from the profile (`profile.provider.remote_libvirt` is not `None`) or the bound Resource kind — pick the signal already available at this call site (the profile is a parameter). Gate the snapshot:
+In `_resolve_new_system_bindings`, decide remote-vs-local from the profile's plain `remote_libvirt_section` field (the profile is a parameter). Gate the snapshot:
 
 ```python
     resource = await RESOURCES.get(conn, resource_id) if resource_id is not None else None
@@ -726,6 +726,7 @@ async def test_pin_not_in_arch_set_rejected(...): ...        # CONFIGURATION_ERR
 async def test_pin_in_other_arch_set_rejected(...): ...      # x86 model, ppc64le profile -> rejected
 async def test_pin_when_arch_has_no_set_rejected(...): ...   # no selectable_cpus[arch] -> rejected
 async def test_unpinned_profile_no_check(...): ...           # cpu None -> mint proceeds
+async def test_remote_and_fault_mint_do_not_raise(...): ...  # non-local profiles: helper is a no-op, no AttributeError
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -745,7 +746,11 @@ def require_pinned_cpu_selectable(profile: ProvisioningProfile, caps: ResourceCa
     (see the pin field text). A pin with no advertised set for the arch is rejected: never render a
     custom <cpu> we cannot show the host supports.
     """
-    section = profile.provider.local_libvirt
+    # Use the plain `_section` field — `profile.provider.local_libvirt` is a RAISING property
+    # (provisioning.py:246-249) and this helper runs in the provider-AGNOSTIC mint path
+    # (_resolve_new_system_bindings runs for remote/fault too), so the property would raise an
+    # uncaught AttributeError on every non-local provision (same rule as Task 1).
+    section = profile.provider.local_libvirt_section
     if section is None or section.cpu is None:
         return
     allowed = caps.selectable_cpus().get(profile.arch, []) if caps is not None else []
@@ -914,27 +919,31 @@ Add a **generic** state-guarded payload write to `StatefulRepository` (so `SYSTE
             return await cur.fetchone() is not None
 ```
 
-**Wiring (finding-driven — this is the least-obvious part, pinned concretely).** `read_resolved_cpu` lives on `LocalLibvirtProvisioning`, **not** on the `Provisioner` protocol (`providers/ports/lifecycle.py` — it declares only `provision`/`teardown`/`reprovision`), and remote/fault-inject have no live local domain to read. So keep it local-only and narrow:
+**Wiring (finding-driven — this is the least-obvious part, pinned concretely against the handler scope).** `read_resolved_cpu` lives on `LocalLibvirtProvisioning`, **not** on the `Provisioner` protocol (`providers/ports/lifecycle.py` — it declares only `provision`/`teardown`/`reprovision`), and remote/fault-inject have no live local domain to read. Keep it local-only and narrow, and place the block where the needed names are actually in scope:
 
-1. Do the read+write in `_execute_system_lifecycle_call` (`jobs/handlers/systems.py`) **after** the successful commit that drives the System to `READY` — that is where `runtime` (hence `runtime.provisioner`) is in scope; the `_commit_*` callbacks are typed `Callable[..., ]` and never receive the provisioner, so they are the wrong hook.
-2. Gate on kind and narrow the type: only when `binding.kind is ResourceKind.LOCAL_LIBVIRT` **and** `isinstance(runtime.provisioner, LocalLibvirtProvisioning)` (satisfies ty-strict; skips remote/fault with no false attribute access).
-3. Run the blocking libvirt read off the event loop, matching the handler's existing idiom (`_provider_lifecycle_call` already uses `asyncio.to_thread` — a direct blocking libvirt call starves the worker loop, cf. #583):
+1. **Placement: in `provision_handler` and `reprovision_handler`** (`jobs/handlers/systems.py`), **after** their `_execute_system_lifecycle_call(...)` call returns (that helper performs the READY-driving commit). `binding` and `provisioner` are in scope in these handlers (not in `_execute_system_lifecycle_call`, which receives only `conn`/`job`/`system`/`runtime`). The `_commit_*` callbacks never receive the provisioner, so they are the wrong hook.
+2. **No pool on the worker path** — handlers are dispatched with an **injected `conn`** (`lambda conn, job: provision_handler(conn, job, ...)`), there is no `pool`. Reuse that `conn` for the guarded write (open a nested transaction if the commit above closed the current one: `async with conn.transaction(): ...`). Use `system.id`, not a `system_id` local.
+3. **Gate + narrow:** only when `binding.kind is ResourceKind.LOCAL_LIBVIRT` **and** `isinstance(provisioner, LocalLibvirtProvisioning)` (satisfies ty-strict; skips remote/fault with no false attribute access).
+4. **Off the event loop:** the blocking libvirt read runs via `asyncio.to_thread`, matching the handler's existing idiom (`_provider_lifecycle_call` already uses `asyncio.to_thread`; a direct blocking libvirt call starves the worker loop, cf. #583).
 
 ```python
+   # in provision_handler / reprovision_handler, after _execute_system_lifecycle_call(...) succeeds:
    if binding.kind is ResourceKind.LOCAL_LIBVIRT and isinstance(provisioner, LocalLibvirtProvisioning):
        try:
-           resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system_id)
+           resolved = await asyncio.to_thread(provisioner.read_resolved_cpu, system.id)
        except (libvirt.libvirtError, CategorizedError) as _exc:
            _log.warning("resolved_cpu read failed; recording null", exc_info=True)
            resolved = None
-       async with pool.connection() as conn:
+       async with conn.transaction():
            await SYSTEMS.set_json_column(
-               conn, system_id, "resolved_cpu", resolved,
+               conn, system.id, "resolved_cpu", resolved,
                allowed_states=frozenset({SystemState.PROVISIONING, SystemState.READY}),
            )
 ```
 
-**State-set / ordering (finding-driven):** the write runs **after** the READY transition, so the row is `READY` at write time and the `{PROVISIONING, READY}` guard (the spec/ADR set) admits it; a guest that crashed/was reaped between the transition and the write has moved to `CRASHING`/`CRASHED`/`TORN_DOWN`, so the guard no-ops (no stale value). `REPROVISIONING` is **not** in the set because a reprovision also terminates at `READY` before this write — the state during reprovision is transient and never the write-time state. Confirm the exact post-commit line and that both `provision_handler` and `reprovision_handler` route through `_execute_system_lifecycle_call` (if reprovision has a separate commit path, add the same block there).
+**New imports `systems.py` needs** (it does not import these today): `ResourceKind` (`kdive.domain.catalog.resources`), `LocalLibvirtProvisioning` (`kdive.providers.local_libvirt.lifecycle.provisioning`), and `libvirt` with a scoped `# ty: ignore[unresolved-import]`. `asyncio`/`SYSTEMS`/`_log`/`SystemState` are already imported (confirm).
+
+**State-set / ordering (finding-driven):** the write runs **after** the READY transition, so the row is `READY` at write time and the `{PROVISIONING, READY}` guard (the spec/ADR set) admits it; a guest that crashed/was reaped between the transition and the write has moved to `CRASHING`/`CRASHED`/`TORN_DOWN`, so the guard no-ops (no stale value). `REPROVISIONING` is **not** in the set because a reprovision also terminates at `READY` before this write — the reprovision state is transient and never the write-time state.
 
 Update the `systems.get` **wrapper** docstring in `registrar.py` for `resolved_cpu`:
 > `resolved_cpu` (`{model, vendor?, arch, baseline_level?}` or null): the guest CPU the System actually booted with — **live-verified for local Systems** (read from the running domain; passthrough resolves to the host CPU; a TCG machine-default the host does not expand reads null), and the **mint-time snapshot for remote Systems** (ADR-0368). Null means unrecorded/unreadable — treat as unknown.
