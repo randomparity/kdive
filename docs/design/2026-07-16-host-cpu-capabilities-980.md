@@ -40,8 +40,12 @@ This is a **visibility/observability** requirement. The provisioning path does n
 - Advertising CPU capabilities for **local-libvirt** (single co-located host,
   `host-passthrough`, deterministic — no selection ambiguity) or **fault-inject** (a fake).
   This feature is remote-libvirt-scoped, exactly as ADR-0338 scoped `guest_arches` to local.
+  The local cases (x86 host-passthrough, ppc64le KVM host-model, and ppc64le-under-TCG whose
+  guest CPU is the QEMU machine default with no `<cpu>` emitted) each need a different source and
+  are deferred to **#1227** (manage/expose guest CPU across local/remote and cross-arch).
 - A non-x86 baseline taxonomy. `x86-64-vN` is x86-64 only; other arches carry the raw model
-  and arch, with `baseline_level` omitted (see Open questions → resolved).
+  and arch, with `baseline_level` omitted (see Open questions → resolved). A ppc64le/other-arch
+  level notion is part of #1227.
 - Gating admission or placement on CPU capability. This is advisory only; no request is
   rejected for a CPU mismatch (a future issue may add opt-in gating).
 
