@@ -138,7 +138,11 @@ _HOST_CPU = {
 }
 
 
-def test_mint_records_resolved_cpu_from_bound_host(migrated_url: str) -> None:
+def test_local_mint_does_not_snapshot_host_cpu(migrated_url: str) -> None:
+    # ADR-0369: the mint-time host_cpu snapshot is remote-only. A LOCAL System minted against a
+    # host that advertises host_cpu records resolved_cpu = None — the native snapshot would be
+    # wrong for a CPU pin / arch-mismatched for a foreign-TCG guest; local resolved_cpu is a
+    # post-provision live read, not a mint snapshot.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -151,7 +155,7 @@ def test_mint_records_resolved_cpu_from_bound_host(migrated_url: str) -> None:
             assert resp.error_category is None, resp.data
             row = await _system_for_allocation(pool, alloc_id)
             assert row is not None
-            assert row["resolved_cpu"] == _HOST_CPU
+            assert row["resolved_cpu"] is None
 
     asyncio.run(_run())
 
