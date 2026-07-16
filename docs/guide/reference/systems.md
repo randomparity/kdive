@@ -91,6 +91,8 @@ contributor on the Allocation's project.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
@@ -204,6 +206,8 @@ pick one of those or an allocation on a host that offers the arch you need.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
@@ -275,6 +279,8 @@ destructive_ops opt-in).
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
