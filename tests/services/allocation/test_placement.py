@@ -12,7 +12,10 @@ import psycopg
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
-from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
+from kdive.domain.catalog.resource_capabilities import (
+    CONCURRENT_ALLOCATION_CAP_KEY,
+    GUEST_ARCHES_KEY,
+)
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
@@ -50,6 +53,7 @@ async def _resource(
     owner_project: str | None = None,
     affinity_allowlist: list[str] | None = None,
     pool: str = "local-libvirt",
+    guest_arches: dict[str, object] | None = None,
 ) -> Resource:
     capabilities: dict[str, object] = {
         CONCURRENT_ALLOCATION_CAP_KEY: 10,
@@ -58,6 +62,8 @@ async def _resource(
     }
     if pcie:
         capabilities[PCIE_DEVICES_KEY] = [_NIC]
+    if guest_arches is not None:
+        capabilities[GUEST_ARCHES_KEY] = guest_arches
     resource = await RESOURCES.insert(
         conn,
         Resource(
@@ -267,5 +273,72 @@ def test_explicit_scoped_resource_filtered_for_foreign_project(migrated_url: str
                 conn, PlacementRequest(resource_id=scoped.id, project="mine")
             )
         return [r.id for r in candidates.resources]
+
+    assert asyncio.run(_run()) == []
+
+
+_KVM = {"accel": "kvm", "emulator": "/usr/bin/qemu-system-x86_64"}
+_TCG = {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"}
+
+
+def test_arch_filter_excludes_host_without_requested_arch(migrated_url: str) -> None:
+    # A host advertising only x86_64 is dropped for a ppc64le request; a ppc64le-capable host
+    # is kept — arch-aware routing across a multi-arch fleet (ADR-0362).
+    async def _run() -> tuple[list[UUID], UUID]:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, guest_arches={"x86_64": _KVM})
+            power = await _resource(
+                conn, created_offset=timedelta(seconds=1), guest_arches={"ppc64le": _TCG}
+            )
+            candidates = await resolve_placement_candidates(
+                conn,
+                PlacementRequest(resource_id=None, kind=ResourceKind.LOCAL_LIBVIRT, arch="ppc64le"),
+            )
+            return [r.id for r in candidates.resources], power.id
+
+    ids, power_id = asyncio.run(_run())
+    assert ids == [power_id]
+
+
+def test_arch_filter_keeps_host_advertising_no_guest_arches(migrated_url: str) -> None:
+    # A resource that advertises no guest_arches (remote-libvirt / fault-inject) is fail-open:
+    # it cannot prove it lacks the arch, so it stays a candidate (ADR-0362).
+    async def _run() -> int:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn)  # no guest_arches key
+            candidates = await resolve_placement_candidates(
+                conn,
+                PlacementRequest(resource_id=None, kind=ResourceKind.LOCAL_LIBVIRT, arch="ppc64le"),
+            )
+            return len(candidates.resources)
+
+    assert asyncio.run(_run()) == 1
+
+
+def test_arch_none_disables_arch_filter(migrated_url: str) -> None:
+    # An arch-blind request (arch=None) selects every schedulable host regardless of guest_arches.
+    async def _run() -> int:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, guest_arches={"x86_64": _KVM})
+            await _resource(
+                conn, created_offset=timedelta(seconds=1), guest_arches={"ppc64le": _TCG}
+            )
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=None, kind=ResourceKind.LOCAL_LIBVIRT)
+            )
+            return len(candidates.resources)
+
+    assert asyncio.run(_run()) == 2
+
+
+def test_explicit_resource_id_rejects_wrong_arch(migrated_url: str) -> None:
+    # By-id targeting an x86_64-only host with a ppc64le request yields no candidate.
+    async def _run() -> list[UUID]:
+        async with _conn(migrated_url) as conn:
+            host = await _resource(conn, guest_arches={"x86_64": _KVM})
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=host.id, arch="ppc64le")
+            )
+            return [r.id for r in candidates.resources]
 
     assert asyncio.run(_run()) == []

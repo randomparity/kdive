@@ -40,3 +40,26 @@ def resource_visible_to_projects(resource: Resource, projects: tuple[str, ...]) 
     if resource.owner_project is None:
         return True
     return any(project_may_place(resource, project) for project in projects)
+
+
+def resource_supports_arch(resource: Resource, arch: str) -> bool:
+    """Report whether ``resource`` can boot guest architecture ``arch`` (ADR-0362).
+
+    Fail-open, mirroring the accel-resolution rule (ADR-0339): a resource that advertises a
+    non-empty ``guest_arches`` set is admitted only when it contains ``arch``; a resource that
+    advertises **no** ``guest_arches`` (remote-libvirt, fault-inject, a host not re-discovered
+    since ADR-0338) is admitted, because it cannot prove it does not support the arch and must
+    behave exactly as before ADR-0362. This routes a ``ppc64le`` request to a ``ppc64le``-capable
+    host and falls through a host that advertises only ``x86_64``.
+
+    Args:
+        resource: The candidate resource host.
+        arch: The requested guest architecture.
+
+    Returns:
+        ``True`` if the resource may place the requested arch, else ``False``.
+    """
+    guest_arches = resource.capability_view.guest_arches()
+    if not guest_arches:
+        return True
+    return arch in guest_arches
