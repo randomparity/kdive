@@ -117,6 +117,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "control.power": _CONTRIBUTOR,  # leaseholder lifecycle over a READY transient VM (ADR-0320)
     "control.force_crash": _ADMIN,
     "control.diagnostic_sysrq": _CONTRIBUTOR,  # non-destructive diagnostic capture, ADR-0285
+    "control.watch_for_crash": _CONTRIBUTOR,  # non-destructive out-of-band console watch, ADR-0367
     # debug
     "debug.list_breakpoints": _CONTRIBUTOR,
     "debug.get_session": _VIEWER,

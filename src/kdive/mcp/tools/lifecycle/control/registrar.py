@@ -17,6 +17,7 @@ repeated power op is always a fresh job; `force_crash` uses a stable
 
 from __future__ import annotations
 
+import math
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -33,7 +34,14 @@ from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind, PowerAction
 from kdive.domain.operations.sysrq import SysRqCommand, parse_command
 from kdive.jobs import queue
-from kdive.jobs.payloads import PowerPayload, SysRqPayload, SystemPayload
+from kdive.jobs.payloads import (
+    WATCH_DEFAULT_DEADLINE_S,
+    WATCH_MAX_DEADLINE_S,
+    PowerPayload,
+    SysRqPayload,
+    SystemPayload,
+    WatchForCrashPayload,
+)
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
@@ -64,6 +72,7 @@ _FORCE_CRASH = JobKind.FORCE_CRASH
 _POWER_KIND = "control.power"
 _FORCE_CRASH_KIND = "control.force_crash"
 _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
+_WATCH_FOR_CRASH_KIND = "control.watch_for_crash"
 # The agent-facing allowlist rendered into the `command` Field description (single source of
 # truth is `SysRqCommand`; ADR-0285).
 _SYSRQ_COMMANDS = ", ".join(command.value for command in SysRqCommand)
@@ -283,6 +292,66 @@ async def diagnostic_sysrq_system(
             )
 
 
+async def watch_for_crash_system(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    deadline_s: float,
+    resolver: ProviderResolver,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
+    """Admit an out-of-band crash-signature console watch on a ready local-libvirt System.
+
+    Non-destructive: requires ``contributor``. ``deadline_s`` is validated (finite, positive) and
+    clamped to ``WATCH_MAX_DEADLINE_S`` before enqueue, so a pure-wait watch cannot hold a worker
+    slot past the cap. Rejects a non-local-libvirt or non-``ready`` System with a
+    ``configuration_error``. The role check binds to the target System's project and runs after
+    the in-project check, so it is never evaluated against a foreign project.
+    """
+    uid = _as_uuid(system_id)
+    if uid is None:
+        return _config_error(system_id)
+    if not math.isfinite(deadline_s) or deadline_s <= 0:
+        return _config_error(system_id, data={"reason": "invalid_deadline"})
+    clamped = min(deadline_s, WATCH_MAX_DEADLINE_S)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            system = await SYSTEMS.get(conn, uid)
+            if system is None or system.project not in ctx.projects:
+                return _config_error(system_id)
+            require_role(ctx, system.project, Role.CONTRIBUTOR)
+            binding = await resolver.binding_for_system(conn, system.id)
+            if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
+                return _config_error(
+                    system_id,
+                    detail="watch_for_crash is supported only on local-libvirt Systems",
+                    data={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+                )
+            if system.state is not SystemState.READY:
+                return _config_error(system_id, data={"current_status": system.state.value})
+            dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.WATCH_FOR_CRASH,
+                    WatchForCrashPayload(system_id=system_id, deadline_s=clamped),
+                    job_authorizing(ctx, system.project),
+                    f"{system_id}:watch_for_crash:{dedup_suffix}",
+                )
+                return job_envelope(job, "system_id", uid)
+
+            return await keyed_mutation(
+                conn,
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=system.project,
+                kind=_WATCH_FOR_CRASH_KIND,
+                do_work=_enqueue,
+            )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `control.*` tools on ``app``, bound to ``pool``."""
 
@@ -381,6 +450,52 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             current_context(),
             system_id=system_id,
             command=command,
+            resolver=resolver,
+            idempotency_key=idempotency_key,
+        )
+
+    @app.tool(
+        name="control.watch_for_crash",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def control_watch_for_crash(
+        system_id: Annotated[
+            str, Field(description="The ready local-libvirt System whose console to watch.")
+        ],
+        deadline_s: Annotated[
+            float,
+            Field(
+                description=(
+                    "Seconds to watch the guest's serial console before returning a 'not fired' "
+                    f"verdict; defaults to {int(WATCH_DEFAULT_DEADLINE_S)} and is clamped to "
+                    f"{int(WATCH_MAX_DEADLINE_S)}. Size it to the reproducer batch you are about "
+                    "to run; re-issue the watch for a longer campaign."
+                )
+            ),
+        ] = WATCH_DEFAULT_DEADLINE_S,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
+    ) -> ToolResponse:
+        """Watch a ready local-libvirt guest's serial console out-of-band for a kernel-crash
+        signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on
+        the first hit. Use this to catch a crash your own reproducer provokes: drive the
+        repeat-until-crash loop over your root SSH, and this watches the console — which survives
+        the panic that drops SSH. Requires contributor; enqueues a job and returns
+        `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
+        `refs.result`. The verdict's `outcome` is `fired` (a signature appeared: carries
+        `signature`, a redacted matched `matched` slice, and `elapsed_s`), `not_fired` (the guest
+        was still live at the deadline), or `exited_no_signature` (the guest died with no
+        signature in the watched window — read the full console with the `artifacts` tools). A
+        non-local-libvirt or non-ready System, or a non-positive `deadline_s`, is a
+        `configuration_error`."""
+        return await watch_for_crash_system(
+            pool,
+            current_context(),
+            system_id=system_id,
+            deadline_s=deadline_s,
             resolver=resolver,
             idempotency_key=idempotency_key,
         )

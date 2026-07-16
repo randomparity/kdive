@@ -14,6 +14,19 @@ each tool's own description.
 - `control.diagnostic_sysrq` — send a diagnostic SysRq key to a ready local-libvirt system to
   provoke kernel diagnostics (for example a task-state or memory dump) without destroying it.
 
+## Catching a crash you provoke
+
+- `control.watch_for_crash` — watch a ready local-libvirt system's serial console **out of
+  band** for a kernel-crash signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until a
+  deadline, returning on the first hit. This is the primitive for a repeat-until-crash race
+  reproduction: you drive the reproducer loop over your own root SSH, and this watches the
+  console — which survives the panic that drops your SSH channel. It enqueues a job; poll
+  `jobs.wait`, then read the verdict from `refs.result`. The `outcome` is `fired` (with the
+  matched `signature`, a redacted `matched` slice, and `elapsed_s`), `not_fired` (the guest was
+  still live at the deadline), or `exited_no_signature` (the guest died with no signature in the
+  watched window — read the full console with the `artifacts` tools). Contributor-level,
+  non-destructive. See the [race-debugging guide](../../operating/race-debugging.md).
+
 ## Power
 
 - `control.power` — power actions (`on`/`off`/`cycle`/`reset`) on a **READY** system.
