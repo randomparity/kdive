@@ -33,14 +33,13 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
-from kdive.domain.platform.cpu_baseline import baseline_level
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.fadump_detect import detect_pseries_fadump
+from kdive.providers.shared.host_cpu import host_cpu_dict
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
-    ParsedHostCpu,
     parse_capabilities_arch,
     parse_guest_arches,
     parse_host_capabilities_cpu,
@@ -49,6 +48,7 @@ from kdive.providers.shared.libvirt_xml import (
     parse_selectable_cpus,
 )
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
+from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
 
@@ -122,20 +122,9 @@ def _native_kvm_arch(guest_arches: Mapping[str, Mapping[str, str]], host_arch: s
     return None
 
 
-def _host_cpu_dict(parsed: ParsedHostCpu, fallback_arch: str) -> dict[str, Any]:
-    """Compose the advertised ``host_cpu`` dict from a parsed block, adding the x86 level."""
-    result: dict[str, Any] = {"model": parsed.model, "arch": parsed.arch or fallback_arch}
-    if parsed.vendor is not None:
-        result["vendor"] = parsed.vendor
-    level = baseline_level(parsed.model, parsed.disabled_features)
-    if level is not None:
-        result["baseline_level"] = level
-    return result
-
-
 def _discover_local_host_cpu(
     conn: _LibvirtConn, caps_xml: str, native_arch: str | None
-) -> dict[str, Any] | None:
+) -> dict[str, JsonValue] | None:
     """The native host CPU (ADR-0369), guarded; ``None`` for a foreign/TCG-only host or any fault.
 
     x86 host-passthrough reads the host's own ``<host><cpu>`` (a passthrough guest gets the host
@@ -157,7 +146,7 @@ def _discover_local_host_cpu(
         parsed = parse_host_cpu(dom_caps)
     if parsed is None:
         return None
-    return _host_cpu_dict(parsed, native_arch)
+    return host_cpu_dict(parsed, native_arch)
 
 
 def _discover_selectable_cpus(

@@ -1949,3 +1949,48 @@ def test_domain_xml_has_serial_console_with_log() -> None:
     assert target is not None
     assert target.get("type") == "serial"
     assert target.get("port") == "0"
+
+
+# --- #1227 Phase C: read_resolved_cpu (best-effort live read) ---
+
+_HOST_CPU_CAPS = (
+    "<capabilities><host><cpu>"
+    "<arch>x86_64</arch><model>SapphireRapids</model><vendor>Intel</vendor>"
+    "</cpu></host></capabilities>"
+)
+
+
+def test_read_resolved_cpu_concrete_model() -> None:
+    name = domain_name_for(_SYS)
+    xml = (
+        "<domain><os><type arch='x86_64'>hvm</type></os>"
+        "<cpu mode='custom'><model>x86-64-v2</model></cpu></domain>"
+    )
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)})
+    # "x86-64-v2" is a QEMU synthetic model name, not in the curated model->level table (which
+    # holds real names like Nehalem/SapphireRapids), so baseline_level is honestly omitted.
+    assert _prov(conn).read_resolved_cpu(_SYS) == {"model": "x86-64-v2", "arch": "x86_64"}
+
+
+def test_read_resolved_cpu_passthrough_falls_back_to_host_cpu() -> None:
+    name = domain_name_for(_SYS)
+    xml = "<domain><os><type arch='x86_64'>hvm</type></os><cpu mode='host-passthrough'/></domain>"
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)}, caps_xml=_HOST_CPU_CAPS)
+    assert _prov(conn).read_resolved_cpu(_SYS) == {
+        "model": "SapphireRapids",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v4",
+    }
+
+
+def test_read_resolved_cpu_tcg_default_is_none() -> None:
+    name = domain_name_for(_SYS)
+    xml = "<domain><os><type arch='ppc64le'>hvm</type></os></domain>"  # no <cpu> (TCG default)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)})
+    assert _prov(conn).read_resolved_cpu(_SYS) is None
+
+
+def test_read_resolved_cpu_domain_gone_is_none() -> None:
+    conn = _ProvConn()  # no domain defined -> lookupByName raises NO_DOMAIN
+    assert _prov(conn).read_resolved_cpu(_SYS) is None

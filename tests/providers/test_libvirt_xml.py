@@ -12,6 +12,7 @@ from kdive.providers.shared.libvirt_xml import (
     QEMU_NS,
     ParsedHostCpu,
     parse_capabilities_arch,
+    parse_domain_resolved_cpu,
     parse_guest_arches,
     parse_host_capabilities_cpu,
     parse_host_cpu,
@@ -396,3 +397,21 @@ def test_parse_selectable_cpus_empty_on_no_custom_mode_or_malformed() -> None:
         "</cpu></domainCapabilities>"
     )
     assert parse_selectable_cpus(unsupported) == []
+
+
+def test_parse_domain_resolved_cpu_concrete_model() -> None:
+    xml = (
+        "<domain><os><type arch='x86_64'>hvm</type></os>"
+        "<cpu mode='custom'><model>x86-64-v2</model><vendor>Intel</vendor></cpu></domain>"
+    )
+    parsed = parse_domain_resolved_cpu(xml)
+    assert parsed == ParsedHostCpu(
+        model="x86-64-v2", vendor="Intel", arch="x86_64", disabled_features=frozenset()
+    )
+
+
+def test_parse_domain_resolved_cpu_none_when_no_concrete_model() -> None:
+    # host-passthrough left unexpanded, or a TCG machine-default with no <model>.
+    assert parse_domain_resolved_cpu("<domain><cpu mode='host-passthrough'/></domain>") is None
+    assert parse_domain_resolved_cpu("<domain/>") is None
+    assert parse_domain_resolved_cpu("<nope") is None
