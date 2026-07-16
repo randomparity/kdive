@@ -44,11 +44,23 @@ host_cpu = {"model": str, "vendor": str?, "arch": str, "baseline_level": "x86-64
 ```
 
 - **Source = domain-capabilities host-model.** Read the connection's
-  `getDomainCapabilities()` `<cpu><mode name='host-model'>` block — the exact model libvirt
-  synthesizes for a `host-model` guest on this host, which is what the renderer emits. This
-  widens the duck-typed `_LibvirtConn` protocol (`connection/transport.py`) with
-  `getDomainCapabilities`, satisfied by the real binding and the test fake. Discovery is a cold
-  path, so the extra libvirt call is immaterial.
+  `getDomainCapabilities(emulator, arch, machine, virttype)` `<cpu><mode name='host-model'>`
+  block — the exact model libvirt synthesizes for a `host-model` guest on this host, which is
+  what the renderer emits. The arguments are **pinned to match `render_domain_xml`**
+  (`virttype="kvm"`, `machine="pc"`, `arch=` the profile default arch, `emulator=` resolved the
+  same way), because host-model resolution is sensitive to `(emulator, arch, machine, virttype)`
+  — the no-arg form lets libvirt pick its own default (often `q35`, possibly TCG) and would
+  predict a CPU for a configuration the provisioner does not build. This widens the duck-typed
+  `_LibvirtConn` protocol (`connection/transport.py`) with `getDomainCapabilities`, satisfied by
+  the real binding and the test fake. Discovery is a cold path, so the extra libvirt call is
+  immaterial.
+- **The call is guarded.** `arch`/`vcpus`/`memory_mb`/`transports` are computed first (unchanged
+  from today); the `getDomainCapabilities` call + parse run in a `try` that catches any
+  `libvirt.libvirtError` (an older libvirt without the API, a transient RPC fault), logs at
+  warning, and omits `host_cpu` — the ResourceRecord still discovers with every existing
+  capability intact. A new advisory field must never drop a host from discovery
+  (`parse_host_cpu` returning `None` guards a parse fault; the `try` guards an RPC raise before
+  any XML exists).
 - **Parser** `parse_host_cpu(dom_caps_xml)` in `providers/shared/libvirt_xml.py`, defusedxml
   (the XML crosses the libvirtd trust boundary), returning `None` on any parse fault or a
   host-model block with no concrete `<model>` — discovery never crashes and never advertises an
@@ -64,41 +76,62 @@ host_cpu = {"model": str, "vendor": str?, "arch": str, "baseline_level": "x86-64
   `resources.list`/`resources.describe`. This is the one deliberate divergence from
   `guest_arches`: #980 exists precisely to make this visible at selection time.
 
-### 2. Persisted `resolved_cpu` on the System (post-provision)
+### 2. Persisted `resolved_cpu` on the System (resolved at mint)
 
-Mirror `accel`: **migration 0070** adds a nullable `resolved_cpu jsonb` column to `systems`
-(no default; NULL = not recorded). The remote-libvirt provisioner, after the domain reaches
-readiness (it already reads the running domain XML), parses the resolved `<cpu>` (host-model
-expanded to a concrete `<model>`) via a `parse_resolved_cpu` helper and persists it —
-**best-effort**: any read/parse fault, or an unexpanded `host-model` element, leaves the column
-NULL and provisioning continues unchanged. `system_envelope` surfaces `data["resolved_cpu"]`
-(sibling of `accel`) as a pure DB read, so `systems.get` stays libvirt-free with no new failure
-mode.
+Mirror `accel`'s **actual** mechanism, which is mint-time resolution — not a provision-time
+worker write-back. `accel` is resolved inside the mint transaction by `_resolve_new_system_accel`
+(`services/systems/admission.py`) from the bound Resource's advertised `guest_arches()` and
+written in the same INSERT that creates the System; the remote worker **discards** the accel it
+is handed (`install.py` `del accel`) and never writes the systems row.
+
+- **Migration 0070** adds a nullable `resolved_cpu jsonb` column to `systems` (no default;
+  NULL = not recorded), mirroring `0067_system_accel.sql`.
+- A `_resolve_new_system_cpu` helper alongside `_resolve_new_system_accel` reads the bound
+  Resource's `capability_view.host_cpu()` and writes the resulting `HostCpu` (or NULL) into the
+  mint INSERT. No live libvirt call, no dependency on libvirt expanding `host-model` in a
+  running domain's XML, no new worker→DB path racing teardown/reap.
+- The value is a **mint-time snapshot**: a later host re-registration or hardware change does not
+  retroactively alter a provisioned System's `resolved_cpu` — it records the baseline the System
+  was minted against.
+- `system_envelope` surfaces `data["resolved_cpu"]` (sibling of `accel`) as a pure DB read, so
+  `systems.get` stays libvirt-free with no new failure mode, and the persist path is fully
+  unit-testable at admission (no `live_vm` gate).
 
 ## Consequences
 
 - An agent can compare candidate remote hosts' CPU baselines (raw model + `x86-64-vN`) at
-  `resources.describe` time, and confirm the actual model a provisioned System received at
-  `systems.get` — closing the ADR-0297 selection-surface gap.
+  `resources.describe` time, and read a specific System's pinned CPU baseline at `systems.get` —
+  closing the ADR-0297 selection-surface gap.
 - Both surfaces are additive JSON fields on existing reads; existing consumers are unaffected,
-  and absence is the graceful default everywhere (unmapped model, malformed row, pre-migration
-  System, local/fault host).
-- `resources.describe` gains one libvirt call at discovery (cold path). `systems.get` gains no
-  libvirt call (the resolved CPU is persisted, read from the row).
-- The advertised `host_cpu` is a *prediction* (what host-model would synthesize); the persisted
-  `resolved_cpu` is the *confirmed* value. On the bound host these agree; the two-surface split
-  lets an agent both plan and verify.
+  and absence is the graceful default everywhere (unmapped model, malformed row, RPC fault,
+  pre-migration System, local/fault host, un-refreshed remote host).
+- `resources.describe` gains one guarded libvirt call at discovery (cold path). `systems.get`
+  gains no libvirt call (the value is persisted at mint, read from the row).
+- The advertised `host_cpu` is the fleet-level baseline for planning; the persisted `resolved_cpu`
+  is that baseline frozen onto one System at mint. They are the same authoritative value from the
+  same source (`getDomainCapabilities` host-model), so no live-domain read is needed to reconcile
+  them — the split just lets an agent plan across the fleet and read one System cheaply.
 - The curated model→level table needs maintenance as new CPU models appear; an unmapped model
   degrades to "raw model, no level" rather than a wrong level. Documented, not silent.
-- Residual risk: the `live_vm` proof is operator-run (CI cannot boot a guest); the persisted
-  `resolved_cpu` populates only on real provisions against a host whose libvirt expands
-  host-model in the running-domain XML.
+- The remote capabilities row refreshes only on re-registration (existing behavior for
+  `arch`/`vcpus`/`memory_mb`): existing hosts gain `host_cpu` only after re-registration, and a
+  host CPU/libvirt change is stale until then. Documented in the rollout note; `resolved_cpu`'s
+  mint-time snapshot deliberately does not chase later host changes.
+- Residual risk: the `live_vm` proof (that a real remote host advertises a non-empty `host_cpu`)
+  is operator-run (CI has no remote host); the mint-time persist path itself is unit-tested
+  without a live gate.
 
 ## Considered & rejected
 
-- **Live-read domain XML on every `systems.get`.** Rejected: bolts a TLS round-trip and new
-  failure modes onto kdive's most-polled read; the resolved CPU is immutable once the domain is
-  defined, so persist-at-provision (mirroring `accel`) is both cheaper and staleness-free.
+- **Live-read domain XML on every `systems.get`, or a provision-time worker→systems write-back.**
+  Rejected: the live read bolts a TLS round-trip and new failure modes onto kdive's most-polled
+  read and depends on libvirt expanding `host-model` in the running XML (not guaranteed — on a
+  host that leaves it unexpanded the field is silently empty on the very fleet this serves). The
+  worker write-back is an entirely new DB path the remote worker lacks today (it `del`s the accel
+  it is handed and never touches the systems row), racing teardown/reap and provable only by an
+  operator-run `live_vm` test. Mint-time resolution from the advertised `host_cpu` is the *actual*
+  `accel` mechanism — resolved in the mint INSERT from bound-Resource capabilities — so it is
+  cheap, staleness-free, and unit-testable at admission.
 - **Static host `<cpu>` from `getCapabilities()` as the discovery source.** Rejected as primary:
   that is the *host* CPU, not the guest-under-host-model CPU (host-model omits non-migratable
   features). `getDomainCapabilities` host-model is the exact predictor. (`getCapabilities` arch
