@@ -12,6 +12,17 @@ Derived from `2026-07-16-crash-watch-984.md` and
 - **Migration:** one forward-only migration `0069_watch_for_crash_job_kind.sql` (byte-immutable
   once committed, ADR-0015). No table/column change.
 - **New dependency:** none.
+- **Generated artifacts (CI-gated, must be regenerated + committed):** adding a tool to
+  `exposure.py` changes the **RBAC tool-visibility matrix** (`just rbac-matrix` →
+  `docs/guide/safety-and-rbac.md`, verified by `rbac-matrix-check`, which `just test` runs) and
+  the **doc-resource snapshots** (`just resources-docs` → `_content/` snapshots, verified by
+  `resources-docs-check`). Never hand-edit a generated file that carries a "do not edit by hand"
+  marker — edit its source and regenerate (see Task 6).
+- **Worker execution model:** handlers run under **autocommit** on a dedicated dispatch
+  connection with a background heartbeat renewing the lease (`jobs/worker.py`; 30+ min handlers
+  are explicitly supported). The watch's up-to-300s poll therefore holds **no** open transaction
+  and stays within the long-handler envelope — do not wrap the poll in a transaction; only the
+  short reads (`SYSTEMS.get`, binding resolve, audit) touch the DB.
 - **TDD:** each task writes the test(s) first, watches them fail, then implements. Suggested
   order 1→7; 1 and 2 are independent, 3 depends on 1+2, 4 on 3, 5 on 2, 6 on 5, 7 on 2+5.
 
@@ -65,9 +76,13 @@ decode its payload.
   (forward-only, constraint-name stable for the SQL↔enum tie).
 - `src/kdive/domain/operations/jobs.py` — add `WATCH_FOR_CRASH = "watch_for_crash"` to `JobKind`;
   add it to `CONTRIBUTOR_CANCELABLE_JOB_KINDS` (a contributor cancels its own watch).
-- `src/kdive/jobs/payloads.py` — add `WatchForCrashPayload(SystemPayload)` with
-  `deadline_s: float`; a `field_validator` rejecting non-finite / non-positive `deadline_s`
-  (the worker-side backstop; the tool boundary clamps/rejects with per-reason codes). Register in
+- `src/kdive/jobs/payloads.py` — add `WATCH_DEFAULT_DEADLINE_S = 60.0` and
+  `WATCH_MAX_DEADLINE_S = 300.0` module constants (the **single source** for the caps — both the
+  tool and the handler import them from here, so the MCP tool never imports the worker-handler
+  module and pulls provider deps into its import graph). Add `WatchForCrashPayload(SystemPayload)`
+  with `deadline_s: float` and a `field_validator` rejecting non-finite / non-positive
+  `deadline_s` and clamping `> WATCH_MAX_DEADLINE_S` to the cap (a worker-side backstop; the tool
+  boundary clamps/rejects with per-reason codes first). Register in
   `_ACTIVE_PAYLOAD_MODELS[JobKind.WATCH_FOR_CRASH]` and add to `_ActivePayloadModel` /
   `ActivePayloadModel` unions.
 - `tests/db/test_migration_0069_watch_for_crash.py` (new, mirror
@@ -98,9 +113,10 @@ This is the correctness core and the bulk of the tests.
 
 **Files:**
 - `src/kdive/jobs/handlers/control/watch_for_crash.py` (new):
-  - `POLL_INTERVAL_S = 1.0`, `DEFAULT_DEADLINE_S = 60.0`, `MAX_DEADLINE_S = 300.0`,
-    `CONTEXT_LINES = 3`, `MATCHED_MAX_BYTES = 4096` (module constants, referenced by the tool for
-    the clamp so the cap has one definition).
+  - Handler-internal tuning constants: `POLL_INTERVAL_S = 1.0`, `CONTEXT_LINES = 3`,
+    `MATCHED_MAX_BYTES = 4096`. The deadline caps (`WATCH_DEFAULT_DEADLINE_S`,
+    `WATCH_MAX_DEADLINE_S`) are imported from `jobs.payloads` (single source; the tool imports the
+    same, so no MCP→handler import edge).
   - `@dataclass(frozen=True, slots=True) class WatchVerdict` with fields
     `outcome: Literal["fired","not_fired","exited_no_signature"]`, `fired: bool`,
     `signature: str | None`, `matched: str | None`, `domain_live: bool | None`,
@@ -156,6 +172,9 @@ This is the correctness core and the bulk of the tests.
   assume a halt.
 - **Handler gates:** non-`READY` System → `CategorizedError` `reason="system_not_ready"`;
   non-local-libvirt binding → `reason="not_local_libvirt"`.
+- **Audit recorded:** the handler records an audit event (tool `control.watch_for_crash`,
+  `object_kind="systems"`, transition carrying the outcome) — assert an audit row exists after a
+  fired and a not-fired run (mirror `diagnostic_sysrq`'s audit test).
 
 **Acceptance:** `just lint`, `just type`, the new test module green; the core has no direct I/O
 (all seams injected).
@@ -198,7 +217,8 @@ admission + enqueue.
     idempotency_key=None) -> ToolResponse`: `_as_uuid`; `SYSTEMS.get`; project-scope →
     `_config_error` (absent-shaped) if not in `ctx.projects`; `require_role(ctx, project,
     CONTRIBUTOR)`; validate `deadline_s` finite/positive → `_config_error` else **clamp to
-    `[.., MAX_DEADLINE_S]`** (import the cap from the handler module — single source);
+    `[.., WATCH_MAX_DEADLINE_S]`** (imported from `jobs.payloads` — single source, no
+    MCP→handler import edge);
     `binding.kind is LOCAL_LIBVIRT` else `_config_error(reason="not_local_libvirt")`; `READY`
     else `_config_error(data={"current_status": …})`; enqueue `JobKind.WATCH_FOR_CRASH` with
     `WatchForCrashPayload(system_id, deadline_s=clamped)`, dedup
@@ -216,8 +236,12 @@ admission + enqueue.
     full console"; contributor-level, non-destructive; enqueues a job → poll `jobs.wait`. No ADR/
     issue numbers.
 - `src/kdive/mcp/exposure.py` — add `"control.watch_for_crash": _CONTRIBUTOR` in the `# control`
-  block.
-- `tests/mcp/…/test_control_tools.py` — tool cases.
+  block; if `CLASSIFIED_TOOLS`/`PUBLIC_TOOLS` are hand-maintained sets rather than derived from
+  the scope map, add the tool to the correct one (a `_CONTRIBUTOR` tool is classified).
+- **Regenerate the RBAC matrix:** `just rbac-matrix` (rewrites `docs/guide/safety-and-rbac.md`
+  from the exposure map) and commit it; `just rbac-matrix-check` must be green (it is gated by
+  `just test`).
+- `tests/mcp/lifecycle/test_control_tools.py` — tool cases.
 - `tests/mcp/…/test_exposure*.py` — scope entry (find with `rg -n "check_ssh_reachable|control.power" tests/`).
 
 **Test first (handler tested directly, no transport):**
@@ -244,21 +268,30 @@ green (no ADR ref in the tool schema).
 **Where it fits:** Spec acceptance #7. The tool must be discoverable and race-debugging.md must
 route to it.
 
+**Respect the doc-generation pipeline.** `gen_doc_resources.py` maps a **canonical source** doc
+to a committed **snapshot** under `_content/`; `resources-docs-check` diffs them. Do **not**
+hand-edit a `_content/` file if it is the generated snapshot — first identify the source in the
+generator's entry registry (`rg -n "source|content_file|_ENTRIES|toolsets-control" scripts/gen_doc_resources.py`),
+edit the **source**, add the tool to the registry if the control toolset is not already covered,
+then run `just resources-docs` to regenerate and commit both.
+
 **Files:**
-- `src/kdive/mcp/resources/_content/toolsets-control.md` — add a `control.watch_for_crash` row/
-  section (mirror the `diagnostic_sysrq` entry).
-- `src/kdive/mcp/resources/_content/agent-index.md` — reference the tool in the
-  reproduce-and-capture loop.
-- `docs/guide/toolsets/control.md` (if the tool list is enumerated there) — add the tool.
+- The **canonical source** for the control toolset content (per the generator registry) — add a
+  `control.watch_for_crash` section mirroring the `diagnostic_sysrq` entry (agent-facing prose:
+  what it observes, that the agent drives the reproducer loop over SSH, the verdict outcomes). No
+  ADR/issue numbers.
+- The **agent-index** source — reference the tool in the reproduce-and-capture loop.
+- `docs/guide/toolsets/control.md` (if the tool list is enumerated there and not generated) —
+  add the tool.
 - `docs/operating/race-debugging.md` — Route 3: replace "A repeat-until-crash-signal primitive is
   tracked separately (#984); until it lands, the loop is guest-side SSH." with a pointer to
   `control.watch_for_crash` (start the watch, drive the reproducer over SSH, poll `jobs.wait`;
   the watch catches the panic on the console after SSH drops). Keep the "panic drops your SSH
   channel" paragraph; the watch is the tool that reads the durable console.
 
-**Test first / verify:** `just resources-docs-check`, `just docs-links`, `just docs-check`, and
-any generated tool-listing snapshot test (`rg -n "toolsets-control|resources-docs" tests/`).
-Update snapshots if the generator produces them.
+**Regenerate + verify:** `just resources-docs` (regenerate snapshots), then
+`just resources-docs-check`, `just docs-links`, `just docs-check`, `just docs-paths` green. If
+the RBAC matrix (Task 5) also lists per-tool docs, confirm `just rbac-matrix-check` too.
 
 **Acceptance:** all doc guardrails green; the tool appears in the control toolset content; Route 3
 names the tool.
