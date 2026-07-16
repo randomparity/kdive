@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -207,25 +208,35 @@ def test_capabilities_advertise_host_cpu(tmp_path: Path) -> None:
     assert conn.domcaps_call == (None, "x86_64", "pc", "kvm", 0)
 
 
-def test_host_cpu_absent_when_getdomaincapabilities_raises(tmp_path: Path) -> None:
+def test_host_cpu_absent_when_getdomaincapabilities_raises(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     conn = FakeConn(domcaps_error=True)
-    record = _discovery(conn, tmp_path).list_resources()[0]
+    with caplog.at_level(logging.WARNING, logger="kdive.providers.remote_libvirt.discovery"):
+        record = _discovery(conn, tmp_path).list_resources()[0]
     assert "host_cpu" not in record["capabilities"]
     # A raised advisory call never drops the pre-feature capabilities.
     assert record["capabilities"]["arch"] == "x86_64"
     assert record["capabilities"]["vcpus"] == 8
     assert record["capabilities"]["memory_mb"] == 16384
+    # The RPC-fault NULL cause is WARNING-logged, distinct from the unmodelable-host INFO cause.
+    assert any(r.levelno == logging.WARNING and "host_cpu" in r.message for r in caplog.records)
 
 
-def test_host_cpu_absent_when_domcaps_has_no_model(tmp_path: Path) -> None:
+def test_host_cpu_absent_when_domcaps_has_no_model(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     conn = FakeConn(
         domcaps_xml=(
             "<domainCapabilities><cpu>"
             "<mode name='host-model' supported='yes'/></cpu></domainCapabilities>"
         )
     )
-    record = _discovery(conn, tmp_path).list_resources()[0]
+    with caplog.at_level(logging.INFO, logger="kdive.providers.remote_libvirt.discovery"):
+        record = _discovery(conn, tmp_path).list_resources()[0]
     assert "host_cpu" not in record["capabilities"]
+    # A connected-but-unmodelable host is INFO-logged (not WARNING), so the NULL causes differ.
+    assert any(r.levelno == logging.INFO and "modelable" in r.message for r in caplog.records)
 
 
 def test_host_cpu_omits_baseline_level_for_unmapped_model(tmp_path: Path) -> None:

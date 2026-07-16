@@ -23,7 +23,10 @@ X86_64_MODEL_LEVELS: dict[str, str] = {
     "SandyBridge-IBRS": "x86-64-v2",
     "IvyBridge": "x86-64-v2",
     "IvyBridge-IBRS": "x86-64-v2",
-    "Opteron_G3": "x86-64-v2",
+    # Opteron_G3 (AMD K10/Barcelona) is deliberately omitted: it lacks SSSE3 and SSE4.1/4.2, so it
+    # does NOT meet x86-64-v2, and the disable-guard cannot catch it (those features are absent, not
+    # <feature policy='disable'>). Mapping it would advertise a wrong level. G4/G5 (Bulldozer/
+    # Piledriver) do carry the v2 feature set.
     "Opteron_G4": "x86-64-v2",
     "Opteron_G5": "x86-64-v2",
     "EPYC": "x86-64-v2",
