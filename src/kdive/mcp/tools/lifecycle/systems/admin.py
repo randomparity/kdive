@@ -178,15 +178,18 @@ async def _reprovision_in_lock(
         # A reprovision can carry a new cpu.model pin; validate it against the bound host's
         # selectable_cpus fail-closed BEFORE the ready->reprovisioning transition (ADR-0369), so an
         # undeliverable pin is rejected pre-mutation exactly as on first provision — never destroy a
-        # working System by rendering a custom <cpu> the host cannot deliver.
-        resource = (
-            await RESOURCES.get(conn, allocation.resource_id)
-            if allocation.resource_id is not None
-            else None
-        )
-        require_pinned_cpu_selectable(
-            profile, resource.capability_view if resource is not None else None
-        )
+        # working System by rendering a custom <cpu> the host cannot deliver. Only load the bound
+        # Resource when a pin is present (the common pin-less reprovision skips the round-trip).
+        section = profile.provider.local_libvirt_section
+        if section is not None and section.cpu is not None:
+            resource = (
+                await RESOURCES.get(conn, allocation.resource_id)
+                if allocation.resource_id is not None
+                else None
+            )
+            require_pinned_cpu_selectable(
+                profile, resource.capability_view if resource is not None else None
+            )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(str(system_id), exc)
     envelope = await _admit_reprovision(conn, ctx, system, profile, digest, dedup_key)

@@ -70,7 +70,6 @@ from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.shared.host_cpu import host_cpu_dict
 from kdive.providers.shared.libvirt_xml import (
-    domain_cpu_mode,
     parse_domain_resolved_cpu,
     parse_guest_arches,
     parse_host_capabilities_cpu,
@@ -451,12 +450,12 @@ class LocalLibvirtProvisioning:
         try:
             domain = conn.lookupByName(name)
             domain_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_UPDATE_CPU)
-            parsed = parse_domain_resolved_cpu(domain_xml)
+            mode, parsed = parse_domain_resolved_cpu(domain_xml)
             if parsed is not None:
-                return host_cpu_dict(parsed, parsed.arch or "")
-            if domain_cpu_mode(domain_xml) == "host-passthrough":
+                return host_cpu_dict(parsed, "")
+            if mode == "host-passthrough":
                 host = parse_host_capabilities_cpu(conn.getCapabilities())
-                return host_cpu_dict(host, host.arch or "") if host is not None else None
+                return host_cpu_dict(host, "") if host is not None else None
             return None
         except libvirt.libvirtError:
             _log.warning("reading resolved_cpu for %s failed; recording null", name, exc_info=True)

@@ -404,14 +404,23 @@ def test_parse_domain_resolved_cpu_concrete_model() -> None:
         "<domain><os><type arch='x86_64'>hvm</type></os>"
         "<cpu mode='custom'><model>x86-64-v2</model><vendor>Intel</vendor></cpu></domain>"
     )
-    parsed = parse_domain_resolved_cpu(xml)
-    assert parsed == ParsedHostCpu(
-        model="x86-64-v2", vendor="Intel", arch="x86_64", disabled_features=frozenset()
+    assert parse_domain_resolved_cpu(xml) == (
+        "custom",
+        ParsedHostCpu(
+            model="x86-64-v2", vendor="Intel", arch="x86_64", disabled_features=frozenset()
+        ),
     )
 
 
-def test_parse_domain_resolved_cpu_none_when_no_concrete_model() -> None:
-    # host-passthrough left unexpanded, or a TCG machine-default with no <model>.
-    assert parse_domain_resolved_cpu("<domain><cpu mode='host-passthrough'/></domain>") is None
-    assert parse_domain_resolved_cpu("<domain/>") is None
-    assert parse_domain_resolved_cpu("<nope") is None
+def test_parse_domain_resolved_cpu_mode_without_model() -> None:
+    # An unexpanded host-passthrough carries the mode but no concrete <model> (caller falls back).
+    assert parse_domain_resolved_cpu("<domain><cpu mode='host-passthrough'/></domain>") == (
+        "host-passthrough",
+        None,
+    )
+
+
+def test_parse_domain_resolved_cpu_none_when_no_cpu() -> None:
+    # A TCG machine-default (no <cpu>) or a malformed doc: no mode, no model.
+    assert parse_domain_resolved_cpu("<domain/>") == (None, None)
+    assert parse_domain_resolved_cpu("<nope") == (None, None)

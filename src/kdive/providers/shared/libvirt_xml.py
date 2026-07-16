@@ -189,42 +189,35 @@ def parse_selectable_cpus(dom_caps_xml: str) -> list[str]:
     return sorted(models)
 
 
-def parse_domain_resolved_cpu(domain_xml: str) -> ParsedHostCpu | None:
-    """The concrete resolved ``<cpu><model>`` of a running domain (ADR-0369), or ``None``.
+def parse_domain_resolved_cpu(domain_xml: str) -> tuple[str | None, ParsedHostCpu | None]:
+    """The ``<cpu mode>`` and concrete resolved ``<cpu><model>`` of a running domain (ADR-0369).
 
-    Reads a running-domain XML (obtained with ``VIR_DOMAIN_XML_UPDATE_CPU``, which asks libvirt to
-    expand host-model / a ``custom`` pin to a concrete ``<model>``). Returns ``None`` when the
-    ``<cpu>`` carries no concrete ``<model>`` — an unexpanded ``host-passthrough`` or a TCG
-    machine-default — so the caller can fall back (passthrough → host CPU) or record NULL. ``arch``
-    is read from ``<os><type arch=…>`` when present. Parsed with ``defusedxml``.
+    One defusedxml parse of a running-domain XML (obtained with ``VIR_DOMAIN_XML_UPDATE_CPU``, which
+    asks libvirt to expand host-model / a ``custom`` pin to a concrete ``<model>``). Returns
+    ``(mode, parsed)``:
+
+    - ``parsed`` is the ``ParsedHostCpu`` when the ``<cpu>`` carries a concrete ``<model>``, else
+      ``None`` — an unexpanded ``host-passthrough`` or a TCG machine-default;
+    - ``mode`` is the ``<cpu mode>`` attribute (or ``None``), so the caller can distinguish an
+      unexpanded ``host-passthrough`` (fall back to the host ``<cpu>``) from a TCG machine-default
+      (no ``<cpu>`` — best-effort NULL).
+
+    ``(None, None)`` on a parse fault. ``arch`` is read from ``<os><type arch=…>`` when present.
     """
     try:
         root: ET.Element = _safe_fromstring(domain_xml)
     except (ET.ParseError, DefusedXmlException) as _exc:
         _log.warning("could not parse domain xml for resolved cpu", exc_info=True)
-        return None
+        return None, None
+    cpu = root.find("./cpu")
+    mode = cpu.get("mode") if cpu is not None else None
     model = (root.findtext("./cpu/model") or "").strip()
     if not model:
-        return None
+        return mode, None
     vendor = (root.findtext("./cpu/vendor") or "").strip() or None
     os_type = root.find("./os/type")
     arch = (os_type.get("arch") if os_type is not None else None) or None
-    return ParsedHostCpu(model=model, vendor=vendor, arch=arch, disabled_features=frozenset())
-
-
-def domain_cpu_mode(domain_xml: str) -> str | None:
-    """The ``<cpu mode=…>`` of a domain XML, or ``None`` if absent/malformed (ADR-0369).
-
-    Lets the resolved-CPU read distinguish an unexpanded ``host-passthrough`` (whose guest is the
-    host CPU, so it falls back to the host ``<cpu>``) from a TCG machine-default (no ``<cpu>`` — a
-    best-effort NULL). Parsed with ``defusedxml``.
-    """
-    try:
-        root: ET.Element = _safe_fromstring(domain_xml)
-    except (ET.ParseError, DefusedXmlException) as _exc:
-        return None
-    cpu = root.find("./cpu")
-    return cpu.get("mode") if cpu is not None else None
+    return mode, ParsedHostCpu(model=model, vendor=vendor, arch=arch, disabled_features=frozenset())
 
 
 def parse_metadata_system_id(meta_xml: str) -> str | None:
