@@ -53,3 +53,14 @@ repos:
         language: system
         files: ^deploy/ansible/
         pass_filenames: false
+      - id: schema-immutable
+        name: applied migrations are byte-immutable (ADR-0015)
+        # Rejects modify/delete/rename of an existing src/kdive/db/schema/*.sql; only
+        # new migrations may be added. A cosmetic edit to an applied migration changes
+        # its whole-file checksum and breaks upgrades of any DB migrated by an earlier
+        # build (#1218). Invokes python3 directly (not `just`) so the venv-free CI
+        # pre-commit job runs it too; diffs against HEAD, so a clean tree passes.
+        entry: python3 scripts/schema_immutable_guard.py
+        language: system
+        files: ^src/kdive/db/schema/.*\.sql$
+        pass_filenames: false

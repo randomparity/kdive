@@ -74,6 +74,30 @@ We will hand-write a forward-only runner over plain `.sql` files:
   checkouts; a CRLF checkout would otherwise flip every hash and block all startup.
   Recovery from a *legitimate* need to change an applied file is itself a new
   forward migration, never an in-place edit.
+- **The checksum is over the whole file bytes — comments and whitespace included —
+  so a migration file is byte-immutable once committed, not merely
+  SQL-semantically immutable.** A doc-comment reword or a whitespace change to an
+  already-applied migration changes its hash exactly as a SQL change would, and a
+  database migrated by an earlier build then fails to upgrade with
+  `checksum changed; applied migrations are immutable`. This is deliberate: the
+  runner has no parser to distinguish "cosmetic" from "significant" bytes, and
+  adding one (a comment-stripping/normalizing pre-hash) would be a second, fallible
+  definition of a migration's identity that could mask a real change. The file, as
+  committed, *is* the immutable snapshot. Because a comment naming a since-renamed
+  or deleted module is therefore correct history for when the migration was applied
+  — not a bug to fix — such comments are **left as-is**; repointing them is exactly
+  the cosmetic edit this forbids (issue #1218).
+- **Byte-immutability is enforced at authoring time by a guard**
+  (`scripts/schema_immutable_guard.py`), so the mistake cannot reach a released
+  build. The guard runs `git diff --name-status` (default reference `HEAD`) scoped
+  to `src/kdive/db/schema/` and rejects any modify / delete / rename of an existing
+  file — only *adding* a new `NNNN_*.sql` is allowed. It runs both as a prek local
+  hook (`schema-immutable`, invoking `python3` directly so the venv-free CI
+  pre-commit job runs it too) and in `just ci` (`just schema-guard`). Diffing
+  against `HEAD` means a clean checkout passes (nothing changed) while a *staged*
+  edit to an applied migration fails at commit — the exact moment issue #1218's
+  edit slipped through. The runtime checksum check in `apply_migrations` remains the
+  backstop for a DB whose file was changed out-of-band.
 - **Closed value sets are `text` columns with named `CHECK` constraints**, not
   native `ENUM` types. The `CHECK` mirrors the corresponding
   `kdive.domain.state` / `kdive.domain.errors` enum and enforces the closed set at
@@ -105,7 +129,9 @@ What becomes easier:
   any process converges the schema, and concurrent startups are safe.
 - A partly-failed migration never leaves a half-applied schema — the run is atomic.
 - An accidental edit to an applied migration fails fast with a checksum mismatch
-  instead of silently drifting code from the live schema.
+  instead of silently drifting code from the live schema — and now fails even
+  earlier, at commit time, via the `schema-immutable` authoring-time guard, so it
+  never reaches a released build to strand an operator's database.
 - Growing a state machine in M1 is a constraint swap in a forward migration, with
   none of native `ENUM`'s evolution friction.
 
@@ -121,6 +147,14 @@ What becomes harder / new obligations:
 - **A very long migration holds the advisory lock and a transaction** for its
   duration, briefly serializing startups. Acceptable for a startup-time operation;
   M0 migrations are schema DDL measured in milliseconds.
+- **A not-yet-merged migration cannot be edited in place across commits.** The
+  authoring-time guard diffs against `HEAD`, so once a new `NNNN_*.sql` is
+  committed, iterating on it means amending that commit or adding a follow-up
+  migration, not a second edit commit. This is the same immutability discipline
+  applied consistently rather than only after release; the alternative — diffing
+  against the base branch so unmerged files stay editable — was rejected because it
+  would also flag a *sanctioned* one-time correction (restoring #1218's reverted
+  bytes) as a violation, and it gives CI no protection on a clean checkout.
 - **A cross-ADR invariant is now load-bearing:** every application advisory lock
   ([0005](0005-postgres-object-store-state.md), [0007](0007-metering-budgets-admission.md))
   must use the single-`bigint` lock form, leaving the two-`int` space to the
