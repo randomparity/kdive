@@ -100,13 +100,25 @@ Provoking a race usually means running the reproducer many times, or under stres
 window hits. That loop is your own code, run over root SSH — compile it in-guest or
 cross-compile and `scp` the binary in, then run it, `stress-ng`, or a fuzzer over SSH. See the
 [reproduce-and-capture loop](../guide/agent-index.md#the-reproduce-and-capture-loop) in the
-agent index. A repeat-until-crash-signal primitive is tracked separately (#984); until it
-lands, the loop is guest-side SSH.
+agent index.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
-anything you were watching over SSH (a `trace_pipe` tail, a drgn poll) is gone. The
-**serial-console sidecar is the durable record** — read it with `runs.get` and the `artifacts`
-tools, which persist across the crash. Do not rely on SSH output as your capture of a panic.
+anything you were watching over SSH (a `trace_pipe` tail, a drgn poll) is gone — including the
+reproducer loop itself, so you never see which run crashed from inside the guest. The
+**serial-console is the durable, out-of-band record** — it survives the panic.
+
+`control.watch_for_crash` is the primitive that reads it for you: start the watch on the ready
+system **before** you begin the loop, then drive your reproducer over SSH; the watch polls the
+console for the crash signature (the same `panic`/`BUG`/`Oops`/`GPF`/`KASAN`/`KFENCE`/soft-lockup
+set boot readiness uses) until its deadline and returns on the first hit — `fired` with the
+matched console slice and elapsed-to-signal, or `not_fired` if no signature appeared. It is
+contributor-level and non-destructive; it earns a tool because it watches the console when SSH is
+gone, which your own loop structurally cannot. Poll it with `jobs.wait` and read the verdict from
+`refs.result`. The reproducer loop stays yours over SSH — the watch only catches the crash. You
+hold the authoritative liveness signal: if your reproducer's SSH drops but the watch returns
+`not_fired`, the crash landed outside the watched window (a pre-watch crash, or a very fast one) —
+read the full console with the `artifacts` tools rather than trusting `not_fired`. Do not rely on
+SSH output as your capture of a panic.
 
 ## When you _do_ need an out-of-band tool: a dead or hung guest
 

@@ -35,7 +35,7 @@ from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs import queue
 from kdive.jobs.handlers.control import control as control_plane
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import PowerPayload, SystemPayload
+from kdive.jobs.payloads import WATCH_MAX_DEADLINE_S, PowerPayload, SystemPayload
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.lifecycle.control import registrar as control_tools
 from kdive.providers.core.resolver import ProviderResolver
@@ -880,5 +880,164 @@ def test_diagnostic_sysrq_non_local_provider_is_config_error(migrated_url: str) 
             )
             assert resp.error_category == "configuration_error"
             assert resp.data["reason"] == "not_local_libvirt"
+
+    asyncio.run(_run())
+
+
+# --- control.watch_for_crash (#984, ADR-0367) -----------------------------------------
+
+
+async def _watch_for_crash(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    deadline_s: float = 60.0,
+    resolver: ProviderResolver | None = None,
+) -> Any:
+    return await control_tools.watch_for_crash_system(
+        pool,
+        ctx,
+        system_id=system_id,
+        deadline_s=deadline_s,
+        resolver=resolver if resolver is not None else provider_resolver(),
+        idempotency_key=None,
+    )
+
+
+def test_watch_for_crash_enqueues_job_for_contributor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _watch_for_crash(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, deadline_s=45.0
+            )
+            assert resp.status == "queued"
+            assert resp.data["system_id"] == sys_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        assert row["payload"]["deadline_s"] == 45.0
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_is_capped_to_one_in_flight_per_system(migrated_url: str) -> None:
+    # Stable per-System dedup key: a second watch while one is in flight returns the same job,
+    # so a contributor cannot flood the shared worker lane with unbounded pure-wait jobs.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            first = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            second = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            assert first.object_id == second.object_id  # same job — in-flight cap
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT count(*) AS n FROM jobs WHERE kind = 'watch_for_crash' "
+                    "AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
+                )
+                row = await cur.fetchone()
+        assert row is not None and row["n"] == 1
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_re_issue_after_cancel_recycles(migrated_url: str) -> None:
+    # A canceled watch must not wedge the stable dedup key: recycle_canceled lets a re-issue
+    # reclaim the slot with a fresh queued watch, so cancel does not brick the tool on that System.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            first = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE jobs SET state = 'canceled' WHERE id = %s", (first.object_id,)
+                )
+            second = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            assert second.status == "queued"  # fresh watch, not the dead canceled job
+            assert second.object_id == first.object_id  # recycled in place (same row)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state FROM jobs WHERE dedup_key = %s", (f"{sys_id}:watch_for_crash",)
+                )
+                rows = await cur.fetchall()
+        assert [r["state"] for r in rows] == ["queued"]  # one row, reclaimed
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_clamps_deadline_above_max(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            await _watch_for_crash(
+                pool,
+                _ctx(Role.CONTRIBUTOR),
+                system_id=sys_id,
+                deadline_s=WATCH_MAX_DEADLINE_S + 999,
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT payload FROM jobs WHERE kind = 'watch_for_crash' AND dedup_key = %s",
+                    (f"{sys_id}:watch_for_crash",),
+                )
+                row = await cur.fetchone()
+        assert row is not None
+        assert row["payload"]["deadline_s"] == WATCH_MAX_DEADLINE_S
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
+def test_watch_for_crash_bad_deadline_is_config_error(migrated_url: str, bad: float) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _watch_for_crash(
+                pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, deadline_s=bad
+            )
+            assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_not_ready_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
+            resp = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id)
+            assert resp.error_category == "configuration_error"
+            assert resp.data["current_status"] == "provisioning"
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_viewer_is_denied(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            with pytest.raises(AuthorizationError):
+                await _watch_for_crash(pool, _ctx(Role.VIEWER), system_id=sys_id)
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_unknown_system_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=str(uuid4()))
+            assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())

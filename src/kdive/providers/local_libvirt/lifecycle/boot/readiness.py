@@ -11,6 +11,7 @@ from typing import NamedTuple
 from uuid import UUID
 
 import kdive.config as config
+from kdive.domain.lifecycle.crash_signatures import first_crash_signature
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for, read_console_log
 
@@ -20,16 +21,6 @@ _TERMINAL_DOMSTATES = frozenset({"shut off", "crashed"})
 _VIRSH = "virsh"
 
 _READINESS_MARKER = "kdive-ready"
-_CRASH_SIGNATURE = re.compile(
-    r"Kernel panic"
-    r"|(?<![A-Za-z])BUG:"
-    r"|(?<![A-Za-z])Oops:"
-    r"|general protection fault"
-    r"|[Uu]nable to handle kernel"
-    r"|KASAN:"
-    r"|KFENCE:"
-    r"|detected stall"
-)
 
 
 class ConsoleVerdict(StrEnum):
@@ -59,7 +50,7 @@ def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> Console
     marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]
-    if _CRASH_SIGNATURE.search(region):
+    if first_crash_signature(region) is not None:
         return ConsoleVerdict.CRASHED
     return ConsoleVerdict.READY if marker_match is not None else ConsoleVerdict.PENDING
 

@@ -38,6 +38,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ReadinessResult,
     _verdict_to_result,
     classify_console,
+    first_crash_signature,
 )
 from kdive.providers.local_libvirt.lifecycle.install import (
     Fetch,
@@ -1171,6 +1172,45 @@ def test_classify_systemd_unit_line_is_not_the_marker() -> None:
 def test_classify_malformed_utf8_does_not_raise() -> None:
     data = b"\xff\xfe partial \x80 bytes, still booting\n"
     assert classify_console(data, marker=_MARKER) == "pending"
+
+
+# --- first_crash_signature: the shared crash matcher (#984) ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("[22.1] Kernel panic - not syncing: Attempted to kill init!", "Kernel panic"),
+        ("[22.1] watchdog: BUG: soft lockup - CPU#0 stuck", "BUG:"),
+        ("[22.1] Oops: 0000 [#1] PREEMPT SMP", "Oops:"),
+        ("[22.1] general protection fault: 0000 [#1] SMP", "general protection fault"),
+        ("[22.1] Unable to handle kernel paging request", "Unable to handle kernel"),
+        ("[22.1] BUG: KASAN: slab-out-of-bounds in __d_lookup", "BUG:"),
+        ("[22.1] BUG: KFENCE: use-after-free read in d_lookup", "BUG:"),
+        ("[22.1] rcu: INFO: rcu_sched self-detected stall on CPU", "detected stall"),
+    ],
+)
+def test_first_crash_signature_matches_each_family(line: str, expected: str) -> None:
+    match = first_crash_signature(line)
+    assert match is not None
+    assert match.group(0) == expected
+
+
+def test_first_crash_signature_none_on_benign_text() -> None:
+    assert first_crash_signature("[0.0] Linux version 7.0.0\n[1.1] still booting\n") is None
+
+
+def test_first_crash_signature_word_boundary_excludes_debug() -> None:
+    # `(?<![A-Za-z])BUG:` must not match `DEBUG:` — no false crash on a benign line.
+    assert first_crash_signature("app DEBUG: initializing readiness") is None
+
+
+def test_first_crash_signature_returns_first_of_two() -> None:
+    # Deterministic: the earliest match (lowest offset) is returned.
+    text = "[1] booting\n[2] Oops: 0000\n[3] Kernel panic - not syncing\n"
+    match = first_crash_signature(text)
+    assert match is not None
+    assert match.group(0) == "Oops:"
 
 
 _FIXTURES = Path(__file__).parent / "fixtures"

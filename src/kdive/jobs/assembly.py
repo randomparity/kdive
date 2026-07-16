@@ -125,6 +125,19 @@ def _diagnostic_sysrq_handler_registrar(
     return _register
 
 
+def _watch_for_crash_handler_registrar(
+    *, resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        from kdive.jobs.handlers.control import watch_for_crash
+
+        watch_for_crash.register_handlers(
+            registry, resolver=resolver, secret_registry=secret_registry
+        )
+
+    return _register
+
+
 def _vmcore_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
     def _register(registry: HandlerRegistry) -> None:
         vmcore.register_handlers(
@@ -177,6 +190,9 @@ def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRe
             resolver=assembly.resolver,
             secret_registry=assembly.secret_registry,
             object_stores=assembly.object_stores,
+        ),
+        _watch_for_crash_handler_registrar(
+            resolver=assembly.resolver, secret_registry=assembly.secret_registry
         ),
         _vmcore_handlers_registrar(assembly.resolver),
         _image_build_handler_registrar(

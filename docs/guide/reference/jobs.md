@@ -44,7 +44,7 @@ accepts active job kinds only; historical retired build jobs remain readable by 
 `request` fields:
 
 - `status` (``queued`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only jobs in this lifecycle state.
-- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable` (nullable)`, optional) — Only active jobs of this kind.
+- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable`, `watch_for_crash` (nullable)`, optional) — Only active jobs of this kind.
 - `investigation_id` (`string (nullable)`, optional) — Only active run-bearing jobs whose Run belongs to this Investigation.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.

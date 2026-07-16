@@ -328,6 +328,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # systems.check_ssh_reachable enqueues this to probe a ready System's guest sshd over the
         # recorded loopback forward and return a compact reachability verdict (ADR-0298, #972).
         "check_ssh_reachable",
+        # control.watch_for_crash enqueues this to watch a ready local-libvirt System's serial
+        # console for the boot-readiness crash signature until a clamped deadline (ADR-0367, #984).
+        "watch_for_crash",
     }
 
 

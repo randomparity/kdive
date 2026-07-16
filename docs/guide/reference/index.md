@@ -29,6 +29,7 @@
 | [`control.diagnostic_sysrq`](control.md#controldiagnostic_sysrq) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `implemented` |
 | [`control.power`](control.md#controlpower) | `implemented` |
+| [`control.watch_for_crash`](control.md#controlwatch_for_crash) | `implemented` |
 | [`debug.backtrace`](debug.md#debugbacktrace) | `implemented` |
 | [`debug.clear_breakpoint`](debug.md#debugclear_breakpoint) | `implemented` |
 | [`debug.clear_watchpoint`](debug.md#debugclear_watchpoint) | `implemented` |
