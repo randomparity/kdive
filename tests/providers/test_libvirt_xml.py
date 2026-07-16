@@ -12,9 +12,12 @@ from kdive.providers.shared.libvirt_xml import (
     QEMU_NS,
     ParsedHostCpu,
     parse_capabilities_arch,
+    parse_domain_resolved_cpu,
     parse_guest_arches,
+    parse_host_capabilities_cpu,
     parse_host_cpu,
     parse_metadata_system_id,
+    parse_selectable_cpus,
     recorded_gdb_port,
     recorded_ssh_port,
     register_kdive_namespace,
@@ -349,3 +352,75 @@ def test_parse_host_cpu_no_disabled_features_is_empty_frozenset() -> None:
     parsed = parse_host_cpu(xml)
     assert parsed is not None
     assert parsed.disabled_features == frozenset()
+
+
+_HOST_CAPS = """
+<capabilities><host><cpu>
+  <arch>x86_64</arch><model>SapphireRapids</model><vendor>Intel</vendor>
+</cpu></host></capabilities>
+"""
+
+_DOMCAPS_CUSTOM = """
+<domainCapabilities><cpu>
+  <mode name='custom' supported='yes'>
+    <model usable='yes'>qemu64</model>
+    <model usable='no'>Denverton</model>
+    <model usable='yes'>x86-64-v2</model>
+    <model usable='yes'>SapphireRapids</model>
+  </mode>
+</cpu></domainCapabilities>
+"""
+
+
+def test_parse_host_capabilities_cpu_reads_model_vendor_arch() -> None:
+    assert parse_host_capabilities_cpu(_HOST_CAPS) == ParsedHostCpu(
+        model="SapphireRapids", vendor="Intel", arch="x86_64", disabled_features=frozenset()
+    )
+
+
+def test_parse_host_capabilities_cpu_none_on_malformed_or_missing_model() -> None:
+    assert parse_host_capabilities_cpu("<nope") is None
+    assert parse_host_capabilities_cpu("<capabilities><host><cpu/></host></capabilities>") is None
+    assert parse_host_capabilities_cpu("<capabilities/>") is None
+
+
+def test_parse_selectable_cpus_usable_only_sorted_deduped() -> None:
+    assert parse_selectable_cpus(_DOMCAPS_CUSTOM) == ["SapphireRapids", "qemu64", "x86-64-v2"]
+
+
+def test_parse_selectable_cpus_empty_on_no_custom_mode_or_malformed() -> None:
+    assert parse_selectable_cpus("<domainCapabilities><cpu/></domainCapabilities>") == []
+    assert parse_selectable_cpus("<nope") == []
+    unsupported = (
+        "<domainCapabilities><cpu>"
+        "<mode name='custom' supported='no'><model usable='yes'>qemu64</model></mode>"
+        "</cpu></domainCapabilities>"
+    )
+    assert parse_selectable_cpus(unsupported) == []
+
+
+def test_parse_domain_resolved_cpu_concrete_model() -> None:
+    xml = (
+        "<domain><os><type arch='x86_64'>hvm</type></os>"
+        "<cpu mode='custom'><model>x86-64-v2</model><vendor>Intel</vendor></cpu></domain>"
+    )
+    assert parse_domain_resolved_cpu(xml) == (
+        "custom",
+        ParsedHostCpu(
+            model="x86-64-v2", vendor="Intel", arch="x86_64", disabled_features=frozenset()
+        ),
+    )
+
+
+def test_parse_domain_resolved_cpu_mode_without_model() -> None:
+    # An unexpanded host-passthrough carries the mode but no concrete <model> (caller falls back).
+    assert parse_domain_resolved_cpu("<domain><cpu mode='host-passthrough'/></domain>") == (
+        "host-passthrough",
+        None,
+    )
+
+
+def test_parse_domain_resolved_cpu_none_when_no_cpu() -> None:
+    # A TCG machine-default (no <cpu>) or a malformed doc: no mode, no model.
+    assert parse_domain_resolved_cpu("<domain/>") == (None, None)
+    assert parse_domain_resolved_cpu("<nope") == (None, None)

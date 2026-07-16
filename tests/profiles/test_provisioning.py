@@ -846,3 +846,33 @@ def test_drgn_live_seeds_bootstrap_key_false_for_fault_inject_section() -> None:
     data["provider"] = {"fault-inject": {}}
     profile = ProvisioningProfile.parse(data)
     assert _FAULT_POLICY.drgn_live_seeds_bootstrap_key(profile) is False
+
+
+def test_cpu_pin_parsed() -> None:
+    data = _valid()
+    data["provider"]["local-libvirt"]["cpu"] = {"model": "x86-64-v2"}
+    profile = ProvisioningProfile.parse(data)
+    assert profile.provider.local_libvirt.cpu is not None
+    assert profile.provider.local_libvirt.cpu.model == "x86-64-v2"
+
+
+def test_cpu_pin_defaults_none() -> None:
+    profile = ProvisioningProfile.parse(_valid())
+    assert profile.provider.local_libvirt.cpu is None
+
+
+def test_cpu_pin_rejects_empty_model() -> None:
+    data = _valid()
+    data["provider"]["local-libvirt"]["cpu"] = {"model": ""}
+    with pytest.raises(CategorizedError):
+        ProvisioningProfile.parse(data)
+
+
+def test_cpu_pin_field_documents_isa_floor() -> None:
+    from kdive.profiles.provisioning import LibvirtCpuPin
+
+    description = LibvirtCpuPin.model_fields["model"].description
+    assert description is not None
+    lowered = description.lower()
+    assert "selectable_cpus" in lowered
+    assert "non-booting" in lowered or "not boot" in lowered

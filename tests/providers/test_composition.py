@@ -121,6 +121,10 @@ class _ProvisionProvider:
     def teardown(self, domain_name: str) -> None:
         self.torn_down = domain_name
 
+    def read_resolved_cpu(self, system_id: UUID) -> None:
+        del system_id
+        return None
+
     def reprovision(
         self,
         system_id: UUID,

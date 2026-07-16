@@ -193,6 +193,32 @@ def test_render_x86_kvm_drops_native_emulator_by_accel_not_none() -> None:
     assert _render(accel="kvm", emulator="/usr/bin/qemu-system-x86_64") == _X86_KVM_GOLDEN
 
 
+def test_render_pinned_cpu_emits_custom_mode() -> None:
+    # A cpu.model pin (ADR-0369) renders <cpu mode="custom" check="partial"><model>…, replacing the
+    # default host-passthrough block. Valid under KVM and TCG.
+    root = _safe_fromstring(_render(profile=_profile(cpu={"model": "x86-64-v2"})))
+    cpu = root.find("cpu")
+    assert cpu is not None
+    assert cpu.get("mode") == "custom"
+    assert cpu.get("check") == "partial"
+    assert cpu.findtext("model") == "x86-64-v2"
+
+
+def test_render_pinned_cpu_under_tcg_still_emits_custom_mode() -> None:
+    # Unpinned TCG emits no <cpu>; a pin adds the custom block even under TCG.
+    root = _safe_fromstring(
+        _render(
+            profile=_profile(cpu={"model": "qemu64"}),
+            accel="tcg",
+            emulator="/usr/bin/qemu-system-x86_64",
+        )
+    )
+    cpu = root.find("cpu")
+    assert cpu is not None
+    assert cpu.get("mode") == "custom"
+    assert cpu.findtext("model") == "qemu64"
+
+
 # The arch-derived serial console the cmdline must carry — ttyS0 on x86, hvc0 on pseries. Kept as
 # the test's own oracle (independent of arch_traits) so the render is pinned to a literal.
 _EXPECTED_CONSOLE = {"x86_64": "ttyS0", "ppc64le": "hvc0"}
@@ -1923,3 +1949,48 @@ def test_domain_xml_has_serial_console_with_log() -> None:
     assert target is not None
     assert target.get("type") == "serial"
     assert target.get("port") == "0"
+
+
+# --- #1227 Phase C: read_resolved_cpu (best-effort live read) ---
+
+_HOST_CPU_CAPS = (
+    "<capabilities><host><cpu>"
+    "<arch>x86_64</arch><model>SapphireRapids</model><vendor>Intel</vendor>"
+    "</cpu></host></capabilities>"
+)
+
+
+def test_read_resolved_cpu_concrete_model() -> None:
+    name = domain_name_for(_SYS)
+    xml = (
+        "<domain><os><type arch='x86_64'>hvm</type></os>"
+        "<cpu mode='custom'><model>x86-64-v2</model></cpu></domain>"
+    )
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)})
+    # "x86-64-v2" is a QEMU synthetic model name, not in the curated model->level table (which
+    # holds real names like Nehalem/SapphireRapids), so baseline_level is honestly omitted.
+    assert _prov(conn).read_resolved_cpu(_SYS) == {"model": "x86-64-v2", "arch": "x86_64"}
+
+
+def test_read_resolved_cpu_passthrough_falls_back_to_host_cpu() -> None:
+    name = domain_name_for(_SYS)
+    xml = "<domain><os><type arch='x86_64'>hvm</type></os><cpu mode='host-passthrough'/></domain>"
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)}, caps_xml=_HOST_CPU_CAPS)
+    assert _prov(conn).read_resolved_cpu(_SYS) == {
+        "model": "SapphireRapids",
+        "vendor": "Intel",
+        "arch": "x86_64",
+        "baseline_level": "x86-64-v4",
+    }
+
+
+def test_read_resolved_cpu_tcg_default_is_none() -> None:
+    name = domain_name_for(_SYS)
+    xml = "<domain><os><type arch='ppc64le'>hvm</type></os></domain>"  # no <cpu> (TCG default)
+    conn = _ProvConn(defined={name: _ProvDomain(name, xml_desc=xml)})
+    assert _prov(conn).read_resolved_cpu(_SYS) is None
+
+
+def test_read_resolved_cpu_domain_gone_is_none() -> None:
+    conn = _ProvConn()  # no domain defined -> lookupByName raises NO_DOMAIN
+    assert _prov(conn).read_resolved_cpu(_SYS) is None

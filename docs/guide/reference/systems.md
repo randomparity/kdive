@@ -91,6 +91,8 @@ contributor on the Allocation's project.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
@@ -111,10 +113,13 @@ Return a System the caller can view.
 or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
 guest-arch capability. Expect a ``tcg`` System to boot and run notably slower.
 
-``data.resolved_cpu`` (remote Systems) is the ``{model, vendor?, arch, baseline_level?}``
-CPU baseline the System was minted against; absent when the host advertised none.
-``baseline_level`` (``x86-64-vN``) is a nominal upper bound (see ``resources.describe``),
-not a guaranteed floor — confirm a hard instruction-set requirement against the guest.
+``data.resolved_cpu`` is the ``{model, vendor?, arch, baseline_level?}`` guest CPU the
+System actually booted with — **live-verified** for local Systems (read from the running
+domain; a host-passthrough guest resolves to the host CPU, a TCG machine-default the host
+does not expand reads ``null``), and the **mint-time snapshot** for remote Systems.
+``null`` means unrecorded/unreadable — treat as unknown. ``baseline_level``
+(``x86-64-vN``) is a nominal upper bound (see ``resources.describe``), not a guaranteed
+floor — confirm a hard instruction-set requirement against the guest.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -204,6 +209,8 @@ pick one of those or an allocation on a host that offers the arch you need.
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
@@ -275,6 +282,8 @@ destructive_ops opt-in).
       - `preserve_on_crash` (`boolean`, optional)
       - `gdbstub` (`boolean`, optional)
       - `fadump` (`boolean`, optional)
+    - `cpu` (`object (nullable)`, optional)
+      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
   - `fault-inject` (`object (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
     - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)

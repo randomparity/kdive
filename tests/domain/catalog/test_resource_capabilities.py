@@ -307,3 +307,28 @@ def test_host_cpu_drops_non_string_optional_fields() -> None:
         {"host_cpu": {"model": "EPYC", "arch": "x86_64", "vendor": 7, "baseline_level": None}}
     )
     assert caps.host_cpu() == {"model": "EPYC", "arch": "x86_64"}
+
+
+def test_selectable_cpus_per_arch() -> None:
+    caps = ResourceCapabilities.from_mapping(
+        {"selectable_cpus": {"x86_64": ["qemu64", "x86-64-v2"], "ppc64le": ["POWER9", "POWER10"]}}
+    )
+    assert caps.selectable_cpus() == {
+        "x86_64": ["qemu64", "x86-64-v2"],
+        "ppc64le": ["POWER9", "POWER10"],
+    }
+
+
+def test_selectable_cpus_absent_is_empty() -> None:
+    assert ResourceCapabilities.from_mapping({}).selectable_cpus() == {}
+
+
+def test_selectable_cpus_drops_malformed_entries() -> None:
+    caps = ResourceCapabilities.from_mapping(
+        {"selectable_cpus": {"x86_64": ["ok", 7], "bad": "notalist", "empty": []}}
+    )
+    assert caps.selectable_cpus() == {"x86_64": ["ok"]}
+
+
+def test_selectable_cpus_non_mapping_is_empty() -> None:
+    assert ResourceCapabilities.from_mapping({"selectable_cpus": "nope"}).selectable_cpus() == {}

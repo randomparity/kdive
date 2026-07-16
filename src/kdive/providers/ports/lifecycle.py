@@ -12,6 +12,7 @@ from kdive.domain.operations.jobs import PowerAction
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.ports._common import config_error
 from kdive.providers.ports.handles import SystemHandle, TransportHandle
+from kdive.serialization import JsonValue
 
 # The handle-scheme decode set (`TransportHandleData.kind`), NOT the agent-facing transport
 # token set. Connectors emit: gdbstub (all), ssh (local drgn-live realization), drgn-live
@@ -143,6 +144,17 @@ class Provisioner(Protocol):
                 ``INFRASTRUCTURE_FAILURE`` for teardown/control-plane faults, or
                 ``TRANSPORT_FAILURE`` when a remote provider's control channel cannot
                 connect.
+        """
+        ...
+
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        """The running domain's live-verified guest CPU baseline, or ``None`` (ADR-0369).
+
+        Best-effort and side-effect-free: read post-provision to record the CPU the System actually
+        booted with (``{model, vendor?, arch, baseline_level?}``). Never raises — a fault, an
+        unreadable/unexpanded ``<cpu>``, or a provider with no live-verified reading returns
+        ``None``. local-libvirt reads the running domain (host-passthrough resolves to the host
+        CPU); remote and fault-inject return ``None`` (remote keeps its selection-time snapshot).
         """
         ...
 

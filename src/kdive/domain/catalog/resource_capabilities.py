@@ -28,6 +28,11 @@ GUEST_ARCHES_KEY = "guest_arches"
 # guest_arches). Absent on local-libvirt/fault-inject and on un-refreshed remote hosts.
 HOST_CPU_KEY = "host_cpu"
 
+# The per-arch guest CPU models a local host can pin (ADR-0369): ``{arch: [model, ...]}`` from the
+# ``getDomainCapabilities`` custom-mode ``usable='yes'`` enumeration. Agent-facing; the allow-list
+# a CPU pin is validated against. Absent on remote/fault and on un-refreshed local hosts.
+SELECTABLE_CPUS_KEY = "selectable_cpus"
+
 # Whether the host QEMU implements pseries firmware-assisted dump (``ibm,configure-kernel-dump``,
 # QEMU ≥10.2) — a fail-closed bool recorded by local-libvirt discovery (ADR-0349). Admission gates
 # a fadump-opted provision against it; absent/non-bool reads as ``False`` (never fadump by default).
@@ -111,6 +116,7 @@ _KNOWN_KEYS = frozenset(
         DISK_GB_KEY,
         GUEST_ARCHES_KEY,
         HOST_CPU_KEY,
+        SELECTABLE_CPUS_KEY,
         MEMORY_MB_KEY,
         PCIE_DEVICES_KEY,
         PSERIES_FADUMP_KEY,
@@ -240,6 +246,25 @@ class ResourceCapabilities:
         level = raw.get("baseline_level")
         if isinstance(level, str):
             result["baseline_level"] = level
+        return result
+
+    def selectable_cpus(self) -> dict[str, list[str]]:
+        """The per-arch pinnable CPU model allow-list (ADR-0369), or ``{}`` if absent/malformed.
+
+        Defensive over the persisted JSON (mirrors :meth:`guest_arches`): keeps only string arch
+        keys whose value is a list, and within each list only string model names; a per-arch entry
+        with no string models is dropped. Any other shape (a stale/hand-edited row) reads as ``{}``.
+        """
+        raw = self._values.get(SELECTABLE_CPUS_KEY)
+        if not isinstance(raw, Mapping):
+            return {}
+        result: dict[str, list[str]] = {}
+        for arch, models in raw.items():
+            if not isinstance(arch, str) or not isinstance(models, list):
+                continue
+            names = [model for model in models if isinstance(model, str)]
+            if names:
+                result[arch] = names
         return result
 
     def pseries_fadump(self) -> bool:

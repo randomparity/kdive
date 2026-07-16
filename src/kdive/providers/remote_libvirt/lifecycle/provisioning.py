@@ -66,6 +66,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
 )
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import JsonValue
 
 __all__ = [
     "KDIVE_METADATA_NS",
@@ -288,6 +289,11 @@ class RemoteLibvirtProvisioning:
         with self._connection(config) as conn:
             recorded_pool = self._teardown_domain(conn, domain_name)
             delete_volume(conn, recorded_pool or config.storage_pool, overlay_name)
+
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        """Remote keeps the ADR-0368 mint-time ``host_cpu`` snapshot — no live read (ADR-0369)."""
+        del system_id
+        return None
 
     def _connection(self, config: RemoteLibvirtConfig):  # noqa: ANN202 - contextmanager passthrough
         return self._connections.connection(config)

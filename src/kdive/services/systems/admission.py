@@ -29,7 +29,7 @@ from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
-from kdive.domain.catalog.resource_capabilities import host_cpu_json
+from kdive.domain.catalog.resource_capabilities import ResourceCapabilities, host_cpu_json
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.lifecycle.sizing import MB_PER_GB, AllocationSizing
@@ -286,7 +286,53 @@ async def _resolve_new_system_bindings(
         requested=profile_policy.fadump_provisioned(profile),
         supported=caps is not None and caps.pseries_fadump(),
     )
-    return accel, host_cpu_json(caps)
+    require_pinned_cpu_selectable(profile, caps)
+    return accel, _mint_resolved_cpu(profile, caps)
+
+
+def require_pinned_cpu_selectable(
+    profile: ProvisioningProfile, caps: ResourceCapabilities | None
+) -> None:
+    """Reject a CPU pin the bound host cannot deliver for the profile arch (ADR-0369, fail-closed).
+
+    Validates host-deliverability only — **not** that the bound rootfs image can run on the pinned
+    model (a sub-ISA-floor pin non-boots; that is disclosed in the pin field text, not enforced
+    here). Reads the plain ``local_libvirt_section`` field (the ``local_libvirt`` property raises
+    for a non-local profile, and this runs in the provider-agnostic mint path). A pin with no
+    advertised ``selectable_cpus[arch]`` is rejected: never render a custom ``<cpu>`` the host
+    cannot be shown to support.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when a pinned ``cpu.model`` is not in the bound
+            Resource's ``selectable_cpus`` for ``profile.arch``. The message names the model, the
+            arch, and the advertised set.
+    """
+    section = profile.provider.local_libvirt_section
+    if section is None or section.cpu is None:
+        return
+    allowed = caps.selectable_cpus().get(profile.arch, []) if caps is not None else []
+    if section.cpu.model not in allowed:
+        raise CategorizedError(
+            f"CPU model {section.cpu.model!r} is not selectable for arch {profile.arch!r} on this "
+            f"host; advertised: {sorted(allowed)}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+
+def _mint_resolved_cpu(
+    profile: ProvisioningProfile, caps: ResourceCapabilities | None
+) -> dict[str, JsonValue] | None:
+    """The mint-time ``resolved_cpu`` snapshot — remote-libvirt only (ADR-0369).
+
+    Remote hosts are heterogeneous and unreachable at ``systems.get`` time, so remote keeps
+    ADR-0368's mint-time ``host_cpu`` snapshot. Local ``resolved_cpu`` is instead a post-provision
+    live read (ADR-0369 Phase C); snapshotting the native ``host_cpu`` at mint would be wrong for a
+    CPU pin and arch-mismatched for a foreign-TCG guest, so local/fault return ``None`` here. Reads
+    the plain ``remote_libvirt_section`` field, never the raising ``remote_libvirt`` property.
+    """
+    if profile.provider.remote_libvirt_section is None:
+        return None
+    return host_cpu_json(caps)
 
 
 @dataclass(frozen=True, slots=True)

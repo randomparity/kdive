@@ -107,6 +107,27 @@ class LibvirtDebugOptions(_ProfileBase):
     fadump: bool = False
 
 
+# Provenance: ADR-0369, #1227.
+class LibvirtCpuPin(_ProfileBase):
+    """An agent-selected guest CPU model pin.
+
+    ``model`` must be one of the bound host's advertised ``selectable_cpus[arch]`` (validated at
+    admission); the guest is then pinned to that CPU model. Omit ``cpu`` entirely for the operator
+    default (the host CPU: host-passthrough on x86, host-model on ppc64le, the machine default under
+    TCG emulation).
+    """
+
+    model: NonEmptyStr = Field(
+        description=(
+            "Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. "
+            "Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the "
+            "rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING "
+            "System — admission checks only that the host can deliver the model, not that the "
+            "image can run on it. Omit to get the operator default (host CPU)."
+        )
+    )
+
+
 # Provenance: ADR-0024 decisions 1/2b/2c; rootfs ADR-0048 §3; destructive opt-in ADR-0028 §2;
 # debug ADR-0049 Decision 3.
 class LibvirtProfile(_ProfileBase):
@@ -150,6 +171,7 @@ class LibvirtProfile(_ProfileBase):
     )
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
     debug: LibvirtDebugOptions = Field(default_factory=LibvirtDebugOptions)
+    cpu: LibvirtCpuPin | None = None
 
 
 # Provenance: ADR-0072.

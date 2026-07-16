@@ -48,11 +48,18 @@ Deregister a runtime or config-owned remote-libvirt resource.
 
 Return one runtime resource visible to the caller.
 
-Remote-libvirt hosts carry ``data.host_cpu`` — the expected guest CPU under host-model:
-``{model, vendor?, arch, baseline_level?}``. ``baseline_level`` (``x86-64-vN``) is a
-nominal upper bound for selecting a host that meets a CPU baseline; it may be absent for a
-model not in the level table, and a present level is not a guaranteed floor (confirm a hard
-instruction-set requirement against the running guest). Absent on local hosts.
+``data.host_cpu`` is the host's default guest CPU: ``{model, vendor?, arch,
+baseline_level?}`` — remote under host-model, local the host's native CPU.
+``baseline_level`` (``x86-64-vN``) is a nominal upper bound; it may be absent for a model
+not in the level table, and a present level is not a guaranteed floor (confirm a hard
+instruction-set requirement against the running guest).
+
+Local hosts also carry ``data.selectable_cpus`` — ``{arch: [model, ...]}``, the CPU models
+this host can pin for a System via the ``cpu.model`` field of the local-libvirt profile
+section. Pin a portable ``x86-64-vN`` rung for a deterministic reproducer. A pinned model
+**below the rootfs image's ISA floor** (``x86-64-v2`` for EL9/RHEL-family) produces a
+non-booting System — admission validates only that the host can deliver the model, not that
+the image can run on it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -79,11 +86,18 @@ List runtime resources visible to the caller.
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
 ``cursor`` for the next page.
 
-Remote-libvirt hosts carry ``data.host_cpu`` — the expected guest CPU under host-model:
-``{model, vendor?, arch, baseline_level?}``. ``baseline_level`` (``x86-64-vN``) is a
-nominal upper bound for selecting a host that meets a CPU baseline; it may be absent for a
-model not in the level table, and a present level is not a guaranteed floor (confirm a hard
-instruction-set requirement against the running guest). Absent on local hosts.
+``data.host_cpu`` is the host's default guest CPU: ``{model, vendor?, arch,
+baseline_level?}`` — remote under host-model, local the host's native CPU.
+``baseline_level`` (``x86-64-vN``) is a nominal upper bound; it may be absent for a model
+not in the level table, and a present level is not a guaranteed floor (confirm a hard
+instruction-set requirement against the running guest).
+
+Local hosts also carry ``data.selectable_cpus`` — ``{arch: [model, ...]}``, the CPU models
+this host can pin for a System via the ``cpu.model`` field of the local-libvirt profile
+section. Pin a portable ``x86-64-vN`` rung for a deterministic reproducer. A pinned model
+**below the rootfs image's ISA floor** (``x86-64-v2`` for EL9/RHEL-family) produces a
+non-booting System — admission validates only that the host can deliver the model, not that
+the image can run on it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

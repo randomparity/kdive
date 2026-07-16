@@ -25,23 +25,30 @@ from kdive.domain.catalog.resource_capabilities import (
     CONCURRENT_ALLOCATION_CAP_KEY,
     DISK_GB_KEY,
     GUEST_ARCHES_KEY,
+    HOST_CPU_KEY,
     PSERIES_FADUMP_KEY,
+    SELECTABLE_CPUS_KEY,
 )
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
-from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES
+from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, arch_traits
 from kdive.providers.local_libvirt.lifecycle.storage import ROOTFS_DIR
 from kdive.providers.local_libvirt.settings import LIBVIRT_ALLOCATION_CAP, LIBVIRT_URI
 from kdive.providers.ports.handles import OwnedInfra
 from kdive.providers.shared.fadump_detect import detect_pseries_fadump
+from kdive.providers.shared.host_cpu import host_cpu_dict
 from kdive.providers.shared.libvirt_xml import (
     KDIVE_METADATA_NS,
     parse_capabilities_arch,
     parse_guest_arches,
+    parse_host_capabilities_cpu,
+    parse_host_cpu,
     parse_metadata_system_id,
+    parse_selectable_cpus,
 )
 from kdive.providers.shared.runtime_paths import system_id_from_domain_name
+from kdive.serialization import JsonValue
 
 _log = logging.getLogger(__name__)
 
@@ -85,12 +92,89 @@ class _LibvirtNodeDevice(Protocol):
 class _LibvirtConn(Protocol):
     def getInfo(self) -> list[Any]: ...
     def getCapabilities(self) -> str: ...
+    def getDomainCapabilities(  # noqa: N802 - libvirt binding name
+        self,
+        emulatorbin: str | None = None,
+        arch: str | None = None,
+        machine: str | None = None,
+        virttype: str | None = None,
+        flags: int = 0,
+    ) -> str: ...
     def listAllDevices(self, flags: int = 0) -> Sequence[_LibvirtNodeDevice]: ...
     def listAllDomains(self, flags: int = 0) -> Sequence[_LibvirtDomain]: ...
 
 
 type Connect = Callable[[], _LibvirtConn]
 type FadumpProbe = Callable[[Mapping[str, Mapping[str, str]]], bool]
+
+
+def _native_kvm_arch(guest_arches: Mapping[str, Mapping[str, str]], host_arch: str) -> str | None:
+    """The arch that runs under KVM on this host and is the host's own arch (ADR-0369).
+
+    accel is a per-host discovery value (``guest_arches[arch]['accel']`` — the same arch is KVM on
+    one host and TCG on another). ``host_cpu`` describes the single native CPU, so it is scoped to
+    that arch. ``None`` when the host arch is not advertised or is not KVM-capable (a foreign/TCG
+    host has no native host CPU to advertise).
+    """
+    entry = guest_arches.get(host_arch)
+    if entry is not None and entry.get("accel") == "kvm":
+        return host_arch
+    return None
+
+
+def _discover_local_host_cpu(
+    conn: _LibvirtConn, caps_xml: str, native_arch: str | None
+) -> dict[str, JsonValue] | None:
+    """The native host CPU (ADR-0369), guarded; ``None`` for a foreign/TCG-only host or any fault.
+
+    x86 host-passthrough reads the host's own ``<host><cpu>`` (a passthrough guest gets the host
+    CPU); native ppc64le host-model reads the ``getDomainCapabilities`` host-model block. A
+    ``libvirtError`` or an unparseable/absent block yields ``None`` — the host still discovers.
+    """
+    if native_arch is None:
+        return None
+    if native_arch == "x86_64":
+        parsed = parse_host_capabilities_cpu(caps_xml)
+    else:
+        try:
+            dom_caps = conn.getDomainCapabilities(
+                None, native_arch, arch_traits(native_arch).machine, "kvm"
+            )
+        except libvirt.libvirtError:
+            _log.warning("getDomainCapabilities failed; omitting host_cpu", exc_info=True)
+            return None
+        parsed = parse_host_cpu(dom_caps)
+    if parsed is None:
+        return None
+    return host_cpu_dict(parsed, native_arch)
+
+
+def _discover_selectable_cpus(
+    conn: _LibvirtConn, guest_arches: Mapping[str, Mapping[str, str]]
+) -> dict[str, list[str]]:
+    """The per-arch pinnable CPU model allow-list (ADR-0369), guarded per arch.
+
+    For each advertised guest arch, read that arch's ``getDomainCapabilities`` custom-mode usable
+    models with the arch-derived ``machine``/``virttype``/``emulator`` (matching the renderer). A
+    per-arch ``libvirtError`` omits only that arch key; an empty usable set omits the arch too.
+    """
+    out: dict[str, list[str]] = {}
+    for guest_arch, entry in guest_arches.items():
+        virttype = "kvm" if entry.get("accel") == "kvm" else "qemu"
+        emulator = entry.get("emulator") if virttype == "qemu" else None
+        try:
+            dom_caps = conn.getDomainCapabilities(
+                emulator, guest_arch, arch_traits(guest_arch).machine, virttype
+            )
+        except libvirt.libvirtError:
+            _log.warning(
+                "getDomainCapabilities failed for %s; omitting selectable_cpus", guest_arch
+            )
+            continue
+        models = parse_selectable_cpus(dom_caps)
+        if models:
+            out[guest_arch] = models
+    return out
 
 
 def _hex_id(raw: str) -> str:
@@ -201,9 +285,10 @@ class LocalLibvirtDiscovery:
         conn = self._connect()
         info = conn.getInfo()
         caps_xml = conn.getCapabilities()
+        host_arch = parse_capabilities_arch(caps_xml)
         guest_arches = parse_guest_arches(caps_xml, SUPPORTED_ARCHES)
         capabilities: dict[str, Any] = {
-            "arch": parse_capabilities_arch(caps_xml),
+            "arch": host_arch,
             GUEST_ARCHES_KEY: guest_arches,
             # Whether this host's QEMU implements pseries fadump (ADR-0349); fail-closed, keyed off
             # the discovered ppc64le emulator's version (no ppc64le arch → False, no subprocess).
@@ -215,6 +300,17 @@ class LocalLibvirtDiscovery:
             CONCURRENT_ALLOCATION_CAP_KEY: self.concurrent_allocation_cap,
             PCIE_DEVICES_KEY: self._list_pcie_descriptors(conn),
         }
+        # Agent-facing guest-CPU surfaces (ADR-0369), both guarded: an advisory field never drops
+        # the host from discovery. host_cpu is the single NATIVE host CPU; selectable_cpus is the
+        # per-arch pin allow-list.
+        host_cpu = _discover_local_host_cpu(
+            conn, caps_xml, _native_kvm_arch(guest_arches, host_arch)
+        )
+        if host_cpu is not None:
+            capabilities[HOST_CPU_KEY] = host_cpu
+        selectable = _discover_selectable_cpus(conn, guest_arches)
+        if selectable:
+            capabilities[SELECTABLE_CPUS_KEY] = selectable
         return [
             ResourceRecord(
                 resource_id=self.host_uri,

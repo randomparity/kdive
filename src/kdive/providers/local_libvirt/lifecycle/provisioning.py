@@ -68,12 +68,16 @@ from kdive.providers.local_libvirt.lifecycle.storage import (
 )
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.shared.host_cpu import host_cpu_dict
 from kdive.providers.shared.libvirt_xml import (
+    parse_domain_resolved_cpu,
     parse_guest_arches,
+    parse_host_capabilities_cpu,
     recorded_gdb_port_from_root,
     recorded_ssh_port_from_root,
 )
 from kdive.providers.shared.runtime_paths import console_log_path, domain_name_for
+from kdive.serialization import JsonValue
 
 __all__ = [
     "LocalLibvirtProvisioning",
@@ -419,6 +423,43 @@ class LocalLibvirtProvisioning:
             if exc.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
                 return None
             raise self._infra("reading the recorded SSH port", name) from exc
+        finally:
+            _close(conn)
+
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
+        """The running domain's resolved guest CPU (ADR-0369), best-effort — never raises.
+
+        Reads the domain XML with ``VIR_DOMAIN_XML_UPDATE_CPU`` (libvirt expands host-model / a
+        ``custom`` pin to a concrete ``<model>``). Returns the ``{model, vendor?, arch,
+        baseline_level?}`` dict, or ``None`` when nothing concrete can be read:
+
+        - a concrete ``<model>`` → that CPU (host-model / a pin / an expanding passthrough);
+        - an unexpanded ``host-passthrough`` (no ``<model>``) → the host's ``getCapabilities``
+          ``<cpu>`` (the passthrough guest **is** the host CPU) — the default local-x86 case;
+        - a TCG machine-default (no ``<cpu>``, or a non-passthrough mode with no model) → ``None``.
+
+        Any ``libvirt.libvirtError`` (domain gone, connection fault) or parse fault yields ``None``
+        and is logged — the caller records NULL and provisioning is unaffected.
+        """
+        name = domain_name_for(system_id)
+        try:
+            conn = self._connect()
+        except libvirt.libvirtError:
+            _log.warning("connecting to libvirt to read resolved_cpu for %s failed", name)
+            return None
+        try:
+            domain = conn.lookupByName(name)
+            domain_xml = domain.XMLDesc(libvirt.VIR_DOMAIN_XML_UPDATE_CPU)
+            mode, parsed = parse_domain_resolved_cpu(domain_xml)
+            if parsed is not None:
+                return host_cpu_dict(parsed, "")
+            if mode == "host-passthrough":
+                host = parse_host_capabilities_cpu(conn.getCapabilities())
+                return host_cpu_dict(host, "") if host is not None else None
+            return None
+        except libvirt.libvirtError:
+            _log.warning("reading resolved_cpu for %s failed; recording null", name, exc_info=True)
+            return None
         finally:
             _close(conn)
 

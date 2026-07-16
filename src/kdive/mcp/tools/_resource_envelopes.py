@@ -49,6 +49,10 @@ def resource_capability_data(resource: Resource) -> dict[str, JsonValue]:
     host_cpu = host_cpu_json(caps)
     if host_cpu is not None:
         data["host_cpu"] = host_cpu
+    # The per-arch guest-CPU pin allow-list (ADR-0369) — local hosts only; omitted otherwise.
+    selectable = caps.selectable_cpus()
+    if selectable:
+        data["selectable_cpus"] = {arch: list(models) for arch, models in selectable.items()}
     return data
 
 

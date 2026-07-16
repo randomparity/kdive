@@ -102,6 +102,7 @@ def render_domain_xml(
     section = profile.provider.local_libvirt
     traits = arch_traits(profile.arch)
     machine = section.domain_xml_params.get("machine", traits.machine)
+    cpu_model = section.cpu.model if section.cpu is not None else None
 
     domain, devices = _build_baseline_domain(
         system_id,
@@ -113,6 +114,7 @@ def render_domain_xml(
         emulator=emulator,
         kernel_path=kernel_path,
         initrd_path=initrd_path,
+        cpu_model=cpu_model,
     )
 
     if section.debug.preserve_on_crash:
@@ -141,12 +143,14 @@ def _build_baseline_domain(
     emulator: str | None,
     kernel_path: Path | None,
     initrd_path: Path | None,
+    cpu_model: str | None = None,
 ) -> tuple[ET.Element, ET.Element]:
-    """Build the always-present local-libvirt domain skeleton (ADR-0340).
+    """Build the always-present local-libvirt domain skeleton (ADR-0340, ADR-0369).
 
-    ``<domain type>`` is ``kvm`` under KVM and ``qemu`` (TCG) otherwise. The ``<cpu>`` element,
-    the x86-only ``<features>`` block, and the TCG ``<emulator>`` are all arch/accel-resolved
-    through ``traits`` — see the per-element helpers.
+    ``<domain type>`` is ``kvm`` under KVM and ``qemu`` (TCG) otherwise. The ``<cpu>`` element
+    (a ``custom`` pin when ``cpu_model`` is set, else the arch/accel default), the x86-only
+    ``<features>`` block, and the TCG ``<emulator>`` are all resolved through the per-element
+    helpers.
     """
     # Decode the accelerator once: KVM vs TCG drives the domain type, the <cpu> element, and
     # whether <emulator> is emitted (ADR-0340).
@@ -156,9 +160,9 @@ def _build_baseline_domain(
     ET.SubElement(domain, "uuid").text = str(system_id)
     ET.SubElement(domain, "memory", unit="MiB").text = str(profile.memory_mb)
     ET.SubElement(domain, "vcpu").text = str(profile.vcpu)
-    # <cpu> stays here (after <vcpu>, before <os>) so the x86-KVM domain is byte-identical to
-    # the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
-    _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode)
+    # <cpu> stays here (after <vcpu>, before <os>) so the unpinned x86-KVM domain is byte-identical
+    # to the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
+    _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode, cpu_model=cpu_model)
     os_el = _append_os(domain, arch=profile.arch, machine=machine)
     _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
     if traits.emit_acpi_features:
@@ -172,18 +176,26 @@ def _build_baseline_domain(
     return domain, devices
 
 
-def _append_guest_cpu(domain: ET.Element, *, is_kvm: bool, kvm_cpu_mode: str) -> None:
-    """Pin the guest CPU per arch under KVM; emit nothing for TCG (ADR-0340, ADR-0294, #956).
+def _append_guest_cpu(
+    domain: ET.Element, *, is_kvm: bool, kvm_cpu_mode: str, cpu_model: str | None = None
+) -> None:
+    """Pin the guest CPU per arch under KVM; emit nothing for TCG (ADR-0340, ADR-0294, ADR-0369).
 
-    Under KVM the mode is the arch-resolved ``kvm_cpu_mode``: ``host-passthrough`` on x86 and
-    ``host-model`` on pseries. The x86 case is load-bearing (ADR-0294) — the QEMU/KVM default
-    model ``qemu64`` is x86-64-v1 while EL9/RHEL-family glibc requires x86-64-v2, so a wrong
-    model makes an EL9 guest's ``ld.so`` abort PID 1 and the domain never reaches userspace.
+    A pinned ``cpu_model`` (ADR-0369) emits ``<cpu mode='custom' check='partial'><model>…</model>
+    </cpu>`` — an agent-selected model validated at admission against the host's advertised
+    ``selectable_cpus``; it is valid under both KVM and TCG.
 
-    A **TCG** domain emits no ``<cpu>``: QEMU's per-machine default is used, and pinning a model
-    would couple the domain to specific QEMU versions. Whether that default meets the guest's
-    ISA baseline (x86-64-v2 / POWER9) is proven at the #1144 live boot, not asserted here.
+    Unpinned (``cpu_model is None``): under KVM the mode is the arch-resolved ``kvm_cpu_mode``
+    (``host-passthrough`` on x86, ``host-model`` on pseries). The x86 case is load-bearing
+    (ADR-0294) — the QEMU/KVM default model ``qemu64`` is x86-64-v1 while EL9/RHEL-family glibc
+    requires x86-64-v2, so a wrong model makes an EL9 guest's ``ld.so`` abort PID 1. A **TCG**
+    domain emits no ``<cpu>``: QEMU's per-machine default is used. This unpinned output is
+    byte-identical to the pre-#1227 renderer.
     """
+    if cpu_model is not None:
+        cpu = ET.SubElement(domain, "cpu", mode="custom", check="partial")
+        ET.SubElement(cpu, "model").text = cpu_model
+        return
     if not is_kvm:
         return
     ET.SubElement(domain, "cpu", mode=kvm_cpu_mode)
