@@ -41,6 +41,14 @@ the matched signature, and elapsed-to-signal, and otherwise returns a "not fired
 the deadline. It returns the verdict inline in the job's `result_ref` (the ADR-0164 pattern,
 as `check_ssh_reachable` does), with no new artifact row.
 
+Because the start offset is snapshotted at worker pickup (queue latency and at-least-once
+retries can both put a real panic *before* it), the deadline path probes domain liveness and
+**never reports a healthy guest unless the domain is actually live**: a domain that exited with
+no matching signature returns a distinct `exited_no_signature` verdict that routes the agent to
+the full console. `deadline_s` is clamped to a modest cap (default 60s, max 300s) so a
+pure-wait watch cannot hold a worker slot long enough to starve short lifecycle jobs on the
+shared dispatch lane.
+
 kdive does **not** run agent-supplied commands in the guest. The agent drives its own
 reproducer loop over root SSH (ADR-0366); kdive supplies the one thing SSH cannot: catching the
 crash on the console after SSH is gone. `_CRASH_SIGNATURE` is promoted to a public
