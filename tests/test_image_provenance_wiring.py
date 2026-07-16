@@ -47,9 +47,27 @@ def test_workflows_pass_provenance_build_args() -> None:
     for workflow in (".github/workflows/release-image.yml", ".github/workflows/ci.yml"):
         text = _read(workflow)
         assert "KDIVE_COMMIT=" in text, f"ADR-0370 wiring: {workflow} stopped passing KDIVE_COMMIT"
-        assert "KDIVE_RELEASE=" in text, (
-            f"ADR-0370 wiring: {workflow} stopped passing KDIVE_RELEASE"
-        )
         assert "rev-parse --short=12 HEAD" in text, (
             f"ADR-0370 wiring: {workflow} lost the pinned --short=12 provenance SHA"
         )
+
+
+def test_release_workflow_marks_tag_builds_as_release() -> None:
+    # The whole point is that a v* tag image reports X.Y.Z+g<sha> (release) and :edge reports
+    # X.Y.Z-dev+g<sha>. Assert the *rendering signal*, not just that the token exists: a bare
+    # `KDIVE_RELEASE=false` in the release workflow would pass a token-presence check yet ship a
+    # tag image mislabeled -dev, and the multi-arch release job has no runtime --version gate.
+    release = _read(".github/workflows/release-image.yml")
+    assert "KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}" in release, (
+        "ADR-0370 wiring: release-image.yml must derive KDIVE_RELEASE from the v* tag ref, not a "
+        "literal — otherwise a released tag image self-reports X.Y.Z-dev"
+    )
+
+
+def test_ci_pr_build_is_never_release() -> None:
+    # A PR build is never a release, so ci.yml pins KDIVE_RELEASE=false; this is what lets the
+    # image-smoke test assert the -dev shape deterministically.
+    ci = _read(".github/workflows/ci.yml")
+    assert "KDIVE_RELEASE=false" in ci, (
+        "ADR-0370 wiring: ci.yml must pin KDIVE_RELEASE=false for the non-release PR image"
+    )

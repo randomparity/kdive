@@ -172,9 +172,13 @@ jobs:
       - name: Resolve build provenance
         # Bake the same provenance the release path does (ADR-0370) so the smoke step can prove
         # the running image self-reports X.Y.Z-dev+g<sha>. A PR build is never a release, so
-        # KDIVE_RELEASE is false. An empty sha would skip the stamp and fail the smoke assertion.
+        # KDIVE_RELEASE is false. An empty sha would skip the stamp and fail the smoke assertion;
+        # fail loudly here anyway so the cause is the SHA step, not a puzzling smoke mismatch.
         id: prov
-        run: echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          sha="$(git rev-parse --short=12 HEAD)"
+          [ -n "$sha" ] || { echo "::error::empty provenance SHA from git rev-parse" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Build image (no push)
         # Exercises the Dockerfile on every PR (ADR-0088 decision 8). The build-time
