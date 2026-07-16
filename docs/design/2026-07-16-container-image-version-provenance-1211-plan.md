@@ -126,9 +126,13 @@ script). No new secret or permission is needed.
 **Where it fits:** closes the silent-failure surface (Finding 1 of the spec review) — nothing
 else proves the baked file survives the multi-stage copy and is read by the running image.
 
-**Change** `.github/workflows/ci.yml` `Build image (no push)` step: add the same
-`Resolve build provenance` step as Task 3 (id `prov`, `git rev-parse --short=12 HEAD`) before it,
-then add to the build step:
+**Change** `.github/workflows/ci.yml` — in the **`image-build` job** (the one with the
+`Build image (no push)` step), add the same `Resolve build provenance` step as Task 3 (id `prov`,
+`git rev-parse --short=12 HEAD`) after that job's `actions/checkout` and before the build step.
+The checkout must retain `.git` (the default does) so `rev-parse` resolves; if it returns empty,
+`KDIVE_COMMIT` is empty, the stamp is skipped, `--version` reports `X.Y.Z-dev` with no `+g`, and
+the smoke assertion below fails red — so a misplacement is caught, never silent. Then add to the
+build step:
 ```yaml
 build-args: |
   KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
@@ -148,7 +152,7 @@ def test_version_reports_baked_provenance() -> None:
     # CI builds this image with KDIVE_COMMIT + KDIVE_RELEASE=false, so the running
     # binary must self-report a dev build with a 12-hex baked commit (ADR-0370) —
     # proving _buildinfo.py survived the multi-stage COPY and PYTHONPATH import.
-    assert re.match(r"^kdive \d+\.\d+\.\d+-dev\+g[0-9a-f]{12}$", res.stdout.strip()), res.stdout
+    assert re.match(r"^kdive \d+\.\d+\.\d+-dev\+g[0-9a-f]{12,}$", res.stdout.strip()), res.stdout
 ```
 This runs only when `KDIVE_IMAGE` + `docker` are present (the module's `pytestmark` skipif), i.e.
 in the CI `image-build` job and any local build — it skips cleanly in the plain unit run.
@@ -161,7 +165,9 @@ gate (no docker):
 - Read `.github/workflows/release-image.yml` and `.github/workflows/ci.yml`; assert each passes
   `KDIVE_COMMIT=` and `KDIVE_RELEASE=` build-args to the build step.
 - Keep the assertions token-level and documented so an intentional refactor updates the guard
-  deliberately (the guard's failure message should say "ADR-0370 wiring").
+  deliberately (the guard's failure message should say "ADR-0370 wiring"). Where it references the
+  baked SHA width, allow `[0-9a-f]{12,}` to match the smoke test's tolerance for git extending the
+  abbreviation.
 
 **Acceptance:** `just lint-workflows` clean; `just test` green (the wiring guard runs and passes;
 the image-smoke `--version` case skips locally, runs in CI); on a PR, the CI `image-build` job's
@@ -177,10 +183,17 @@ smoke assertion are self-contained.
 - `just lint && just type && just lint-shell && just lint-workflows && just test` all green.
 - `just adr-status-check`, `just docs-links`, `just docs-paths`, `just docs-check` green.
 - `zizmor .github/workflows/` raises no new finding for the two edited workflows.
-- Manual (optional, local, since this host builds images): `docker build --build-arg
-  KDIVE_COMMIT=$(git rev-parse --short=12 HEAD) --build-arg KDIVE_RELEASE=false -t kdive:prov . &&
-  docker run --rm kdive:prov python -m kdive --version` → `kdive X.Y.Z-dev+g<12 hex>`; repeat with
-  `KDIVE_RELEASE=true` → `kdive X.Y.Z+g<12 hex>`.
+- **Required local end-to-end proof (this host builds images), both release states** — CI only
+  ever builds `RELEASE=false`, so the release rendering must be proven here before the PR, not
+  first at the real tag. Run and capture both in the PR description:
+  ```
+  docker build --build-arg KDIVE_COMMIT=$(git rev-parse --short=12 HEAD) \
+    --build-arg KDIVE_RELEASE=false -t kdive:prov-dev .
+  docker run --rm kdive:prov-dev python -m kdive --version   # → kdive X.Y.Z-dev+g<12 hex>
+  docker build --build-arg KDIVE_COMMIT=$(git rev-parse --short=12 HEAD) \
+    --build-arg KDIVE_RELEASE=true -t kdive:prov-rel .
+  docker run --rm kdive:prov-rel python -m kdive --version   # → kdive X.Y.Z+g<12 hex>
+  ```
 
 ## Out of scope (restated)
 
