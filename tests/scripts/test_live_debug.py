@@ -203,6 +203,110 @@ def test_wait_job_selects_matching_job_and_requires_success(
     }
 
 
+def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    live_debug = _load_live_debug()
+    kernel_src = tmp_path / "linux"
+    (kernel_src / "arch/x86/boot").mkdir(parents=True)
+    (kernel_src / "arch/x86/boot/bzImage").write_bytes(b"bz")
+    dest = tmp_path / "scratch"
+    dest.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> object:
+        calls.append(cmd)
+        if cmd[1] == "-czf":  # the tar invocation writes the archive
+            Path(cmd[2]).write_bytes(b"tar")
+        return object()
+
+    monkeypatch.setattr(live_debug, "_required_executable", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(live_debug.subprocess, "run", fake_run)
+
+    result = live_debug._combined_kernel_tar(kernel_src, dest)
+
+    assert result == dest / "kernel.tar.gz"
+    assert result.read_bytes() == b"tar"
+    assert calls[0] == [
+        "/bin/make",
+        "-C",
+        str(kernel_src),
+        "modules_install",
+        f"INSTALL_MOD_PATH={dest / 'modstage'}",
+    ]
+    tar_cmd = calls[1]
+    assert tar_cmd[:3] == ["/bin/tar", "-czf", str(dest / "kernel.tar.gz")]
+    assert "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|" in tar_cmd
+    assert "--exclude=*/build" in tar_cmd and "--exclude=*/source" in tar_cmd
+
+
+def test_combined_kernel_tar_requires_built_bzimage(tmp_path: Path) -> None:
+    live_debug = _load_live_debug()
+    with pytest.raises(RuntimeError, match="no built bzImage"):
+        live_debug._combined_kernel_tar(tmp_path / "unbuilt", tmp_path / "scratch")
+
+
+def test_upload_kernel_drives_declare_put_complete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    live_debug = _load_live_debug()
+    kernel_tar = tmp_path / "kernel.tar.gz"
+    kernel_tar.write_bytes(b"kernel-bytes")
+    tool_calls: list[tuple[str, dict[str, Any]]] = []
+    put_calls: list[tuple[dict[str, Any], Path]] = []
+
+    async def fake_call(
+        _client: object, tool: str, args: dict[str, Any], _schemas: dict[str, Any]
+    ) -> dict[str, Any]:
+        tool_calls.append((tool, args))
+        if tool == "artifacts.expected_uploads":
+            return {"items": [{"data": {"owner_kind": "run", "accepted_names": ["kernel"]}}]}
+        if tool == "artifacts.create_run_upload":
+            return {
+                "items": [{"refs": {"upload_url": "http://s3/kernel"}, "data": {"name": "kernel"}}]
+            }
+        return {"object_id": tool}
+
+    async def fake_put(item: dict[str, Any], path: Path) -> None:
+        put_calls.append((item, path))
+
+    monkeypatch.setattr(live_debug, "_call", fake_call)
+    monkeypatch.setattr(live_debug, "_put_presigned", fake_put)
+
+    asyncio.run(live_debug._upload_kernel(object(), {}, run_id="r1", kernel_tar=kernel_tar))
+
+    names = [tool for tool, _ in tool_calls]
+    assert names == [
+        "artifacts.expected_uploads",
+        "artifacts.create_run_upload",
+        "runs.complete_build",
+    ]
+    decl = tool_calls[1][1]["artifacts"][0]
+    assert decl["name"] == "kernel"
+    assert decl["size_bytes"] == len(b"kernel-bytes")
+    assert decl["sha256"] == live_debug._sha256_b64(kernel_tar)
+    assert tool_calls[2][1] == {"run_id": "r1"}
+    assert len(put_calls) == 1
+    assert put_calls[0][0]["refs"]["upload_url"] == "http://s3/kernel"
+    assert put_calls[0][1] == kernel_tar
+
+
+def test_upload_kernel_rejects_missing_kernel_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    live_debug = _load_live_debug()
+    kernel_tar = tmp_path / "kernel.tar.gz"
+    kernel_tar.write_bytes(b"k")
+
+    async def fake_call(
+        _client: object, _tool: str, _args: dict[str, Any], _schemas: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {"items": [{"data": {"owner_kind": "run", "accepted_names": ["rootfs"]}}]}
+
+    monkeypatch.setattr(live_debug, "_call", fake_call)
+
+    with pytest.raises(RuntimeError, match="no longer accepts a 'kernel'"):
+        asyncio.run(live_debug._upload_kernel(object(), {}, run_id="r1", kernel_tar=kernel_tar))
+
+
 def test_transcript_renders_records(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
