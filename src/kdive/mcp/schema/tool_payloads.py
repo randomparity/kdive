@@ -100,6 +100,17 @@ class AllocationRequestPayload(SelectorPayload):
         ),
     )
     resource: ResourceSelector = Field(default_factory=ResourceByKind, discriminator="mode")
+    arch: str | None = Field(
+        default=None,
+        description=(
+            "Guest architecture to place and price for (e.g. 'ppc64le'); omit for an "
+            "architecture-blind request. When set, only hosts that can boot it are candidates "
+            "(a host advertising other guest arches is skipped; one advertising none is still "
+            "eligible), and the reserved cost reflects the host's accelerator for this arch — "
+            "an emulated (TCG) guest is priced above a native (KVM) one. The bill is finalized "
+            "from the System's provisioned architecture."
+        ),
+    )
     pcie_devices: list[str] = Field(
         default_factory=list,
         description="PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.",
@@ -143,8 +154,18 @@ _COST_CLASS_DESCRIPTION = (
 )
 
 
+_ACCEL_DESCRIPTION = (
+    "Optional accelerator to price the estimate at: 'kvm' (native) or 'tcg' (foreign-arch "
+    "emulation). Omit for the native baseline. A TCG guest is priced above a same-size KVM "
+    "guest — price both to compare architectures before you allocate. This is a what-if input; "
+    "the host resolves the real accelerator for your arch at provision. An unknown value is a "
+    "configuration_error."
+)
+
+
 class EstimateRequestPayload(SelectorPayload):
     vcpus: int
     memory_gb: int
     window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])
     cost_class: str = Field(default=_DEFAULT_COST_CLASS, description=_COST_CLASS_DESCRIPTION)
+    accel: str | None = Field(default=None, description=_ACCEL_DESCRIPTION)

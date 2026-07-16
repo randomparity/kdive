@@ -273,8 +273,29 @@ async def _extension_estimate(
             details={"allocation_id": str(alloc.id)},
         )
     coeff = await resolve_coeff(conn, await _cost_class(conn, alloc))
-    rate_kcu_per_hr = rate(coeff, vcpus=alloc.requested_vcpus, memory_gb=alloc.requested_memory_gb)
+    rate_kcu_per_hr = rate(
+        coeff,
+        vcpus=alloc.requested_vcpus,
+        memory_gb=alloc.requested_memory_gb,
+        accel=await _system_accel(conn, alloc),
+    )
     return quantize_kcu(cost(rate_kcu_per_hr, added_hours))
+
+
+async def _system_accel(conn: AsyncConnection, alloc: Allocation) -> str | None:
+    """Return the accelerator of the System this allocation booked, priced into the renewal.
+
+    The extension is priced at the architecture actually provisioned (``systems.accel``,
+    ADR-0339/0362), so a renewed TCG lease reserves its added window at the same emulation rate
+    as the original — never re-reserving an emulated guest at the native baseline. ``None`` (no
+    System yet, or one that recorded no accel) prices at the native baseline.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT accel FROM systems WHERE allocation_id = %s", (alloc.id,))
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return row[0]
 
 
 async def _cost_class(conn: AsyncConnection, alloc: Allocation) -> str:

@@ -458,9 +458,30 @@ async def _actual_cost(conn: AsyncConnection, allocation: Allocation) -> Decimal
         )
     coeff = await resolve_coeff(conn, await _cost_class(conn, allocation))
     rate_kcu_per_hr = rate(
-        coeff, vcpus=allocation.requested_vcpus, memory_gb=allocation.requested_memory_gb
+        coeff,
+        vcpus=allocation.requested_vcpus,
+        memory_gb=allocation.requested_memory_gb,
+        accel=await _system_accel(conn, allocation),
     )
     return cost(rate_kcu_per_hr, hours)
+
+
+async def _system_accel(conn: AsyncConnection, allocation: Allocation) -> str | None:
+    """Return the persisted accelerator of the System this allocation booked (ADR-0362).
+
+    The reconciled bill reflects the architecture actually provisioned: ``systems.accel``
+    (``kvm``/``tcg``, ADR-0339) is the billing source of truth, so a TCG-emulated guest
+    reconciles above a native one. ``None`` — no System yet, or a System that recorded no accel
+    (a resource advertising no ``guest_arches``) — prices at the native baseline, the accel-blind
+    behavior every pre-ADR-0362 allocation reconciled at. One System per Allocation (ADR-0025), so
+    at most one row matches.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT accel FROM systems WHERE allocation_id = %s", (allocation.id,))
+        row = await cur.fetchone()
+    if row is None:
+        return None
+    return row[0]
 
 
 def _active_hours(allocation: Allocation) -> Decimal:

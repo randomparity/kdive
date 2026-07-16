@@ -227,6 +227,64 @@ def test_reserve_then_reconcile_net_to_rate_times_active_hours(migrated_url: str
     asyncio.run(_run())
 
 
+async def _seed_system(
+    conn: psycopg.AsyncConnection, allocation: Allocation, *, accel: str | None
+) -> None:
+    """Insert the System (one per Allocation) carrying the persisted accelerator (ADR-0339)."""
+    await SYSTEMS.insert(
+        conn,
+        System(
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project=allocation.project,
+            allocation_id=allocation.id,
+            state=SystemState.READY,
+            provisioning_profile={},
+            accel=accel,
+        ),
+    )
+
+
+def test_reconcile_prices_tcg_system_above_native(migrated_url: str) -> None:
+    # A TCG-emulated guest reconciles at 4× a same-size native one, keyed off the System's
+    # persisted accel — the architecture-true bill (ADR-0362).
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_budget(conn)
+            res = await _seed_resource(conn)
+            alloc = await _seed_alloc(
+                conn, res.id, active_started_at=_DT, active_ended_at=_DT + timedelta(hours=2)
+            )
+            await _seed_system(conn, alloc, accel="tcg")
+            await accounting.reserve(conn, alloc, Decimal("36.0000"))
+            delta = await accounting.reconcile(conn, alloc)
+            # native rate 3.0 × A(tcg)=4 = 12.0/hr; actual = 12.0 * 2 = 24.0.
+            assert delta == Decimal("-12.0000")
+            assert await _spent(conn) == Decimal("24.0000")
+
+    asyncio.run(_run())
+
+
+def test_reconcile_native_system_is_unchanged(migrated_url: str) -> None:
+    # A kvm (or no-accel) System reconciles byte-identically to the pre-ADR-0362 native bill.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_budget(conn)
+            res = await _seed_resource(conn)
+            alloc = await _seed_alloc(
+                conn, res.id, active_started_at=_DT, active_ended_at=_DT + timedelta(hours=2)
+            )
+            await _seed_system(conn, alloc, accel="kvm")
+            await accounting.reserve(conn, alloc, Decimal("9.0000"))
+            delta = await accounting.reconcile(conn, alloc)
+            assert delta == Decimal("-3.0000")  # actual 6.0 - reserved 9.0
+            assert await _spent(conn) == Decimal("6.0000")
+
+    asyncio.run(_run())
+
+
 def test_reconcile_sums_all_reserved_rows(migrated_url: str) -> None:
     # A renewal writes an additional reserved row; reconcile nets against their Σ, not
     # the initial estimate, so a renewed allocation is not permanently over-debited.

@@ -104,6 +104,7 @@ state before treating it as granted.
   - _variant object(mode=pool):_
     - `mode` (``=pool``, optional)
     - `pool` (`string`, required)
+- `arch` (`string (nullable)`, optional) — Guest architecture to place and price for (e.g. 'ppc64le'); omit for an architecture-blind request. When set, only hosts that can boot it are candidates (a host advertising other guest arches is skipped; one advertising none is still eligible), and the reserved cost reflects the host's accelerator for this arch — an emulated (TCG) guest is priced above a native (KVM) one. The bill is finalized from the System's provisioned architecture.
 - `pcie_devices` (`array<string>`, optional) — PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.
 - `on_capacity` (``deny`, `queue``, optional) — On a capacity denial (host cap / concurrency quota): 'deny' (default) returns the denial; 'queue' enqueues a durable 'requested' allocation holding a queue position (no budget/lease/occupancy). Budget and configuration denials always hard-deny.
 

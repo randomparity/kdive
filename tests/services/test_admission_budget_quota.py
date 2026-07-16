@@ -61,7 +61,16 @@ async def _seed_resource(
     vcpus: int = 64,
     memory_mb: int = 65536,
     disk_gb: int = 500,
+    guest_arches: dict[str, object] | None = None,
 ) -> Resource:
+    capabilities: dict[str, object] = {
+        CONCURRENT_ALLOCATION_CAP_KEY: cap,
+        "vcpus": vcpus,
+        "memory_mb": memory_mb,
+        "disk_gb": disk_gb,
+    }
+    if guest_arches is not None:
+        capabilities["guest_arches"] = guest_arches
     return await RESOURCES.insert(
         conn,
         Resource(
@@ -69,12 +78,7 @@ async def _seed_resource(
             created_at=_DT,
             updated_at=_DT,
             kind=ResourceKind.LOCAL_LIBVIRT,
-            capabilities={
-                CONCURRENT_ALLOCATION_CAP_KEY: cap,
-                "vcpus": vcpus,
-                "memory_mb": memory_mb,
-                "disk_gb": disk_gb,
-            },
+            capabilities=capabilities,
             pool="local-libvirt",
             cost_class="local",
             status=ResourceStatus.AVAILABLE,
@@ -134,6 +138,34 @@ def _admit(conn: psycopg.AsyncConnection, **kw: object):  # type: ignore[no-unty
             idempotency_key=kw.pop("idempotency_key", None),  # ty: ignore[invalid-argument-type]
         ),
     )
+
+
+def test_grant_reserves_tcg_arch_at_emulation_rate(migrated_url: str) -> None:
+    # A ppc64le request against a host that advertises tcg for it reserves at 4× the native
+    # rate and persists the requested arch for the queued-promotion path (ADR-0362).
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(
+                conn,
+                guest_arches={
+                    "ppc64le": {"accel": "tcg", "emulator": "/usr/bin/qemu-system-ppc64"}
+                },
+            )
+            await _seed_budget(conn, limit="100")
+            await _seed_quota(conn)
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX, resource=res, project="proj", selector=SEL, window=2, arch="ppc64le"
+                ),
+            )
+            assert outcome.granted is True
+            assert outcome.allocation is not None
+            assert outcome.allocation.requested_arch == "ppc64le"
+            # native rate 3.0 × A(tcg)=4 × window 2h = 24.0000 reserved.
+            assert await _spent(conn) == Decimal("24.0000")
+
+    asyncio.run(_run())
 
 
 def test_grant_reserves_estimate_and_writes_one_ledger_audit(migrated_url: str) -> None:
