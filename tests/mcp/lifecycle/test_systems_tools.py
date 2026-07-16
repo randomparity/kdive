@@ -48,6 +48,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.serialization import JsonValue
 from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
@@ -93,7 +94,13 @@ from tests.mcp.systems_support import (
 )
 
 
-async def _seed_system(pool: AsyncConnectionPool, alloc_id: str, state: SystemState) -> str:
+async def _seed_system(
+    pool: AsyncConnectionPool,
+    alloc_id: str,
+    state: SystemState,
+    *,
+    resolved_cpu: dict[str, JsonValue] | None = None,
+) -> str:
     async with pool.connection() as conn:
         system = await SYSTEMS.insert(
             conn,
@@ -106,9 +113,47 @@ async def _seed_system(pool: AsyncConnectionPool, alloc_id: str, state: SystemSt
                 allocation_id=UUID(alloc_id),
                 state=state,
                 provisioning_profile=_profile(),
+                resolved_cpu=resolved_cpu,
             ),
         )
     return str(system.id)
+
+
+def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(
+                pool,
+                alloc_id,
+                SystemState.READY,
+                resolved_cpu={
+                    "model": "Skylake-Client-IBRS",
+                    "vendor": "Intel",
+                    "arch": "x86_64",
+                    "baseline_level": "x86-64-v3",
+                },
+            )
+            resp = await get_system(pool, _ctx(), sys_id)
+        assert resp.data["resolved_cpu"] == {
+            "model": "Skylake-Client-IBRS",
+            "vendor": "Intel",
+            "arch": "x86_64",
+            "baseline_level": "x86-64-v3",
+        }
+
+    asyncio.run(_run())
+
+
+def test_get_system_omits_resolved_cpu_when_absent(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await get_system(pool, _ctx(), sys_id)
+        assert "resolved_cpu" not in resp.data
+
+    asyncio.run(_run())
 
 
 def test_get_own_system_returns_state(migrated_url: str) -> None:

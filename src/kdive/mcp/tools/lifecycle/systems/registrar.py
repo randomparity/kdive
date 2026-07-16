@@ -298,7 +298,12 @@ def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
         ``data.accel`` is the host-derived accelerator resolved at admission — ``kvm`` (native)
         or ``tcg`` (foreign-arch emulation) — or ``null`` when the backing host advertised no
-        guest-arch capability. Expect a ``tcg`` System to boot and run substantially slower.
+        guest-arch capability. Expect a ``tcg`` System to boot and run notably slower.
+
+        ``data.resolved_cpu`` (remote Systems) is the ``{model, vendor?, arch, baseline_level?}``
+        CPU baseline the System was minted against; absent when the host advertised none.
+        ``baseline_level`` (``x86-64-vN``) is a nominal upper bound (see ``resources.describe``),
+        not a guaranteed floor — confirm a hard instruction-set requirement against the guest.
         """
         return await _get_system(pool, current_context(), system_id)
 

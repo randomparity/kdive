@@ -74,6 +74,10 @@ def system_envelope(
         "updated_at": iso(system.updated_at),
         **provisioning_profile_summary(system.provisioning_profile),
     }
+    # The CPU baseline the System was minted against (ADR-0368); omitted when the host advertised
+    # none (local/fault/un-refreshed remote). A cheap row read — systems.get makes no libvirt call.
+    if system.resolved_cpu is not None:
+        data["resolved_cpu"] = system.resolved_cpu
     if resource_kind is not None:
         data["resource_kind"] = resource_kind
     if resource_id is not None:
