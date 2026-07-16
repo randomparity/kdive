@@ -149,6 +149,19 @@ Apply the schema, then start the three processes (a real deployment runs them un
 The **reconciler runs discovery**: it enumerates `qemu:///system`, creates the local-libvirt
 resource row, and probes its vcpus/memory_mb ceiling. It must be running for the resource to exist.
 
+### Guest-CPU visibility and pinning
+
+Discovery advertises the host's native CPU (`host_cpu`) and the per-arch set of CPU models the host
+can pin (`selectable_cpus`) on `resources.describe`. An existing host must be **re-discovered** (let
+the reconciler enumerate it again) to gain these fields after upgrading to this version; until then
+they are absent and a CPU pin is rejected. An agent pins a guest CPU per-System with the local-libvirt
+profile's `cpu.model`, chosen from `selectable_cpus[arch]` — pin a portable `x86-64-vN` rung for a
+deterministic reproducer. Admission validates only that the **host** can deliver the model, not that
+the rootfs **image** can run on it: a model below the image's ISA floor (`x86-64-v2` for
+EL9/RHEL-family) produces a non-booting System. `systems.get` reports the System's actual booted CPU
+in `resolved_cpu` — a live reading of the running domain for local Systems (a host-passthrough guest
+resolves to the host CPU; a TCG machine-default the host does not expand reads `null`).
+
 ### Worker privilege under `qemu:///system`
 
 Provisioning a System to `ready` works with a **non-root** worker — it never reads the guest

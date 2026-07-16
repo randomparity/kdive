@@ -310,6 +310,12 @@ class FakeProvisioning:
     def teardown(self, domain_name: str) -> None:
         self.torn_down.append(domain_name)
 
+    def read_resolved_cpu(self, system_id: UUID) -> dict[str, Any] | None:
+        del system_id
+        return self.resolved_cpu
+
+    resolved_cpu: dict[str, Any] | None = None
+
     def reprovision(
         self,
         system_id: UUID,
