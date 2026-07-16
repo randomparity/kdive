@@ -339,6 +339,9 @@ container-arch-check:
 # Assert the Helm chart's appVersion tracks the pyproject version (spec A3). A drift
 # would let a cut release point the chart's default image tag at a tag that was never
 # published. Run in CI and `just ci`.
+# Scope is deliberately appVersion ONLY. Chart.yaml `version` is the chart-package version
+# on its own SemVer track and is NOT constrained here (ADR-0365) — coupling the two would
+# turn every legitimate chart-only bump into a CI failure.
 chart-version-check:
     #!/usr/bin/env bash
     set -euo pipefail
