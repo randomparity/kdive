@@ -286,7 +286,37 @@ async def _resolve_new_system_bindings(
         requested=profile_policy.fadump_provisioned(profile),
         supported=caps is not None and caps.pseries_fadump(),
     )
+    require_pinned_cpu_selectable(profile, caps)
     return accel, _mint_resolved_cpu(profile, caps)
+
+
+def require_pinned_cpu_selectable(
+    profile: ProvisioningProfile, caps: ResourceCapabilities | None
+) -> None:
+    """Reject a CPU pin the bound host cannot deliver for the profile arch (ADR-0369, fail-closed).
+
+    Validates host-deliverability only — **not** that the bound rootfs image can run on the pinned
+    model (a sub-ISA-floor pin non-boots; that is disclosed in the pin field text, not enforced
+    here). Reads the plain ``local_libvirt_section`` field (the ``local_libvirt`` property raises
+    for a non-local profile, and this runs in the provider-agnostic mint path). A pin with no
+    advertised ``selectable_cpus[arch]`` is rejected: never render a custom ``<cpu>`` the host
+    cannot be shown to support.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when a pinned ``cpu.model`` is not in the bound
+            Resource's ``selectable_cpus`` for ``profile.arch``. The message names the model, the
+            arch, and the advertised set.
+    """
+    section = profile.provider.local_libvirt_section
+    if section is None or section.cpu is None:
+        return
+    allowed = caps.selectable_cpus().get(profile.arch, []) if caps is not None else []
+    if section.cpu.model not in allowed:
+        raise CategorizedError(
+            f"CPU model {section.cpu.model!r} is not selectable for arch {profile.arch!r} on this "
+            f"host; advertised: {sorted(allowed)}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
 
 
 def _mint_resolved_cpu(
