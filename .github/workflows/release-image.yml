@@ -29,6 +29,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify tag matches pyproject version
+        # A v* tag build bakes RELEASE=true (X.Y.Z+g<sha>), so the tag must equal the packaged
+        # version or the image self-reports a version that disagrees with its :X.Y.Z tag. Mirror
+        # the guard release.yml enforces for the wheel (this job has no runtime --version gate) and
+        # the git-derived stamp-buildinfo.sh path — so an operator's forgotten pyproject bump fails
+        # here instead of publishing a signed, mislabeled release image (ADR-0370).
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          expected="v$version"
+          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != pyproject $expected" >&2
+            exit 1
+          fi
+
       - name: Set up QEMU
         # Registers binfmt_misc handlers so buildx can build the linux/ppc64le layer
         # under emulation on this amd64 runner (ADR-0359). No POWER runner is required.

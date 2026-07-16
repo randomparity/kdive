@@ -62,6 +62,13 @@ def test_release_workflow_marks_tag_builds_as_release() -> None:
         "ADR-0370 wiring: release-image.yml must derive KDIVE_RELEASE from the v* tag ref, not a "
         "literal — otherwise a released tag image self-reports X.Y.Z-dev"
     )
+    # A v* tag bakes RELEASE=true, so the tag must equal the pyproject version or the image's
+    # baked X.Y.Z disagrees with its :X.Y.Z registry tag. release.yml enforces this for the wheel;
+    # the release image path must too, since it has no runtime --version gate.
+    assert "Verify tag matches pyproject version" in release, (
+        "ADR-0370 wiring: release-image.yml must verify the v* tag equals the pyproject version "
+        "before baking RELEASE=true"
+    )
 
 
 def test_ci_pr_build_is_never_release() -> None:
