@@ -58,6 +58,15 @@ banner "reconcile app tier (never run the kdive:dev containers)"
 docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 
 banner "backends"
+# When KDIVE_OIDC_IMAGE is unset, the oidc service builds from ./deploy/mock-oidc
+# (ADR-0357). Pre-build it explicitly so the subsequent `docker compose up` finds
+# kdive-mock-oidc:dev locally and skips a doomed pull attempt against that local-only
+# tag — which otherwise prints a "pull access denied" warning that looks like a hard
+# failure before compose falls back to build anyway. `docker compose build` is
+# cache-honoring, so repeat runs are near-instant.
+if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
+  docker compose build oidc
+fi
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
   # Bring prometheus up on its own first: it publishes ppc64le and is the metrics store, so a
