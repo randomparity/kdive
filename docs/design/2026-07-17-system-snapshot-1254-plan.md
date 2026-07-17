@@ -31,7 +31,9 @@ Derived from `2026-07-17-system-snapshot-1254.md` and
   notes per task. Tasks 1–2 are the foundation; the provider seam (3–4), persistence (5), handlers
   (6), repairs (7), state-site membership sets (8), power/debug gates + sweep guard (9),
   teardown/reprovision (10), and the MCP tools (11) build on them; each drift-causing task
-  regenerates its own artifacts; 12 verifies no drift remains; 13 is docs; 14 is the live proof.
+  regenerates its own artifacts; 13 is docs; **12 (drift verification) runs last of the
+  non-live steps — after 13** (its number is kept for reference but it executes once every
+  drift-causing task, including 13, has committed); 14 is the live proof.
 
 > **Agent-surface guardrail (applies to Tasks 11–13):** the `@app.tool` **wrapper docstring +
 > `Field(description=…)`** are the only agent-facing text (FastMCP serializes nothing else). They
@@ -308,6 +310,15 @@ Task-8/9 cycle).
   state and requires `READY`.
 - `src/kdive/mcp/tools/debug/sessions/lifecycle.py` — widen the `start_session` gate from
   `state is READY` to `state in {READY, PAUSED}`.
+- **`src/kdive/mcp/tools/lifecycle/control/registrar.py` — the `control.power` `@app.tool`
+  *wrapper* `Field(description=…)` and docstring (the `action` param is a `str`, so the wrapper
+  text is the ONLY agent-facing surface; editing it is what drifts the generated reference — an
+  enum member alone changes no schema).** Add `resume` to the action list, state it is admitted
+  **only from `PAUSED`** and commits `PAUSED→READY`, name the `start_paused` restore → `resume`
+  workflow, and **correct the now-false "Admitted only on a READY System" / "Refused on a
+  non-READY System" wording** (resume is the one action admitted from a non-`READY` state). This is
+  distinct from the `power_system` admission helper edited above. **Agent-surface guardrail
+  (extends the preamble note to this task):** no `ADR-`/`#NNN` in the wrapper text.
 - `tests/domain/test_state_site_coverage.py` (new) — the **discovery sweep**: enumerate
   `frozenset[SystemState]` literals / `SystemState`-membership sets and `state is …READY` gates in
   the tree (via `ast`/import introspection over the known modules — the Task-8 sets plus the
@@ -316,8 +327,9 @@ Task-8/9 cycle).
   deliberate exclusions (new-Run admission excludes `PAUSED`/`RESTORING`; the `debug`
   gate excludes `RESTORING`; non-`RESUME` power actions exclude `PAUSED`/`RESTORING`).
 - **Regenerate the generated tool reference** (`just docs` → `docs/guide/reference/`) in this
-  commit: `PowerAction.RESUME` serializes into `control.power`'s schema, so the reference drifts
-  here; regenerate + commit so this commit passes `docs-check`.
+  commit: editing the `control.power` wrapper `Field`/docstring text (above) drifts the reference
+  (the reference is generated from the wrapper text, not the enum); regenerate + commit so this
+  commit passes `docs-check`.
 
 **Test first** (`tests/mcp/.../test_control_power.py`, `tests/mcp/.../test_debug_sessions.py`, the
 sweep test):
@@ -329,8 +341,12 @@ sweep test):
   refused against non-`READY`/non-`PAUSED`.
 - The sweep asserts `RESTORING`/`PAUSED` coverage across all state-keyed sites; watch it fail if a
   gate is left un-widened, then green.
+- **The `control.power` wrapper `Field`/docstring text mentions `resume`** (and no longer claims
+  power is refused on every non-`READY` state) — a schema/text assertion so the doc edit is
+  verified, not assumed.
 
-**Acceptance:** the power + debug + sweep tests green; `just type` and `just docs-check` green.
+**Acceptance:** the power + debug + sweep tests green; the wrapper-text assertion green; `just type`
+and `just docs-check` green.
 
 **Rollback:** revert the gate widenings + the sweep test; `RESUME` becomes unreachable (Task 1's
 enum value is inert).
@@ -422,12 +438,14 @@ commit).
 ## Task 12 — Verify no generated-artifact drift remains
 
 **Where it fits:** plan preamble "Generated artifacts"; gates `docs-check`, `rbac-matrix-check`,
-`resources-docs-check`. Depends on Tasks 9, 11, 13.
+`resources-docs-check`. Depends on Tasks 9, 11, 13 — so despite its number, **this pass executes
+after Task 13's docs commit** (it is the last non-live step).
 
 The drift-causing regenerations happen **inside the task that causes them** so each commit is
-self-consistent and bisectable: the tool reference is regenerated in Task 9 (`RESUME`) and Task 11
-(four tools), the RBAC matrix in Task 11, and the doc-resource snapshots in Task 13 (if the systems
-guide is mirrored). This task is the final catch-all check that nothing was missed.
+self-consistent and bisectable: the tool reference is regenerated in Task 9 (the `control.power`
+wrapper edit) and Task 11 (four tools), the RBAC matrix in Task 11, and the doc-resource snapshots
+in Task 13 (if the systems guide is mirrored). This task is the final catch-all check that nothing
+was missed.
 
 **Steps:** run `just docs-check`, `just config-docs-check`, `just resources-docs-check`,
 `just env-docs-check`, and the `rbac-matrix` guard (via `just test`). If any reports drift, a prior
