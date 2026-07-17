@@ -40,7 +40,8 @@ from kdive.services.debug.sessions import active_session_ids_for_system
 
 # libvirt snapshot names are agent-chosen; constrain to a shell/XML-safe charset so the name is
 # injection-safe in the snapshot XML the provider renders and safe as a dedup-key component.
-_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SNAPSHOT_NAME_MAX_LEN = 64
+_NAME_RE = re.compile(rf"^[A-Za-z0-9._-]{{1,{SNAPSHOT_NAME_MAX_LEN}}}$")
 # A snapshot/restore/delete job that still holds the domain (not yet terminal).
 _ACTIVE_JOB_STATES: tuple[str, ...] = (JobState.QUEUED.value, JobState.RUNNING.value)
 # The three domain-exclusive snapshot ops; a restore refuses while any is in flight on the System.
@@ -53,7 +54,7 @@ def _validate_name(system_id: str, name: str) -> str | ToolResponse:
         return name
     return _config_error(
         system_id,
-        detail="snapshot name must be 1..64 characters of [A-Za-z0-9._-]",
+        detail=f"snapshot name must be 1..{SNAPSHOT_NAME_MAX_LEN} characters of [A-Za-z0-9._-]",
         data={"reason": "invalid_snapshot_name"},
     )
 

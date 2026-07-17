@@ -35,6 +35,9 @@ from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    SNAPSHOT_NAME_MAX_LEN as _SNAPSHOT_NAME_MAX_LEN,
+)
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
     delete_snapshot as _delete_snapshot,
 )
 from kdive.mcp.tools.lifecycle.systems.snapshot import (
@@ -530,9 +533,9 @@ def _register_systems_reprovision(
 
 
 _SNAPSHOT_NAME_DESCRIPTION = (
-    "Checkpoint label, unique per System: 1..64 characters of letters, digits, '.', '_', '-'. "
-    "Reuse is guarded — capturing over an existing available checkpoint is rejected "
-    "(systems.delete_snapshot it first); a failed one is auto-reclaimed."
+    f"Checkpoint label, unique per System: 1..{_SNAPSHOT_NAME_MAX_LEN} characters of letters, "
+    "digits, '.', '_', '-'. Reuse is guarded — capturing over an existing available checkpoint is "
+    "rejected (systems.delete_snapshot it first); a failed one is auto-reclaimed."
 )
 
 

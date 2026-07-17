@@ -75,7 +75,12 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
             SystemState.FAILED,
         },
         SystemState.REPROVISIONING: {SystemState.READY, SystemState.FAILED},
-        SystemState.RESTORING: {SystemState.READY, SystemState.PAUSED, SystemState.FAILED},
+        SystemState.RESTORING: {
+            SystemState.READY,
+            SystemState.PAUSED,
+            SystemState.TORN_DOWN,
+            SystemState.FAILED,
+        },
         SystemState.PAUSED: {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED},
         SystemState.CRASHING: {
             SystemState.CRASHED,
@@ -253,10 +258,11 @@ def test_system_restore_and_pause_edges_are_legal() -> None:
     assert can_transition(SystemState.PAUSED, SystemState.READY) is True
     assert can_transition(SystemState.PAUSED, SystemState.TORN_DOWN) is True
     assert can_transition(SystemState.PAUSED, SystemState.FAILED) is True
+    # Both restoring and paused hold a live domain, so teardown can reap them (like crashing).
+    assert can_transition(SystemState.RESTORING, SystemState.TORN_DOWN) is True
     # A restore cannot jump straight past its fence, and paused is not a crash/reprovision path.
     assert can_transition(SystemState.READY, SystemState.PAUSED) is False
     assert can_transition(SystemState.PAUSED, SystemState.CRASHING) is False
-    assert can_transition(SystemState.RESTORING, SystemState.TORN_DOWN) is False
 
 
 def test_snapshot_state_edges() -> None:

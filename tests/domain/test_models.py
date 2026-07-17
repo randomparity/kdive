@@ -331,6 +331,11 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # control.watch_for_crash enqueues this to watch a ready local-libvirt System's serial
         # console for the boot-readiness crash signature until a clamped deadline (ADR-0367, #984).
         "watch_for_crash",
+        # systems.snapshot / systems.restore / systems.delete_snapshot enqueue these to capture,
+        # revert, and free an internal libvirt checkpoint of a System (ADR-0378, #1254).
+        "snapshot",
+        "restore",
+        "delete_snapshot",
     }
 
 
