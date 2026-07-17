@@ -25,8 +25,14 @@ from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import InvalidCursor as _InvalidCursor
 from kdive.mcp.tools._common import as_uuid as _as_uuid
+from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error as _config_error
+from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
+from kdive.mcp.tools._common import encode_ts_uuid_cursor as _encode_ts_uuid_cursor
+from kdive.mcp.tools._common import invalid_cursor_error as _invalid_cursor_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.security.artifacts.artifact_jump import JumpDirection, jump_find, resolve_anchor
 from kdive.security.artifacts.artifact_search import (
@@ -36,7 +42,10 @@ from kdive.security.artifacts.artifact_search import (
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
-from kdive.services.artifacts.listing import RedactedArtifact, list_redacted_system_artifacts
+from kdive.services.artifacts.listing import (
+    RedactedArtifact,
+    list_redacted_system_artifacts,
+)
 from kdive.store.objectstore import (
     object_store_from_env,
 )
@@ -184,24 +193,46 @@ async def _authorized_redacted_artifact(
         return _AuthorizedArtifact(key=str(row["object_key"]))
 
 
-async def artifacts_list(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, system_id: str
-) -> ToolResponse:
-    """Return the System's `redacted` artifacts in one collection envelope.
+_ARTIFACTS_LIST_TAG = "artifacts.list"
 
-    A System's artifact set is naturally bounded, so this carries the uniform pagination
-    keys (ADR-0192) — ``data.total`` (the cheap row count) and ``data.truncated`` (always
-    ``false``: the whole set is returned) — but takes no ``cursor`` and runs no keyset query.
+
+async def artifacts_list(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    system_id: str,
+    limit: int = _DEFAULT_LIST_LIMIT,
+    cursor: str | None = None,
+) -> ToolResponse:
+    """Return one keyset page of the System's `redacted` artifacts (ADR-0192, ADR-0374).
+
+    A System accumulates a redacted artifact per boot/rotation across every Run, so this list is
+    **not** naturally bounded (#1238): it is keyset-paginated over ``(created_at, id) DESC`` like
+    ``runs.list``. ``limit`` is clamped to the shared cap; ``data.truncated`` reports whether a
+    further page exists and ``data.next_cursor`` (present iff truncated) is passed back as
+    ``cursor`` to page. A ``cursor`` not minted by this tool is an ``invalid_cursor``
+    ``configuration_error``, never a silent first page.
     """
-    items = _artifact_list_items(
-        await list_redacted_system_artifacts(pool, ctx, system_id=system_id)
+    after = None
+    if cursor:
+        try:
+            after = _decode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, cursor)
+        except _InvalidCursor:
+            return _invalid_cursor_error(system_id)
+    page = await list_redacted_system_artifacts(
+        pool, ctx, system_id=system_id, limit=_clamp_list_limit(limit), after=after
+    )
+    next_cursor = (
+        _encode_ts_uuid_cursor(_ARTIFACTS_LIST_TAG, page.next_key[0], page.next_key[1])
+        if page.next_key is not None
+        else None
     )
     return ToolResponse.collection(
         system_id,
         "ok",
-        items,
+        _artifact_list_items(page.items),
         suggested_next_actions=["artifacts.get"],
-        data={"truncated": False, "total": len(items)},
+        data={"truncated": page.truncated, "next_cursor": next_cursor},
     )
 
 

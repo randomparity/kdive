@@ -889,6 +889,55 @@ def test_get_run_includes_console_manifest_when_opted_in(migrated_url: str) -> N
     assert set(listed[0]) == {"artifact_id", "object_key", "created_at"}
 
 
+async def _seed_run_console_artifact_at(
+    pool: AsyncConnectionPool, run_id: str, name: str, *, created: datetime
+) -> str:
+    """Insert a Run-correlated console artifact at ``created``; return its id."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+        sys_row = await cur.fetchone()
+        assert sys_row is not None
+        sys_id = sys_row["system_id"]
+        await cur.execute(
+            "INSERT INTO artifacts (created_at, updated_at, owner_kind, owner_id, object_key, "
+            "etag, sensitivity, retention_class, run_id) "
+            "VALUES (%s, %s, 'systems', %s, %s, 'e', 'redacted', 'console', %s) RETURNING id",
+            (created, created, sys_id, f"local/systems/{sys_id}/{name}", run_id),
+        )
+        art = await cur.fetchone()
+    assert art is not None
+    return str(art["id"])
+
+
+def test_get_run_surfaces_latest_console_ref_newest(migrated_url: str) -> None:
+    # ADR-0374 (#1238): refs.latest_console jumps to the newest correlated console artifact
+    # without the opt-in manifest — the rotating part here, not the older boot snapshot.
+    async def _run() -> tuple[ToolResponse, str]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_run_console_artifact_at(pool, run_id, f"console-{run_id}", created=_DT)
+            newest = await _seed_run_console_artifact_at(
+                pool,
+                run_id,
+                "console-part-0-000001",
+                created=_DT.replace(hour=1),
+            )
+            return await get_run(pool, _ctx(), run_id), newest
+
+    resp, newest = asyncio.run(_run())
+    assert resp.refs["latest_console"] == newest
+
+
+def test_get_run_omits_latest_console_ref_without_console(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            return await get_run(pool, _ctx(), run_id)
+
+    resp = asyncio.run(_run())
+    assert "latest_console" not in resp.refs
+
+
 def test_envelope_for_run_console_access_hint_for_expected_crash() -> None:
     resp = runs_common.envelope_for_run(
         _run_model(RunState.SUCCEEDED),

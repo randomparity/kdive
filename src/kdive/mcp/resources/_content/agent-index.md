@@ -36,8 +36,10 @@ the first tool to call.
    succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,
    then run or stress it). This is where most investigation time goes; see the
    reproduce-and-capture loop below.
-7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
-   `artifacts.get` for logs and other files.
+7. **Observe evidence** — `runs.get` for status and console access: `refs.latest_console` jumps
+   to the newest console artifact, and `include_console_artifacts=true` returns the full
+   Run-scoped console manifest (`data.console_artifacts`). Use `artifacts.get` to read an artifact
+   and `artifacts.list` (keyset-paginated) for the System's other logs and files.
 8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
    `debug.start_session(transport="drgn-live")` followed by `introspect.run`/`introspect.script`
    for non-halting drgn introspection against that session. See the debug and introspect guides.
