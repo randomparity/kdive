@@ -138,6 +138,12 @@ async def _drive_gdbmi_smoke(
                 assert isinstance(instruction_count, int)
                 assert instruction_count > 0
 
+                # #1255 stepping is NOT exercised here: this smoke halts in the noreturn panic
+                # path, and a panic that parks the CPU in a hlt (IF=0) is not steppable — a correct
+                # step_instruction stalls (INFRASTRUCTURE_FAILURE), so asserting it here is
+                # image-dependent and false. The deterministic step proof drives the four verbs at
+                # a resumable, returnable frame on a booted kernel: scripts/live-debug.py step.
+
                 watch = await _call_tool(
                     client,
                     "debug.set_watchpoint",

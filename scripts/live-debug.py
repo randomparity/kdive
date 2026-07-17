@@ -59,6 +59,11 @@ DEBUG_DIR = Path(os.environ.get("KDIVE_DEBUG_DIR", "/var/lib/kdive/debug"))
 # to the same warm tree scripts/live-stack uses; must already be built (arch/x86/boot/bzImage).
 KERNEL_SRC = Path(os.environ.get("KDIVE_KERNEL_SRC", str(Path.home() / "src" / "linux")))
 DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue stops at once
+# The stepping proof needs a promptly-returning, same-stack function so `finish` returns within
+# the wait cap. `schedule` will not do: it yields the CPU and only "returns" when this task is
+# rescheduled, and single-stepping across `__switch_to` confuses gdb. A hot VFS-read helper
+# returns to its caller on the same stack.
+STEP_DEFAULT_SYMBOL = "vfs_read"
 _POLL_INTERVAL_SEC = 5.0
 
 
@@ -436,6 +441,66 @@ async def _stopped(args: argparse.Namespace) -> int:
         return 0
 
 
+async def _rip(client: LiveStackClient, schemas: dict, session_id: str) -> str | None:
+    resp = await _call(
+        client, "debug.read_registers", {"session_id": session_id, "registers": ["rip"]}, schemas
+    )
+    return (resp.get("data") or {}).get("rip")
+
+
+async def _step(args: argparse.Namespace) -> int:
+    """Prove step/next/step_instruction/finish (#1255) at a returnable frame on a booted kernel."""
+    async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
+        schemas = await _input_schemas(client)
+        run_id = (await _find_booted_run(client, schemas)) if args.reuse else None
+        if not run_id:
+            run_id = await _provision_boot_run(client, schemas, project=args.project)
+        await _call(
+            client, "debug.start_session", {"run_id": run_id, "transport": "gdbstub"}, schemas
+        )
+        sessions = await _call(client, "debug.list_sessions", {}, schemas)
+        session_id = sessions["items"][0]["object_id"]
+        bp = await _call(
+            client,
+            "debug.set_breakpoint",
+            {"session_id": session_id, "location": args.symbol},
+            schemas,
+        )
+        await _call(
+            client, "debug.continue", {"session_id": session_id, "timeout_sec": 30}, schemas
+        )
+        print(f"  stopped at {args.symbol}", file=sys.stderr)
+        # Clear the breakpoint so it does not re-fire mid-walk and mask a step's own stop.
+        await _call(
+            client,
+            "debug.clear_breakpoint",
+            {"session_id": session_id, "number": (bp.get("data") or {})["number"]},
+            schemas,
+        )
+        # step/next/step_instruction must each advance rip (deterministic on a returnable frame).
+        for verb in ("step_instruction", "next", "step"):
+            before = await _rip(client, schemas, session_id)
+            resp = await _call(
+                client, f"debug.{verb}", {"session_id": session_id, "timeout_sec": 15}, schemas
+            )
+            after = await _rip(client, schemas, session_id)
+            if (resp.get("data") or {}).get("timed_out") or before == after:
+                print(f"  FAIL {verb}: rip {before} -> {after} data={resp.get('data')}")
+                return 1
+            print(f"  {verb}: rip {before} -> {after}")
+        # finish must return to the caller within the wait cap (timed_out=False).
+        fin = await _call(
+            client, "debug.finish", {"session_id": session_id, "timeout_sec": 30}, schemas
+        )
+        if (fin.get("data") or {}).get("timed_out") is not False:
+            print(f"  FAIL finish timed out: {fin.get('data')}")
+            return 1
+        fin_reason = (fin.get("data") or {}).get("reason")
+        print(f"  finish: returned to caller (timed_out=False), reason={fin_reason}")
+        print("STEP_PROOF=ok")
+        return 0
+
+
 # --- simple commands -----------------------------------------------------------------------
 
 
@@ -559,6 +624,14 @@ def _parser() -> argparse.ArgumentParser:
         "--symbol", default=DEFAULT_BREAK_SYMBOL, help="breakpoint symbol to stop at"
     )
 
+    step = sub.add_parser("step", help="prove step/next/step_instruction/finish (#1255)")
+    step.add_argument("--reuse", action="store_true", help="reuse an already-booted Run if present")
+    step.add_argument(
+        "--symbol",
+        default=STEP_DEFAULT_SYMBOL,
+        help="returnable, same-stack breakpoint symbol to step from (not a scheduler function)",
+    )
+
     call = sub.add_parser("call", help="call one tool (auto-wraps the `request` arg)")
     call.add_argument("tool")
     call.add_argument("args", nargs="?", default="{}", help="JSON object of arguments")
@@ -587,6 +660,7 @@ def main(argv: list[str]) -> int:
         return _cmd_reload(args)
     handlers = {
         "stopped": _stopped,
+        "step": _step,
         "call": _cmd_call,
         "tools": _cmd_tools,
         "schema": _cmd_schema,

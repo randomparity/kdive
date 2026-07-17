@@ -649,11 +649,11 @@ def test_execution_control_rejects_bad_timeout_before_resume(
         )
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["code"] == "bad_continue_timeout"
+    assert exc.value.details["code"] == "bad_resume_timeout"
     reported = exc.value.details["timeout_sec"]
     assert isinstance(reported, float)
     assert reported == timeout_sec or (math.isnan(reported) and math.isnan(timeout_sec))
-    assert str(exc.value) == "gdb/MI continue timeout must be a finite non-negative number"
+    assert str(exc.value) == "gdb/MI resume timeout must be a finite non-negative number"
     assert engine.executed == []
 
 
@@ -877,7 +877,7 @@ def test_continue_rejects_invalid_timeout(timeout_sec: float, tmp_path: Path) ->
         _engine().continue_(_attachment(controller, tmp_path), timeout_sec=timeout_sec)
 
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert exc.value.details["code"] == "bad_continue_timeout"
+    assert exc.value.details["code"] == "bad_resume_timeout"
     assert controller.written == []
 
 
@@ -916,6 +916,121 @@ def test_interrupt_returns_none_when_no_stop(tmp_path: Path) -> None:
         reads=[],
     )
     assert _engine().interrupt(_attachment(controller, tmp_path)) is None
+
+
+# --- stepping (#1255): step / next / step_instruction / finish over the resume family --------
+
+
+@pytest.mark.parametrize(
+    ("method", "verb", "reason"),
+    [
+        ("step", "-exec-step", "end-stepping-range"),
+        ("next", "-exec-next", "end-stepping-range"),
+        ("step_instruction", "-exec-step-instruction", "end-stepping-range"),
+        ("finish", "-exec-finish", "function-finished"),
+    ],
+)
+def test_stepping_verb_returns_stop(method: str, verb: str, reason: str, tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={verb: [{"type": "result", "message": "running", "payload": None}]},
+        reads=[[{"type": "notify", "message": "stopped", "payload": {"reason": reason}}]],
+    )
+    stop = getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert stop.reason == reason
+    assert stop.timed_out is False
+    assert controller.written == [verb]
+
+
+def test_finish_raises_on_outermost_frame(tmp_path: Path) -> None:
+    # gdb refuses -exec-finish in the outermost frame with a synchronous ^error; the resume path
+    # must surface it as DEBUG_ATTACH_FAILURE *before* waiting (no 60s hang), so no read poll runs.
+    controller = _FakeMiController(
+        responses={
+            "-exec-finish": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": '"finish" not meaningful in the outermost frame.'},
+                }
+            ]
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().finish(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert controller.read_timeouts == []
+
+
+def test_step_raises_on_missing_function_bounds(tmp_path: Path) -> None:
+    # Symbol-poor sub-case (b): a PC with no function-bounds symbol makes -exec-step return a
+    # synchronous ^error -> DEBUG_ATTACH_FAILURE (not timed_out=True), before any wait poll.
+    controller = _FakeMiController(
+        responses={
+            "-exec-step": [
+                {
+                    "type": "result",
+                    "message": "error",
+                    "payload": {"msg": "Cannot find bounds of current function"},
+                }
+            ]
+        },
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().step(_attachment(controller, tmp_path), timeout_sec=1)
+    assert exc.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+    assert controller.read_timeouts == []
+
+
+def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={
+            "-exec-finish": [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+        reads=[
+            [],
+            [],
+            [],
+            [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}],
+        ],
+    )
+    stop = _engine().finish(_attachment(controller, tmp_path), timeout_sec=1)
+    assert stop.timed_out is True
+    assert "-exec-interrupt" in controller.written
+
+
+@pytest.mark.parametrize(("method", "verb"), [("step", "-exec-step"), ("next", "-exec-next")])
+def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> None:
+    # Symbol-poor sub-case (a) (ADR-0379): with function bounds but no line table, gdb
+    # single-steps until a line with info; over such code it can run past the bounded wait, so
+    # the op interrupts back and returns timed_out=True (the documented step/next degradation).
+    controller = _FakeMiController(
+        responses={
+            verb: [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+        reads=[
+            [],
+            [],
+            [],
+            [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}],
+        ],
+    )
+    stop = getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert stop.timed_out is True
+    assert "-exec-interrupt" in controller.written
+
+
+@pytest.mark.parametrize("timeout_sec", [-1.0, math.inf, math.nan])
+def test_step_rejects_invalid_timeout(timeout_sec: float, tmp_path: Path) -> None:
+    controller = _FakeMiController(
+        responses={"-exec-step": [{"type": "result", "message": "running", "payload": None}]},
+    )
+    with pytest.raises(CategorizedError) as exc:
+        _engine().step(_attachment(controller, tmp_path), timeout_sec=timeout_sec)
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details["code"] == "bad_resume_timeout"
+    assert controller.written == []
 
 
 # --- evaluate_value helper -----------------------------------------------------------------
