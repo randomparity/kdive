@@ -478,6 +478,15 @@ def _require_snapshotter(runtime: ProviderRuntime, system_id: UUID) -> Snapshott
     return runtime.snapshot
 
 
+async def _bind_snapshotter(
+    conn: AsyncConnection, resolver: ProviderResolver, system_id: UUID
+) -> Snapshotter:
+    """Resolve the provider binding, set the worker provider kind, return its Snapshotter."""
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    return _require_snapshotter(binding.runtime, system_id)
+
+
 async def _fail_snapshot_row(conn: AsyncConnection, snapshot_id: UUID) -> None:
     """Drive a ``snapshots`` row to ``failed``; tolerant of an already-terminal/absent row."""
     try:
@@ -508,9 +517,7 @@ async def snapshot_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    binding = await resolver.binding_for_system(conn, system_id)
-    set_provider_kind(binding.kind.value)
-    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
     if system.state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown/revert.
         await _fail_snapshot_row(conn, snapshot_id)
         return str(snapshot_id)
@@ -579,9 +586,7 @@ async def restore_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    binding = await resolver.binding_for_system(conn, system_id)
-    set_provider_kind(binding.kind.value)
-    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
     if system.state is not SystemState.RESTORING:
         return str(system_id)
     domain = system.domain_name or domain_name_for(system_id)
@@ -635,9 +640,7 @@ async def snapshot_delete_handler(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    binding = await resolver.binding_for_system(conn, system_id)
-    set_provider_kind(binding.kind.value)
-    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
     # The still-present row holds the name, so no concurrent snapshot can reuse it until we delete
     # it (admission rejects an in-use name); if the id no longer matches, this delete already ran
     # and the name belongs to a newer snapshot — leave it alone.

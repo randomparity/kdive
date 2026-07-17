@@ -69,6 +69,17 @@ def _capability_refusal(runtime: ProviderRuntime, system_id: str) -> ToolRespons
     )
 
 
+def _admit_snapshot_op(system_id: str, runtime: ProviderRuntime) -> UUID | ToolResponse:
+    """Validate the System id and require a snapshot-capable provider; UUID or refusal."""
+    uid = _as_uuid(system_id)
+    if uid is None:
+        return _config_error(system_id)
+    refusal = _capability_refusal(runtime, system_id)
+    if refusal is not None:
+        return refusal
+    return uid
+
+
 async def _active_job_by_dedup(conn: AsyncConnection, dedup_key: str) -> Job | None:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -162,12 +173,9 @@ async def snapshot_system(
     A live Run does not block a snapshot — checkpointing mid-debug is the primary use. The System
     stays ``READY``; the child ``snapshots`` row drives ``creating → available|failed``.
     """
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return _config_error(system_id)
-    refusal = _capability_refusal(runtime, system_id)
-    if refusal is not None:
-        return refusal
+    uid = _admit_snapshot_op(system_id, runtime)
+    if isinstance(uid, ToolResponse):
+        return uid
     validated = _validate_name(system_id, name)
     if isinstance(validated, ToolResponse):
         return validated
@@ -243,12 +251,9 @@ async def restore_system(
     Run, an in-flight snapshot/restore/delete op, or an attached debug session — each would be
     corrupted or silently broken by the revert (ADR-0378).
     """
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return _config_error(system_id)
-    refusal = _capability_refusal(runtime, system_id)
-    if refusal is not None:
-        return refusal
+    uid = _admit_snapshot_op(system_id, runtime)
+    if isinstance(uid, ToolResponse):
+        return uid
     with bind_context(principal=ctx.principal):
         async with (
             pool.connection() as conn,
@@ -337,12 +342,9 @@ async def list_snapshots(
     system_id: str,
 ) -> ToolResponse:
     """Return a System's snapshots newest-first from Postgres (no libvirt round-trip)."""
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return _config_error(system_id)
-    refusal = _capability_refusal(runtime, system_id)
-    if refusal is not None:
-        return refusal
+    uid = _admit_snapshot_op(system_id, runtime)
+    if isinstance(uid, ToolResponse):
+        return uid
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             system = await SYSTEMS.get(conn, uid)
@@ -373,12 +375,9 @@ async def delete_snapshot(
     ``RESTORING`` System (a concurrent restore could revert the snapshot being removed). No
     System-state transition — deletion does not disturb the guest.
     """
-    uid = _as_uuid(system_id)
-    if uid is None:
-        return _config_error(system_id)
-    refusal = _capability_refusal(runtime, system_id)
-    if refusal is not None:
-        return refusal
+    uid = _admit_snapshot_op(system_id, runtime)
+    if isinstance(uid, ToolResponse):
+        return uid
     with bind_context(principal=ctx.principal):
         async with (
             pool.connection() as conn,
