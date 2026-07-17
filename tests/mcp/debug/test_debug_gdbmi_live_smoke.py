@@ -138,6 +138,28 @@ async def _drive_gdbmi_smoke(
                 assert isinstance(instruction_count, int)
                 assert instruction_count > 0
 
+                # #1255: single-instruction step. The hard signal is that the step completes
+                # (timed_out=False); rip-advance is only a diagnostic, because the panic halt PC
+                # may sit in an unsteppable park (a hlt/IF=0 loop) a correct tool cannot advance
+                # in one instruction. The deterministic rip-advance proof is scripts/live-debug.py.
+                before = await _call_tool(
+                    client, "debug.read_registers", {"session_id": session_id, "registers": ["rip"]}
+                )
+                assert before.status == "read", before
+                stepped = await _call_tool(
+                    client, "debug.step_instruction", {"session_id": session_id, "timeout_sec": 5}
+                )
+                assert stepped.status == "stopped", stepped
+                assert stepped.data["timed_out"] is False, stepped
+                after = await _call_tool(
+                    client, "debug.read_registers", {"session_id": session_id, "registers": ["rip"]}
+                )
+                assert after.status == "read", after
+                print(
+                    f"[1255] step_instruction rip: {before.data.get('rip')} -> "
+                    f"{after.data.get('rip')}"
+                )
+
                 watch = await _call_tool(
                     client,
                     "debug.set_watchpoint",
