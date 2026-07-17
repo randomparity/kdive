@@ -103,6 +103,14 @@ the crash was outside the watched window — read the console directly with `run
 access) and the `artifacts` tools. Do not rely on SSH output as your capture of a panic; rely on
 the console.
 
+**Scope resource-exhaustion reproducers to a throwaway uid.** Reproducing a per-uid or
+per-cgroup quota bug (inotify watches, file descriptors, pending signals, and the like) by
+running the workload as root exhausts *root's own* quota — starving root-owned services such as
+sshd's session setup and systemd, which hangs new SSH logins and looks exactly like a guest
+wedge. Run the reproducer under a throwaway unprivileged uid instead, e.g. `setpriv --reuid
+$(id -u nobody) --clear-groups ...`, so the exhaustion is scoped to that uid and your SSH/control
+channel stays reachable and recoverable.
+
 ## Decide before you provision
 
 Several choices are bound at `systems.provision` and expensive to change — altering any of them
