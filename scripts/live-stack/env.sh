@@ -17,7 +17,7 @@ export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"
 # Explicit KDIVE_OIDC_IMAGE (including empty) overrides this and is honored verbatim.
 if [[ -z "${KDIVE_OIDC_IMAGE+set}" && "$(uname -m 2>/dev/null || true)" == "ppc64le" ]] &&
   grep -q 'emulated by qemu' /sys/firmware/devicetree/base/model 2>/dev/null; then
-  export KDIVE_OIDC_IMAGE="ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6"
+  export KDIVE_OIDC_IMAGE="ghcr.io/randomparity/mock-oauth2-server@sha256:e11ba633538714499356765720c05ef57ecb0ac70db4ca780f6a44d2e49a070a"
 fi
 export KDIVE_S3_ENDPOINT_URL="${KDIVE_S3_ENDPOINT_URL:-http://localhost:9000}"
 export KDIVE_S3_BUCKET="${KDIVE_S3_BUCKET:-kdive-artifacts}"

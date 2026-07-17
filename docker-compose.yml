@@ -103,7 +103,7 @@ services:
   #
   # KDIVE_OIDC_IMAGE overrides the reference so an operator PULLS the published GHCR mirror
   # (#1184, ADR-0358) — digest-pinned for reproducibility — instead of building it, e.g.
-  #   export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:bdf70ffa80b3aec360917da5a2bbafd1cd8d93c278e5b00e79d4a85251a9fff6
+  #   export KDIVE_OIDC_IMAGE=ghcr.io/randomparity/mock-oauth2-server@sha256:e11ba633538714499356765720c05ef57ecb0ac70db4ca780f6a44d2e49a070a
   # It parallels KDIVE_IMAGE for the app image (ADR-0359). A digest ref cannot coexist with a
   # taggable local build, so the override is the pull path and the unset default is the build
   # path — never both. The publish-mock-oidc workflow prints the digest to pin on each republish.
