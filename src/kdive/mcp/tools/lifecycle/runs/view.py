@@ -132,10 +132,10 @@ async def _load_run_read_details(
 
 
 async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:
-    # The newest-console shortcut ref (ADR-0374, #1238): a single indexed LIMIT 1 read, always
-    # resolved (no opt-in — avoiding the manifest round-trip is the point). Skipped for a failed
-    # Run, whose envelope surfaces no console refs.
-    if run.state is RunState.FAILED:
+    # The newest-console shortcut ref (ADR-0374, #1238): a single indexed LIMIT 1 read, no opt-in
+    # (avoiding the manifest round-trip is the point). Skipped when no correlated console can exist
+    # — a failed Run (whose envelope surfaces no console refs) or an unbound/pre-boot Run.
+    if run.state is RunState.FAILED or run.system_id is None:
         return None
     return await latest_run_console_artifact_id(conn, run.id)
 
