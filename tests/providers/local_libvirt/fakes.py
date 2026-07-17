@@ -76,6 +76,11 @@ class FakeDomain:
         self._maybe_raise("undefine")
         return 0
 
+    def undefineFlags(self, flags: int) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        self.calls.append("undefine")
+        self._maybe_raise("undefine")
+        return 0
+
     def reset(self, flags: int = 0) -> int:
         self.calls.append("reset")
         self._maybe_raise("reset")

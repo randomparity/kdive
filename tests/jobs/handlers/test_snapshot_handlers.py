@@ -13,7 +13,14 @@ from uuid import UUID, uuid4
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.db.repositories import ALLOCATIONS, RESOURCES, SNAPSHOTS, SYSTEMS, snapshot_by_name
+from kdive.db.repositories import (
+    ALLOCATIONS,
+    RESOURCES,
+    SNAPSHOTS,
+    SYSTEMS,
+    snapshot_by_name,
+    snapshots_for_system,
+)
 from kdive.domain.capacity.state import (
     AllocationState,
     JobState,
@@ -26,11 +33,18 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Snapshot, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.systems import (
+    reprovision_handler,
     restore_handler,
     snapshot_delete_handler,
     snapshot_handler,
+    teardown_handler,
 )
-from tests.mcp.systems_support import provider_resolver
+from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from tests.mcp.systems_support import (
+    PROVISIONING_PROFILE,
+    FakeProvisioning,
+    provider_resolver,
+)
 
 _DT = datetime(2026, 7, 17, tzinfo=UTC)
 
@@ -42,6 +56,7 @@ class _FakeSnapshotter:
         self.created: list[tuple[str, str, bool]] = []
         self.reverted: list[tuple[str, str, bool]] = []
         self.deleted: list[tuple[str, str]] = []
+        self.deleted_all: list[str] = []
         self._create_error = create_error
         self._revert_error = revert_error
 
@@ -58,10 +73,16 @@ class _FakeSnapshotter:
     def delete(self, domain_name: str, name: str) -> None:
         self.deleted.append((domain_name, name))
 
-    def delete_all(self, domain_name: str) -> None: ...
+    def delete_all(self, domain_name: str) -> None:
+        self.deleted_all.append(domain_name)
 
 
-async def _seed_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
+async def _seed_system(
+    pool: AsyncConnectionPool,
+    state: SystemState,
+    *,
+    provisioning_profile: dict[str, object] | None = None,
+) -> UUID:
     async with pool.connection() as conn:
         res = await RESOURCES.insert(
             conn,
@@ -98,7 +119,7 @@ async def _seed_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
                 project="proj",
                 allocation_id=alloc.id,
                 state=state,
-                provisioning_profile={},
+                provisioning_profile=provisioning_profile or {},
                 domain_name="kdive-x",
             ),
         )
@@ -331,6 +352,53 @@ def test_delete_removes_libvirt_snapshot_and_ledger_row(migrated_url: str) -> No
                 )
                 assert await snapshot_by_name(conn, sid, "cp") is None
             assert snapshotter.deleted == [("kdive-x", "cp")]
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_teardown_deletes_all_snapshots_and_ledger_rows(migrated_url: str) -> None:
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            await _seed_snapshot(pool, sid, "available-cp", SnapshotState.AVAILABLE)
+            await _seed_snapshot(pool, sid, "creating-orphan", SnapshotState.CREATING)
+            snapshotter = _FakeSnapshotter()
+            resolver = provider_resolver(provisioner=FakeProvisioning(), snapshotter=snapshotter)
+            async with pool.connection() as conn:
+                await teardown_handler(
+                    conn,
+                    _job(JobKind.TEARDOWN, sid, {}),
+                    resolver=resolver,
+                )
+                assert await _sys_state(conn, sid) is SystemState.TORN_DOWN
+                assert await snapshots_for_system(conn, sid) == []
+            assert snapshotter.deleted_all == ["kdive-x"]
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_reprovision_deletes_snapshot_ledger_rows(migrated_url: str) -> None:
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(
+                pool, SystemState.REPROVISIONING, provisioning_profile=PROVISIONING_PROFILE
+            )
+            await _seed_snapshot(pool, sid, "stale-cp", SnapshotState.AVAILABLE)
+            fingerprint = profile_digest(ProvisioningProfile.parse(PROVISIONING_PROFILE))
+            resolver = provider_resolver(provisioner=FakeProvisioning())
+            job = _job(JobKind.REPROVISION, sid, {"profile_digest": fingerprint})
+            async with pool.connection() as conn:
+                await reprovision_handler(conn, job, resolver=resolver)
+                assert await _sys_state(conn, sid) is SystemState.READY
+                assert await snapshot_by_name(conn, sid, "stale-cp") is None
         finally:
             await pool.close()
 

@@ -16,7 +16,14 @@ from kdive.artifacts import upload_manifest
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, SNAPSHOTS, SYSTEMS, ObjectNotFound, snapshot_by_name
+from kdive.db.repositories import (
+    ARTIFACTS,
+    SNAPSHOTS,
+    SYSTEMS,
+    ObjectNotFound,
+    delete_snapshots_for_system,
+    snapshot_by_name,
+)
 from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
@@ -258,6 +265,9 @@ async def _commit_reprovision_result(
                 "target_fingerprint = %s WHERE id = %s",
                 (SystemState.READY.value, domain_name, fingerprint, system.id),
             )
+            # The recreated qcow2 destroys the old libvirt snapshots; drop their ledger rows in
+            # the same commit so a restore of a stale name is refused, not silently mismatched.
+            await delete_snapshots_for_system(conn, system.id)
             await audit_transition(
                 conn,
                 job,
@@ -660,6 +670,30 @@ async def _reclaim_sysrq_artifacts(
             await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
 
 
+async def _reclaim_snapshots(
+    conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
+) -> None:
+    """Free a System's snapshots at teardown: provider data, then ledger rows (ADR-0378).
+
+    ``delete_all`` is best-effort — the ``undefine`` metadata flag already lets a snapshotted
+    domain tear down, and the internal snapshot data is freed with the overlay qcow2 this teardown
+    reclaims — so a provider snapshot fault never blocks teardown. A provider that does not support
+    snapshots (``snapshot is None``) skips it. The ledger rows are then deleted so a torn-down
+    System reports no snapshots.
+    """
+    if snapshotter is not None:
+        try:
+            await asyncio.to_thread(snapshotter.delete_all, domain_name)
+        except CategorizedError:
+            _log.warning(
+                "best-effort snapshot delete_all for system %s failed; continuing teardown",
+                system_id,
+                exc_info=True,
+            )
+    async with conn.transaction():
+        await delete_snapshots_for_system(conn, system_id)
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
@@ -692,6 +726,7 @@ async def teardown_handler(
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
+    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)
     # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
     # deletion is not best-effort: a stale row after teardown wrongly reports a System as

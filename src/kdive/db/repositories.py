@@ -334,6 +334,16 @@ async def snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> list[S
     return [Snapshot.model_validate(row) for row in rows]
 
 
+async def delete_snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> None:
+    """Delete every snapshot ledger row for a System (teardown/reprovision reclaim, ADR-0378).
+
+    The libvirt snapshot data is freed with the overlay qcow2 at teardown and destroyed by the
+    recreated disk at reprovision, so the ledger rows are removed to match. A no-op when none
+    exist; the ``ON DELETE CASCADE`` FK still covers the eventual System-row delete at release.
+    """
+    await conn.execute("DELETE FROM snapshots WHERE system_id = %s", (system_id,))
+
+
 JOBS = StatefulRepository(
     Job,
     "jobs",
