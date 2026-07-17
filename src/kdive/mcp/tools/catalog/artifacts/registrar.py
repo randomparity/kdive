@@ -12,6 +12,8 @@ from pydantic import Field
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT as _DEFAULT_LIST_LIMIT
+from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools.catalog.artifacts import raw_fetch as artifact_raw_fetch
 from kdive.mcp.tools.catalog.artifacts import reads as artifact_reads
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
@@ -64,18 +66,40 @@ def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
         system_id: Annotated[
             str, Field(description="The System whose redacted artifacts to list.")
         ],
+        limit: Annotated[
+            int,
+            Field(
+                description=(
+                    f"Maximum rows returned (default {_DEFAULT_LIST_LIMIT}, capped at "
+                    f"{_MAX_LIST_LIMIT})."
+                )
+            ),
+        ] = _DEFAULT_LIST_LIMIT,
+        cursor: Annotated[
+            str | None,
+            Field(description="Opaque continuation cursor from a prior page's data.next_cursor."),
+        ] = None,
     ) -> ToolResponse:
-        """List a System's redacted artifacts. Requires viewer.
+        """List a System's redacted artifacts, newest-first. Requires viewer.
 
         This listing is **System-scoped**: it returns every redacted artifact owned by the System
-        and so mixes all of the System's Runs and debug sessions. Console artifacts use two naming
-        conventions — `console-<run_id>` is a Run's one-time boot-window snapshot, and
-        `console-part-<gen>-<index>` are the rotating post-readiness console parts. Neither is
-        correlated to a Run by this listing; to get the console artifacts for a specific Run, call
-        `runs.get` with `include_console_artifacts=true` and read its opt-in
-        `data.console_artifacts` (the Run-scoped console manifest) instead.
+        and so mixes all of the System's Runs and debug sessions. It is **keyset-paginated** and
+        not naturally bounded — a System accrues a redacted artifact per boot/console rotation, so
+        pass `limit` and page with `cursor`: when `data.truncated` is true, pass
+        `data.next_cursor` back as `cursor` for the next (older) page. A cursor not minted by this
+        tool is rejected with configuration_error `data.reason=invalid_cursor`, never a silent
+        first page.
+
+        Console artifacts use two naming conventions — `console-<run_id>` is a Run's one-time
+        boot-window snapshot, and `console-part-<gen>-<index>` are the rotating post-readiness
+        console parts. Neither is correlated to a Run by this listing. To get the console artifacts
+        for a specific Run, prefer `runs.get`: `refs.latest_console` jumps straight to the newest
+        console artifact, and `include_console_artifacts=true` returns the full Run-scoped console
+        manifest under `data.console_artifacts`.
         """
-        return await artifact_reads.artifacts_list(pool, current_context(), system_id=system_id)
+        return await artifact_reads.artifacts_list(
+            pool, current_context(), system_id=system_id, limit=limit, cursor=cursor
+        )
 
 
 def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:

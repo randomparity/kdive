@@ -250,6 +250,10 @@ def _register_runs_get(
         Console evidence: `refs.console` is the boot-window console snapshot and
         `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
         `artifacts.find` for literal search) — both always present on a booted Run.
+        `refs.latest_console` jumps straight to the **newest** console artifact correlated to this
+        Run (the boot snapshot, or the newest rotating part on a chatty Run) — read it the same way
+        as `refs.console`, and it equals `refs.console` when only the boot snapshot exists. Use it
+        to reach the latest console evidence without listing or the opt-in manifest.
         `data.console_artifacts` is the Run-scoped console manifest and is **opt-in**: it appears
         only when you pass `include_console_artifacts=true`. When requested it is an ordered,
         newest-first list of `{artifact_id, object_key, created_at}` for every console artifact

@@ -106,7 +106,11 @@ _CONSOLE_ACCESS_HINT: dict[str, str] = {
 
 
 def _run_artifact_refs(
-    run: Run, *, console_ref: str | None = None, build_log_ref: str | None = None
+    run: Run,
+    *,
+    console_ref: str | None = None,
+    latest_console_ref: str | None = None,
+    build_log_ref: str | None = None,
 ) -> dict[str, str]:
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
@@ -115,9 +119,12 @@ def _run_artifact_refs(
     or searched via ``artifacts.find``, and ``data["console_access"]`` names those paths
     (``_CONSOLE_ACCESS_HINT``, ADR-0262/0283) so the agent need not know it out of band. It is
     supplied only on the ``runs.get`` success path (which loads the boot step), and omitted when no
-    boot step recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id
-    (ADR-0238), surfaced as ``build-log`` on the failed-Run path; omitted when the build captured
-    no log.
+    boot step recorded evidence. ``latest_console_ref`` is the newest console artifact correlated
+    to the Run (ADR-0374, #1238) — the boot snapshot or, on a chatty Run, the newest rotating part
+    — surfaced as ``latest_console`` so an agent jumps to the newest console evidence without the
+    opt-in manifest; read the same way as ``console`` and equal to it when only the boot snapshot
+    exists. ``build_log_ref`` is the failed build's build-log artifact id (ADR-0238), surfaced as
+    ``build-log`` on the failed-Run path; omitted when the build captured no log.
     """
     refs: dict[str, str] = {}
     if run.kernel_ref:
@@ -126,6 +133,8 @@ def _run_artifact_refs(
         refs["debuginfo"] = run.debuginfo_ref
     if console_ref is not None:
         refs["console"] = console_ref
+    if latest_console_ref is not None:
+        refs["latest_console"] = latest_console_ref
     if build_log_ref is not None:
         refs["build-log"] = build_log_ref
     return refs
@@ -294,6 +303,7 @@ def envelope_for_run(
     boot_readiness: BootAttempt | None = None,
     build_provenance: dict[str, str | bool | list[str]] | None = None,
     console_manifest: ConsoleManifest | None = None,
+    latest_console_ref: str | None = None,
     liveness: Liveness | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
@@ -318,6 +328,10 @@ def envelope_for_run(
     `liveness` (#1237, ADR-0373) is the combined console-storm + SSH-reachability verdict,
     surfaced as `data.liveness` so an agent can tell a healthy guest from one that livelocked
     after a ready boot. The read path passes it only for a ready-booted local-libvirt Run.
+
+    `latest_console_ref` (#1238, ADR-0374) is the newest console artifact id correlated to the Run,
+    surfaced as `refs.latest_console` so an agent jumps straight to the newest console evidence
+    without the opt-in manifest. The read path passes it for any non-failed Run that has one.
     """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -353,7 +367,9 @@ def envelope_for_run(
         str(run.id),
         run.state.value,
         suggested_next_actions=actions,
-        refs=_run_artifact_refs(run, console_ref=console_ref),
+        refs=_run_artifact_refs(
+            run, console_ref=console_ref, latest_console_ref=latest_console_ref
+        ),
         data=data,
     )
 

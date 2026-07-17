@@ -24,7 +24,11 @@ from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.listing import ConsoleManifest, list_run_console_artifacts
+from kdive.services.artifacts.listing import (
+    ConsoleManifest,
+    latest_run_console_artifact_id,
+    list_run_console_artifacts,
+)
 from kdive.services.debug.sessions import active_session_ids_for_run
 from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
@@ -52,6 +56,7 @@ class RunReadDetails:
     boot_readiness: BootAttempt | None
     build_result: BuildStepResult | None
     console_manifest: ConsoleManifest | None
+    latest_console_id: str | None
     liveness: Liveness | None
 
 
@@ -97,6 +102,7 @@ async def get_run(
                 details.build_result.build_provenance if details.build_result is not None else None
             ),
             console_manifest=details.console_manifest,
+            latest_console_ref=details.latest_console_id,
             liveness=details.liveness,
         )
 
@@ -120,8 +126,18 @@ async def _load_run_read_details(
         boot_readiness=await _boot_readiness(conn, run, progress),
         build_result=await _build_result(conn, run),
         console_manifest=await _console_manifest(conn, run, include_console_artifacts),
+        latest_console_id=await _latest_console_id(conn, run),
         liveness=await _liveness(conn, run, progress, secret_registry),
     )
+
+
+async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:
+    # The newest-console shortcut ref (ADR-0374, #1238): a single indexed LIMIT 1 read, always
+    # resolved (no opt-in — avoiding the manifest round-trip is the point). Skipped for a failed
+    # Run, whose envelope surfaces no console refs.
+    if run.state is RunState.FAILED:
+        return None
+    return await latest_run_console_artifact_id(conn, run.id)
 
 
 async def _liveness(
