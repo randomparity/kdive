@@ -367,14 +367,13 @@ def test_collection_chains_full_discovery_lifecycle(tmp_path: Path) -> None:
 def test_direct_kernel_placeholder_is_not_uri_looking() -> None:
     # kernel_source_ref is an inert provenance label (#1061): no provisioning/job code reads it,
     # so any non-empty string is accepted and there is no valid-value set to discover. The example
-    # value is still kept non-URI-looking, so an agent scanning the example doesn't mistake it for
-    # the unrelated runs.create structured git source ({"git": {"remote": ..., "ref": ...}}),
-    # which is a separate field with real dispatch semantics.
+    # value is still kept non-URI-looking, so an agent scanning the example doesn't mistake the
+    # inert label for a fetchable source with real dispatch semantics.
     examples = _examples(None)
     for provider in ("local-libvirt", "fault-inject"):
         ref = _profile_of(examples[provider])["kernel_source_ref"]
         assert isinstance(ref, str)
-        # No URI-looking scheme prefix, to avoid confusion with the runs.create git source shape.
+        # No URI-looking scheme prefix, to avoid implying a fetchable source.
         assert "://" not in ref
         assert not any(ref.startswith(f"{scheme}:") for scheme in ("git", "https", "http", "ssh"))
 
