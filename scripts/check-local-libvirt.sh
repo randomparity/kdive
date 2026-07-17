@@ -7,9 +7,18 @@ set -euo pipefail
 
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # The worker imports drgn + the libguestfs binding from the project venv, not system
-# python3. Probe the same interpreter the worker uses; override on a host-services
-# deployment, e.g. KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
-readonly PY="${KDIVE_PYTHON:-python3}"
+# python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
+# script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
+# fall back to system python3, which a host-services deployment overrides via
+# KDIVE_PYTHON=/opt/kdive/.venv/bin/python (or similar).
+_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_repo_venv_py="$(cd -- "${_script_dir}/.." && pwd)/.venv/bin/python"
+if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
+  readonly PY="${_repo_venv_py}"
+else
+  readonly PY="${KDIVE_PYTHON:-python3}"
+fi
+unset _script_dir _repo_venv_py
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
