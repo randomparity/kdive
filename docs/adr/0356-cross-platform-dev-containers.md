@@ -127,7 +127,12 @@ has no pulled per-arch manifest; the guard verifies instead that a compose servi
     it inherits the identical ppc64le gap and would otherwise stay amd64-only on k8s.
   - Fence the Helm `values.yaml` backing-image set (it pins the same images independently of
     compose and is out of this guard's compose-only scope), beyond the OIDC repoint above.
-  - Resolve or accept the Grafana ppc64le gap for the opt-in `obs` tier.
+  - Resolve or accept the Grafana ppc64le gap for the opt-in `obs` tier. Interim handling
+    landed in #1261: `scripts/live-stack/up.sh` brings prometheus up on its own and skips grafana
+    on ppc64le, so metrics stay live on POWER (point a workstation grafana at the host's published
+    prometheus port, `http://<power-host>:9090`). The longer-term posture (mirror a ppc64le grafana
+    à la ADR-0357, replace with a ppc64le-native dashboard, or accept the gap indefinitely) remains
+    open under #1261.
   - Keycloak (production-OIDC track #349/#350/#351) also lacks a ppc64le manifest
     (`quay.io/keycloak/keycloak:26.4`); that is a separate track's POWER gap, cross-referenced
     only.

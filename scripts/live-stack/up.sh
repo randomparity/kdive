@@ -60,8 +60,20 @@ docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 banner "backends"
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
-  if ! docker compose --profile obs up -d prometheus grafana; then
-    echo "WARNING: observability tier (prometheus/grafana) failed to start; essential stack continues" >&2
+  # Bring prometheus up on its own first: it publishes ppc64le and is the metrics store, so a
+  # grafana failure (missing manifest, bad tag, registry outage) must never abort it. Grafana
+  # ships no ppc64le manifest (ADR-0356 accept-gap), so skip it outright on POWER — otherwise its
+  # pull prints a "no matching manifest" error every run — and start it best-effort elsewhere. An
+  # operator runs grafana on their own workstation pointed at this host's published prometheus
+  # port (http://<this-host>:9090). See issue #1261.
+  host_arch="$(uname -m 2>/dev/null || true)"
+  if ! docker compose --profile obs up -d prometheus; then
+    echo "WARNING: prometheus (metrics store) failed to start; essential stack continues" >&2
+  fi
+  if ! grafana_supports_arch "$host_arch"; then
+    echo "NOTE: skipping grafana on ${host_arch} (no upstream manifest; ADR-0356 / #1261); prometheus is up at :9090" >&2
+  elif ! docker compose --profile obs up -d grafana; then
+    echo "WARNING: grafana failed to start; prometheus continues" >&2
   fi
 fi
 echo "waiting for postgres to report healthy ..."
