@@ -372,6 +372,25 @@ def test_composite_mutations_use_flat_top_level_params() -> None:
         assert "request" not in params["properties"]
 
 
+def test_every_mutation_tool_takes_flat_top_level_params() -> None:
+    # ADR-0372: the project convention is that every mutation tool (mutating or destructive,
+    # i.e. readOnlyHint is False) exposes its arguments as flat top-level params and never nests
+    # them under a `request` wrapper, so a black-box agent can predict a mutation's argument
+    # shape without fetching the schema first. Read/query tools may keep a `request` filter
+    # wrapper (guarded by test_filtered_list_tools_use_request_payloads). A new wrapped mutation
+    # tool must break here.
+    offenders = [
+        t.name
+        for t in TOOLS
+        if t.annotations is not None
+        and t.annotations.readOnlyHint is False
+        and "request" in cast(dict[str, object], t.parameters.get("properties", {}))
+    ]
+    assert offenders == [], (
+        f"mutation tools still nesting args under `request`: {sorted(offenders)}"
+    )
+
+
 def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:
     tools = {t.name: t for t in TOOLS}
 
