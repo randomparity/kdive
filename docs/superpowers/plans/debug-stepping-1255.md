@@ -166,12 +166,16 @@ in the panic context. Split the proof accordingly:
 
 **Files:**
 - `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, assert
-  **only** `debug.step_instruction`: it advances one machine instruction and returns a stop
-  (representative of a halt-anywhere step). Do not add `finish`/`step`/`next` here. Assert the
-  step **advanced the PC** — the smoke already disassembles the halt point, so compare the
-  post-step instruction pointer against it — rather than merely "returned a stop", so a step
-  stuck on a `hlt`-with-interrupts-disabled PC fails visibly. (`step_instruction` terminates
-  promptly from a `cpu_relax`-style spin; it is not guaranteed instantaneous from every halt.)
+  **only** `debug.step_instruction`. Prove the step **advanced the PC** by capturing the
+  program-counter register (e.g. `rip` on x86_64) via `debug.read_registers` immediately
+  **before** and **after** the step and asserting the two differ — so a step stuck on a
+  `hlt`-with-interrupts-disabled PC fails visibly instead of passing as "returned a stop". Do
+  **not** rely on the pre-existing `symbol="panic"` disassembly for this (that window starts at
+  panic's *entry* address, not the current halt PC) and note the step response itself carries no
+  PC (it reduces the stop to `{reason, timed_out}`); `debug.read_registers` is already
+  registered/driven in the smoke, so this is two extra calls, no new wiring. Do not add
+  `finish`/`step`/`next` here (`step_instruction` terminates promptly from a `cpu_relax`-style
+  spin; it is not guaranteed instantaneous from every halt).
 - `scripts/live-debug.py` — add a stepping exercise that reaches a **resumable, returnable**
   frame the way `_stopped` already does (`set_breakpoint(<sym>)` + `debug.continue`,
   lines ~418-430) on a normally-booted kernel, then drives `debug.step`, `debug.next`,
@@ -183,8 +187,9 @@ in the panic context. Split the proof accordingly:
   `--symbol` (do not reuse the scheduler default): pick a leaf-ish syscall/VFS helper that
   returns to its caller on the same stack within the wait cap (e.g. `ksys_read`/`vfs_read`),
   **verified present and hit on the booted kernel** on this host. State expected outcomes so the
-  run is falsifiable and non-hanging: `step`/`next`/`step_instruction` return a stop at an
-  advanced PC; `finish` returns a clean stop at the breakpoint frame's caller and — critically —
+  run is falsifiable and non-hanging: for `step`/`next`/`step_instruction`, capture the PC via
+  `debug.read_registers` (rip) before and after and assert it advanced (the step response carries
+  no PC field); `finish` returns a clean stop at the breakpoint frame's caller and — critically —
   **`timed_out=False`**, so a scheduler-style non-return fails the gate loudly instead of passing
   as "a stop". This is the full four-verb functional proof run on this KVM host.
 - Do **not** assert the outermost-frame refusal live (not reliably reachable without a
