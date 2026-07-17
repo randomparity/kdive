@@ -999,6 +999,28 @@ def test_finish_interrupts_on_timeout(tmp_path: Path) -> None:
     assert "-exec-interrupt" in controller.written
 
 
+@pytest.mark.parametrize(("method", "verb"), [("step", "-exec-step"), ("next", "-exec-next")])
+def test_step_interrupts_on_timeout(method: str, verb: str, tmp_path: Path) -> None:
+    # Symbol-poor sub-case (a) (ADR-0379): with function bounds but no line table, gdb
+    # single-steps until a line with info; over such code it can run past the bounded wait, so
+    # the op interrupts back and returns timed_out=True (the documented step/next degradation).
+    controller = _FakeMiController(
+        responses={
+            verb: [{"type": "result", "message": "running", "payload": None}],
+            "-exec-interrupt": [{"type": "result", "message": "done", "payload": None}],
+        },
+        reads=[
+            [],
+            [],
+            [],
+            [{"type": "notify", "message": "stopped", "payload": {"reason": "signal-received"}}],
+        ],
+    )
+    stop = getattr(_engine(), method)(_attachment(controller, tmp_path), timeout_sec=1)
+    assert stop.timed_out is True
+    assert "-exec-interrupt" in controller.written
+
+
 @pytest.mark.parametrize("timeout_sec", [-1.0, math.inf, math.nan])
 def test_step_rejects_invalid_timeout(timeout_sec: float, tmp_path: Path) -> None:
     controller = _FakeMiController(
