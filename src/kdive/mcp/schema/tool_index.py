@@ -154,6 +154,12 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.end_session": frozenset({"session", "end", "stop", "gdb", "debug"}),
     "debug.continue": frozenset({"continue", "resume", "run", "debug"}),
     "debug.interrupt": frozenset({"interrupt", "pause", "break", "debug"}),
+    "debug.step": frozenset({"step", "into", "line", "stepi", "debug"}),
+    "debug.next": frozenset({"next", "step", "over", "line", "debug"}),
+    "debug.step_instruction": frozenset(
+        {"step", "instruction", "stepi", "asm", "single-step", "debug"}
+    ),
+    "debug.finish": frozenset({"finish", "return", "step", "out", "debug"}),
     "debug.get_session": frozenset({"session", "get", "status", "debug"}),
     "debug.list_sessions": frozenset({"sessions", "list", "debug"}),
     # introspect plane

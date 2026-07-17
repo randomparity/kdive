@@ -71,6 +71,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.continue": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.step": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.next": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.step_instruction": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.finish": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.disassemble": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.end_session": (
         "tests/mcp/debug/test_debug_tools.py",

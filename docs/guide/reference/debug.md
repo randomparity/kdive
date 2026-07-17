@@ -71,6 +71,19 @@ Drive a live DebugSession to detached; close its transport. Requires contributor
 |---|---|---|---|
 | `session_id` | string | yes | The DebugSession to detach and close. |
 
+## `debug.finish`
+
+`implemented`
+
+Resume a live DebugSession until the current (innermost) frame returns, and wait for
+the stop. A frame that does not return within the wait interrupts back with
+timed_out=True. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession to resume until the current frame returns on. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
+
 ## `debug.get_session`
 
 `implemented` · `read-only`
@@ -155,6 +168,19 @@ Requires contributor.
 | `expected_base` | integer (nullable) | no | The base address seen in debug.list_modules; if it no longer matches the live module, the load is refused as stale rather than loading wrong symbols. |
 | `module` | string | yes | Loaded module name to load symbols for (from debug.list_modules). |
 | `session_id` | string | yes | The live DebugSession to load module symbols on. |
+
+## `debug.next`
+
+`implemented`
+
+Step one source line, over called functions, on a live DebugSession, and wait for the
+stop. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
+current code has no debug symbols). Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession to step. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.read_frame`
 
@@ -243,3 +269,30 @@ it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this 
 |---|---|---|---|
 | `run_id` | string | yes | The booted Run to attach a debug session to. |
 | `transport` | string | no | Transport kind: `gdbstub` (default) or `drgn-live`. |
+
+## `debug.step`
+
+`implemented`
+
+Step one source line, into called functions, on a live DebugSession, and wait for the
+stop. In a region with no debug symbols this returns timed_out=True or a
+debug_attach_failure ("Cannot find bounds of current function"); use
+debug.step_instruction there. Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession to step. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
+
+## `debug.step_instruction`
+
+`implemented`
+
+Step one machine instruction on a live DebugSession, and wait for the stop. Works
+without debug symbols, so it is the fallback for stepping in symbol-poor regions.
+Requires contributor.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | The live DebugSession to step. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |

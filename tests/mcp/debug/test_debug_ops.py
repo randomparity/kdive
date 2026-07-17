@@ -280,6 +280,10 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "resolve_symbol": ops_memory._resolve_symbol_op,
         "continue": ops_execution._continue_op,
         "interrupt": ops_execution._interrupt_op,
+        "step": ops_execution._step_op,
+        "next": ops_execution._next_op,
+        "step_instruction": ops_execution._step_instruction_op,
+        "finish": ops_execution._finish_op,
         "backtrace": ops_stack._backtrace_op,
         "read_frame": ops_stack._read_frame_op,
         "disassemble": ops_stack._disassemble_op,
@@ -343,6 +347,10 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
         "debug.clear_watchpoint",
         "debug.continue",
         "debug.interrupt",
+        "debug.step",
+        "debug.next",
+        "debug.step_instruction",
+        "debug.finish",
         "debug.load_module_symbols",
     } == debug_runtime._AUDITED_OPS
     assert debug_runtime._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
@@ -614,6 +622,115 @@ def test_continue_returns_stopped(migrated_url: str) -> None:
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
         assert resp.data["code"] == "transport_stall"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("op", "verb", "reason"),
+    [
+        ("step", "-exec-step", "end-stepping-range"),
+        ("next", "-exec-next", "end-stepping-range"),
+        ("step_instruction", "-exec-step-instruction", "end-stepping-range"),
+        ("finish", "-exec-finish", "function-finished"),
+    ],
+)
+def test_stepping_op_returns_stopped(op: str, verb: str, reason: str, migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            # The command's own reader captures ^running + *stopped, so resume returns without poll.
+            controller = _FakeMiController(
+                {
+                    verb: [
+                        {"type": "result", "message": "running", "payload": None},
+                        {"type": "notify", "message": "stopped", "payload": {"reason": reason}},
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for(op, runtime, session_id, timeout_sec=1),
+            )
+        assert resp.status == "stopped"
+        assert resp.data["reason"] == reason
+        assert resp.data["timed_out"] is False
+        assert resp.suggested_next_actions
+        assert controller.written == [verb]
+
+    asyncio.run(_run())
+
+
+def test_finish_op_surfaces_outermost_frame_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    "-exec-finish": [
+                        {
+                            "type": "result",
+                            "message": "error",
+                            "payload": {"msg": '"finish" not meaningful in the outermost frame.'},
+                        }
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("finish", runtime, session_id, timeout_sec=1),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "debug_attach_failure"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("op", ["step", "next", "step_instruction", "finish"])
+def test_stepping_op_writes_audit_row(
+    op: str, migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Drive each resume op through the REGISTERED wrapper so its `audit=_op_audit("debug.<op>")`
+    # wiring is exercised end-to-end; a name missing from _AUDITED_OPS fails here (no row written).
+    verb = f"-exec-{op.replace('_', '-')}"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            controller = _FakeMiController(
+                {
+                    verb: [
+                        {"type": "result", "message": "running", "payload": None},
+                        {
+                            "type": "notify",
+                            "message": "stopped",
+                            "payload": {"reason": "end-stepping-range"},
+                        },
+                    ]
+                }
+            )
+            runtime = _runtime(_CountingAttach(controller))
+            resp = await _call_registered_debug_tool(
+                pool,
+                runtime,
+                tool=f"debug.{op}",
+                arguments={"session_id": session_id, "timeout_sec": 1},
+                ctx=_ctx(),
+                monkeypatch=monkeypatch,
+            )
+            rows = await _audit_rows(pool, session_id)
+        assert resp.status == "stopped"
+        assert len(rows) == 1
+        assert rows[0][1] == f"debug.{op}"
+        assert rows[0][5] == op
 
     asyncio.run(_run())
 
