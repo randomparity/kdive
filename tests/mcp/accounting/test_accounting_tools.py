@@ -176,7 +176,7 @@ def test_estimate_cost_class_field_documents_hypothetical() -> None:
     description = EstimateRequestPayload.model_fields["cost_class"].description
     assert description is not None
     assert "billed" in description
-    assert "catalog.resources" in description
+    assert "resources.describe" in description
 
 
 def test_configuration_failure_names_validation_fields() -> None:
