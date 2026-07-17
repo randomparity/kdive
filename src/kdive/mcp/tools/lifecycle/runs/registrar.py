@@ -373,8 +373,10 @@ def _register_runs_complete_build(
                 default=None,
                 description=(
                     "Kernel debug args appended to the platform-required boot args "
-                    "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
-                    "via runs.install/runs.boot."
+                    "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot. "
+                    "This value is not fixed at build: to try a different cmdline (e.g. nokaslr, "
+                    "loglevel=8, maxcpus=1) against the already-built kernel, pass cmdline to "
+                    "runs.install with no rebuild — no build-upload cycle needed."
                 ),
             ),
         ] = None,
