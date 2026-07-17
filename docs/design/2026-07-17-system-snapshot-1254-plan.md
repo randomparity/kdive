@@ -337,9 +337,13 @@ Task-8/9 cycle).
   Discover every `frozenset[SystemState]` literal / `SystemState`-membership set and `state is …
   READY` gate anywhere in the tree and assert each `SystemState` value is either present or on an
   explicit `INTENTIONALLY_EXCLUDED` allow-list with a reason — so a state-keyed site added later in
-  *any* module fails the guard. Seed the allow-list with the deliberate exclusions (new-Run
-  admission excludes `PAUSED`/`RESTORING`; the `debug` gate excludes `RESTORING`; non-`RESUME`
-  power actions exclude `PAUSED`/`RESTORING`).
+  *any* module fails the guard. **Contract for later tasks:** because the scan is tree-wide, any
+  subsequent task that adds a new `state is …READY` gate (e.g. Task 11's snapshot/restore/delete
+  admission, which correctly require `READY`) must add that gate to the `INTENTIONALLY_EXCLUDED`
+  allow-list (reason: "requires a running guest") and re-run this test in its own commit, so no
+  post-Task-9 commit lands red on the sweep. Seed the allow-list with the deliberate exclusions
+  (new-Run admission excludes `PAUSED`/`RESTORING`; the `debug` gate excludes `RESTORING`;
+  non-`RESUME` power actions exclude `PAUSED`/`RESTORING`).
 - **Regenerate the generated tool reference** (`just docs` → `docs/guide/reference/`) in this
   commit: editing the `control.power` wrapper `Field`/docstring text (above) drifts the reference
   (the reference is generated from the wrapper text, not the enum); regenerate + commit so this
@@ -428,6 +432,10 @@ fully reverted).
   `docs/guide/safety-and-rbac.md`): the four new tools drift both; regenerate + commit so this
   commit passes `docs-check` and the `rbac-matrix` guard (`just test`). If the systems guide is a
   mirrored doc-resource, defer its `resources-docs` regen to Task 13 (which edits it).
+- `tests/domain/test_state_site_coverage.py` (the Task-9 sweep) — **add each new READY-only
+  admission gate** (`systems.snapshot`, `systems.restore`, `systems.delete_snapshot`) to the
+  `INTENTIONALLY_EXCLUDED` allow-list with reason "requires a running guest", per the Task-9
+  contract, so the whole-tree sweep stays green on this commit.
 
 **Test first** (`tests/mcp/lifecycle/test_systems_snapshot.py`, handler-level, injected pool +
 `RequestContext`, fake runtime):
@@ -445,9 +453,10 @@ fully reverted).
 - RBAC: a viewer is denied the mutating tools; an ungranted project is indistinguishable from
   absent.
 
-**Acceptance:** tool tests green; `just type` green; `test_no_adr_leak` green (no `ADR-`/`#NNN` in
-the wrapper schemas); `just docs-check` and the `rbac-matrix` guard green (regenerated in this
-commit).
+**Acceptance:** tool tests green; the Task-9 sweep (`tests/domain/test_state_site_coverage.py`)
+green with the new gates allow-listed; `just type` green; `test_no_adr_leak` green (no
+`ADR-`/`#NNN` in the wrapper schemas); `just docs-check` and the `rbac-matrix` guard green
+(regenerated in this commit).
 
 **Rollback:** revert the registrar/exposure/get additions; the handlers/jobs become unreachable.
 
