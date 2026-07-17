@@ -23,8 +23,10 @@ from kdive.domain.operations.jobs import (
 )
 from kdive.jobs import queue
 from kdive.jobs.payloads import (
+    AuthorizeSshKeyPayload,
     Authorizing,
     BuildPayload,
+    CheckSshReachablePayload,
     InstallPayload,
     SystemPayload,
     WatchForCrashPayload,
@@ -106,6 +108,7 @@ async def _list_jobs(
     status: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: str | None = None,
+    system_id: str | None = None,
 ) -> Any:
     return await jobs_tools.list_jobs(
         pool,
@@ -116,6 +119,7 @@ async def _list_jobs(
             status=status,
             kind=kind,
             investigation_id=investigation_id,
+            system_id=system_id,
         ),
     )
 
@@ -1052,5 +1056,69 @@ def test_list_jobs_investigation_filter_no_match_is_empty(migrated_url: str) -> 
             resp = await _list_jobs(pool, VIEWER_CTX, limit=50, investigation_id=str(uuid4()))
         assert resp.status == "ok"
         assert resp.items == []
+
+    asyncio.run(_run())
+
+
+async def _enqueue_authorize_ssh_key(pool: AsyncConnectionPool, dedup: str, system_id: str) -> str:
+    """Enqueue an authorize_ssh_key job (SystemPayload, no run_id) for ``system_id``."""
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.AUTHORIZE_SSH_KEY,
+            AuthorizeSshKeyPayload(system_id=system_id, public_key="ssh-ed25519 AAAA"),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
+
+
+def test_list_jobs_filters_by_system_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        system_id = str(uuid4())
+        async with _pool(migrated_url) as pool:
+            mine = await _enqueue_authorize_ssh_key(pool, "mine", system_id)
+            await _enqueue_authorize_ssh_key(pool, "other", str(uuid4()))  # other system
+            await _enqueue(pool, "install")  # run-bearing, no system_id
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, system_id=system_id)
+        assert [r.object_id for r in resp.items] == [mine]
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_malformed_system_id_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _list_jobs(pool, VIEWER_CTX, limit=50, system_id="not-a-uuid")
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert resp.data["reason"] == "invalid_uuid"
+
+    asyncio.run(_run())
+
+
+def test_list_jobs_system_scoped_job_excluded_from_investigation_filter(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        system_id = str(uuid4())
+        async with _pool(migrated_url) as pool:
+            # An investigation with a run-bearing install job (matches investigation_id).
+            investigation_id = await _enqueue_install_for_investigation(pool, "in-inv")
+            # A check_ssh_reachable job for the System: system_id but no run_id.
+            async with pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.CHECK_SSH_REACHABLE,
+                    CheckSshReachablePayload(system_id=system_id),
+                    Authorizing(principal="p", project="proj"),
+                    "ssh-probe",
+                )
+            by_system = await _list_jobs(pool, VIEWER_CTX, limit=50, system_id=system_id)
+            by_investigation = await _list_jobs(
+                pool, VIEWER_CTX, limit=50, investigation_id=investigation_id
+            )
+        assert [r.data["kind"] for r in by_system.items] == ["check_ssh_reachable"]
+        assert [r.data["kind"] for r in by_investigation.items] == ["install"]
 
     asyncio.run(_run())
