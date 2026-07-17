@@ -52,6 +52,8 @@ _LIVE_SYSTEM_STATES = (
     SystemState.PROVISIONING,
     SystemState.READY,
     SystemState.REPROVISIONING,
+    SystemState.RESTORING,  # mid snapshot-revert: a live host domain (ADR-0378)
+    SystemState.PAUSED,  # start_paused restore: suspended guest, still a live domain (ADR-0378)
     SystemState.CRASHING,
     SystemState.CRASHED,
 )
