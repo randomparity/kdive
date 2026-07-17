@@ -29,8 +29,11 @@ child ledger, and a static provider capability flag.
   agent can attach a gdbstub `debug.*` session and set breakpoints before execution resumes; it
   resumes with a new `systems.power(action="resume")` (`PowerAction.RESUME` → `virDomainResume`).
   A paused restore lands the System in a distinct **`PAUSED`** state, not `READY`, so the
-  `READY ⇒ running` invariant the snapshot and SSH tools depend on stays intact. `start_paused`
-  against a disk-only snapshot is refused (no saved CPU/RAM to resume).
+  `READY ⇒ running` invariant the snapshot and SSH tools depend on stays intact. Because the
+  gdbstub `debug.start_session` gate is the *only* inspection path for a suspended guest
+  (drgn-live needs a running kernel), that gate is widened from `state is READY` to
+  `state in {READY, PAUSED}` — otherwise the whole `start_paused` feature is unreachable.
+  `start_paused` against a disk-only snapshot is refused (no saved CPU/RAM to resume).
 
 - **Internal libvirt snapshots** stored inside the System's qcow2 — not external memory-state
   files, not S3. This makes "freed on release" near-free (deleting the qcow2 at teardown frees the
@@ -73,8 +76,11 @@ child ledger, and a static provider capability flag.
   rows cascade. A `torn_down` System leaves no rows and no libvirt snapshot metadata.
 
 - **Persistence:** one forward-only migration `0071` creates `snapshots`, widens `jobs_kind_check`
-  with `snapshot`/`restore`, and widens `systems_state_check` with `restoring`. `SNAPSHOT`/
-  `RESTORE` join `ACTIVE_JOB_KINDS` and `CONTRIBUTOR_CANCELABLE_JOB_KINDS`.
+  with `snapshot`/`restore`/`delete_snapshot`, and widens `systems_state_check` with
+  `restoring`/`paused`. `SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT` join `ACTIVE_JOB_KINDS` and
+  `CONTRIBUTOR_CANCELABLE_JOB_KINDS`. `systems.delete_snapshot` is an async job (not a synchronous
+  call): deleting an internal memory snapshot frees the same multi-GB qcow2 clusters that make
+  capture a job, so it must not block the server or hold the SYSTEM lock inline.
 
 ## Consequences
 
@@ -84,10 +90,11 @@ child ledger, and a static provider capability flag.
   at call (`capability_unsupported`), so a future bare-metal provider degrades gracefully with no
   agent-visible surprise.
 - One new provider port (`Snapshotter`), one new table, two new System states (`RESTORING`,
-  `PAUSED`), two new job kinds, one new `PowerAction` (`RESUME`), one new reconciler repair
-  (`repair_stalled_restoring_systems`), and four tools (`snapshot`/`restore`/`list_snapshots`/
-  `delete_snapshot`). Local-libvirt only in this change; the port makes remote-libvirt a later
-  opt-in.
+  `PAUSED`), three new job kinds (`SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT`), one new `PowerAction`
+  (`RESUME`), one widened `debug.start_session` gate (accepts `PAUSED`), one new reconciler repair
+  (`repair_stalled_restoring_systems`), and four tools
+  (`snapshot`/`restore`/`list_snapshots`/`delete_snapshot`). Local-libvirt only in this change;
+  the port makes remote-libvirt a later opt-in.
 - Snapshots are strictly System-scoped and released with the System, adding no long-lived storage
   and nothing to bill or leak past a release.
 - The live `debug.*` tools gain a "restore to a known-good live state, then attach" workflow;

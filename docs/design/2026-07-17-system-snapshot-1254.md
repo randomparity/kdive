@@ -65,9 +65,10 @@ state) removes a snapshot; it is driven by `systems.delete_snapshot` and by tear
 `(system, name)` at a time. Because a name is a durable checkpoint identity, admission does **not**
 silently overwrite: `systems.snapshot(name)` against an existing **`available`** row is a
 `configuration_error` ("name in use — `systems.delete_snapshot` first"); against a **`failed`**
-row, admission **deletes the stale row (and any stale libvirt snapshot of that name) and creates
-fresh** (auto-reclaim, so a failed capture never wedges the name); against a **`creating`** row it
-returns the in-flight job (idempotent replay). `systems.delete_snapshot` frees the name (and the
+row, admission **deletes the stale ledger row (Postgres-only) and creates fresh** (auto-reclaim,
+so a failed capture never wedges the name) — any stale libvirt snapshot of that name is cleaned by
+the `SNAPSHOT` handler's own defensive pre-delete, so admission does no libvirt I/O under the
+SYSTEM lock; against a **`creating`** row it returns the in-flight job (idempotent replay). `systems.delete_snapshot` frees the name (and the
 qcow2 space) before teardown, so a repro-loop agent reclaims checkpoints without tearing the
 System down. Chosen over accumulate-until-teardown (which the reviewer flagged: no reclamation
 path, single-use names).
@@ -107,6 +108,17 @@ any of them:
   a Run requires `READY`, so a paused/reverting System is refused a new Run until resumed.
 - `providers/infra/console_hosting.py` live-state set — add `RESTORING`, `PAUSED` (the console
   keeps streaming across a revert and while paused).
+- **`mcp/tools/debug/sessions/lifecycle.py` — the `debug.start_session` gate is widened from
+  `state is READY` to `state in {READY, PAUSED}`.** A `PAUSED` guest is exactly the gdbstub
+  attach target: with drgn-live unavailable on a suspended guest, a gdbstub `debug.*` session is
+  the *only* inspection path, so the `start_paused` workflow is dead unless debug admission
+  accepts `PAUSED`. The other `debug.*` tools operate on an already-open session (keyed on the
+  `DebugSession` row, not the System state), so only the session-*open* gate needs widening; a
+  test asserts `debug.start_session` succeeds against a `PAUSED` System.
+- **`systems.teardown` — admissible from `PAUSED`.** Teardown does not gate on `READY` (it only
+  short-circuits an already-`TORN_DOWN` System); the `PAUSED → TORN_DOWN` edge is reachable via
+  `systems.teardown`, so an agent that pause-restored can abandon the System without resuming
+  first. Confirmed present in the enumeration and covered by a test.
 
 ## Provider seam — a new `Snapshotter` port + capability advertisement
 
@@ -202,7 +214,13 @@ All four live in the existing `systems` toolset registrar
   `include_memory=False` snapshot** (`configuration_error`, "cannot pause-restore a disk-only
   snapshot: it has no saved CPU/RAM state") — a memoryless revert cannot resume at an
   instruction; **rejects if a live Run exists** (`_has_live_run`, the reprovision rule — restore
-  discards the running guest, corrupting an active Run). Transitions the System `READY →
+  discards the running guest, corrupting an active Run); **rejects if an active `SNAPSHOT` job
+  exists for the System** (`configuration_error`, "a snapshot capture is in progress"). The last
+  check is what makes the `RESTORING` fence a true domain-exclusivity guarantee: a snapshot stays
+  `READY` and does not fence via state, so without this check a restore could be admitted while a
+  capture's off-thread `snapshotCreateXML` still runs on the same domain — a revert landing
+  mid-capture. Admission queries the job queue for a non-terminal `SNAPSHOT` (and `RESTORE`) job
+  on this `system_id` before transitioning. Transitions the System `READY →
   RESTORING`, audits `ready→restoring`, enqueues `JobKind.RESTORE` with `RestorePayload(system_id,
   name, start_paused)`, dedup key `{system_id}:restore:{name}:{start_paused}` with
   `recycle_terminal=True` (restore is repeatable — a re-issue after a prior restore completed
@@ -234,15 +252,24 @@ All four live in the existing `systems` toolset registrar
   round-trip. A supported provider with no snapshots returns an empty collection; an unsupported
   provider returns `capability_unsupported`.
 
-### `systems.delete_snapshot` — synchronous mutation
+### `systems.delete_snapshot` — long op (`JobKind.DELETE_SNAPSHOT`)
 
 - **Params:** `system_id: str`; `name: str`. **Annotation:** `mutating()`. **RBAC:** `contributor`.
-- **Admission (under `advisory_xact_lock(SYSTEM)`):** the named row must exist (else
-  `configuration_error`). Rejects deleting a `creating` snapshot (a capture is in flight — cancel
-  the job first). Calls `runtime.snapshot.delete(domain_name, name)` (idempotent) to free the
-  libvirt snapshot + qcow2 space, then removes the ledger row, audits `delete_snapshot`. Returns a
-  success envelope. Synchronous: a libvirt snapshot delete is fast (metadata + qcow2 block
-  discard), unlike a capture. This frees the name for reuse and reclaims disk before teardown.
+- **Async, not synchronous:** deleting an internal **memory** snapshot frees/merges the same
+  multi-GB qcow2 clusters that made *capture* a job, so a blocking inline delete would stall the
+  server request and hold the SYSTEM lock for the whole duration. It is therefore a worker job, on
+  the worker plane with the other slow provider ops (the server never blocks on long provider I/O).
+- **Admission (under `advisory_xact_lock(SYSTEM)`, Postgres-only):** the named row must exist
+  (else `configuration_error`); rejects a `creating` snapshot (cancel the capture first); rejects
+  if a `DELETE_SNAPSHOT` job is already in flight for `(system_id, name)`. Enqueues
+  `JobKind.DELETE_SNAPSHOT` with `SnapshotDeletePayload(system_id, name)`, dedup key
+  `{system_id}:delete_snapshot:{name}`, audits `delete_snapshot`, returns the job handle. **No
+  System-state transition** — deletion does not disturb the guest.
+- **Worker handler** (`snapshot_delete_handler`): calls `runtime.snapshot.delete(domain_name,
+  name)` (idempotent) off-thread to free the libvirt snapshot + qcow2 space, then removes the
+  ledger row under the SYSTEM lock. This frees the name for reuse and reclaims disk before
+  teardown. Cancelable (contributor); a mid-delete cancel is safe (idempotent delete, row removal
+  is the last step).
 
 ## Teardown — snapshots are freed on release
 
@@ -273,8 +300,10 @@ including snapshots orphaned by a canceled capture.
   the reprovision/power pattern.
 - **Restore fences via `RESTORING`:** while a System is `RESTORING`, reprovision/power/teardown/
   another restore/snapshot are refused at admission (they require `READY`), so the disruptive
-  revert has exclusive control of the domain. `PAUSED` similarly refuses new Runs and non-resume
-  power actions until the agent resumes.
+  revert has exclusive control of the domain — **provided** restore admission also rejects an
+  already-in-flight `SNAPSHOT` job (above), which a fresh `RESTORING` state cannot recall. `PAUSED`
+  refuses new Runs and non-resume power actions until the agent resumes, but **does** admit
+  `debug.start_session` (the paused-attach path) and `systems.teardown` (abandon-without-resume).
 - **Snapshot does not fence via state** (stays `READY`, permitted during a live Run); concurrent
   snapshots on one System serialize via libvirt's per-domain job lock, and a teardown that lands
   mid-snapshot (agent-owned System, unlikely) surfaces as a snapshot-job `INFRASTRUCTURE_FAILURE`
@@ -289,6 +318,14 @@ including snapshots orphaned by a canceled capture.
   repair — it is a resting state (like `READY`) awaiting the agent's explicit resume — but it is
   non-terminal, so a lapsed allocation reaps it via the existing allocation-liveness path (hence
   `PAUSED ∈ _NON_TERMINAL_SYSTEM`).
+  - **Repair-vs-completing-restore ordering.** The repair cannot clobber a succeeding restore: the
+    `restore_handler` commits the `RESTORING → READY|PAUSED` transition (under the SYSTEM lock)
+    **before it returns**, and the worker framework marks the `RESTORE` job terminal only *after*
+    the handler returns (`worker.py`: `handler(...)` then `queue.complete(...)`). So on the success
+    path the System is already `READY`/`PAUSED` when the job becomes terminal — the repair's
+    `state is RESTORING` guard fails and it no-ops. The only state a repair can act on is a genuine
+    terminal-job-plus-still-`RESTORING`, which is exactly a failed/canceled revert, for which
+    `FAILED` is correct. A test races the repair against a completing restore to lock this in.
 - **Cancel is best-effort.** `SNAPSHOT`/`RESTORE` join `CONTRIBUTOR_CANCELABLE_JOB_KINDS`
   (otherwise the cancel gate fails closed to operator-only). Cancel flips the job state but cannot
   abort an in-flight off-thread `snapshotCreateXML`/`revertToSnapshot`. Consequences are designed,
@@ -310,9 +347,12 @@ including snapshots orphaned by a canceled capture.
 - **Memory-capture pause scales with guest RAM.** An internal memory snapshot pauses the guest
   while all of guest RAM is written into the qcow2 — order of seconds per GB, so a multi-GB guest
   can pause for tens of seconds. This is the `SNAPSHOT` job's own duration; the agent polls
-  `jobs.wait`, so there is no external tool timeout. The only in-guest effect is a live Run's SSH
-  stalling for the pause, then resuming (TCP survives the pause). The tool docstring states the
-  pause scales with RAM so an agent can size expectations.
+  `jobs.wait`, so there is no external tool timeout. In-guest, a live Run's TCP sockets (SSH)
+  survive the pause at the transport layer and resume — but a pause of tens of seconds **can still
+  trip application-level timeouts inside the Run** (an SSH command timeout, the reproducer's own
+  liveness check, an orchestration heartbeat) even though the socket is intact. The tool docstring
+  states the pause scales with guest RAM and surfaces the expectation so an agent can quiesce a
+  sensitive Run first or choose `include_memory=False` (no pause of that magnitude).
 - **Disk-only snapshots of a running guest are crash-consistent.** kdive assumes no in-guest
   qemu-guest-agent, so disk-only capture does **not** `fsfreeze`/quiesce; the disk image is
   crash-consistent (equivalent to a hard reset at the capture instant), and a restored disk-only
@@ -324,8 +364,10 @@ including snapshots orphaned by a canceled capture.
 
 1. `CREATE TABLE snapshots (...)` with the columns above, `UNIQUE (system_id, name)`,
    `system_id ... ON DELETE CASCADE`, `snapshots_state_check`, and the `_set_updated_at` trigger.
-2. Drop-and-recreate `jobs_kind_check` widened with `'snapshot'`, `'restore'` (the `0069`
-   pattern; keeps the constraint name for the SQL↔enum tie in `test_migrate.py`).
+2. Drop-and-recreate `jobs_kind_check` widened with `'snapshot'`, `'restore'`,
+   `'delete_snapshot'` (the `0069` pattern; keeps the constraint name for the SQL↔enum tie in
+   `test_migrate.py`). All three join `ACTIVE_JOB_KINDS`; `SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT`
+   join `CONTRIBUTOR_CANCELABLE_JOB_KINDS`.
 3. Drop-and-recreate `systems_state_check` widened with `'restoring'`, `'paused'` (the `0065`
    pattern).
 
@@ -355,33 +397,39 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    `include_memory=True` (default) produces a full system checkpoint.
 3. `systems.restore(system_id, name)` on a `READY` System with an `available` memory snapshot and
    **no** live Run transitions `READY → RESTORING`, reverts the domain, and returns it to `READY`
-   (running restore). A restore with a live Run is refused `configuration_error`.
+   (running restore). A restore with a live Run, or with an active `SNAPSHOT` job for the System,
+   is refused `configuration_error`.
 3b. Restoring a disk-only snapshot reboots the guest and lands `READY` (not at an instruction);
    `start_paused=True` against a disk-only snapshot is refused `configuration_error` naming the
    mode mismatch.
 4. `start_paused=True` (memory snapshot) reverts the guest paused and lands the System in
    `PAUSED`; `systems.power(action="resume")` transitions `PAUSED → READY` and resumes the guest.
-   A `PAUSED` System is refused a new Run and non-resume power actions, and is not SSH-reachable.
-   `suggested_next_actions` on the paused restore names `debug.start_session` and `systems.power`.
+   A `PAUSED` System is refused a new Run and non-resume power actions and is not SSH-reachable,
+   **but `debug.start_session` succeeds against it** (the gdbstub attach path) and
+   `systems.teardown` is admissible from it. `suggested_next_actions` on the paused restore names
+   `debug.start_session` and `systems.power`.
 5. `systems.list_snapshots(system_id)` returns the System's snapshots newest-first from Postgres,
-   no libvirt round-trip. `systems.delete_snapshot(system_id, name)` deletes the libvirt snapshot
-   and the ledger row (freeing the name for reuse); deleting a `creating` snapshot is refused.
+   no libvirt round-trip. `systems.delete_snapshot(system_id, name)` enqueues a `DELETE_SNAPSHOT`
+   job that deletes the libvirt snapshot and removes the ledger row (freeing the name for reuse);
+   deleting a `creating` snapshot is refused, and admission does no libvirt I/O under the lock.
 6. On a provider with `supports_snapshots is False`, all four tools return `capability_unsupported`
    (`capability="snapshot"`); `systems.get` surfaces `data.supports_snapshots` for both provider
    kinds without a libvirt call.
 7. Tearing down a snapshotted System deletes libvirt snapshot metadata (undefine does not fail),
    frees the data with the qcow2, and leaves **no** `snapshots` rows — including a snapshot
    orphaned by a canceled capture.
-8. `SNAPSHOT`/`RESTORE` are in `ACTIVE_JOB_KINDS` and `CONTRIBUTOR_CANCELABLE_JOB_KINDS`; a
-   contributor can cancel its own snapshot/restore job. A canceled restore lands the System in
-   `FAILED`; a System stuck in `RESTORING` with no active `RESTORE` job is recovered to `FAILED`
-   by `repair_stalled_restoring_systems`.
+8. `SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT` are in `ACTIVE_JOB_KINDS` and
+   `CONTRIBUTOR_CANCELABLE_JOB_KINDS`; a contributor can cancel its own job. A canceled restore
+   lands the System in `FAILED`; a System stuck in `RESTORING` with no active `RESTORE` job is
+   recovered to `FAILED` by `repair_stalled_restoring_systems`, and that repair no-ops against a
+   restore that has already committed `READY`/`PAUSED`.
 9. A guard test fails when a new `SystemState` value is absent from any state-exhaustive site
    (`_NON_TERMINAL_SYSTEM`, admission non-terminal set, `console_hosting` live set, the adjacency
-   table). `RESTORING` and `PAUSED` are present in all four.
-10. Migration `0071` creates `snapshots`, widens `jobs_kind_check` (`snapshot`,`restore`) and
-    `systems_state_check` (`restoring`,`paused`); `test_migrate.py` and the per-migration test
-    stay green.
+   table, and the `debug.start_session` admission gate). `RESTORING` and `PAUSED` are present in
+   all of them (`PAUSED` accepted by the debug-session gate; `RESTORING` not).
+10. Migration `0071` creates `snapshots`, widens `jobs_kind_check`
+    (`snapshot`,`restore`,`delete_snapshot`) and `systems_state_check` (`restoring`,`paused`);
+    `test_migrate.py` and the per-migration test stay green.
 11. The `systems` toolset guide and agent index document the four tools, the capability
     advertisement, the paused-restore→resume workflow, the disk-only crash-consistency and
     memory-pause caveats, and the "freed on release" contract.
