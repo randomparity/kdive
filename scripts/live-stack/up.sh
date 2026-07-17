@@ -119,8 +119,12 @@ if [[ "$skip_libvirt" != "1" ]]; then
     exit 1
   }
   # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
-  # The root worker owns/writes them at provision time; existence is all up.sh requires.
-  sudo mkdir -p "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+  # Own them to the invoking user with mode 0755: the root worker (default) can still write,
+  # a KDIVE_WORKER_AS_ROOT=0 worker can now write too, and 0755 keeps the qemu user's traverse
+  # bit — needed so the domain can read staged kernels back at boot (ADR-0222/#694). `mkdir -p`
+  # left prior runs root:root:0755, tripping the preflight's writable-by-worker check on a
+  # non-root worker even though the actual runtime worked. `install -d` is idempotent.
+  sudo install -d -o "$(id -un)" -m 0755 "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
   provision_prereqs_ok || {
     echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
     exit 1

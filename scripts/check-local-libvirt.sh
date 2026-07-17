@@ -159,8 +159,8 @@ _venv_imports_kdump_deps || note_fail \
   "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
 
 _host_kernels_readable || note_fail \
-  "a host kernel under ${BOOT_DIR} (vmlinuz-*) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
-  "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 /boot/vmlinuz-* (re-apply after kernel upgrades, or use dpkg-statoverride)"
+  "a host kernel under ${BOOT_DIR} (vmlinuz-* on x86_64, vmlinux-* on ppc64le) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
+  "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 ${BOOT_DIR}/vmlinu?-* (matches both arches; re-apply after kernel upgrades, or use dpkg-statoverride)"
 
 _dir_writable "${INSTALL_STAGING}" || note_fail \
   "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \
