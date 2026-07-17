@@ -75,8 +75,9 @@ is already verb-generic, so each engine method is a one-line delegate.
 - `test_step_raises_on_missing_function_bounds` — fake returns `^error`
   ("Cannot find bounds of current function") for `-exec-step`; assert `DEBUG_ATTACH_FAILURE`
   (pins symbol-poor sub-case (b), mirroring the finish `^error` test).
-- Migrate the two `bad_continue_timeout` assertions (lines ~652, ~880) to `bad_resume_timeout`
-  and the new message.
+- Migrate the three `bad_continue_timeout` sites to the new code/message (verified the only
+  references, so Commit A is self-contained): `test_debug_gdbmi.py:652` (code assert),
+  `:656` (message assert), `:880` (code assert).
 
 **Acceptance:** `uv run python -m pytest tests/providers/local_libvirt/test_debug_gdbmi.py -q`
 green; each method issues its exact verb; timeout guard code is `bad_resume_timeout`.
@@ -165,17 +166,27 @@ in the panic context. Split the proof accordingly:
 
 **Files:**
 - `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, assert
-  **only** `debug.step_instruction`: it advances exactly one machine instruction and returns a
-  stop (fast, terminating, representative of a halt-anywhere step). Do not add `finish`/`step`/
-  `next` here.
+  **only** `debug.step_instruction`: it advances one machine instruction and returns a stop
+  (representative of a halt-anywhere step). Do not add `finish`/`step`/`next` here. Assert the
+  step **advanced the PC** — the smoke already disassembles the halt point, so compare the
+  post-step instruction pointer against it — rather than merely "returned a stop", so a step
+  stuck on a `hlt`-with-interrupts-disabled PC fails visibly. (`step_instruction` terminates
+  promptly from a `cpu_relax`-style spin; it is not guaranteed instantaneous from every halt.)
 - `scripts/live-debug.py` — add a stepping exercise that reaches a **resumable, returnable**
-  frame the way `_stopped` already does (`set_breakpoint(<returnable hot fn>)` + `debug.continue`,
+  frame the way `_stopped` already does (`set_breakpoint(<sym>)` + `debug.continue`,
   lines ~418-430) on a normally-booted kernel, then drives `debug.step`, `debug.next`,
-  `debug.step_instruction`, and `debug.finish`. State expected outcomes so the run is falsifiable
-  and non-hanging: `step`/`next`/`step_instruction` return a stop at an advanced PC; `finish`
-  returns a clean stop at the breakpoint frame's caller (choose a function that returns within
-  the wait cap — e.g. the same symbol the existing `_stopped` breakpoints — not a noreturn one).
-  This is the full four-verb functional proof run on this KVM host.
+  `debug.step_instruction`, and `debug.finish`. The breakpoint symbol must be a **promptly-
+  returning, same-stack** hot function — **not** `schedule`/`DEFAULT_BREAK_SYMBOL` (a
+  context-switch function: `finish` does not return on the same stack — it yields the CPU and
+  only "returns" when this task is rescheduled, which can exceed the wait cap and time out; and
+  single-stepping across `context_switch`/`__switch_to` confuses gdb). Pass an explicit
+  `--symbol` (do not reuse the scheduler default): pick a leaf-ish syscall/VFS helper that
+  returns to its caller on the same stack within the wait cap (e.g. `ksys_read`/`vfs_read`),
+  **verified present and hit on the booted kernel** on this host. State expected outcomes so the
+  run is falsifiable and non-hanging: `step`/`next`/`step_instruction` return a stop at an
+  advanced PC; `finish` returns a clean stop at the breakpoint frame's caller and — critically —
+  **`timed_out=False`**, so a scheduler-style non-return fails the gate loudly instead of passing
+  as "a stop". This is the full four-verb functional proof run on this KVM host.
 - Do **not** assert the outermost-frame refusal live (not reliably reachable without a
   frame-select op — see the spec Refused-verb contract); the no-hang mechanism is the fake unit
   test (Task 1).
