@@ -31,7 +31,12 @@ capability flag, plus a `RESUME` action on the existing `control.power` tool.
   resumes with a new `control.power(action="resume")` (`PowerAction.RESUME` → `virDomainResume`).
   `RESUME` widens the two `control.power` READY-only gates (admission + worker) so it is admitted
   **only** from `PAUSED`, commits `PAUSED → READY` (a documented exception to power's move-no-state
-  rule; a failed resume routes `PAUSED → FAILED`), and leaves every other power action READY-only.
+  rule), and leaves every other power action READY-only. The worker resume is **retry-safe** under
+  at-least-once delivery: the provider `resume` is idempotent (an already-running guest is the
+  achieved post-state), a worker-time `READY` is a no-op success (a prior delivery already
+  committed), and a `control.power` fault re-raises without touching state — the System stays
+  `PAUSED` (a determinate, recoverable landing the agent can re-resume or tear down), never an
+  eager `FAILED` that would wrongly condemn a healthy paused guest.
   A paused restore lands the System in a distinct **`PAUSED`** state, not `READY`, so the
   `READY ⇒ running` invariant the snapshot and SSH tools depend on stays intact. Because the
   gdbstub `debug.start_session` gate is the *only* inspection path for a suspended guest
@@ -63,7 +68,10 @@ capability flag, plus a `RESUME` action on the existing `control.power` tool.
   does not transition System state; concurrent snapshots serialize via libvirt's per-domain job
   lock. **Restore is destructive to a running Run**, so it rejects a live Run (the reprovision
   rule) and transitions `READY → RESTORING → READY|PAUSED|FAILED` to fence
-  reprovision/power/teardown out during the revert. Both use `contributor` RBAC and the
+  reprovision/power out during the revert. `RESTORING` and `PAUSED` both also accept `TORN_DOWN`
+  (they hold a live domain, like `CRASHING`), so an admin or orphan-repair teardown reaps a
+  mid-restore or paused System cleanly instead of hitting an `IllegalTransition`. Both use
+  `contributor` RBAC and the
   `advisory_xact_lock(SYSTEM)` pattern; neither uses the `force_crash` destructive-op gate, which
   stays reserved for `force_crash`. Because there is no generic reconciler sweep for transient
   System states (`repair_stalled_crashing_systems` is CRASHING-specific), a new

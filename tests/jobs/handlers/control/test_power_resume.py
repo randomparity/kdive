@@ -118,7 +118,9 @@ def test_resume_commits_paused_to_ready(migrated_url: str) -> None:
     asyncio.run(scenario())
 
 
-def test_failed_resume_routes_paused_to_failed(migrated_url: str) -> None:
+def test_failed_resume_leaves_paused_for_retry(migrated_url: str) -> None:
+    # A control.power fault must NOT condemn a healthy paused guest to FAILED: it re-raises (the
+    # job retries) and leaves the System PAUSED — a determinate, recoverable landing.
     async def scenario() -> None:
         pool = _pool(migrated_url)
         await pool.open()
@@ -133,29 +135,29 @@ def test_failed_resume_routes_paused_to_failed(migrated_url: str) -> None:
                 except CategorizedError:
                     raised = True
                 assert raised
-                assert await _sys_state(conn, sid) is SystemState.FAILED
+                assert await _sys_state(conn, sid) is SystemState.PAUSED
         finally:
             await pool.close()
 
     asyncio.run(scenario())
 
 
-def test_resume_refused_from_ready_system(migrated_url: str) -> None:
+def test_resume_redelivered_after_commit_is_noop(migrated_url: str) -> None:
+    # A resume job only exists because admission saw PAUSED; a worker-time READY means a prior
+    # delivery already committed paused->ready, so the re-run is an idempotent no-op success — not
+    # a terminal refusal that would dead-letter a resume that actually succeeded.
     async def scenario() -> None:
         pool = _pool(migrated_url)
         await pool.open()
         try:
             sid = await _seed_system(pool, SystemState.READY)
-            resolver = provider_resolver(controller=_FakeControl())
+            control = _FakeControl()
+            resolver = provider_resolver(controller=control)
             async with pool.connection() as conn:
-                error: CategorizedError | None = None
-                try:
-                    await power_handler(conn, _resume_job(sid), resolver=resolver)
-                except CategorizedError as exc:
-                    error = exc
-                assert error is not None
-                assert error.category is ErrorCategory.CONFIGURATION_ERROR
+                result = await power_handler(conn, _resume_job(sid), resolver=resolver)
+                assert result == str(sid)
                 assert await _sys_state(conn, sid) is SystemState.READY  # untouched
+            assert control.calls == []  # never touched the guest
         finally:
             await pool.close()
 

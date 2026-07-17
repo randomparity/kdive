@@ -413,6 +413,28 @@ def test_teardown_deletes_all_snapshots_and_ledger_rows(migrated_url: str) -> No
     asyncio.run(scenario())
 
 
+def test_teardown_of_a_restoring_system_succeeds(migrated_url: str) -> None:
+    # A slow multi-GB revert holds the System in RESTORING; an admin teardown (or orphan repair)
+    # must reap it, not hit an IllegalTransition — RESTORING holds a live domain like CRASHING.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.RESTORING)
+            resolver = provider_resolver(provisioner=FakeProvisioning())
+            async with pool.connection() as conn:
+                await teardown_handler(
+                    conn,
+                    _job(JobKind.TEARDOWN, sid, {}),
+                    resolver=resolver,
+                )
+                assert await _sys_state(conn, sid) is SystemState.TORN_DOWN
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
 def test_reprovision_deletes_snapshot_ledger_rows(migrated_url: str) -> None:
     async def scenario() -> None:
         pool = _pool(migrated_url)

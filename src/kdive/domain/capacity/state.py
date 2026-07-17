@@ -72,8 +72,9 @@ class SystemState(StrEnum):
     ``ready → restoring → {ready|paused|failed}``: a running restore returns to ``ready``, a
     ``start_paused`` restore lands in ``paused`` (the guest's vCPUs are suspended, awaiting
     ``control.power(resume)`` back to ``ready``), and an interrupted/failed revert goes to
-    ``failed``. ``paused`` is a resting state, not ``ready``, so the ``ready ⇒ running`` invariant
-    the snapshot/SSH tools rely on holds; a ``paused`` System can be torn down without resuming.
+    ``failed``. Both ``restoring`` and ``paused`` also accept ``torn_down`` — they hold a live
+    domain, so teardown can reap them (mirroring ``crashing``). ``paused`` is a resting state, not
+    ``ready``, so the ``ready ⇒ running`` invariant the snapshot/SSH tools rely on holds.
     """
 
     DEFINED = "defined"
@@ -203,7 +204,12 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         ),
         SystemState.REPROVISIONING: frozenset({SystemState.READY, SystemState.FAILED}),
         SystemState.RESTORING: frozenset(
-            {SystemState.READY, SystemState.PAUSED, SystemState.FAILED}
+            {
+                SystemState.READY,
+                SystemState.PAUSED,
+                SystemState.TORN_DOWN,
+                SystemState.FAILED,
+            }
         ),
         SystemState.PAUSED: frozenset(
             {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED}

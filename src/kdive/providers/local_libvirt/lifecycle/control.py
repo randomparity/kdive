@@ -167,7 +167,10 @@ class LocalLibvirtControl:
             elif action is PowerAction.RESET:
                 domain.reset(0)
             elif action is PowerAction.RESUME:
-                domain.resume()
+                # Idempotent like on/off: resuming an already-running domain (a completion-window
+                # redelivery after the resume already landed) raises OPERATION_INVALID, the
+                # achieved post-state, and is treated as success.
+                self._idempotent(domain.resume, "resuming", domain_name)
             elif action is PowerAction.CYCLE:
                 domain.reboot(0)
             else:
