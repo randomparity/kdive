@@ -122,8 +122,18 @@ server_health() {
   local host port code
   host="${KDIVE_HTTP_HOST:-127.0.0.1}"
   port="${KDIVE_HTTP_PORT:-8000}"
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${host}:${port}/mcp" || echo 000)"
-  printf 'server http://%s:%s/mcp -> %s (401 = up, auth required)\n' "$host" "$port" "$code"
+  # Ride out FastMCP startup latency (server.log shows ~30–40s from process spawn to accepting
+  # requests). Fail-open after the deadline so status reports honestly instead of hanging.
+  #
+  # `|| true` (not `|| echo 000`): curl already prints "000" to stdout on connection failure via
+  # `-w %{http_code}`, so a fallback `echo 000` would DOUBLE the code into "000000" — the visible
+  # bug we are fixing. `|| true` keeps set -e happy without appending to the captured stdout.
+  for _ in {1..30}; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://${host}:${port}/mcp" 2>/dev/null || true)"
+    [[ "$code" == "401" ]] && break
+    sleep 1
+  done
+  printf 'server http://%s:%s/mcp -> %s (401 = up, auth required)\n' "$host" "$port" "${code:-000}"
   [[ "$code" == "401" ]]
 }
 
