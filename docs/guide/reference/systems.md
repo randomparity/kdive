@@ -37,6 +37,10 @@ re-poll rather than reuse an old result. The probe tolerates the brief window af
 ``true`` on a repeat call. Available on any ready System whose provider exposes an SSH
 forward; reports ``ssh_not_provisioned`` otherwise.
 
+``reachable`` confirms sshd is answering, not that your key is authorized — the probe
+sends no handshake and attempts no login. Call ``systems.authorize_ssh_key`` if a real
+SSH attempt is denied with ``Permission denied (publickey)``.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `system_id` | string | yes | The ready System whose guest sshd reachability to probe. |

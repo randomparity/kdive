@@ -200,4 +200,8 @@ async def check_ssh_reachable(
                 job_authorizing(ctx, system.project),
                 f"{system_id}:check_ssh_reachable:{uuid4().hex}",
             )
-    return ToolResponse.from_job(job)
+    # reachable is a banner-only probe: a true verdict means sshd is answering, not that the
+    # caller's key is authorized. Point a contributor at authorize_ssh_key so reachable=true is
+    # not misread as login-ready (#1250, ADR-0377); the sibling ssh_info surfaces the same action.
+    authorize_action = visible_next_actions(["systems.authorize_ssh_key"], ctx, system.project)
+    return ToolResponse.from_job(job, extra_next_actions=authorize_action)

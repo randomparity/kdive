@@ -211,15 +211,23 @@ class ToolResponse(BaseModel):
         )
 
     @classmethod
-    def from_job(cls, job: Job) -> ToolResponse:
+    def from_job(cls, job: Job, *, extra_next_actions: list[str] | None = None) -> ToolResponse:
+        """Build a worker-plane job-handle envelope.
+
+        ``extra_next_actions`` are tool-specific next actions appended *after* the job
+        state's generic lifecycle set (order preserved, not deduplicated). The default
+        ``None`` yields the lifecycle-only set every existing caller relies on; a caller
+        that supplies actions is responsible for RBAC-filtering them first (ADR-0377).
+        """
         refs = {"result": job.result_ref} if job.result_ref else {}
         data: dict[str, JsonValue] = {"kind": job.kind.value}
         if job.state is JobState.FAILED:
             data.update(job.failure_context)
+        actions = list(_NEXT_ACTIONS[job.state]) + list(extra_next_actions or [])
         return cls(
             object_id=str(job.id),
             status=job.state.value,
-            suggested_next_actions=list(_NEXT_ACTIONS[job.state]),
+            suggested_next_actions=actions,
             refs=refs,
             error_category=job.error_category.value if job.error_category else None,
             data=data,

@@ -35,6 +35,13 @@ provisioning-for-debugging notes in the investigation index.
 - `systems.authorize_ssh_key` — authorize your public key so you can run commands in the
   guest over SSH.
 
+`check_ssh_reachable` reports transport, not authorization: a `reachable=true` verdict means
+the guest's sshd is answering, not that your key is authorized. It is a banner-only probe that
+sends no handshake and attempts no login, so `reachable=true` is expected before you authorize a
+key. If a real SSH attempt is denied with `Permission denied (publickey)`, call
+`systems.authorize_ssh_key` — which both `check_ssh_reachable` and `ssh_info` point to as a next
+action.
+
 Once authorized you have **root** in the guest, and kdive never holds the private key. The
 guest is yours to customize: the guest package manager is your own — install tracers,
 compilers, and stress tools at runtime (`apt install trace-cmd`) rather than concluding a
