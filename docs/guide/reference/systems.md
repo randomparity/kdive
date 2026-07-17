@@ -107,6 +107,21 @@ contributor on the Allocation's project.
 
 See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
 
+## `systems.delete_snapshot`
+
+`implemented`
+
+Delete a System's checkpoint, freeing its name for reuse and reclaiming its disk before
+teardown. Requires contributor. Refused for a `creating` checkpoint (cancel the capture
+first) or while the System is being restored. Enqueues a job and returns
+`{job_id, status: queued}` — poll `jobs.wait`; freeing a large RAM checkpoint takes time,
+so this is a background op.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | The checkpoint to delete, freeing its name+disk. |
+| `system_id` | string | yes | The System whose checkpoint to delete. |
+
 ## `systems.get`
 
 `implemented` · `read-only`
@@ -124,6 +139,10 @@ does not expand reads ``null``), and the **mint-time snapshot** for remote Syste
 ``null`` means unrecorded/unreadable — treat as unknown. ``baseline_level``
 (``x86-64-vN``) is a nominal upper bound (see ``resources.describe``), not a guaranteed
 floor — confirm a hard instruction-set requirement against the guest.
+
+``data.supports_snapshots`` is whether the backing provider can checkpoint/restore this
+System (``systems.snapshot`` / ``systems.restore``); ``false`` for a provider with no
+snapshot support.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -145,11 +164,24 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 `request` fields:
 
 - `allocation_id` (`string (nullable)`, optional) — Only Systems under this Allocation id.
-- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `crashing`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
+- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `restoring`, `paused`, `crashing`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
 - `shape` (`string (nullable)`, optional) — Only Systems with this named shape, or '__custom__' for full-custom.
 - `pcie` (`string (nullable)`, optional) — Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
+
+## `systems.list_snapshots`
+
+`implemented` · `read-only`
+
+List a System's checkpoints newest first — each item carries `name`, `state`
+(`creating`/`available`/`failed`), `include_memory`, and `created_at`. Requires viewer.
+Only an `available` checkpoint can be restored. Returns an empty collection for a System
+with none.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `system_id` | string | yes | The System whose checkpoints to list. |
 
 ## `systems.profile_examples`
 
@@ -295,6 +327,45 @@ destructive_ops opt-in).
     - `base_image_volume` (`string`, required)
     - `crashkernel` (`string (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
+
+## `systems.restore`
+
+`implemented`
+
+Roll a READY System back to a named checkpoint. Requires contributor. Refused while a
+run holds the System, while a snapshot capture/restore/delete is in progress, or while a
+debug session is attached (end it first, then attach a fresh session after the restore) —
+each would be corrupted by the revert. A RAM+CPU checkpoint resumes the guest exactly
+where it was; a disk-only checkpoint rolls back the filesystem and reboots (so
+`start_paused` is rejected for it). Enqueues a job and returns `{job_id, status: queued}` —
+poll `jobs.wait`. With `start_paused=true` the System lands PAUSED for a gdbstub attach
+(drgn-live over SSH does not work on a paused guest; use `debug.*`); resume it with
+`control.power(action="resume")`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | An existing available checkpoint from systems.list_snapshots. |
+| `start_paused` | boolean | no | Leave the guest suspended after the revert instead of running it, so you can attach a gdbstub `debug.start_session` and set breakpoints before execution resumes; resume with `control.power(action="resume")`. Requires a RAM+CPU (include_memory) checkpoint — rejected against a disk-only one. Default false runs the guest immediately. |
+| `system_id` | string | yes | The READY System to roll back. |
+
+## `systems.snapshot`
+
+`implemented`
+
+Checkpoint a READY System's disk (and, by default, live RAM+CPU) so you can roll it
+back later with `systems.restore` — capture a fully-configured guest once, then restore in
+seconds between reproducer attempts instead of reprovisioning. Requires contributor.
+Allowed during a live run (snapshotting mid-debug is the point); a RAM capture briefly
+pauses the guest while its memory is written, so an in-flight SSH stalls then resumes.
+Enqueues a job and returns `{job_id, status: queued}` — poll `jobs.wait` until it is
+`succeeded`, then the checkpoint is listed by `systems.list_snapshots`. The System stays
+READY throughout.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `include_memory` | boolean | no | Capture live RAM+CPU as well as disk (default true), so systems.restore can resume the guest exactly where it was — including a paused restore for a debugger attach. Set false for a disk-only checkpoint (smaller, faster); restoring a disk-only checkpoint rolls back the filesystem and reboots the guest, and cannot be pause-restored. |
+| `name` | string | yes | Checkpoint label, unique per System: 1..64 characters of letters, digits, '.', '_', '-'. Reuse is guarded — capturing over an existing available checkpoint is rejected (systems.delete_snapshot it first); a failed one is auto-reclaimed. |
+| `system_id` | string | yes | The READY System to checkpoint. |
 
 ## `systems.ssh_info`
 

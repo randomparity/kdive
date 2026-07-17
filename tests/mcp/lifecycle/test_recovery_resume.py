@@ -244,7 +244,7 @@ def test_resume_from_read_tools(migrated_url: str) -> None:
 
             ctx = _ctx()
             alloc_resp = await get_allocation(pool, ctx, str(alloc_id))
-            sys_resp = await get_system(pool, ctx, str(system_id))
+            sys_resp = await get_system(pool, ctx, str(system_id), resolver=provider_resolver())
             run_resp = await get_run(
                 pool,
                 ctx,

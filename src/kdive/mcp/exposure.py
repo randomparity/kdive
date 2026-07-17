@@ -223,6 +223,10 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.ssh_info": _VIEWER,
     "systems.check_ssh_reachable": _VIEWER,
     "systems.authorize_ssh_key": _CONTRIBUTOR,  # add a key to a VM the caller already sudos
+    "systems.snapshot": _CONTRIBUTOR,  # checkpoint a leaseholder's own transient VM (ADR-0378)
+    "systems.restore": _CONTRIBUTOR,
+    "systems.list_snapshots": _VIEWER,
+    "systems.delete_snapshot": _CONTRIBUTOR,
     # vmcore
     "vmcore.list": _VIEWER,
     "vmcore.fetch": _CONTRIBUTOR,

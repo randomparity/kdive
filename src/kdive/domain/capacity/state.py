@@ -68,7 +68,7 @@ class SystemState(StrEnum):
     ``crashing`` marker is committed before the physical NMI so the power path (which refuses any
     non-``ready`` System) cannot reset the guest mid-crash.
 
-    Snapshot restore (ADR-0378) fences a ready System through
+    Snapshot restore fences a ready System through
     ``ready → restoring → {ready|paused|failed}``: a running restore returns to ``ready``, a
     ``start_paused`` restore lands in ``paused`` (the guest's vCPUs are suspended, awaiting
     ``control.power(resume)`` back to ``ready``), and an interrupted/failed revert goes to

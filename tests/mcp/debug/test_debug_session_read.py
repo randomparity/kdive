@@ -488,7 +488,7 @@ def test_systems_get_surfaces_active_debug_session_ids(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id, _, sys_id = await _seeded_session(pool, DebugSessionState.LIVE)
-            resp = await _get_system(pool, _ctx(), sys_id)
+            resp = await _get_system(pool, _ctx(), sys_id, resolver=provider_resolver())
         assert resp.data["active_debug_session_ids"] == [session_id]
 
     asyncio.run(_run())

@@ -34,6 +34,18 @@ from kdive.mcp.tools.lifecycle.systems.profile_examples import (
 from kdive.mcp.tools.lifecycle.systems.provision import (
     SystemProvisionHandlers as _SystemProvisionHandlers,
 )
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    delete_snapshot as _delete_snapshot,
+)
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    list_snapshots as _list_snapshots,
+)
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    restore_system as _restore_system,
+)
+from kdive.mcp.tools.lifecycle.systems.snapshot import (
+    snapshot_system as _snapshot_system,
+)
 from kdive.mcp.tools.lifecycle.systems.ssh_access import (
     authorize_ssh_key as _authorize_ssh_key,
 )
@@ -106,7 +118,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_define(app, pool, resolver)
     _register_systems_provision(app, pool, resolver)
     _register_systems_provision_defined(app, pool, resolver)
-    _register_systems_get(app, pool)
+    _register_systems_get(app, pool, resolver)
     _register_systems_list(app, pool)
     _register_systems_profile_examples(app, resolver)
     _register_systems_teardown(app, pool)
@@ -114,6 +126,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_systems_ssh_info(app, pool, resolver)
     _register_systems_check_ssh_reachable(app, pool, resolver)
     _register_systems_authorize_ssh_key(app, pool, resolver)
+    _register_systems_snapshot(app, pool, resolver)
+    _register_systems_restore(app, pool, resolver)
+    _register_systems_list_snapshots(app, pool, resolver)
+    _register_systems_delete_snapshot(app, pool, resolver)
 
 
 def _rootfs_validator(runtime: ProviderRuntime):
@@ -285,7 +301,9 @@ def _register_systems_provision_defined(
         )
 
 
-def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
+def _register_systems_get(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
     @app.tool(
         name="systems.get",
         annotations=_docmeta.read_only(),
@@ -307,8 +325,12 @@ def _register_systems_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
         ``null`` means unrecorded/unreadable — treat as unknown. ``baseline_level``
         (``x86-64-vN``) is a nominal upper bound (see ``resources.describe``), not a guaranteed
         floor — confirm a hard instruction-set requirement against the guest.
+
+        ``data.supports_snapshots`` is whether the backing provider can checkpoint/restore this
+        System (``systems.snapshot`` / ``systems.restore``); ``false`` for a provider with no
+        snapshot support.
         """
-        return await _get_system(pool, current_context(), system_id)
+        return await _get_system(pool, current_context(), system_id, resolver=resolver)
 
 
 def _register_systems_ssh_info(
@@ -503,5 +525,155 @@ def _register_systems_reprovision(
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
             ),
+            required_role=Role.CONTRIBUTOR,
+        )
+
+
+_SNAPSHOT_NAME_DESCRIPTION = (
+    "Checkpoint label, unique per System: 1..64 characters of letters, digits, '.', '_', '-'. "
+    "Reuse is guarded — capturing over an existing available checkpoint is rejected "
+    "(systems.delete_snapshot it first); a failed one is auto-reclaimed."
+)
+
+
+def _register_systems_snapshot(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.snapshot",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_snapshot(
+        system_id: Annotated[str, Field(description="The READY System to checkpoint.")],
+        name: Annotated[str, Field(description=_SNAPSHOT_NAME_DESCRIPTION)],
+        include_memory: Annotated[
+            bool,
+            Field(
+                description="Capture live RAM+CPU as well as disk (default true), so "
+                "systems.restore can resume the guest exactly where it was — including a paused "
+                "restore for a debugger attach. Set false for a disk-only checkpoint (smaller, "
+                "faster); restoring a disk-only checkpoint rolls back the filesystem and reboots "
+                "the guest, and cannot be pause-restored."
+            ),
+        ] = True,
+    ) -> ToolResponse:
+        """Checkpoint a READY System's disk (and, by default, live RAM+CPU) so you can roll it
+        back later with `systems.restore` — capture a fully-configured guest once, then restore in
+        seconds between reproducer attempts instead of reprovisioning. Requires contributor.
+        Allowed during a live run (snapshotting mid-debug is the point); a RAM capture briefly
+        pauses the guest while its memory is written, so an in-flight SSH stalls then resumes.
+        Enqueues a job and returns `{job_id, status: queued}` — poll `jobs.wait` until it is
+        `succeeded`, then the checkpoint is listed by `systems.list_snapshots`. The System stays
+        READY throughout."""
+        ctx = current_context()
+        return await with_runtime_for_system(
+            pool,
+            resolver,
+            ctx,
+            system_id,
+            lambda runtime: _snapshot_system(
+                pool, ctx, runtime, system_id=system_id, name=name, include_memory=include_memory
+            ),
+            required_role=Role.CONTRIBUTOR,
+        )
+
+
+def _register_systems_restore(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.restore",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_restore(
+        system_id: Annotated[str, Field(description="The READY System to roll back.")],
+        name: Annotated[
+            str, Field(description="An existing available checkpoint from systems.list_snapshots.")
+        ],
+        start_paused: Annotated[
+            bool,
+            Field(
+                description="Leave the guest suspended after the revert instead of running it, so "
+                "you can attach a gdbstub `debug.start_session` and set breakpoints before "
+                'execution resumes; resume with `control.power(action="resume")`. Requires a '
+                "RAM+CPU (include_memory) checkpoint — rejected against a disk-only one. Default "
+                "false runs the guest immediately."
+            ),
+        ] = False,
+    ) -> ToolResponse:
+        """Roll a READY System back to a named checkpoint. Requires contributor. Refused while a
+        run holds the System, while a snapshot capture/restore/delete is in progress, or while a
+        debug session is attached (end it first, then attach a fresh session after the restore) —
+        each would be corrupted by the revert. A RAM+CPU checkpoint resumes the guest exactly
+        where it was; a disk-only checkpoint rolls back the filesystem and reboots (so
+        `start_paused` is rejected for it). Enqueues a job and returns `{job_id, status: queued}` —
+        poll `jobs.wait`. With `start_paused=true` the System lands PAUSED for a gdbstub attach
+        (drgn-live over SSH does not work on a paused guest; use `debug.*`); resume it with
+        `control.power(action="resume")`."""
+        ctx = current_context()
+        return await with_runtime_for_system(
+            pool,
+            resolver,
+            ctx,
+            system_id,
+            lambda runtime: _restore_system(
+                pool, ctx, runtime, system_id=system_id, name=name, start_paused=start_paused
+            ),
+            required_role=Role.CONTRIBUTOR,
+        )
+
+
+def _register_systems_list_snapshots(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.list_snapshots",
+        annotations=_docmeta.read_only(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_list_snapshots(
+        system_id: Annotated[str, Field(description="The System whose checkpoints to list.")],
+    ) -> ToolResponse:
+        """List a System's checkpoints newest first — each item carries `name`, `state`
+        (`creating`/`available`/`failed`), `include_memory`, and `created_at`. Requires viewer.
+        Only an `available` checkpoint can be restored. Returns an empty collection for a System
+        with none."""
+        ctx = current_context()
+        return await with_runtime_for_system(
+            pool,
+            resolver,
+            ctx,
+            system_id,
+            lambda runtime: _list_snapshots(pool, ctx, runtime, system_id=system_id),
+            required_role=Role.VIEWER,
+        )
+
+
+def _register_systems_delete_snapshot(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="systems.delete_snapshot",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def systems_delete_snapshot(
+        system_id: Annotated[str, Field(description="The System whose checkpoint to delete.")],
+        name: Annotated[str, Field(description="The checkpoint to delete, freeing its name+disk.")],
+    ) -> ToolResponse:
+        """Delete a System's checkpoint, freeing its name for reuse and reclaiming its disk before
+        teardown. Requires contributor. Refused for a `creating` checkpoint (cancel the capture
+        first) or while the System is being restored. Enqueues a job and returns
+        `{job_id, status: queued}` — poll `jobs.wait`; freeing a large RAM checkpoint takes time,
+        so this is a background op."""
+        ctx = current_context()
+        return await with_runtime_for_system(
+            pool,
+            resolver,
+            ctx,
+            system_id,
+            lambda runtime: _delete_snapshot(pool, ctx, runtime, system_id=system_id, name=name),
             required_role=Role.CONTRIBUTOR,
         )
