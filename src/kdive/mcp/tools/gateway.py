@@ -115,6 +115,11 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
     ) -> ToolResult:
         """Call any registered tool by name (gateway dispatch).
 
+        This is the universal fallback for any capability that is advertised by the server
+        but is not bound as a callable tool in your client — including lazy-loading hosts
+        that materialize only a subset of the catalog. ``tools.invoke`` is always available;
+        use ``tools.search`` to discover a tool name and schema, then invoke it here.
+
         Re-enters the server's own dispatch path with ``run_middleware=True`` so the
         inner tool runs through the full middleware stack — RBAC, telemetry, binding
         validation, and denial audit — natively, exactly as a direct call would.

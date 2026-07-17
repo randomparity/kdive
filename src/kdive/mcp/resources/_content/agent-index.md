@@ -8,11 +8,13 @@ schema live in each tool's own description.
 ## Reaching tools
 
 Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdive__*`) is
-the canonical path — by default the server lists its full catalog. `tools.search` and
-`tools.invoke` are a discovery gateway for hosts without lazy tool loading; prefer direct
-calls when your host lists the tools. Both paths enforce the same RBAC. If an operator
-enables the core-set gateway, only a small core set is listed directly, so reach everything
-else through `tools.search` / `tools.invoke`.
+the canonical path — by default the server lists its full catalog. If a capability you need
+is not a callable tool in your client — including lazy-loading hosts that materialize only
+some of the ~100 tools and may never bind `tools.invoke` — reach it through the gateway:
+`tools.search` finds the name and schema, and `tools.invoke(name, arguments)` executes any
+registered tool. `tools.search` and `tools.invoke` are always available. Both paths enforce
+the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
+directly, so reach everything else through `tools.search` / `tools.invoke`.
 
 ## The typical session
 
