@@ -650,6 +650,24 @@ def test_systems_get_surfaces_supports_snapshots(migrated_url: str) -> None:
     asyncio.run(scenario())
 
 
+def test_systems_get_resilient_when_provider_unregistered(migrated_url: str) -> None:
+    # A System whose provider kind is no longer registered (disabled/uncomposed) cannot resolve a
+    # runtime; systems.get must still return the System envelope (so an agent can read state and
+    # tear it down), omitting supports_snapshots rather than failing as a raw error.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            resp = await get_system(pool, _ctx(), str(sid), resolver=ProviderResolver({}))
+            assert resp.status == "ready"
+            assert "supports_snapshots" not in resp.data
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
 def test_viewer_is_denied_the_mutating_snapshot_tools(migrated_url: str) -> None:
     async def scenario() -> None:
         pool = _pool(migrated_url)

@@ -172,8 +172,15 @@ async def get_system(
             active_run = await _active_run_for_system(conn, system.id)
             # In-memory capability read (no libvirt round-trip): whether this System's provider can
             # snapshot/restore, surfaced so an agent discovers support before calling the tools.
-            runtime = await resolver.runtime_for_system(conn, system.id)
-            supports_snapshots = runtime.support.supports_snapshots
+            # A System whose provider kind is no longer registered (disabled/uncomposed) cannot
+            # resolve a runtime; keep systems.get resilient (its metadata still lets an agent tear
+            # the System down) by omitting the field rather than failing the whole read.
+            supports_snapshots: bool | None = None
+            try:
+                runtime = await resolver.runtime_for_system(conn, system.id)
+                supports_snapshots = runtime.support.supports_snapshots
+            except CategorizedError:
+                supports_snapshots = None
         return system_envelope(
             system,
             resource_kind=resource_kind,
