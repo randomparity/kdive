@@ -113,6 +113,13 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "local-libvirt preserve-crash live-attach test (#747); unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_ROOTFS",
+        "test",
+        None,
+        "Path to a bootable rootfs qcow2 for the gated live_vm snapshot/revert/resume proof "
+        "(#1254); unset → that test skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_VMCORE",
         "test",
         None,
