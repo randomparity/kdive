@@ -60,9 +60,19 @@ carry the shared `implemented` gdb-MI maturity.
 - No schema migration and no `DebugSessionState` change — stepping reuses the `LIVE` state and
   the existing resume/wait/interrupt/redaction machinery.
 - A timed-out `finish` (the frame never returns within the wait) interrupts back and returns
-  `timed_out=True`, identical to `continue`. A synchronously-refused verb (e.g. `finish` in the
-  outermost frame) surfaces as `DEBUG_ATTACH_FAILURE` with the redacted gdb message, consistent
-  with every other MI-command error.
+  `timed_out=True`, identical to `continue`. A synchronously-refused verb surfaces as
+  `DEBUG_ATTACH_FAILURE` with the redacted gdb message, consistent with every other MI-command
+  error, because `execute_mi_command` raises on the `^error` result before `resume` waits.
+- `finish` acts on gdb's *selected* frame, which is frame #0 (innermost) after any stop — the
+  plane exposes no frame-select op, so `finish` runs to the current function's caller. The
+  outermost-frame refusal (`^error`) only arises when frame #0 is itself unwind-terminal, which
+  on a live gdbstub kernel is location-dependent; the no-hang mechanism is therefore proven by a
+  deterministic fake-controller unit test, not a live assertion that would hinge on unwind
+  quality.
+- The four ops are audited via `_AUDITED_OPS`, backed by a per-op end-to-end audit-row test so
+  that omitting one from the set fails CI rather than shipping an unaudited live-execution op.
+  A broad "mutating ⇒ audited" structural guard is not used: `start_session`/`end_session` are
+  mutating but audited through their attach/detach rows, so that invariant does not hold.
 - The four tool names must be added to every tool registry the guards enforce: `exposure.py`
   ACL, `tool_index.py` search keywords, and the `test_tool_docs.py` tool→test map. The wrapper
   docstrings state the into/over/instruction/return semantics so the agent-facing schema is the

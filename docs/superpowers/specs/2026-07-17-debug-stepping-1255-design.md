@@ -41,12 +41,18 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
   the wait. If the wait elapses (e.g. `finish` on a frame that does not return, or a step over a
   call that runs long or hits nothing), the engine interrupts back and returns `timed_out=True` —
   identical to `continue`.
-- **Refused verb:** a verb gdb rejects synchronously — most notably `finish` in the outermost
-  frame — surfaces as `CategorizedError(DEBUG_ATTACH_FAILURE)` with the redacted gdb message,
-  the same path every other MI-command error takes. No 60-second hang. gdb validates
-  "finish not meaningful in the outermost frame" as a static precondition, so it returns
-  `^error` before resuming regardless of `mi-async`; success criterion #5 proves this against
-  real gdb rather than only the fake.
+- **Refused verb:** a verb gdb rejects synchronously — e.g. `finish` when the selected frame is
+  the outermost (unwind-terminal) one — surfaces as `CategorizedError(DEBUG_ATTACH_FAILURE)`
+  with the redacted gdb message, the same path every other MI-command error takes. No
+  60-second hang, because `execute_mi_command` raises on the `^error` result before `resume`
+  ever waits. This synchronous-refusal *mechanism* is proven deterministically by the
+  fake-controller unit test (criterion #3); it is **not** asserted against real gdb, because
+  `-exec-finish` acts on gdb's *selected* frame, which is always frame #0 (innermost) after a
+  stop, and the plane exposes no frame-select op — so forcing the outermost-frame refusal live
+  would depend on the smoke test landing at an unwind-terminal frame #0 (location- and
+  unwind-quality-dependent), not a property this feature controls. `finish` at a normal
+  breakpoint therefore runs to frame #0's caller and returns a regular stop; that functional
+  behavior is what the live smoke proves.
 - **Missing line info (`step`/`next`):** these verbs need line-number information for the
   current PC. Where a live kernel has none (a stripped region, or a module whose symbols were
   not loaded via `debug.load_module_symbols`), gdb does not error — `-exec-step`/`-exec-next`
@@ -77,17 +83,30 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
 4. A timed-out step interrupts back and returns `timed_out=True` — asserted by a unit test
    (mirroring `test_continue_interrupts_on_timeout`).
 5. The live smoke test exercises all four new verbs against real KVM (added to the promoted-ops
-   smoke) and asserts that `debug.finish` in the outermost frame returns `DEBUG_ATTACH_FAILURE`
-   in well under the interactive wait cap — proving the no-hang guarantee on real gdb, not only
-   the fake; `scripts/live-debug.py` demonstrates a step.
+   smoke), asserting each advances execution and returns a stop — proving the resume path works
+   on real gdb, not only the fake. It does **not** assert the outermost-frame refusal (see the
+   Refused-verb contract: not reliably reachable without a frame-select op); the no-hang
+   *mechanism* is criterion #3's deterministic fake test. `scripts/live-debug.py` demonstrates a
+   step.
 6. A negative/non-finite `timeout_sec` on any of the four tools raises `CONFIGURATION_ERROR`
    with code `bad_resume_timeout` (verb-neutral) — asserted by the migrated guard tests.
-7. `just ci` is green.
+7. Each of the four ops is audited: it writes exactly one `audit_log` row on success (asserted
+   by a per-op end-to-end test mirroring `test_registered_set_breakpoint_handler_writes_audit_row`),
+   and the pinned `_AUDITED_OPS` drift test
+   (`test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops`) is updated to include the
+   four names. A registered op omitted from `_AUDITED_OPS` fails its own audit-row test.
+8. `just ci` is green.
 
 ## Out of scope
 
 - `-exec-next-instruction` (step over one instruction) and a step-count/repeat parameter — see
   ADR-0379 rejected alternatives.
+- A frame-select op (`-stack-select-frame`). `finish` acts on the innermost frame #0 after a
+  stop; selecting an outer frame to finish is a separate capability #1255 does not ask for.
+- A broad "every mutating `debug.*` tool ∈ `_AUDITED_OPS`" structural guard: the invariant is
+  false, because `debug.start_session`/`end_session` are mutating yet deliberately audited via
+  their attach/detach rows, not `_AUDITED_OPS`. The per-op audit-row tests (criterion #7) are
+  the falsifiable backstop instead.
 - Any `DebugSessionState` change, schema migration, or new provider port beyond the four
   methods on the existing `GdbMiEngine`.
 
@@ -101,7 +120,9 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
 - Tool: `mcp/tools/debug/operations/execution.py` (4 registrations + op closures).
 - Registries: `mcp/tools/debug/operations/runtime.py` `_AUDITED_OPS`; `mcp/exposure.py` ACL;
   `mcp/schema/tool_index.py` keywords; `tests/mcp/core/test_tool_docs.py` tool→test map.
-- Tests: `tests/mcp/debug/test_debug_ops.py` (tool dispatch),
+- Tests: `tests/mcp/debug/test_debug_ops.py` (tool dispatch; per-op audit-row tests mirroring
+  `test_registered_set_breakpoint_handler_writes_audit_row`; update the pinned expected set in
+  `test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops`),
   `tests/providers/local_libvirt/test_debug_gdbmi.py` (engine/verb),
   `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` (live), `scripts/live-debug.py`.
 - Docs: `docs/guide/reference/debug.md`, `docs/guide/toolsets/debug.md`.
