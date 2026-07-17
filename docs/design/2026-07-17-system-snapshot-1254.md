@@ -68,7 +68,11 @@ silently overwrite: `systems.snapshot(name)` against an existing **`available`**
 row, admission **deletes the stale ledger row (Postgres-only) and creates fresh** (auto-reclaim,
 so a failed capture never wedges the name) — any stale libvirt snapshot of that name is cleaned by
 the `SNAPSHOT` handler's own defensive pre-delete, so admission does no libvirt I/O under the
-SYSTEM lock; against a **`creating`** row it returns the in-flight job (idempotent replay). `systems.delete_snapshot` frees the name (and the
+SYSTEM lock; against a **`creating`** row it returns the in-flight job **only if that job is
+genuinely non-terminal** (idempotent replay) — if the referenced `SNAPSHOT` job is already
+terminal (a worker died or a cancel raced the handler, leaving the row stranded in `creating`),
+admission treats the row as stale, deletes it, and creates fresh, so a dead capture cannot wedge
+the name (see `repair_stalled_creating_snapshots` below). `systems.delete_snapshot` frees the name (and the
 qcow2 space) before teardown, so a repro-loop agent reclaims checkpoints without tearing the
 System down. Chosen over accumulate-until-teardown (which the reviewer flagged: no reclamation
 path, single-use names).
@@ -220,7 +224,11 @@ All four live in the existing `systems` toolset registrar
   `READY` and does not fence via state, so without this check a restore could be admitted while a
   capture's off-thread `snapshotCreateXML` still runs on the same domain — a revert landing
   mid-capture. Admission queries the job queue for a non-terminal `SNAPSHOT` (and `RESTORE`) job
-  on this `system_id` before transitioning. Transitions the System `READY →
+  on this `system_id` before transitioning. **Also refuses if a debug session is attached** to the
+  System (an open gdbstub `DebugSession` on the System's Run): a revert replaces the machine state
+  under the attached gdbstub and would silently break it, so — symmetric with the live-Run guard —
+  restore requires the agent to `debug.end_session` first (the paused-restore workflow then attaches
+  a *fresh* session post-revert). Transitions the System `READY →
   RESTORING`, audits `ready→restoring`, enqueues `JobKind.RESTORE` with `RestorePayload(system_id,
   name, start_paused)`, dedup key `{system_id}:restore:{name}:{start_paused}` with
   `recycle_terminal=True` (restore is repeatable — a re-issue after a prior restore completed
@@ -261,7 +269,10 @@ All four live in the existing `systems` toolset registrar
   the worker plane with the other slow provider ops (the server never blocks on long provider I/O).
 - **Admission (under `advisory_xact_lock(SYSTEM)`, Postgres-only):** the named row must exist
   (else `configuration_error`); rejects a `creating` snapshot (cancel the capture first); rejects
-  if a `DELETE_SNAPSHOT` job is already in flight for `(system_id, name)`. Enqueues
+  if a `DELETE_SNAPSHOT` job is already in flight for `(system_id, name)`; **rejects while the
+  System is `RESTORING`** (a concurrent `restore(name)` could otherwise revert a snapshot this
+  delete is removing — the delete winning the race would fail the revert `CONFIGURATION_ERROR →
+  FAILED`; the fence closes the mirror of the restore-rejects-in-flight-SNAPSHOT guard). Enqueues
   `JobKind.DELETE_SNAPSHOT` with `SnapshotDeletePayload(system_id, name)`, dedup key
   `{system_id}:delete_snapshot:{name}`, audits `delete_snapshot`, returns the job handle. **No
   System-state transition** — deletion does not disturb the guest.
@@ -278,11 +289,13 @@ never outlives its parent). `teardown_handler` (`jobs/handlers/systems.py`) is m
 snapshot-aware:
 
 1. **Delete libvirt snapshot metadata before undefine.** libvirt refuses to `undefine` a domain
-   that still has snapshot metadata unless `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA` is passed.
-   Teardown calls `runtime.snapshot.delete_all(domain_name)` (idempotent) — reaping every
-   libvirt snapshot including any cancel-orphaned one whose ledger row is `failed`/`creating` — and
-   passes the undefine-with-snapshots flag as defense in depth, so undefine cannot fail on a
-   snapshotted System.
+   that still has snapshot metadata unless `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA` is passed. The
+   flag is added to the **shared provider undefine primitive** (`_teardown_domain` in
+   `local_libvirt/lifecycle/provisioning.py`), **not** only to the teardown job — that primitive is
+   also on the reprovision path (`reprovision = teardown + provision`), so a bare undefine there
+   would fail on a snapshotted System too (see the reprovision note below). Teardown additionally
+   calls `runtime.snapshot.delete_all(domain_name)` (idempotent) to reap every libvirt snapshot,
+   including any cancel-orphaned one whose ledger row is `failed`/`creating`.
 2. **The qcow2 deletion frees the data.** Internal snapshots live inside the disk image teardown
    already removes; no external file or S3 object to leak.
 3. **Ledger rows cascade.** `snapshots.system_id → systems(id) ON DELETE CASCADE` removes the
@@ -293,17 +306,32 @@ snapshot-aware:
 A `torn_down` System leaves **no** `snapshots` rows and **no** libvirt snapshot metadata,
 including snapshots orphaned by a canceled capture.
 
+### Reprovision invalidates a System's snapshots
+
+`systems.reprovision` is `teardown + provision` on the same provider primitive: it destroys+
+undefines the domain (now with the metadata flag, so it no longer fails on a snapshotted System)
+and **recreates the qcow2 overlay**, which destroys the internal libvirt snapshots living inside
+it. Those snapshots cannot survive a reprovision, and leaving their `available` ledger rows behind
+would be a correctness trap — a later `systems.restore` would revert a snapshot that no longer
+exists (`CONFIGURATION_ERROR` → `FAILED`). So `reprovision_handler` **deletes the System's
+`snapshots` ledger rows** as part of the reprovision commit (the libvirt snapshots are already gone
+with the old overlay; `delete_all` on the fresh domain is a harmless no-op). Reprovision is a full
+guest rebuild — discarding checkpoints of the old guest is the correct semantics, and it is
+stated on the `systems.reprovision` docstring. An acceptance criterion covers reprovision of a
+snapshotted System: undefine does not fail, and no stale `available` rows remain.
+
 ## Concurrency, safety, recovery, observability
 
 - **Advisory lock:** every snapshot/restore/delete admission and every worker-side state commit
   runs under `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)` inside the same transaction,
   the reprovision/power pattern.
 - **Restore fences via `RESTORING`:** while a System is `RESTORING`, reprovision/power/teardown/
-  another restore/snapshot are refused at admission (they require `READY`), so the disruptive
-  revert has exclusive control of the domain — **provided** restore admission also rejects an
-  already-in-flight `SNAPSHOT` job (above), which a fresh `RESTORING` state cannot recall. `PAUSED`
-  refuses new Runs and non-resume power actions until the agent resumes, but **does** admit
-  `debug.start_session` (the paused-attach path) and `systems.teardown` (abandon-without-resume).
+  another restore/snapshot/**delete_snapshot** are refused at admission (they require `READY`, and
+  `delete_snapshot` explicitly refuses `RESTORING`), so the disruptive revert has exclusive
+  control of the domain — **provided** restore admission also rejects an already-in-flight
+  `SNAPSHOT` job (above), which a fresh `RESTORING` state cannot recall. `PAUSED` refuses new Runs
+  and non-resume power actions until the agent resumes, but **does** admit `debug.start_session`
+  (the paused-attach path) and `systems.teardown` (abandon-without-resume).
 - **Snapshot does not fence via state** (stays `READY`, permitted during a live Run); concurrent
   snapshots on one System serialize via libvirt's per-domain job lock, and a teardown that lands
   mid-snapshot (agent-owned System, unlikely) surfaces as a snapshot-job `INFRASTRUCTURE_FAILURE`
@@ -318,6 +346,13 @@ including snapshots orphaned by a canceled capture.
   repair — it is a resting state (like `READY`) awaiting the agent's explicit resume — but it is
   non-terminal, so a lapsed allocation reaps it via the existing allocation-liveness path (hence
   `PAUSED ∈ _NON_TERMINAL_SYSTEM`).
+  - **Stranded `creating` snapshot recovery.** Symmetric to the RESTORING limbo, a `SNAPSHOT`
+    worker that dies (or a cancel that races the handler) can strand a `snapshots` row in
+    `creating` with no active job. A new **`repair_stalled_creating_snapshots`** sweep transitions
+    a `creating` row whose `SNAPSHOT` job is terminal (or absent) to `failed`, so it becomes
+    reclaimable by the failed-row recycle path. This backstops the admission-time job-liveness
+    check above (which handles the common re-issue case) for the case where the agent never
+    re-issues the name.
   - **Repair-vs-completing-restore ordering.** The repair cannot clobber a succeeding restore: the
     `restore_handler` commits the `RESTORING → READY|PAUSED` transition (under the SYSTEM lock)
     **before it returns**, and the worker framework marks the `RESTORE` job terminal only *after*
@@ -397,8 +432,8 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    `include_memory=True` (default) produces a full system checkpoint.
 3. `systems.restore(system_id, name)` on a `READY` System with an `available` memory snapshot and
    **no** live Run transitions `READY → RESTORING`, reverts the domain, and returns it to `READY`
-   (running restore). A restore with a live Run, or with an active `SNAPSHOT` job for the System,
-   is refused `configuration_error`.
+   (running restore). A restore with a live Run, with an active `SNAPSHOT` job for the System, or
+   with an attached debug session is refused `configuration_error`.
 3b. Restoring a disk-only snapshot reboots the guest and lands `READY` (not at an instruction);
    `start_paused=True` against a disk-only snapshot is refused `configuration_error` naming the
    mode mismatch.
@@ -411,18 +446,24 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
 5. `systems.list_snapshots(system_id)` returns the System's snapshots newest-first from Postgres,
    no libvirt round-trip. `systems.delete_snapshot(system_id, name)` enqueues a `DELETE_SNAPSHOT`
    job that deletes the libvirt snapshot and removes the ledger row (freeing the name for reuse);
-   deleting a `creating` snapshot is refused, and admission does no libvirt I/O under the lock.
+   deleting a `creating` snapshot is refused, admission does no libvirt I/O under the lock, and
+   `delete_snapshot` is refused while the System is `RESTORING`.
 6. On a provider with `supports_snapshots is False`, all four tools return `capability_unsupported`
    (`capability="snapshot"`); `systems.get` surfaces `data.supports_snapshots` for both provider
    kinds without a libvirt call.
 7. Tearing down a snapshotted System deletes libvirt snapshot metadata (undefine does not fail),
    frees the data with the qcow2, and leaves **no** `snapshots` rows — including a snapshot
    orphaned by a canceled capture.
+7b. `systems.reprovision` of a snapshotted System does not fail at undefine (the metadata flag is
+   in the shared provider primitive), and the reprovision commit deletes the System's `snapshots`
+   ledger rows so no stale `available` row survives pointing at the destroyed overlay.
 8. `SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT` are in `ACTIVE_JOB_KINDS` and
    `CONTRIBUTOR_CANCELABLE_JOB_KINDS`; a contributor can cancel its own job. A canceled restore
    lands the System in `FAILED`; a System stuck in `RESTORING` with no active `RESTORE` job is
    recovered to `FAILED` by `repair_stalled_restoring_systems`, and that repair no-ops against a
-   restore that has already committed `READY`/`PAUSED`.
+   restore that has already committed `READY`/`PAUSED`. A `snapshots` row stranded in `creating`
+   (worker death / raced cancel) is recovered to `failed` by `repair_stalled_creating_snapshots`
+   and by the admission-time job-liveness check, so a dead capture never wedges the name.
 9. A guard test fails when a new `SystemState` value is absent from any state-exhaustive site
    (`_NON_TERMINAL_SYSTEM`, admission non-terminal set, `console_hosting` live set, the adjacency
    table, and the `debug.start_session` admission gate). `RESTORING` and `PAUSED` are present in

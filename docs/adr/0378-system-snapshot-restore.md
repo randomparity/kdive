@@ -70,6 +70,17 @@ child ledger, and a static provider capability flag.
   live set, the adjacency table), guarded by a test that fails when a new `SystemState` is missing
   from any.
 
+- **Reprovision invalidates snapshots.** `reprovision = teardown + provision` shares the provider
+  undefine primitive and recreates the qcow2, so the `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA` flag
+  goes in that **shared** primitive (not only the teardown job) — otherwise reprovision of any
+  snapshotted System fails at undefine — and the reprovision commit deletes the System's
+  `snapshots` ledger rows so no `available` row survives pointing at the destroyed overlay (a later
+  restore of which would fail the System). Two symmetric worker-death repairs
+  (`repair_stalled_restoring_systems`, `repair_stalled_creating_snapshots`) recover a stranded
+  `RESTORING` System and a stranded `creating` snapshot row so neither wedges lifecycle nor a name.
+  `delete_snapshot` is refused while `RESTORING` and `restore` is refused while a debug session is
+  attached, closing the two remaining cross-op races.
+
 - **Snapshots are freed on release.** Teardown is made snapshot-aware: it deletes libvirt snapshot
   metadata before `undefine` (libvirt refuses to undefine a snapshotted domain without
   `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA`), the qcow2 deletion frees the data, and the ledger
@@ -91,8 +102,8 @@ child ledger, and a static provider capability flag.
   agent-visible surprise.
 - One new provider port (`Snapshotter`), one new table, two new System states (`RESTORING`,
   `PAUSED`), three new job kinds (`SNAPSHOT`/`RESTORE`/`DELETE_SNAPSHOT`), one new `PowerAction`
-  (`RESUME`), one widened `debug.start_session` gate (accepts `PAUSED`), one new reconciler repair
-  (`repair_stalled_restoring_systems`), and four tools
+  (`RESUME`), one widened `debug.start_session` gate (accepts `PAUSED`), two new reconciler repairs
+  (`repair_stalled_restoring_systems`, `repair_stalled_creating_snapshots`), and four tools
   (`snapshot`/`restore`/`list_snapshots`/`delete_snapshot`). Local-libvirt only in this change;
   the port makes remote-libvirt a later opt-in.
 - Snapshots are strictly System-scoped and released with the System, adding no long-lived storage
