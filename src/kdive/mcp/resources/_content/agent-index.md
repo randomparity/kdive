@@ -77,14 +77,21 @@ Most real investigation time is spent here, not in the setup stages. After
    via debugfs, if you built the kernel with `CONFIG_FAULT_INJECTION`), tracing (`ftrace`,
    `bpftrace`), and stress are all in-guest-over-SSH activities using tools you installed
    (see "The guest is yours" above). **To target one allocation site** instead of whatever
-   fires first: set `ignore-gfp-wait=N` (`Y`, the debugfs default, skips every `GFP_KERNEL`
-   allocation before `cache-filter`/`fail-nth` even run), pin `cache-filter` to the exact
-   slab-cache name from `/proc/slabinfo`, and boot with `slab_nomerge` so SLUB doesn't
-   merge same-size caches out from under your filter. Prefer `probability` over
-   `/proc/self/fail-nth` when more than one site can fire — `fail-nth` is global and trips
-   on the first eligible call in the process (e.g. `fail_usercopy`'s
-   `strncpy_from_user`), not necessarily the one you're after. This is manual guest-side
-   work today; #918 and #919 track a debugfs-driven fault-injection tool surface.
+   fires first, default to the *bounded* knob: write `1` to `/proc/self/fail-nth` so exactly
+   one eligible allocation fails and the injector then disarms — it cannot storm. Scope which
+   allocations count as eligible with `cache-filter` (pin it to the exact slab-cache name from
+   `/proc/slabinfo`) and boot `slab_nomerge` so SLUB doesn't merge same-size caches out from
+   under your filter. To reach a `GFP_KERNEL` site you must also set `ignore-gfp-wait=N` (`Y`,
+   the debugfs default, skips every `GFP_KERNEL` allocation before `cache-filter`/`fail-nth`
+   even run); with `fail-nth=1` that stays bounded. **Do not reach for `probability` on a
+   targeted reproducer:** `probability` together with `ignore-gfp-wait=N` fails `GFP_KERNEL`
+   allocations *persistently*, and when one such failure lands in the page-fault path the
+   kernel retries `handle_mm_fault` forever — a `VM_FAULT_OOM` retry storm that livelocks the
+   guest (nothing detects a livelock; it is worse than a crash). Reserve `probability` for
+   stress/soak runs, not surgical single-site reproducers. The old caveat that `fail-nth`
+   "trips on the first eligible call, not necessarily the one you're after" only holds when
+   you *cannot* scope — `cache-filter` scopes it. This is manual guest-side work today; #918
+   and #919 track a debugfs-driven fault-injection tool surface.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
 whatever you were watching over SSH is gone. The **serial-console is the durable record** — it
