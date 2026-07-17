@@ -56,7 +56,7 @@ class AllocationState(StrEnum):
     FAILED = "failed"
 
 
-# Provenance: reprovision-in-place ADR-0038.
+# Provenance: reprovision-in-place ADR-0038; snapshot restore/pause ADR-0378.
 class SystemState(StrEnum):
     """A provisioned target's lifecycle.
 
@@ -67,12 +67,21 @@ class SystemState(StrEnum):
     ``provisioning``. ``force_crash`` cycles a ready System ``ready → crashing → crashed``: the
     ``crashing`` marker is committed before the physical NMI so the power path (which refuses any
     non-``ready`` System) cannot reset the guest mid-crash.
+
+    Snapshot restore (ADR-0378) fences a ready System through
+    ``ready → restoring → {ready|paused|failed}``: a running restore returns to ``ready``, a
+    ``start_paused`` restore lands in ``paused`` (the guest's vCPUs are suspended, awaiting
+    ``control.power(resume)`` back to ``ready``), and an interrupted/failed revert goes to
+    ``failed``. ``paused`` is a resting state, not ``ready``, so the ``ready ⇒ running`` invariant
+    the snapshot/SSH tools rely on holds; a ``paused`` System can be torn down without resuming.
     """
 
     DEFINED = "defined"
     PROVISIONING = "provisioning"
     READY = "ready"
     REPROVISIONING = "reprovisioning"
+    RESTORING = "restoring"
+    PAUSED = "paused"
     CRASHING = "crashing"
     CRASHED = "crashed"
     TORN_DOWN = "torn_down"
@@ -111,6 +120,20 @@ class DebugSessionState(StrEnum):
     ATTACH = "attach"
     LIVE = "live"
     DETACHED = "detached"
+
+
+# Provenance: System snapshot child ledger ADR-0378.
+class SnapshotState(StrEnum):
+    """A ``snapshots`` ledger row's lifecycle (child of a System).
+
+    A row is minted ``creating`` when a ``systems.snapshot`` job is enqueued and resolves to
+    ``available`` on success or ``failed`` on error/cancel. ``available → failed`` covers a
+    later invalidation. ``failed`` is terminal; deletion is row removal, not a state.
+    """
+
+    CREATING = "creating"
+    AVAILABLE = "available"
+    FAILED = "failed"
 
 
 class JobState(StrEnum):
@@ -174,10 +197,17 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 SystemState.CRASHING,
                 SystemState.TORN_DOWN,
                 SystemState.REPROVISIONING,
+                SystemState.RESTORING,
                 SystemState.FAILED,
             }
         ),
         SystemState.REPROVISIONING: frozenset({SystemState.READY, SystemState.FAILED}),
+        SystemState.RESTORING: frozenset(
+            {SystemState.READY, SystemState.PAUSED, SystemState.FAILED}
+        ),
+        SystemState.PAUSED: frozenset(
+            {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED}
+        ),
         SystemState.CRASHING: frozenset(
             {SystemState.CRASHED, SystemState.FAILED, SystemState.TORN_DOWN}
         ),
@@ -206,6 +236,11 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         DebugSessionState.ATTACH: frozenset({DebugSessionState.LIVE, DebugSessionState.DETACHED}),
         DebugSessionState.LIVE: frozenset({DebugSessionState.DETACHED}),
         DebugSessionState.DETACHED: frozenset(),
+    },
+    SnapshotState: {
+        SnapshotState.CREATING: frozenset({SnapshotState.AVAILABLE, SnapshotState.FAILED}),
+        SnapshotState.AVAILABLE: frozenset({SnapshotState.FAILED}),
+        SnapshotState.FAILED: frozenset(),
     },
     JobState: {
         JobState.QUEUED: frozenset({JobState.RUNNING, JobState.CANCELED}),
