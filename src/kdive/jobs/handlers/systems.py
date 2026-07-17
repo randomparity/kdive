@@ -591,7 +591,7 @@ async def restore_handler(
                 snapshotter.revert, domain, payload.name, start_paused=payload.start_paused
             )
         )
-    except CategorizedError:
+    except CategorizedError as exc:
         # A half-reverted guest is indeterminate: route RESTORING -> FAILED, never back to READY.
         await _record_system_failure(
             conn,
@@ -602,6 +602,9 @@ async def restore_handler(
             tool="systems.restore",
             operation="restore",
         )
+        # Terminal: the System is now FAILED, so a retry would read `not RESTORING` and early-return
+        # str(system_id), marking the RESTORE job succeeded while the System is actually FAILED.
+        exc.terminal = True
         raise
     await _commit_restore_result(
         conn, job, system_id, system.project, start_paused=payload.start_paused

@@ -355,8 +355,9 @@ def test_restore_provider_error_fails_the_system(migrated_url: str) -> None:
                         _job(JobKind.RESTORE, sid, {"name": "cp", "start_paused": False}),
                         resolver=resolver,
                     )
-                except CategorizedError:
+                except CategorizedError as exc:
                     raised = True
+                    assert exc.terminal is True  # dead-letters; a retry must not report success
                 assert raised
                 assert await _sys_state(conn, sid) is SystemState.FAILED
         finally:
