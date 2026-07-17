@@ -71,14 +71,10 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Project concurrency quota update request. |
-
-`request` fields:
-
-- `project` (`string`, required) — Project to set concurrency caps for.
-- `max_concurrent_allocations` (`integer`, required) — Maximum concurrent allocations allowed (>= 0).
-- `max_concurrent_systems` (`integer`, required) — Maximum concurrent Systems allowed (>= 0).
-- `max_pending_allocations` (`integer`, optional) — Maximum queued (requested) allocations (>= 0); 0 = no queue.
+| `max_concurrent_allocations` | integer | yes | Maximum concurrent allocations allowed (>= 0). |
+| `max_concurrent_systems` | integer | yes | Maximum concurrent Systems allowed (>= 0). |
+| `max_pending_allocations` | integer | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
+| `project` | string | yes | Project to set concurrency caps for. |
 
 ## `accounting.usage_investigation`
 

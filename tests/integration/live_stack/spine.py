@@ -217,7 +217,7 @@ async def allocate_remote(
             client,
             "allocations.request",
             project=project,
-            request={
+            **{
                 "vcpus": 2,
                 "memory_gb": 2,
                 "disk_gb": REMOTE_ALLOCATION_DISK_GB,

@@ -192,10 +192,29 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def accounting_set_quota(
-        request: Annotated[
-            QuotaSetRequest,
-            Field(description="Project concurrency quota update request."),
+        project: Annotated[str, Field(description="Project to set concurrency caps for.")],
+        max_concurrent_allocations: Annotated[
+            int, Field(description="Maximum concurrent allocations allowed (>= 0).")
         ],
+        max_concurrent_systems: Annotated[
+            int, Field(description="Maximum concurrent Systems allowed (>= 0).")
+        ],
+        max_pending_allocations: Annotated[
+            int,
+            Field(
+                default=0,
+                description="Maximum queued (requested) allocations (>= 0); 0 = no queue.",
+            ),
+        ] = 0,
     ) -> ToolResponse:
         """Set a project's concurrency caps and pending-queue cap. Requires admin."""
-        return await set_quota(pool, current_context(), request=request)
+        return await set_quota(
+            pool,
+            current_context(),
+            request=QuotaSetRequest(
+                project=project,
+                max_concurrent_allocations=max_concurrent_allocations,
+                max_concurrent_systems=max_concurrent_systems,
+                max_pending_allocations=max_pending_allocations,
+            ),
+        )

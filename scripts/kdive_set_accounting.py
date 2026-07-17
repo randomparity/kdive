@@ -42,12 +42,10 @@ def build_calls(ns: argparse.Namespace) -> list[tuple[str, dict[str, object]]]:
         (
             "accounting.set_quota",
             {
-                "request": {
-                    "project": ns.project,
-                    "max_concurrent_allocations": ns.max_alloc,
-                    "max_concurrent_systems": ns.max_sys,
-                    "max_pending_allocations": ns.max_pending,
-                },
+                "project": ns.project,
+                "max_concurrent_allocations": ns.max_alloc,
+                "max_concurrent_systems": ns.max_sys,
+                "max_pending_allocations": ns.max_pending,
             },
         ),
         ("accounting.set_budget", {"project": ns.project, "limit_kcu": ns.limit_kcu}),

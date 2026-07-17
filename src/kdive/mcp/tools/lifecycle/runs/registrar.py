@@ -45,87 +45,6 @@ from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
-class _RunsCreatePayload(ToolPayload):
-    """Public payload for ``runs.create``."""
-
-    investigation_id: str = Field(description="Investigation to attach the Run to.")
-    build_profile: BuildProfile = Field(
-        description=(
-            "Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or "
-            "{'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU "
-            "architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, "
-            "ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree "
-            "or config is named here. After runs.create, call artifacts.expected_uploads to learn "
-            "the exact bytes to produce and artifacts.feature_config_requirements to learn which "
-            "CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then "
-            "runs.complete_build (where you may also record the optional source_label/source_ref "
-            "provenance of the tree you built from - an unverified client claim, surfaced in "
-            "runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') "
-            "are not set here: pass the request.cmdline field to runs.complete_build. See "
-            "resource://kdive/docs/operating/external-build-upload.md for shaping an upload."
-        )
-    )
-    system_id: str | None = Field(
-        default=None,
-        description=(
-            "Ready System to bind now. Omit to create an unbound Run that targets "
-            "`target_kind` and is bound later with runs.bind."
-        ),
-    )
-    target_kind: str | None = Field(
-        default=None,
-        description=(
-            "Resource kind the Run builds for. Required when system_id is omitted; derived "
-            "from the System when system_id is set."
-        ),
-    )
-    expected_boot_failure: ExpectedBootFailureInput | None = Field(
-        default=None,
-        description=(
-            "Optional declared boot crash. Use a named preset for a maintained, version- and "
-            "arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - "
-            "a preset takes no 'pattern' and expands to a canonical kernel console signature. "
-            "For a custom signature use {'kind':'console_crash','pattern':'Unable to handle "
-            "kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is "
-            "matched as a case-sensitive literal substring (not a regex), tested line-by-line "
-            "against the redacted console log; a single line containing the substring is a match. "
-            f"Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to {MAX_TERMS} "
-            f"terms, {MAX_PATTERN_CHARS} characters total, each term non-empty. A match makes the "
-            "expected crash the Run's "
-            "success outcome."
-        ),
-    )
-    reuse_requirement: _RunReuseRequirementInput | None = Field(
-        default=None,
-        description="Optional System reuse assertion payload.",
-    )
-    idempotency_key: str | None = Field(
-        default=None,
-        description="Replay-safe key; a repeated key returns the prior envelope.",
-    )
-    label: str | None = Field(
-        default=None,
-        description=(
-            "Optional human handle for this Run, echoed back as data.label in runs.get / "
-            "runs.list so you thread fewer bare UUIDs. Freeform and non-unique: "
-            f"1..{LABEL_MAX_LEN} printable characters (surrounding whitespace trimmed); not a "
-            "lookup key. Omit for no handle."
-        ),
-    )
-
-    def to_create_request(self) -> _RunCreateRequest:
-        """Convert the public MCP payload into the service request record."""
-        return _RunCreateRequest(
-            investigation_id=self.investigation_id,
-            system_id=self.system_id,
-            target_kind=self.target_kind,
-            build_profile=dump_build_profile(self.build_profile),
-            expected_boot_failure=self.expected_boot_failure,
-            reuse_requirement=self.reuse_requirement,
-            label=self.label,
-        )
-
-
 class _RunsListPayload(ToolPayload):
     """Public payload for ``runs.list`` filters and pagination."""
 
@@ -151,47 +70,6 @@ class _RunsListPayload(ToolPayload):
             limit=self.limit,
             cursor=self.cursor,
         )
-
-
-class _RunsCompleteBuildPayload(ToolPayload):
-    """Public payload for ``runs.complete_build`` operation fields."""
-
-    cmdline: str | None = Field(
-        default=None,
-        description=(
-            "Kernel debug args appended to the platform-required boot args "
-            "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
-            "via runs.install/runs.boot."
-        ),
-    )
-    build_id: str | None = Field(
-        default=None,
-        description=(
-            "GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was "
-            "uploaded. Case-insensitive."
-        ),
-    )
-    source_label: str | None = Field(
-        default=None,
-        description=(
-            "Optional unverified provenance: a freeform handle for the local source tree that "
-            "produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client "
-            "claim in runs.get data.build_provenance with client_attested=true; kdive does not "
-            "clone, resolve, or verify it. "
-            f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first completion. "
-            "Omit if unknown."
-        ),
-    )
-    source_ref: str | None = Field(
-        default=None,
-        description=(
-            "Optional unverified provenance: the ref/commit you claim produced these artifacts "
-            "(e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get "
-            "data.build_provenance with client_attested=true; treated as an opaque label, never "
-            f"fetched. 1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
-            "completion. Omit if unknown."
-        ),
-    )
 
 
 def register(
@@ -244,7 +122,7 @@ def _register_runs_get(
         """Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
         `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-        args (e.g. `dhash_entries=1`) with the `request.cmdline` field on
+        args (e.g. `dhash_entries=1`) with the `cmdline` field on
         `runs.complete_build`.
 
         Console evidence: `refs.console` is the boot-window console snapshot and
@@ -324,24 +202,112 @@ def _register_runs_create(
         meta={"maturity": "implemented"},
     )
     async def runs_create(
-        request: Annotated[
-            _RunsCreatePayload,
+        investigation_id: Annotated[str, Field(description="Investigation to attach the Run to.")],
+        build_profile: Annotated[
+            BuildProfile,
             Field(
                 description=(
-                    "Run creation request. After runs.create, call artifacts.expected_uploads and "
-                    "artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline "
-                    "args are passed later as `request.cmdline` on runs.complete_build."
+                    "Build profile for the Run's kernel: a thin document, e.g. "
+                    "{'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' "
+                    "(default x86_64) is the target CPU architecture and selects the boot/vmlinuz "
+                    "upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The "
+                    "kernel is built locally and uploaded, so no source tree or config is named "
+                    "here. After runs.create, call artifacts.expected_uploads to learn the exact "
+                    "bytes to produce and artifacts.feature_config_requirements to learn which "
+                    "CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, "
+                    "then runs.complete_build (where you may also record the optional "
+                    "source_label/source_ref provenance of the tree you built from - an "
+                    "unverified client claim, surfaced in runs.get data.build_provenance). Extra "
+                    "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the "
+                    "cmdline field to runs.complete_build. See "
+                    "resource://kdive/docs/operating/external-build-upload.md for shaping an "
+                    "upload."
                 )
             ),
         ],
+        system_id: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Ready System to bind now. Omit to create an unbound Run that targets "
+                    "`target_kind` and is bound later with runs.bind."
+                ),
+            ),
+        ] = None,
+        target_kind: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Resource kind the Run builds for. Required when system_id is omitted; derived "
+                    "from the System when system_id is set."
+                ),
+            ),
+        ] = None,
+        expected_boot_failure: Annotated[
+            ExpectedBootFailureInput | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional declared boot crash. Use a named preset for a maintained, version- "
+                    "and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or "
+                    "{'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical "
+                    "kernel console signature. For a custom signature use "
+                    "{'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a "
+                    "custom 'pattern' are mutually exclusive. The pattern is matched as a "
+                    "case-sensitive literal substring (not a regex), tested line-by-line against "
+                    "the redacted console log; a single line containing the substring is a match. "
+                    f"Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to "
+                    f"{MAX_TERMS} terms, {MAX_PATTERN_CHARS} characters total, each term "
+                    "non-empty. A match makes the expected crash the Run's success outcome."
+                ),
+            ),
+        ] = None,
+        reuse_requirement: Annotated[
+            _RunReuseRequirementInput | None,
+            Field(default=None, description="Optional System reuse assertion payload."),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Replay-safe key; a repeated key returns the prior envelope.",
+            ),
+        ] = None,
+        label: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional human handle for this Run, echoed back as data.label in runs.get / "
+                    "runs.list so you thread fewer bare UUIDs. Freeform and non-unique: "
+                    f"1..{LABEL_MAX_LEN} printable characters (surrounding whitespace trimmed); "
+                    "not a lookup key. Omit for no handle."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
-        """Create a run, bound to a system or unbound against a target_kind."""
+        """Create a run, bound to a system or unbound against a target_kind.
+
+        After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then
+        runs.complete_build. Extra kernel cmdline args are passed later as the `cmdline` field on
+        runs.complete_build.
+        """
         return await _create_run(
             pool,
             current_context(),
-            request.to_create_request(),
+            _RunCreateRequest(
+                investigation_id=investigation_id,
+                system_id=system_id,
+                target_kind=target_kind,
+                build_profile=dump_build_profile(build_profile),
+                expected_boot_failure=expected_boot_failure,
+                reuse_requirement=reuse_requirement,
+                label=label,
+            ),
             resolver=resolver,
-            idempotency_key=request.idempotency_key,
+            idempotency_key=idempotency_key,
         )
 
 
@@ -401,9 +367,54 @@ def _register_runs_complete_build(
     )
     async def runs_complete_build(
         run_id: Annotated[str, Field(description="The external-build Run to finalize.")],
-        request: Annotated[
-            _RunsCompleteBuildPayload | None,
-            Field(description="Optional build finalization fields: cmdline, build_id, and source."),
+        cmdline: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Kernel debug args appended to the platform-required boot args "
+                    "(e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot "
+                    "via runs.install/runs.boot."
+                ),
+            ),
+        ] = None,
+        build_id: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux "
+                    "was uploaded. Case-insensitive."
+                ),
+            ),
+        ] = None,
+        source_label: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional unverified provenance: a freeform handle for the local source tree "
+                    "that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as "
+                    "a client claim in runs.get data.build_provenance with client_attested=true; "
+                    "kdive does not clone, resolve, or verify it. "
+                    f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
+                    "completion. Omit if unknown."
+                ),
+            ),
+        ] = None,
+        source_ref: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional unverified provenance: the ref/commit you claim produced these "
+                    "artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in "
+                    "runs.get data.build_provenance with client_attested=true; treated as an "
+                    "opaque label, never fetched. "
+                    f"1..{PROVENANCE_FIELD_MAX_LEN} printable characters; bound on the first "
+                    "completion. Omit if unknown."
+                ),
+            ),
         ] = None,
     ) -> ToolResponse:
         """Finalize an externally built Run: validate the uploaded artifacts, mark it succeeded.
@@ -413,7 +424,6 @@ def _register_runs_complete_build(
         does not match the declared arch is rejected. See artifacts.expected_uploads for the
         per-arch byte contract.
         """
-        payload = request or _RunsCompleteBuildPayload()
         ctx = current_context()
         return await with_runtime_for_run_target_kind(
             pool,
@@ -424,10 +434,10 @@ def _register_runs_complete_build(
                 pool,
                 ctx,
                 run_id,
-                build_id=payload.build_id,
-                cmdline=payload.cmdline,
-                source_label=payload.source_label,
-                source_ref=payload.source_ref,
+                build_id=build_id,
+                cmdline=cmdline,
+                source_label=source_label,
+                source_ref=source_ref,
             ),
             required_role=Role.CONTRIBUTOR,
         )

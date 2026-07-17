@@ -285,9 +285,9 @@ def _remote_request(
     )
 
 
-async def _call_registered_tool(tool: object, *args: object) -> ToolResponse:
+async def _call_registered_tool(tool: object, *args: object, **kwargs: object) -> ToolResponse:
     fn = cast(Any, tool).fn
-    result = await fn(*args)
+    result = await fn(*args, **kwargs)
     assert isinstance(result, ToolResponse)
     return result
 
@@ -332,12 +332,13 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
 
         resp = await _call_registered_tool(
             tools[REGISTER_FAULT_INJECT_TOOL],
-            _fault_request(
-                "fi-registrar",
-                concurrent_allocation_cap=4,
-                secret_refs=("ref-a", "ref-b"),
-                owner_project="*",
-            ),
+            name="fi-registrar",
+            cost_class="standard",
+            vcpus=8,
+            memory_mb=16384,
+            concurrent_allocation_cap=4,
+            secret_refs=("ref-a", "ref-b"),
+            owner_project="*",
         )
 
         assert resp.status == "registered"

@@ -55,35 +55,6 @@ class _InvestigationsListPayload(ToolPayload):
     )
 
 
-class _InvestigationOpenPayload(ToolPayload):
-    """Public payload for ``investigations.open``."""
-
-    project: str = Field(description="Project to create the Investigation under.")
-    title: str = Field(description=f"Human-readable title (1..={TITLE_MAX} chars).")
-    description: str | None = Field(
-        default=None,
-        description=f"Optional free-form description for reporting (<={DESCRIPTION_MAX} chars).",
-    )
-    external_refs: list[ExternalRefInput] | None = Field(
-        default=None,
-        description="Optional external tracker refs (each with tracker, id, url).",
-    )
-    idempotency_key: str | None = Field(
-        default=None,
-        description="Replay-safe key; a repeated key returns the prior envelope.",
-    )
-
-    def to_open_request(self) -> InvestigationOpenRequest:
-        """Convert the public MCP payload into the handler request record."""
-        return InvestigationOpenRequest(
-            project=self.project,
-            title=self.title,
-            description=self.description,
-            external_refs=self.external_refs,
-            idempotency_key=self.idempotency_key,
-        )
-
-
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the `investigations.*` tools on ``app``, bound to ``pool``."""
     _register_investigations_open(app, pool)
@@ -102,13 +73,44 @@ def _register_investigations_open(app: FastMCP, pool: AsyncConnectionPool) -> No
         meta={"maturity": "implemented"},
     )
     async def investigations_open(
-        request: Annotated[
-            _InvestigationOpenPayload,
-            Field(description="Investigation creation request."),
-        ],
+        project: Annotated[str, Field(description="Project to create the Investigation under.")],
+        title: Annotated[str, Field(description=f"Human-readable title (1..={TITLE_MAX} chars).")],
+        description: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    f"Optional free-form description for reporting (<={DESCRIPTION_MAX} chars)."
+                ),
+            ),
+        ] = None,
+        external_refs: Annotated[
+            list[ExternalRefInput] | None,
+            Field(
+                default=None,
+                description="Optional external tracker refs (each with tracker, id, url).",
+            ),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description="Replay-safe key; a repeated key returns the prior envelope.",
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Open an investigation."""
-        return await open_investigation(pool, current_context(), request.to_open_request())
+        return await open_investigation(
+            pool,
+            current_context(),
+            InvestigationOpenRequest(
+                project=project,
+                title=title,
+                description=description,
+                external_refs=external_refs,
+                idempotency_key=idempotency_key,
+            ),
+        )
 
 
 def _register_investigations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
