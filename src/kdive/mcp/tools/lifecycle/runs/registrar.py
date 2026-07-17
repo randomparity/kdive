@@ -42,6 +42,7 @@ from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.artifact_search import MAX_PATTERN_CHARS, MAX_TERMS
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 
 
 class _RunsCreatePayload(ToolPayload):
@@ -198,9 +199,10 @@ def register(
     pool: AsyncConnectionPool,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
 ) -> None:
     """Register the `runs.*` tools on ``app``, bound to ``pool``."""
-    _register_runs_get(app, pool, resolver)
+    _register_runs_get(app, pool, resolver, secret_registry)
     _register_runs_list(app, pool)
     _register_runs_create(app, pool, resolver)
     _register_runs_bind(app, pool)
@@ -214,7 +216,12 @@ def _complete_build_handlers() -> _CompleteBuildHandlers:
     return _CompleteBuildHandlers()
 
 
-def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver) -> None:
+def _register_runs_get(
+    app: FastMCP,
+    pool: AsyncConnectionPool,
+    resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
+) -> None:
     @app.tool(
         name="runs.get",
         annotations=_docmeta.read_only(),
@@ -258,12 +265,24 @@ def _register_runs_get(app: FastMCP, pool: AsyncConnectionPool, resolver: Provid
         freeform claim: `client_attested: true` with the `source_label`/`source_ref` passed to
         `runs.complete_build`. Compare it across runs to track which local source produced each
         build.
+
+        Liveness: `data.liveness` tells a healthy guest from one that livelocked **after** a ready
+        boot — a case `boot_outcome=ready` and `control.watch_for_crash` (which sees no crash
+        signature) both miss. It appears only on a ready-booted local-libvirt Run, and is
+        `{state, console_storm, ssh_reachable, checked_at}`: `state` is `healthy`, `degraded`, or
+        `unknown`; `console_storm` is true when the current console shows a runaway printk /
+        OOM-retry storm (e.g. `callbacks suppressed`, `VM_FAULT_OOM`, `soft lockup`);
+        `ssh_reachable` is the latest `systems.check_ssh_reachable` verdict (`null` until you have
+        probed once — call it to refresh) and `checked_at` is when that probe ran (`null` when
+        unprobed). `state` is `degraded` when the console storms or SSH is unreachable, so treat
+        `degraded` as a wedged guest even while `status=succeeded`.
         """
         return await _get_run(
             pool,
             current_context(),
             run_id,
             resolver=resolver,
+            secret_registry=secret_registry,
             include_console_artifacts=include_console_artifacts,
         )
 

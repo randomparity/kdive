@@ -46,6 +46,7 @@ from kdive.mcp.tools.lifecycle.allocations.view import get_allocation
 from kdive.mcp.tools.lifecycle.runs.view import get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -244,7 +245,13 @@ def test_resume_from_read_tools(migrated_url: str) -> None:
             ctx = _ctx()
             alloc_resp = await get_allocation(pool, ctx, str(alloc_id))
             sys_resp = await get_system(pool, ctx, str(system_id))
-            run_resp = await get_run(pool, ctx, str(run_id), resolver=provider_resolver())
+            run_resp = await get_run(
+                pool,
+                ctx,
+                str(run_id),
+                resolver=provider_resolver(),
+                secret_registry=SecretRegistry(),
+            )
 
         # systems.provision needs the granted resource id:
         assert alloc_resp.data["resource_id"] is not None

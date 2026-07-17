@@ -368,6 +368,26 @@ async def all_recent_jobs(
     return [Job.model_validate(row) for row in rows]
 
 
+async def latest_succeeded_job_for_system(
+    conn: AsyncConnection, kind: JobKind, system_id: UUID
+) -> Job | None:
+    """Return the most recent ``succeeded`` ``kind`` job for ``system_id``, or ``None``.
+
+    Matches on the job payload's ``system_id`` (the system-scoped kinds carry it) and
+    ``state = succeeded`` so only a job that actually ran — and therefore carries a
+    ``result_ref`` verdict — is returned. Newest first by ``(created_at, id)``. Used by the
+    ``runs.get`` liveness read to fold in the latest ``check_ssh_reachable`` verdict (ADR-0373).
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM jobs WHERE kind = %s AND payload->>'system_id' = %s "
+            "AND state = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            (kind.value, str(system_id), JobState.SUCCEEDED.value),
+        )
+        row = await cur.fetchone()
+    return Job.model_validate(row) if row is not None else None
+
+
 async def queue_depth(conn: AsyncConnection) -> dict[str, int]:
     """Return the cross-project job count per state (the platform queue depth).
 

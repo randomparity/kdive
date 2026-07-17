@@ -56,6 +56,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
 from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
+from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
@@ -148,6 +149,7 @@ async def get_run(
         ctx,
         run_id,
         resolver=provider_resolver(),
+        secret_registry=SecretRegistry(),
         include_console_artifacts=include_console_artifacts,
     )
 
@@ -747,6 +749,55 @@ def test_envelope_for_run_surfaces_console_access_hint() -> None:
     assert console_access == _CONSOLE_ACCESS_EXPECTED
     # fetch_raw cannot serve the console artifact and is contributor-gated; never named here.
     assert "artifacts.fetch_raw" not in console_access.values()
+
+
+def test_envelope_for_run_surfaces_degraded_liveness() -> None:
+    # A guest that livelocked after a ready boot reads state=degraded (#1237, ADR-0373).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+        liveness=Liveness(
+            state="degraded",
+            console_storm=True,
+            ssh_reachable=False,
+            checked_at="2026-07-16T00:00:00+00:00",
+        ),
+    )
+
+    assert resp.data["liveness"] == {
+        "state": "degraded",
+        "console_storm": True,
+        "ssh_reachable": False,
+        "checked_at": "2026-07-16T00:00:00+00:00",
+    }
+
+
+def test_envelope_for_run_surfaces_healthy_liveness() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+        liveness=Liveness(
+            state="healthy",
+            console_storm=False,
+            ssh_reachable=True,
+            checked_at="2026-07-16T00:00:00+00:00",
+        ),
+    )
+
+    liveness = resp.data["liveness"]
+    assert isinstance(liveness, dict)
+    assert liveness["state"] == "healthy"
+    assert liveness["console_storm"] is False
+
+
+def test_envelope_for_run_omits_liveness_when_absent() -> None:
+    # No liveness passed (non-ready or non-local-libvirt Run): the key is omitted, not a null claim.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+    )
+
+    assert "liveness" not in resp.data
 
 
 def _manifest_entry(name: str) -> dict[str, str]:
@@ -3698,7 +3749,11 @@ def test_runs_get_omits_root_for_provider_without_platform_root(migrated_url: st
                 pool, provisioning_profile=_profile_dump(crashkernel="256M")
             )
             resp = await _get_run(
-                pool, _ctx(), run_id, resolver=provider_resolver(platform_root_cmdline=None)
+                pool,
+                _ctx(),
+                run_id,
+                resolver=provider_resolver(platform_root_cmdline=None),
+                secret_registry=SecretRegistry(),
             )
         assert resp.data["required_cmdline"] == "console=ttyS0 crashkernel=256M"  # no root=
 
