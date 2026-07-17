@@ -69,7 +69,19 @@ carry the shared `implemented` gdb-MI maturity.
   contract (per the wrapper-docstring rule).
 - `debug.step`/`next`/`step_instruction` are source-and-instruction granular, so they need
   loaded debuginfo for `step`/`next` line boundaries — the same debuginfo the backtrace/frame
-  ops (ADR-0275) already assume; `step_instruction` works without line tables.
+  ops (ADR-0275) already assume; `step_instruction` works without line tables. Where the current
+  PC has no line information (a stripped kernel region or a module whose symbols were not loaded),
+  gdb does not error: `-exec-step`/`-exec-next` single-step until control reaches a line with
+  info, which over such code can run out the bounded wait and return `timed_out=True` at an
+  unrelated frame — the same timeout+interrupt path as a long-running `continue`. The `step`/`next`
+  wrapper docstrings tell the agent to use `step_instruction` for deterministic progress in a
+  no-line-info region, so the degradation is a stated contract rather than a silent surprise.
+- The reused `ExecutionControl.resume` invalid-timeout guard is generalized from the
+  `continue`-specific message/code (`bad_continue_timeout`) to a verb-neutral one
+  (`bad_resume_timeout`, "gdb/MI resume timeout ..."), so a bad `timeout_sec` on `debug.step`
+  et al. names the resume family rather than misnaming the operation as `continue`. The two
+  existing `continue` guard tests move to the new code; `continue`'s behavior is otherwise
+  unchanged.
 
 ## Considered & rejected
 

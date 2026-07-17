@@ -43,7 +43,23 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
   identical to `continue`.
 - **Refused verb:** a verb gdb rejects synchronously — most notably `finish` in the outermost
   frame — surfaces as `CategorizedError(DEBUG_ATTACH_FAILURE)` with the redacted gdb message,
-  the same path every other MI-command error takes. No 60-second hang.
+  the same path every other MI-command error takes. No 60-second hang. gdb validates
+  "finish not meaningful in the outermost frame" as a static precondition, so it returns
+  `^error` before resuming regardless of `mi-async`; success criterion #5 proves this against
+  real gdb rather than only the fake.
+- **Missing line info (`step`/`next`):** these verbs need line-number information for the
+  current PC. Where a live kernel has none (a stripped region, or a module whose symbols were
+  not loaded via `debug.load_module_symbols`), gdb does not error — `-exec-step`/`-exec-next`
+  single-step until control reaches a line with info, which over such code can run out the
+  bounded wait and return `timed_out=True` at an unrelated frame. This is the same
+  timeout+interrupt path as a long-running `continue`; an agent that wants deterministic
+  instruction-granular progress in a no-line-info region uses `debug.step_instruction`. The
+  `step`/`next` wrapper docstrings state this so the agent-facing schema is the contract.
+- **Invalid timeout:** a negative or non-finite `timeout_sec` raises
+  `CONFIGURATION_ERROR`. The shared `ExecutionControl.resume` guard is generalized to name the
+  resume family, not `continue` specifically (message "gdb/MI resume timeout must be a finite
+  non-negative number", code `bad_resume_timeout`), so the error names the operation the agent
+  actually called — the two existing `continue` guard tests move to the new code.
 - **Redaction / audit / transcript:** unchanged — the stop record is redacted, the four ops are
   audited alongside `continue`/`interrupt`, and each MI command is appended to the session
   transcript by the existing machinery.
@@ -60,9 +76,13 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
    timeout — asserted by a unit test.
 4. A timed-out step interrupts back and returns `timed_out=True` — asserted by a unit test
    (mirroring `test_continue_interrupts_on_timeout`).
-5. The live smoke test exercises at least one of the new verbs against real KVM (added to the
-   promoted-ops smoke), and `scripts/live-debug.py` demonstrates a step.
-6. `just ci` is green.
+5. The live smoke test exercises all four new verbs against real KVM (added to the promoted-ops
+   smoke) and asserts that `debug.finish` in the outermost frame returns `DEBUG_ATTACH_FAILURE`
+   in well under the interactive wait cap — proving the no-hang guarantee on real gdb, not only
+   the fake; `scripts/live-debug.py` demonstrates a step.
+6. A negative/non-finite `timeout_sec` on any of the four tools raises `CONFIGURATION_ERROR`
+   with code `bad_resume_timeout` (verb-neutral) — asserted by the migrated guard tests.
+7. `just ci` is green.
 
 ## Out of scope
 
@@ -74,11 +94,14 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
 ## Touch points (from the plane map)
 
 - Engine: `providers/shared/debug_common/gdbmi/core/engine.py` (4 methods) +
-  `providers/ports/debug.py` `GdbMiEngine` protocol (4 declarations).
+  `providers/ports/debug.py` `GdbMiEngine` protocol (4 declarations); generalize the
+  invalid-timeout guard in `providers/shared/debug_common/gdbmi/core/execution.py`
+  `resume` to `bad_resume_timeout` and update the two guard tests in
+  `tests/providers/local_libvirt/test_debug_gdbmi.py`.
 - Tool: `mcp/tools/debug/operations/execution.py` (4 registrations + op closures).
 - Registries: `mcp/tools/debug/operations/runtime.py` `_AUDITED_OPS`; `mcp/exposure.py` ACL;
   `mcp/schema/tool_index.py` keywords; `tests/mcp/core/test_tool_docs.py` tool→test map.
 - Tests: `tests/mcp/debug/test_debug_ops.py` (tool dispatch),
   `tests/providers/local_libvirt/test_debug_gdbmi.py` (engine/verb),
-  `tests/mcp/debug/test_debug_gdmbi_live_smoke.py` (live), `scripts/live-debug.py`.
+  `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` (live), `scripts/live-debug.py`.
 - Docs: `docs/guide/reference/debug.md`, `docs/guide/toolsets/debug.md`.
