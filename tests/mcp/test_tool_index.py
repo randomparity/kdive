@@ -120,3 +120,26 @@ def test_default_app_instructions_do_not_claim_gateway_primary() -> None:
     """The assembled app defaults to gateway-off instructions (proves the wiring, #1034)."""
     app = _built_app()
     assert _GATEWAY_PRIMARY_CLAIM not in (app.instructions or "")
+
+
+# The mis-scoped clause from #1248: framing the gateway as "for hosts without lazy tool
+# loading" tells a lazy-loading client that materialises only a subset of the ~100 tools
+# (and may never bind tools.invoke) that the escape hatch does not apply to it.
+_MISSCOPED_CLAUSE = "without lazy tool loading"
+
+
+def test_instructions_gateway_off_do_not_exclude_lazy_hosts() -> None:
+    """Gateway-off instructions must not scope the gateway to non-lazy hosts (#1248).
+
+    A lazy-loading client that materialises only a subset of the catalog may never bind
+    ``tools.invoke``; the always-delivered instructions must point it at the gateway as
+    the fallback, not tell it the gateway is only for hosts without lazy loading.
+    """
+    from kdive.mcp.schema.tool_index import build_instructions
+
+    text = build_instructions(gateway_enabled=False)
+    assert _MISSCOPED_CLAUSE not in text, (
+        "gateway-off instructions must not scope the gateway to hosts "
+        "'without lazy tool loading'; lazy hosts that materialise a subset need it too"
+    )
+    assert "tools.invoke" in text and "tools.search" in text
