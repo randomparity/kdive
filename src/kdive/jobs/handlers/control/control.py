@@ -14,7 +14,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
@@ -34,15 +34,19 @@ def _resolved_domain_name(system: System) -> str:
     return system.domain_name or domain_name_for(system.id)
 
 
-async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarget:
-    """Resolve a power job's domain/project, re-checking READY under the SYSTEM lock.
+async def _power_target(
+    conn: AsyncConnection, system_id: UUID, action: PowerAction
+) -> _ControlTarget:
+    """Resolve a power job's domain/project, re-checking the required state under the SYSTEM lock.
 
-    The READY re-check is power-specific policy (ADR-0320): a power job admitted while READY
+    Every action except ``resume`` requires ``READY`` (ADR-0320): a power job admitted while READY
     may dequeue after a ready->crashing/crashed transition, and a CRASHING (mid-force_crash) or
     CRASHED System holds crash evidence that must not be destroyed through the power path
-    (ADR-0325). ``terminal=True`` because the state will not improve on retry — dead-letter rather
-    than churn. (`force_crash` has its own precheck path; this helper is power-only.)
+    (ADR-0325). ``resume`` (ADR-0378) is the exception — it requires ``PAUSED`` (a start_paused
+    restore's suspended guest) and is refused from every other state. ``terminal=True`` because the
+    state will not improve on retry. (`force_crash` has its own precheck path; this is power-only.)
     """
+    required = SystemState.PAUSED if action is PowerAction.RESUME else SystemState.READY
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -51,10 +55,15 @@ async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarge
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
-        if system.state is not SystemState.READY:
+        if system.state is not required:
+            detail = (
+                f"resume requires a {required.value} system"
+                if action is PowerAction.RESUME
+                else "power requires a READY system; crash evidence on a non-READY system is "
+                "protected from the power path"
+            )
             raise CategorizedError(
-                "power requires a READY system; crash evidence on a non-READY system is "
-                "protected from the power path",
+                detail,
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(system_id), "current_status": system.state.value},
                 terminal=True,
@@ -79,9 +88,16 @@ async def power_handler(
     payload = load_payload(job, PowerPayload)
     system_id = UUID(payload.system_id)
     action = payload.action
-    target = await _power_target(conn, system_id)
+    target = await _power_target(conn, system_id, action)
     control = await _controller(conn, system_id, resolver)
-    await asyncio.to_thread(control.power, target.domain_name, action)
+    try:
+        await asyncio.to_thread(control.power, target.domain_name, action)
+    except CategorizedError:
+        # A failed virDomainResume leaves the guest in an indeterminate power state, so PAUSED
+        # is not a safe landing: route paused->failed (ADR-0378). Other actions move no state.
+        if action is PowerAction.RESUME:
+            await _fail_resume(conn, system_id)
+        raise
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
         if system is None:
@@ -90,6 +106,11 @@ async def power_handler(
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"system_id": str(system_id)},
             )
+        # RESUME is the one power action that moves System state: paused->ready (ADR-0378).
+        transition = f"power:{action.value}"
+        if action is PowerAction.RESUME and system.state is SystemState.PAUSED:
+            await SYSTEMS.update_state(conn, system_id, SystemState.READY)
+            transition = "paused->ready"
         await audit.record(
             conn,
             job_context_from_job(job, target.project),
@@ -97,12 +118,20 @@ async def power_handler(
                 tool="control.power",
                 object_kind="systems",
                 object_id=system_id,
-                transition=f"power:{action.value}",
+                transition=transition,
                 args={"system_id": str(system_id), "action": action.value},
                 project=target.project,
             ),
         )
     return str(system_id)
+
+
+async def _fail_resume(conn: AsyncConnection, system_id: UUID) -> None:
+    """Route a PAUSED System to FAILED after a failed resume; tolerant of a raced state change."""
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is not None and system.state is SystemState.PAUSED:
+            await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
 
 
 _CrashAction = Literal["done", "finalize", "crash"]

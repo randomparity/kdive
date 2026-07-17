@@ -24,6 +24,8 @@ def _control(domain: FakeDomain | None) -> tuple[LocalLibvirtControl, FakeDomain
         (PowerAction.OFF, "destroy"),
         (PowerAction.RESET, "reset"),
         (PowerAction.CYCLE, "reboot"),
+        # #1254: resume must call virDomainResume, NOT reboot (which would destroy paused state).
+        (PowerAction.RESUME, "resume"),
     ],
 )
 def test_power_maps_to_libvirt_call(action: PowerAction, expected_call: str) -> None:
