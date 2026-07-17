@@ -26,12 +26,8 @@ Create or update a system shape.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Complete shape definition to upsert. |
-
-`request` fields:
-
-- `name` (`string`, required) — Shape name to upsert (e.g. 'medium').
-- `vcpus` (`integer`, required) — Virtual CPU count (> 0).
-- `memory_mb` (`integer`, required) — Memory in MiB, a whole-GB multiple (> 0).
-- `disk_gb` (`integer`, required) — Disk size in GiB (> 0).
-- `pcie_match` (`string (nullable)`, optional) — Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex).
+| `disk_gb` | integer | yes | Disk size in GiB (> 0). |
+| `memory_mb` | integer | yes | Memory in MiB, a whole-GB multiple (> 0). |
+| `name` | string | yes | Shape name to upsert (e.g. 'medium'). |
+| `pcie_match` | string (nullable) | no | Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex). |
+| `vcpus` | integer | yes | Virtual CPU count (> 0). |

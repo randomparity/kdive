@@ -298,11 +298,9 @@ def test_images_registrar_exposes_annotations_and_invokes_wrappers(
             assert _destructive_hint(tools[BUILD_TOOL]) is False
             assert _destructive_hint(tools[PRUNE_TOOL]) is True
 
-            request = images_registrar.ImageBuildRequest(
-                provider="local-libvirt",
-                name="fedora-kdive-ready-44",
+            build_resp = await _call_registered_tool(
+                tools[BUILD_TOOL], "local-libvirt", "fedora-kdive-ready-44"
             )
-            build_resp = await _call_registered_tool(tools[BUILD_TOOL], request)
             ctx["value"] = _admin_ctx()
             prune_resp = await _call_registered_tool(tools[PRUNE_TOOL], "registrar boundary")
 

@@ -67,15 +67,11 @@ Open an investigation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Investigation creation request. |
-
-`request` fields:
-
-- `project` (`string`, required) — Project to create the Investigation under.
-- `title` (`string`, required) — Human-readable title (1..=200 chars).
-- `description` (`string (nullable)`, optional) — Optional free-form description for reporting (<=4096 chars).
-- `external_refs` (`array<object> (nullable)`, optional) — Optional external tracker refs (each with tracker, id, url).
-- `idempotency_key` (`string (nullable)`, optional) — Replay-safe key; a repeated key returns the prior envelope.
+| `description` | string (nullable) | no | Optional free-form description for reporting (<=4096 chars). |
+| `external_refs` | array<object> (nullable) | no | Optional external tracker refs (each with tracker, id, url). |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `project` | string | yes | Project to create the Investigation under. |
+| `title` | string | yes | Human-readable title (1..=200 chars). |
 
 ## `investigations.set`
 

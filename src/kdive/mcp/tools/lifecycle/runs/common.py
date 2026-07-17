@@ -188,7 +188,7 @@ def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]
     if required_cmdline is None:
         return {}
     # The platform-owned boot args (#748). Extra kernel debug args are set via runs.install.cmdline
-    # (per-boot, no rebuild) or runs.complete_build.request.cmdline (at build finalization).
+    # (per-boot, no rebuild) or the runs.complete_build cmdline field (at build finalization).
     return {"required_cmdline": required_cmdline}
 
 

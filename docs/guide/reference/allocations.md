@@ -76,37 +76,36 @@ a ``configuration_error`` naming the ceiling.
 
 Two outcomes on success: the allocation is admitted immediately (state
 ``granted``, ready to use), or — when a capacity denial is hit with
-``request.on_capacity="queue"`` — it comes back queued (state ``requested``)
+``on_capacity="queue"`` — it comes back queued (state ``requested``)
 holding a queue position instead of a live grant. A queued allocation is not
 usable yet; poll `allocations.wait` on its id until it leaves the ``requested``
 state before treating it as granted.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `arch` | string (nullable) | no | Guest architecture to place and price for (e.g. 'ppc64le'); omit for an architecture-blind request. When set, only hosts that can boot it are candidates (a host advertising other guest arches is skipped; one advertising none is still eligible), and the reserved cost reflects the host's accelerator for this arch — an emulated (TCG) guest is priced above a native (KVM) one. The bill is finalized from the System's provisioned architecture. |
+| `disk_gb` | integer (nullable) | no | Guest disk in GB (part of the custom triple; omit when using a shape). Sizes the guest's usable disk — the filesystem grows to fill it on first boot — so allow headroom for tool installs + build artifacts + a vmcore. Bounded by the host disk ceiling (over-ceiling is a configuration_error). |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior grant. |
+| `memory_gb` | integer (nullable) | no | Guest memory in GB (part of the custom triple; omit when using a shape). |
+| `on_capacity` | `deny`, `queue` | no | On a capacity denial (host cap / concurrency quota): 'deny' (default) returns the denial; 'queue' enqueues a durable 'requested' allocation holding a queue position (no budget/lease/occupancy). Budget and configuration denials always hard-deny. |
+| `pcie_devices` | array<string> | no | PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim. |
 | `project` | string | yes | Project to admit the allocation for. |
-| `request` | object | yes | Allocation request payload: size, lease window, resource selector. |
+| `resource` | object(mode=id) \| object(mode=kind) \| object(mode=pool) | no | Resource selector chosen by its 'mode': by kind (default), by id, or by pool. Omit to select any resource of the default kind. |
+| `shape` | string (nullable) | no | Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source). |
+| `vcpus` | integer (nullable) | no | Guest vCPUs (part of the custom triple; omit when using a shape). |
+| `window` | number \| string \| null | no | Lease window length in hours, e.g. 24. |
 
-`request` fields:
+`resource` fields:
 
-- `vcpus` (`integer (nullable)`, optional)
-- `memory_gb` (`integer (nullable)`, optional)
-- `window` (`number \| string \| null`, optional) — Lease window length in hours, e.g. 24.
-- `shape` (`string (nullable)`, optional) — Named size from `shapes.list`; mutually exclusive with vcpus/memory_gb/disk_gb (supply exactly one sizing source).
-- `disk_gb` (`integer (nullable)`, optional) — Guest disk in GB (part of the custom triple; omit when using a shape). Sizes the guest's usable disk — the filesystem grows to fill it on first boot — so allow headroom for tool installs + build artifacts + a vmcore. Bounded by the host disk ceiling (over-ceiling is a configuration_error).
-- `resource` (`object(mode=id) \| object(mode=kind) \| object(mode=pool)`, optional)
-  - _variant object(mode=id):_
-    - `mode` (``=id``, required)
-    - `resource_id` (`string`, required)
-  - _variant object(mode=kind):_
-    - `mode` (``=kind``, optional)
-    - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
-  - _variant object(mode=pool):_
-    - `mode` (``=pool``, optional)
-    - `pool` (`string`, required)
-- `arch` (`string (nullable)`, optional) — Guest architecture to place and price for (e.g. 'ppc64le'); omit for an architecture-blind request. When set, only hosts that can boot it are candidates (a host advertising other guest arches is skipped; one advertising none is still eligible), and the reserved cost reflects the host's accelerator for this arch — an emulated (TCG) guest is priced above a native (KVM) one. The bill is finalized from the System's provisioned architecture.
-- `pcie_devices` (`array<string>`, optional) — PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.
-- `on_capacity` (``deny`, `queue``, optional) — On a capacity denial (host cap / concurrency quota): 'deny' (default) returns the denial; 'queue' enqueues a durable 'requested' allocation holding a queue position (no budget/lease/occupancy). Budget and configuration denials always hard-deny.
+- _variant object(mode=id):_
+  - `mode` (``=id``, required)
+  - `resource_id` (`string`, required)
+- _variant object(mode=kind):_
+  - `mode` (``=kind``, optional)
+  - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
+- _variant object(mode=pool):_
+  - `mode` (``=pool``, optional)
+  - `pool` (`string`, required)
 
 ## `allocations.wait`
 

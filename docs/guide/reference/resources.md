@@ -117,17 +117,13 @@ Register a fault-inject runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Fault-inject runtime resource registration request. |
-
-`request` fields:
-
-- `name` (`string`, required) — The (kind, name) identity for the new resource.
-- `cost_class` (`string`, required) — The cost class for pricing.
-- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
-- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable.
-- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
-- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
-- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
+| `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
+| `cost_class` | string | yes | The cost class for pricing. |
+| `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
+| `name` | string | yes | The (kind, name) identity for the new resource. |
+| `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
+| `secret_refs` | array<string> | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged. |
+| `vcpus` | integer | yes | The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable. |
 
 ## `resources.register_local_libvirt`
 
@@ -137,18 +133,14 @@ Register a local-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Local-libvirt runtime resource registration request. |
-
-`request` fields:
-
-- `name` (`string`, required) — The (kind, name) identity for the new resource.
-- `cost_class` (`string`, required) — The cost class for pricing.
-- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
-- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable.
-- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
-- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
-- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
-- `host_uri` (`string`, required) — Local-libvirt provider host URI.
+| `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
+| `cost_class` | string | yes | The cost class for pricing. |
+| `host_uri` | string | yes | Local-libvirt provider host URI. |
+| `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
+| `name` | string | yes | The (kind, name) identity for the new resource. |
+| `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
+| `secret_refs` | array<string> | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged. |
+| `vcpus` | integer | yes | The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable. |
 
 ## `resources.register_remote_libvirt`
 
@@ -158,19 +150,15 @@ Register a remote-libvirt runtime resource.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Remote-libvirt runtime resource registration request. |
-
-`request` fields:
-
-- `name` (`string`, required) — The (kind, name) identity for the new resource.
-- `cost_class` (`string`, required) — The cost class for pricing.
-- `concurrent_allocation_cap` (`integer`, optional) — Per-host concurrent-allocation cap (> 0).
-- `vcpus` (`integer`, required) — The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable.
-- `memory_mb` (`integer`, required) — The host's memory size ceiling in MiB (admission ≤-resource-caps check).
-- `secret_refs` (`array<string>`, optional) — Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged.
-- `owner_project` (`string (nullable)`, optional) — Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource.
-- `host_uri` (`string`, required) — Remote-libvirt provider host URI.
-- `base_image` (`string`, required) — Registered remote-libvirt base image name.
+| `base_image` | string | yes | Registered remote-libvirt base image name. |
+| `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
+| `cost_class` | string | yes | The cost class for pricing. |
+| `host_uri` | string | yes | Remote-libvirt provider host URI. |
+| `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
+| `name` | string | yes | The (kind, name) identity for the new resource. |
+| `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
+| `secret_refs` | array<string> | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged. |
+| `vcpus` | integer | yes | The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable. |
 
 ## `resources.renew`
 

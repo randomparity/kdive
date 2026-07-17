@@ -65,15 +65,11 @@ per-arch byte contract.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object (nullable) | no | Optional build finalization fields: cmdline, build_id, and source. |
+| `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
+| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot. |
 | `run_id` | string | yes | The external-build Run to finalize. |
-
-`request` fields:
-
-- `cmdline` (`string (nullable)`, optional) — Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot.
-- `build_id` (`string (nullable)`, optional) — GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive.
-- `source_label` (`string (nullable)`, optional) — Optional unverified provenance: a freeform handle for the local source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; kdive does not clone, resolve, or verify it. 1..256 printable characters; bound on the first completion. Omit if unknown.
-- `source_ref` (`string (nullable)`, optional) — Optional unverified provenance: the ref/commit you claim produced these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; treated as an opaque label, never fetched. 1..256 printable characters; bound on the first completion. Omit if unknown.
+| `source_label` | string (nullable) | no | Optional unverified provenance: a freeform handle for the local source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; kdive does not clone, resolve, or verify it. 1..256 printable characters; bound on the first completion. Omit if unknown. |
+| `source_ref` | string (nullable) | no | Optional unverified provenance: the ref/commit you claim produced these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; treated as an opaque label, never fetched. 1..256 printable characters; bound on the first completion. Omit if unknown. |
 
 ## `runs.create`
 
@@ -81,26 +77,32 @@ per-arch byte contract.
 
 Create a run, bound to a system or unbound against a target_kind.
 
+After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then
+runs.complete_build. Extra kernel cmdline args are passed later as the `cmdline` field on
+runs.complete_build.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Run creation request. After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are passed later as `request.cmdline` on runs.complete_build. |
+| `build_profile` | object(schema_version=1) | yes | Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload. |
+| `expected_boot_failure` | object(free-form) (nullable) | no | Optional declared boot crash. Use a named preset for a maintained, version- and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical kernel console signature. For a custom signature use {'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '\|' to OR alternatives (e.g. 'Oops\|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `investigation_id` | string | yes | Investigation to attach the Run to. |
+| `label` | string (nullable) | no | Optional human handle for this Run, echoed back as data.label in runs.get / runs.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
+| `reuse_requirement` | object (nullable) | no | Optional System reuse assertion payload. |
+| `system_id` | string (nullable) | no | Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind. |
+| `target_kind` | string (nullable) | no | Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set. |
 
-`request` fields:
+`build_profile` fields:
 
-- `investigation_id` (`string`, required) — Investigation to attach the Run to.
-- `build_profile` (`object(schema_version=1)`, required) — Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the request.cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload.
-  - `schema_version` (``=1``, required)
-  - `arch` (`string`, optional) — Target CPU architecture the uploaded kernel is built for. One of ppc64le, x86_64; defaults to x86_64. Selects the boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md.
-- `system_id` (`string (nullable)`, optional) — Ready System to bind now. Omit to create an unbound Run that targets `target_kind` and is bound later with runs.bind.
-- `target_kind` (`string (nullable)`, optional) — Resource kind the Run builds for. Required when system_id is omitted; derived from the System when system_id is set.
-- `expected_boot_failure` (`object(free-form) (nullable)`, optional) — Optional declared boot crash. Use a named preset for a maintained, version- and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or {'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical kernel console signature. For a custom signature use {'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '|' to OR alternatives (e.g. 'Oops|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome.
-- `reuse_requirement` (`object (nullable)`, optional) — Optional System reuse assertion payload.
-  - `vcpus` (`integer (nullable)`, optional)
-  - `memory_gb` (`integer (nullable)`, optional)
-  - `disk_gb` (`integer (nullable)`, optional)
-  - `pcie` (`array<string> (nullable)`, optional)
-- `idempotency_key` (`string (nullable)`, optional) — Replay-safe key; a repeated key returns the prior envelope.
-- `label` (`string (nullable)`, optional) — Optional human handle for this Run, echoed back as data.label in runs.get / runs.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle.
+- `schema_version` (``=1``, required)
+- `arch` (`string`, optional) — Target CPU architecture the uploaded kernel is built for. One of ppc64le, x86_64; defaults to x86_64. Selects the boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md.
+
+`reuse_requirement` fields:
+
+- `vcpus` (`integer (nullable)`, optional)
+- `memory_gb` (`integer (nullable)`, optional)
+- `disk_gb` (`integer (nullable)`, optional)
+- `pcie` (`array<string> (nullable)`, optional)
 
 `build_profile` examples:
 
@@ -119,7 +121,7 @@ _external-upload lane (build locally, upload the prebuilt artifact):_
 Return one run; `succeeded` means build done. `data.steps` has install/boot status.
 
 `data.required_cmdline` is the platform-required boot args; append extra kernel debug
-args (e.g. `dhash_entries=1`) with the `request.cmdline` field on
+args (e.g. `dhash_entries=1`) with the `cmdline` field on
 `runs.complete_build`.
 
 Console evidence: `refs.console` is the boot-window console snapshot and

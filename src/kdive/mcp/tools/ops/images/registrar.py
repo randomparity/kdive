@@ -14,7 +14,7 @@ from typing import Annotated
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from kdive.jobs.payloads import ImageBuildPayload
 from kdive.mcp.auth import current_context
@@ -32,27 +32,6 @@ from kdive.mcp.tools.ops.images.retention import extend, prune_expired
 from kdive.mcp.tools.ops.images.upload import ImageUploadRequest, upload
 from kdive.services.images.retention import ImageSweepStore
 from kdive.services.images.upload import UploadObjectStore
-
-
-class ImageBuildRequest(BaseModel):
-    """MCP-facing public image build/publish request shared by both tools."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    provider: str = Field(description="The provider whose plane builds or built the image.")
-    name: str = Field(description="The catalog image name.")
-    packages: tuple[str, ...] = Field(
-        default=(),
-        description="Optional package override; omitted uses the provider catalog default.",
-    )
-
-    def to_payload(self) -> ImageBuildPayload:
-        """Convert the MCP request into the durable IMAGE_BUILD job payload."""
-        return ImageBuildPayload(
-            provider=self.provider,
-            name=self.name,
-            packages=self.packages,
-        )
 
 
 def register(
@@ -74,25 +53,47 @@ def register(
 def _register_images_build(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=BUILD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_build(
-        request: Annotated[
-            ImageBuildRequest,
-            Field(description="Public image build request."),
+        provider: Annotated[
+            str, Field(description="The provider whose plane builds or built the image.")
         ],
+        name: Annotated[str, Field(description="The catalog image name.")],
+        packages: Annotated[
+            tuple[str, ...],
+            Field(
+                default=(),
+                description="Optional package override; omitted uses the provider catalog default.",
+            ),
+        ] = (),
     ) -> ToolResponse:
         """Enqueue an image build job."""
-        return await build(pool, current_context(), payload=request.to_payload())
+        return await build(
+            pool,
+            current_context(),
+            payload=ImageBuildPayload(provider=provider, name=name, packages=packages),
+        )
 
 
 def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=PUBLISH_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_publish(
-        request: Annotated[
-            ImageBuildRequest,
-            Field(description="Public image publish request."),
+        provider: Annotated[
+            str, Field(description="The provider whose plane builds or built the image.")
         ],
+        name: Annotated[str, Field(description="The catalog image name.")],
+        packages: Annotated[
+            tuple[str, ...],
+            Field(
+                default=(),
+                description="Optional package override; omitted uses the provider catalog default.",
+            ),
+        ] = (),
     ) -> ToolResponse:
         """Publish a built image into the catalog."""
-        return await publish(pool, current_context(), payload=request.to_payload())
+        return await publish(
+            pool,
+            current_context(),
+            payload=ImageBuildPayload(provider=provider, name=name, packages=packages),
+        )
 
 
 def _register_images_upload(
@@ -100,13 +101,33 @@ def _register_images_upload(
 ) -> None:
     @app.tool(name=UPLOAD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_upload(
-        request: Annotated[
-            ImageUploadRequest,
-            Field(description="Private image upload registration request."),
+        project: Annotated[str, Field(description="The owning project for the private image.")],
+        name: Annotated[str, Field(description="The catalog image name.")],
+        arch: Annotated[str, Field(description="The target architecture.")],
+        quarantine_key: Annotated[
+            str, Field(description="The object-store key of the quarantined upload.")
         ],
+        lifetime_seconds: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description="TTL seconds (clamped to the ceiling); default applies.",
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Create an image upload request."""
-        return await upload(pool, current_context(), upload_store, request)
+        return await upload(
+            pool,
+            current_context(),
+            upload_store,
+            ImageUploadRequest(
+                project=project,
+                name=name,
+                arch=arch,
+                quarantine_key=quarantine_key,
+                lifetime_seconds=lifetime_seconds,
+            ),
+        )
 
 
 def _register_images_delete(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -151,6 +172,5 @@ def _register_images_extend(app: FastMCP, pool: AsyncConnectionPool) -> None:
 
 
 __all__ = [
-    "ImageBuildRequest",
     "register",
 ]
