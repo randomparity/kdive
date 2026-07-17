@@ -128,6 +128,15 @@ def _resolver_tools_registrar(
     return _register
 
 
+def _runs_tools_registrar(
+    resolver: ProviderResolver, secret_registry: SecretRegistry
+) -> PlaneRegistrar:
+    def _register(app: FastMCP, pool: AsyncConnectionPool) -> None:
+        runs_tools.register(app, pool, resolver=resolver, secret_registry=secret_registry)
+
+    return _register
+
+
 def _vmcore_tools_registrar(
     resolver: ProviderResolver, secret_registry: SecretRegistry
 ) -> PlaneRegistrar:
@@ -248,7 +257,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         _pool_only_plane_registrar(ops_breakglass_tools.register),
         _resolver_tools_registrar(systems_tools.register, assembly.resolver),
         _pool_only_plane_registrar(investigations.register),
-        _resolver_tools_registrar(runs_tools.register, assembly.resolver),
+        _runs_tools_registrar(assembly.resolver, assembly.secret_registry),
         _resolver_tools_registrar(control_tools.register, assembly.resolver),
         _resolver_tools_registrar(artifacts_tools.register, assembly.resolver),
         _vmcore_tools_registrar(assembly.resolver, assembly.secret_registry),

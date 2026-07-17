@@ -141,6 +141,17 @@ freeform claim: `client_attested: true` with the `source_label`/`source_ref` pas
 `runs.complete_build`. Compare it across runs to track which local source produced each
 build.
 
+Liveness: `data.liveness` tells a healthy guest from one that livelocked **after** a ready
+boot — a case `boot_outcome=ready` and `control.watch_for_crash` (which sees no crash
+signature) both miss. It appears only on a ready-booted local-libvirt Run, and is
+`{state, console_storm, ssh_reachable, checked_at}`: `state` is `healthy`, `degraded`, or
+`unknown`; `console_storm` is true when the current console shows a runaway printk /
+OOM-retry storm (e.g. `callbacks suppressed`, `VM_FAULT_OOM`, `soft lockup`);
+`ssh_reachable` is the latest `systems.check_ssh_reachable` verdict (`null` until you have
+probed once — call it to refresh) and `checked_at` is when that probe ran (`null` when
+unprobed). `state` is `degraded` when the console storms or SSH is unreachable, so treat
+`degraded` as a wedged guest even while `status=succeeded`.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `include_console_artifacts` | boolean | no | Inline the Run-scoped console manifest under `data.console_artifacts`. Defaults false: a status read stays token-cheap and the boot console snapshot is always at `refs.console`. Set true only when you need the full correlated console listing (boot snapshot plus rotating parts). |
