@@ -53,14 +53,24 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
   unwind-quality-dependent), not a property this feature controls. `finish` at a normal
   breakpoint therefore runs to frame #0's caller and returns a regular stop; that functional
   behavior is what the live smoke proves.
-- **Missing line info (`step`/`next`):** these verbs need line-number information for the
-  current PC. Where a live kernel has none (a stripped region, or a module whose symbols were
-  not loaded via `debug.load_module_symbols`), gdb does not error — `-exec-step`/`-exec-next`
-  single-step until control reaches a line with info, which over such code can run out the
-  bounded wait and return `timed_out=True` at an unrelated frame. This is the same
-  timeout+interrupt path as a long-running `continue`; an agent that wants deterministic
-  instruction-granular progress in a no-line-info region uses `debug.step_instruction`. The
-  `step`/`next` wrapper docstrings state this so the agent-facing schema is the contract.
+- **Symbol-poor regions (`step`/`next`):** these verbs need symbol coverage for the current PC,
+  and gdb splits into two sub-cases the contract must state, because both land where an agent is
+  most likely stepping blind (a stripped region, or a module whose symbols were not loaded via
+  `debug.load_module_symbols`):
+  - *(a) function bounds known, no line table:* gdb does not error — `-exec-step`/`-exec-next`
+    single-step until control reaches a line with info, which over such code can run out the
+    bounded wait and return `timed_out=True` at an unrelated frame (the same timeout+interrupt
+    path as a long-running `continue`).
+  - *(b) no function-bounds symbol at all* (a bare kernel address, a trampoline/PLT): gdb
+    returns a synchronous `^error "Cannot find bounds of current function"`, which — via the
+    same `execute_mi_command`-raises-on-`^error` mechanism as the no-hang path — surfaces as
+    `DEBUG_ATTACH_FAILURE`, **not** `timed_out=True`.
+
+  `debug.step_instruction` is the fallback for **both** sub-cases. The `step`/`next` wrapper
+  docstrings state that a symbol-poor region may return either `timed_out=True` or
+  `DEBUG_ATTACH_FAILURE` and to use `step_instruction` there — so the agent does not misread the
+  attach-failure as a dead session. A fake-controller unit test scripts the bounds `^error` for
+  `-exec-step` to pin sub-case (b), mirroring criterion #3.
 - **Invalid timeout:** a negative or non-finite `timeout_sec` raises
   `CONFIGURATION_ERROR`. The shared `ExecutionControl.resume` guard is generalized to name the
   resume family, not `continue` specifically (message "gdb/MI resume timeout must be a finite

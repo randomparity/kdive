@@ -79,13 +79,15 @@ carry the shared `implemented` gdb-MI maturity.
   contract (per the wrapper-docstring rule).
 - `debug.step`/`next`/`step_instruction` are source-and-instruction granular, so they need
   loaded debuginfo for `step`/`next` line boundaries — the same debuginfo the backtrace/frame
-  ops (ADR-0275) already assume; `step_instruction` works without line tables. Where the current
-  PC has no line information (a stripped kernel region or a module whose symbols were not loaded),
-  gdb does not error: `-exec-step`/`-exec-next` single-step until control reaches a line with
-  info, which over such code can run out the bounded wait and return `timed_out=True` at an
-  unrelated frame — the same timeout+interrupt path as a long-running `continue`. The `step`/`next`
-  wrapper docstrings tell the agent to use `step_instruction` for deterministic progress in a
-  no-line-info region, so the degradation is a stated contract rather than a silent surprise.
+  ops (ADR-0275) already assume; `step_instruction` works without line tables. In a symbol-poor
+  region gdb splits into two behaviors: with function bounds but no line table, `-exec-step`/
+  `-exec-next` single-step until a line with info and can run out the bounded wait
+  (`timed_out=True`); with no function-bounds symbol at all (a bare address or trampoline), gdb
+  returns a synchronous `^error "Cannot find bounds of current function"` that surfaces as
+  `DEBUG_ATTACH_FAILURE` via the same `^error` path as the no-hang mechanism. The `step`/`next`
+  wrapper docstrings state both outcomes and point `step_instruction` as the fallback for both,
+  so the degradation is a stated contract and the agent does not misread the attach-failure as a
+  dead session.
 - The reused `ExecutionControl.resume` invalid-timeout guard is generalized from the
   `continue`-specific message/code (`bad_continue_timeout`) to a verb-neutral one
   (`bad_resume_timeout`, "gdb/MI resume timeout ..."), so a bad `timeout_sec` on `debug.step`
