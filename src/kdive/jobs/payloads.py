@@ -56,6 +56,37 @@ class ReprovisionPayload(SystemPayload):
     profile_digest: str
 
 
+class SnapshotPayload(SystemPayload):
+    """A request to capture a named checkpoint of a System (ADR-0378, #1254).
+
+    ``snapshot_id`` is the pre-minted ``snapshots`` ledger row the handler drives
+    ``creating → available|failed``.
+    """
+
+    snapshot_id: str
+    name: str
+    include_memory: bool
+
+    @field_validator("snapshot_id")
+    @classmethod
+    def _valid_snapshot_id(cls, value: str) -> str:
+        UUID(value)
+        return value
+
+
+class RestorePayload(SystemPayload):
+    """A request to revert a System to a named checkpoint (ADR-0378, #1254)."""
+
+    name: str
+    start_paused: bool
+
+
+class SnapshotDeletePayload(SystemPayload):
+    """A request to delete a named checkpoint of a System (ADR-0378, #1254)."""
+
+    name: str
+
+
 class AuthorizeSshKeyPayload(SystemPayload):
     """A request to authorize an agent SSH public key in a System's guest (ADR-0271)."""
 
@@ -263,6 +294,9 @@ class DiagnosticsWorkerCheckPayload(_PayloadBase):
 type _ActivePayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
+    | type[SnapshotPayload]
+    | type[RestorePayload]
+    | type[SnapshotDeletePayload]
     | type[AuthorizeSshKeyPayload]
     | type[CheckSshReachablePayload]
     | type[ConsoleRotatePayload]
@@ -278,6 +312,9 @@ type _ActivePayloadModel = (
 type ActivePayloadModel = (
     SystemPayload
     | ReprovisionPayload
+    | SnapshotPayload
+    | RestorePayload
+    | SnapshotDeletePayload
     | AuthorizeSshKeyPayload
     | CheckSshReachablePayload
     | ConsoleRotatePayload
@@ -295,6 +332,9 @@ type PayloadModel = ActivePayloadModel
 _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.PROVISION: SystemPayload,
     JobKind.REPROVISION: ReprovisionPayload,
+    JobKind.SNAPSHOT: SnapshotPayload,
+    JobKind.RESTORE: RestorePayload,
+    JobKind.DELETE_SNAPSHOT: SnapshotDeletePayload,
     JobKind.TEARDOWN: SystemPayload,
     JobKind.INSTALL: InstallPayload,
     JobKind.BOOT: RunPayload,

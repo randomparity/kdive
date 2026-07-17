@@ -141,6 +141,8 @@ def provider_resolver(
     bootstrap_key_customizer: Callable[[str], Callable[[str], None]] | None = (
         authorized_key_customizer
     ),
+    snapshotter: object | None = None,
+    supports_snapshots: bool = True,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -193,6 +195,7 @@ def provider_resolver(
                 if supported_introspection is not None
                 else INTROSPECTION_MODES
             ),
+            supports_snapshots=supports_snapshots,
         ),
         rootfs=RootfsCapabilities(validator=lambda _: None),
         platform_root_cmdline=platform_root_cmdline,
@@ -201,6 +204,7 @@ def provider_resolver(
             if bootstrap_key_customizer is None
             else BootstrapKeyCapabilities(customizer=bootstrap_key_customizer)
         ),
+        snapshot=cast(Any, snapshotter) if snapshotter is not None else None,
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 

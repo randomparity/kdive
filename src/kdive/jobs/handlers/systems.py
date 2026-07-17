@@ -16,8 +16,8 @@ from kdive.artifacts import upload_manifest
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, SYSTEMS
-from kdive.domain.capacity.state import IllegalTransition, SystemState
+from kdive.db.repositories import ARTIFACTS, SNAPSHOTS, SYSTEMS, ObjectNotFound, snapshot_by_name
+from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -28,7 +28,14 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
+from kdive.jobs.payloads import (
+    ReprovisionPayload,
+    RestorePayload,
+    SnapshotDeletePayload,
+    SnapshotPayload,
+    SystemPayload,
+    load_payload,
+)
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.prereqs.system_bootstrap_key import (
     delete_system_bootstrap_key,
@@ -39,6 +46,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -450,6 +458,165 @@ async def reprovision_handler(
     )
 
 
+def _require_snapshotter(runtime: ProviderRuntime, system_id: UUID) -> Snapshotter:
+    if runtime.snapshot is None:  # Defense in depth: the tool gates on supports_snapshots.
+        raise CategorizedError(
+            "provider does not support snapshots",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(system_id)},
+        )
+    return runtime.snapshot
+
+
+async def _fail_snapshot_row(conn: AsyncConnection, snapshot_id: UUID) -> None:
+    """Drive a ``snapshots`` row to ``failed``; tolerant of an already-terminal/absent row."""
+    try:
+        await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.FAILED)
+    except IllegalTransition, ObjectNotFound:
+        _log.info("snapshot row %s already terminal or gone; not marking failed", snapshot_id)
+
+
+async def snapshot_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Create the libvirt snapshot and drive the ledger row ``creating -> available|failed``.
+
+    The System row is never touched: a snapshot is non-destructive to System identity and is
+    permitted during a live Run (ADR-0378).
+    """
+    payload = load_payload(job, SnapshotPayload)
+    system_id = UUID(payload.system_id)
+    snapshot_id = UUID(payload.snapshot_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        await _fail_snapshot_row(conn, snapshot_id)
+        raise CategorizedError(
+            "snapshot target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    if system.state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown/revert.
+        await _fail_snapshot_row(conn, snapshot_id)
+        return str(snapshot_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    try:
+        await asyncio.to_thread(
+            functools.partial(
+                snapshotter.create, domain, payload.name, include_memory=payload.include_memory
+            )
+        )
+    except CategorizedError:
+        await _fail_snapshot_row(conn, snapshot_id)
+        raise
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.AVAILABLE)
+    return str(snapshot_id)
+
+
+async def _commit_restore_result(
+    conn: AsyncConnection, job: Job, system_id: UUID, project: str, *, start_paused: bool
+) -> None:
+    """Commit ``restoring -> paused|ready`` under the SYSTEM lock (re-reading state first).
+
+    Committed before the handler returns, so the worker marks the RESTORE job terminal only
+    after this transition lands — the RESTORING stuck-transition repair therefore never observes
+    a terminal job alongside a still-RESTORING System on the success path (ADR-0378).
+    """
+    target = SystemState.PAUSED if start_paused else SystemState.READY
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        current = await _locked_system_state(conn, system_id)
+        if current is SystemState.RESTORING:
+            await SYSTEMS.update_state(conn, system_id, target)
+            await audit_transition(
+                conn,
+                job,
+                project=project,
+                object_id=system_id,
+                transition=f"restoring->{target.value}",
+                tool="systems.restore",
+            )
+
+
+async def restore_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Revert the domain and drive ``restoring -> ready|paused`` (or ``failed`` on error)."""
+    payload = load_payload(job, RestorePayload)
+    system_id = UUID(payload.system_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        raise CategorizedError(
+            "restore target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    if system.state is not SystemState.RESTORING:
+        return str(system_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    try:
+        await asyncio.to_thread(
+            functools.partial(
+                snapshotter.revert, domain, payload.name, start_paused=payload.start_paused
+            )
+        )
+    except CategorizedError:
+        # A half-reverted guest is indeterminate: route RESTORING -> FAILED, never back to READY.
+        await _record_system_failure(
+            conn,
+            job,
+            system_id=system_id,
+            project=system.project,
+            transition="restoring->failed",
+            tool="systems.restore",
+            operation="restore",
+        )
+        raise
+    await _commit_restore_result(
+        conn, job, system_id, system.project, start_paused=payload.start_paused
+    )
+    return str(system_id)
+
+
+async def snapshot_delete_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Delete the libvirt snapshot and remove the ledger row (idempotent)."""
+    payload = load_payload(job, SnapshotDeletePayload)
+    system_id = UUID(payload.system_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        raise CategorizedError(
+            "delete-snapshot target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    snapshotter = _require_snapshotter(binding.runtime, system_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    await asyncio.to_thread(snapshotter.delete, domain, payload.name)
+    row = await snapshot_by_name(conn, system_id, payload.name)
+    if row is not None:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            await SNAPSHOTS.delete(conn, row.id)
+    return str(system_id)
+
+
 async def _console_part_keys(conn: AsyncConnection, system_id: UUID) -> list[str]:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _CONSOLE_PART_LIKE))
@@ -572,6 +739,18 @@ def register_handlers(
         lambda conn, job: reprovision_handler(
             conn, job, resolver=resolver, secret_registry=secret_registry
         ),
+    )
+    registry.register(
+        JobKind.SNAPSHOT,
+        lambda conn, job: snapshot_handler(conn, job, resolver=resolver),
+    )
+    registry.register(
+        JobKind.RESTORE,
+        lambda conn, job: restore_handler(conn, job, resolver=resolver),
+    )
+    registry.register(
+        JobKind.DELETE_SNAPSHOT,
+        lambda conn, job: snapshot_delete_handler(conn, job, resolver=resolver),
     )
     registry.register(
         JobKind.AUTHORIZE_SSH_KEY,
