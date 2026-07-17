@@ -165,21 +165,14 @@ Only `step_instruction` (one machine instruction, terminates immediately from an
 in the panic context. Split the proof accordingly:
 
 **Files:**
-- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, exercise
-  **only** `debug.step_instruction`. The **primary, hard** assertion is that the step returns a
-  stop with `timed_out=False` (it completed, not ran out the wait). Also capture the
-  program-counter register (`rip`) via `debug.read_registers` **before** and **after** and **log**
-  the two values as a diagnostic — do **not** hard-assert they differ: the panic halt PC is
-  wherever the operator image is spinning at attach, and an unsteppable park (a `hlt`-with-IF=0
-  loop or a self-jump) leaves `rip` unchanged even though the tool is correct, so a hard
-  rip-inequality here would red the gate on a working feature. (The authoritative rip-advance
-  proof is the `scripts/live-debug.py` walk below, on a deterministic returnable frame.) Notes for
-  the implementer: `debug.read_registers` is **registered but not yet called** in this smoke —
-  add two calls (no new wiring, it goes through the same `_call_tool` path); its response is
-  `data = {register_name: hex_string}`, so read `before.data["rip"]` / `after.data["rip"]` (hex
-  strings keyed by name, not a numeric or a top-level PC field). Do not rely on the pre-existing
-  `symbol="panic"` disassembly (that window starts at panic's *entry*, not the halt PC). Do not
-  add `finish`/`step`/`next` here.
+- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — do **not** exercise any stepping verb here.
+  This smoke halts in the noreturn panic path, and a panic that parks the CPU in a `hlt` (IF=0)
+  is not steppable: a correct `step_instruction` stalls (`INFRASTRUCTURE_FAILURE`), so any
+  assertion here is image-dependent and false. **Confirmed by live test** (2026-07-17, this KVM
+  host): at a `hlt`-parked panic `step_instruction` transport-stalls; at an executing PC (booted
+  paused at the entry vector) it advances `rip` cleanly across 5 steps, and `step`/`next` in a
+  no-symbol region return `DEBUG_ATTACH_FAILURE` — the documented sub-case (b). The step proof
+  lives entirely in `scripts/live-debug.py step`.
 - `scripts/live-debug.py` — add a **new argparse subcommand** (e.g. `step`, its own subparser +
   `_dispatch` entry near lines ~545-589) that reuses `_stopped`'s setup to reach a **resumable,
   returnable** frame (`set_breakpoint(<sym>)` + `debug.continue`, lines ~418-430) on a

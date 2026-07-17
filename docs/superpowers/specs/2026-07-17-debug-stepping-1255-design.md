@@ -92,12 +92,13 @@ an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, t
    timeout — asserted by a unit test.
 4. A timed-out step interrupts back and returns `timed_out=True` — asserted by a unit test
    (mirroring `test_continue_interrupts_on_timeout`).
-5. The live smoke test exercises all four new verbs against real KVM (added to the promoted-ops
-   smoke), asserting each advances execution and returns a stop — proving the resume path works
-   on real gdb, not only the fake. It does **not** assert the outermost-frame refusal (see the
-   Refused-verb contract: not reliably reachable without a frame-select op); the no-hang
-   *mechanism* is criterion #3's deterministic fake test. `scripts/live-debug.py` demonstrates a
-   step.
+5. The step proof against real KVM is `scripts/live-debug.py step`, which reaches a resumable,
+   returnable frame on a booted kernel and drives all four verbs. The panic-halted promoted-ops
+   smoke does **not** exercise stepping: it halts in the noreturn panic path, where a `hlt`-parked
+   CPU is not steppable and a correct `step_instruction` stalls (live-confirmed 2026-07-17 — at an
+   executing PC it advances `rip` cleanly; at a `hlt` park it transport-stalls; `step`/`next` in a
+   no-symbol region return `DEBUG_ATTACH_FAILURE`, the documented sub-case (b)). The no-hang
+   *mechanism* is criterion #3's deterministic fake test.
 6. A negative/non-finite `timeout_sec` on any of the four tools raises `CONFIGURATION_ERROR`
    with code `bad_resume_timeout` (verb-neutral) — asserted by the migrated guard tests.
 7. Each of the four ops is audited: it writes exactly one `audit_log` row on success (asserted
