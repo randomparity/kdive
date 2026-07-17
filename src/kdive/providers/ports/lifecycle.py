@@ -275,3 +275,55 @@ class Controller(Protocol):
                 ``CONTROL_FAILURE``.
         """
         ...
+
+
+class Snapshotter(Protocol):
+    """Snapshot port keyed on provider domain name (ADR-0378).
+
+    A provider that advertises ``ProviderSupport.supports_snapshots`` wires a ``Snapshotter``
+    into ``ProviderRuntime.snapshot``. Snapshots are internal (stored inside the domain's disk
+    image), so ``delete``/``delete_all`` free the data with no external object-store cleanup.
+    """
+
+    def create(self, domain_name: str, name: str, *, include_memory: bool) -> None:
+        """Create a named checkpoint of a domain.
+
+        ``include_memory`` captures the live RAM+CPU state (a full system checkpoint, guest
+        must be running); otherwise a disk-only snapshot. A pre-existing snapshot of ``name`` is
+        replaced.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider snapshot fault or an
+                absent domain, ``CONFIGURATION_ERROR`` for invalid provider connection
+                configuration.
+        """
+        ...
+
+    def revert(self, domain_name: str, name: str, *, start_paused: bool) -> None:
+        """Revert a domain to a named checkpoint.
+
+        ``start_paused`` leaves the guest's vCPUs suspended after the revert (for a debugger
+        attach before execution resumes); otherwise the guest runs.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a missing snapshot,
+                ``INFRASTRUCTURE_FAILURE`` for a provider revert fault or an absent domain.
+        """
+        ...
+
+    def delete(self, domain_name: str, name: str) -> None:
+        """Delete a named checkpoint; idempotent (a missing snapshot is a no-op).
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider delete fault.
+        """
+        ...
+
+    def delete_all(self, domain_name: str) -> None:
+        """Delete every checkpoint of a domain; idempotent. Called at teardown so ``undefine``
+        cannot fail on residual snapshot metadata.
+
+        Raises:
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a provider delete fault.
+        """
+        ...
