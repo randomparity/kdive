@@ -218,13 +218,16 @@ All four live in the existing `systems` toolset registrar
   `include_memory=False` snapshot** (`configuration_error`, "cannot pause-restore a disk-only
   snapshot: it has no saved CPU/RAM state") — a memoryless revert cannot resume at an
   instruction; **rejects if a live Run exists** (`_has_live_run`, the reprovision rule — restore
-  discards the running guest, corrupting an active Run); **rejects if an active `SNAPSHOT` job
-  exists for the System** (`configuration_error`, "a snapshot capture is in progress"). The last
-  check is what makes the `RESTORING` fence a true domain-exclusivity guarantee: a snapshot stays
-  `READY` and does not fence via state, so without this check a restore could be admitted while a
-  capture's off-thread `snapshotCreateXML` still runs on the same domain — a revert landing
-  mid-capture. Admission queries the job queue for a non-terminal `SNAPSHOT` (and `RESTORE`) job
-  on this `system_id` before transitioning. **Also refuses if a debug session is attached** to the
+  discards the running guest, corrupting an active Run); **rejects if an active `SNAPSHOT` or
+  `DELETE_SNAPSHOT` job exists for the System** (`configuration_error`, "a snapshot capture/delete
+  is in progress"). This is what makes the `RESTORING` fence a true domain-exclusivity guarantee:
+  both `SNAPSHOT` and `DELETE_SNAPSHOT` stay `READY` and do not fence via state, so without this
+  check a restore could be admitted while a capture's off-thread `snapshotCreateXML` — or a
+  delete's off-thread multi-GB snapshot merge/removal — still runs on the same domain (a revert
+  landing mid-op → the losing job fails, and if the restore loses, `RESTORING → FAILED`). This is
+  the mirror of the `delete_snapshot`-rejects-`RESTORING` guard, closing both orderings. Admission
+  queries the job queue for a non-terminal `SNAPSHOT` / `RESTORE` / `DELETE_SNAPSHOT` job on this
+  `system_id` before transitioning. **Also refuses if a debug session is attached** to the
   System (an open gdbstub `DebugSession` on the System's Run): a revert replaces the machine state
   under the attached gdbstub and would silently break it, so — symmetric with the live-Run guard —
   restore requires the agent to `debug.end_session` first (the paused-restore workflow then attaches
@@ -274,8 +277,11 @@ All four live in the existing `systems` toolset registrar
   delete is removing — the delete winning the race would fail the revert `CONFIGURATION_ERROR →
   FAILED`; the fence closes the mirror of the restore-rejects-in-flight-SNAPSHOT guard). Enqueues
   `JobKind.DELETE_SNAPSHOT` with `SnapshotDeletePayload(system_id, name)`, dedup key
-  `{system_id}:delete_snapshot:{name}`, audits `delete_snapshot`, returns the job handle. **No
-  System-state transition** — deletion does not disturb the guest.
+  `{system_id}:delete_snapshot:{name}` with `recycle_terminal=True, recycle_canceled=True`
+  (symmetric with snapshot/restore — so a delete that failed on a transient
+  `INFRASTRUCTURE_FAILURE` or was canceled mid-merge is retryable instead of returning the dead
+  job forever and wedging the name/disk until teardown), audits `delete_snapshot`, returns the job
+  handle. **No System-state transition** — deletion does not disturb the guest.
 - **Worker handler** (`snapshot_delete_handler`): calls `runtime.snapshot.delete(domain_name,
   name)` (idempotent) off-thread to free the libvirt snapshot + qcow2 space, then removes the
   ledger row under the SYSTEM lock. This frees the name for reuse and reclaims disk before
@@ -432,8 +438,8 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    `include_memory=True` (default) produces a full system checkpoint.
 3. `systems.restore(system_id, name)` on a `READY` System with an `available` memory snapshot and
    **no** live Run transitions `READY → RESTORING`, reverts the domain, and returns it to `READY`
-   (running restore). A restore with a live Run, with an active `SNAPSHOT` job for the System, or
-   with an attached debug session is refused `configuration_error`.
+   (running restore). A restore with a live Run, with an active `SNAPSHOT` or `DELETE_SNAPSHOT`
+   job for the System, or with an attached debug session is refused `configuration_error`.
 3b. Restoring a disk-only snapshot reboots the guest and lands `READY` (not at an instruction);
    `start_paused=True` against a disk-only snapshot is refused `configuration_error` naming the
    mode mismatch.
@@ -447,7 +453,8 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    no libvirt round-trip. `systems.delete_snapshot(system_id, name)` enqueues a `DELETE_SNAPSHOT`
    job that deletes the libvirt snapshot and removes the ledger row (freeing the name for reuse);
    deleting a `creating` snapshot is refused, admission does no libvirt I/O under the lock, and
-   `delete_snapshot` is refused while the System is `RESTORING`.
+   `delete_snapshot` is refused while the System is `RESTORING`. A retry after a failed/canceled
+   `DELETE_SNAPSHOT` starts a fresh job (recycle flags) and eventually frees the name + disk.
 6. On a provider with `supports_snapshots is False`, all four tools return `capability_unsupported`
    (`capability="snapshot"`); `systems.get` surfaces `data.supports_snapshots` for both provider
    kinds without a libvirt call.
