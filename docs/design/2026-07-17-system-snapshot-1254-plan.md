@@ -329,13 +329,17 @@ Task-8/9 cycle).
   non-READY System" wording** (resume is the one action admitted from a non-`READY` state). This is
   distinct from the `power_system` admission helper edited above. **Agent-surface guardrail
   (extends the preamble note to this task):** no `ADR-`/`#NNN` in the wrapper text.
-- `tests/domain/test_state_site_coverage.py` (new) — the **discovery sweep**: enumerate
-  `frozenset[SystemState]` literals / `SystemState`-membership sets and `state is …READY` gates in
-  the tree (via `ast`/import introspection over the known modules — the Task-8 sets plus the
-  debug/power gates just widened here) and assert each `SystemState` value is either present or on
-  an explicit `INTENTIONALLY_EXCLUDED` allow-list with a reason. Seed the allow-list with the
-  deliberate exclusions (new-Run admission excludes `PAUSED`/`RESTORING`; the `debug`
-  gate excludes `RESTORING`; non-`RESUME` power actions exclude `PAUSED`/`RESTORING`).
+- `tests/domain/test_state_site_coverage.py` (new) — the **discovery sweep**. It must be a
+  **whole-tree AST scan** (glob `src/kdive/**/*.py`, `ast`-parse each), **not** introspection over
+  a hand-picked module list — a fixed list is the exact failure mode the sweep exists to prevent
+  (it already missed the power + console-rotate gates). Follow the repo's established whole-tree
+  scan precedent (`tests/cli/test_no_service_import.py`, `tests/providers/test_provider_boundaries.py`).
+  Discover every `frozenset[SystemState]` literal / `SystemState`-membership set and `state is …
+  READY` gate anywhere in the tree and assert each `SystemState` value is either present or on an
+  explicit `INTENTIONALLY_EXCLUDED` allow-list with a reason — so a state-keyed site added later in
+  *any* module fails the guard. Seed the allow-list with the deliberate exclusions (new-Run
+  admission excludes `PAUSED`/`RESTORING`; the `debug` gate excludes `RESTORING`; non-`RESUME`
+  power actions exclude `PAUSED`/`RESTORING`).
 - **Regenerate the generated tool reference** (`just docs` → `docs/guide/reference/`) in this
   commit: editing the `control.power` wrapper `Field`/docstring text (above) drifts the reference
   (the reference is generated from the wrapper text, not the enum); regenerate + commit so this
