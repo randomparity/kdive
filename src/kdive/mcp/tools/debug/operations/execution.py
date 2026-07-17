@@ -125,6 +125,16 @@ def _finish_op(session_id: str, timeout_sec: float) -> _EngineOp:
     return op
 
 
+def _session_id_field(verb: str) -> object:
+    return Field(description=f"The live DebugSession to {verb}.")
+
+
+def _timeout_field() -> object:
+    return Field(
+        description="Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap."
+    )
+
+
 def _register_debug_continue(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
@@ -134,16 +144,8 @@ def _register_debug_continue(
         meta=_gdbmi_maturity(),
     )
     async def debug_continue(
-        session_id: Annotated[
-            str, Field(description="The live DebugSession to continue execution on.")
-        ],
-        timeout_sec: Annotated[
-            float,
-            Field(
-                description="Seconds to wait for a stop event; 0.0 uses the provider "
-                "interactive wait cap."
-            ),
-        ] = 0.0,
+        session_id: Annotated[str, _session_id_field("continue execution on")],
+        timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Resume a live DebugSession and wait for a stop event. Requires contributor."""
         return await run_engine_op_with_resolver(
@@ -165,7 +167,7 @@ def _register_debug_interrupt(
         meta=_gdbmi_maturity(),
     )
     async def debug_interrupt(
-        session_id: Annotated[str, Field(description="The live DebugSession to interrupt.")],
+        session_id: Annotated[str, _session_id_field("interrupt")],
     ) -> ToolResponse:
         """Send an interrupt to halt a running live DebugSession. Requires contributor."""
         return await run_engine_op_with_resolver(
@@ -178,22 +180,12 @@ def _register_debug_interrupt(
         )
 
 
-def _session_id_field(verb: str) -> object:
-    return Field(description=f"The live DebugSession to {verb}.")
-
-
-def _timeout_field() -> object:
-    return Field(
-        description="Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap."
-    )
-
-
 def _register_debug_step(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
     @app.tool(name="debug.step", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
     async def debug_step(
-        session_id: Annotated[str, _session_id_field("step")],
+        session_id: Annotated[str, _session_id_field("step into calls on")],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Step one source line, into called functions, on a live DebugSession, and wait for the
@@ -215,7 +207,7 @@ def _register_debug_next(
 ) -> None:
     @app.tool(name="debug.next", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
     async def debug_next(
-        session_id: Annotated[str, _session_id_field("step")],
+        session_id: Annotated[str, _session_id_field("step over calls on")],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Step one source line, over called functions, on a live DebugSession, and wait for the
@@ -238,7 +230,7 @@ def _register_debug_step_instruction(
         name="debug.step_instruction", annotations=_docmeta.mutating(), meta=_gdbmi_maturity()
     )
     async def debug_step_instruction(
-        session_id: Annotated[str, _session_id_field("step")],
+        session_id: Annotated[str, _session_id_field("step one instruction on")],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Step one machine instruction on a live DebugSession, and wait for the stop. Works

@@ -179,7 +179,7 @@ current code has no debug symbols). Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step. |
+| `session_id` | string | yes | The live DebugSession to step over calls on. |
 | `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.read_frame`
@@ -281,7 +281,7 @@ debug.step_instruction there. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step. |
+| `session_id` | string | yes | The live DebugSession to step into calls on. |
 | `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.step_instruction`
@@ -294,5 +294,5 @@ Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step. |
+| `session_id` | string | yes | The live DebugSession to step one instruction on. |
 | `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
