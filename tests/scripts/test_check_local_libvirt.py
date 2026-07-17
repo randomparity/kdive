@@ -65,7 +65,7 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     }
     result = _run(env)
     assert result.returncode == 0, result.stderr
-    assert "ready" in result.stdout.lower()
+    assert "ready" in result.stderr.lower()
 
 
 def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
@@ -216,7 +216,7 @@ def test_readable_host_kernel_passes(tmp_path: Path) -> None:
 
     result = _run(_healthy_env(tmp_path, bindir, py, boot))
     assert result.returncode == 0, result.stderr
-    assert "ready" in result.stdout.lower()
+    assert "ready" in result.stderr.lower()
 
 
 def test_absent_boot_kernels_skip_probe(tmp_path: Path) -> None:
@@ -227,7 +227,7 @@ def test_absent_boot_kernels_skip_probe(tmp_path: Path) -> None:
 
     result = _run(_healthy_env(tmp_path, bindir, py, boot))
     assert result.returncode == 0, result.stderr
-    assert "ready" in result.stdout.lower()
+    assert "ready" in result.stderr.lower()
 
 
 def _readable_boot(tmp_path: Path) -> Path:
@@ -247,7 +247,7 @@ def test_nonroot_worker_on_system_uri_warns_advisory(tmp_path: Path) -> None:
 
     result = _run(env)
     assert result.returncode == 0, result.stderr  # advisory, not a failure
-    assert "ready" in result.stdout.lower()
+    assert "ready" in result.stderr.lower()
     assert "boot-confirmation" in result.stderr.lower()
     assert "qemu:///session" in result.stderr  # the fix is named
 
@@ -260,6 +260,7 @@ def test_session_uri_suppresses_advisory(tmp_path: Path) -> None:
 
     result = _run(env)
     assert result.returncode == 0, result.stderr
+    assert "ready" in result.stderr.lower()
     assert "boot-confirmation" not in result.stderr.lower()
 
 
@@ -273,6 +274,7 @@ def test_remote_transport_uri_suppresses_advisory(tmp_path: Path) -> None:
 
     result = _run(env)
     assert result.returncode == 0, result.stderr
+    assert "ready" in result.stderr.lower()
     assert "boot-confirmation" not in result.stderr.lower()
 
 
@@ -283,6 +285,7 @@ def test_root_worker_on_system_uri_suppresses_advisory(tmp_path: Path) -> None:
 
     result = _run(env)
     assert result.returncode == 0, result.stderr
+    assert "ready" in result.stderr.lower()
     assert "boot-confirmation" not in result.stderr.lower()
 
 
