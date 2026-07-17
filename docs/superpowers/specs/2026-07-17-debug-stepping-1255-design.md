@@ -1,0 +1,84 @@
+# Spec: Complete the gdb-MI debug plane with stepping (#1255)
+
+- Issue: #1255 "Complete Debug Tool Features"
+- ADR: [ADR-0379](../../adr/0379-gdb-source-and-instruction-stepping.md)
+- Status: Design accepted
+
+## Problem
+
+The gdb-MI debug plane drives a live gdbstub `DebugSession` and exposes `debug.continue`
+and `debug.interrupt`, but no stepping. After a breakpoint fires, an agent that wants to
+walk the next few source lines has to set a breakpoint on the following line, `continue`,
+then clear it — and stepping *over* a call needs a hand-computed temporary breakpoint on the
+return address. The issue asks to complete the plane with `debug.step`, `debug.step_instruction`,
+and `debug.finish` (this design adds `debug.next` — see ADR-0379).
+
+## Requirement (restated)
+
+Add interactive stepping to the live gdb-MI debug session so an agent can advance execution
+by one source line (into or over calls), by one machine instruction, or run until the current
+frame returns — without breakpoint churn — and observe the resulting stop.
+
+## Tool surface
+
+Four contributor-gated MCP tools, each mirroring `debug.continue`'s shape (a `session_id` and
+an optional `timeout_sec`, returning the redacted `GdbStopRecord` as `{reason, timed_out}`):
+
+| tool | MI verb | behavior |
+|------|---------|----------|
+| `debug.step` | `-exec-step` | advance one source line, stepping into called functions |
+| `debug.next` | `-exec-next` | advance one source line, stepping over called functions |
+| `debug.step_instruction` | `-exec-step-instruction` | advance one machine instruction |
+| `debug.finish` | `-exec-finish` | resume until the current frame returns |
+
+## Behavior contract
+
+- **Precondition:** an existing `DebugSession` in `LIVE` state, resolved and role-gated by the
+  shared `_live_session` path. Stepping does not change the session state.
+- **Success:** returns `ToolResponse.success(session_id, "stopped", data={reason, timed_out})`
+  with `suggested_next_actions` steering toward reading state and stepping again.
+- **Timeout:** `timeout_sec=0.0` uses the provider interactive wait cap; a positive value bounds
+  the wait. If the wait elapses (e.g. `finish` on a frame that does not return, or a step over a
+  call that runs long or hits nothing), the engine interrupts back and returns `timed_out=True` —
+  identical to `continue`.
+- **Refused verb:** a verb gdb rejects synchronously — most notably `finish` in the outermost
+  frame — surfaces as `CategorizedError(DEBUG_ATTACH_FAILURE)` with the redacted gdb message,
+  the same path every other MI-command error takes. No 60-second hang.
+- **Redaction / audit / transcript:** unchanged — the stop record is redacted, the four ops are
+  audited alongside `continue`/`interrupt`, and each MI command is appended to the session
+  transcript by the existing machinery.
+
+## Success criteria (falsifiable)
+
+1. `debug.step`/`next`/`step_instruction`/`finish` are registered, contributor-gated, and
+   discoverable (exposure ACL, tool-index keywords, tool-doc map — the existing enumeration
+   guards pass).
+2. Each engine method issues its exact MI verb through `ExecutionControl.resume` and returns the
+   redacted stop — asserted by a unit test that scripts the fake controller keyed on the verb
+   string (mirroring `test_continue_returns_stop_on_breakpoint_hit`).
+3. A `finish` whose MI result is `^error` raises `DEBUG_ATTACH_FAILURE` without waiting out the
+   timeout — asserted by a unit test.
+4. A timed-out step interrupts back and returns `timed_out=True` — asserted by a unit test
+   (mirroring `test_continue_interrupts_on_timeout`).
+5. The live smoke test exercises at least one of the new verbs against real KVM (added to the
+   promoted-ops smoke), and `scripts/live-debug.py` demonstrates a step.
+6. `just ci` is green.
+
+## Out of scope
+
+- `-exec-next-instruction` (step over one instruction) and a step-count/repeat parameter — see
+  ADR-0379 rejected alternatives.
+- Any `DebugSessionState` change, schema migration, or new provider port beyond the four
+  methods on the existing `GdbMiEngine`.
+
+## Touch points (from the plane map)
+
+- Engine: `providers/shared/debug_common/gdbmi/core/engine.py` (4 methods) +
+  `providers/ports/debug.py` `GdbMiEngine` protocol (4 declarations).
+- Tool: `mcp/tools/debug/operations/execution.py` (4 registrations + op closures).
+- Registries: `mcp/tools/debug/operations/runtime.py` `_AUDITED_OPS`; `mcp/exposure.py` ACL;
+  `mcp/schema/tool_index.py` keywords; `tests/mcp/core/test_tool_docs.py` tool→test map.
+- Tests: `tests/mcp/debug/test_debug_ops.py` (tool dispatch),
+  `tests/providers/local_libvirt/test_debug_gdbmi.py` (engine/verb),
+  `tests/mcp/debug/test_debug_gdmbi_live_smoke.py` (live), `scripts/live-debug.py`.
+- Docs: `docs/guide/reference/debug.md`, `docs/guide/toolsets/debug.md`.
