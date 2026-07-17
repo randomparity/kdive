@@ -123,12 +123,16 @@
 | [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `implemented` |
 | [`systems.check_ssh_reachable`](systems.md#systemscheck_ssh_reachable) | `implemented` |
 | [`systems.define`](systems.md#systemsdefine) | `implemented` |
+| [`systems.delete_snapshot`](systems.md#systemsdelete_snapshot) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |
+| [`systems.list_snapshots`](systems.md#systemslist_snapshots) | `implemented` |
 | [`systems.profile_examples`](systems.md#systemsprofile_examples) | `implemented` |
 | [`systems.provision`](systems.md#systemsprovision) | `implemented` |
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
+| [`systems.restore`](systems.md#systemsrestore) | `implemented` |
+| [`systems.snapshot`](systems.md#systemssnapshot) | `implemented` |
 | [`systems.ssh_info`](systems.md#systemsssh_info) | `implemented` |
 | [`systems.teardown`](systems.md#systemsteardown) | `implemented` |
 | [`tools.invoke`](tools.md#toolsinvoke) | `implemented` |

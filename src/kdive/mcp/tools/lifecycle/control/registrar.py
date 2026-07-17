@@ -108,7 +108,13 @@ async def power_system(
             if system is None or system.project not in ctx.projects:
                 return _config_error(system_id)
             require_role(ctx, system.project, Role.CONTRIBUTOR)
-            if system.state is not SystemState.READY:
+            # `resume` (ADR-0378) is admitted only from PAUSED (a start_paused restore's suspended
+            # guest); every other action requires READY. So resume-from-READY and
+            # on/off/cycle/reset from PAUSED/RESTORING are all refused.
+            required = (
+                SystemState.PAUSED if power_action is PowerAction.RESUME else SystemState.READY
+            )
+            if system.state is not required:
                 return _config_error(system_id, data={"current_status": system.state.value})
             # A supplied key makes the power action idempotent by replacing the per-call uuid4
             # in the dedup key; absent, every call is a distinct power job (ADR-0193).
@@ -376,10 +382,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             str,
             Field(
                 description=(
-                    "Power action: `on`/`off`/`cycle`/`reset`. All require `contributor` "
-                    "(leaseholder control over your transient VM). Use `reset`/`cycle` to "
-                    "recover a wedged but READY guest. Admitted only on a READY System; "
-                    "refused on a CRASHED or CRASHING (mid-force_crash) System."
+                    "Power action: `on`/`off`/`cycle`/`reset`/`resume`. All require `contributor` "
+                    "(leaseholder control over your transient VM). Use `reset`/`cycle` to recover "
+                    "a wedged but READY guest. `on`/`off`/`cycle`/`reset` are admitted only on a "
+                    "READY System (refused on a CRASHED/CRASHING/PAUSED System). `resume` is the "
+                    "exception: it resumes a PAUSED System (left suspended by a `systems.restore` "
+                    "with `start_paused=true`) back to READY, and is admitted only from PAUSED."
                 )
             ),
         ],
@@ -388,10 +396,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Power action on a READY System: on/off/cycle/reset, all contributor-level
-        leaseholder control. reset/cycle recover a wedged READY guest. Refused on a
-        non-READY System (a CRASHED or CRASHING System holds crash evidence — use the crash
-        workflow). Enqueues a power job."""
+        """Power action on a System: on/off/cycle/reset (READY only) or resume (PAUSED only),
+        all contributor-level leaseholder control. reset/cycle recover a wedged READY guest.
+        resume returns a PAUSED System (left suspended by a start_paused systems.restore, for a
+        gdbstub debug attach) to READY. on/off/cycle/reset are refused on a non-READY System (a
+        CRASHED/CRASHING System holds crash evidence — use the crash workflow). Enqueues a power
+        job."""
         return await power_system(
             pool,
             current_context(),

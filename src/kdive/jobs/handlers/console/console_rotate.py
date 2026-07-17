@@ -66,7 +66,13 @@ _RETENTION_CLASS = "console"
 # guard and teardown both run under the per-System advisory lock, so the lock serializes the
 # state-set against this state-read: whichever runs second sees the other's committed effect.
 _LIVE_STATES: frozenset[SystemState] = frozenset(
-    {SystemState.READY, SystemState.CRASHING, SystemState.CRASHED}
+    {
+        SystemState.READY,
+        SystemState.RESTORING,  # keep sealing the console across a revert (ADR-0378)
+        SystemState.PAUSED,  # keep sealing while the guest is suspended (ADR-0378)
+        SystemState.CRASHING,
+        SystemState.CRASHED,
+    }
 )
 
 _PART_ROW_SQL: LiteralString = (

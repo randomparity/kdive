@@ -64,6 +64,8 @@ _NON_TERMINAL_SYSTEM = (
     SystemState.PROVISIONING,
     SystemState.READY,
     SystemState.REPROVISIONING,
+    SystemState.RESTORING,  # mid snapshot-revert: still holds a quota slot (ADR-0378)
+    SystemState.PAUSED,  # start_paused restore: a live System still holds a quota slot (ADR-0378)
     SystemState.CRASHING,  # mid-force_crash: still holds a quota slot (#1078)
     SystemState.CRASHED,
 )

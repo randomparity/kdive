@@ -50,6 +50,7 @@ class _FakeTeardown:
 class _FakeRuntime:
     def __init__(self) -> None:
         self.provisioner = _FakeTeardown()
+        self.snapshot = None  # no snapshot port; teardown skips delete_all
 
     def for_resource(self, _name: str) -> _FakeRuntime:
         return self

@@ -653,6 +653,7 @@ class _ProvDomain:
     create_error: int | None = None
     destroy_error: int | None = None
     undefine_error: int | None = None
+    undefine_flags: int | None = None  # flags passed to undefineFlags() at teardown
     xml_desc: str | None = None  # XMLDesc() result; gdbstub port reuse reads it back
 
     def XMLDesc(self, flags: int = 0) -> str:  # noqa: N802 - mirrors the libvirt binding name
@@ -678,6 +679,13 @@ class _ProvDomain:
         if self.undefine_error is not None:
             raise libvirt_error(self.undefine_error)
         self.undefined = True
+        return 0
+
+    def undefineFlags(self, flags: int) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        if self.undefine_error is not None:
+            raise libvirt_error(self.undefine_error)
+        self.undefined = True
+        self.undefine_flags = flags
         return 0
 
 
@@ -1044,6 +1052,17 @@ def test_teardown_removes_baseline_dir() -> None:
     removed: list[str] = []
     _prov(conn, remove_baseline=removed.append).teardown(name)
     assert removed == [storage_module.baseline_dir(_SYS)]
+
+
+def test_teardown_undefines_with_snapshot_metadata_flag() -> None:
+    # Teardown must undefine with VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA so a snapshotted domain
+    # undefines cleanly instead of libvirt refusing on residual snapshot metadata (ADR-0378).
+    name = domain_name_for(_SYS)
+    dom = _ProvDomain(name)
+    conn = _ProvConn(defined={name: dom})
+    _prov(conn).teardown(name)
+    assert dom.undefined is True
+    assert dom.undefine_flags == libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
 
 
 def test_provision_define_error_is_provisioning_failure() -> None:

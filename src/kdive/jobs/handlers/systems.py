@@ -16,8 +16,15 @@ from kdive.artifacts import upload_manifest
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ARTIFACTS, SYSTEMS
-from kdive.domain.capacity.state import IllegalTransition, SystemState
+from kdive.db.repositories import (
+    ARTIFACTS,
+    SNAPSHOTS,
+    SYSTEMS,
+    ObjectNotFound,
+    delete_snapshots_for_system,
+    snapshot_by_name,
+)
+from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -28,7 +35,14 @@ from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.handlers.connectivity.ssh_authorize import authorize_ssh_key_handler
 from kdive.jobs.handlers.connectivity.ssh_reachable import check_ssh_reachable_handler
 from kdive.jobs.models import HandlerRegistry
-from kdive.jobs.payloads import ReprovisionPayload, SystemPayload, load_payload
+from kdive.jobs.payloads import (
+    ReprovisionPayload,
+    RestorePayload,
+    SnapshotDeletePayload,
+    SnapshotPayload,
+    SystemPayload,
+    load_payload,
+)
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.prereqs.system_bootstrap_key import (
     delete_system_bootstrap_key,
@@ -39,6 +53,7 @@ from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from kdive.providers.ports.lifecycle import Snapshotter
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -250,6 +265,9 @@ async def _commit_reprovision_result(
                 "target_fingerprint = %s WHERE id = %s",
                 (SystemState.READY.value, domain_name, fingerprint, system.id),
             )
+            # The recreated qcow2 destroys the old libvirt snapshots; drop their ledger rows in
+            # the same commit so a restore of a stale name is refused, not silently mismatched.
+            await delete_snapshots_for_system(conn, system.id)
             await audit_transition(
                 conn,
                 job,
@@ -450,6 +468,194 @@ async def reprovision_handler(
     )
 
 
+def _require_snapshotter(runtime: ProviderRuntime, system_id: UUID) -> Snapshotter:
+    if runtime.snapshot is None:  # Defense in depth: the tool gates on supports_snapshots.
+        raise CategorizedError(
+            "provider does not support snapshots",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(system_id)},
+        )
+    return runtime.snapshot
+
+
+async def _bind_snapshotter(
+    conn: AsyncConnection, resolver: ProviderResolver, system_id: UUID
+) -> Snapshotter:
+    """Resolve the provider binding, set the worker provider kind, return its Snapshotter."""
+    binding = await resolver.binding_for_system(conn, system_id)
+    set_provider_kind(binding.kind.value)
+    return _require_snapshotter(binding.runtime, system_id)
+
+
+async def _fail_snapshot_row(conn: AsyncConnection, snapshot_id: UUID) -> None:
+    """Drive a ``snapshots`` row to ``failed``; tolerant of an already-terminal/absent row."""
+    try:
+        await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.FAILED)
+    except IllegalTransition, ObjectNotFound:
+        _log.info("snapshot row %s already terminal or gone; not marking failed", snapshot_id)
+
+
+async def snapshot_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Create the libvirt snapshot and drive the ledger row ``creating -> available|failed``.
+
+    The System row is never touched: a snapshot is non-destructive to System identity and is
+    permitted during a live Run (ADR-0378).
+    """
+    payload = load_payload(job, SnapshotPayload)
+    system_id = UUID(payload.system_id)
+    snapshot_id = UUID(payload.snapshot_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        await _fail_snapshot_row(conn, snapshot_id)
+        raise CategorizedError(
+            "snapshot target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    if system.state is not SystemState.READY:  # Re-verify at start: a mid-flight teardown/revert.
+        await _fail_snapshot_row(conn, snapshot_id)
+        return str(snapshot_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    try:
+        await asyncio.to_thread(
+            functools.partial(
+                snapshotter.create, domain, payload.name, include_memory=payload.include_memory
+            )
+        )
+    except CategorizedError as exc:
+        await _fail_snapshot_row(conn, snapshot_id)
+        # A failed capture is terminal (recycle_terminal on the dedup key frees a fresh re-issue),
+        # so it dead-letters at once rather than retrying and racing the failed row to available.
+        exc.terminal = True
+        raise
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        # Idempotent under at-least-once delivery: a worker that dies after this transition commits
+        # but before the job is marked complete re-runs the handler. Only a still-``creating`` row
+        # transitions, so an already-``available`` row (the capture already landed) is a no-op
+        # success rather than an ``available -> available`` IllegalTransition that would dead-letter
+        # a snapshot that actually succeeded.
+        row = await SNAPSHOTS.get(conn, snapshot_id)
+        if row is not None and row.state is SnapshotState.CREATING:
+            await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.AVAILABLE)
+    return str(snapshot_id)
+
+
+async def _commit_restore_result(
+    conn: AsyncConnection, job: Job, system_id: UUID, project: str, *, start_paused: bool
+) -> None:
+    """Commit ``restoring -> paused|ready`` under the SYSTEM lock (re-reading state first).
+
+    Committed before the handler returns, so the worker marks the RESTORE job terminal only
+    after this transition lands — the RESTORING stuck-transition repair therefore never observes
+    a terminal job alongside a still-RESTORING System on the success path (ADR-0378).
+    """
+    target = SystemState.PAUSED if start_paused else SystemState.READY
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        current = await _locked_system_state(conn, system_id)
+        if current is SystemState.RESTORING:
+            await SYSTEMS.update_state(conn, system_id, target)
+            await audit_transition(
+                conn,
+                job,
+                project=project,
+                object_id=system_id,
+                transition=f"restoring->{target.value}",
+                tool="systems.restore",
+            )
+
+
+async def restore_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Revert the domain and drive ``restoring -> ready|paused`` (or ``failed`` on error)."""
+    payload = load_payload(job, RestorePayload)
+    system_id = UUID(payload.system_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        raise CategorizedError(
+            "restore target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    if system.state is not SystemState.RESTORING:
+        return str(system_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    try:
+        await asyncio.to_thread(
+            functools.partial(
+                snapshotter.revert, domain, payload.name, start_paused=payload.start_paused
+            )
+        )
+    except CategorizedError as exc:
+        # A half-reverted guest is indeterminate: route RESTORING -> FAILED, never back to READY.
+        await _record_system_failure(
+            conn,
+            job,
+            system_id=system_id,
+            project=system.project,
+            transition="restoring->failed",
+            tool="systems.restore",
+            operation="restore",
+        )
+        # Terminal: the System is now FAILED, so a retry would read `not RESTORING` and early-return
+        # str(system_id), marking the RESTORE job succeeded while the System is actually FAILED.
+        exc.terminal = True
+        raise
+    await _commit_restore_result(
+        conn, job, system_id, system.project, start_paused=payload.start_paused
+    )
+    return str(system_id)
+
+
+async def snapshot_delete_handler(
+    conn: AsyncConnection,
+    job: Job,
+    *,
+    resolver: ProviderResolver,
+) -> str | None:
+    """Delete the libvirt snapshot and remove the ledger row (idempotent, ABA-safe).
+
+    Anchored on ``snapshot_id``: the delete proceeds only while the ``(system_id, name)`` row is
+    still the exact one admission targeted. A row that is gone, or now a *different* snapshot that
+    reused the name (an at-least-once redelivery after the name was recreated), is a no-op — so a
+    stale redelivery never destroys a fresh, reported-successful checkpoint.
+    """
+    payload = load_payload(job, SnapshotDeletePayload)
+    system_id = UUID(payload.system_id)
+    snapshot_id = UUID(payload.snapshot_id)
+    system = await SYSTEMS.get(conn, system_id)
+    if system is None:
+        raise CategorizedError(
+            "delete-snapshot target system is gone",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
+    snapshotter = await _bind_snapshotter(conn, resolver, system_id)
+    # The still-present row holds the name, so no concurrent snapshot can reuse it until we delete
+    # it (admission rejects an in-use name); if the id no longer matches, this delete already ran
+    # and the name belongs to a newer snapshot — leave it alone.
+    row = await snapshot_by_name(conn, system_id, payload.name)
+    if row is None or row.id != snapshot_id:
+        return str(system_id)
+    domain = system.domain_name or domain_name_for(system_id)
+    await asyncio.to_thread(snapshotter.delete, domain, payload.name)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        row = await snapshot_by_name(conn, system_id, payload.name)
+        if row is not None and row.id == snapshot_id:
+            await SNAPSHOTS.delete(conn, row.id)
+    return str(system_id)
+
+
 async def _console_part_keys(conn: AsyncConnection, system_id: UUID) -> list[str]:
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(_SELECT_PART_KEYS_SQL, (system_id, _CONSOLE_PART_LIKE))
@@ -493,6 +699,30 @@ async def _reclaim_sysrq_artifacts(
             await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
 
 
+async def _reclaim_snapshots(
+    conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
+) -> None:
+    """Free a System's snapshots at teardown: provider data, then ledger rows (ADR-0378).
+
+    ``delete_all`` is best-effort — the ``undefine`` metadata flag already lets a snapshotted
+    domain tear down, and the internal snapshot data is freed with the overlay qcow2 this teardown
+    reclaims — so a provider snapshot fault never blocks teardown. A provider that does not support
+    snapshots (``snapshot is None``) skips it. The ledger rows are then deleted so a torn-down
+    System reports no snapshots.
+    """
+    if snapshotter is not None:
+        try:
+            await asyncio.to_thread(snapshotter.delete_all, domain_name)
+        except CategorizedError:
+            _log.warning(
+                "best-effort snapshot delete_all for system %s failed; continuing teardown",
+                system_id,
+                exc_info=True,
+            )
+    async with conn.transaction():
+        await delete_snapshots_for_system(conn, system_id)
+
+
 async def teardown_handler(
     conn: AsyncConnection,
     job: Job,
@@ -525,6 +755,7 @@ async def teardown_handler(
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     provisioner = binding.runtime.provisioner
+    await _reclaim_snapshots(conn, binding.runtime.snapshot, system_id, domain_name)
     await asyncio.to_thread(provisioner.teardown, domain_name)
     # The bootstrap key (ADR-0289, #963) is System-owned like the console/sysrq artifacts, but its
     # deletion is not best-effort: a stale row after teardown wrongly reports a System as
@@ -572,6 +803,18 @@ def register_handlers(
         lambda conn, job: reprovision_handler(
             conn, job, resolver=resolver, secret_registry=secret_registry
         ),
+    )
+    registry.register(
+        JobKind.SNAPSHOT,
+        lambda conn, job: snapshot_handler(conn, job, resolver=resolver),
+    )
+    registry.register(
+        JobKind.RESTORE,
+        lambda conn, job: restore_handler(conn, job, resolver=resolver),
+    )
+    registry.register(
+        JobKind.DELETE_SNAPSHOT,
+        lambda conn, job: snapshot_delete_handler(conn, job, resolver=resolver),
     )
     registry.register(
         JobKind.AUTHORIZE_SSH_KEY,

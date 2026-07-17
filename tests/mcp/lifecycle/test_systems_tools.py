@@ -134,7 +134,7 @@ def test_get_system_surfaces_resolved_cpu(migrated_url: str) -> None:
                     "baseline_level": "x86-64-v3",
                 },
             )
-            resp = await get_system(pool, _ctx(), sys_id)
+            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
         assert resp.data["resolved_cpu"] == {
             "model": "Skylake-Client-IBRS",
             "vendor": "Intel",
@@ -150,7 +150,7 @@ def test_get_system_omits_resolved_cpu_when_absent(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await get_system(pool, _ctx(), sys_id)
+            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
         assert "resolved_cpu" not in resp.data
 
     asyncio.run(_run())
@@ -161,7 +161,7 @@ def test_get_own_system_returns_state(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await get_system(pool, _ctx(), sys_id)
+            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
         assert resp.object_id == sys_id
         assert resp.status == "ready"
 
@@ -174,7 +174,7 @@ def test_get_system_requires_viewer_role(migrated_url: str) -> None:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             with pytest.raises(AuthorizationError):
-                await get_system(pool, _ctx(role=None), sys_id)
+                await get_system(pool, _ctx(role=None), sys_id, resolver=_provider_resolver())
 
     asyncio.run(_run())
 
@@ -184,7 +184,7 @@ def test_get_failed_system_renders_failure(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.FAILED)
-            resp = await get_system(pool, _ctx(), sys_id)
+            resp = await get_system(pool, _ctx(), sys_id, resolver=_provider_resolver())
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
         assert resp.data["current_status"] == "failed"
@@ -197,7 +197,9 @@ def test_get_cross_project_is_not_found(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await get_system(pool, _ctx(projects=("other",)), sys_id)
+            resp = await get_system(
+                pool, _ctx(projects=("other",)), sys_id, resolver=_provider_resolver()
+            )
         assert resp.status == "error"
         assert resp.error_category == "not_found"
 
@@ -222,7 +224,7 @@ def test_get_platform_only_token_is_not_found_not_authorization_denied(migrated_
                 roles={},
                 platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}),
             )
-            resp = await get_system(pool, platform_only, sys_id)
+            resp = await get_system(pool, platform_only, sys_id, resolver=_provider_resolver())
         # The held platform role buys no project data, and a non-member gets the same
         # not_found envelope as an absent ID.
         assert resp.status == "error"
@@ -235,7 +237,7 @@ def test_get_platform_only_token_is_not_found_not_authorization_denied(migrated_
 def test_get_malformed_uuid_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await get_system(pool, _ctx(), "not-a-uuid")
+            resp = await get_system(pool, _ctx(), "not-a-uuid", resolver=_provider_resolver())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
@@ -380,7 +382,7 @@ def test_provision_with_label_persists_and_systems_get_echoes(migrated_url: str)
             resp = await _provision(pool, _ctx(), alloc_id, _profile(), label="  edge-case A  ")
             assert resp.status == "queued"
             system_id = str(resp.data["system_id"])
-            get_resp = await get_system(pool, _ctx(), system_id)
+            get_resp = await get_system(pool, _ctx(), system_id, resolver=_provider_resolver())
         assert get_resp.data["label"] == "edge-case A"  # stored stripped, echoed verbatim
 
     asyncio.run(_run())
@@ -392,7 +394,7 @@ def test_define_with_label_echoes_on_systems_get(migrated_url: str) -> None:
             alloc_id = await _granted_allocation(pool)
             resp = await _define(pool, _ctx(), alloc_id, _upload_profile(), label="defined-A")
             assert resp.status == "defined"
-            get_resp = await get_system(pool, _ctx(), resp.object_id)
+            get_resp = await get_system(pool, _ctx(), resp.object_id, resolver=_provider_resolver())
         assert get_resp.data["label"] == "defined-A"
 
     asyncio.run(_run())
@@ -403,7 +405,9 @@ def test_provision_without_label_echoes_null(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             resp = await _provision(pool, _ctx(), alloc_id, _profile())
-            get_resp = await get_system(pool, _ctx(), str(resp.data["system_id"]))
+            get_resp = await get_system(
+                pool, _ctx(), str(resp.data["system_id"]), resolver=_provider_resolver()
+            )
         assert get_resp.data["label"] is None
 
     asyncio.run(_run())

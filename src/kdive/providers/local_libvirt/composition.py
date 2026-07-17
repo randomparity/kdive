@@ -43,6 +43,7 @@ from kdive.providers.local_libvirt.lifecycle.provisioning import LocalLibvirtPro
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,
 )
+from kdive.providers.local_libvirt.lifecycle.snapshot import LocalLibvirtSnapshotter
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
@@ -161,6 +162,8 @@ def build_runtime(
             ),
             debug_transports=frozenset({"gdbstub", "drgn-live"}),
             introspection=frozenset({"offline-vmcore", "live", "live-script"}),
+            # Internal libvirt snapshots are supported on the local host (ADR-0378, #1254).
+            supports_snapshots=True,
         ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
@@ -181,4 +184,7 @@ def build_runtime(
         binding=ResourceBindingCapabilities(
             rebind_for_resource=_rebind_for_resource(secret_registry)
         ),
+        # Internal RAM+disk/disk-only domain snapshots (ADR-0378, #1254). Matches
+        # ``support.supports_snapshots``; a snapshot-incapable provider leaves both unset.
+        snapshot=LocalLibvirtSnapshotter.from_env(),
     )

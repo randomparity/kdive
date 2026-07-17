@@ -27,6 +27,7 @@ from kdive.domain.capacity.state import (
     JobState,
     ResourceStatus,
     RunState,
+    SnapshotState,
     SystemState,
     ensure_transition,
 )
@@ -38,6 +39,7 @@ from kdive.domain.lifecycle.records import (
     DebugSession,
     Investigation,
     Run,
+    Snapshot,
     System,
     SystemShape,
 )
@@ -308,6 +310,40 @@ RUNS = StatefulRepository(
     json_columns=frozenset({"build_profile", "expected_boot_failure"}),
 )
 DEBUG_SESSIONS = StatefulRepository(DebugSession, "debug_sessions", DebugSessionState)
+SNAPSHOTS = StatefulRepository(Snapshot, "snapshots", SnapshotState)
+
+
+async def snapshot_by_name(conn: AsyncConnection, system_id: UUID, name: str) -> Snapshot | None:
+    """Return the ``(system_id, name)`` snapshot row, or ``None`` (the UNIQUE lookup)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM snapshots WHERE system_id = %s AND name = %s", (system_id, name)
+        )
+        row = await cur.fetchone()
+    return None if row is None else Snapshot.model_validate(row)
+
+
+async def snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> list[Snapshot]:
+    """Return a System's snapshots newest-first (the ``systems.list_snapshots`` read)."""
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM snapshots WHERE system_id = %s ORDER BY created_at DESC, id DESC",
+            (system_id,),
+        )
+        rows = await cur.fetchall()
+    return [Snapshot.model_validate(row) for row in rows]
+
+
+async def delete_snapshots_for_system(conn: AsyncConnection, system_id: UUID) -> None:
+    """Delete every snapshot ledger row for a System (teardown/reprovision reclaim, ADR-0378).
+
+    The libvirt snapshot data is freed with the overlay qcow2 at teardown and destroyed by the
+    recreated disk at reprovision, so the ledger rows are removed to match. A no-op when none
+    exist; the ``ON DELETE CASCADE`` FK still covers the eventual System-row delete at release.
+    """
+    await conn.execute("DELETE FROM snapshots WHERE system_id = %s", (system_id,))
+
+
 JOBS = StatefulRepository(
     Job,
     "jobs",

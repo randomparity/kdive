@@ -14,6 +14,7 @@ from kdive.domain.capacity.state import (
     DebugSessionState,
     InvestigationState,
     RunState,
+    SnapshotState,
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
@@ -86,6 +87,20 @@ class System(DomainModel, Attribution):
     #: at mint (ADR-0368): `{model, vendor?, arch, baseline_level?}`. NULL when the resource
     #: advertises none (local/fault/un-refreshed remote) — treat NULL as unknown, never crash.
     resolved_cpu: dict[str, JsonValue] | None = None
+
+
+class Snapshot(DomainModel, Attribution):
+    """A named checkpoint of a System — a child ledger row (ADR-0378, #1254).
+
+    Postgres is the index-of-record for `systems.list_snapshots`, audit, and teardown cleanup;
+    libvirt holds the actual RAM+disk data inside the System's qcow2. `include_memory` records
+    whether the checkpoint captured live RAM+CPU (a full system checkpoint) or disk only.
+    """
+
+    system_id: UUID
+    name: str
+    include_memory: bool
+    state: SnapshotState
 
 
 class Investigation(DomainModel, Attribution):
@@ -226,6 +241,7 @@ __all__ = [
     "ExternalRef",
     "Investigation",
     "Run",
+    "Snapshot",
     "System",
     "SystemShape",
 ]

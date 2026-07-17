@@ -616,7 +616,10 @@ async def _attach_preconditions(
     system = await _system_for_run(conn, run)
     if system is None:
         return _config_error(str(run.id))
-    if system.state is not SystemState.READY:
+    # PAUSED is admitted (ADR-0378): a start_paused restore leaves the guest suspended, and a
+    # gdbstub debug session is the only way to inspect/breakpoint it before resuming — drgn-live
+    # over SSH cannot reach a non-executing kernel. Every other non-READY state is refused.
+    if system.state not in (SystemState.READY, SystemState.PAUSED):
         return _config_error(str(run.id), data={"current_status": system.state.value})
     if await _system_occupied(conn, system.id, transport):
         return ToolResponse.failure(str(run.id), ErrorCategory.TRANSPORT_CONFLICT)

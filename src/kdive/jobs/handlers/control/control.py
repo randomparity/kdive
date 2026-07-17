@@ -14,7 +14,7 @@ from kdive.domain.capacity.state import SystemState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.lifecycle.rules import TERMINAL_SYSTEM_STATES
-from kdive.domain.operations.jobs import Job, JobKind
+from kdive.domain.operations.jobs import Job, JobKind, PowerAction
 from kdive.jobs.context import context_from_job as job_context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import PowerPayload, SystemPayload, load_payload
@@ -35,13 +35,13 @@ def _resolved_domain_name(system: System) -> str:
 
 
 async def _power_target(conn: AsyncConnection, system_id: UUID) -> _ControlTarget:
-    """Resolve a power job's domain/project, re-checking READY under the SYSTEM lock.
+    """Resolve a non-resume power job's domain/project, re-checking ``READY`` under the SYSTEM lock.
 
-    The READY re-check is power-specific policy (ADR-0320): a power job admitted while READY
-    may dequeue after a ready->crashing/crashed transition, and a CRASHING (mid-force_crash) or
-    CRASHED System holds crash evidence that must not be destroyed through the power path
-    (ADR-0325). ``terminal=True`` because the state will not improve on retry — dead-letter rather
-    than churn. (`force_crash` has its own precheck path; this helper is power-only.)
+    Every non-resume action requires ``READY`` (ADR-0320): a power job admitted while READY may
+    dequeue after a ready->crashing/crashed transition, and a CRASHING (mid-force_crash) or CRASHED
+    System holds crash evidence that must not be destroyed through the power path (ADR-0325).
+    ``terminal=True`` because the state will not improve on retry. (`resume` has its own retry-safe
+    handler; `force_crash` has its own precheck path — this is non-resume-power-only.)
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
         system = await SYSTEMS.get(conn, system_id)
@@ -75,10 +75,12 @@ async def power_handler(
     *,
     resolver: ProviderResolver,
 ) -> str | None:
-    """Drive the domain's power; audit `power:{action}`; move no System state."""
+    """Drive the domain's power and audit it; RESUME moves paused->ready, other actions no state."""
     payload = load_payload(job, PowerPayload)
     system_id = UUID(payload.system_id)
     action = payload.action
+    if action is PowerAction.RESUME:
+        return await _resume_handler(conn, job, system_id, resolver)
     target = await _power_target(conn, system_id)
     control = await _controller(conn, system_id, resolver)
     await asyncio.to_thread(control.power, target.domain_name, action)
@@ -102,6 +104,57 @@ async def power_handler(
                 project=target.project,
             ),
         )
+    return str(system_id)
+
+
+async def _resume_handler(
+    conn: AsyncConnection, job: Job, system_id: UUID, resolver: ProviderResolver
+) -> str | None:
+    """Resume a PAUSED System to READY, retry-safe across at-least-once redelivery (ADR-0378).
+
+    A resume job only exists because admission saw ``PAUSED``, so a worker-time ``READY`` means a
+    prior delivery already committed ``paused -> ready`` — a no-op success, never a failure. The
+    provider resume is idempotent (an already-running guest is the achieved post-state), and a
+    ``control.power`` fault re-raises without touching state, leaving the System ``PAUSED`` so the
+    job retries — a determinate, recoverable landing (the agent can re-issue resume or tear down),
+    never an eager ``FAILED`` that would wrongly condemn a healthy paused guest.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is None:
+            raise CategorizedError(
+                "resume target system is gone",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id)},
+            )
+        if system.state is SystemState.READY:
+            return str(system_id)  # already resumed by a prior delivery; idempotent no-op
+        if system.state is not SystemState.PAUSED:
+            raise CategorizedError(
+                "resume requires a paused system",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(system_id), "current_status": system.state.value},
+                terminal=True,
+            )
+        target = _ControlTarget(_resolved_domain_name(system), system.project)
+    control = await _controller(conn, system_id, resolver)
+    await asyncio.to_thread(control.power, target.domain_name, PowerAction.RESUME)
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        system = await SYSTEMS.get(conn, system_id)
+        if system is not None and system.state is SystemState.PAUSED:
+            await SYSTEMS.update_state(conn, system_id, SystemState.READY)
+            await audit.record(
+                conn,
+                job_context_from_job(job, target.project),
+                audit.AuditEvent(
+                    tool="control.power",
+                    object_kind="systems",
+                    object_id=system_id,
+                    transition="paused->ready",
+                    args={"system_id": str(system_id), "action": PowerAction.RESUME.value},
+                    project=target.project,
+                ),
+            )
     return str(system_id)
 
 

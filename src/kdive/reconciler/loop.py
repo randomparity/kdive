@@ -102,6 +102,8 @@ _repair_abandoned_jobs = job_repairs.repair_abandoned_jobs
 _repair_dead_sessions = debug_session_repairs.repair_dead_sessions
 _repair_orphaned_systems = system_repairs.repair_orphaned_systems
 _repair_stalled_crashing_systems = system_repairs.repair_stalled_crashing_systems
+_repair_stalled_restoring_systems = system_repairs.repair_stalled_restoring_systems
+_repair_stalled_creating_snapshots = system_repairs.repair_stalled_creating_snapshots
 _sweep_expired_allocations = allocation_repairs.sweep_expired_allocations
 _sweep_console_rotation = console_rotation_repairs.sweep_console_rotation
 
@@ -320,6 +322,14 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted force_crash job.
     _RepairCatalogEntry(
         "stalled_crashing_systems", lambda _r, _c, _g: _repair_stalled_crashing_systems
+    ),
+    # Runs after abandoned_jobs, which dead-letters a lease-lapsed-and-exhausted restore/snapshot
+    # job (ADR-0378): a stranded RESTORING System -> failed, a stranded creating snapshot -> failed.
+    _RepairCatalogEntry(
+        "stalled_restoring_systems", lambda _r, _c, _g: _repair_stalled_restoring_systems
+    ),
+    _RepairCatalogEntry(
+        "stalled_creating_snapshots", lambda _r, _c, _g: _repair_stalled_creating_snapshots
     ),
     _RepairCatalogEntry("console_rotations_enqueued", lambda _r, _c, _g: _sweep_console_rotation),
     _RepairCatalogEntry(
