@@ -259,6 +259,23 @@ jobs:
           version: "0.11.18"
           enable-cache: true
 
+      - name: Install pinned shellcheck
+        # The shellcheck hook is `language: system` (koalaman/shellcheck ships no
+        # ppc64le manifest, so the docker_image variant broke POWER dev). Ubuntu's
+        # apt shellcheck is older than 0.11.0 and emits info-level findings 0.11.0
+        # dropped (SC2015/SC2002 on `A && B || C` and `cat | tr` shapes that are
+        # correct by construction). Install the same pinned 0.11.0 tarball the
+        # lint-type-test job uses so both jobs enforce one standard.
+        run: |
+          sc_ver=v0.11.0
+          sc_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${sc_ver}/shellcheck-${sc_ver}.linux.x86_64.tar.xz"
+          echo "${sc_sha}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install "/tmp/shellcheck-${sc_ver}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
       - name: Run hooks
         # The ty hook shells out to `uv run ty check`, which would sync the whole
         # project (and need libvirt-dev) just to type-check; the lint-type-test job
