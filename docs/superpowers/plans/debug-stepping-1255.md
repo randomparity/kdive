@@ -165,33 +165,39 @@ Only `step_instruction` (one machine instruction, terminates immediately from an
 in the panic context. Split the proof accordingly:
 
 **Files:**
-- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, assert
-  **only** `debug.step_instruction`. Prove the step **advanced the PC** by capturing the
-  program-counter register (e.g. `rip` on x86_64) via `debug.read_registers` immediately
-  **before** and **after** the step and asserting the two differ — so a step stuck on a
-  `hlt`-with-interrupts-disabled PC fails visibly instead of passing as "returned a stop". Do
-  **not** rely on the pre-existing `symbol="panic"` disassembly for this (that window starts at
-  panic's *entry* address, not the current halt PC) and note the step response itself carries no
-  PC (it reduces the stop to `{reason, timed_out}`); `debug.read_registers` is already
-  registered/driven in the smoke, so this is two extra calls, no new wiring. Do not add
-  `finish`/`step`/`next` here (`step_instruction` terminates promptly from a `cpu_relax`-style
-  spin; it is not guaranteed instantaneous from every halt).
-- `scripts/live-debug.py` — add a stepping exercise that reaches a **resumable, returnable**
-  frame the way `_stopped` already does (`set_breakpoint(<sym>)` + `debug.continue`,
-  lines ~418-430) on a normally-booted kernel, then drives `debug.step`, `debug.next`,
-  `debug.step_instruction`, and `debug.finish`. The breakpoint symbol must be a **promptly-
-  returning, same-stack** hot function — **not** `schedule`/`DEFAULT_BREAK_SYMBOL` (a
-  context-switch function: `finish` does not return on the same stack — it yields the CPU and
-  only "returns" when this task is rescheduled, which can exceed the wait cap and time out; and
-  single-stepping across `context_switch`/`__switch_to` confuses gdb). Pass an explicit
-  `--symbol` (do not reuse the scheduler default): pick a leaf-ish syscall/VFS helper that
-  returns to its caller on the same stack within the wait cap (e.g. `ksys_read`/`vfs_read`),
-  **verified present and hit on the booted kernel** on this host. State expected outcomes so the
-  run is falsifiable and non-hanging: for `step`/`next`/`step_instruction`, capture the PC via
-  `debug.read_registers` (rip) before and after and assert it advanced (the step response carries
-  no PC field); `finish` returns a clean stop at the breakpoint frame's caller and — critically —
-  **`timed_out=False`**, so a scheduler-style non-return fails the gate loudly instead of passing
-  as "a stop". This is the full four-verb functional proof run on this KVM host.
+- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, exercise
+  **only** `debug.step_instruction`. The **primary, hard** assertion is that the step returns a
+  stop with `timed_out=False` (it completed, not ran out the wait). Also capture the
+  program-counter register (`rip`) via `debug.read_registers` **before** and **after** and **log**
+  the two values as a diagnostic — do **not** hard-assert they differ: the panic halt PC is
+  wherever the operator image is spinning at attach, and an unsteppable park (a `hlt`-with-IF=0
+  loop or a self-jump) leaves `rip` unchanged even though the tool is correct, so a hard
+  rip-inequality here would red the gate on a working feature. (The authoritative rip-advance
+  proof is the `scripts/live-debug.py` walk below, on a deterministic returnable frame.) Notes for
+  the implementer: `debug.read_registers` is **registered but not yet called** in this smoke —
+  add two calls (no new wiring, it goes through the same `_call_tool` path); its response is
+  `data = {register_name: hex_string}`, so read `before.data["rip"]` / `after.data["rip"]` (hex
+  strings keyed by name, not a numeric or a top-level PC field). Do not rely on the pre-existing
+  `symbol="panic"` disassembly (that window starts at panic's *entry*, not the halt PC). Do not
+  add `finish`/`step`/`next` here.
+- `scripts/live-debug.py` — add a **new argparse subcommand** (e.g. `step`, its own subparser +
+  `_dispatch` entry near lines ~545-589) that reuses `_stopped`'s setup to reach a **resumable,
+  returnable** frame (`set_breakpoint(<sym>)` + `debug.continue`, lines ~418-430) on a
+  normally-booted kernel, then drives `debug.step`, `debug.next`, `debug.step_instruction`, and
+  `debug.finish`. The breakpoint symbol must be a **promptly-returning, same-stack** hot function —
+  **not** `schedule`/`DEFAULT_BREAK_SYMBOL` (a context-switch function: `finish` does not return
+  on the same stack — it yields the CPU and only "returns" when this task is rescheduled, which
+  can exceed the wait cap and time out; and single-stepping across `context_switch`/`__switch_to`
+  confuses gdb). Pass an explicit `--symbol` (do not reuse the scheduler default): pick a leaf-ish
+  syscall/VFS helper that returns to its caller on the same stack within the wait cap (e.g.
+  `ksys_read`/`vfs_read`), **verified present and hit on the booted kernel** on this host. State
+  expected outcomes so the run is falsifiable and non-hanging: for `step`/`next`/
+  `step_instruction`, read `rip` via `debug.read_registers` before and after (response is
+  `data = {name: hex_string}`, so compare `before.data["rip"] != after.data["rip"]`) and assert
+  it advanced — this is deterministic on a returnable frame, so the hard rip-advance proof lives
+  here; `finish` returns a clean stop at the breakpoint frame's caller with **`timed_out=False`**,
+  so a scheduler-style non-return fails the gate loudly instead of passing as "a stop". This is
+  the authoritative four-verb functional proof run on this KVM host.
 - Do **not** assert the outermost-frame refusal live (not reliably reachable without a
   frame-select op — see the spec Refused-verb contract); the no-hang mechanism is the fake unit
   test (Task 1).
