@@ -106,6 +106,13 @@ stack-migrate:
 # stack report exit 1. Run that init separately to completion — its exit code still propagates,
 # so a real bucket-creation failure fails the recipe.
 stack-up:
+    # Pre-build oidc when using the local build path (KDIVE_OIDC_IMAGE unset). ADR-0357
+    # has compose build kdive-mock-oidc:dev from ./deploy/mock-oidc; without this pre-build,
+    # `compose up` first tries to PULL that local-only tag and prints a confusing "pull
+    # access denied" warning before falling back to build. Cache-honoring, so it's a no-op
+    # once the image is up to date. Skipped when an operator pins KDIVE_OIDC_IMAGE to a
+    # published GHCR digest (ADR-0358) — that's the pull path, no local build to run.
+    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then docker compose build oidc; fi
     docker compose up -d --wait postgres minio oidc
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh

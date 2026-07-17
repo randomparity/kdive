@@ -58,6 +58,15 @@ banner "reconcile app tier (never run the kdive:dev containers)"
 docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 
 banner "backends"
+# When KDIVE_OIDC_IMAGE is unset, the oidc service builds from ./deploy/mock-oidc
+# (ADR-0357). Pre-build it explicitly so the subsequent `docker compose up` finds
+# kdive-mock-oidc:dev locally and skips a doomed pull attempt against that local-only
+# tag — which otherwise prints a "pull access denied" warning that looks like a hard
+# failure before compose falls back to build anyway. `docker compose build` is
+# cache-honoring, so repeat runs are near-instant.
+if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
+  docker compose build oidc
+fi
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
   # Bring prometheus up on its own first: it publishes ppc64le and is the metrics store, so a
@@ -110,8 +119,12 @@ if [[ "$skip_libvirt" != "1" ]]; then
     exit 1
   }
   # Create the provision dirs (idempotent) so a clean host isn't gated on dirs nothing made.
-  # The root worker owns/writes them at provision time; existence is all up.sh requires.
-  sudo mkdir -p "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+  # Own them to the invoking user with mode 0755: the root worker (default) can still write,
+  # a KDIVE_WORKER_AS_ROOT=0 worker can now write too, and 0755 keeps the qemu user's traverse
+  # bit — needed so the domain can read staged kernels back at boot (ADR-0222/#694). `mkdir -p`
+  # left prior runs root:root:0755, tripping the preflight's writable-by-worker check on a
+  # non-root worker even though the actual runtime worked. `install -d` is idempotent.
+  sudo install -d -o "$(id -un)" -m 0755 "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
   provision_prereqs_ok || {
     echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
     exit 1

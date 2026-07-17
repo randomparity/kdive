@@ -7,9 +7,23 @@ set -euo pipefail
 
 readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # The worker imports drgn + the libguestfs binding from the project venv, not system
-# python3. Probe the same interpreter the worker uses; override on a host-services
-# deployment, e.g. KDIVE_PYTHON=/opt/kdive/.venv/bin/python.
-readonly PY="${KDIVE_PYTHON:-python3}"
+# python3. Probe the same interpreter the worker uses. Prefer the .venv sibling of this
+# script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
+# fall back to system python3, which a host-services deployment overrides via
+# KDIVE_PYTHON=/opt/kdive/.venv/bin/python (or similar).
+#
+# Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
+# stubbed PATH containing only the test stubs (no coreutils), so an external `dirname` call
+# fails. `${var%/*}` strips the trailing path component; two applications on an absolute
+# BASH_SOURCE[0] give the repo root, then append `.venv/bin/python`.
+_repo_venv_py="${BASH_SOURCE[0]%/*}"
+_repo_venv_py="${_repo_venv_py%/*}/.venv/bin/python"
+if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
+  readonly PY="${_repo_venv_py}"
+else
+  readonly PY="${KDIVE_PYTHON:-python3}"
+fi
+unset _repo_venv_py
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
@@ -159,8 +173,8 @@ _venv_imports_kdump_deps || note_fail \
   "uv sync --group live (drgn); install python3-libguestfs, then symlink its guestfs.py + libguestfsmod*.so into the venv site-packages (python versions must match) — see docs/operating/runbooks/four-method-live-run.md section 4b"
 
 _host_kernels_readable || note_fail \
-  "a host kernel under ${BOOT_DIR} (vmlinuz-*) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
-  "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 /boot/vmlinuz-* (re-apply after kernel upgrades, or use dpkg-statoverride)"
+  "a host kernel under ${BOOT_DIR} (vmlinuz-* on x86_64, vmlinux-* on ppc64le) is not readable by this user (libguestfs build-fs appliance, ADR-0222)" \
+  "run this preflight as the worker user; if Debian/Ubuntu (root:0600 kernels): sudo chmod 0644 ${BOOT_DIR}/vmlinu?-* (matches both arches; re-apply after kernel upgrades, or use dpkg-statoverride)"
 
 _dir_writable "${INSTALL_STAGING}" || note_fail \
   "install staging ${INSTALL_STAGING} is not a directory writable by the worker user (KDIVE_INSTALL_STAGING; runs.install stages the kernel/initrd here)" \

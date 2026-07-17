@@ -200,7 +200,12 @@ def test_unreadable_host_kernel_fails_with_chmod_hint(tmp_path: Path) -> None:
     result = _run(_healthy_env(tmp_path, bindir, py, boot))
     assert result.returncode == 1, result.stdout
     assert "vmlinuz" in result.stderr.lower()
-    assert "chmod 0644 /boot/vmlinuz-*" in result.stderr
+    # The hint interpolates ${BOOT_DIR} (a tmp path under the test) and uses an arch-neutral
+    # glob `vmlinu?-*` that matches both `vmlinuz-*` (x86_64) and `vmlinux-*` (ppc64le). Assert
+    # on the semantic content — the fix command and the boot dir it targets — not the literal
+    # `/boot/vmlinuz-*` string, which is neither what the script prints nor what a ppc64le
+    # operator would need to type.
+    assert f"chmod 0644 {boot}/vmlinu?-*" in result.stderr
 
 
 def test_readable_host_kernel_passes(tmp_path: Path) -> None:

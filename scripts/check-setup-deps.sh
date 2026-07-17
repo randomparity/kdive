@@ -62,6 +62,24 @@ package_for() {
   libelf-headers:opensuse) printf "libelf-devel" ;;
   libelf-headers:arch) printf "libelf" ;;
   libelf-headers:*) printf "libelf-dev" ;;
+  # libdw is the DWARF debuginfo library from elfutils; drgn's vendored libdrgn links against
+  # it when building from source (wheel-less arches). On Fedora it lives inside elfutils-devel;
+  # Arch's libelf package already includes libdw.
+  libdw-headers:fedora) printf "elfutils-devel" ;;
+  libdw-headers:opensuse) printf "libdw-devel" ;;
+  libdw-headers:arch) printf "libelf" ;;
+  libdw-headers:*) printf "libdw-dev" ;;
+  # libkdumpfile lets drgn open kdump-COMPRESSED vmcores; without it the local-libvirt kdump
+  # capture path fails "drgn was built without libkdumpfile support" even though ELF cores read.
+  libkdumpfile-headers:fedora | libkdumpfile-headers:opensuse) printf "libkdumpfile-devel" ;;
+  libkdumpfile-headers:arch) printf "libkdumpfile" ;;
+  libkdumpfile-headers:*) printf "libkdumpfile-dev" ;;
+  # The libguestfs Python binding — required for the local-libvirt kdump capture path (ADR-0203).
+  # Fedora/RHEL/openSUSE keep the historical `python3-libguestfs` name; Debian/Ubuntu renamed to
+  # `python3-guestfs` (POWER host bring-up runbook, §1). Not pip-installable; system package only.
+  python3-guestfs:fedora | python3-guestfs:opensuse) printf "python3-libguestfs" ;;
+  python3-guestfs:arch) printf "libguestfs" ;;
+  python3-guestfs:*) printf "python3-guestfs" ;;
   node:opensuse) printf "nodejs-default" ;;
   node:*) printf "nodejs" ;;
   npm:opensuse) printf "npm-default" ;;
@@ -81,6 +99,10 @@ package_for() {
   virt-builder:arch | virt-tar-out:arch | virt-make-fs:arch | guestfish:arch) printf "libguestfs" ;;
   virt-builder:* | virt-tar-out:* | virt-make-fs:* | guestfish:*) printf "guestfs-tools" ;;
   gcc-or-clang:*) printf "gcc" ;;
+  # The .deb / .rpm named `libtool` provides `libtoolize`; there is no standalone `libtoolize`
+  # package to install. Rename here rather than probe `libtool` (which is a per-project script
+  # generated at build time, not a distro binary).
+  libtoolize:*) printf "libtool" ;;
   *) printf "%s" "${name}" ;;
   esac
 }
@@ -122,6 +144,15 @@ require_tool() {
 require_header() {
   local tier="$1" label="$2" module="$3" distro="$4"
   command_exists pkg-config && pkg-config --exists "${module}" 2>/dev/null && return
+  note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
+}
+
+# A distro-packaged Python binding is not pip-installable, so verify presence by asking the
+# system python3 to import it. Falls back to a note_package hint under the given tier if the
+# import fails (module missing OR python3 absent).
+require_pyimport() {
+  local tier="$1" label="$2" module="$3" distro="$4"
+  command_exists python3 && python3 -c "import ${module}" 2>/dev/null && return
   note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
 }
 
@@ -267,6 +298,23 @@ done
 command_exists gcc || command_exists clang ||
   note_package future "gcc or clang" "$(package_for gcc-or-clang "${distro}")"
 require_header future libelf-headers libelf "${distro}"
+
+# The four-method live run needs the libguestfs Python binding on the WORKER host (kdump
+# capture; ADR-0203) plus libdw + libkdumpfile so drgn can build with debuginfo support and
+# open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
+require_header future libdw-headers libdw "${distro}"
+require_header future libkdumpfile-headers libkdumpfile "${distro}"
+require_pyimport future python3-guestfs guestfs "${distro}"
+
+# Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
+# `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
+# .deb ships `libtoolize` (no `libtool` binary); the actual libtool script is generated per
+# project, so probe `libtoolize` — its presence is what drgn's build actually needs.
+if arch_needs_rust "${host_arch}"; then
+  for cmd in autoconf automake libtoolize; do
+    require_command future "${cmd}" "${distro}"
+  done
+fi
 
 report_tier "Required dependencies" required "${distro}"
 report_tier "Recommended dependencies (full local CI)" recommended "${distro}"
