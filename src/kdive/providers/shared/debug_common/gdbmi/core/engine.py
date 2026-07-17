@@ -310,6 +310,22 @@ class GdbMiEngine(
         """Resume, wait for the stop, and interrupt back on timeout."""
         return self._execution.resume(attachment, "-exec-continue", timeout_sec=timeout_sec)
 
+    def step(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one source line, into called functions (ADR-0379)."""
+        return self._execution.resume(attachment, "-exec-step", timeout_sec=timeout_sec)
+
+    def next(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one source line, over called functions (ADR-0379)."""
+        return self._execution.resume(attachment, "-exec-next", timeout_sec=timeout_sec)
+
+    def step_instruction(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one machine instruction (ADR-0379)."""
+        return self._execution.resume(attachment, "-exec-step-instruction", timeout_sec=timeout_sec)
+
+    def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Resume until the current (innermost) frame returns (ADR-0379)."""
+        return self._execution.resume(attachment, "-exec-finish", timeout_sec=timeout_sec)
+
     def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         """Idempotent 'ensure HALTED': -exec-interrupt then wait the short fixed bound."""
         return self._execution.interrupt(attachment)
