@@ -36,3 +36,19 @@ def test_restart_host_processes_starts_all_three() -> None:
     assert "-m kdive server" in text
     assert "-m kdive reconciler" in text
     assert "-m kdive worker" in text
+
+
+def test_up_skips_grafana_on_ppc64le_keeping_prometheus() -> None:
+    """The obs tier must drop grafana (no ppc64le manifest) on POWER without losing prometheus.
+
+    Grafana is the second image in the obs `compose up`, so on ppc64le its missing manifest
+    would abort prometheus too. The gate keeps prometheus (which does publish ppc64le) up.
+    """
+    text = (ROOT / "scripts/live-stack/up.sh").read_text()
+    assert "uname -m" in text, "obs tier must detect host arch to gate grafana"
+    assert "ppc64le" in text, "the gate must key on the ppc64le arch string"
+    # On ppc64le the obs service set reduces to prometheus only; other arches keep grafana.
+    assert "obs_services=(prometheus)" in text
+    assert "obs_services=(prometheus grafana)" in text
+    # The skip is traceable to its tracking issue.
+    assert "#1261" in text

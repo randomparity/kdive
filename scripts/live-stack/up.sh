@@ -60,8 +60,17 @@ docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 banner "backends"
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
-  if ! docker compose --profile obs up -d prometheus grafana; then
-    echo "WARNING: observability tier (prometheus/grafana) failed to start; essential stack continues" >&2
+  # Grafana publishes no ppc64le manifest (ADR-0356 accept-gap) and is the second image in this
+  # one `compose up`, so on POWER its failed pull aborts prometheus too. Drop grafana on ppc64le
+  # and bring prometheus up on its own; prometheus does publish ppc64le, so metrics stay live and
+  # an operator points a workstation-side grafana at this host's prometheus:9090. See issue #1261.
+  obs_services=(prometheus grafana)
+  if [[ "$(uname -m 2>/dev/null || true)" == "ppc64le" ]]; then
+    obs_services=(prometheus)
+    echo "NOTE: skipping grafana on ppc64le (no upstream manifest; ADR-0356 / #1261); starting prometheus only" >&2
+  fi
+  if ! docker compose --profile obs up -d "${obs_services[@]}"; then
+    echo "WARNING: observability tier (${obs_services[*]}) failed to start; essential stack continues" >&2
   fi
 fi
 echo "waiting for postgres to report healthy ..."
