@@ -66,7 +66,7 @@ per-arch byte contract.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
-| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot via runs.install/runs.boot. |
+| `cmdline` | string (nullable) | no | Kernel debug args appended to the platform-required boot args (e.g. 'dhash_entries=1'). Recorded in the build ledger and applied at boot. This value is not fixed at build: to try a different cmdline (e.g. nokaslr, loglevel=8, maxcpus=1) against the already-built kernel, pass cmdline to runs.install with no rebuild — no build-upload cycle needed. |
 | `run_id` | string | yes | The external-build Run to finalize. |
 | `source_label` | string (nullable) | no | Optional unverified provenance: a freeform handle for the local source tree that produced these uploaded artifacts (e.g. 'my-fix worktree'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; kdive does not clone, resolve, or verify it. 1..256 printable characters; bound on the first completion. Omit if unknown. |
 | `source_ref` | string (nullable) | no | Optional unverified provenance: the ref/commit you claim produced these artifacts (e.g. a git SHA or 'v6.9-rc1+patch'). Recorded as a client claim in runs.get data.build_provenance with client_attested=true; treated as an opaque label, never fetched. 1..256 printable characters; bound on the first completion. Omit if unknown. |

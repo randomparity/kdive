@@ -433,6 +433,23 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
+def test_complete_build_cmdline_advertises_iteration_without_rebuild() -> None:
+    # #1256: an agent that sets cmdline at runs.complete_build reads only that field, and its
+    # "fixed at build" mental model is what drives the ask for a phantom boot-time override. The
+    # field must tell them the value is NOT locked in — it can be changed against the built kernel
+    # via runs.install with no rebuild — so they find the real knob (#988) instead of a rebuild.
+    tools = {t.name: t for t in TOOLS}
+    schema = cast(
+        dict[str, object],
+        tools["runs.complete_build"].parameters["properties"]["cmdline"],
+    )
+    description = schema["description"]
+    assert isinstance(description, str)
+    lowered = description.lower()
+    assert "runs.install" in lowered
+    assert "without a rebuild" in lowered or "no rebuild" in lowered
+
+
 def test_runs_create_build_profile_documents_arch() -> None:
     # The nested build_profile.arch is agent-facing (ADR-0343): its description must name the
     # allowed values. test_every_parameter_has_a_description checks only top-level params, so
