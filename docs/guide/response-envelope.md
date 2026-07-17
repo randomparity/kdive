@@ -115,7 +115,6 @@ Every `*.list` tool is opt-in keyset-paginated
 |---|---|---|
 | `truncated` | `bool` | `true` iff more rows match than were returned. Deterministic, never best-effort. |
 | `next_cursor` | `str \| None` | An opaque continuation token, present (non-`null`) **iff** `truncated` is `true`. Pass it back as the next call's `cursor` to read the next page. |
-| `total` | `int` | Present only where it is cheap to compute (the bounded single-System `artifacts.list`). |
 | `count` | `int` | The per-page item count (always present on a collection). |
 
 Paginated list tools take optional `cursor` and `limit` fields in their request
