@@ -24,10 +24,13 @@ child ledger, and a static provider capability flag.
 - **Scope is caller-selectable RAM+disk (default) or disk-only** (`include_memory`, default
   `true`). The repro-loop use case requires live memory so restore resumes at the exact
   instruction with kdump/reproducer/modules intact; disk-only stays available for the cheap
-  filesystem rollback. **Restore can land the guest paused** (`start_paused`, default `false`) via
-  `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED` so the agent can attach a gdbstub `debug.*` session and set
-  breakpoints before execution resumes; it resumes with a new `systems.power(action="resume")`
-  (`PowerAction.RESUME` → `virDomainResume`).
+  filesystem rollback (crash-consistent, no guest-agent quiesce assumed). **Restore can land the
+  guest paused** (`start_paused`, default `false`) via `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED` so the
+  agent can attach a gdbstub `debug.*` session and set breakpoints before execution resumes; it
+  resumes with a new `systems.power(action="resume")` (`PowerAction.RESUME` → `virDomainResume`).
+  A paused restore lands the System in a distinct **`PAUSED`** state, not `READY`, so the
+  `READY ⇒ running` invariant the snapshot and SSH tools depend on stays intact. `start_paused`
+  against a disk-only snapshot is refused (no saved CPU/RAM to resume).
 
 - **Internal libvirt snapshots** stored inside the System's qcow2 — not external memory-state
   files, not S3. This makes "freed on release" near-free (deleting the qcow2 at teardown frees the
@@ -38,7 +41,10 @@ child ledger, and a static provider capability flag.
 - **A `snapshots` child ledger** (`system_id → systems(id) ON DELETE CASCADE`, `UNIQUE
   (system_id, name)`, a `SnapshotState` machine `creating → available|failed`) is the Postgres
   index-of-record for listing, audit, and teardown cleanup, while libvirt holds the RAM+disk data.
-  A snapshot is a child of the System, exactly like `run_steps` under a Run.
+  A snapshot is a child of the System, exactly like `run_steps` under a Run. A fourth tool
+  **`systems.delete_snapshot`** frees a snapshot (name + qcow2 space) before teardown, and
+  same-name snapshot admission recycles a `failed` row / rejects an `available` one, so names are
+  reusable and disk is reclaimable (the `UNIQUE` constraint never wedges a name).
 
 - **Capability advertised via the static `ProviderSupport` descriptor** (ADR-0208 pattern):
   `supports_snapshots: bool = False`, set `True` only in local-libvirt. `systems.get` surfaces
@@ -49,10 +55,17 @@ child ledger, and a static provider capability flag.
   snapshotting a guest mid-debug — so, unlike reprovision, it does not reject on a live Run and
   does not transition System state; concurrent snapshots serialize via libvirt's per-domain job
   lock. **Restore is destructive to a running Run**, so it rejects a live Run (the reprovision
-  rule) and transitions `READY → RESTORING → READY|FAILED` (one new state, migration `0071`) to
-  fence reprovision/power/teardown out during the revert. Both use `contributor` RBAC and the
+  rule) and transitions `READY → RESTORING → READY|PAUSED|FAILED` to fence
+  reprovision/power/teardown out during the revert. Both use `contributor` RBAC and the
   `advisory_xact_lock(SYSTEM)` pattern; neither uses the `force_crash` destructive-op gate, which
-  stays reserved for `force_crash`.
+  stays reserved for `force_crash`. Because there is no generic reconciler sweep for transient
+  System states (`repair_stalled_crashing_systems` is CRASHING-specific), a new
+  `repair_stalled_restoring_systems` recovers a System stranded in `RESTORING` (no active
+  `RESTORE` job → `FAILED`), so a canceled restore or a worker death mid-revert cannot wedge the
+  System in a fenced limbo. Adding `RESTORING`/`PAUSED` (migration `0071`) also updates every
+  state-exhaustive site (`_NON_TERMINAL_SYSTEM`, admission's non-terminal set, `console_hosting`'s
+  live set, the adjacency table), guarded by a test that fails when a new `SystemState` is missing
+  from any.
 
 - **Snapshots are freed on release.** Teardown is made snapshot-aware: it deletes libvirt snapshot
   metadata before `undefine` (libvirt refuses to undefine a snapshotted domain without
@@ -70,9 +83,11 @@ child ledger, and a static provider capability flag.
 - Snapshot support is discoverable before use (`systems.get.data.supports_snapshots`) and enforced
   at call (`capability_unsupported`), so a future bare-metal provider degrades gracefully with no
   agent-visible surprise.
-- One new provider port (`Snapshotter`), one new table, one new System state (`RESTORING`), two
-  new job kinds, and one new `PowerAction` (`RESUME`). Local-libvirt only in this change; the port
-  makes remote-libvirt a later opt-in.
+- One new provider port (`Snapshotter`), one new table, two new System states (`RESTORING`,
+  `PAUSED`), two new job kinds, one new `PowerAction` (`RESUME`), one new reconciler repair
+  (`repair_stalled_restoring_systems`), and four tools (`snapshot`/`restore`/`list_snapshots`/
+  `delete_snapshot`). Local-libvirt only in this change; the port makes remote-libvirt a later
+  opt-in.
 - Snapshots are strictly System-scoped and released with the System, adding no long-lived storage
   and nothing to bill or leak past a release.
 - The live `debug.*` tools gain a "restore to a known-good live state, then attach" workflow;
@@ -108,3 +123,15 @@ child ledger, and a static provider capability flag.
 - **Resuming a paused restore only via the debug session's `continue`.** Rejected as the sole
   path: an agent may pause-restore to inspect without a gdb session; a provider-level
   `systems.power(action="resume")` is a general, discoverable resume independent of a debug session.
+- **Landing a paused restore back in `READY` (guest suspended).** Rejected: it breaks the
+  `READY ⇒ running` invariant the snapshot admission (`include_memory` needs a running guest) and
+  the SSH tools (`ssh_access`/`ssh_reachable` gate on `state is READY`) rely on — a READY-but-paused
+  System would be memory-snapshotted or SSH-probed as if live. A distinct `PAUSED` state models the
+  suspended guest explicitly rather than scattering run-state checks behind `READY`.
+- **Accumulate snapshots until teardown (no delete tool, single-use names).** Rejected: with
+  `UNIQUE (system_id, name)` and no reclamation, a name is single-use for the System's life and a
+  per-iteration repro loop grows the qcow2 unboundedly. `systems.delete_snapshot` + failed-row
+  recycle makes names reusable and disk reclaimable pre-teardown.
+- **Skipping restore-mode validation.** Rejected: `start_paused=True` against a disk-only snapshot
+  has no saved CPU/RAM to resume and would surface as a raw libvirt error; admission refuses it as
+  a `configuration_error` naming the mismatch, and the disk-only reboot semantics are documented.
