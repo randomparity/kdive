@@ -29,8 +29,9 @@ Derived from `2026-07-17-system-snapshot-1254.md` and
   under `advisory_xact_lock(conn, LockScope.SYSTEM, system_id)` inside a `conn.transaction()`.
 - **TDD:** each task writes the failing test(s) first, then implements. Order 1→13; dependency
   notes per task. Tasks 1–2 are the foundation; the provider seam (3–4), persistence (5), handlers
-  (6), repairs (7), state-site updates (8), power/debug gates (9), teardown/reprovision (10), and
-  the MCP tools (11) build on them; 12 regenerates artifacts; 13 is docs; 14 is the live proof.
+  (6), repairs (7), state-site membership sets (8), power/debug gates + sweep guard (9),
+  teardown/reprovision (10), and the MCP tools (11) build on them; each drift-causing task
+  regenerates its own artifacts; 12 verifies no drift remains; 13 is docs; 14 is the live proof.
 
 > **Agent-surface guardrail (applies to Tasks 11–13):** the `@app.tool` **wrapper docstring +
 > `Field(description=…)`** are the only agent-facing text (FastMCP serializes nothing else). They
@@ -97,6 +98,13 @@ CHECK values.
   deleting the `systems` row cascades the `snapshots` rows.
 
 **Acceptance:** `uv run python -m pytest tests/db/test_migrate.py -q` green; `just type` green.
+
+**Commit boundary:** Task 1's enum additions and this migration **land in a single commit**. The
+SQL↔enum guard is bidirectional (every enum value must be permitted by the constraint and
+vice-versa), so a commit that adds `SystemState.RESTORING`/`PAUSED` or the new `JobKind`s without
+widening the CHECK constraints is red — splitting T1 and T2 into separate commits would leave the
+T1 commit failing the guard and break `git bisect`'s per-commit-green invariant. Author them as two
+TDD steps if convenient, but commit them together.
 
 **Rollback:** the migration is byte-immutable once committed — if wrong before commit, edit;
 after commit, a follow-up migration corrects it (do not edit an applied file).
@@ -255,9 +263,12 @@ recovery"; AC 8. Depends on Tasks 1–2, 5–6.
 
 ---
 
-## Task 8 — State-exhaustive-site updates + discovery-sweep guard test
+## Task 8 — State-exhaustive-site membership-set updates
 
-**Where it fits:** Spec §"System state machine" enumeration; AC 9. Depends on Task 1.
+**Where it fits:** Spec §"System state machine" enumeration; AC 9. Depends on Task 1. **The
+discovery-sweep guard is authored in Task 9**, after Task 9 widens the debug/power *gates* — so the
+sweep is written against the final state of every site and there is no ordering cycle (this task
+updates only the membership *sets*, which have no dependency on the gates).
 
 **Files:**
 - `src/kdive/reconciler/repairs/allocations.py` — add `RESTORING`, `PAUSED` to
@@ -267,27 +278,24 @@ recovery"; AC 8. Depends on Tasks 1–2, 5–6.
   as launchable).
 - `src/kdive/providers/infra/console_hosting.py` — add `RESTORING`, `PAUSED` to the live-state set.
 - `src/kdive/jobs/handlers/console/console_rotate.py` — add `RESTORING`, `PAUSED` to `_LIVE_STATES`.
-- `tests/domain/test_state_site_coverage.py` (new) — the **discovery sweep**: enumerate
-  `frozenset[SystemState]` literals / `SystemState`-membership sets and `state is …READY` gates in
-  the tree (via `ast`/import introspection over the known modules) and assert each new
-  `SystemState` is either present or on an explicit `INTENTIONALLY_EXCLUDED` allow-list with a
-  reason. Seed the allow-list with the deliberate exclusions (e.g. new-Run admission excludes
-  `PAUSED`/`RESTORING`; `debug` gate excludes `RESTORING`).
 
-**Test first:** write the sweep test asserting `RESTORING`/`PAUSED` coverage; watch it fail
-against the un-updated sites; then update the sites to green it.
+**Test first:** behavioral tests per site — a `RESTORING`/`PAUSED` System is counted non-terminal
+by allocation reaping + quota admission, its console is hosted and sealed; new-Run admission still
+refuses `RESTORING`/`PAUSED`. Watch them fail against the un-updated sets, then update.
 
-**Acceptance:** the sweep test green; `just test` (which runs reconciler/admission/console tests)
-green; `just type` green.
+**Acceptance:** the per-site tests green; `just test` (reconciler/admission/console) green;
+`just type` green.
 
-**Rollback:** revert the set additions + the sweep test.
+**Rollback:** revert the set additions.
 
 ---
 
-## Task 9 — `control.power` `RESUME` gate + `debug.start_session` `PAUSED` gate
+## Task 9 — `control.power` `RESUME` gate + `debug.start_session` `PAUSED` gate + discovery-sweep guard
 
 **Where it fits:** Spec §"Paused restore & resume", §enumeration (power + debug gates); ACs 4, 9.
-Depends on Tasks 1, 8.
+Depends on Tasks 1, 8. This task widens the last two state-keyed sites (the debug + power gates)
+and then authors the sweep guard, so the sweep sees every site in its final form (closing the
+Task-8/9 cycle).
 
 **Files:**
 - `src/kdive/mcp/tools/lifecycle/control/registrar.py` (`power_system`) — admit `RESUME` iff the
@@ -300,19 +308,32 @@ Depends on Tasks 1, 8.
   state and requires `READY`.
 - `src/kdive/mcp/tools/debug/sessions/lifecycle.py` — widen the `start_session` gate from
   `state is READY` to `state in {READY, PAUSED}`.
+- `tests/domain/test_state_site_coverage.py` (new) — the **discovery sweep**: enumerate
+  `frozenset[SystemState]` literals / `SystemState`-membership sets and `state is …READY` gates in
+  the tree (via `ast`/import introspection over the known modules — the Task-8 sets plus the
+  debug/power gates just widened here) and assert each `SystemState` value is either present or on
+  an explicit `INTENTIONALLY_EXCLUDED` allow-list with a reason. Seed the allow-list with the
+  deliberate exclusions (new-Run admission excludes `PAUSED`/`RESTORING`; the `debug`
+  gate excludes `RESTORING`; non-`RESUME` power actions exclude `PAUSED`/`RESTORING`).
+- **Regenerate the generated tool reference** (`just docs` → `docs/guide/reference/`) in this
+  commit: `PowerAction.RESUME` serializes into `control.power`'s schema, so the reference drifts
+  here; regenerate + commit so this commit passes `docs-check`.
 
-**Test first** (`tests/mcp/.../test_control_power.py`, `tests/mcp/.../test_debug_sessions.py`):
+**Test first** (`tests/mcp/.../test_control_power.py`, `tests/mcp/.../test_debug_sessions.py`, the
+sweep test):
 - `control.power(action=resume)` admitted from `PAUSED`, refused from `READY`/`RESTORING`/others.
 - ON/OFF/CYCLE/RESET refused from `PAUSED`/`RESTORING`.
 - The `RESUME` handler commits `PAUSED→READY` on success and `PAUSED→FAILED` on a simulated
   `virDomainResume` failure.
 - `debug.start_session` succeeds against a `PAUSED` System and (regression) still against `READY`;
   refused against non-`READY`/non-`PAUSED`.
+- The sweep asserts `RESTORING`/`PAUSED` coverage across all state-keyed sites; watch it fail if a
+  gate is left un-widened, then green.
 
-**Acceptance:** the power + debug tests green; `just type` green.
+**Acceptance:** the power + debug + sweep tests green; `just type` and `just docs-check` green.
 
-**Rollback:** revert the gate widenings; `RESUME` becomes unreachable (Task 1's enum value is
-inert).
+**Rollback:** revert the gate widenings + the sweep test; `RESUME` becomes unreachable (Task 1's
+enum value is inert).
 
 ---
 
@@ -353,8 +374,12 @@ fully reverted).
 - `src/kdive/mcp/tools/lifecycle/systems/registrar.py` — four new `_register_systems_*` calls
   inside `register()`: `systems.snapshot` (`mutating`, contributor, enqueue `SNAPSHOT`),
   `systems.restore` (`mutating`, contributor, admission per spec: `available` snapshot, mode
-  validation, reject live Run / active `SNAPSHOT`|`RESTORE`|`DELETE_SNAPSHOT` job / attached debug
-  session, transition `READY→RESTORING`, enqueue `RESTORE`), `systems.list_snapshots` (`read_only`,
+  validation, reject live Run (`_has_live_run`) / active `SNAPSHOT`|`RESTORE`|`DELETE_SNAPSHOT`
+  job (job-queue query on `system_id`) / **attached debug session** (query `DEBUG_SESSIONS`
+  joined `debug_sessions.run_id → runs.id` where `runs.system_id = :sid` and
+  `debug_sessions.state != DETACHED` — i.e. state in `{ATTACH, LIVE}`; refuse
+  `configuration_error` "end the debug session first"), transition `READY→RESTORING`, enqueue
+  `RESTORE`), `systems.list_snapshots` (`read_only`,
   viewer, `ToolResponse.collection`), `systems.delete_snapshot` (`mutating`, contributor,
   Postgres-only admission, reject `creating`/`RESTORING`/in-flight delete, enqueue
   `DELETE_SNAPSHOT` with `recycle_terminal=True, recycle_canceled=True`). Wrapper docstrings +
@@ -365,6 +390,10 @@ fully reverted).
   (resolve `runtime_for_system`, read `runtime.support.supports_snapshots`; no libvirt call).
 - `src/kdive/security/authz/exposure.py` — register the four tools' RBAC exposure
   (`snapshot`/`restore`/`delete_snapshot` = `_CONTRIBUTOR`, `list_snapshots` = `_VIEWER`).
+- **Regenerate in this commit** (`just docs` → tool reference, `just rbac-matrix` →
+  `docs/guide/safety-and-rbac.md`): the four new tools drift both; regenerate + commit so this
+  commit passes `docs-check` and the `rbac-matrix` guard (`just test`). If the systems guide is a
+  mirrored doc-resource, defer its `resources-docs` regen to Task 13 (which edits it).
 
 **Test first** (`tests/mcp/lifecycle/test_systems_snapshot.py`, handler-level, injected pool +
 `RequestContext`, fake runtime):
@@ -383,29 +412,32 @@ fully reverted).
   absent.
 
 **Acceptance:** tool tests green; `just type` green; `test_no_adr_leak` green (no `ADR-`/`#NNN` in
-the wrapper schemas).
+the wrapper schemas); `just docs-check` and the `rbac-matrix` guard green (regenerated in this
+commit).
 
 **Rollback:** revert the registrar/exposure/get additions; the handlers/jobs become unreachable.
 
 ---
 
-## Task 12 — Regenerate CI-gated artifacts
+## Task 12 — Verify no generated-artifact drift remains
 
 **Where it fits:** plan preamble "Generated artifacts"; gates `docs-check`, `rbac-matrix-check`,
-`resources-docs-check`. Depends on Task 11.
+`resources-docs-check`. Depends on Tasks 9, 11, 13.
 
-**Steps:**
-- `just docs` → regenerate `docs/guide/reference/` (the tool reference now lists the four tools +
-  the `RESUME` power action); commit.
-- `just rbac-matrix` → regenerate `docs/guide/safety-and-rbac.md`; commit.
-- `just resources-docs` → regenerate `_content/` snapshots if the mirrored docs changed; commit.
+The drift-causing regenerations happen **inside the task that causes them** so each commit is
+self-consistent and bisectable: the tool reference is regenerated in Task 9 (`RESUME`) and Task 11
+(four tools), the RBAC matrix in Task 11, and the doc-resource snapshots in Task 13 (if the systems
+guide is mirrored). This task is the final catch-all check that nothing was missed.
 
-**Test first:** run `just docs-check`, `rbac-matrix-check` (via `just test`), `resources-docs-check`
-and watch them fail (drift) before regenerating; green after.
+**Steps:** run `just docs-check`, `just config-docs-check`, `just resources-docs-check`,
+`just env-docs-check`, and the `rbac-matrix` guard (via `just test`). If any reports drift, a prior
+task's in-commit regen was incomplete — regenerate the source and fold the fixup into that task's
+commit (not a new trailing commit) where practical.
 
-**Acceptance:** `just docs-check`, `just resources-docs-check`, and the rbac-matrix guard green.
+**Acceptance:** all generated-doc guards green with a clean working tree (`git status` empty after
+regeneration).
 
-**Rollback:** regenerate from the reverted source.
+**Rollback:** n/a (verification).
 
 ---
 
@@ -451,13 +483,18 @@ works (this dev host runs `live_vm` tests directly). Depends on all prior tasks.
 
 ## Commit sequence
 
-One logical change per commit, imperative ≤72-char subjects, `Co-Authored-By` trailer. Suggested:
-`feat(1254): domain enums for snapshot states/kinds` (T1) · `feat(1254): migration 0071 snapshots
-table + check widening` (T2) · `feat(1254): Snapshotter port + supports_snapshots capability` (T3)
-· `feat(1254): local-libvirt snapshotter` (T4) · `feat(1254): snapshots repository + model` (T5) ·
-`feat(1254): snapshot/restore/delete job handlers` (T6) · `feat(1254): reconciler repairs for
-stranded restore/snapshot` (T7) · `feat(1254): state-site coverage + sweep guard` (T8) ·
-`feat(1254): control.power resume + debug PAUSED gate` (T9) · `feat(1254): teardown/reprovision
-free snapshots` (T10) · `feat(1254): systems snapshot/restore/list/delete tools` (T11) ·
-`docs(1254): regenerate tool/RBAC/resource references` (T12) · `docs(1254): systems snapshot guide`
-(T13). Run the guardrails before each commit; the full `just ci` + doc guards before push.
+One logical change per commit, imperative ≤72-char subjects, `Co-Authored-By` trailer. Each commit
+must be green on its own (per-commit-green bisect invariant): regenerate any drifted generated
+artifact **within** the commit that drifts it (Tasks 9, 11, 13), never in a trailing batch.
+Suggested:
+`feat(1254): snapshot domain enums + migration 0071` (T1+T2, one commit — see Task 2 commit
+boundary) · `feat(1254): Snapshotter port + supports_snapshots capability` (T3) · `feat(1254):
+local-libvirt snapshotter` (T4) · `feat(1254): snapshots repository + model` (T5) · `feat(1254):
+snapshot/restore/delete job handlers` (T6) · `feat(1254): reconciler repairs for stranded
+restore/snapshot` (T7) · `feat(1254): state-site membership-set updates` (T8) · `feat(1254):
+control.power resume + debug PAUSED gate + state-site sweep` (T9, regenerates the tool reference) ·
+`feat(1254): teardown/reprovision free snapshots` (T10) · `feat(1254): systems
+snapshot/restore/list/delete tools` (T11, regenerates tool reference + RBAC matrix) · `docs(1254):
+systems snapshot guide` (T13, regenerates doc-resource snapshots if mirrored). Task 12 is a
+verification pass, not a commit. Run the guardrails before each commit; the full `just ci` + doc
+guards before push.
