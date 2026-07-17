@@ -62,10 +62,14 @@ banner "backends"
 # (ADR-0357). Pre-build it explicitly so the subsequent `docker compose up` finds
 # kdive-mock-oidc:dev locally and skips a doomed pull attempt against that local-only
 # tag — which otherwise prints a "pull access denied" warning that looks like a hard
-# failure before compose falls back to build anyway. `docker compose build` is
-# cache-honoring, so repeat runs are near-instant.
+# failure before compose falls back to build anyway. Skip the build when the image
+# already exists: the Dockerfile inputs (pom.xml + Dockerfile) change rarely, and
+# `docker compose build` re-contacts the registry on every invocation to resolve the
+# pinned base-image digests even when every layer is cached.
 if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
-  docker compose build oidc
+  if ! docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
+    docker compose build oidc
+  fi
 fi
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
