@@ -19,6 +19,22 @@ KDIVE_BACKEND_SERVICES=(postgres minio minio-init oidc)
 KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 KDIVE_ROOTFS_DIR="${KDIVE_ROOTFS_DIR:-/var/lib/kdive/rootfs}"
 
+# Arches for which grafana publishes no upstream manifest (ADR-0356 accept-gap, #1261); it ships
+# amd64 + arm64 only. On a listed arch, up.sh skips grafana and brings prometheus (which does
+# publish ppc64le) up on its own, so a missing-manifest pull can't abort the metrics store.
+GRAFANA_UNSUPPORTED_ARCHES=(ppc64le)
+
+# Returns 0 if grafana publishes an image for the given `uname -m` arch (start it), 1 if not
+# (skip it). An empty/unknown arch is treated as supported, so a host where `uname` is absent
+# still attempts grafana best-effort rather than silently skipping it.
+grafana_supports_arch() {
+  local candidate
+  for candidate in "${GRAFANA_UNSUPPORTED_ARCHES[@]}"; do
+    [[ "$candidate" == "$1" ]] && return 1
+  done
+  return 0
+}
+
 # Matches the real daemon argv, e.g. ".venv/bin/python -m kdive server". `[.]` is a literal
 # dot, so awk's dynamic-regex engine does not warn about an unescaped metacharacter.
 _daemon_match='[.]venv/bin/python -m kdive (server|worker|reconciler)'

@@ -60,17 +60,20 @@ docker compose rm -sf migrate server worker reconciler >/dev/null 2>&1 || true
 banner "backends"
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"
 if [[ "$skip_obs" != "1" ]]; then
-  # Grafana publishes no ppc64le manifest (ADR-0356 accept-gap) and is the second image in this
-  # one `compose up`, so on POWER its failed pull aborts prometheus too. Drop grafana on ppc64le
-  # and bring prometheus up on its own; prometheus does publish ppc64le, so metrics stay live and
-  # an operator points a workstation-side grafana at this host's prometheus:9090. See issue #1261.
-  obs_services=(prometheus grafana)
-  if [[ "$(uname -m 2>/dev/null || true)" == "ppc64le" ]]; then
-    obs_services=(prometheus)
-    echo "NOTE: skipping grafana on ppc64le (no upstream manifest; ADR-0356 / #1261); starting prometheus only" >&2
+  # Bring prometheus up on its own first: it publishes ppc64le and is the metrics store, so a
+  # grafana failure (missing manifest, bad tag, registry outage) must never abort it. Grafana
+  # ships no ppc64le manifest (ADR-0356 accept-gap), so skip it outright on POWER — otherwise its
+  # pull prints a "no matching manifest" error every run — and start it best-effort elsewhere. An
+  # operator runs grafana on their own workstation pointed at this host's published prometheus
+  # port (http://<this-host>:9090). See issue #1261.
+  host_arch="$(uname -m 2>/dev/null || true)"
+  if ! docker compose --profile obs up -d prometheus; then
+    echo "WARNING: prometheus (metrics store) failed to start; essential stack continues" >&2
   fi
-  if ! docker compose --profile obs up -d "${obs_services[@]}"; then
-    echo "WARNING: observability tier (${obs_services[*]}) failed to start; essential stack continues" >&2
+  if ! grafana_supports_arch "$host_arch"; then
+    echo "NOTE: skipping grafana on ${host_arch} (no upstream manifest; ADR-0356 / #1261); prometheus is up at :9090" >&2
+  elif ! docker compose --profile obs up -d grafana; then
+    echo "WARNING: grafana failed to start; prometheus continues" >&2
   fi
 fi
 echo "waiting for postgres to report healthy ..."
