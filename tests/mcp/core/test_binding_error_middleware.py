@@ -1,31 +1,38 @@
 """Boundary binding middleware: re-envelope a binding ValidationError (ADR-0124, ADR-0132).
 
-FastMCP validates a tool's typed params at argument binding — *before* the tool body and before any
-in-body catch that builds our envelope. ``BindingErrorMiddleware`` catches that
-``pydantic.ValidationError`` for the tools that need it and returns the standard
-``configuration_error`` envelope (reusing ADR-0123's ``detail`` surfacing), instead of letting a raw
-FastMCP ``ToolError`` reach the caller: the three typed-profile tools (``ProvisioningProfile`` is
-``extra="forbid"``) and ``allocations.request`` (the shape-XOR-custom rule, ADR-0132). Any other
-tool, any non-recognised binding error (a field-level error on the same payload), or any other
-exception passes through unchanged.
+``BindingErrorMiddleware`` wraps the whole tool call, so it catches a ``pydantic.ValidationError``
+whether FastMCP raises it at argument binding (the three typed-profile tools — where
+``ProvisioningProfile`` is ``extra="forbid"`` and FastMCP validates the typed param *before* the
+tool body) or the tool body raises it while reconstructing its payload. Since ADR-0372 flattened
+``allocations.request`` to top-level params, its shape-XOR-custom rule (ADR-0132) is enforced
+in-body when the wrapper rebuilds ``AllocationRequestPayload``; the middleware still converts it to
+the standard ``configuration_error`` envelope (reusing ADR-0123's ``detail`` surfacing) rather than
+letting a raw FastMCP ``ToolError`` reach the caller. Any other tool, any non-recognised binding
+error (a field-level error on the same payload), or any other exception passes through unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.tools.base import ToolResult
+from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.binding_errors import BindingErrorMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, ShapeXorCustomError
+from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_registrar
 from kdive.profiles.build import BuildProfile
 from kdive.profiles.provisioning import ProvisioningProfile
+from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 
 
 def _envelope(result: ToolResult) -> dict[str, Any]:
@@ -328,3 +335,64 @@ def test_end_to_end_runs_create_typed_build_profile_publishes_schema_and_envelop
 
     # R4 (no input echo) is asserted exactly by the fixed-template test below; a substring
     # check here is unreliable when the input digit also appears in a bound.
+
+
+def _alloc_ctx() -> RequestContext:
+    return RequestContext(
+        principal="user-1",
+        agent_session="s",
+        projects=("proj",),
+        roles={"proj": Role.OPERATOR},
+    )
+
+
+def _flat_shape_xor_envelope(
+    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, object]
+) -> dict[str, Any]:
+    """Drive the real flattened allocations.request wrapper end-to-end through the middleware.
+
+    ADR-0372 moved the shape-XOR-custom check from FastMCP argument binding (the old nested
+    ``request`` payload) into the wrapper body, which rebuilds ``AllocationRequestPayload`` from
+    flat params. This proves the in-body ``ValidationError`` still reaches
+    ``BindingErrorMiddleware`` and is re-enveloped as ``configuration_error`` — the shape-XOR error
+    path a black-box caller hits when it supplies both/neither sizing source.
+    """
+    from kdive.mcp.schema.schema_advertising import advertise_envelope_output_schema
+
+    monkeypatch.setattr(allocations_registrar, "current_context", _alloc_ctx)
+    resolver = ProviderResolver({ResourceKind.LOCAL_LIBVIRT: cast(Any, object())})
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app: FastMCP = FastMCP(name="alloc-shape-xor")
+    app.add_middleware(BindingErrorMiddleware())
+    allocations_registrar.register(app, pool, resolver=resolver)
+    advertise_envelope_output_schema(app)
+
+    async def _run() -> dict[str, Any]:
+        async with Client(app) as client:
+            result = await client.call_tool("allocations.request", arguments, raise_on_error=False)
+            content = result.structured_content
+            assert isinstance(content, dict)
+            return content
+
+    return asyncio.run(_run())
+
+
+def test_flattened_allocations_request_shape_and_custom_becomes_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _flat_shape_xor_envelope(
+        monkeypatch,
+        {"project": "proj", "shape": "medium", "vcpus": 2, "memory_gb": 4, "disk_gb": 20},
+    )
+    assert data["status"] == "error"
+    assert data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert "both" in (data["detail"] or "")
+
+
+def test_flattened_allocations_request_neither_shape_nor_custom_becomes_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _flat_shape_xor_envelope(monkeypatch, {"project": "proj"})
+    assert data["status"] == "error"
+    assert data["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
+    assert "neither" in (data["detail"] or "")
