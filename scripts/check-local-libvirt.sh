@@ -11,14 +11,19 @@ readonly KVM_NODE="${KDIVE_KVM_NODE:-/dev/kvm}"
 # script when present (in-repo dev loop) so `just check-local-libvirt` needs no env var;
 # fall back to system python3, which a host-services deployment overrides via
 # KDIVE_PYTHON=/opt/kdive/.venv/bin/python (or similar).
-_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-_repo_venv_py="$(cd -- "${_script_dir}/.." && pwd)/.venv/bin/python"
+#
+# Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
+# stubbed PATH containing only the test stubs (no coreutils), so an external `dirname` call
+# fails. `${var%/*}` strips the trailing path component; two applications on an absolute
+# BASH_SOURCE[0] give the repo root, then append `.venv/bin/python`.
+_repo_venv_py="${BASH_SOURCE[0]%/*}"
+_repo_venv_py="${_repo_venv_py%/*}/.venv/bin/python"
 if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
   readonly PY="${_repo_venv_py}"
 else
   readonly PY="${KDIVE_PYTHON:-python3}"
 fi
-unset _script_dir _repo_venv_py
+unset _repo_venv_py
 # runs.install stages the kernel/initrd here before booting the System; must be writable
 # by the worker user and live under a path the qemu user can traverse (see the boot check).
 readonly INSTALL_STAGING="${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
