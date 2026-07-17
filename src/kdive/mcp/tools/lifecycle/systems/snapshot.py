@@ -419,7 +419,7 @@ async def delete_snapshot(
             job = await queue.enqueue(
                 conn,
                 JobKind.DELETE_SNAPSHOT,
-                SnapshotDeletePayload(system_id=system_id, name=name),
+                SnapshotDeletePayload(system_id=system_id, snapshot_id=str(snapshot.id), name=name),
                 job_authorizing(ctx, system.project),
                 f"{uid}:delete_snapshot:{name}",
                 recycle_terminal=True,

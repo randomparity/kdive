@@ -82,9 +82,21 @@ class RestorePayload(SystemPayload):
 
 
 class SnapshotDeletePayload(SystemPayload):
-    """A request to delete a named checkpoint of a System (ADR-0378, #1254)."""
+    """A request to delete a named checkpoint of a System (ADR-0378, #1254).
 
+    ``snapshot_id`` anchors the delete to the exact ledger row admission targeted, so an
+    at-least-once redelivery after the name was reused by a fresh snapshot is a no-op instead of
+    destroying the new checkpoint (an ABA on the ``name``).
+    """
+
+    snapshot_id: str
     name: str
+
+    @field_validator("snapshot_id")
+    @classmethod
+    def _valid_snapshot_id(cls, value: str) -> str:
+        UUID(value)
+        return value
 
 
 class AuthorizeSshKeyPayload(SystemPayload):

@@ -618,9 +618,16 @@ async def snapshot_delete_handler(
     *,
     resolver: ProviderResolver,
 ) -> str | None:
-    """Delete the libvirt snapshot and remove the ledger row (idempotent)."""
+    """Delete the libvirt snapshot and remove the ledger row (idempotent, ABA-safe).
+
+    Anchored on ``snapshot_id``: the delete proceeds only while the ``(system_id, name)`` row is
+    still the exact one admission targeted. A row that is gone, or now a *different* snapshot that
+    reused the name (an at-least-once redelivery after the name was recreated), is a no-op — so a
+    stale redelivery never destroys a fresh, reported-successful checkpoint.
+    """
     payload = load_payload(job, SnapshotDeletePayload)
     system_id = UUID(payload.system_id)
+    snapshot_id = UUID(payload.snapshot_id)
     system = await SYSTEMS.get(conn, system_id)
     if system is None:
         raise CategorizedError(
@@ -631,11 +638,17 @@ async def snapshot_delete_handler(
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
     snapshotter = _require_snapshotter(binding.runtime, system_id)
+    # The still-present row holds the name, so no concurrent snapshot can reuse it until we delete
+    # it (admission rejects an in-use name); if the id no longer matches, this delete already ran
+    # and the name belongs to a newer snapshot — leave it alone.
+    row = await snapshot_by_name(conn, system_id, payload.name)
+    if row is None or row.id != snapshot_id:
+        return str(system_id)
     domain = system.domain_name or domain_name_for(system_id)
     await asyncio.to_thread(snapshotter.delete, domain, payload.name)
-    row = await snapshot_by_name(conn, system_id, payload.name)
-    if row is not None:
-        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+        row = await snapshot_by_name(conn, system_id, payload.name)
+        if row is not None and row.id == snapshot_id:
             await SNAPSHOTS.delete(conn, row.id)
     return str(system_id)
 

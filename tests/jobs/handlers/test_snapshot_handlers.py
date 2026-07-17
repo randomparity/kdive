@@ -372,17 +372,53 @@ def test_delete_removes_libvirt_snapshot_and_ledger_row(migrated_url: str) -> No
         await pool.open()
         try:
             sid = await _seed_system(pool, SystemState.READY)
-            await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
             snapshotter = _FakeSnapshotter()
             resolver = provider_resolver(snapshotter=snapshotter)
             async with pool.connection() as conn:
                 await snapshot_delete_handler(
                     conn,
-                    _job(JobKind.DELETE_SNAPSHOT, sid, {"name": "cp"}),
+                    _job(
+                        JobKind.DELETE_SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(snap_id), "name": "cp"},
+                    ),
                     resolver=resolver,
                 )
                 assert await snapshot_by_name(conn, sid, "cp") is None
             assert snapshotter.deleted == [("kdive-x", "cp")]
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_delete_snapshot_redelivery_after_name_reuse_is_noop(migrated_url: str) -> None:
+    # ABA guard: a stale DELETE_SNAPSHOT redelivery whose target row was already deleted and whose
+    # name was reused by a NEW snapshot must not destroy the new checkpoint. The handler anchors on
+    # snapshot_id, so a name-match with a different id is a no-op.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            old_id = uuid4()  # the original snapshot, already deleted (row is gone)
+            new_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            snapshotter = _FakeSnapshotter()
+            resolver = provider_resolver(snapshotter=snapshotter)
+            async with pool.connection() as conn:
+                await snapshot_delete_handler(
+                    conn,
+                    _job(
+                        JobKind.DELETE_SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(old_id), "name": "cp"},
+                    ),
+                    resolver=resolver,
+                )
+                row = await snapshot_by_name(conn, sid, "cp")
+                assert row is not None and row.id == new_id  # the new checkpoint survives
+            assert snapshotter.deleted == []  # never touched the new libvirt snapshot
         finally:
             await pool.close()
 
