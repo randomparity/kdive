@@ -107,6 +107,15 @@ the crash was outside the watched window — read the console directly with `run
 access) and the `artifacts` tools. Do not rely on SSH output as your capture of a panic; rely on
 the console.
 
+**Checkpoint a configured guest to restore between attempts.** When each reproducer attempt leaves
+the guest dirty (or crashes it), `systems.snapshot` a fully-configured guest once — packages
+installed, reproducer staged, kdump armed — then `systems.restore` back to that checkpoint in
+seconds between attempts instead of reprovisioning from scratch. `systems.get`'s
+`data.supports_snapshots` tells you whether the provider supports this. A memory checkpoint
+(`include_memory=true`) resumes the guest exactly where it was; `start_paused=true` lands it
+`paused` for a gdbstub `debug.start_session` before execution resumes, then
+`control.power(action="resume")` runs it. See the systems guide.
+
 **Scope resource-exhaustion reproducers to a throwaway uid.** Reproducing a per-uid or
 per-cgroup quota bug (inotify watches, file descriptors, pending signals, and the like) by
 running the workload as root exhausts *root's own* quota — starving root-owned services such as
