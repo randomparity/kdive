@@ -22,8 +22,30 @@ machine instruction, or until the current frame returns, each returning the reda
   (`tests/mcp/core/test_no_adr_leak.py`) and must name every field/constraint.
 - Pick the most specific existing `ErrorCategory`; never invent strings.
 - Every tool returns a `ToolResponse`; failures carry an `error_category`.
-- Commit one logical change at a time, imperative subject ≤72 chars, with the
+- Commit with an imperative subject ≤72 chars and the
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` trailer.
+
+## Commit boundaries (every committed state must pass `just ci` — bisectability)
+
+The task numbering is an implementation order, **not** a commit-per-task mapping. Two
+whole-registry equality guards force some tasks to land together:
+
+- `test_app.py` asserts the exposure classification set **equals** the live tool registry.
+- `test_toolset_doc_completeness.py` requires the toolset doc to name **exactly** the live
+  tools in the namespace.
+
+So a commit that registers the four tools without also updating the ACL / tool-index / tool-doc
+map / toolset doc leaves `just ci` **red**. Commit in these atomic units:
+
+- **Commit A = Task 1** — engine methods + port + timeout-guard rename + their unit tests. No
+  tools are registered yet, so the registry guards are unaffected; the new methods are covered
+  by Task 1's unit tests. Green on its own.
+- **Commit B = Tasks 2 + 3 + 4 together** — tool registration, `_AUDITED_OPS`, exposure ACL,
+  tool-index keywords, `test_tool_docs` map, audit tests, **and** the guide docs, all in one
+  commit. This is the smallest green state. Per-task acceptance commands below are progress
+  checks, not commit boundaries.
+- **Commit C = Task 5** — live smoke + `scripts/live-debug.py` (test/script only, `live_vm`-gated,
+  so `just ci` stays green).
 
 ## Task 1 — Engine methods, port protocol, verb-neutral timeout guard (TDD)
 
@@ -50,6 +72,9 @@ is already verb-generic, so each engine method is a one-line delegate.
   wait (no `*stopped` scripted).
 - `test_step_interrupts_on_timeout` — no stop scripted; assert interrupt-back +
   `timed_out=True` (mirror `test_continue_interrupts_on_timeout`).
+- `test_step_raises_on_missing_function_bounds` — fake returns `^error`
+  ("Cannot find bounds of current function") for `-exec-step`; assert `DEBUG_ATTACH_FAILURE`
+  (pins symbol-poor sub-case (b), mirroring the finish `^error` test).
 - Migrate the two `bad_continue_timeout` assertions (lines ~652, ~880) to `bad_resume_timeout`
   and the new message.
 
@@ -64,14 +89,18 @@ green; each method issues its exact verb; timeout guard code is `bad_resume_time
 - `src/kdive/mcp/tools/debug/operations/execution.py` — add `_register_debug_step`,
   `_register_debug_next`, `_register_debug_step_instruction`, `_register_debug_finish` (call
   them from `register`, lines 26-27) plus their `_EngineOp` closures (mirror `_continue_op`,
-  calling `engine.step/next/step_instruction/finish`). Each returns
+  calling `engine.step/next/step_instruction/finish`). Each wrapper is decorated
+  `@app.tool(name="debug.<op>", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())`
+  exactly as `debug.continue` — the `mutating` classification and maturity are load-bearing for
+  the flat-param and audit-set guards, so they must be explicit, not assumed. Each returns
   `ToolResponse.success(session_id, "stopped", suggested_next_actions=[...],
   data=_stop_data(stop.reason, stop.timed_out))`. Suggested next actions steer toward
   `debug.read_registers`, `debug.backtrace`, and stepping again.
   - Wrapper docstrings: `session_id` + `timeout_sec` Fields as on `debug.continue`; one-line
-    docstring naming into/over/instruction/return and (for step/next) telling the agent to use
-    `debug.step_instruction` where the PC has no line info. End with "Requires contributor."
-    No ADR references.
+    docstring naming into/over/instruction/return. For `step`/`next`, state that a symbol-poor
+    region may return either `timed_out=True` or a `DEBUG_ATTACH_FAILURE`
+    ("Cannot find bounds of current function") and that `debug.step_instruction` is the fallback
+    for both. End with "Requires contributor." No ADR references.
 - `src/kdive/mcp/tools/debug/operations/runtime.py` — add `"debug.step"`, `"debug.next"`,
   `"debug.step_instruction"`, `"debug.finish"` to `_AUDITED_OPS` (line ~76).
 
@@ -126,21 +155,44 @@ green; `just check-mermaid` clean.
 **Where it fits:** the real-KVM proof (spec criterion #5); does not run in `just ci` (gated
 `live_vm` marker) but is the functional-capability proof.
 
-**Files:**
-- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — exercise all four verbs against real KVM
-  in the promoted-ops smoke; assert each advances execution and returns a stop. Do **not**
-  assert the outermost-frame refusal live (not reliably reachable without a frame-select op —
-  see the spec Refused-verb contract); the no-hang mechanism is the fake unit test.
-- `scripts/live-debug.py` — add a step exercise near the existing `debug.continue` call
-  (line ~430).
+**Context constraint:** the promoted-ops smoke (`test_debug_gdbmi_live_smoke.py:77`) boots an
+**early-panicking** kernel and halts in the `panic()` (noreturn) path — it never continues to a
+returnable frame. So `finish`/`step`/`next` must **not** be exercised there: `finish` on a
+noreturn frame runs out the 60s wait cap and returns `timed_out=True` (a 60s hang + a false
+"returns a stop" assertion), and source-line stepping through panic code is unrepresentative.
+Only `step_instruction` (one machine instruction, terminates immediately from any halt) is safe
+in the panic context. Split the proof accordingly:
 
-**Acceptance:** the live smoke is collectable (`-m live_vm` selects it); run it on this KVM
-host as the functional proof before shipping.
+**Files:**
+- `tests/mcp/debug/test_debug_gdbmi_live_smoke.py` — in the existing panic-halted smoke, assert
+  **only** `debug.step_instruction`: it advances exactly one machine instruction and returns a
+  stop (fast, terminating, representative of a halt-anywhere step). Do not add `finish`/`step`/
+  `next` here.
+- `scripts/live-debug.py` — add a stepping exercise that reaches a **resumable, returnable**
+  frame the way `_stopped` already does (`set_breakpoint(<returnable hot fn>)` + `debug.continue`,
+  lines ~418-430) on a normally-booted kernel, then drives `debug.step`, `debug.next`,
+  `debug.step_instruction`, and `debug.finish`. State expected outcomes so the run is falsifiable
+  and non-hanging: `step`/`next`/`step_instruction` return a stop at an advanced PC; `finish`
+  returns a clean stop at the breakpoint frame's caller (choose a function that returns within
+  the wait cap — e.g. the same symbol the existing `_stopped` breakpoints — not a noreturn one).
+  This is the full four-verb functional proof run on this KVM host.
+- Do **not** assert the outermost-frame refusal live (not reliably reachable without a
+  frame-select op — see the spec Refused-verb contract); the no-hang mechanism is the fake unit
+  test (Task 1).
+
+**Acceptance:** the smoke is collectable (`-m live_vm`) and its `step_instruction` assertion
+passes on this host; the `scripts/live-debug.py` stepping exercise walks all four verbs to a
+clean, non-hanging finish on this KVM host. This is a **hard pre-merge gate** (see below), not a
+best-effort — the tools ship maturity `implemented`, which asserts a live-proven capability.
 
 ## Full-suite gate
 
-After all tasks: `just ci` green. Then run the live proof (Task 5) on this host per the
-"functional test drives capability" rule.
+After all tasks: `just ci` green. **Hard pre-merge gate:** the four tools ship maturity
+`implemented`, which under ADR-0175 asserts a live-proven capability — but the live proof is
+`live_vm`-gated and does **not** run in `just ci`. So a green `just ci` alone is **not**
+sufficient to merge. Before merge, run the Task 5 live proof on this KVM host (the smoke's
+`step_instruction` assertion + the `scripts/live-debug.py` four-verb stepping exercise walking to
+a clean finish) and confirm it passes. Do not merge on green CI until that proof passes.
 
 ## Rollback
 
