@@ -230,10 +230,40 @@ def test_snapshot_provider_error_marks_row_failed(migrated_url: str) -> None:
                         ),
                         resolver=resolver,
                     )
-                except CategorizedError:
+                except CategorizedError as exc:
                     raised = True
+                    assert exc.terminal is True  # a failed capture dead-letters, does not retry
                 assert raised
                 assert await _snap_state(conn, snap_id) is SnapshotState.FAILED
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_retry_after_available_is_idempotent(migrated_url: str) -> None:
+    # A completion-window worker crash re-delivers a SNAPSHOT job whose row already reached
+    # `available`; the re-run must be a no-op success, not an available->available IllegalTransition
+    # that dead-letters a snapshot that actually succeeded.
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await snapshot_handler(
+                    conn,
+                    _job(
+                        JobKind.SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(snap_id), "name": "cp", "include_memory": True},
+                    ),
+                    resolver=resolver,
+                )
+                assert result == str(snap_id)
+                assert await _snap_state(conn, snap_id) is SnapshotState.AVAILABLE
         finally:
             await pool.close()
 

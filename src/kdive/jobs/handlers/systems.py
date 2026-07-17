@@ -521,11 +521,21 @@ async def snapshot_handler(
                 snapshotter.create, domain, payload.name, include_memory=payload.include_memory
             )
         )
-    except CategorizedError:
+    except CategorizedError as exc:
         await _fail_snapshot_row(conn, snapshot_id)
+        # A failed capture is terminal (recycle_terminal on the dedup key frees a fresh re-issue),
+        # so it dead-letters at once rather than retrying and racing the failed row to available.
+        exc.terminal = True
         raise
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
-        await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.AVAILABLE)
+        # Idempotent under at-least-once delivery: a worker that dies after this transition commits
+        # but before the job is marked complete re-runs the handler. Only a still-``creating`` row
+        # transitions, so an already-``available`` row (the capture already landed) is a no-op
+        # success rather than an ``available -> available`` IllegalTransition that would dead-letter
+        # a snapshot that actually succeeded.
+        row = await SNAPSHOTS.get(conn, snapshot_id)
+        if row is not None and row.state is SnapshotState.CREATING:
+            await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.AVAILABLE)
     return str(snapshot_id)
 
 
