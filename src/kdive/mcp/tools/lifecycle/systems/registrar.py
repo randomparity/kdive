@@ -370,6 +370,10 @@ def _register_systems_check_ssh_reachable(
         ``ready`` before sshd binds, so a single ``false`` right after provisioning may become
         ``true`` on a repeat call. Available on any ready System whose provider exposes an SSH
         forward; reports ``ssh_not_provisioned`` otherwise.
+
+        ``reachable`` confirms sshd is answering, not that your key is authorized — the probe
+        sends no handshake and attempts no login. Call ``systems.authorize_ssh_key`` if a real
+        SSH attempt is denied with ``Permission denied (publickey)``.
         """
         return await _check_ssh_reachable(pool, current_context(), system_id, resolver=resolver)
 
