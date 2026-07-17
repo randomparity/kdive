@@ -18,8 +18,9 @@ it, so support must be advertised, not assumed.
 
 ## Decision
 
-Add three `systems.*` tools backed by a new `Snapshotter` provider port, a `snapshots` Postgres
-child ledger, and a static provider capability flag.
+Add four `systems.*` tools (`snapshot`/`restore`/`list_snapshots`/`delete_snapshot`) backed by a
+new `Snapshotter` provider port, a `snapshots` Postgres child ledger, and a static provider
+capability flag, plus a `RESUME` action on the existing `control.power` tool.
 
 - **Scope is caller-selectable RAM+disk (default) or disk-only** (`include_memory`, default
   `true`). The repro-loop use case requires live memory so restore resumes at the exact
@@ -27,7 +28,10 @@ child ledger, and a static provider capability flag.
   filesystem rollback (crash-consistent, no guest-agent quiesce assumed). **Restore can land the
   guest paused** (`start_paused`, default `false`) via `VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED` so the
   agent can attach a gdbstub `debug.*` session and set breakpoints before execution resumes; it
-  resumes with a new `systems.power(action="resume")` (`PowerAction.RESUME` → `virDomainResume`).
+  resumes with a new `control.power(action="resume")` (`PowerAction.RESUME` → `virDomainResume`).
+  `RESUME` widens the two `control.power` READY-only gates (admission + worker) so it is admitted
+  **only** from `PAUSED`, commits `PAUSED → READY` (a documented exception to power's move-no-state
+  rule; a failed resume routes `PAUSED → FAILED`), and leaves every other power action READY-only.
   A paused restore lands the System in a distinct **`PAUSED`** state, not `READY`, so the
   `READY ⇒ running` invariant the snapshot and SSH tools depend on stays intact. Because the
   gdbstub `debug.start_session` gate is the *only* inspection path for a suspended guest
@@ -52,7 +56,7 @@ child ledger, and a static provider capability flag.
 - **Capability advertised via the static `ProviderSupport` descriptor** (ADR-0208 pattern):
   `supports_snapshots: bool = False`, set `True` only in local-libvirt. `systems.get` surfaces
   `data.supports_snapshots` (a constant read, no libvirt I/O) for proactive discovery, and the
-  three tools refuse an unsupported provider with the existing `capability_unsupported` envelope.
+  all four tools refuse an unsupported provider with the existing `capability_unsupported` envelope.
 
 - **Snapshot stays `READY` and is permitted during a live Run** — the primary use case is
   snapshotting a guest mid-debug — so, unlike reprovision, it does not reject on a live Run and
@@ -67,8 +71,10 @@ child ledger, and a static provider capability flag.
   `RESTORE` job → `FAILED`), so a canceled restore or a worker death mid-revert cannot wedge the
   System in a fenced limbo. Adding `RESTORING`/`PAUSED` (migration `0071`) also updates every
   state-exhaustive site (`_NON_TERMINAL_SYSTEM`, admission's non-terminal set, `console_hosting`'s
-  live set, the adjacency table), guarded by a test that fails when a new `SystemState` is missing
-  from any.
+  live set, `console_rotate._LIVE_STATES`, the adjacency table, the `debug.start_session` gate, and
+  the `control.power` gates), guarded by a **discovery-sweep** test that enumerates the tree's
+  `SystemState`-membership sets rather than a hand-picked list (a hand-picked list had already
+  missed the power and console-rotate gates).
 
 - **Reprovision invalidates snapshots.** `reprovision = teardown + provision` shares the provider
   undefine primitive and recreates the qcow2, so the `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA` flag
@@ -109,7 +115,7 @@ child ledger, and a static provider capability flag.
 - Snapshots are strictly System-scoped and released with the System, adding no long-lived storage
   and nothing to bill or leak past a release.
 - The live `debug.*` tools gain a "restore to a known-good live state, then attach" workflow;
-  `systems.power` gains a resume action for the paused-restore case.
+  `control.power` gains a resume action for the paused-restore case.
 
 ## Alternatives considered
 
@@ -140,7 +146,7 @@ child ledger, and a static provider capability flag.
   existing `vmcore.*` capture plane already covers offline analysis. Snapshots are for rollback.
 - **Resuming a paused restore only via the debug session's `continue`.** Rejected as the sole
   path: an agent may pause-restore to inspect without a gdb session; a provider-level
-  `systems.power(action="resume")` is a general, discoverable resume independent of a debug session.
+  `control.power(action="resume")` is a general, discoverable resume independent of a debug session.
 - **Landing a paused restore back in `READY` (guest suspended).** Rejected: it breaks the
   `READY ⇒ running` invariant the snapshot admission (`include_memory` needs a running guest) and
   the SSH tools (`ssh_access`/`ssh_reachable` gate on `state is READY`) rely on — a READY-but-paused

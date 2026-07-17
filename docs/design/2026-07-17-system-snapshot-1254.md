@@ -89,7 +89,7 @@ its own MCP lifecycle: heavier than the child-ledger the data needs. See ADR-037
 - **`RESTORING`** — a transient fence during a revert. Edges: `READY → RESTORING`;
   `RESTORING → {READY, PAUSED, FAILED}`.
 - **`PAUSED`** — a resting state: the guest exists but its vCPUs are suspended (after a
-  `start_paused` restore), awaiting `systems.power(action="resume")`. Edges:
+  `start_paused` restore), awaiting `control.power(action="resume")`. Edges:
   `PAUSED → {READY, TORN_DOWN, FAILED}`.
 
 `READY`'s successor set gains `RESTORING`. `PAUSED` is **not** `READY`, which keeps the
@@ -98,9 +98,13 @@ and the SSH tools (`ssh_access.py`, `ssh_reachable.py`) that gate on `state is R
 correctly exclude a suspended guest. A `PAUSED` guest is not SSH-reachable (its kernel is not
 executing); that is expected and documented, not a silent inconsistency.
 
-Adding two `SystemState` values ripples into every state-exhaustive site; the plan enumerates
-each as an explicit step, and a guard test (below) fails when a new `SystemState` is missing from
-any of them:
+Adding two `SystemState` values ripples into every state-exhaustive site. Because a hand-picked
+list is provably incomplete (this review found three state-keyed gates — the power plane and
+`console_rotate` — that an earlier enumeration missed), the guard test is a **discovery sweep**:
+it greps the tree for `frozenset[SystemState]` / `SystemState`-membership sets and `state is …
+READY` gates and fails when a new `SystemState` is absent from a set it should join (or unlisted
+in an explicit allow-list of gates that intentionally exclude it). The plan enumerates each site
+as an explicit step; the sweep is the backstop that catches any the plan misses:
 
 - `domain/capacity/state.py` — the adjacency table edges above.
 - `db/schema/0071_*.sql` — widen `systems_state_check` with `restoring`, `paused`.
@@ -112,6 +116,26 @@ any of them:
   a Run requires `READY`, so a paused/reverting System is refused a new Run until resumed.
 - `providers/infra/console_hosting.py` live-state set — add `RESTORING`, `PAUSED` (the console
   keeps streaming across a revert and while paused).
+- `jobs/handlers/console/console_rotate.py` `_LIVE_STATES` — add `RESTORING`, `PAUSED` so console
+  **sealing/rotation** keeps running while paused/reverting (this set is distinct from
+  `console_hosting`'s live set; leaving it unchanged would silently suspend sealing during those
+  windows — conservative, not data loss, but inconsistent with keeping the stream live).
+- **`mcp/tools/debug/sessions/lifecycle.py` — the `debug.start_session` gate is widened from
+  `state is READY` to `state in {READY, PAUSED}`.** A `PAUSED` guest is exactly the gdbstub
+  attach target: with drgn-live unavailable on a suspended guest, a gdbstub `debug.*` session is
+  the *only* inspection path, so the `start_paused` workflow is dead unless debug admission
+  accepts `PAUSED`. The other `debug.*` tools operate on an already-open session (keyed on the
+  `DebugSession` row, not the System state), so only the session-*open* gate needs widening; a
+  test asserts `debug.start_session` succeeds against a `PAUSED` System.
+- **The `control.power` plane — admission `power_system` and worker `_power_target`.** Both today
+  reject *every* action from any non-`READY` state ("power requires a READY system"). They are
+  widened for the new `RESUME` action only: `RESUME` is admitted **iff** the System is `PAUSED`
+  (rejected from every other state), and every non-`RESUME` action still requires `READY` (so
+  `PAUSED`/`RESTORING` continue to refuse ON/OFF/CYCLE/RESET). See the resume-path spec below.
+- **`systems.teardown` — admissible from `PAUSED`.** Teardown does not gate on `READY` (it only
+  short-circuits an already-`TORN_DOWN` System); the `PAUSED → TORN_DOWN` edge is reachable via
+  `systems.teardown`, so an agent that pause-restored can abandon the System without resuming
+  first. Confirmed present in the enumeration and covered by a test.
 - **`mcp/tools/debug/sessions/lifecycle.py` — the `debug.start_session` gate is widened from
   `state is READY` to `state in {READY, PAUSED}`.** A `PAUSED` guest is exactly the gdbstub
   attach target: with drgn-live unavailable on a suspended guest, a gdbstub `debug.*` session is
@@ -245,14 +269,27 @@ All four live in the existing `systems` toolset registrar
 - **Disk-only restore reboots.** Reverting a disk-only (`include_memory=False`) snapshot rolls
   back the filesystem and the guest reboots (no saved RAM/CPU to resume) — it lands in `READY`
   after re-boot, not at an instruction. Documented on the tool and in acceptance criterion 3b.
-- **Paused restore & resume:** `start_paused=True` reverts into libvirt's *paused* domain state
-  (`VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`) and the System lands in **`PAUSED`**. The agent attaches a
-  gdbstub `debug.start_session`, inspects/sets breakpoints, then **resumes with
-  `systems.power(system_id, action="resume")`** — a new `PowerAction.RESUME` → `virDomainResume`,
-  valid only from `PAUSED` (→ `READY`); other power actions still require `READY`. PowerAction is
-  serialized in the job payload (no CHECK constraint), so `RESUME` adds no migration.
+- **Paused restore & resume (the `control.power` `RESUME` path):** `start_paused=True` reverts
+  into libvirt's *paused* domain state (`VIR_DOMAIN_SNAPSHOT_REVERT_PAUSED`) and the System lands
+  in **`PAUSED`**. The agent attaches a gdbstub `debug.start_session`, inspects/sets breakpoints,
+  then **resumes with `control.power(system_id, action="resume")`** — a new `PowerAction.RESUME`
+  (added to the `PowerAction` enum `ON/OFF/CYCLE/RESET`) → `virDomainResume`. This grafts onto the
+  existing `control.power` job with three deliberate changes, each enumerated as a state-site above:
+  - **Admission** (`power_system`): today rejects any non-`READY` state for every action. Widened
+    so `RESUME` is admitted **iff** `PAUSED` (else `configuration_error`); every other action still
+    requires `READY`, so `RESUME` from `READY` and ON/OFF/CYCLE/RESET from `PAUSED`/`RESTORING` are
+    all refused.
+  - **Worker** (`_power_target` / `power_handler`): today raises "power requires a READY system"
+    and is documented to "move no System state". For `RESUME` only, it accepts a `PAUSED` target
+    and **commits `PAUSED → READY`** under the SYSTEM lock — an explicit, documented exception to
+    the move-no-state rule (every other action still moves no state). A failed `virDomainResume`
+    routes **`PAUSED → FAILED`** (`_record_system_failure`); the guest is left in an indeterminate
+    power state, so `PAUSED` is not a safe landing.
+  - `PowerAction` is serialized in the job payload (no CHECK constraint), so `RESUME` adds no
+    migration; only the enum + these two gates change.
+
   `suggested_next_actions` on a `start_paused` restore names `debug.start_session` and
-  `systems.power`. drgn-*live* over SSH does not work against a paused guest (the kernel is not
+  `control.power`. drgn-*live* over SSH does not work against a paused guest (the kernel is not
   executing); gdbstub-based `debug.*` does. Documented on the tool.
 
 ### `systems.list_snapshots` — synchronous read
@@ -444,11 +481,13 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    `start_paused=True` against a disk-only snapshot is refused `configuration_error` naming the
    mode mismatch.
 4. `start_paused=True` (memory snapshot) reverts the guest paused and lands the System in
-   `PAUSED`; `systems.power(action="resume")` transitions `PAUSED → READY` and resumes the guest.
-   A `PAUSED` System is refused a new Run and non-resume power actions and is not SSH-reachable,
-   **but `debug.start_session` succeeds against it** (the gdbstub attach path) and
-   `systems.teardown` is admissible from it. `suggested_next_actions` on the paused restore names
-   `debug.start_session` and `systems.power`.
+   `PAUSED`; `control.power(action="resume")` is admitted only from `PAUSED`, transitions
+   `PAUSED → READY`, and resumes the guest; a failed `virDomainResume` routes `PAUSED → FAILED`.
+   `RESUME` from `READY`, and ON/OFF/CYCLE/RESET from `PAUSED`/`RESTORING`, are all refused
+   `configuration_error`. A `PAUSED` System is refused a new Run and is not SSH-reachable, **but
+   `debug.start_session` succeeds against it** (the gdbstub attach path) and `systems.teardown` is
+   admissible from it. `suggested_next_actions` on the paused restore names `debug.start_session`
+   and `control.power`.
 5. `systems.list_snapshots(system_id)` returns the System's snapshots newest-first from Postgres,
    no libvirt round-trip. `systems.delete_snapshot(system_id, name)` enqueues a `DELETE_SNAPSHOT`
    job that deletes the libvirt snapshot and removes the ledger row (freeing the name for reuse);
@@ -471,10 +510,13 @@ No change to `PowerAction` persistence (payload jsonb, no CHECK).
    restore that has already committed `READY`/`PAUSED`. A `snapshots` row stranded in `creating`
    (worker death / raced cancel) is recovered to `failed` by `repair_stalled_creating_snapshots`
    and by the admission-time job-liveness check, so a dead capture never wedges the name.
-9. A guard test fails when a new `SystemState` value is absent from any state-exhaustive site
-   (`_NON_TERMINAL_SYSTEM`, admission non-terminal set, `console_hosting` live set, the adjacency
-   table, and the `debug.start_session` admission gate). `RESTORING` and `PAUSED` are present in
-   all of them (`PAUSED` accepted by the debug-session gate; `RESTORING` not).
+9. A **discovery-sweep** guard test enumerates the tree's `SystemState`-membership sets and
+   `state is …READY` gates and fails when a new `SystemState` is unaccounted for — covering
+   `_NON_TERMINAL_SYSTEM`, admission's non-terminal set, `console_hosting` live set,
+   `console_rotate._LIVE_STATES`, the adjacency table, the `debug.start_session` gate, and the
+   `control.power` admission/worker gates. `RESTORING`/`PAUSED` are present in each set they must
+   join, and each intentional exclusion (e.g. `PAUSED` not launchable for a new Run) is an explicit
+   allow-list entry, so the guard is not a hand-picked subset that silently misses a site.
 10. Migration `0071` creates `snapshots`, widens `jobs_kind_check`
     (`snapshot`,`restore`,`delete_snapshot`) and `systems_state_check` (`restoring`,`paused`);
     `test_migrate.py` and the per-migration test stay green.
