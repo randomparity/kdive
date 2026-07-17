@@ -304,10 +304,20 @@ Task-8/9 cycle).
   System is `PAUSED` (else `configuration_error`); keep every other action requiring `READY`
   (so `RESUME` from `READY` and ON/OFF/CYCLE/RESET from `PAUSED`/`RESTORING` are refused).
 - `src/kdive/jobs/handlers/control/control.py` (`_power_target` / `power_handler`) — accept a
-  `PAUSED` target for `RESUME` only; the `RESUME` branch of `_apply_power` calls `virDomainResume`
-  and **commits `PAUSED→READY`** under the SYSTEM lock (a documented exception to the
-  move-no-state rule); a failed resume routes `PAUSED→FAILED`. Every other action still moves no
-  state and requires `READY`.
+  `PAUSED` target for `RESUME` only (`_power_target` today raises "power requires a READY system"
+  for any non-`READY`); the `RESUME` path **commits `PAUSED→READY`** under the SYSTEM lock (a
+  documented exception to the handler's move-no-state rule), and a failed resume routes
+  `PAUSED→FAILED`. Every other action still moves no state and requires `READY`. **This file does
+  the DB state commit and delegates the libvirt call to the provider** (`asyncio.to_thread(
+  control.power, domain_name, action)`) — it does not itself call libvirt.
+- **`src/kdive/providers/local_libvirt/lifecycle/control.py` — the actual `virDomainResume`
+  dispatch.** `_apply_power` (not the job handler) is where the libvirt power call lives. Add an
+  explicit `elif action is PowerAction.RESUME: domain.resume()` branch and extend the narrow
+  `_LibvirtDomain` Protocol with `resume()` (→ `virDomainResume`). **Convert the current tail
+  `else: # PowerAction.CYCLE` into an explicit `elif action is PowerAction.CYCLE` + a final
+  `assert_never(action)`** so a new power action can never silently fall through to `reboot(0)` —
+  today `RESUME` would otherwise hit the `else` and *reboot* the guest, destroying the paused
+  state (the opposite of resume) with no type error and no fake-provider unit-test failure.
 - `src/kdive/mcp/tools/debug/sessions/lifecycle.py` — widen the `start_session` gate from
   `state is READY` to `state in {READY, PAUSED}`.
 - **`src/kdive/mcp/tools/lifecycle/control/registrar.py` — the `control.power` `@app.tool`
@@ -337,6 +347,10 @@ sweep test):
 - ON/OFF/CYCLE/RESET refused from `PAUSED`/`RESTORING`.
 - The `RESUME` handler commits `PAUSED→READY` on success and `PAUSED→FAILED` on a simulated
   `virDomainResume` failure.
+- **Provider-level:** `LocalLibvirtControl._apply_power(PowerAction.RESUME)` calls
+  `domain.resume()` and **not** `domain.reboot()` (a fake `_LibvirtDomain` asserting which method
+  fired) — catches a forgotten branch / catch-all fall-through at unit-test time, not only at the
+  Task 14 live proof.
 - `debug.start_session` succeeds against a `PAUSED` System and (regression) still against `READY`;
   refused against non-`READY`/non-`PAUSED`.
 - The sweep asserts `RESTORING`/`PAUSED` coverage across all state-keyed sites; watch it fail if a
