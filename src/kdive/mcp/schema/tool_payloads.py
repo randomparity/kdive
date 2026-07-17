@@ -149,7 +149,7 @@ _COST_CLASS_DESCRIPTION = (
     "pricing coefficient. This is a what-if input, not the class you are billed under: "
     "actual usage is billed under the persisted cost_class of the resource the allocation "
     "books. To get an estimate that matches the bill, pass the cost_class of the resource "
-    "you intend to allocate on (read it from `catalog.resources`). An unknown class is a "
+    "you intend to allocate on (read it from `resources.describe`). An unknown class is a "
     "configuration_error."
 )
 
