@@ -76,7 +76,18 @@ class _JobsListPayload(ToolPayload):
     kind: JobKind | None = Field(default=None, description="Only active jobs of this kind.")
     investigation_id: str | None = Field(
         default=None,
-        description=("Only active run-bearing jobs whose Run belongs to this Investigation."),
+        description=(
+            "Only active run-bearing jobs whose Run belongs to this Investigation. "
+            "System-scoped jobs (authorize_ssh_key, check_ssh_reachable) carry no run_id "
+            "and are excluded; reach them with the system_id filter instead."
+        ),
+    )
+    system_id: str | None = Field(
+        default=None,
+        description=(
+            "Only jobs carrying this System in their payload — the system-scoped kinds "
+            "(authorize_ssh_key, check_ssh_reachable, provision, …) that no run_id filter reaches."
+        ),
     )
     limit: int = Field(
         default=DEFAULT_LIST_LIMIT,
@@ -101,6 +112,7 @@ class JobsListRequest:
     status: JobState | None = None
     kind: JobKind | None = None
     investigation_id: str | None = None
+    system_id: str | None = None
     limit: int = DEFAULT_LIST_LIMIT
     cursor: str | None = None
 
@@ -315,11 +327,13 @@ async def list_jobs(
     ``(created_at, id)``. A ``cursor`` from a prior page resumes strictly after it; a
     malformed or wrong-tool cursor is an ``invalid_cursor`` configuration error.
 
-    Optional server-side filters (ADR-0197): ``status``/``kind`` narrow by lifecycle
-    state / job kind; ``investigation_id`` narrows to the run-bearing jobs whose Run
-    belongs to that Investigation (a malformed id is an ``invalid_uuid`` configuration
-    error). Filters compose with the cursor — following ``next_cursor`` drains the full
-    filtered set.
+    Optional server-side filters (ADR-0197, ADR-0376): ``status``/``kind`` narrow by
+    lifecycle state / job kind; ``investigation_id`` narrows to the run-bearing jobs whose
+    Run belongs to that Investigation; ``system_id`` narrows to the system-scoped jobs
+    carrying that System in their payload — the ``authorize_ssh_key``/``check_ssh_reachable``
+    kinds that no ``investigation_id`` filter reaches (they carry no ``run_id``). A malformed
+    ``investigation_id``/``system_id`` is an ``invalid_uuid`` configuration error. Filters
+    compose with the cursor — following ``next_cursor`` drains the full filtered set.
     """
     request = request or JobsListRequest()
     capped = _clamp_list_limit(request.limit)
@@ -334,6 +348,11 @@ async def list_jobs(
         investigation_uid = _as_uuid(request.investigation_id)
         if investigation_uid is None:
             return _invalid_uuid_error("investigation_id", request.investigation_id)
+    system_uid = None
+    if request.system_id is not None:
+        system_uid = _as_uuid(request.system_id)
+        if system_uid is None:
+            return _invalid_uuid_error("system_id", request.system_id)
     after = None
     if request.cursor:
         try:
@@ -350,6 +369,7 @@ async def list_jobs(
                 status=request.status,
                 kind=request.kind,
                 investigation_id=investigation_uid,
+                system_id=system_uid,
             )
         kept, truncated = _paginate(jobs, capped)
         next_cursor = (
@@ -448,11 +468,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Jobs list filters and pagination request."),
         ] = None,
     ) -> ToolResponse:
-        """List jobs visible to the caller, newest first, filterable by status/kind/investigation.
+        """List the caller's jobs newest first, filterable by status/kind/investigation/system_id.
 
         Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
         ``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
         accepts active job kinds only; historical retired build jobs remain readable by id.
+        The ``system_id`` filter reaches the system-scoped jobs (authorize_ssh_key,
+        check_ssh_reachable) that ``investigation_id`` excludes (they carry no run_id).
         """
         request = request or _JobsListPayload()
         return await list_jobs(
@@ -464,5 +486,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 status=request.status,
                 kind=request.kind,
                 investigation_id=request.investigation_id,
+                system_id=request.system_id,
             ),
         )

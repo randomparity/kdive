@@ -409,6 +409,7 @@ async def recent_jobs(
     status: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: UUID | None = None,
+    system_id: UUID | None = None,
 ) -> list[Job]:
     """Return the caller's most recent jobs, newest first, capped at ``limit``.
 
@@ -433,6 +434,11 @@ async def recent_jobs(
       ``jobs.payload->>'run_id'``; only run-bearing kinds (``build``/``install``/``boot``)
       carry a ``run_id``, so non-run-bearing jobs never match. The project predicate still
       gates every row, so an Investigation in an unreadable project yields no rows.
+    - ``system_id`` filters to the system-scoped jobs carrying that System in their payload
+      (``authorize_ssh_key``/``check_ssh_reachable``/provision/…), an equality predicate on
+      ``j.payload->>'system_id'`` — the same key ``latest_succeeded_job_for_system`` matches.
+      These jobs carry no ``run_id``, so ``investigation_id`` never reaches them; ``system_id``
+      is how an agent lists them (ADR-0376).
     """
     # Qualify every job column so the optional `runs` join cannot make `created_at`/`id`
     # ambiguous, and so `j.*` returns only `jobs` columns (a bare `*` would pull `runs`
@@ -451,6 +457,9 @@ async def recent_jobs(
     if kind is not None:
         clauses.append(sql.SQL("j.kind = %s"))
         params.append(kind.value)
+    if system_id is not None:
+        clauses.append(sql.SQL("j.payload->>'system_id' = %s"))
+        params.append(str(system_id))
     if after is not None:
         clauses.append(sql.SQL("(j.created_at, j.id) < (%s, %s)"))
         params.extend(after)
