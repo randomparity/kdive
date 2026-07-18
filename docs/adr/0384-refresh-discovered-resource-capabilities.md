@@ -42,11 +42,20 @@ guarded so the insert-only safety properties survive.
 2. **Capabilities only.** The refresh writes **only** `capabilities`. It does not touch
    `status`, `pool`, `cost_class`, `cordoned`, `managed_by`, `host_uri`, `id`, or `created_at`.
 
-3. **Full replace of the jsonb from the fresh discovery record.** For a `creates=True`
-   (local-libvirt) host, discovery is the sole authoritative writer of `capabilities`; there is
-   no production operator capability-edit path to merge-preserve, so replacing the jsonb with
-   the current discovery record is correct and also corrects a *changed* key value, not only a
-   missing one.
+3. **Discovery-authoritative replace, preserving operator-owned keys.** The new `capabilities`
+   value is the fresh discovery record with the stored value of each operator-owned key overlaid
+   back on top: `fresh | {k: stored[k] for k in _OPERATOR_OWNED_CAP_KEYS if k in stored}`, where
+   `_OPERATOR_OWNED_CAP_KEYS = {concurrent_allocation_cap}`. Replacing (not additively-filling)
+   the discovery-owned keys corrects a *changed* value, not only a net-new key. The operator
+   overlay exists because `ops.set_host_capacity` (`mcp/tools/ops/tuning.py`, `platform_operator`)
+   writes `concurrent_allocation_cap` directly onto the discovery row's `capabilities` and
+   deliberately records **no** override-ledger entry — its contract is "a discovery row is
+   outside the ledger; reconcile never overwrites a runtime row's cap." That audited value sticks
+   today only because nothing re-writes the discovery row; a naive full replace would revert it to
+   the `KDIVE_LIBVIRT_ALLOCATION_CAP` default (fail-open: re-opening placement an operator
+   blocked). The overlay keeps that key stable while still rolling out every other discovery
+   change. The `UPDATE` is change-guarded — it writes only when the merged value differs from the
+   stored one, so an unchanged discovery source is a pure read.
 
 4. **`creates=True` scope preserves the remote-connect safety structurally.** The registrar
    already returns early for `creates=False`. Only local-libvirt is `creates=True`;
@@ -55,12 +64,18 @@ guarded so the insert-only safety properties survive.
    remote connect on any path. The "remote TLS connect has no pre-connect timeout" concern is
    honored by construction, not by a runtime check.
 
-5. **Best-effort on the exists branch.** If discovery raises or does not return the target
-   record, the refresh logs at `WARNING` and leaves the existing `capabilities` untouched. A
-   transiently-unreachable local libvirt on a redeploy/restart must not fail onboarding or
-   starve the reconciler, and must never make a working row worse — the refresh can only improve
-   an existing row or leave it as-is. The absent branch keeps today's fail-on-discovery-failure
-   behavior (a never-registered host must discover to insert).
+5. **Best-effort on the exists branch, scoped to the pre-write read.** The `try/except` wraps
+   only `list_resources()` + record selection; on failure it logs at `WARNING` and leaves the
+   existing `capabilities` untouched. The change-guarded `UPDATE` runs outside the catch, so a
+   genuine DB write error propagates like any other registration DB error (swallowing a failed
+   statement inside the outer advisory-locked transaction would poison it and fail the commit
+   regardless). A transiently-unreachable local libvirt on a redeploy/restart must not fail
+   onboarding or starve the reconciler, and must never make a working row worse — the refresh can
+   only improve an existing row or leave it as-is. The absent branch keeps today's
+   fail-on-discovery-failure behavior (a never-registered host must discover to insert). No new
+   local-connect timeout is added: the exists-branch read is the same untimed local libvirt call
+   the cold-start insert already makes, and the reconciler path keeps its existing
+   `PROVIDER_DISCOVERY_TIMEOUT_SECONDS` bound around `register_all_discovery`.
 
 No schema change, no migration, no new tool, no new error category.
 
@@ -74,8 +89,11 @@ No schema change, no migration, no new tool, no new error category.
   connection; no remote connect.
 - Latent-status-clobber is avoided: a future health path that sets a resource `DEGRADED`/
   `OFFLINE` will not be reset to `AVAILABLE` by a capability refresh.
-- `capabilities` is a full replace from discovery, so it is not a place to stash operator
-  overrides for a `creates=True` host — that was already true (discovery owned inserts).
+- An operator's `ops.set_host_capacity` change to a discovery host survives a refresh (the
+  operator-owned-key overlay), so an audited cap is not silently reverted on restart.
+- `_OPERATOR_OWNED_CAP_KEYS` is the single point that must grow if a future operator tool writes
+  another capability key directly onto a discovery row. A new such key not added there would be
+  reverted by the refresh — a maintenance obligation, called out so it is not a silent trap.
 
 ## Considered & rejected
 
@@ -83,15 +101,21 @@ No schema change, no migration, no new tool, no new error category.
   `cost_class` (latent status clobber, §Decision 2) and opens its own transaction + advisory
   lock, which is awkward to call from inside the registrar's existing locked transaction.
   Rejected in favor of a capabilities-only `UPDATE` on the existing connection.
+- **Full replace of the whole `capabilities` jsonb from discovery.** Simpler, but it reverts an
+  operator's `ops.set_host_capacity` change to `concurrent_allocation_cap` — which discovery
+  re-emits from an env default — on every onboard/process-start, silently and in the fail-open
+  direction (§Decision 3). Rejected in favor of the operator-owned-key-preserving overlay.
 - **A separate operator-invoked refresh tool / CLI command.** More surface for a problem the
   automatic deploy/reconciler paths already cover; the issue asks for automatic rollout.
   Rejected.
 - **Extend the refresh to remote-libvirt (`creates=True` for remote).** Would require the
   untimed remote TLS connect the insert-only choice exists to avoid, on every pass. Rejected;
   remote rows are config-overlay-owned (ADR-0112) and refreshed through that path.
-- **Additive-only capability merge (add missing keys, never change existing).** Fails to correct
-  a *changed* capability value and adds merge complexity for no benefit, since discovery is the
-  sole authoritative writer of a local host's capabilities. Rejected in favor of full replace.
+- **Additive-only capability merge (add missing keys, never change any existing value).** Would
+  preserve the operator cap, but only as a side effect of never updating *any* existing key — so
+  it also fails to roll out a *changed* value of a genuinely discovery-owned key (e.g. an
+  expanded `guest_arches`). Rejected in favor of the targeted overlay, which updates
+  discovery-owned keys and preserves only the enumerated operator-owned ones.
 - **Raise on an exists-branch discovery failure.** Regresses onboard/restart robustness for a
   working row (a transient libvirt blip would fail a redeploy that previously succeeded).
   Rejected in favor of best-effort.

@@ -69,16 +69,41 @@ Because the function no longer only *ensures registered*, it is renamed
 `register_or_refresh_discovered_resource` (call sites: `providers/assembly/composition.py` and
 the discovery tests). The rename is mechanical.
 
-### What is refreshed: capabilities only
+### What is refreshed: capabilities, preserving operator-owned keys
 
 The refresh updates **only** the `capabilities` jsonb. It does **not** touch `status`, `pool`,
 `cost_class`, `cordoned`, `managed_by`, `host_uri`, `id`, or `created_at`.
 
+Within `capabilities`, the refresh is **discovery-authoritative except for operator-owned
+keys**. Concretely, the new value is the fresh discovery record's capabilities, with the stored
+value of each operator-owned key overlaid back on top:
+
+```
+new_capabilities = fresh_discovery_caps | {
+    k: stored_caps[k] for k in _OPERATOR_OWNED_CAP_KEYS if k in stored_caps
+}
+```
+
+`_OPERATOR_OWNED_CAP_KEYS = frozenset({CONCURRENT_ALLOCATION_CAP_KEY})` — a new constant beside
+the capability keys. It captures the one capability key a `platform_operator` can write directly
+onto a resource row.
+
 Rationale (full detail in ADR-0384):
 
-- `capabilities` is the field the bug is about, and for a `creates=True` (local-libvirt) host
-  discovery is the **sole** authoritative writer of it — there is no operator capability-edit
-  path to preserve, so a full replace of the jsonb from the fresh discovery record is correct.
+- **`concurrent_allocation_cap` is operator-owned and must survive the refresh.** Local-libvirt
+  discovery emits `concurrent_allocation_cap` itself (from `KDIVE_LIBVIRT_ALLOCATION_CAP`,
+  default 1), *and* the `platform_operator` tool `ops.set_host_capacity`
+  (`mcp/tools/ops/tuning.py`) writes that same key straight into the discovery row's
+  `capabilities` via a targeted `jsonb ||` merge — deliberately writing **no** override-ledger
+  entry, on the documented contract that "a discovery row is outside the ledger" and "reconcile
+  never overwrites a runtime row's cap." That audited cap sticks today *only* because nothing
+  re-writes the discovery row. A naive full replace would revert it to the env default on every
+  onboard/process-start — in the **fail-open** direction (a deliberately-lowered cap raised back
+  up, re-opening placement the operator blocked). Overlaying the stored value back preserves it.
+- **Everything else in `capabilities` is discovery-authoritative.** Replacing (not merely
+  additively-filling) lets the refresh correct a *changed* value of a discovery-owned key — e.g.
+  a host that gains an arch reports a new `guest_arches` list under the same key — not only a
+  net-new key. Additive-only-by-key (the ADR-0384-rejected merge) would miss that.
 - `status` from a local discovery record is a hardcoded `AVAILABLE`. Nothing in production
   transitions a resource to `DEGRADED`/`OFFLINE` today, but the state machine permits it; a
   refresh that also rewrote `status` would silently reset any future operationally-set status
@@ -103,55 +128,86 @@ connect on any path. This is a structural property, not a runtime check.
 On the **absent** branch, discovery failure still fails the insert exactly as today (a host
 that has never registered must discover to insert; unchanged).
 
-On the **exists** branch, the refresh is **best-effort**: if `list_resources()` raises or the
-target record is not returned, the failure is logged at `WARNING` and the existing row's
-`capabilities` are left untouched. The row already exists and the system is functional; a
-transiently-unreachable local libvirt on a redeploy/restart must not fail an onboarding or
-starve the reconciler, and must never make a working row worse. This is what "preserve that
-safety" means concretely: the refresh can only *improve* an existing row or leave it as-is.
+On the **exists** branch, the refresh is **best-effort with a precisely-scoped catch**. The
+`try/except` wraps **only the pre-write work** — the `list_resources()` call and the record
+selection. If either raises (discovery unreachable, or the target record absent from the
+result), the failure is logged at `WARNING` and the branch returns with the existing row's
+`capabilities` untouched. The subsequent change-guarded `UPDATE` is **outside** that catch: a
+genuine DB error on the write propagates like any other registration DB error rather than being
+swallowed (swallowing a failed statement inside the outer advisory-locked transaction would
+poison it and fail the commit anyway, so a broad catch around the write would be worse than
+useless). The row already exists and the system is functional; a transiently-unreachable local
+libvirt on a redeploy/restart must not fail an onboarding or starve the reconciler, and must
+never make a working row worse. This is what "preserve that safety" means concretely: the
+refresh can only *improve* an existing row or leave it as-is.
 
 The reconciler path (`register_provider_resources`) already wraps `register_all_discovery` in a
 timeout + catch-all; the onboarding path (`register_discovered_resources`) does not, which is
 why the exists-branch best-effort guard lives at the refresh site rather than relying on an
 outer catch.
 
+### Discovery-read boundedness (no new timeout added)
+
+The exists-branch re-read calls the **local** libvirt discovery source, the same source the
+absent branch already calls on cold-start insert. There is no separate pre-connect timeout on
+the local connect, and this change does **not** add one — doing so would be inconsistent with
+the untimed cold-start insert read that already exists and would expand scope. So the hang
+exposure of a wedged local `libvirtd` is unchanged in kind from today; the only difference is
+that the read now also happens on a *re-registration* pass, not solely on first insert. The
+reconciler path retains its existing `PROVIDER_DISCOVERY_TIMEOUT_SECONDS` `wait_for` bound
+around the whole `register_all_discovery`; the onboarding path is an interactive operator CLI
+action where a wedged local libvirtd is observable to the operator. The best-effort catch
+covers a discovery call that *raises*, not one that *hangs* — that is an accepted, pre-existing
+residual, not a new one.
+
 ## Behavior change summary
 
-| Path | Row absent | Row exists, key present | Row exists, key missing/stale |
-|------|------------|-------------------------|-------------------------------|
+| Path | Row absent | Row exists, capabilities already current | Row exists, key missing / discovery-owned value stale |
+|------|------------|------------------------------------------|-------------------------------------------------------|
 | Today | discover + insert | no-op (short-circuit) | no-op (stale kept) |
-| After | discover + insert (unchanged) | discover + `UPDATE capabilities` (idempotent) | discover + `UPDATE capabilities` (**gains key**) |
+| After | discover + insert (unchanged) | discover, compute merge, **skip UPDATE** (no write) | discover + `UPDATE capabilities` (**gains key / corrects value**, operator-owned keys preserved) |
 
-On the exists branch the refresh now re-reads the local discovery source on every registration
-pass (onboard + each process start). For local libvirt this is a bounded local connection; it
-was already paid once on cold-start insert.
+The `UPDATE` is **change-guarded**: the branch computes the merged capabilities and writes only
+when they differ from the stored value, so an unchanged discovery source produces no row write
+(no WAL, no version bump) — only a discovery read. On the exists branch the refresh re-reads the
+local discovery source on every registration pass (onboard + each process start); see
+"Discovery-read boundedness" for why that read is no worse than today's cold-start insert.
 
 ## Acceptance criteria
 
 1. An existing local-libvirt resource row whose stored `capabilities` lack a key that discovery
    now reports **gains** that key after `register_or_refresh_discovered_resource` runs, with
    the row's `id` and `managed_by` unchanged.
-2. `status`, `pool`, `cost_class`, and `cordoned` on an existing row are **unchanged** by a
+2. A discovery-owned key whose **value** changed (e.g. `guest_arches`) is **updated** to the
+   discovery value on refresh.
+3. An operator-set `concurrent_allocation_cap` on an existing row **survives** a refresh even
+   though the discovery record reports a different (env-default) value — the stored operator
+   value wins, and the row still gains any net-new discovery keys in the same pass.
+4. `status`, `pool`, `cost_class`, and `cordoned` on an existing row are **unchanged** by a
    refresh even when the discovery record would report different values.
-3. A `creates=False` registration (remote-libvirt, fault-inject) remains a bind-only no-op:
+5. A `creates=False` registration (remote-libvirt, fault-inject) remains a bind-only no-op:
    `list_resources()` is **not** called and no row is written.
-4. On the **absent** path, a discovery failure still raises (insert behavior unchanged).
-5. On the **exists** path, a discovery failure (raise, or target record absent from the result)
-   leaves the stored `capabilities` **unchanged** and does not propagate — the pass logs and
-   continues.
-6. The refresh is idempotent: running it twice against an unchanged discovery source leaves the
-   row identical.
-7. Guardrails green: `just lint`, `just type`, `just test`.
+6. On the **absent** path, a discovery failure still raises (insert behavior unchanged).
+7. On the **exists** path, a discovery **read** failure (raise, or target record absent from the
+   result) leaves the stored `capabilities` **unchanged** and does not propagate — the pass logs
+   and continues.
+8. Change-guard: a refresh against an unchanged discovery source performs the discovery read but
+   issues **no** `UPDATE` (end-state identical, no write).
+9. Guardrails green: `just lint`, `just type`, `just test`.
 
 ## Test plan
 
 - Unit (`tests/services/test_resource_discovery.py`): rework
   `test_ensure_discovered_resource_registered_does_not_overwrite_existing_row` into a
   **refresh** assertion — an existing row's capabilities are updated from a changed discovery
-  record — and add: (a) a missing-key-gained case, (b) `status`/`pool`/`cost_class`/`cordoned`
-  preserved on refresh, (c) `id`/`managed_by` preserved, (d) exists-branch discovery failure is
-  swallowed and leaves capabilities intact, (e) `creates=False` still never calls
-  `list_resources`. Update `test_ensure_discovered_resource_registered_bootstraps_one_row`'s
-  `discovery.calls` expectation to reflect the refresh re-read.
+  record — and add: (a) a missing-key-gained case, (b) a discovery-owned changed value updated,
+  (c) an operator-set `concurrent_allocation_cap` preserved while a net-new key is still gained,
+  (d) `status`/`pool`/`cost_class`/`cordoned` preserved on refresh, (e) `id`/`managed_by`
+  preserved, (f) exists-branch discovery-**read** failure is swallowed and leaves capabilities
+  intact, (g) change-guard: an unchanged discovery source issues no `UPDATE` (assert via a write
+  probe such as `xmin` unchanged or an unchanged `updated_at`/row identity), (h) `creates=False`
+  still never calls `list_resources`. Update
+  `test_ensure_discovered_resource_registered_bootstraps_one_row`'s `discovery.calls` expectation
+  to reflect the refresh re-read.
 - Rename ripples: `test_register_discovered_resource_is_idempotent` (the standalone upsert
   helper) is unaffected.
