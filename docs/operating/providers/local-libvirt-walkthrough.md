@@ -401,7 +401,7 @@ export KDIVE_TOKEN=$(KDIVE_PROJECT=demo examples/local-libvirt/mint-token.sh)
 ```
 
 The token carries `roles={demo: admin}` plus the platform roles, so it reaches every tool; it
-expires after `KDIVE_TOKEN_TTL` seconds (default 12h). The client expands `${KDIVE_TOKEN}` **once,
+expires after `KDIVE_TOKEN_TTL` seconds (default 30d). The client expands `${KDIVE_TOKEN}` **once,
 when it connects**, so after a token expires you must re-export it and then **reconnect** the
 `kdive` server in your client (in Claude Code: `/mcp` → reconnect), not just re-run the export.
 

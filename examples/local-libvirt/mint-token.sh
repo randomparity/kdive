@@ -14,7 +14,7 @@
 # source of truth in kdive.cli.login. Its `iss` matches what the host processes validate
 # against, so no kubectl/port-forward dance is needed (unlike the Helm demo-token.sh).
 #
-# The token expires after KDIVE_TOKEN_TTL seconds (env.sh default 12h). The MCP client only
+# The token expires after KDIVE_TOKEN_TTL seconds (live-stack env.sh default 30d). The MCP client only
 # re-reads ${KDIVE_TOKEN} when it reconnects, so when a token expires, re-run this and
 # reconnect the kdive server in your client.
 #

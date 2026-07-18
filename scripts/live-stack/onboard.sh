@@ -17,7 +17,8 @@
 # against a real deployment; production onboards a project with the audited admin tools
 # (docs/operating/project-onboarding.md).
 #
-# Env overrides: KDIVE_PROJECT (demo), KDIVE_ROLE (admin), KDIVE_TOKEN_TTL (86400 = 24h),
+# Env overrides: KDIVE_PROJECT (demo), KDIVE_ROLE (admin), KDIVE_TOKEN_TTL (2592000 = 30d,
+#   default from live-stack/env.sh),
 #   KDIVE_LIMIT_KCU (1000000), KDIVE_MAX_ALLOC (4), KDIVE_MAX_SYS (4).
 set -euo pipefail
 
@@ -29,7 +30,7 @@ cd "$repo_root"
 
 PROJECT="${KDIVE_PROJECT:-demo}"
 ROLE="${KDIVE_ROLE:-admin}"
-TTL="${KDIVE_TOKEN_TTL:-86400}"
+TTL="${KDIVE_TOKEN_TTL}" # exported by env.sh (default 30d); see its comment
 LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
 MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"
 MAX_SYS="${KDIVE_MAX_SYS:-4}"
@@ -91,6 +92,14 @@ else
   echo "      export KDIVE_TOKEN=\$(examples/local-libvirt/mint-token.sh --project ${PROJECT})" >&2
 fi
 
+if ((TTL % 86400 == 0)); then
+  human_ttl="$((TTL / 86400))d"
+elif ((TTL % 3600 == 0)); then
+  human_ttl="$((TTL / 3600))h"
+else
+  human_ttl="$((TTL / 60))m"
+fi
+
 cat <<EOF
 
 Token contract — these THREE strings must match for allocations.request to be granted:
@@ -98,7 +107,7 @@ Token contract — these THREE strings must match for allocations.request to be 
   roles:{"${PROJECT}":"${ROLE}"}
   project arg: "${PROJECT}"
 
-The minted token expires in $((TTL / 3600))h. WHEN IT EXPIRES, re-run 'just onboard' (or the mint
+The minted token expires in ${human_ttl}. WHEN IT EXPIRES, re-run 'just onboard' (or the mint
 command above) and reconnect your MCP client — the client only re-reads KDIVE_TOKEN on reconnect.
 DEMO ONLY: the bundled mock issuer mints a valid token for any caller — never against production.
 EOF

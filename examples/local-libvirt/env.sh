@@ -27,11 +27,9 @@ export KDIVE_LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
 export KDIVE_MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"
 export KDIVE_MAX_SYS="${KDIVE_MAX_SYS:-4}"
 
-# Lifetime (seconds) of the token mint-token.sh issues. The bundled mock issuer defaults to
-# 3600 (1h), which a build→boot→debug→capture session routinely outlasts — so default to 12h
-# here to avoid mid-session expiry. The MCP client only re-reads the token when it reconnects,
-# so a longer TTL means fewer re-mint/reconnect cycles. Overridable.
-export KDIVE_TOKEN_TTL="${KDIVE_TOKEN_TTL:-43200}"
+# KDIVE_TOKEN_TTL (token lifetime) is inherited from the live-stack env sourced above — one
+# default (30d) shared with `just onboard`, not a second one that drifts. Override in the
+# caller's environment to change it.
 
 # The local-libvirt provider drives system-scope QEMU/KVM domains. qemu:///system is the
 # provider default; exported here for visibility because it is the core of this setup.
