@@ -424,7 +424,7 @@ def load_payload[T: ActivePayloadModel](job: Job, model_class: type[T]) -> T:
             f"{model_class.__name__} does not match {job.kind.value} payload contract"
         )
     try:
-        return model_class.model_validate(job.payload)
+        return cast("T", model_class.model_validate(job.payload))
     except ValidationError as exc:
         raise _validation_error(f"{job.kind.value} payload", exc) from exc
 
