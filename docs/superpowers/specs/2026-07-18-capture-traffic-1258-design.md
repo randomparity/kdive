@@ -71,15 +71,18 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   stays non-blocking; authoritative filter validation happens in the worker.
 - **Worker capture.** Under a per-System advisory lock, re-verify `READY`+local and resolve the
   `TrafficCapturer` port. The worker creates `/var/lib/kdive/pcap/<system_id>/` (mirroring the
-  console-log/host-dump path owner/label handling so QEMU `svirt_t` can write and the worker can
-  read). Lock-free: `object-del` any stale filter for `kdive-dump-<job_id>` (idempotent
-  re-attach after an at-least-once retry), then `object-add` a `filter-dump` with QOM id
-  `kdive-dump-<job_id>` on the `SYSTEM_SSH_NETDEV_ID` (`kdivessh`) netdev writing to
-  `<job_id>.pcap` with `maxlen=snaplen`. Poll the file size every `POLL_INTERVAL`, stopping when
-  `duration_s` elapses, the file reaches `max_bytes` (`truncated=True`), or the owning job row is
-  `CANCELED`. `object-del` the filter on **every** exit path (success, error, cancel). The result
-  carries `bytes_captured` (host file size — the poll already reads it) and `packets` (a small
-  pure-Python pcap record walk).
+  console-log/host-dump path owner/label handling so QEMU `svirt_t` can write there). Lock-free,
+  **the handler owns the poll loop** (the port is thin primitives — see Provider seam): `attach`
+  (`object-del` any stale `kdive-dump-<job_id>` filter, then `object-add` a `filter-dump` with
+  that QOM id on the `SYSTEM_SSH_NETDEV_ID` (`kdivessh`) netdev writing to `<job_id>.pcap` with
+  `maxlen=snaplen`). Then poll every `POLL_INTERVAL`, stopping when `duration_s` elapses, the file
+  reaches `max_bytes` (`truncated=True`), or a direct async read of the owning job row returns
+  `CANCELED`. The size read is `os.stat(dest_path).st_size` — visible cross-uid even where the
+  ADR-0223 content-read wall blocks the later whole-file read, and the cancel read is a plain
+  async `SELECT state` on the handler's autocommit dispatch connection (not a sync callback
+  threaded into a `to_thread` capture loop). `detach` (`object-del`) runs on **every** exit path
+  (success, error, cancel). The result carries `bytes_captured` (the stat size) and `packets` (a
+  small pure-Python pcap record walk).
 - **Zero-packet capture.** A window with no matching packets yields a valid header-only pcap.
   This is the *common* case: the System NIC defaults to `restrict=on` (`guest_egress` False), so
   only the agent's SSH forward rides `kdivessh`. It is a **success**, not a failure — the
@@ -92,10 +95,12 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   `CONFIGURATION_ERROR` `{reason: invalid_filter}` carrying tcpdump's stderr), then
   `tcpdump -r <raw> -w <out> <expr>` (single argv, no shell). Stream the resulting pcap to the
   object store via `put_stream` named `pcap-<job_id>` (job-unique + retry-stable), as
-  `SENSITIVE`, `retention_class="pcap"`, `owner_kind="runs"`, `owner_id=run_id`. Insert the
-  artifact row insert-if-absent on the object key (at-least-once safe), audit
-  (`tool="control.capture_traffic"`, `transition="capture_traffic"`), delete the host files,
-  return the artifact id.
+  `SENSITIVE`, `retention_class="pcap"`, `owner_kind="runs"`, `owner_id=run_id`. The store runs
+  under a second per-System-locked transaction (mirroring `diagnostic_sysrq._store_capture`) that
+  re-checks the job is not `CANCELED` and skips the store if it is; otherwise it inserts the
+  artifact row insert-if-absent on the object key (at-least-once safe), audits
+  (`tool="control.capture_traffic"`, `transition="capture_traffic"`), deletes the host files, and
+  returns the artifact id.
 - **Egress.** A Run has **many** pcaps (one per capture), so egress is capture-addressable, not
   `(run_id, asset)`-keyed: `artifacts.fetch_raw` gains an optional `artifact_id` (used only for
   `asset="pcap"`). The agent passes the id from the job's `refs.result`; the `_resolve_key` PCAP
@@ -106,44 +111,53 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   `artifacts.get`/`find` return `not_found` for the `SENSITIVE` pcap (unchanged `REDACTED`-only
   gate).
 - **Cancellation / early exit.** `jobs.cancel` is a cooperative DB state flip (no signal to the
-  handler), so the size-poll reads the job row's state each `POLL_INTERVAL` and, on `CANCELED`,
-  breaks, `object-del`s the filter, deletes the partial host file, and returns **without**
-  storing an object or row (job ends `CANCELED`, no `result_ref`). This per-interval cancel-check
-  is a new mechanism (neither `watch_for_crash` nor `diagnostic_sysrq` has it), added because a
-  stray `filter-dump` fills host disk. `CAPTURE_TRAFFIC` is in `CONTRIBUTOR_CANCELABLE_JOB_KINDS`.
-- **Worker-crash orphans + reaper.** The `filter-dump` stays attached for the whole window, so a
-  worker `SIGKILL`/host crash between `object-add` and `object-del` strands it writing unbounded
-  to host disk and leaves a partial file. A reconciler reap (modeled on
-  `reap_orphaned_dump_volumes` + `has_active_capture_job`) `object-del`s kdive `kdive-dump-*`
-  filters whose owning capture job is terminal and deletes orphaned
-  `/var/lib/kdive/pcap/<system_id>/*.pcap` files with no live job. The deterministic
-  `kdive-dump-<job_id>` id makes both the retry re-attach and the reap idempotent.
+  handler), so the poll reads the job row's state each `POLL_INTERVAL` and, on `CANCELED`, breaks,
+  `detach`es the filter, deletes the partial host file, and returns **without** storing. The final
+  store transaction re-checks `CANCELED` under the lock, so a cancel observed any time before that
+  commit stores nothing. This per-interval cancel-check is a new mechanism (neither
+  `watch_for_crash` nor `diagnostic_sysrq` has it), added because a stray `filter-dump` fills host
+  disk. `CAPTURE_TRAFFIC` is in `CONTRIBUTOR_CANCELABLE_JOB_KINDS`. Residual (documented, benign):
+  a cancel that commits in the narrow window *after* the store transaction commits but *before*
+  `queue.complete` still ends the job `CANCELED` with no `result_ref`, yet the pcap exists and is
+  reachable as the Run's newest pcap — consistent with the "stored pcaps persist" non-goal.
+- **Worker-crash orphans (no new reaper).** The `filter-dump` stays attached for the whole window,
+  so a worker `SIGKILL`/host crash between `attach` and `detach` strands it. This is contained
+  without a new reconciler port: (1) the deterministic `kdive-dump-<job_id>` id makes the
+  at-least-once **retry**'s `attach` (`object-del`-before-`object-add`) clean the stranded filter
+  and never double-attach — the normal recovery; (2) System teardown removes the per-System
+  `/var/lib/kdive/pcap/<system_id>/` directory (the bespoke `_reclaim_*` per-family pattern in
+  `jobs/handlers/systems.py`), sweeping orphaned host pcap files; (3) the filter dies when the
+  domain stops. The one residual — a `SIGKILL` on the *final* attempt with no retry — is bounded:
+  the filter captures only low-volume SSH-forward traffic on the default `restrict=on` NIC and is
+  freed at the next domain stop. A dedicated `qemuMonitorCommand` reconciler reaper is a named
+  follow-up, not warranted at priority:low (see ADR-0384 rejected alternatives).
 
 ## Provider seam
 
-- New port `TrafficCapturer` (`providers/ports/`): `capture(domain_name, *, qom_id, netdev_id,
-  duration_s, max_bytes, snaplen, dest_path, cancelled) -> TrafficCaptureResult`, where
-  `cancelled: Callable[[], bool]` is the per-interval cooperative cancel probe the handler
-  supplies (reads the job state) and `qom_id`/`netdev_id` are passed in (not hardcoded in the
-  port). The result carries `bytes_captured`, `packets`, `truncated` (max_bytes early-stop), and
-  `cancelled` (stopped by cancel). Keyed on the provider domain name, DB-free — the handler drives
-  the state machine and cancel semantics, exactly like `Controller`.
+- New port `TrafficCapturer` (`providers/ports/`) — thin primitives, so the handler owns the
+  loop and cancel semantics (like `Controller`): `attach(domain_name, *, qom_id, netdev_id,
+  dest_path, snaplen) -> None` (`object-del`-then-`object-add` of the `filter-dump`) and
+  `detach(domain_name, *, qom_id) -> None` (`object-del`). No `capture()`/`cancelled` callback —
+  the handler does the size `os.stat` and the async `CANCELED` read itself, avoiding a
+  sync-callback-across-`to_thread` boundary. Keyed on the provider domain name, DB-free.
 - `ProviderRuntime.traffic_capturer: TrafficCapturer | None = None` and a static
   `ProviderSupport.supports_traffic_capture: bool = False` (ADR-0378 `supports_snapshots`
-  pattern). Local-libvirt sets both; remote-libvirt leaves them fail-closed.
+  pattern), **surfaced on `systems.get`** (`mcp/tools/lifecycle/systems/view.py`, exactly where
+  `supports_snapshots` is) so an agent discovers it before calling. Local-libvirt sets both;
+  remote-libvirt leaves them fail-closed.
 - `SYSTEM_SSH_NETDEV_ID = "kdivessh"` is extracted to a shared constant in
-  `providers/local_libvirt/lifecycle/xml.py` (today it is a bare literal written twice in
+  `providers/local_libvirt/lifecycle/xml.py` (today a bare literal written twice in
   `_append_ssh_forward`) and imported by both `xml.py` and the capture impl + its test, so a
   rename cannot silently detach the capture from a non-existent netdev.
 - Local impl `LocalLibvirtTrafficCapture` (`providers/local_libvirt/lifecycle/`): narrow
-  `_LibvirtConn`/`_LibvirtDomain` Protocols, `qemuMonitorCommand` object-del-then-add of
-  `filter-dump` (idempotent re-attach), bounded size-poll honoring the `cancelled` probe,
-  `object-del` on every exit. Unit-tested with a fake connection; the real `libvirt_qemu` adapter
-  is `live_vm`-only.
-- Reconciler reap (`reconciler/cleanup/gc.py`, modeled on `reap_orphaned_dump_volumes`):
-  `object-del` `kdive-dump-*` filters whose owning capture job is terminal, and delete orphaned
-  `/var/lib/kdive/pcap/<system_id>/*.pcap` files with no live capture job
-  (`has_active_capture_job`).
+  `_LibvirtConn`/`_LibvirtDomain` Protocols wrapping `libvirt_qemu.qemuMonitorCommand`,
+  `object-del`-then-`object-add` of `filter-dump` in `attach`, `object-del` in `detach`. Both
+  offloaded via `asyncio.to_thread`. Unit-tested with a fake connection; the real `libvirt_qemu`
+  adapter is `live_vm`-only.
+- No new reconciler port: worker-crash orphan containment is idempotent re-attach + System
+  teardown directory removal (see Behavior contract). System teardown
+  (`jobs/handlers/systems.py`) gains a `_reclaim_pcap_artifacts`-style step that `rm`s the
+  per-System `/var/lib/kdive/pcap/<system_id>/` tree, mirroring `_reclaim_console_artifacts`.
 
 ## Cross-cutting integration
 
@@ -158,6 +172,10 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
 - Tool wrapper + admission handler added inside the existing `control.register`
   (`mcp/tools/lifecycle/control/registrar.py`) — no new tool-registration tuple entry.
 - `mcp/exposure.py` `_TOOL_SCOPES`: `"control.capture_traffic": _CONTRIBUTOR`.
+- `mcp/tools/lifecycle/systems/view.py`: add `data["supports_traffic_capture"]` from
+  `runtime.support` to the `systems.get` envelope (mirrors `supports_snapshots`).
+- `jobs/handlers/systems.py`: teardown removes `/var/lib/kdive/pcap/<system_id>/` (a
+  `_reclaim_pcap_artifacts`-style step alongside `_reclaim_console_artifacts`).
 - `RawAsset.PCAP` + an optional `artifact_id` param on `artifacts.fetch_raw`
   (`mcp/tools/catalog/artifacts/raw_fetch.py`; used only for `asset="pcap"`, ignored for the
   singleton `vmcore`/`vmlinux`) + a `_resolve_key` PCAP branch calling a new
@@ -167,23 +185,27 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   `fetchone()`-with-no-order assumption.
 - `_BEHAVIOR_TESTS_BY_TOOL["control.capture_traffic"]` → the new behavior test file
   (`tests/mcp/core/test_tool_docs.py`).
-- Migration: one numbered migration widening `jobs_kind_check` for `capture_traffic` (no new
-  table — the pcap is a plain `artifacts` row).
+- Migration `0072_capture_traffic_job_kind.sql` (next after `0071_system_snapshots.sql`; one
+  file per job-kind add, per the `0069_watch_for_crash_job_kind.sql` precedent) widens
+  `jobs_kind_check` for `capture_traffic`. No new table — the pcap is a plain `artifacts` row.
 - Regenerate: `just rbac-matrix`, `just docs`, `just resources-docs` (and their `-check`
   variants gate CI).
 
 ## Test strategy
 
-- **Provider unit** — fake libvirt connection asserts the exact `object-add`/`object-del` QMP
-  JSON (qom-type `filter-dump`, `netdev=SYSTEM_SSH_NETDEV_ID`, QOM id `kdive-dump-<job_id>`,
-  `maxlen=snaplen`, `file=dest_path`), the object-del-then-add idempotent re-attach, the
-  size-poll early-stop at `max_bytes`, and `object-del` on the success, error, **and cancel**
-  paths.
-- **Capture-loop unit** — a pure poll function (injected size-reader/sleeper/`cancelled`, no
-  libvirt), covering: stop-at-duration, stop-at-max_bytes (`truncated=True`), and
-  stop-at-cancel (`cancelled=True`, no store).
-- **Packet-count unit** — the pure pcap record walk over a header-only file (`packets=0`), a
-  known N-packet file, and a truncated/garbage tail (counts whole records only).
+- **Provider unit** — fake libvirt connection asserts the exact `attach` QMP JSON (`object-del`
+  of a stale filter, then `object-add` qom-type `filter-dump`, `netdev=SYSTEM_SSH_NETDEV_ID`, QOM
+  id `kdive-dump-<job_id>`, `maxlen=snaplen`, `file=dest_path`) and that `detach` issues
+  `object-del` for the QOM id.
+- **Capture-loop unit** — the handler-owned poll loop with injected `stat`/sleeper/`read_state`
+  (no libvirt), covering: stop-at-duration, stop-at-max_bytes (`truncated=True`), stop-at-cancel
+  (no store), and `detach` invoked on every path (success, error, cancel).
+- **Packet-count unit** — the pure pcap record walk reads the 4-byte magic to pick byte order and
+  the µs-vs-ns record format, then walks `incl_len` record headers. Vectors: header-only
+  (`packets=0`), a known N-packet little-endian file, a **big-endian** (`0xd4c3b2a1`) file, a
+  **nanosecond-magic** (`0xa1b23c4d`) file, and a truncated/garbage tail (counts whole records
+  only). A wrong count would silently corrupt the zero-packet signal, so both byte orders are
+  pinned.
 - **Filter validation unit** — `tcpdump -d` accept/reject and argv-not-shell construction; a
   filter containing shell metacharacters is passed literally and rejected by `tcpdump -d` (never
   interpreted).
@@ -196,9 +218,8 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
 - **Admission (behavior test, `test_control_tools`-adjacent)** — each precondition rejection
   creates no job; happy path enqueues `CAPTURE_TRAFFIC` and returns the running envelope;
   `capture_filter` hygiene rejection.
-- **Reaper unit** — a terminal capture job with a still-attached `kdive-dump-*` filter is
-  `object-del`ed; an orphaned `<system_id>/*.pcap` with no live job is deleted; a file with a
-  live job is left untouched.
+- **Teardown unit** — System teardown removes the per-System `/var/lib/kdive/pcap/<system_id>/`
+  tree (and no-ops when it is absent), alongside the existing console/sysrq reclaim.
 - **Egress** — `fetch_raw(run_id, asset="pcap", artifact_id=<id>)` presigns the exact object for a
   `contributor`; a cross-Run `artifact_id` is `not_found`; `artifact_id` omitted returns the
   newest; two pcaps on one Run are each fetchable by id; the pcap is `not_found` via
@@ -223,7 +244,8 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   Run accumulates one **per capture**. Wiring pcap into the closed-investigation reclaim
   (`gc_investigation_artifacts`, which already has the `owner_kind='runs'` + retention-class
   mechanism) is a named follow-up. This non-goal is about *stored evidence* only — the *live*
-  filter/host-file orphaned by a worker crash **is** reaped (see Behavior contract).
+  filter/host-file orphaned by a worker crash is contained by idempotent re-attach + teardown
+  directory removal (see Behavior contract), not a reconciler reaper.
 - A free-form tcpdump command line (the agent controls `snaplen` + BPF `capture_filter` only).
 - On-the-wire filtering (impossible with `filter-dump`; the BPF filter is a post-capture trim).
 - A start/stop capture pair (the operator selected the fixed-duration job).

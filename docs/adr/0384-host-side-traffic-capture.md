@@ -61,20 +61,30 @@ inline packet bytes are ever returned.
 
 **Provider port — `TrafficCapturer` (fail-closed).** A new typed port on `ProviderRuntime`
 (`traffic_capturer: TrafficCapturer | None = None`) plus a static
-`ProviderSupport.supports_traffic_capture` flag, following ADR-0378's `supports_snapshots`
-pattern. A provider that does not implement it yields `capability_unsupported`. Local-libvirt
-implements it via `filter-dump`; remote-libvirt leaves it `None` (see follow-up below).
+`ProviderSupport.supports_traffic_capture` flag, surfaced on `systems.get` for discoverability
+exactly like ADR-0378's `supports_snapshots`. A provider that does not implement it yields
+`capability_unsupported`. The port is deliberately thin — `attach(domain_name, *, qom_id,
+netdev_id, dest_path, snaplen)` and `detach(domain_name, *, qom_id)` primitives — so the
+**handler owns the poll loop** (consistent with "the handler drives the state machine, exactly
+like `Controller`"). The handler's own poll loop avoids a sync-callback-across-thread-boundary
+problem: the size read is `os.stat` (visible cross-uid even where the ADR-0223 content-read wall
+blocks) and the cancel check is a direct async read of the job row on the autocommit dispatch
+connection (no probe callback threaded into a `to_thread` capture loop). Local-libvirt
+implements the primitives via `filter-dump`; remote-libvirt leaves the port `None` (see
+follow-up below).
 
-**Local-libvirt implementation.** Over `qemuMonitorCommand` on the running domain: `object-del`
-any stale filter for this job's deterministic QOM id first (idempotent re-attach), then
-`object-add` a `filter-dump` on the `kdivessh` netdev (a shared `SYSTEM_SSH_NETDEV_ID` constant,
-not a re-hardcoded literal) with QOM id `kdive-dump-<job_id>`, `file=<host path>`, and
-`maxlen=snaplen`. Poll the file size on a bounded interval, stopping when the window
-(`duration_s`) elapses, the file reaches `max_bytes` (`truncated=True`), or the owning job's row
-has turned `CANCELED` (a per-interval cooperative check — a mechanism `watch_for_crash` does not
-have, added because a stray `filter-dump` fills host disk); then `object-del` the filter on every
-exit path. The result carries `bytes_captured` and a `packets` count (a small pure-Python pcap
-record walk) so a header-only pcap (zero packets — the common case on the default `restrict=on`
+**Local-libvirt implementation.** `attach` runs `qemuMonitorCommand` on the running domain:
+`object-del` any stale filter for this job's deterministic QOM id first (idempotent re-attach),
+then `object-add` a `filter-dump` on the `kdivessh` netdev (a shared `SYSTEM_SSH_NETDEV_ID`
+constant, not a re-hardcoded literal) with QOM id `kdive-dump-<job_id>`, `file=<host path>`, and
+`maxlen=snaplen`. The handler then polls `os.stat(dest_path).st_size` on a bounded interval,
+stopping when the window (`duration_s`) elapses, the file reaches `max_bytes` (`truncated=True`),
+or a direct async read of the owning job row returns `CANCELED` (a per-interval cooperative
+check — a mechanism `watch_for_crash` does not have, added because a stray `filter-dump` fills
+host disk); `detach` (`object-del`) runs on every exit path. The result carries `bytes_captured`
+and a `packets` count from a small pure-Python pcap record walk (which reads the 4-byte magic to
+pick byte order and the µs-vs-ns record format, so it counts correctly regardless of host
+endianness) so a header-only pcap (zero packets — the common case on the default `restrict=on`
 NIC, which sees only the SSH forward) is a distinguishable success, not a mystery. The pcap is
 written under `/var/lib/kdive/pcap/<system_id>/` (the worker creates the per-System directory
 mirroring the console-log/host-dump path handling) — the same host-writable location class as
@@ -93,8 +103,12 @@ at-least-once redelivery dedups), written **`SENSITIVE`**, `retention_class="pca
 `owner_kind="runs"`, streamed from disk via `put_stream` (disk-backed, sha256-bound, constant
 memory). The handler inserts the artifact row insert-if-absent on the object key (at-least-once
 safe), audits the capture, deletes the host files, and returns the artifact id as the job
-`result_ref`. A capture stopped by cancellation stores nothing and writes no row (it
-`object-del`s and deletes the partial file); the job ends `CANCELED` with no `result_ref`.
+`result_ref`. A capture whose cancel is observed during the poll stores nothing (it `detach`es
+and deletes the partial file), and the final store transaction re-checks `CANCELED` under the
+lock and skips the store; the job ends `CANCELED` with no `result_ref`. A cancel that commits
+in the narrow window after the store transaction commits but before `queue.complete` runs still
+ends the job `CANCELED` with no `result_ref`, but the stored pcap exists and is reachable as the
+Run's newest pcap — consistent with the "stored pcaps persist" non-goal.
 
 **Egress.** `RawAsset` gains a `PCAP` member and `artifacts.fetch_raw` gains an optional
 `artifact_id` parameter (used only for `asset="pcap"`; ignored for the singleton `vmcore`/
@@ -131,12 +145,18 @@ rows, so the pcap is never inline-served.
   (`gc_investigation_artifacts`) is a named follow-up, not done here (kept consistent with the
   unreclaimed `vmcore`).
 - The `filter-dump` stays attached for the whole capture window, so the fixed-duration job
-  **does** hold live host state: a worker `SIGKILL`/host crash between `object-add` and
-  `object-del` strands the filter writing unbounded to `/var/lib/kdive/pcap/` and leaves a
-  partial host file. A reconciler reap (modeled on `reap_orphaned_dump_volumes`) `object-del`s
-  kdive filter-dumps whose owning capture job is terminal and deletes orphaned pcap files with
-  no live job; the handler makes re-attach idempotent (delete-before-add on a deterministic QOM
-  id) so an at-least-once retry never double-attaches.
+  **does** hold live host state. This is contained without a new reconciler port: (1) the
+  handler makes re-attach idempotent (`object-del`-before-`object-add` on the deterministic
+  `kdive-dump-<job_id>` QOM id), so a worker crash followed by the at-least-once **retry** —
+  the normal recovery — cleans the stranded filter and never double-attaches; (2) System
+  teardown removes the per-System `/var/lib/kdive/pcap/<system_id>/` directory (the bespoke
+  per-family reclaim pattern already used for console/sysrq artifacts), sweeping any orphaned
+  host pcap files; (3) the filter itself dies when the domain stops (teardown, power-off,
+  crash). The one residual — a `SIGKILL`/host crash on the *final* attempt with no retry — is a
+  documented bounded risk: the filter captures only low-volume SSH-forward traffic on the
+  default `restrict=on` NIC and is freed at the next domain stop. A dedicated reconciler reaper
+  (a new `qemuMonitorCommand` provider port + loop wiring, modeled on the dump-volume reaper) is
+  a named follow-up, not warranted for this residual at priority:low.
 - `qemuMonitorCommand` is libvirt's "unsupported" QMP passthrough; a QEMU/libvirt version
   whose `filter-dump` QOM schema changes could break the object-add. The op fails as
   `CONTROL_FAILURE`, observable via per-kind job telemetry.
@@ -166,9 +186,10 @@ rows, so the pcap is never inline-served.
   speculative. Unbounded artifact accumulation is a broader retention concern for `vmcore` and
   pcap together, out of scope here.
 - **A start/stop capture pair** — rejected: the fixed-duration job is one tool with bounded
-  resource use; the operator selected it. (It still holds live state for its window — see the
-  reconciler reap above — but a start/stop pair would hold it open indefinitely, needing the
-  same reaper plus orphan-on-crash handling for an unbounded window.)
+  resource use; the operator selected it. Its live filter is contained by idempotent re-attach +
+  teardown cleanup (see Consequences); a start/stop pair would hold the filter open indefinitely,
+  turning the bounded residual into an unbounded one and forcing the dedicated reaper this design
+  avoids.
 - **Remote-libvirt in this change** — rejected for now (documented follow-up): remote's
   data-plane traffic rides a libvirt-managed NIC whose netdev id libvirt auto-generates (not
   `kdivessh`, which carries only its SSH forward), needs runtime netdev/tap discovery, and the
