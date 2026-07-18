@@ -43,6 +43,7 @@
 - `src/kdive/mcp/tools/lifecycle/control/registrar.py` — **Modify**. Admission handler + `@app.tool`.
 - `src/kdive/mcp/exposure.py` — **Modify**. `_TOOL_SCOPES` entry.
 - `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` — **Modify**. `RawAsset.PCAP` + `artifact_id` param + `_resolve_key` branch.
+- `src/kdive/mcp/tools/catalog/artifacts/registrar.py` — **Modify**. `artifacts.fetch_raw` `@app.tool` wrapper gains `artifact_id` + `pcap` in the `asset` description.
 - `src/kdive/artifacts/read_model.py` — **Modify**. `raw_pcap_key(conn, run_id, artifact_id)`.
 - `src/kdive/mcp/tools/lifecycle/systems/view.py` — **Modify**. Surface `supports_traffic_capture`.
 - `src/kdive/jobs/handlers/systems.py` — **Modify**. Teardown `rmtree` of the pcap dir.
@@ -228,7 +229,7 @@ class TrafficCapturer(Protocol):
         ...
 ```
 
-- [ ] **Step 4: Wire the runtime.** In `runtime.py`: import `TrafficCapturer`; add `traffic_capturer: TrafficCapturer | None = None` to `ProviderRuntime` (alongside `snapshotter`); add `supports_traffic_capture: bool = False` to `ProviderSupport` (alongside `supports_snapshots`). Keep the scoped `unresolved-import` ignore pattern if `ty` needs it (it will not — this is a pure-Python protocol).
+- [ ] **Step 4: Wire the runtime.** In `runtime.py`: import `TrafficCapturer`; add `traffic_capturer: TrafficCapturer | None = None` to `ProviderRuntime` **next to the optional `snapshot: Snapshotter | None = None` field (runtime.py:146)** — NOT next to `ProviderSupport.snapshotter`, which is a *required* `ConsoleSnapshotter`. Add `supports_traffic_capture: bool = False` to `ProviderSupport` next to `supports_snapshots: bool = False` (runtime.py:76). This is a pure-Python protocol; no `ty` ignore needed.
 
 - [ ] **Step 5: Run, verify pass.** Run the runtime test; expected PASS. Run `just type` (whole tree) to confirm no `ty` break from the new optional field.
 
@@ -269,7 +270,7 @@ class _FakeConn:
 
 def _capturer(monitor):
     dom = _FakeDomain(monitor)
-    return LocalLibvirtTrafficCapture(connect=lambda: _FakeConn(dom)), dom
+    return LocalLibvirtTrafficCapture(connect=lambda: _FakeConn(dom), monitor=monitor), dom
 
 def test_attach_deletes_stale_then_adds_filter_dump():
     seen = []
@@ -318,13 +319,14 @@ def test_detach_issues_object_del():
     assert seen[0]["execute"] == "object-del" and seen[0]["arguments"]["id"] == "kdive-dump-J"
 ```
 
-Note: the impl calls `libvirt_qemu.qemuMonitorCommand(domain, cmd, 0)`. In the test, `monkeypatch.setattr("kdive.providers.local_libvirt.lifecycle.traffic_capture.libvirt_qemu.qemuMonitorCommand", monitor)` (or inject a `monitor` callable — see Step 3, prefer a small injected seam for testability, mirroring `connect`).
+Note: the injected `monitor(domain, cmd_json, flags)` seam (default bound to `libvirt_qemu.qemuMonitorCommand` only in `from_env`) means the unit tests pass `monitor=` directly and never import the C-extension. Drop the `test_attach_swallows_object_not_found_on_first_run` `monkeypatch` fixture arg — the fake `monitor` raises directly.
 
 - [ ] **Step 2: Run, verify fail.** Run: `uv run python -m pytest tests/providers/local_libvirt/test_traffic_capture.py -q`. Expected FAIL (module missing).
 
 - [ ] **Step 3: Implement.** Create `traffic_capture.py`, mirroring `control.py`'s structure. Key points:
-  - Constructor `__init__(self, *, connect: Connect, monitor: Callable = libvirt_qemu.qemuMonitorCommand)` — inject `monitor` so tests don't need real libvirt (default is the real passthrough).
-  - `from_env()` reads `LIBVIRT_URI` and returns `cls(connect=lambda: libvirt.open(uri))`.
+  - Constructor `__init__(self, *, connect: Connect, monitor: Callable | None = None)` — inject `monitor` so tests don't need real libvirt. Do **not** `import libvirt_qemu` at module top (the in-tree pattern imports it lazily inside functions — `transport_reset.py:57`, `guest/agent.py:130` — to keep the QEMU-specific binding off the import path; a module-top import would force the C-extension at test collection even though the unit tests inject a fake `monitor`).
+  - `from_env()` reads `LIBVIRT_URI`, does a local `import libvirt_qemu`, and returns `cls(connect=lambda: libvirt.open(uri), monitor=libvirt_qemu.qemuMonitorCommand)`. The unit tests construct `LocalLibvirtTrafficCapture(connect=..., monitor=fake)` directly, never importing `libvirt_qemu`.
+  - Internally, resolve the monitor once (`mon = self._monitor` — `from_env` always supplies it); `attach`/`detach` call `mon(domain, json.dumps(cmd), 0)`.
   - `attach`: `_open` → `_lookup` domain → `self._object_del(dom, qom_id, tolerate_missing=True)` → `self._object_add(dom, {...filter-dump...})` → `_close`.
   - `_object_del(dom, qom_id, *, tolerate_missing)`: build `{"execute":"object-del","arguments":{"id":qom_id}}`, call `self._monitor(dom, json.dumps(cmd), 0)`; on `libvirt.libvirtError` as `exc`: if `tolerate_missing and _is_not_found(exc)` → log + return; else raise `_control_failure("deleting capture filter on", domain_name)`.
   - `_is_not_found(exc)`: match the QMP not-found signature in the message string — `s = str(exc).lower(); return "not found" in s or "devicenotfound" in s` (QMP `object-del` on a missing id yields "object 'X' not found" / `DeviceNotFound`; `qemuMonitorCommand` carries no `VIR_ERR_*` code, so match text).
@@ -660,7 +662,7 @@ Handler flow (`capture_traffic_handler`):
 9. `artifact_id = await _store_capture(conn, store, job, run_id, source_path)` — tx2 under `advisory_xact_lock(SYSTEM, system_id)`: re-check `_job_canceled` (skip + return None if canceled); `name = f"pcap-{job.id}"`; `object_key = artifact_key("local","runs",str(run_id),name)`; insert-if-absent; `stored = await asyncio.to_thread(store.put_stream, ArtifactStreamRequest(tenant="local", owner_kind="runs", owner_id=str(run_id), name=name, path=source_path, sha256_b64=<computed>, sensitivity=Sensitivity.SENSITIVE, retention_class="pcap"))`; `register_artifact_row(stored, owner_kind="runs", owner_id=run_id, run_id=run_id)`; `ARTIFACTS.insert`; `audit.record(... tool="control.capture_traffic", object_kind="runs", object_id=run_id, transition="capture_traffic", args={"run_id":..., "duration_s":..., "snaplen":..., "filtered": bool(capture_filter)}, project=...)`.
 10. Clean up host files (`dest`, `out`) via `asyncio.to_thread(... unlink, missing_ok=True)`; `return str(artifact_id)`.
 
-(Compute `sha256_b64` by streaming the source file — reuse the helper `providers/local_libvirt/retrieve.py` uses for `put_stream`; grep `sha256_b64` there for the exact one-pass hash + `ArtifactStreamRequest` construction to copy.)
+(Compute `sha256_b64` with the existing `kdive.providers.local_libvirt.retrieve_kdump.file_sha256_b64` helper — it is imported and used at `providers/local_libvirt/retrieve.py:220-237` in exactly the `SENSITIVE` Run-owned `put_stream` path this handler mirrors. Copy the `ArtifactStreamRequest(...)` construction from there, swapping `retention_class="vmcore"` → `"pcap"` and the name to `pcap-<job.id>`.)
 
 - [ ] **Step 4: Write handler behavior tests.** In the same test file, with a fake resolver/binding (mirror `tests/jobs/handlers/control/test_diagnostic_sysrq*.py` fakes) + a fake store recording `put_stream`:
   - READY+local snapshot resolves; a non-READY System → `CategorizedError(CONFIGURATION_ERROR)`; a non-local binding → capability config error; `traffic_capturer is None` → capability config error.
@@ -702,16 +704,36 @@ Handler flow (`capture_traffic_handler`):
 
 - [ ] **Step 2: Run, verify fail.** Expected FAIL (tool not registered).
 
-- [ ] **Step 3: Implement the admission handler.** Add `capture_traffic_system(pool, ctx, *, run_id, duration_s, max_bytes, snaplen, capture_filter, idempotency_key)` near `diagnostic_sysrq_system` in `registrar.py`. Flow (mirror `_fetch_vmcore` + sysrq):
-  - `uid = _as_uuid(run_id)`; None → `_invalid_uuid_error("run_id", run_id)`.
-  - `RUNS.get`; None/foreign project → `_config_error`; `require_role(ctx, run.project, Role.CONTRIBUTOR)`.
-  - `run.system_id is None` → `_config_error(run_id, detail=..., data={"reason":"run_unbound"})`.
-  - `SYSTEMS.get`; state ≠ READY → `_config_error(run_id, data={"current_status": state.value})`.
-  - resolve runtime for the Run (`with_runtime_for_run` or the binding); `not runtime.support.supports_traffic_capture` → `_capability_unsupported(run_id, capability="traffic_capture", provider=..., supported=[])`.
-  - `reason = hygiene_reason(capture_filter)`; not None → `_config_error(run_id, data={"reason":"invalid_filter","detail":reason})`.
-  - enqueue under `keyed_mutation(kind="control.capture_traffic")`: `queue.enqueue(conn, JobKind.CAPTURE_TRAFFIC, CaptureTrafficPayload(run_id=run_id, duration_s=duration_s, max_bytes=max_bytes, snaplen=snaplen, capture_filter=capture_filter), job_authorizing(ctx, run.project), f"{run_id}:capture_traffic")` → `job_envelope(job, "run_id", uid)`.
+- [ ] **Step 3: Add imports.** `control/registrar.py` does **not** currently import several needed symbols. Add: `RUNS` from `kdive.db.repositories`; `as_uuid as _as_uuid`, `invalid_uuid_error as _invalid_uuid_error`, `capability_unsupported as _capability_unsupported` from `kdive.mcp.tools._common`; `with_runtime_for_run` from `kdive.mcp.tools._runtime_resolution` (NOT `_common`); `CaptureTrafficPayload` from `kdive.jobs.payloads`; `hygiene_reason` from `kdive.security.artifacts.bpf_filter`. (`SYSTEMS`, `keyed_mutation`, `job_authorizing`, `job_envelope`, `_config_error`, `queue`, `Role`, `require_role` are already imported — confirm.)
 
-- [ ] **Step 4: Add the `@app.tool` wrapper.** Inside `register()`, alongside `control.diagnostic_sysrq`. Bounds constants live at module top (e.g. `CAPTURE_MIN_DURATION_S=1`, `CAPTURE_MAX_DURATION_S=300`, `CAPTURE_DEFAULT_DURATION_S=30`, `CAPTURE_MIN_BYTES=1048576`, `CAPTURE_MAX_BYTES=536870912`, `CAPTURE_DEFAULT_BYTES=67108864`, `CAPTURE_DEFAULT_SNAPLEN=128`, `CAPTURE_MAX_SNAPLEN=262144`). Flat top-level params, each `Annotated[..., Field(description=f"... {CAPTURE_MAX_DURATION_S} ...")]` interpolating the bound. Wrapper docstring: describe the host-side capture, the `restrict=on` default (only SSH-forward traffic visible unless `guest_egress` on), that the pcap is fetched via `artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>)`, and that a 24-byte result means zero packets. **No `ADR-NNNN` anywhere in the docstring/Field.** `annotations=_docmeta.mutating()`, `meta=_docmeta.maturity_meta("implemented")`, `suggested_next_actions` via the job envelope. Example wrapper skeleton:
+- [ ] **Step 4: Implement the admission handler (resolver-threaded).** Mirror `VmcoreHandlers.fetch_vmcore` exactly: the resolver is threaded through `with_runtime_for_run`, which resolves the Run's runtime + applies the role gate, then calls an inner function that does the state/capability/enqueue work. Add near `diagnostic_sysrq_system` in `registrar.py`:
+
+```python
+async def capture_traffic_system(
+    pool, ctx, *, resolver: ProviderResolver, run_id, duration_s, max_bytes, snaplen,
+    capture_filter, idempotency_key,
+) -> ToolResponse:
+    return await with_runtime_for_run(
+        pool, resolver, ctx, run_id,
+        lambda runtime: _capture_traffic(
+            pool, ctx, run_id=run_id, duration_s=duration_s, max_bytes=max_bytes,
+            snaplen=snaplen, capture_filter=capture_filter, idempotency_key=idempotency_key,
+            runtime=runtime,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+```
+
+`_capture_traffic(pool, ctx, *, run_id, ..., runtime)` does the rest (single resolution — do NOT also `RUNS.get`+`require_role` at the top; `with_runtime_for_run` already gated the role and resolved the Run's runtime):
+  - `uid = _as_uuid(run_id)`; None → `_invalid_uuid_error("run_id", run_id)`.
+  - `RUNS.get(conn, uid)`; None/foreign project → `_config_error(run_id)`.
+  - `run.system_id is None` → `_config_error(run_id, detail="run is not bound to a system", data={"reason":"run_unbound"})`.
+  - `SYSTEMS.get`; state ≠ READY → `_config_error(run_id, data={"current_status": state.value})`.
+  - `not runtime.support.supports_traffic_capture` → `_capability_unsupported(run_id, capability="traffic_capture", provider=runtime.support.component_sources.provider, supported=[])`.
+  - `reason = hygiene_reason(capture_filter)`; not None → `_config_error(run_id, data={"reason":"invalid_filter","detail":reason})`.
+  - enqueue under `keyed_mutation(..., kind="control.capture_traffic")`: `queue.enqueue(conn, JobKind.CAPTURE_TRAFFIC, CaptureTrafficPayload(run_id=run_id, duration_s=duration_s, max_bytes=max_bytes, snaplen=snaplen, capture_filter=capture_filter), job_authorizing(ctx, run.project), f"{run_id}:capture_traffic")` → `job_envelope(job, "run_id", uid)`.
+
+- [ ] **Step 5: Add the `@app.tool` wrapper.** Inside `register()` (which has `pool`, `resolver`, and `current_context()` in scope — confirm against the existing `control.diagnostic_sysrq` wrapper), alongside `control.diagnostic_sysrq`. Bounds constants live at module top: `CAPTURE_MIN_DURATION_S=1`, `CAPTURE_MAX_DURATION_S=300`, `CAPTURE_DEFAULT_DURATION_S=30`, `CAPTURE_MIN_BYTES=1048576`, `CAPTURE_MAX_BYTES=536870912`, `CAPTURE_DEFAULT_BYTES=67108864`, `CAPTURE_MIN_SNAPLEN=1`, `CAPTURE_DEFAULT_SNAPLEN=128`, `CAPTURE_MAX_SNAPLEN=262144`. Flat top-level params, each `Annotated[..., Field(description=f"... {CAPTURE_MAX_DURATION_S} ...")]` interpolating **both** bounds from constants (never a bare literal — interpolate `CAPTURE_MIN_SNAPLEN` too). Wrapper docstring: describe the host-side capture, the `restrict=on` default (only SSH-forward traffic visible unless `guest_egress` on), that the pcap is fetched via `artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>)`, and that a 24-byte result means zero packets. **No `ADR-NNNN` anywhere in the docstring/Field.** `annotations=_docmeta.mutating()`, `meta=_docmeta.maturity_meta("implemented")`, `suggested_next_actions` via the job envelope. Example wrapper skeleton:
 
 ```python
 @app.tool(
@@ -730,8 +752,8 @@ async def capture_traffic(
         description=f"Stop early when the pcap reaches this many bytes ({CAPTURE_MIN_BYTES}-{CAPTURE_MAX_BYTES}).",
     )] = CAPTURE_DEFAULT_BYTES,
     snaplen: Annotated[int, Field(
-        ge=1, le=CAPTURE_MAX_SNAPLEN,
-        description=f"Bytes captured per packet (1-{CAPTURE_MAX_SNAPLEN}); {CAPTURE_DEFAULT_SNAPLEN} captures headers.",
+        ge=CAPTURE_MIN_SNAPLEN, le=CAPTURE_MAX_SNAPLEN,
+        description=f"Bytes captured per packet ({CAPTURE_MIN_SNAPLEN}-{CAPTURE_MAX_SNAPLEN}); {CAPTURE_DEFAULT_SNAPLEN} captures headers.",
     )] = CAPTURE_DEFAULT_SNAPLEN,
     capture_filter: Annotated[str | None, Field(
         description="Optional pcap-filter(7)/tcpdump BPF expression applied after capture (e.g. 'tcp port 80').",
@@ -740,24 +762,26 @@ async def capture_traffic(
 ) -> ToolResponse:
     """Capture host-side guest network traffic into a Run-owned pcap. ..."""
     return await capture_traffic_system(
-        pool, current_context(), run_id=run_id, duration_s=duration_s, max_bytes=max_bytes,
-        snaplen=snaplen, capture_filter=capture_filter, idempotency_key=idempotency_key,
+        pool, current_context(), resolver=resolver, run_id=run_id, duration_s=duration_s,
+        max_bytes=max_bytes, snaplen=snaplen, capture_filter=capture_filter,
+        idempotency_key=idempotency_key,
     )
 ```
 
-- [ ] **Step 5: Register scope + behavior-test map.** In `exposure.py` `_TOOL_SCOPES`, add `"control.capture_traffic": _CONTRIBUTOR,`. In `tests/mcp/core/test_tool_docs.py` `_BEHAVIOR_TESTS_BY_TOOL`, add `"control.capture_traffic": "tests/mcp/lifecycle/test_control_tools.py",`.
+- [ ] **Step 6: Register scope + behavior-test map.** In `exposure.py` `_TOOL_SCOPES`, add `"control.capture_traffic": _CONTRIBUTOR,`. In `tests/mcp/core/test_tool_docs.py` `_BEHAVIOR_TESTS_BY_TOOL`, add `"control.capture_traffic": "tests/mcp/lifecycle/test_control_tools.py",`.
 
-- [ ] **Step 6: Run tool-docs + admission tests.** Run: `uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/core/test_no_adr_leak.py tests/mcp/lifecycle/test_control_tools.py -q`. Expected: PASS (flat-params guard, description guard, maturity guard, no-ADR-leak, destructive-set unchanged since the tool is `mutating` not `destructive`, admission cases). Fix any guard failure before proceeding.
+- [ ] **Step 7: Run tool-docs + admission tests.** Run: `uv run python -m pytest tests/mcp/core/test_tool_docs.py tests/mcp/core/test_no_adr_leak.py tests/mcp/core/test_app.py tests/mcp/lifecycle/test_control_tools.py -q`. Expected: PASS (flat-params guard, description guard, maturity guard, no-ADR-leak, `test_app`'s `CLASSIFIED_TOOLS | PUBLIC_TOOLS == live registry` equality now satisfied by the `_TOOL_SCOPES` entry, destructive-set unchanged since the tool is `mutating` not `destructive`, admission cases). Fix any guard failure before proceeding.
 
-- [ ] **Step 7: Guardrails + commit.** `just lint type`; commit `feat(1258): control.capture_traffic admission tool`.
+- [ ] **Step 8: Guardrails + commit.** `just lint type`; commit `feat(1258): control.capture_traffic admission tool`.
 
 ---
 
 ### Task 10: Egress — `RawAsset.PCAP` + `artifact_id` + `raw_pcap_key`
 
 **Files:**
-- Modify: `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py`
-- Modify: `src/kdive/artifacts/read_model.py`
+- Modify: `src/kdive/mcp/tools/catalog/artifacts/raw_fetch.py` (`RawAsset.PCAP`, `fetch_raw` `artifact_id`, `_resolve_key` branch)
+- Modify: `src/kdive/mcp/tools/catalog/artifacts/registrar.py:163-184` (the `artifacts.fetch_raw` `@app.tool` wrapper — add the `artifact_id` param + `pcap` in the `asset` Field description)
+- Modify: `src/kdive/artifacts/read_model.py` (`raw_pcap_key`)
 - Test: `tests/mcp/tools/artifacts/test_raw_fetch*.py` (add pcap cases), `tests/artifacts/test_read_model*.py`
 
 **Interfaces:**
@@ -806,7 +830,7 @@ if asset is RawAsset.PCAP:
     return key
 ```
 
-Keep `require_role(ctx, run.project, Role.CONTRIBUTOR)` as-is (already at the top of `_resolve_key`). The `@app.tool` wrapper for `artifacts.fetch_raw` must expose the new `artifact_id` param (find the wrapper in the artifacts registrar; add the flat `Annotated[str | None, Field(...)]` param, defaulting `None`, description noting it selects a specific pcap when `asset="pcap"`).
+Keep `require_role(ctx, run.project, Role.CONTRIBUTOR)` as-is (already at the top of `_resolve_key`). The `@app.tool` wrapper `artifacts_fetch_raw` (`catalog/artifacts/registrar.py:163-184`, which calls `fetch_raw(pool, current_context(), run_id=run_id, asset=asset)`) must gain the new param: add `artifact_id: Annotated[str | None, Field(description="Select a specific pcap by id (from the capture job's refs.result); only meaningful when asset='pcap'. Omit for the newest.")] = None`, thread it into the `fetch_raw(...)` call, and extend the `asset` Field description from "vmcore or vmlinux" to include `pcap`.
 
 - [ ] **Step 5: Run, verify pass.** Run: `uv run python -m pytest tests/mcp/tools/artifacts/ tests/artifacts/ -k "pcap or raw" -q`. Expected: PASS.
 
@@ -828,7 +852,7 @@ Keep `require_role(ctx, run.project, Role.CONTRIBUTOR)` as-is (already at the to
 
 - [ ] **Step 2: Run, verify fail.** Expected FAIL (`KeyError`).
 
-- [ ] **Step 3: Implement.** In `view.py` `get_system` (the get-only path where `supports_snapshots` is threaded from `runtime.support`), add `supports_traffic_capture=runtime.support.supports_traffic_capture` into the `system_envelope`/`data` exactly parallel to `supports_snapshots` (same try/except CategorizedError guard for `runtime_for_system`).
+- [ ] **Step 3: Implement.** Two edits in `view.py`, exactly parallel to `supports_snapshots`: (1) add a `supports_traffic_capture: bool | None = None` param to the `system_envelope(...)` builder (view.py:52-92, next to `supports_snapshots`); (2) in `get_system` (the get-only path, under the existing `try/except CategorizedError` guard for `runtime_for_system`, view.py:178-190), pass `supports_traffic_capture=runtime.support.supports_traffic_capture` into `system_envelope(...)`.
 
 - [ ] **Step 4: Run, verify pass.** Expected PASS.
 
