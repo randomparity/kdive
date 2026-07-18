@@ -46,6 +46,34 @@ Fast operations — `debug.set_breakpoint`, `debug.read_memory`,
 without a job. Note that `control.power` is **not** fast: every power action
 (including `on`) enqueues a `power` job and returns a job handle.
 
+### Typical durations
+
+Rough, host-dependent figures for sizing `timeout_s` and a poll loop — not
+guarantees. Figures are for a native-KVM guest; a TCG-emulated (foreign-arch)
+guest scales by `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` (default `10`), so budget
+roughly 10x longer (see [platform support](../operating/platform-support.md)):
+
+- **`runs.boot`** — usually well under a minute once the guest is already
+  provisioned and just needs to reach the `kdive-ready` marker. The server's
+  ceiling (`KDIVE_LIBVIRT_BOOT_WINDOW_S`, default 900 s / 15 min — see
+  [config reference](reference/config.md)) absorbs slow hosts (e.g. POWER9) and
+  `kdump.service` arming; it is a ceiling, not a typical wait.
+- **`runs.install`** — includes a boot pass under the same
+  `KDIVE_LIBVIRT_BOOT_WINDOW_S` ceiling plus kernel/module install work; expect
+  low minutes on a warm host.
+- **`systems.provision`** (image customization / first boot) — several minutes
+  to tens of minutes; the customization boot ceiling
+  (`KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S`, default 1800 s / 30 min) absorbs
+  first-time mirror/network fetch variance.
+- **`vmcore.fetch`** (kdump capture) — the guest reboots out of the capture
+  kernel and uploads; budget on the order of 300 s for that readiness window.
+- **`control.force_crash` / `control.power`** — seconds, dominated by the
+  hypervisor call and a readiness poll.
+
+For anything past the first minute, prefer several short `jobs.wait` calls
+(default `timeout_s` 30 s) over one long wait sized to the worst case — see
+[transport resets](#transport-resets-and-retries) below.
+
 ## Transport resets and retries
 
 A long `jobs.wait` holds one streamable-HTTP request open while it polls (up to the 300 s
