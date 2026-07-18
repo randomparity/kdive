@@ -338,6 +338,50 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
         "as root via sudo (1) or as the current user (0).",
     ),
+    # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
+    # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an
+    # override relocates the host mapping and the URL that reaches it together. Container-internal
+    # ports never change; only the host mapping does.
+    ExternalEnvVar(
+        "KDIVE_POSTGRES_PORT",
+        "script",
+        "5432",
+        "Host port the compose `postgres` service publishes; `scripts/live-stack/env.sh` folds it "
+        "into the default `KDIVE_DATABASE_URL`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MINIO_PORT",
+        "script",
+        "9000",
+        "Host port the compose `minio` S3 API publishes; `scripts/live-stack/env.sh` folds it into "
+        "the default `KDIVE_S3_ENDPOINT_URL`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_MINIO_CONSOLE_PORT",
+        "script",
+        "9001",
+        "Host port the compose `minio` web console publishes (no client URL derives from it).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_OIDC_PORT",
+        "script",
+        "8090",
+        "Host port the compose `oidc` mock issuer publishes; `scripts/live-stack/env.sh` folds it "
+        "into the default `KDIVE_OIDC_ISSUER` and `KDIVE_OIDC_JWKS_URI`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_PROMETHEUS_PORT",
+        "script",
+        "9090",
+        "Host port the compose `prometheus` service publishes (obs profile); an off-host grafana "
+        "points at this port (#1261).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_GRAFANA_PORT",
+        "script",
+        "3000",
+        "Host port the compose `grafana` service publishes (obs profile).",
+    ),
     ExternalEnvVar(
         "KDIVE_DEMO_NAMESPACE",
         "script",

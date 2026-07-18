@@ -68,6 +68,30 @@ stop_daemons() {
   echo "WARN: daemons still running after stop: $(daemon_pids | tr '\n' ' ')" >&2
 }
 
+# Fail (return 1) if KDIVE_HTTP_PORT is already held by a foreign listener, printing the holder so
+# the operator can free it or relocate the port. Returns 0 when the port is free — or when `ss` is
+# unavailable to inspect it (never block the stack on a missing diagnostic tool). MUST be called
+# AFTER stop_daemons: a kdive server we just stopped has released its LISTEN socket, so anything
+# still on the port is genuinely foreign (e.g. a podman vLLM container). Without this guard the
+# host daemon loses the bind race and dies with a bare uvicorn sys.exit(1) buried in server.log.
+require_free_http_port() {
+  local port holder
+  port="${KDIVE_HTTP_PORT:-8000}"
+  command -v ss >/dev/null 2>&1 || return 0
+  # `sport = :N` matches only that exact port (not :N-suffixed ports); -H drops the header, -p adds
+  # the owning process when visible (a foreign owner's pid needs privilege, but the LISTEN line
+  # still prints without it, so the bind is detected regardless).
+  holder="$(ss -ltnpH "sport = :${port}" 2>/dev/null)"
+  [[ -n "$holder" ]] || return 0
+  {
+    echo "ERROR: KDIVE_HTTP_PORT ${port} is already in use — the kdive server cannot bind it:"
+    echo "  ${holder}"
+    echo "Free that port, or relocate the stack, e.g.:"
+    echo "    KDIVE_HTTP_PORT=8001 scripts/live-stack/up.sh"
+  } >&2
+  return 1
+}
+
 # Restart the host-run kdive daemons with the code in THIS checkout: server + reconciler as the
 # invoking user, worker as root (unless KDIVE_WORKER_AS_ROOT=0) for install-staging + VM ops.
 # Stops live daemons found in the process table first. Assumes env.sh is already sourced and the
@@ -83,6 +107,9 @@ restart_host_processes() {
   }
   mkdir -p "$log_dir"
   stop_daemons
+  # Stopped our own daemons above; anything still on KDIVE_HTTP_PORT is foreign — fail loudly rather
+  # than let the new server lose the bind race and die silently.
+  require_free_http_port || return 1
   echo "starting kdive host processes @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
   setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
   setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &

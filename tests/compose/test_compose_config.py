@@ -16,6 +16,7 @@ A future edit that weakens the condition fails here.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,12 +53,17 @@ _COMPOSE_FILE = Path(__file__).resolve().parents[2] / "docker-compose.yml"
 _APP_SERVICES = ("server", "worker", "reconciler")
 
 
-def _config() -> dict[str, Any]:
+def _config(env_overrides: dict[str, str] | None = None, *, obs: bool = False) -> dict[str, Any]:
+    # `docker compose config` drops profile-gated services (prometheus/grafana) unless the profile
+    # is active, so pass `--profile obs` to render them into the model.
+    profile = ["--profile", "obs"] if obs else []
     res = subprocess.run(
-        ["docker", "compose", "-f", str(_COMPOSE_FILE), "config", "--format", "json"],
+        ["docker", "compose", "-f", str(_COMPOSE_FILE), *profile, "config", "--format", "json"],
         capture_output=True,
         text=True,
         timeout=60,
+        # compose interpolates ${VAR} from the process environment, so overrides go here.
+        env={**os.environ, **(env_overrides or {})},
     )
     assert res.returncode == 0, f"compose config invalid: {res.stderr}"
     return json.loads(res.stdout)
@@ -65,6 +71,10 @@ def _config() -> dict[str, Any]:
 
 def _services() -> dict[str, Any]:
     return _config()["services"]
+
+
+def _published_ports(service: dict[str, Any]) -> set[str]:
+    return {str(p.get("published")) for p in service.get("ports", [])}
 
 
 def test_compose_config_is_valid() -> None:
@@ -116,8 +126,34 @@ def test_shared_backend_env_is_merged_into_every_app_service(service: str) -> No
 def test_server_binds_all_interfaces_and_publishes_its_port() -> None:
     server = _services()["server"]
     assert server["environment"]["KDIVE_HTTP_HOST"] == "0.0.0.0"
-    published = {str(p.get("published")) for p in server.get("ports", [])}
-    assert "8000" in published
+    assert "8000" in _published_ports(server)
+
+
+# Configurable host-published ports: the publish (left) side is a ${VAR:-default} override; the
+# container-internal port and the env the process binds inside stay fixed. Each case renders the
+# model with the override set and asserts ONLY the host mapping moved.
+@pytest.mark.parametrize(
+    ("service", "env_var", "internal", "obs"),
+    [
+        ("postgres", "KDIVE_POSTGRES_PORT", "5432", False),
+        ("minio", "KDIVE_MINIO_PORT", "9000", False),
+        ("oidc", "KDIVE_OIDC_PORT", "8080", False),
+        ("server", "KDIVE_HTTP_PORT", "8000", False),
+        ("prometheus", "KDIVE_PROMETHEUS_PORT", "9090", True),
+        ("grafana", "KDIVE_GRAFANA_PORT", "3000", True),
+    ],
+)
+def test_backend_host_port_is_overridable(
+    service: str, env_var: str, internal: str, obs: bool
+) -> None:
+    override = "17777"
+    svc = _config({env_var: override}, obs=obs)["services"][service]
+    published = _published_ports(svc)
+    assert override in published, f"{service}: override {env_var} did not move the host port"
+    assert internal not in published, f"{service}: default host port must be gone after override"
+    # The container-internal target is unchanged: the service still binds its canonical port.
+    targets = {str(p.get("target")) for p in svc.get("ports", [])}
+    assert internal in targets
 
 
 # Per-process aux health/metrics ports (ADR-0090 §5): the loopback default ports the
@@ -160,26 +196,7 @@ _PROM_CONFIG = Path(__file__).resolve().parents[2] / "deploy" / "compose" / "pro
 
 
 def _services_with_obs_profile() -> dict[str, Any]:
-    # `docker compose config` drops profile-gated services unless the profile is active, so
-    # render with `--profile obs` to make the prometheus service appear in the model.
-    res = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(_COMPOSE_FILE),
-            "--profile",
-            "obs",
-            "config",
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert res.returncode == 0, f"compose config invalid: {res.stderr}"
-    return json.loads(res.stdout)["services"]
+    return _config(obs=True)["services"]
 
 
 def test_prometheus_service_is_obs_profile_only() -> None:
@@ -192,7 +209,7 @@ def test_prometheus_service_is_obs_profile_only() -> None:
 
 def test_prometheus_publishes_ui_but_not_the_scraped_ports() -> None:
     prom = _services_with_obs_profile()["prometheus"]
-    published = {str(p.get("published")) for p in prom.get("ports", [])}
+    published = _published_ports(prom)
     assert "9090" in published
     for aux in _AUX_PORTS.values():
         assert str(aux) not in published
