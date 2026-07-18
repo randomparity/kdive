@@ -9,6 +9,7 @@ from uuid import UUID
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _CONSOLE_DIR = "/var/lib/kdive/console"
+_PCAP_DIR = "/var/lib/kdive/pcap"
 
 # Shared operator guidance for the non-root-worker-under-qemu:///system readability wall
 # (ADR-0223): virtlogd writes the console log and QEMU writes the host-dump core as root, so a
@@ -62,6 +63,45 @@ def system_id_from_domain_name(name: str) -> UUID | None:
 
 def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
+
+
+def pcap_dir(system_id: UUID) -> Path:
+    """The per-System host directory QEMU writes traffic captures into (ADR-0384)."""
+    return Path(_PCAP_DIR) / str(system_id)
+
+
+def pcap_path(system_id: UUID, job_id: UUID) -> Path:
+    """The host pcap path for one capture job (``<pcap_dir>/<job_id>.pcap``)."""
+    return pcap_dir(system_id) / f"{job_id}.pcap"
+
+
+def read_pcap_bytes(path: Path) -> bytes:
+    """Read a captured pcap whole; absent captures are empty.
+
+    Like the console log, a pcap written by QEMU under ``qemu:///system`` is root-owned, so a
+    non-root worker may hit the ADR-0223 readback wall — categorized with the operator remedy.
+    """
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+    except PermissionError as err:
+        raise CategorizedError(
+            "failed to read captured pcap",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={
+                "operation": "read_pcap",
+                "path": str(path),
+                "error": type(err).__name__,
+                "remediation": WORKER_READABILITY_REMEDIATION,
+            },
+        ) from err
+    except OSError as err:
+        raise CategorizedError(
+            "failed to read captured pcap",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"operation": "read_pcap", "path": str(path), "error": type(err).__name__},
+        ) from err
 
 
 def read_console_log(path: Path) -> bytes:
