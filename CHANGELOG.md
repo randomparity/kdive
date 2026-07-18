@@ -78,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tighten plan self-containment from plan review
 - Make plan Step 2 fail/pass expectations precise
 - Caveat register_discovered_resource as test-only overwrite
+- Regenerate tool reference for fastmcp-slim 3.4.4
 
 ### Fixed
 
@@ -106,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clear 401 for a bare-JWT Authorization header (#1268)
 - Escape-safe WWW-Authenticate and simpler bare-JWT check (#1268)
 - Evaluate expected_boot_failure after ready; add ubsan preset
+- Model read-only protocol members for ty 0.0.57
+- Adapt error handling and tests to fastmcp-slim 3.4.4
 
 ### Build
 
@@ -113,6 +116,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-build oidc so compose skips a doomed pull
 - Skip oidc pre-build when image already exists locally
 - Bump the github-actions group across 1 directory with 5 updates
+- Bump the python-dependencies group across 1 directory with 8 updates
 
 ### Scripts
 
