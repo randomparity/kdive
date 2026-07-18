@@ -65,11 +65,20 @@ inline packet bytes are ever returned.
 pattern. A provider that does not implement it yields `capability_unsupported`. Local-libvirt
 implements it via `filter-dump`; remote-libvirt leaves it `None` (see follow-up below).
 
-**Local-libvirt implementation.** Over `qemuMonitorCommand` on the running domain: `object-add`
-a `filter-dump` on the `kdivessh` netdev with `file=<host path>` and `maxlen=snaplen`; poll
-the file size on a bounded interval, stopping at `duration_s` or when the file reaches
-`max_bytes`; `object-del` the filter. The pcap is written under `/var/lib/kdive/pcap/` — the
-same host-writable location class as the console log and host-dump core.
+**Local-libvirt implementation.** Over `qemuMonitorCommand` on the running domain: `object-del`
+any stale filter for this job's deterministic QOM id first (idempotent re-attach), then
+`object-add` a `filter-dump` on the `kdivessh` netdev (a shared `SYSTEM_SSH_NETDEV_ID` constant,
+not a re-hardcoded literal) with QOM id `kdive-dump-<job_id>`, `file=<host path>`, and
+`maxlen=snaplen`. Poll the file size on a bounded interval, stopping when the window
+(`duration_s`) elapses, the file reaches `max_bytes` (`truncated=True`), or the owning job's row
+has turned `CANCELED` (a per-interval cooperative check — a mechanism `watch_for_crash` does not
+have, added because a stray `filter-dump` fills host disk); then `object-del` the filter on every
+exit path. The result carries `bytes_captured` and a `packets` count (a small pure-Python pcap
+record walk) so a header-only pcap (zero packets — the common case on the default `restrict=on`
+NIC, which sees only the SSH forward) is a distinguishable success, not a mystery. The pcap is
+written under `/var/lib/kdive/pcap/<system_id>/` (the worker creates the per-System directory
+mirroring the console-log/host-dump path handling) — the same host-writable location class as
+the console log and host-dump core.
 
 **Worker capture, filter, store.** The handler mirrors `diagnostic_sysrq`: a per-System-locked
 snapshot verifies `READY`+local and resolves the port; the capture runs lock-free; a second
@@ -78,17 +87,26 @@ qemu:///system cross-uid readability wall, ADR-0223, applies unchanged — a `Pe
 becomes a `CONFIGURATION_ERROR` carrying `WORKER_READABILITY_REMEDIATION`). If `capture_filter`
 is set, the worker trims the raw pcap with `tcpdump -r <raw> -w <out> <expr>`; the expression
 is validated with `tcpdump -d <expr>` (compile-only, no capture) and passed as a single argv
-element (never a shell string). The stored object is written **`SENSITIVE`**,
-`retention_class="pcap"`, `owner_kind="runs"`, streamed from disk via `put_stream`
-(disk-backed, sha256-bound, constant memory). The handler inserts the artifact row
-insert-if-absent on the object key (at-least-once safe), audits the capture, deletes the host
-files, and returns the artifact id as the job `result_ref`.
+element (never a shell string). The stored object is named
+`pcap-<job_id>` (job-unique so distinct captures never collide, retry-stable so an
+at-least-once redelivery dedups), written **`SENSITIVE`**, `retention_class="pcap"`,
+`owner_kind="runs"`, streamed from disk via `put_stream` (disk-backed, sha256-bound, constant
+memory). The handler inserts the artifact row insert-if-absent on the object key (at-least-once
+safe), audits the capture, deletes the host files, and returns the artifact id as the job
+`result_ref`. A capture stopped by cancellation stores nothing and writes no row (it
+`object-del`s and deletes the partial file); the job ends `CANCELED` with no `result_ref`.
 
-**Egress.** `RawAsset` gains a `PCAP` member and `artifacts.fetch_raw` gains a `_resolve_key`
-branch (a `raw_pcap_key(conn, run_id)` mirroring `raw_vmcore_key`), so the agent fetches the
-pcap through the existing presigned-URL path: `artifacts.fetch_raw(run_id, asset="pcap")`,
-gated on `contributor` over the Run's project. `artifacts.get`/`find` continue to serve only
-`REDACTED` rows, so the pcap is never inline-served.
+**Egress.** `RawAsset` gains a `PCAP` member and `artifacts.fetch_raw` gains an optional
+`artifact_id` parameter (used only for `asset="pcap"`; ignored for the singleton `vmcore`/
+`vmlinux`). Because a Run has **many** pcaps (one per capture), egress is capture-addressable:
+the agent passes the pcap id from the completed job's `refs.result` —
+`artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<id>)` — and the `_resolve_key` PCAP
+branch resolves that exact `artifacts` row, requiring `owner_kind='runs'`, `owner_id=run_id`
+(so a cross-Run id is `not_found`), and `retention_class='pcap'`. With `artifact_id` omitted it
+resolves the newest pcap for the Run (`ORDER BY created_at DESC, id DESC LIMIT 1`); earlier
+captures remain reachable by id, discoverable through the `jobs.list`/`jobs.get` trail. Gated on
+`contributor` over the Run's project. `artifacts.get`/`find` continue to serve only `REDACTED`
+rows, so the pcap is never inline-served.
 
 ## Consequences
 
@@ -104,9 +122,21 @@ gated on `contributor` over the Run's project. `artifacts.get`/`find` continue t
   not. A malformed filter fails the job as `CONFIGURATION_ERROR` (from `tcpdump -d`), not at
   admission — the server stays non-blocking (admission does a length/printable-character
   hygiene check only, no subprocess).
-- The pcap is `SENSITIVE` and retained like a `vmcore` (reclaimed on owner teardown; no TTL
-  sweep). A busy link at a raised snaplen can produce a large object bounded only by
-  `max_bytes` per capture.
+- The pcap is `SENSITIVE`. Like a `vmcore`, it is reclaimed by **no** teardown or sweep today
+  (System teardown reclaims only `owner_kind='systems'` artifacts; the GC sweeps reclaim only
+  run-owned `build`/`kernel-build`) — a stored pcap persists until an object-store lifecycle
+  policy or manual cleanup removes it, and unlike a `vmcore` a Run accumulates one pcap **per
+  capture**. A busy link at a raised snaplen can produce a large object bounded only by
+  `max_bytes` per capture. Wiring pcap into the existing closed-investigation reclaim
+  (`gc_investigation_artifacts`) is a named follow-up, not done here (kept consistent with the
+  unreclaimed `vmcore`).
+- The `filter-dump` stays attached for the whole capture window, so the fixed-duration job
+  **does** hold live host state: a worker `SIGKILL`/host crash between `object-add` and
+  `object-del` strands the filter writing unbounded to `/var/lib/kdive/pcap/` and leaves a
+  partial host file. A reconciler reap (modeled on `reap_orphaned_dump_volumes`) `object-del`s
+  kdive filter-dumps whose owning capture job is terminal and deletes orphaned pcap files with
+  no live job; the handler makes re-attach idempotent (delete-before-add on a deterministic QOM
+  id) so an at-least-once retry never double-attaches.
 - `qemuMonitorCommand` is libvirt's "unsupported" QMP passthrough; a QEMU/libvirt version
   whose `filter-dump` QOM schema changes could break the object-add. The op fails as
   `CONTROL_FAILURE`, observable via per-kind job telemetry.
@@ -136,7 +166,9 @@ gated on `contributor` over the Run's project. `artifacts.get`/`find` continue t
   speculative. Unbounded artifact accumulation is a broader retention concern for `vmcore` and
   pcap together, out of scope here.
 - **A start/stop capture pair** — rejected: the fixed-duration job is one tool with bounded
-  resource use and no live-capture state for the reconciler to reap; the operator selected it.
+  resource use; the operator selected it. (It still holds live state for its window — see the
+  reconciler reap above — but a start/stop pair would hold it open indefinitely, needing the
+  same reaper plus orphan-on-crash handling for an unbounded window.)
 - **Remote-libvirt in this change** — rejected for now (documented follow-up): remote's
   data-plane traffic rides a libvirt-managed NIC whose netdev id libvirt auto-generates (not
   `kdivessh`, which carries only its SSH forward), needs runtime netdev/tap discovery, and the
