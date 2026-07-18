@@ -60,6 +60,7 @@ def _combined_kernel_tar() -> bytes:
         for name, data in (
             ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
             ("lib/modules/6.9.0/modules.dep", b""),
+            ("lib/modules/6.9.0/kernel/drivers/foo.ko", b"\x7fELFmod"),
         ):
             info = tarfile.TarInfo(name)
             info.size = len(data)

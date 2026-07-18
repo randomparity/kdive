@@ -72,7 +72,7 @@ The tar must also contain:
 
 | Member | What it is | Rule |
 |---|---|---|
-| `lib/modules/<release>/…` | the `make modules_install` tree for that kernel | at least one `lib/modules/` member must be present |
+| `lib/modules/<release>/…` | the `make modules_install` tree for that kernel | at least one real kernel-module file (`*.ko`, `.ko.xz`, `.ko.gz`, or `.ko.zst`) under `lib/modules/<release>/` must be present — a bare directory or a `modules.dep` with no module is rejected |
 
 The declared `arch` and the payload must agree: an x86 bzImage under `arch: ppc64le`, or an ELF
 (or non-ppc64 ELF) under `arch: x86_64`, is rejected. Learn the exact per-arch magic bytes from
