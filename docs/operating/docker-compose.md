@@ -34,3 +34,7 @@ The server publishes the MCP endpoint over streamable HTTP. Point an agent at
 `http://localhost:8000/mcp` (or the host/port you mapped) and supply a bearer token your
 OIDC issuer accepts. The agent's MCP client config names the server and its URL; consult
 your client's documentation for the exact `mcpServers` shape.
+
+The `Authorization` header value must include the `Bearer ` scheme prefix —
+`Authorization: Bearer <token>`, not a bare `<token>` (RFC 6750). A bare token is
+rejected with a 401 that names the missing prefix.
