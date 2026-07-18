@@ -371,6 +371,22 @@ _DOMCAPS_CUSTOM = """
 </cpu></domainCapabilities>
 """
 
+# ppc64le (and other non-x86 arches): QEMU does not probe custom-model usability, so every
+# model is reported as usable='unknown'. All five should appear in selectable_cpus — 'unknown'
+# means "QEMU did not check", not "unusable" (virsh define with POWER9 succeeds on a POWER9 KVM
+# host regardless of this attribute).
+_DOMCAPS_CUSTOM_PPC64LE = """
+<domainCapabilities><cpu>
+  <mode name='custom' supported='yes'>
+    <model usable='unknown' vendor='IBM'>POWER7</model>
+    <model usable='unknown' vendor='IBM'>POWER8</model>
+    <model usable='unknown' vendor='IBM'>POWER9</model>
+    <model usable='unknown' vendor='IBM'>POWER10</model>
+    <model usable='unknown' vendor='IBM'>POWER11</model>
+  </mode>
+</cpu></domainCapabilities>
+"""
+
 
 def test_parse_host_capabilities_cpu_reads_model_vendor_arch() -> None:
     assert parse_host_capabilities_cpu(_HOST_CAPS) == ParsedHostCpu(
@@ -384,8 +400,20 @@ def test_parse_host_capabilities_cpu_none_on_malformed_or_missing_model() -> Non
     assert parse_host_capabilities_cpu("<capabilities/>") is None
 
 
-def test_parse_selectable_cpus_usable_only_sorted_deduped() -> None:
+def test_parse_selectable_cpus_yes_and_unknown_included_no_excluded() -> None:
+    # x86: usable=yes included, usable=no excluded, result sorted.
     assert parse_selectable_cpus(_DOMCAPS_CUSTOM) == ["SapphireRapids", "qemu64", "x86-64-v2"]
+
+
+def test_parse_selectable_cpus_unknown_included_for_ppc64le() -> None:
+    # ppc64le: QEMU reports all models as usable='unknown'; all must appear in selectable_cpus.
+    assert parse_selectable_cpus(_DOMCAPS_CUSTOM_PPC64LE) == [
+        "POWER10",
+        "POWER11",
+        "POWER7",
+        "POWER8",
+        "POWER9",
+    ]
 
 
 def test_parse_selectable_cpus_empty_on_no_custom_mode_or_malformed() -> None:
@@ -397,6 +425,18 @@ def test_parse_selectable_cpus_empty_on_no_custom_mode_or_malformed() -> None:
         "</cpu></domainCapabilities>"
     )
     assert parse_selectable_cpus(unsupported) == []
+
+
+def test_parse_selectable_cpus_all_no_returns_empty() -> None:
+    # A mode where every model is explicitly usable='no' yields no selectable cpus.
+    all_no = (
+        "<domainCapabilities><cpu>"
+        "<mode name='custom' supported='yes'>"
+        "<model usable='no'>POWER9</model>"
+        "<model usable='no'>POWER10</model>"
+        "</mode></cpu></domainCapabilities>"
+    )
+    assert parse_selectable_cpus(all_no) == []
 
 
 def test_parse_domain_resolved_cpu_concrete_model() -> None:
