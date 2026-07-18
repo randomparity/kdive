@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add OPERATOR_OWNED_CAP_KEYS for capability refresh
 - Refresh existing resource capabilities on registration
 - Log changed keys when a capability refresh writes
+- Consolidate demo token TTL to a 30d default
 
 ### Changed
 
