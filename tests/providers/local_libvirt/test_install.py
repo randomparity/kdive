@@ -43,6 +43,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 from kdive.providers.local_libvirt.lifecycle.install import (
     Fetch,
     LocalLibvirtInstall,
+    _boot_window_polls,
     _stage_object,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
@@ -243,6 +244,24 @@ def _install(
         fetch_modules=fetch_modules or fetch,
         kernel_writer=kernel_writer,
     )
+
+
+def test_boot_window_polls_default_is_180(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 900 s default / 5 s poll cadence = 180 polls (the widened POWER9-friendly window).
+    monkeypatch.delenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", raising=False)
+    assert _boot_window_polls() == 180
+
+
+def test_boot_window_polls_rounds_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A window not divisible by the 5 s cadence rounds up (math.ceil), so the last partial
+    # interval is still polled — 902 / 5 = 180.4 -> 181, never truncated to 180.
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "902")
+    assert _boot_window_polls() == 181
+
+
+def test_boot_window_polls_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "1000")
+    assert _boot_window_polls() == 200
 
 
 def _request(
@@ -962,6 +981,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         fetch_initrd=_initrd_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
+        boot_window_polls=3,
     )
     # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
     installer.install(_request(cmdline="console=ttyS0", method=CaptureMethod.CONSOLE))

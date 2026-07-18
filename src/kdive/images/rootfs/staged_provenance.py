@@ -64,6 +64,9 @@ def write_sidecar(qcow2: Path, *, provenance: Mapping[str, object]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(document)
+        # mkstemp creates 0600; make readable before the atomic replace so readers
+        # (e.g. reconcile-systems run as a different user) never see a 0600 sidecar.
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, target)
     except OSError:
         Path(tmp_name).unlink(missing_ok=True)
@@ -146,6 +149,9 @@ def write_config_sibling(qcow2: Path, *, config: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(config)
+        # mkstemp creates 0600; make readable before the atomic replace so readers
+        # (e.g. reconcile-systems run as a different user) never see a 0600 sibling.
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, target)
     except OSError:
         Path(tmp_name).unlink(missing_ok=True)
