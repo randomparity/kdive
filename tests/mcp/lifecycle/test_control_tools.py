@@ -1152,13 +1152,54 @@ def test_capture_traffic_enqueues_job_for_contributor(migrated_url: str) -> None
             assert resp.data["run_id"] == run_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT payload FROM jobs WHERE kind = 'capture_traffic' AND dedup_key = %s",
-                    (f"{run_id}:capture_traffic",),
+                    "SELECT payload FROM jobs WHERE kind = 'capture_traffic' AND dedup_key LIKE %s",
+                    (f"{run_id}:capture_traffic:%",),
                 )
                 row = await cur.fetchone()
         assert row is not None
         assert row["payload"]["capture_filter"] == "tcp port 80"
         assert row["payload"]["snaplen"] == 128
+
+    asyncio.run(_run())
+
+
+def test_capture_traffic_unkeyed_calls_are_distinct_jobs(migrated_url: str) -> None:
+    # A Run owns many pcaps; a repeated unkeyed capture must be a fresh job, not a replay.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_bound_run(pool, sys_id)
+            first = await _capture_traffic(pool, _ctx(Role.CONTRIBUTOR), run_id=run_id)
+            second = await _capture_traffic(pool, _ctx(Role.CONTRIBUTOR), run_id=run_id)
+            assert first.object_id != second.object_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'capture_traffic'")
+                count_row = await cur.fetchone()
+                assert count_row is not None
+                assert count_row["n"] == 2
+
+    asyncio.run(_run())
+
+
+def test_capture_traffic_keyed_retry_replays_one_job(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_bound_run(pool, sys_id)
+            first = await _capture_traffic(
+                pool, _ctx(Role.CONTRIBUTOR), run_id=run_id, idempotency_key="k1"
+            )
+            second = await _capture_traffic(
+                pool, _ctx(Role.CONTRIBUTOR), run_id=run_id, idempotency_key="k1"
+            )
+            assert first.object_id == second.object_id
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'capture_traffic'")
+                count_row = await cur.fetchone()
+                assert count_row is not None
+                assert count_row["n"] == 1
 
     asyncio.run(_run())
 

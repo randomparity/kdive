@@ -484,6 +484,12 @@ async def _capture_traffic(
                     data={"reason": "invalid_filter", "detail": reason},
                 )
 
+            # A Run owns many pcaps (one per capture, egressed by artifact_id), so a repeated call
+            # must enqueue a fresh job — not replay the first like force_crash's once-per-System
+            # key. Mirror control.power/diagnostic_sysrq: a supplied idempotency_key makes the call
+            # replay-safe; absent, a per-call uuid4 makes every capture distinct.
+            dedup_suffix = idempotency_key if idempotency_key is not None else str(uuid4())
+
             async def _enqueue() -> ToolResponse:
                 job = await queue.enqueue(
                     conn,
@@ -496,7 +502,7 @@ async def _capture_traffic(
                         capture_filter=capture_filter,
                     ),
                     job_authorizing(ctx, run.project),
-                    f"{run_id}:capture_traffic",
+                    f"{run_id}:capture_traffic:{dedup_suffix}",
                 )
                 return job_envelope(job, "run_id", uid)
 
