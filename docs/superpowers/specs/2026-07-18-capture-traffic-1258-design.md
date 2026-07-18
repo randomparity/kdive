@@ -47,10 +47,11 @@ descriptions carry no `ADR-NNNN` references (the `test_no_adr_leak` guard).
 
 Returns the standard job envelope `{object_id: run_id, status: running, refs:{}}` with
 `suggested_next_actions` steering to `jobs.wait`; on completion `refs.result` is the pcap
-artifact id, which the agent passes to `artifacts.fetch_raw(run_id, asset="pcap",
-artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-addressable, not
-`(run_id, asset)`-keyed). The completion also surfaces `data.packets` and `data.bytes_captured`
-(see zero-packet handling below).
+artifact id (the only success channel `ToolResponse.from_job` carries — like `vmcore.fetch`),
+which the agent passes to `artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<id>)` (see
+Egress — a Run has many pcaps, so egress is capture-addressable, not `(run_id, asset)`-keyed).
+The empty-capture signal rides `fetch_raw`'s existing `data.size_bytes` (see zero-packet handling
+below), not the job envelope.
 
 ## Behavior contract
 
@@ -83,12 +84,15 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   threaded into a `to_thread` capture loop). `detach` (`object-del`) runs on **every** exit path
   (success, error, cancel). The result carries `bytes_captured` (the stat size) and `packets` (a
   small pure-Python pcap record walk).
-- **Zero-packet capture.** A window with no matching packets yields a valid header-only pcap.
-  This is the *common* case: the System NIC defaults to `restrict=on` (`guest_egress` False), so
-  only the agent's SSH forward rides `kdivessh`. It is a **success**, not a failure — the
-  envelope surfaces `data.packets=0` and steers the agent toward enabling `guest_egress`,
-  broadening `capture_filter`, or driving traffic. A `capture_filter` that matches nothing is the
-  same success with `packets=0`.
+- **Zero-packet capture.** A window with no matching packets yields a valid header-only pcap
+  (the 24-byte libpcap global header, no records). This is the *common* case: the System NIC
+  defaults to `restrict=on` (`guest_egress` False), so only the agent's SSH forward rides
+  `kdivessh`. It is a **success**, not a failure. The agent detects it without a full download
+  from `artifacts.fetch_raw`'s `data.size_bytes` (== 24 ⇒ zero packets), and the tool docstring
+  steers a zero-packet result toward enabling `guest_egress`, broadening `capture_filter`, or
+  driving traffic. A `capture_filter` that matches nothing is the same 24-byte success. The
+  provider result's `packets`/`bytes_captured` feed the worker's per-kind job telemetry
+  (observability), not the agent envelope (`from_job` carries no `data.*` success channel).
 - **Worker filter + store.** Read the raw pcap off host disk (a `PermissionError` under
   qemu:///system → `CONFIGURATION_ERROR` with `WORKER_READABILITY_REMEDIATION`, ADR-0223). If
   `capture_filter` is set: validate with `tcpdump -d <expr>` (compile-only; failure →
@@ -225,8 +229,8 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   `retention_class='pcap'` named `pcap-<job_id>`; insert-if-absent idempotency on retry (same job
   id → same name → one row); a distinct job id → distinct row (no stale-row collision);
   `PermissionError` → `CONFIGURATION_ERROR` with the readability remediation; host-file cleanup on
-  success, filter failure, and cancellation; a zero-packet capture completes as success with
-  `data.packets=0`.
+  success, filter failure, and cancellation; a zero-packet capture completes as success (the
+  stored object is the 24-byte libpcap header; the empty signal is `fetch_raw`'s `size_bytes`).
 - **Admission (behavior test, `test_control_tools`-adjacent)** — each precondition rejection
   creates no job; happy path enqueues `CAPTURE_TRAFFIC` and returns the running envelope;
   `capture_filter` hygiene rejection.
@@ -270,8 +274,8 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   operator-remediation `CONFIGURATION_ERROR`, not a silent failure.
 - **Disk-full mid-capture** — if the host disk fills before `duration_s`/`max_bytes`, `filter-dump`
   write failures are silent to the size-poll (the file simply stops growing, indistinguishable
-  from an idle link). The capture ends as a short/empty success surfaced via `data.bytes_captured`
-  /`data.packets` (the zero-packet path); the reaper still `object-del`s the filter. Detecting
+  from an idle link). The capture ends as a short/empty success (detectable via `fetch_raw`'s
+  `size_bytes`, the zero-packet path); `detach` still `object-del`s the filter. Detecting
   `ENOSPC` distinctly is a possible refinement, not required for correctness.
 - **qemu:///system cross-uid readback** — the raw pcap is QEMU-owned; a non-root worker cannot
   read it. Reuses the ADR-0223 `WORKER_READABILITY_REMEDIATION` contract unchanged.

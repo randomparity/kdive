@@ -88,9 +88,11 @@ check — a mechanism `watch_for_crash` does not have, added because a stray `fi
 host disk); `detach` (`object-del`) runs on every exit path. The result carries `bytes_captured`
 and a `packets` count from a small pure-Python pcap record walk (which reads the 4-byte magic to
 pick byte order and the µs-vs-ns record format, so it counts correctly regardless of host
-endianness) so a header-only pcap (zero packets — the common case on the default `restrict=on`
-NIC, which sees only the SSH forward) is a distinguishable success, not a mystery. The pcap is
-written under `/var/lib/kdive/pcap/<system_id>/` (the worker creates the per-System directory
+endianness); these feed the worker's per-kind job telemetry. A header-only pcap (zero packets —
+the common case on the default `restrict=on` NIC, which sees only the SSH forward) is a
+distinguishable success: the agent reads it from `artifacts.fetch_raw`'s `data.size_bytes`
+(== 24, the bare libpcap header), since a completed job envelope carries only `refs.result`. The
+pcap is written under `/var/lib/kdive/pcap/<system_id>/` (the worker creates the per-System directory
 mirroring the console-log/host-dump path handling) — the same host-writable location class as
 the console log and host-dump core.
 
