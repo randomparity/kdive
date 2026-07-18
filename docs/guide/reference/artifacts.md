@@ -136,15 +136,19 @@ not need. Requires a token.
 
 `implemented` · `read-only`
 
-Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor.
+Mint a presigned download URL for a Run's raw vmcore, vmlinux, or pcap. Requires
+contributor.
 
 Returns the URL under `refs.download_uri` with `data.asset`/`data.size_bytes`; never
 inline bytes (these are large binaries). The asset stays sensitive — egress is gated by
-project membership + contributor on the asset's owning project, not by redaction.
+project membership + contributor on the asset's owning project, not by redaction. A Run may
+own several pcaps (one per capture job); pass `artifact_id` to pick one, or omit it for the
+newest.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `asset` | `vmcore`, `vmlinux` | yes | Which raw asset to fetch: vmcore or vmlinux. |
+| `artifact_id` | string (nullable) | no | Select a specific pcap by id (from the capture job's refs.result); only meaningful when asset='pcap'. Omit to fetch the newest pcap. |
+| `asset` | `vmcore`, `vmlinux`, `pcap` | yes | Which raw asset to fetch: vmcore, vmlinux, or pcap. |
 | `run_id` | string | yes | The Run whose raw asset to fetch. |
 
 ## `artifacts.find`
