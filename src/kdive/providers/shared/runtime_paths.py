@@ -113,7 +113,7 @@ def _qemu_runtime_owner() -> tuple[int, int] | None:
 def _relabel_svirt_image(directory: Path) -> None:
     """Best-effort SELinux relabel so the confined hypervisor can create files in ``directory``."""
     try:
-        import selinux  # noqa: PLC0415 - optional; absent on non-SELinux hosts
+        import selinux  # noqa: PLC0415  # ty: ignore[unresolved-import]  # operator-provided
     except ImportError:
         return
     try:

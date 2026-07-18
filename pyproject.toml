@@ -86,6 +86,7 @@ include = [
   "src/kdive/providers/local_libvirt/retrieve.py",
   "src/kdive/providers/shared/debug_common/core_file.py",
   "src/kdive/providers/shared/debug_common/drgn_program.py",
+  "src/kdive/providers/shared/runtime_paths.py",
   "tests/providers/local_libvirt/test_introspect_ppc64le_live.py",
 ]
 
