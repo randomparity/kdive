@@ -133,3 +133,12 @@ No schema change, no migration, no new tool, no new error category.
 - **Raise on an exists-branch discovery failure.** Regresses onboard/restart robustness for a
   working row (a transient libvirt blip would fail a redeploy that previously succeeded).
   Rejected in favor of best-effort.
+- **Reorder to discover-then-lock** (run `list_resources()` before taking the row `FOR UPDATE`,
+  so the row lock covers only the read-modify-write). Would shorten the window in which a wedged
+  libvirtd blocks a concurrent `ops.set_host_capacity`, but it complicates the best-effort
+  contract: the absent path must *raise* on a discovery failure while the exists path must
+  *swallow* it, and which branch applies is not known until the row is probed — so a
+  discover-first ordering must defer the raise-vs-swallow decision past the branch. Rejected for
+  #1172: the contention it optimizes only opens on an already-wedged host and causes a bounded
+  delay, not corruption, and the module already holds a lock across `list_resources()` on the
+  insert path. Left as a localized follow-up if the contention ever proves material.

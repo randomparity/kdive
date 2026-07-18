@@ -187,6 +187,19 @@ action where a wedged local libvirtd is observable to the operator. The best-eff
 covers a discovery call that *raises*, not one that *hangs* — that is an accepted, pre-existing
 residual, not a new one.
 
+One contention effect is new, and accepted: because the exists-branch existence probe is
+`SELECT … FOR UPDATE`, the resource row lock is held across the untimed discovery call, so a
+wedged local libvirtd blocks a *concurrent* `ops.set_host_capacity` on the same host for the
+hang duration. This is a degraded-mode delay (the host is already wedged), not corruption, and
+is strictly safer than the lost-update it replaces. The module already holds its per-resource
+advisory lock across `list_resources()` on the cold-start insert path, so this does not
+introduce a new "lock held across external I/O" pattern — it extends the existing one to the row
+lock. The alternative of reordering to discover-then-lock (so the row lock covers only the fast
+read-modify-write) is recorded in ADR-0384 and deliberately not taken: it complicates the
+best-effort raise-vs-swallow decision (the absent path must raise on a discovery failure, the
+exists path must swallow, and the branch is not known until after the probe), for a contention
+window that only opens on an already-wedged host.
+
 ## Behavior change summary
 
 | Path | Row absent | Row exists, capabilities already current | Row exists, key missing / discovery-owned value stale |
