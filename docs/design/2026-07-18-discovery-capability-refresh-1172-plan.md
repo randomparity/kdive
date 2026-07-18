@@ -47,7 +47,8 @@ the rename from the behavior change keeps each independently reviewable.
 **Files:**
 - Modify: `src/kdive/providers/core/resource_registration.py` (the `async def` at line 60 and its
   docstring)
-- Modify: `src/kdive/providers/assembly/composition.py` (import at line 24; call at line 72)
+- Modify: `src/kdive/providers/assembly/composition.py` (import at line 24; **comment at line
+  68**; call at line 72)
 - Modify: `tests/services/test_resource_discovery.py` (import at line 16-19; call in `_ensure`
   helper at line 118)
 
@@ -73,7 +74,7 @@ async def register_or_refresh_discovered_resource(
     """Insert the target discovered Resource when absent (refresh added in a later step)."""
 ```
 
-- [ ] **Step 2: Update the call site in composition.py**
+- [ ] **Step 2: Update the call site and stale comment in composition.py**
 
 In `src/kdive/providers/assembly/composition.py`, change the import (line 24) and the call
 (line 72):
@@ -91,6 +92,19 @@ from kdive.providers.core.resource_registration import register_or_refresh_disco
             pool_name=registration.pool_name,
             cost_class=registration.cost_class,
         )
+```
+
+Also update the comment at lines 68-70, which names the old symbol and predates the refresh —
+reword it to the new name and note the refresh now reads discovery on the exists path too, while
+the remote-connect safety stays structural (this registrar only reaches it for `creates=True`
+local kinds):
+
+```python
+        # Known remote limitation: register_or_refresh_discovered_resource calls
+        # discovery.list_resources() synchronously inside its async transaction (on both the
+        # insert and the exists/refresh path, ADR-0384), and a remote TLS connect has no
+        # pre-connect timeout. This registrar only reaches it for creates=True (local) kinds, so
+        # no remote connect occurs here. Async offload is deferred.
 ```
 
 - [ ] **Step 3: Update the test import and helper**
@@ -190,14 +204,17 @@ tests first (they fail against the still-insert-only code from Task 1), then imp
   - `async def _refresh_capabilities(conn, discovery, *, kind, resource_id, stored) -> None`
   - `def _merge_capabilities(fresh: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]`
 
-- [ ] **Step 1: Rework the existing behavior tests + add the new ones**
+- [ ] **Step 1: Rework the existing behavior tests + add the new ones (all test edits happen here)**
 
-In `tests/services/test_resource_discovery.py`: (a) extend `_Discovery` to support extra
-capability keys and a failing mode; (b) replace
-`test_ensure_discovered_resource_registered_does_not_overwrite_existing_row` with refresh
-assertions; (c) update `test_ensure_discovered_resource_registered_bootstraps_one_row`'s
-`discovery.calls` expectation (the exists pass now re-reads → 2 calls). Add these tests (keep
-`test_register_discovered_resource_is_idempotent` and the `_pg`/`_ensure` helpers):
+Do every test-file edit in this one step so the module is fully in its final test state before
+Step 2 runs. In `tests/services/test_resource_discovery.py`: (a) extend `_Discovery` to support
+extra capability keys and a failing mode; (b) **delete**
+`test_ensure_discovered_resource_registered_does_not_overwrite_existing_row` entirely — the
+refresh inverts its insert-only intent; (c) replace
+`test_ensure_discovered_resource_registered_bootstraps_one_row`'s body with the `discovery.calls
+== 2` version shown below (the exists pass now re-reads); (d) add the `test_refresh_*` tests plus
+the absent-branch AC7 test below. Keep `test_register_discovered_resource_is_idempotent` and the
+`_pg`/`_ensure` helpers. Full code:
 
 ```python
 class _Discovery:
@@ -342,13 +359,53 @@ def test_refresh_change_guard_skips_write_when_unchanged(migrated_url: str) -> N
         assert after[0] == before[0]  # no row write: xmin unchanged
 
     asyncio.run(_run())
+
+
+def test_absent_branch_discovery_failure_raises(migrated_url: str) -> None:
+    async def _run() -> None:
+        failing = _Discovery()
+        failing.fail = True
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            try:
+                await _ensure(pool, failing)  # empty DB → absent branch must raise
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("absent-branch discovery failure did not raise")
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT count(*) FROM resources")
+                row = await cur.fetchone()
+        assert row is not None and row[0] == 0  # nothing inserted
+
+    asyncio.run(_run())
 ```
 
-- [ ] **Step 2: Run the new tests to confirm they fail against the insert-only code**
+And replace the existing `bootstraps_one_row` test body with the re-read count (this is edit
+(c) — the second `_ensure` now refreshes, so discovery is read twice):
+
+```python
+def test_ensure_discovered_resource_registered_bootstraps_one_row(migrated_url: str) -> None:
+    async def _run() -> None:
+        discovery = _Discovery(cap=2)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, discovery)
+            await _ensure(pool, discovery)
+        async with _pg(migrated_url) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT kind, host_uri FROM resources")
+            rows = await cur.fetchall()
+        assert rows == [("local-libvirt", "qemu:///system")]
+        assert discovery.calls == 2  # insert reads once; the second pass refreshes (reads again)
+
+    asyncio.run(_run())
+```
+
+- [ ] **Step 2: Run the tests to confirm they fail against the insert-only code**
 
 Run: `uv run python -m pytest tests/services/test_resource_discovery.py -q`
-Expected: FAIL — the refresh tests fail (insert-only code never updates an existing row); the
-reworked `bootstraps_one_row` `discovery.calls == 2` assertion fails against the short-circuit.
+Expected: FAIL — the `test_refresh_*` tests fail (insert-only code never updates an existing row)
+and the reworked `bootstraps_one_row` `discovery.calls == 2` assertion fails against the
+short-circuit. `test_absent_branch_discovery_failure_raises` should already PASS (the absent
+branch already raises today).
 
 - [ ] **Step 3: Implement the refresh**
 
@@ -458,35 +515,12 @@ def _merge_capabilities(fresh: dict[str, Any], stored: dict[str, Any]) -> dict[s
     return merged
 ```
 
-- [ ] **Step 4: Update the two existing tests that asserted insert-only behavior**
-
-Replace `test_ensure_discovered_resource_registered_does_not_overwrite_existing_row` (its intent
-inverts) with the refresh tests above, and update
-`test_ensure_discovered_resource_registered_bootstraps_one_row`'s call count — the second
-`_ensure` now re-reads discovery:
-
-```python
-def test_ensure_discovered_resource_registered_bootstraps_one_row(migrated_url: str) -> None:
-    async def _run() -> None:
-        discovery = _Discovery(cap=2)
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
-            await _ensure(pool, discovery)
-            await _ensure(pool, discovery)
-        async with _pg(migrated_url) as conn, conn.cursor() as cur:
-            await cur.execute("SELECT kind, host_uri FROM resources")
-            rows = await cur.fetchall()
-        assert rows == [("local-libvirt", "qemu:///system")]
-        assert discovery.calls == 2  # insert reads once; the second pass refreshes (reads again)
-
-    asyncio.run(_run())
-```
-
-- [ ] **Step 5: Run the full discovery test module**
+- [ ] **Step 4: Run the full discovery test module**
 
 Run: `uv run python -m pytest tests/services/test_resource_discovery.py -q`
 Expected: PASS (all reworked + new tests green).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add src/kdive/providers/core/resource_registration.py \
@@ -608,11 +642,7 @@ git commit -m "test(discovery): cover creates=False bind-only registrar no-op"
 - AC4 (FOR UPDATE serialization, concurrent cap not lost) → Task 4.
 - AC5 (status/pool/cost_class/cordoned unchanged) → Task 3 `test_refresh_preserves_status_pool_cost_and_cordoned`.
 - AC6 (creates=False bind-only no-op) → Task 5.
-- AC7 (absent-path discovery failure still raises) → unchanged code (absent branch identical);
-  covered by the existing `test_ensure_discovered_resource_registered_bootstraps_one_row` path
-  and the untouched insert logic. (A discovery-raises-on-absent test is not newly required since
-  the absent branch is byte-identical to today; add one only if a reviewer wants explicit
-  coverage.)
+- AC7 (absent-path discovery failure still raises) → Task 3 `test_absent_branch_discovery_failure_raises`.
 - AC8 (exists-path read failure swallowed) → Task 3 `test_refresh_read_failure_keeps_existing_capabilities`.
 - AC9 (change-guard: no write when unchanged) → Task 3 `test_refresh_change_guard_skips_write_when_unchanged`.
 - AC10 (guardrails green) → Task 5.
