@@ -101,10 +101,10 @@ state before treating it as granted.
   - `mode` (``=id``, required)
   - `resource_id` (`string`, required)
 - _variant object(mode=kind):_
-  - `mode` (``=kind``, optional)
+  - `mode` (``=kind``, required)
   - `kind` (``local-libvirt`, `fault-inject`, `remote-libvirt``, optional) — The provider resource kinds.
 - _variant object(mode=pool):_
-  - `mode` (``=pool``, optional)
+  - `mode` (``=pool``, required)
   - `pool` (`string`, required)
 
 ## `allocations.wait`
