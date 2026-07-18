@@ -1144,6 +1144,7 @@ _MARKER = "kdive-ready"
         "[   22.10] Unable to handle kernel paging request at virtual address 0",
         "[   22.10] BUG: KASAN: slab-out-of-bounds in __d_lookup+0x1a/0x2b",
         "[   22.10] BUG: KFENCE: use-after-free read in d_lookup",
+        "[   22.10] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34",
         "[   22.10] rcu: INFO: rcu_sched self-detected stall on CPU",
     ],
 )
@@ -1235,6 +1236,7 @@ def test_classify_malformed_utf8_does_not_raise() -> None:
         ("[22.1] Unable to handle kernel paging request", "Unable to handle kernel"),
         ("[22.1] BUG: KASAN: slab-out-of-bounds in __d_lookup", "BUG:"),
         ("[22.1] BUG: KFENCE: use-after-free read in d_lookup", "BUG:"),
+        ("[22.1] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34", "UBSAN:"),
         ("[22.1] rcu: INFO: rcu_sched self-detected stall on CPU", "detected stall"),
     ],
 )

@@ -232,6 +232,7 @@ def test_expected_boot_failure_model_and_run_field() -> None:
         ("panic", "Kernel panic"),
         ("oops", CRASH_SIGNATURE_PRESETS["oops"]),
         ("hung_task", CRASH_SIGNATURE_PRESETS["hung_task"]),
+        ("ubsan", "UBSAN:"),
     ],
 )
 def test_expected_boot_failure_preset_resolves_to_canonical_pattern(
