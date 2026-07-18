@@ -65,6 +65,9 @@ DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue sto
 # returns to its caller on the same stack.
 STEP_DEFAULT_SYMBOL = "vfs_read"
 _POLL_INTERVAL_SEC = 5.0
+# Generous cap for the slow build/compress steps (make modules_install, tar+gzip). A stalled step
+# fails loudly here rather than hanging forever or being killed mid-write by an outer timeout.
+_ARCHIVE_STEP_TIMEOUT_S = 900
 
 
 @functools.cache
@@ -73,6 +76,28 @@ def _required_executable(name: str) -> str:
     if path is None:
         raise RuntimeError(f"{name} executable is required on PATH")
     return path
+
+
+def _run_build_step(argv: list[str], *, step: str) -> None:
+    """Run a fixed-argv build/compress step, bounded so a stall fails loudly.
+
+    Args:
+        argv: The command to run (fixed argv, never a shell string).
+        step: A short label used in the timeout error (e.g. ``"tar"``).
+
+    Raises:
+        RuntimeError: If the step runs longer than ``_ARCHIVE_STEP_TIMEOUT_S``.
+        subprocess.CalledProcessError: If the step exits non-zero.
+    """
+    try:
+        subprocess.run(  # noqa: S603 - fixed argv, no shell  # nosec B603
+            argv, check=True, timeout=_ARCHIVE_STEP_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{step} exceeded {_ARCHIVE_STEP_TIMEOUT_S}s and was aborted; install pigz for "
+            "parallel gzip or raise _ARCHIVE_STEP_TIMEOUT_S for very large kernel trees"
+        ) from exc
 
 
 def _token(project: str) -> str:
@@ -198,12 +223,18 @@ async def _wait_job(
 
 
 def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
-    """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
+    """Cut the ADR-0234 combined ``kernel`` artifact from a built x86_64 kernel tree.
 
     Reproduces the ``external-build-upload`` recipe: stage the module tree with
     ``make modules_install`` into ``dest_dir`` and tar ``arch/x86/boot/bzImage`` (renamed to
     ``boot/vmlinuz``, listed first so ``lib/modules`` lands inside the validator's decompress scan
     bound) plus ``lib/modules`` into one gzip tar, dropping the ``build``/``source`` back-symlinks.
+    Uses ``pigz`` for parallel gzip when it is on ``PATH`` (it emits a standard gzip stream), else
+    falls back to tar's built-in single-threaded gzip. Both slow steps are bounded (see
+    :func:`_run_build_step`).
+
+    This reference client packages **x86_64** kernels only. For ppc64le and other arches, follow the
+    manual packaging recipe in ``docs/operating/external-build-upload.md``.
 
     Args:
         kernel_src: A *built* x86_64 kernel tree (must contain ``arch/x86/boot/bzImage``).
@@ -213,16 +244,18 @@ def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
         The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
 
     Raises:
-        RuntimeError: If ``kernel_src`` holds no built bzImage.
+        RuntimeError: If ``kernel_src`` holds no built x86_64 bzImage, or a build step stalls.
     """
     bzimage = kernel_src / "arch/x86/boot/bzImage"
     if not bzimage.is_file():
         raise RuntimeError(
-            f"no built bzImage at {bzimage}; build the kernel tree at {kernel_src} "
-            "(or point KDIVE_KERNEL_SRC at a built x86_64 tree) first"
+            f"no built x86_64 bzImage at {bzimage}: this reference client packages x86_64 kernels "
+            f"only. Build the tree at {kernel_src} (or point KDIVE_KERNEL_SRC at a built x86_64 "
+            "tree). For ppc64le and other arches, follow the manual packaging recipe in "
+            "docs/operating/external-build-upload.md."
         )
     modstage = dest_dir / "modstage"
-    subprocess.run(  # noqa: S603 - fixed make argv, no shell  # nosec B603
+    _run_build_step(
         [
             _required_executable("make"),
             "-C",
@@ -230,13 +263,15 @@ def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
             "modules_install",
             f"INSTALL_MOD_PATH={modstage}",
         ],
-        check=True,
+        step="modules_install",
     )
     tar_path = dest_dir / "kernel.tar.gz"
-    subprocess.run(  # noqa: S603 - fixed tar argv, no shell  # nosec B603
+    pigz = shutil.which("pigz")
+    compress = ["-I", pigz, "-cf"] if pigz else ["-czf"]
+    _run_build_step(
         [
             _required_executable("tar"),
-            "-czf",
+            *compress,
             str(tar_path),
             "--exclude=*/build",
             "--exclude=*/source",
@@ -248,7 +283,7 @@ def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
             str(modstage),
             "lib/modules",
         ],
-        check=True,
+        step="tar",
     )
     return tar_path
 

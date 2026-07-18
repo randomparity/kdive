@@ -203,23 +203,40 @@ def test_wait_job_selects_matching_job_and_requires_success(
     }
 
 
-def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    live_debug = _load_live_debug()
+def _built_kernel_src(tmp_path: Path) -> Path:
     kernel_src = tmp_path / "linux"
     (kernel_src / "arch/x86/boot").mkdir(parents=True)
     (kernel_src / "arch/x86/boot/bzImage").write_bytes(b"bz")
-    dest = tmp_path / "scratch"
-    dest.mkdir()
-    calls: list[list[str]] = []
+    return kernel_src
 
-    def fake_run(cmd: list[str], **_kwargs: Any) -> object:
+
+def _record_build_runs(
+    monkeypatch: pytest.MonkeyPatch, live_debug: Any
+) -> tuple[list[list[str]], list[dict[str, Any]]]:
+    calls: list[list[str]] = []
+    kwargs_seen: list[dict[str, Any]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> object:
         calls.append(cmd)
-        if cmd[1] == "-czf":  # the tar invocation writes the archive
-            Path(cmd[2]).write_bytes(b"tar")
+        kwargs_seen.append(kwargs)
+        if cmd[0].endswith("tar"):  # the tar invocation writes the archive
+            Path(cmd[cmd.index("-cf") + 1 if "-cf" in cmd else cmd.index("-czf") + 1]).write_bytes(
+                b"tar"
+            )
         return object()
 
     monkeypatch.setattr(live_debug, "_required_executable", lambda name: f"/bin/{name}")
     monkeypatch.setattr(live_debug.subprocess, "run", fake_run)
+    return calls, kwargs_seen
+
+
+def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    live_debug = _load_live_debug()
+    kernel_src = _built_kernel_src(tmp_path)
+    dest = tmp_path / "scratch"
+    dest.mkdir()
+    monkeypatch.setattr(live_debug.shutil, "which", lambda name: None)  # no pigz -> gzip fallback
+    calls, kwargs_seen = _record_build_runs(monkeypatch, live_debug)
 
     result = live_debug._combined_kernel_tar(kernel_src, dest)
 
@@ -236,11 +253,56 @@ def test_combined_kernel_tar_runs_recipe(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert tar_cmd[:3] == ["/bin/tar", "-czf", str(dest / "kernel.tar.gz")]
     assert "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|" in tar_cmd
     assert "--exclude=*/build" in tar_cmd and "--exclude=*/source" in tar_cmd
+    # every build step is bounded so a stall fails loudly instead of hanging
+    assert all(kw.get("timeout") == live_debug._ARCHIVE_STEP_TIMEOUT_S for kw in kwargs_seen)
+
+
+def test_combined_kernel_tar_uses_pigz_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    live_debug = _load_live_debug()
+    kernel_src = _built_kernel_src(tmp_path)
+    dest = tmp_path / "scratch"
+    dest.mkdir()
+    monkeypatch.setattr(
+        live_debug.shutil, "which", lambda name: "/usr/bin/pigz" if name == "pigz" else None
+    )
+    calls, _ = _record_build_runs(monkeypatch, live_debug)
+
+    result = live_debug._combined_kernel_tar(kernel_src, dest)
+
+    assert result.read_bytes() == b"tar"
+    tar_cmd = calls[1]
+    assert tar_cmd[:5] == [
+        "/bin/tar",
+        "-I",
+        "/usr/bin/pigz",
+        "-cf",
+        str(dest / "kernel.tar.gz"),
+    ]
+    assert "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|" in tar_cmd
+
+
+def test_combined_kernel_tar_times_out(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    live_debug = _load_live_debug()
+    kernel_src = _built_kernel_src(tmp_path)
+    dest = tmp_path / "scratch"
+    dest.mkdir()
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> object:
+        raise live_debug.subprocess.TimeoutExpired(cmd, live_debug._ARCHIVE_STEP_TIMEOUT_S)
+
+    monkeypatch.setattr(live_debug, "_required_executable", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(live_debug.shutil, "which", lambda name: None)
+    monkeypatch.setattr(live_debug.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="modules_install exceeded 900s"):
+        live_debug._combined_kernel_tar(kernel_src, dest)
 
 
 def test_combined_kernel_tar_requires_built_bzimage(tmp_path: Path) -> None:
     live_debug = _load_live_debug()
-    with pytest.raises(RuntimeError, match="no built bzImage"):
+    with pytest.raises(RuntimeError, match="packages x86_64 kernels only"):
         live_debug._combined_kernel_tar(tmp_path / "unbuilt", tmp_path / "scratch")
 
 
