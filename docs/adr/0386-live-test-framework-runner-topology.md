@@ -45,9 +45,12 @@ skipping a family to green.
 
 We will run the live tiers on an **arch-additive** topology: emulated
 `live_vm_tcg` on a hosted `ubuntu-latest` runner for breadth, and native-KVM
-`live_vm` on per-arch self-hosted runners for depth. Both tiers ride the same
-harness; the accelerator is resolved from the host×guest arch pair. Self-hosted
-runners are selected by arch label (`[self-hosted, kvm, x64]` now,
+`live_vm` on per-arch self-hosted runners for depth. These are two vehicles, not
+one harness: `live_vm_tcg` rides the existing live-stack spine (ADR-0353), which
+already resolves KVM-vs-TCG from the host arch and — needing no `/dev/kvm` — runs
+on the hosted runner once the compose backends + S3 are up; the new
+`boot_throwaway_domain` harness serves only the throwaway-domain `live_vm`
+family. Self-hosted runners are selected by arch label (`[self-hosted, kvm, x64]` now,
 `[self-hosted, kvm, ppc64le]` as the target drop-in), both on Rocky Linux 10,
 so adding an architecture is a new label, matrix entry, and an arch branch in
 the harness's domain-XML builder (machine type, console device, kernel format) —

@@ -79,28 +79,46 @@ corruption, arch/accel resolving wrong on real silicon.
 
 ## Architecture
 
-### The three live tiers (target state)
+### The live tiers and their vehicles (target state)
 
-| Marker | What it drives | Accelerator | Where it runs |
-| --- | --- | --- | --- |
-| `live_stack` | The running stack over MCP/HTTP | n/a | unchanged (existing spine harness) |
-| `live_vm` | A real throwaway libvirt domain, native KVM | KVM | self-hosted, arch-labeled runner |
-| `live_vm_tcg` | Same harness, emulated foreign arch | TCG | hosted `ubuntu-latest`, or self-hosted |
+There are two distinct test *vehicles*, and the markers map onto them — they are
+not one harness:
 
-`live_vm` and `live_vm_tcg` ride the **same** harness; the accelerator is
-resolved dynamically from the host×guest arch pair via the existing
-`expected_accel` / `kvm_probe_for_uri` helpers, so one code path serves both.
+| Marker | Vehicle | What it drives | Accel | Where it runs |
+| --- | --- | --- | --- | --- |
+| `live_stack` | live-stack spine (`spine.py`, existing) | the running stack over MCP/HTTP | n/a | unchanged |
+| `live_vm_tcg` | live-stack spine (existing, ADR-0353) | the ppc64le provision→boot→crash→retrieve spine, emulated | TCG | hosted `ubuntu-latest` (compose backends + S3, no KVM) |
+| `live_vm` — throwaway-domain family | **new** `boot_throwaway_domain` harness | a short-lived domain + one provider op | KVM | self-hosted, arch-labeled |
+| `live_vm` — provisioned-System family | externally provisioned System (`KDIVE_LIVE_VM_SYSTEM_ID`) + S3 | kdump/install against a real System | KVM | self-hosted, arch-labeled |
+
+Two consequences follow, and they correct an easy misconception:
+
+- `live_vm_tcg` is **not** a throwaway-domain test. By ADR-0353 and the
+  `test_live_vm_tcg_tier.py` guard, every `live_vm_tcg` proof is also
+  `live_stack`-marked and runs the spine over the stack; its cross-arch
+  KVM-vs-TCG resolution already lives in the spine (`expected_accel` /
+  `kvm_probe_for_uri`). Because TCG needs no `/dev/kvm`, that spine runs on a
+  hosted `ubuntu-latest` runner once the compose backends + S3 are stood up — no
+  special hardware, but a full stack bring-up, not a lightweight boot.
+- The **new** work this epic adds is the `boot_throwaway_domain` harness for the
+  throwaway-domain `live_vm` family only. It does not replace the spine and does
+  not by itself produce cross-arch TCG coverage. Authoring throwaway-domain tests
+  that boot a foreign arch under TCG is possible but out of scope here, and would
+  revise the ADR-0353 guard.
 
 ### Runner topology (arch-additive)
 
-- **Hosted tier — `ubuntu-latest` (x64), no KVM.** Runs `live_vm_tcg`: emulated
-  foreign-arch boots (ppc64le today). Available with no special hardware. A full
-  ppc64le boot-to-panic under TCG is minutes-scale and variable, so this tier
-  carries an explicit job timeout and a target boot-to-panic wall-time, and the
-  PR-gate-vs-nightly choice is made on the measured wall-time and flake rate, not
-  left as "either". Its ppc64le image set (rootfs + kernel + matching debuginfo)
-  must fit the 14 GB runner disk and is a distinct, ephemeral input from the
-  self-hosted warm store — sub-issue C produces both and keeps them separate.
+- **Hosted tier — `ubuntu-latest` (x64), no KVM.** Runs the existing
+  `live_vm_tcg` spine, so it stands up the live-stack compose backends + S3
+  (Postgres/MinIO/OIDC) and runs the ppc64le provision→boot→crash→retrieve path
+  under TCG — no `/dev/kvm`, but a full stack bring-up. A ppc64le boot-to-panic
+  under TCG is minutes-scale and variable, so this tier carries an explicit job
+  timeout and a target boot-to-panic wall-time, and the PR-gate-vs-nightly choice
+  is made on the measured wall-time and flake rate, not left as "either". The
+  14 GB runner disk must hold the compose backends **and** the ppc64le image set
+  (rootfs + kernel + matching debuginfo) — a distinct, ephemeral input from the
+  self-hosted warm store. Sub-issue C produces both image sets and keeps them
+  separate.
 - **Self-hosted tier — arch-labeled, native-KVM for the host's own arch.**
   - `[self-hosted, kvm, x64]`, Rocky Linux 10 — provisioned in this phase.
   - `[self-hosted, kvm, ppc64le]`, Rocky Linux 10 ppc64le — the north-star
@@ -143,6 +161,12 @@ rather than skipping to green. Whether the nightly stands up a provisioned
 System (live stack + S3) on the runner or runs only the throwaway-domain family
 is a decision sub-issues C and D must make explicit.
 
+Because `pytest -m live_vm` selects both families and no sub-marker exists to
+pick one, sub-issue A must add a **family-selection primitive** — distinct
+`live_vm_throwaway` / `live_vm_provisioned` sub-markers under the `live_vm`
+umbrella, or a documented keyword convention — so "declare which families" has a
+real handle and D's fail-loud preflight has a declared-family input.
+
 ### The environment contract (the seam)
 
 The contract is the interface between "the runner host" and "the tests" — the
@@ -151,12 +175,14 @@ and the host build (sub-issue B) is built to satisfy it. The libvirt **mode is a
 resolved contract variable, not a single pin**, because the two families need
 different modes:
 
-- **libvirt URI / mode:** resolved per test via `KDIVE_LIBVIRT_URI`, with a
-  per-family default. `qemu:///session` (unprivileged, avoids the root-readback
-  wall) is the traffic-capture path proven in #1258; `qemu:///system` is what
-  the snapshot test and the product default (`KDIVE_LIBVIRT_URI=qemu:///system`)
-  use. The harness resolves and documents the mode; it does not pin one URI for
-  all tests.
+- **libvirt URI / mode:** a **per-test** default that `boot_throwaway_domain`
+  takes as a parameter, with `KDIVE_LIBVIRT_URI` as the operator escape hatch —
+  not a per-family or global pin. The throwaway-domain family itself splits:
+  `test_traffic_capture_live.py` needs `qemu:///session` (unprivileged, dodges
+  the root-readback wall, #1258) while `test_snapshot_live.py` uses
+  `qemu:///system` (the product default). The harness carries each test's mode
+  rather than forcing one; "per-family" governs only the env-var *set* each
+  family needs (below), never the mode.
 - **Environment variables:** the throwaway rootfs (`KDIVE_LIVE_VM_ROOTFS`) and
   guest arch for the throwaway family; `KDIVE_LIVE_VM_SYSTEM_ID` and the
   `KDIVE_S3_*` backend for the provisioned-System family — read in one place,
@@ -175,13 +201,18 @@ different modes:
 
 ### Harness surface (sketch — detailed in sub-issue A's spec)
 
-- `boot_throwaway_domain(rootfs, *, arch, netdev=…, wait_for="active"|"panic"|"ssh")`
-  as a context manager that yields a live domain and guarantees teardown.
+- `boot_throwaway_domain(rootfs, *, arch, mode=…, netdev=…, wait_for="active"|"panic"|"ssh")`
+  as a context manager that yields a live domain and guarantees teardown. `mode`
+  (session/system) is per-test; `arch` drives the machine-type / console /
+  kernel-format branch.
+- A family-selection primitive (`live_vm_throwaway` / `live_vm_provisioned`
+  sub-markers, or a keyword convention) so a run can target one family and the
+  fail-loud preflight has a declared-family input.
 - Centralized `require_live_vm_*` skip gates alongside the existing
   `require_issuer` / `require_stack` / `require_guest_arch`.
 - One libvirt-connect helper, replacing the ~14 open sites.
-- Shared panic-wait, `qemu-img` overlay creation, and domain-XML builder,
-  replacing the three panic-loop copies and the per-test XML.
+- Shared panic-wait, `qemu-img` overlay creation, and an arch-parameterized
+  domain-XML builder, replacing the three panic-loop copies and the per-test XML.
 
 ## Sub-issues
 
@@ -191,7 +222,7 @@ different modes:
 | **B** | Self-hosted KVM runner: reproducible, arch-parameterized host setup | infra/ops | A (contract) |
 | **C** | Guest-image + debuginfo provisioning — self-hosted warm store **and** the hosted TCG image set (≤14 GB) | code + ops | A |
 | **D** | CI wiring — TCG on hosted; finish the self-hosted `live_vm` job; fail-loud env preflight | code | A, B, C |
-| **E** | Migrate + prune the existing `live_vm` tests onto the harness | code | A |
+| **E** | Migrate + prune `live_vm` tests — throwaway family onto `boot_throwaway_domain`, provisioned-System family onto the shared `require_live_vm_*` gates | code | A |
 | **F** | Discoverability — canonical guide + `AGENTS.md` pointer + runbook | docs | A–E |
 
 Sub-issue A is the root: it is the reusable framework the work is named for, and
