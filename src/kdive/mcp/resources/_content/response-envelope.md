@@ -9,7 +9,7 @@ learns one envelope and one polling pattern
 
 | Field | Type | Meaning |
 |---|---|---|
-| `object_id` | `str` | The primary object this response concerns (e.g. the `job_id` for `jobs.*`, the `system_id` for `systems.*`). |
+| `object_id` | `str` | The primary object this response concerns — **polymorphic** by tool kind. On a job-returning tool (`runs.boot`, `runs.install`, `systems.provision`, …) it is the **job id**; the id of the entity the job creates or targets is separately available in `data.<entity>_id` (e.g. `data.run_id`, `data.system_id`) and/or `refs.result`. On an entity tool (`systems.get`) it is the **entity id** directly, with no job involved. Check `data.kind` to tell which case applies — see "Reading an open payload". |
 | `status` | `str` | The object's lifecycle status as a plain string (e.g. `running`, `ready`, `failed`). |
 | `suggested_next_actions` | `list[str]` | Literal next **tool names** the agent should consider (e.g. `["jobs.wait", "jobs.cancel"]`). No inference needed. |
 | `refs` | `dict[str, str]` | Artifact **references** keyed by role (e.g. `{"result": "<object-store-key>"}`). Never inline artifact bytes or log text. |
@@ -62,7 +62,10 @@ per-tool shape of these two fields is intentionally open. Read them like this:
 - **`data`** carries plane-specific scalars keyed by name. The keys depend on the
   tool — `{"kind": "provision"}` on a job handle, `{"count": 3}` on a collection,
   `{"current_status": "running"}` on a conflict. The per-plane tool docs name the
-  keys a given tool sets; the envelope does not enumerate them.
+  keys a given tool sets; the envelope does not enumerate them. `data.kind` also
+  disambiguates `object_id`: when it names a job kind (e.g. `"provision"`), `object_id`
+  is a job id and the created/target entity's id lives in `data.<entity>_id`; otherwise
+  `object_id` is the entity id itself.
 - **`items`** is populated only by collection-returning tools (`*.list`); each entry
   is a full `ToolResponse` with the same fields described above. Recurse into an
   entry exactly as you read the top-level envelope.
