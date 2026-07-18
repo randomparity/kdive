@@ -177,7 +177,8 @@ below), not the job envelope.
 - `JobKind.CAPTURE_TRAFFIC` appended (`domain/operations/jobs.py`; Postgres enum member — the
   `jobs_kind_check` constraint widened by a migration) and added to
   `CONTRIBUTOR_CANCELABLE_JOB_KINDS`.
-- `CaptureTrafficPayload(SystemPayload-shaped over run_id)` in `jobs/payloads.py`, registered in
+- `CaptureTrafficPayload(RunPayload)` (run-addressed, like `CaptureVmcorePayload`) in
+  `jobs/payloads.py` carrying `duration_s`/`max_bytes`/`snaplen`/`capture_filter`, registered in
   `_ACTIVE_PAYLOAD_MODELS`.
 - Handler `capture_traffic_handler` + `register_handlers` in `jobs/handlers/control/`, wired via
   a `_capture_traffic_handler_registrar` appended to `jobs/assembly.py`
