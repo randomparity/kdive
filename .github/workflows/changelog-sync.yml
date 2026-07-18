@@ -1,0 +1,74 @@
+name: Changelog Sync
+
+# Keep CHANGELOG.md's [Unreleased] section current without anyone remembering to
+# run `just changelog`. On every push to main, regenerate the changelog from
+# conventional-commit history (git-cliff) and, if it changed, commit the delta
+# straight back to main as a skipped `chore(changelog)` commit.
+#
+# Loop-safety: `paths-ignore: CHANGELOG.md` means a push that only touches the
+# changelog (i.e. this workflow's own commit) does not re-trigger it, and the
+# `[skip ci]` marker keeps ci.yml from running on that generated commit.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - CHANGELOG.md
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize so two near-simultaneous merges don't race on the push to main;
+  # never cancel an in-flight sync (a dropped run would leave the changelog stale).
+  group: changelog-sync
+  cancel-in-progress: false
+
+env:
+  # Single-source the git-cliff pin from the justfile's GIT_CLIFF (kept in step).
+  GIT_CLIFF: git-cliff@2.13.1
+
+jobs:
+  sync:
+    name: regenerate Unreleased
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # commits the regenerated CHANGELOG.md back to main
+    steps:
+      - name: Checkout (full history + tags for git-cliff)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.18"
+          enable-cache: false  # zizmor: cache-poisoning — no cache in a workflow that writes to main
+
+      - name: Regenerate CHANGELOG
+        run: just changelog
+
+      - name: Commit and push if the changelog changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG already current — nothing to sync."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "chore(changelog): sync [Unreleased] section [skip ci]"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git push "$remote" HEAD:main; then
+            # main advanced under us (another merge landed); rebase the regen and retry once.
+            git pull --rebase "$remote" main
+            git push "$remote" HEAD:main
+          fi
