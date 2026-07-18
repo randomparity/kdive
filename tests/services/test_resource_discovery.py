@@ -20,12 +20,16 @@ from kdive.providers.core.resource_registration import (
 
 
 class _Discovery:
-    def __init__(self, cap: int = 2) -> None:
+    def __init__(self, cap: int = 2, extra: dict[str, object] | None = None) -> None:
         self.cap = cap
+        self.extra = extra or {}
         self.calls = 0
+        self.fail = False
 
     def list_resources(self) -> list[ResourceRecord]:
         self.calls += 1
+        if self.fail:
+            raise RuntimeError("libvirt unreachable")
         return [
             ResourceRecord(
                 resource_id="qemu:///system",
@@ -36,6 +40,7 @@ class _Discovery:
                     "memory_mb": 16384,
                     "transports": ["gdbstub"],
                     CONCURRENT_ALLOCATION_CAP_KEY: self.cap,
+                    **self.extra,
                 },
                 status=ResourceStatus.AVAILABLE,
             )
@@ -88,28 +93,142 @@ def test_ensure_discovered_resource_registered_bootstraps_one_row(migrated_url: 
             await cur.execute("SELECT kind, host_uri FROM resources")
             rows = await cur.fetchall()
         assert rows == [("local-libvirt", "qemu:///system")]
-        assert discovery.calls == 1
+        assert discovery.calls == 2  # insert reads once; the second pass refreshes (reads again)
 
     asyncio.run(_run())
 
 
-def test_ensure_discovered_resource_registered_does_not_overwrite_existing_row(
-    migrated_url: str,
-) -> None:
+def test_refresh_gains_missing_capability_key(migrated_url: str) -> None:
     async def _run() -> None:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
-            await _ensure(pool, _Discovery(cap=2))
+            await _ensure(pool, _Discovery())  # inserts without pseries_fadump
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT id, managed_by FROM resources")
+                before = await cur.fetchone()
+            await _ensure(pool, _Discovery(extra={"pseries_fadump": True}))
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, managed_by, capabilities->>'pseries_fadump' FROM resources"
+                )
+                after = await cur.fetchone()
+        assert before is not None and after is not None
+        assert after[0] == before[0]  # id unchanged
+        assert after[1] == before[1]  # managed_by unchanged
+        assert after[2] == "true"  # gained the key
+
+    asyncio.run(_run())
+
+
+def test_refresh_updates_changed_discovery_value(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery(extra={"guest_arches": ["x86_64"]}))
+            await _ensure(pool, _Discovery(extra={"guest_arches": ["x86_64", "ppc64le"]}))
+        async with _pg(migrated_url) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT capabilities->'guest_arches' FROM resources")
+            row = await cur.fetchone()
+        assert row is not None and row[0] == ["x86_64", "ppc64le"]
+
+    asyncio.run(_run())
+
+
+def test_refresh_preserves_operator_cap_and_gains_new_key(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery(cap=1))
+            # Operator sets the cap directly on the discovery row (ops.set_host_capacity shape).
             async with pool.connection() as conn:
                 await conn.execute(
                     "UPDATE resources SET capabilities = "
-                    "jsonb_set(capabilities, '{concurrent_allocation_cap}', '9'::jsonb)"
+                    "capabilities || jsonb_build_object('concurrent_allocation_cap', 5)"
                 )
                 await conn.commit()
-            await _ensure(pool, _Discovery(cap=1))
+            # A later deploy carries a net-new key AND the env-default cap (1).
+            await _ensure(pool, _Discovery(cap=1, extra={"pseries_fadump": True}))
         async with _pg(migrated_url) as conn, conn.cursor() as cur:
-            await cur.execute("SELECT capabilities->>'concurrent_allocation_cap' FROM resources")
+            await cur.execute(
+                "SELECT capabilities->>'concurrent_allocation_cap', "
+                "capabilities->>'pseries_fadump' FROM resources"
+            )
             row = await cur.fetchone()
-        assert row is not None and row[0] == "9"
+        assert row is not None
+        assert row[0] == "5"  # operator cap preserved, NOT reverted to env default 1
+        assert row[1] == "true"  # net-new discovery key still gained
+
+    asyncio.run(_run())
+
+
+def test_refresh_preserves_status_pool_cost_and_cordoned(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery())
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE resources SET status = 'degraded', pool = 'custom', "
+                    "cost_class = 'premium', cordoned = true"
+                )
+                await conn.commit()
+            await _ensure(pool, _Discovery(extra={"pseries_fadump": True}))
+        async with _pg(migrated_url) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT status, pool, cost_class, cordoned, "
+                "capabilities->>'pseries_fadump' FROM resources"
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[:4] == ("degraded", "custom", "premium", True)  # all preserved
+        assert row[4] == "true"  # capabilities still refreshed
+
+    asyncio.run(_run())
+
+
+def test_refresh_read_failure_keeps_existing_capabilities(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery(cap=2, extra={"pseries_fadump": True}))
+            failing = _Discovery()
+            failing.fail = True
+            await _ensure(pool, failing)  # must NOT raise
+        async with _pg(migrated_url) as conn, conn.cursor() as cur:
+            await cur.execute("SELECT capabilities->>'pseries_fadump' FROM resources")
+            row = await cur.fetchone()
+        assert row is not None and row[0] == "true"  # existing capabilities intact
+
+    asyncio.run(_run())
+
+
+def test_refresh_change_guard_skips_write_when_unchanged(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery())
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT xmin FROM resources")
+                before = await cur.fetchone()
+            await _ensure(pool, _Discovery())  # identical discovery record
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT xmin FROM resources")
+                after = await cur.fetchone()
+        assert before is not None and after is not None
+        assert after[0] == before[0]  # no row write: xmin unchanged
+
+    asyncio.run(_run())
+
+
+def test_absent_branch_discovery_failure_raises(migrated_url: str) -> None:
+    async def _run() -> None:
+        failing = _Discovery()
+        failing.fail = True
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            try:
+                await _ensure(pool, failing)  # empty DB → absent branch must raise
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("absent-branch discovery failure did not raise")
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT count(*) FROM resources")
+                row = await cur.fetchone()
+        assert row is not None and row[0] == 0  # nothing inserted
 
     asyncio.run(_run())
 
