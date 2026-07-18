@@ -8,10 +8,16 @@ from uuid import UUID
 
 @runtime_checkable
 class OwnedDomain(Protocol):
-    """A provider-owned domain plus its optional kdive System metadata tag."""
+    """A provider-owned domain plus its optional kdive System metadata tag.
 
-    name: str
-    system_id: UUID | None
+    The members are read-only: implementers are immutable value objects (frozen
+    dataclasses), and consumers only ever read ``name``/``system_id``.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def system_id(self) -> UUID | None: ...
 
 
 @runtime_checkable

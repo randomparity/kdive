@@ -91,8 +91,10 @@ class ProviderComponent(NamedTuple):
 
 
 class ComponentUploadHead(Protocol):
-    size_bytes: int
-    checksum_sha256: str | None
+    @property
+    def size_bytes(self) -> int: ...
+    @property
+    def checksum_sha256(self) -> str | None: ...
 
 
 class UploadVerifier(Protocol):
