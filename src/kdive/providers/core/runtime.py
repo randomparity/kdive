@@ -38,6 +38,7 @@ from kdive.providers.ports.retrieve import (
     Retriever,
     VmcoreIntrospector,
 )
+from kdive.providers.ports.traffic import TrafficCapturer
 from kdive.serialization import JsonValue
 
 type DiscoveryRegistrar = Callable[[AsyncConnectionPool], Awaitable[None]]
@@ -74,6 +75,9 @@ class ProviderSupport:
     # read at admission and surfaced on ``systems.get`` so an agent can discover it before use.
     # Fail-closed default: a future bare-metal provider leaves it False.
     supports_snapshots: bool = False
+    # Host-side network traffic capture support (ADR-0384). Static provider property, surfaced on
+    # ``systems.get`` for discovery. Fail-closed: only local-libvirt advertises it today.
+    supports_traffic_capture: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +148,9 @@ class ProviderRuntime:
     # System snapshot port (ADR-0378); ``None`` when the provider does not support snapshots
     # (kept consistent with ``support.supports_snapshots is False``).
     snapshot: Snapshotter | None = None
+    # Host-side traffic capture port (ADR-0384); ``None`` when unsupported (kept consistent with
+    # ``support.supports_traffic_capture is False``).
+    traffic_capturer: TrafficCapturer | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:
