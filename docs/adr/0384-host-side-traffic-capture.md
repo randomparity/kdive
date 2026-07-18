@@ -64,7 +64,7 @@ inline packet bytes are ever returned.
 `ProviderSupport.supports_traffic_capture` flag, surfaced on `systems.get` for discoverability
 exactly like ADR-0378's `supports_snapshots`. A provider that does not implement it yields
 `capability_unsupported`. The port is deliberately thin — `attach(domain_name, *, qom_id,
-netdev_id, dest_path, snaplen)` and `detach(domain_name, *, qom_id)` primitives — so the
+dest_path, snaplen)` and `detach(domain_name, *, qom_id)` primitives — so the
 **handler owns the poll loop** (consistent with "the handler drives the state machine, exactly
 like `Controller`"). The handler's own poll loop avoids a sync-callback-across-thread-boundary
 problem: the size read is `os.stat` (visible cross-uid even where the ADR-0223 content-read wall
@@ -106,8 +106,10 @@ is validated with `tcpdump -d <expr>` (compile-only, no capture) and passed as a
 element (never a shell string). The stored object is named
 `pcap-<job_id>` (job-unique so distinct captures never collide, retry-stable so an
 at-least-once redelivery dedups), written **`SENSITIVE`**, `retention_class="pcap"`,
-`owner_kind="runs"`, streamed from disk via `put_stream` (disk-backed, sha256-bound, constant
-memory). The handler inserts the artifact row insert-if-absent on the object key (at-least-once
+`owner_kind="runs"`. Because the pcap is bounded by `max_bytes`, the worker already reads the
+whole file for the readback-wall check and the packet count, so it is stored with `put_artifact`
+(in-memory) rather than a disk-backed stream. The handler inserts the artifact row insert-if-absent
+on the object key (at-least-once
 safe), audits the capture, deletes the host files, and returns the artifact id as the job
 `result_ref`. A capture whose cancel is observed during the poll stores nothing (it `detach`es
 and deletes the partial file), and the final store transaction re-checks `CANCELED` under the

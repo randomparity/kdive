@@ -97,9 +97,11 @@ below), not the job envelope.
   qemu:///system → `CONFIGURATION_ERROR` with `WORKER_READABILITY_REMEDIATION`, ADR-0223). If
   `capture_filter` is set: validate with `tcpdump -d <expr>` (compile-only; failure →
   `CONFIGURATION_ERROR` `{reason: invalid_filter}` carrying tcpdump's stderr), then
-  `tcpdump -r <raw> -w <out> <expr>` (single argv, no shell). Stream the resulting pcap to the
-  object store via `put_stream` named `pcap-<job_id>` (job-unique + retry-stable), as
-  `SENSITIVE`, `retention_class="pcap"`, `owner_kind="runs"`, `owner_id=run_id`. The store runs
+  `tcpdump -r <raw> -w <out> <expr>` (single argv, no shell). Store the resulting pcap named
+  `pcap-<job_id>` (job-unique + retry-stable), as `SENSITIVE`, `retention_class="pcap"`,
+  `owner_kind="runs"`, `owner_id=run_id`. The pcap is bounded by `max_bytes` and already read whole
+  for the readback-wall check and packet count, so it is stored with `put_artifact` (in-memory), not
+  a disk-backed stream. The store runs
   under a second per-System-locked transaction (mirroring `diagnostic_sysrq._store_capture`) that
   re-checks the job is not `CANCELED` and skips the store if it is; otherwise it inserts the
   artifact row insert-if-absent on the object key (at-least-once safe), audits
@@ -140,9 +142,12 @@ below), not the job envelope.
 ## Provider seam
 
 - New port `TrafficCapturer` (`providers/ports/`) — thin primitives, so the handler owns the
-  loop and cancel semantics (like `Controller`): `attach(domain_name, *, qom_id, netdev_id,
+  loop and cancel semantics (like `Controller`): `attach(domain_name, *, qom_id,
   dest_path, snaplen) -> None` (`object-del`-then-`object-add` of the `filter-dump`) and
-  `detach(domain_name, *, qom_id) -> None` (`object-del`). No `capture()`/`cancelled` callback —
+  `detach(domain_name, *, qom_id) -> None` (`object-del`). The captured netdev is
+  `SYSTEM_SSH_NETDEV_ID`, a local-libvirt-internal XML detail chosen inside the capturer, so it is
+  not a port parameter (it must not cross the provider boundary into the handler). No
+  `capture()`/`cancelled` callback —
   the handler does the size `os.stat` and the async `CANCELED` read itself, avoiding a
   sync-callback-across-`to_thread` boundary. Keyed on the provider domain name, DB-free.
 - `ProviderRuntime.traffic_capturer: TrafficCapturer | None = None` and a static
