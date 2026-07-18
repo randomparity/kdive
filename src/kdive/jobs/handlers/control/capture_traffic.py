@@ -12,9 +12,11 @@ An optional BPF ``capture_filter`` is applied after capture with ``tcpdump -r/-w
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import LiteralString, NamedTuple
 from uuid import UUID
 
@@ -198,6 +200,12 @@ async def _store_capture(
         return artifact.id
 
 
+def _unlink_quietly(path: Path) -> None:
+    """Best-effort delete of a host pcap file; never masks the handler's real result or error."""
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
 async def capture_traffic_handler(
     conn: AsyncConnection,
     job: Job,
@@ -215,8 +223,15 @@ async def capture_traffic_handler(
     run_id = UUID(payload.run_id)
     snapshot = await _snapshot(conn, run_id, resolver)
 
+    # Validate the BPF filter BEFORE the capture window: a filter tcpdump rejects raises a terminal
+    # CONFIGURATION_ERROR, so the job dead-letters on the first attempt without wasting a capture
+    # window, attaching a filter to the guest, or writing a host file to reclaim.
+    if payload.capture_filter:
+        await asyncio.to_thread(validate_bpf, payload.capture_filter)
+
     qom_id = f"kdive-dump-{job.id}"
     dest = pcap_path(snapshot.system_id, job.id)
+    trimmed = dest.with_suffix(".filtered.pcap")
     await asyncio.to_thread(lambda: pcap_dir(snapshot.system_id).mkdir(parents=True, exist_ok=True))
 
     max_polls = max(1, math.ceil(payload.duration_s / POLL_INTERVAL_SECONDS))
@@ -243,32 +258,35 @@ async def capture_traffic_handler(
         await asyncio.to_thread(snapshot.capturer.detach, snapshot.domain_name, qom_id=qom_id)
 
     if result.canceled:
-        await asyncio.to_thread(lambda: dest.unlink(missing_ok=True))
+        await asyncio.to_thread(_unlink_quietly, dest)
         return None
 
-    # The whole read also performs the ADR-0223 readback-wall check (categorized PermissionError).
-    data = await asyncio.to_thread(read_pcap_bytes, dest)
-    if payload.capture_filter:
-        await asyncio.to_thread(validate_bpf, payload.capture_filter)
-        trimmed = dest.with_suffix(".filtered.pcap")
-        await asyncio.to_thread(trim_pcap, dest, trimmed, payload.capture_filter)
-        data = await asyncio.to_thread(read_pcap_bytes, trimmed)
-        await asyncio.to_thread(lambda: trimmed.unlink(missing_ok=True))
+    # The host pcap files are always reclaimed — a read/trim/store failure must not leak them.
+    try:
+        # The whole read also performs the ADR-0223 readback-wall check (PermissionError -> error).
+        data = await asyncio.to_thread(read_pcap_bytes, dest)
+        if payload.capture_filter:
+            await asyncio.to_thread(trim_pcap, dest, trimmed, payload.capture_filter)
+            data = await asyncio.to_thread(read_pcap_bytes, trimmed)
 
-    packets = count_pcap_packets(data)
-    _log.info(
-        "capture_traffic job %s: %d bytes, %d packets, truncated=%s, filtered=%s",
-        job.id,
-        len(data),
-        packets,
-        result.truncated,
-        bool(payload.capture_filter),
-    )
-    if len(data) <= _PCAP_HEADER_LEN:
-        _log.info("capture_traffic job %s captured no packets (header-only pcap)", job.id)
+        packets = count_pcap_packets(data)
+        _log.info(
+            "capture_traffic job %s: %d bytes, %d packets, truncated=%s, filtered=%s",
+            job.id,
+            len(data),
+            packets,
+            result.truncated,
+            bool(payload.capture_filter),
+        )
+        if len(data) <= _PCAP_HEADER_LEN:
+            _log.info("capture_traffic job %s captured no packets (header-only pcap)", job.id)
 
-    artifact_id = await _store_capture(conn, artifact_store, job, run_id, snapshot.project, data)
-    await asyncio.to_thread(lambda: dest.unlink(missing_ok=True))
+        artifact_id = await _store_capture(
+            conn, artifact_store, job, run_id, snapshot.project, data
+        )
+    finally:
+        await asyncio.to_thread(_unlink_quietly, dest)
+        await asyncio.to_thread(_unlink_quietly, trimmed)
     return None if artifact_id is None else str(artifact_id)
 
 

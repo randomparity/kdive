@@ -41,10 +41,15 @@ def _run(args: list[str], op: str) -> None:
             details={"reason": "invalid_filter", "error": type(err).__name__},
         ) from err
     if proc.returncode != 0:
+        # ``terminal=True``: a filter tcpdump rejects is deterministically bad, so the job must
+        # dead-letter at once rather than retry the full capture window on the same bad filter.
+        # (The OSError/timeout branch above stays non-terminal — a missing binary or timeout may
+        # be transient/infra.)
         raise CategorizedError(
             f"{op} rejected the capture filter",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "invalid_filter", "stderr": proc.stderr.strip()[:500]},
+            terminal=True,
         )
 
 

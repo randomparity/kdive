@@ -39,6 +39,16 @@ def test_validate_bpf_rejects_garbage() -> None:
         bf.validate_bpf("this is not a filter )(")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details.get("reason") == "invalid_filter"
+    # A rejected filter is deterministically bad: the job must dead-letter, not retry the window.
+    assert excinfo.value.terminal is True
+
+
+def test_missing_tcpdump_binary_is_not_terminal() -> None:
+    # A missing binary / timeout may be transient/infra, so it stays retryable (non-terminal).
+    with pytest.raises(CategorizedError) as excinfo:
+        bf._run(["definitely-not-a-real-binary-xyz", "-d", "tcp"], "filter validation")
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.terminal is False
 
 
 @_needs_tcpdump

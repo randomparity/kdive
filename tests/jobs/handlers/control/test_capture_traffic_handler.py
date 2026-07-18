@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import struct
 import tempfile
 from datetime import UTC, datetime
@@ -255,6 +256,36 @@ def test_cancel_stores_nothing(migrated_url: str, monkeypatch) -> None:
     assert ref is None
     assert rows == []
     assert capturer.detached  # detach still ran
+
+
+def test_invalid_filter_fails_before_capture(migrated_url: str, monkeypatch) -> None:
+    # An invalid BPF filter is validated before attach: no capture runs, nothing is stored, and the
+    # error is terminal (dead-letter, not retry). Requires tcpdump for the real validate_bpf.
+    if shutil.which("tcpdump") is None:
+        pytest.skip("tcpdump not installed")
+    store = _FakeStore()
+    capturer = _FakeCapturer()
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id = await _seed_ready_run(pool)
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run(
+                    pool,
+                    store,
+                    capturer,
+                    _job(run_id, capture_filter="this is not a filter )("),
+                    loop_result=capture_traffic.LoopResult(False, False),
+                    monkeypatch=monkeypatch,
+                )
+            return excinfo.value, await _artifact_rows(pool, run_id), capturer
+
+    err, rows, capturer = asyncio.run(_go())
+    assert err.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.terminal is True
+    assert rows == []
+    assert capturer.attached == []  # validation failed before any filter-dump was attached
 
 
 def test_zero_packet_capture_is_success(migrated_url: str, monkeypatch) -> None:
