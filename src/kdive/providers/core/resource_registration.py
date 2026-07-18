@@ -57,7 +57,7 @@ async def register_discovered_resource(
     return Resource.model_validate(row)
 
 
-async def ensure_discovered_resource_registered(
+async def register_or_refresh_discovered_resource(
     pool: AsyncConnectionPool,
     discovery: DiscoverySource,
     *,
@@ -66,7 +66,7 @@ async def ensure_discovered_resource_registered(
     pool_name: str,
     cost_class: str,
 ) -> None:
-    """Insert the target discovered Resource only when it is absent."""
+    """Insert the target discovered Resource when absent (refresh added in a later step)."""
     async with (
         pool.connection() as conn,
         conn.transaction(),

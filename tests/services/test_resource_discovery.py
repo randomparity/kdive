@@ -14,8 +14,8 @@ from kdive.domain.catalog.discovery import ResourceRecord
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.providers.core.resource_registration import (
-    ensure_discovered_resource_registered,
     register_discovered_resource,
+    register_or_refresh_discovered_resource,
 )
 
 
@@ -115,7 +115,7 @@ def test_ensure_discovered_resource_registered_does_not_overwrite_existing_row(
 
 
 async def _ensure(pool: AsyncConnectionPool, discovery: _Discovery) -> None:
-    await ensure_discovered_resource_registered(
+    await register_or_refresh_discovered_resource(
         pool,
         discovery,
         kind=ResourceKind.LOCAL_LIBVIRT,

@@ -21,7 +21,7 @@ from kdive.images.planes.base import RootfsBuildPlane
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.core.resource_registration import ensure_discovered_resource_registered
+from kdive.providers.core.resource_registration import register_or_refresh_discovered_resource
 from kdive.providers.core.runtime import DiscoveryRegistrar, ProviderRuntime
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.fault_inject import composition as fault_inject_composition
@@ -65,11 +65,13 @@ def _discovery_registrar(registration: ProviderDiscoveryRegistration) -> Discove
         # creator, so discovery must not insert a competing row (ADR-0112 #393).
         if not registration.creates:
             return
-        # Known remote limitation: ensure_discovered_resource_registered calls
-        # discovery.list_resources() synchronously inside its async transaction, and
-        # remote TLS connect has no pre-connect timeout. Async offload is deferred.
+        # Known remote limitation: register_or_refresh_discovered_resource calls
+        # discovery.list_resources() synchronously inside its async transaction (on both the
+        # insert and the exists/refresh path, ADR-0384), and a remote TLS connect has no
+        # pre-connect timeout. This registrar only reaches it for creates=True (local) kinds, so
+        # no remote connect occurs here. Async offload is deferred.
         target = registration.target_factory()
-        await ensure_discovered_resource_registered(
+        await register_or_refresh_discovered_resource(
             pool,
             target.discovery,
             kind=registration.kind,
