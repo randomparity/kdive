@@ -239,10 +239,12 @@ def _readable_boot(tmp_path: Path) -> Path:
 
 def test_nonroot_worker_on_system_uri_warns_advisory(tmp_path: Path) -> None:
     """A non-root worker under qemu:///system gets a non-failing advisory (ADR-0223): boot
-    confirmation + host_dump cannot read root-owned virtlogd/QEMU output."""
+    confirmation + host_dump cannot read root-owned virtlogd/QEMU output.
+    Only fires when KDIVE_WORKER_AS_ROOT=0 (worker will not be sudo'd to root by up.sh)."""
     bindir, py = _healthy_bin(tmp_path)
     env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
     env["KDIVE_EFFECTIVE_UID"] = "1000"  # pin non-root regardless of the CI runner's real uid
+    env["KDIVE_WORKER_AS_ROOT"] = "0"  # explicitly opt out of root worker -> warning fires
     # KDIVE_LIBVIRT_URI unset -> defaults to qemu:///system
 
     result = _run(env)
@@ -250,6 +252,33 @@ def test_nonroot_worker_on_system_uri_warns_advisory(tmp_path: Path) -> None:
     assert "ready" in result.stderr.lower()
     assert "boot-confirmation" in result.stderr.lower()
     assert "qemu:///session" in result.stderr  # the fix is named
+
+
+def test_worker_as_root_default_suppresses_advisory(tmp_path: Path) -> None:
+    """KDIVE_WORKER_AS_ROOT unset (default 1): up.sh will sudo the worker, so a non-root
+    invoker sees no advisory — the worker identity is what matters, not the invoker's."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "1000"  # non-root invoker
+    # KDIVE_WORKER_AS_ROOT unset -> script defaults to 1 (the lib.sh/up.sh default)
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "ready" in result.stderr.lower()
+    assert "boot-confirmation" not in result.stderr.lower()
+
+
+def test_worker_as_root_explicit_1_suppresses_advisory(tmp_path: Path) -> None:
+    """KDIVE_WORKER_AS_ROOT=1 explicitly set: advisory is suppressed for non-root invoker."""
+    bindir, py = _healthy_bin(tmp_path)
+    env = _healthy_env(tmp_path, bindir, py, _readable_boot(tmp_path))
+    env["KDIVE_EFFECTIVE_UID"] = "1000"
+    env["KDIVE_WORKER_AS_ROOT"] = "1"
+
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    assert "ready" in result.stderr.lower()
+    assert "boot-confirmation" not in result.stderr.lower()
 
 
 def test_session_uri_suppresses_advisory(tmp_path: Path) -> None:

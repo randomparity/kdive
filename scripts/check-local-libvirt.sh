@@ -36,8 +36,11 @@ readonly BOOT_DIR="${KDIVE_BOOT_DIR:-/boot}"
 # Worker connection URI + effective uid drive the non-root-readability advisory (ADR-0223, #699):
 # under qemu:///system, virtlogd/QEMU write root-owned files a non-root worker cannot read back.
 # KDIVE_EFFECTIVE_UID overrides $EUID for tests, mirroring the KDIVE_KVM_NODE override.
+# KDIVE_WORKER_AS_ROOT mirrors the lib.sh default (1): when the worker will be sudo'd to root by
+# up.sh / restart_host_processes, the advisory is moot even if the *invoker* is non-root.
 readonly LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
 readonly EFFECTIVE_UID="${KDIVE_EFFECTIVE_UID:-$EUID}"
+readonly WORKER_AS_ROOT="${KDIVE_WORKER_AS_ROOT:-1}"
 fail=0
 
 note_fail() {
@@ -236,10 +239,13 @@ else
     "create it writable under a world-traversable path (NOT \$HOME, which a 0700 mode hides from the qemu user that boots the VM): sudo install -d -o \"\$USER\" ${INSTALL_STAGING} — see docs/operating/runbooks/four-method-live-run.md section 4b"
 fi
 
-if [[ "${LIBVIRT_URI}" == "qemu:///system" && "${EFFECTIVE_UID}" -ne 0 ]]; then
+# Warn only when the worker will genuinely run as non-root under qemu:///system.
+# KDIVE_WORKER_AS_ROOT=1 (the lib.sh/up.sh default) means up.sh will sudo the worker, so the
+# invoker's uid is irrelevant — suppress the advisory in that case.
+if [[ "${LIBVIRT_URI}" == "qemu:///system" && "${EFFECTIVE_UID}" -ne 0 && "${WORKER_AS_ROOT}" != "1" ]]; then
   note_warn \
     "non-root worker under qemu:///system: boot-confirmation and host_dump capture cannot read the root-owned console log / core that virtlogd/QEMU write (ADR-0223, #699)" \
-    "run the worker as root, set KDIVE_LIBVIRT_URI=qemu:///session (worker-owned QEMU), or grant the worker group read access to the libvirt/virtlogd output; build and kdump capture still work as-is"
+    "run the worker as root (KDIVE_WORKER_AS_ROOT=1, the up.sh default), set KDIVE_LIBVIRT_URI=qemu:///session (worker-owned QEMU), or grant the worker group read access to the libvirt/virtlogd output; build and kdump capture still work as-is"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
