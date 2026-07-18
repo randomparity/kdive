@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Expose debug.step/next/step_instruction/finish tools
 - Skip grafana on ppc64le, keep prometheus in live-stack
 - Flag the live_vm/kdump host packages, add ppc64le drgn build deps
+- Add OPERATOR_OWNED_CAP_KEYS for capability refresh
+- Refresh existing resource capabilities on registration
+- Log changed keys when a capability refresh writes
 
 ### Changed
 
@@ -35,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extract shared snapshot admission and binding helpers
 - Dedup debug field descriptions via shared helpers
 - Decouple prometheus from grafana, pin gate behaviorally
+- Rename to register_or_refresh_discovered_resource
 
 ### Documentation
 
@@ -66,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify object_id polymorphism in response envelope
 - Add typical per-operation duration guidance
 - Add pigz recipe, size/time expectations, pre-flight verify
+- Spec + ADR-0384 for capability refresh on upgrade
+- Preserve operator-owned cap key on capability refresh
+- FOR UPDATE the refresh read to serialize with cap tool
+- Note row-lock contention under wedged libvirtd
+- Implementation plan for capability refresh (#1172)
+- Tighten plan self-containment from plan review
+- Make plan Step 2 fail/pass expectations precise
+- Caveat register_discovered_resource as test-only overwrite
 
 ### Fixed
 
@@ -100,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make pre-commit hooks ppc64le-portable
 - Pre-build oidc so compose skips a doomed pull
 - Skip oidc pre-build when image already exists locally
+- Bump the github-actions group across 1 directory with 5 updates
 
 ### Scripts
 
