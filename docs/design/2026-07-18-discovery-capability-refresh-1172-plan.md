@@ -402,10 +402,19 @@ def test_ensure_discovered_resource_registered_bootstraps_one_row(migrated_url: 
 - [ ] **Step 2: Run the tests to confirm they fail against the insert-only code**
 
 Run: `uv run python -m pytest tests/services/test_resource_discovery.py -q`
-Expected: FAIL — the `test_refresh_*` tests fail (insert-only code never updates an existing row)
-and the reworked `bootstraps_one_row` `discovery.calls == 2` assertion fails against the
-short-circuit. `test_absent_branch_discovery_failure_raises` should already PASS (the absent
-branch already raises today).
+Expected: the module goes **red overall**. Precisely, against the insert-only Task-1 code (the
+exists branch returns before any discovery call):
+- **FAIL:** `test_refresh_gains_missing_capability_key`,
+  `test_refresh_updates_changed_discovery_value`,
+  `test_refresh_preserves_operator_cap_and_gains_new_key`,
+  `test_refresh_preserves_status_pool_cost_and_cordoned`, and the reworked
+  `bootstraps_one_row` (`discovery.calls == 2` fails against the short-circuit) — these need the
+  refresh to update the existing row.
+- **Already PASS (no refresh needed to satisfy them):**
+  `test_refresh_read_failure_keeps_existing_capabilities` and
+  `test_refresh_change_guard_skips_write_when_unchanged` (the insert-only short-circuit already
+  leaves the row untouched), and `test_absent_branch_discovery_failure_raises` (the absent branch
+  already raises today). Step 3's implementation must keep these green.
 
 - [ ] **Step 3: Implement the refresh**
 
