@@ -60,7 +60,7 @@ services:
       POSTGRES_PASSWORD: kdive # pragma: allowlist secret — local dev only
       POSTGRES_DB: kdive
     ports:
-      - "5432:5432"
+      - "${KDIVE_POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kdive -d kdive"]
       interval: 5s
@@ -74,8 +74,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin # pragma: allowlist secret — local dev only
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${KDIVE_MINIO_PORT:-9000}:9000"
+      - "${KDIVE_MINIO_CONSOLE_PORT:-9001}:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -114,7 +114,7 @@ services:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
       SERVER_PORT: "8080"
     ports:
-      - "8090:8080"
+      - "${KDIVE_OIDC_PORT:-8090}:8080"
 
   # Forward-only schema rollout as a dedicated one-shot (ADR-0088 decision 4). The
   # app services gate on its successful completion, so they never hit the DB before
@@ -162,7 +162,9 @@ services:
               ok = False
           sys.exit(0 if ok else 1)
     ports:
-      - "8000:8000"
+      # Host-publish side only; the in-container bind (KDIVE_HTTP_PORT above) stays 8000. Reuses
+      # the same var the host-daemon live-stack binds, so one override moves both serving paths.
+      - "${KDIVE_HTTP_PORT:-8000}:8000"
     # Self-contained graph: a bare `docker compose up server` pulls in migrate
     # (completed), the bucket-creation one-shot (completed → minio healthy + bucket
     # exists), and the issuer (started; the mock has no healthcheck, and JWKS is
@@ -249,7 +251,7 @@ services:
     volumes:
       - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "${KDIVE_PROMETHEUS_PORT:-9090}:9090"
 
   # Grafana for the kdive-overview dashboard (deploy/grafana/README.md). Behind the `obs`
   # profile alongside prometheus. Anonymous access is enabled for a frictionless LOCAL dev box
@@ -268,7 +270,7 @@ services:
       - ./deploy/compose/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/grafana/kdive-overview.json:/var/lib/grafana/dashboards/kdive-overview.json:ro
     ports:
-      - "3000:3000"
+      - "${KDIVE_GRAFANA_PORT:-3000}:3000"
 
 volumes:
   kdive-build:
