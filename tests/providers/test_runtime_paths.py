@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.shared import runtime_paths
 from kdive.providers.shared.runtime_paths import (
     WORKER_READABILITY_REMEDIATION,
     build_domain_name,
@@ -15,6 +16,7 @@ from kdive.providers.shared.runtime_paths import (
     domain_name_for,
     pcap_dir,
     pcap_path,
+    prepare_pcap_dir,
     read_console_log,
     read_pcap_bytes,
     system_id_from_domain_name,
@@ -155,3 +157,18 @@ def test_read_pcap_bytes_permission_error_is_configuration_error(monkeypatch, tm
         read_pcap_bytes(target)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["remediation"] == WORKER_READABILITY_REMEDIATION
+
+
+def test_prepare_pcap_dir_creates_dir_and_degrades_without_privilege(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # prepare_pcap_dir creates the per-System dir; the chown/SELinux relabel are best-effort, so
+    # in a non-root test they are skipped without raising and the directory still exists.
+    sid = UUID("11111111-1111-1111-1111-111111111111")
+    target = tmp_path / str(sid)
+    monkeypatch.setattr(runtime_paths, "pcap_dir", lambda _sid: target)
+    out = prepare_pcap_dir(sid)
+    assert out == target
+    assert target.is_dir()
+    # Idempotent: a second call on the existing dir does not raise.
+    assert prepare_pcap_dir(sid) == target

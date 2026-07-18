@@ -40,9 +40,10 @@ from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import TrafficCapturer
 from kdive.providers.shared.runtime_paths import (
+    PCAP_HYPERVISOR_WRITE_REMEDIATION,
     domain_name_for,
-    pcap_dir,
     pcap_path,
+    prepare_pcap_dir,
     read_pcap_bytes,
 )
 from kdive.security import audit
@@ -232,7 +233,9 @@ async def capture_traffic_handler(
     qom_id = f"kdive-dump-{job.id}"
     dest = pcap_path(snapshot.system_id, job.id)
     trimmed = dest.with_suffix(".filtered.pcap")
-    await asyncio.to_thread(lambda: pcap_dir(snapshot.system_id).mkdir(parents=True, exist_ok=True))
+    # Prepare the dir so the confined qemu:///system hypervisor can write the pcap (own to the
+    # QEMU user + SELinux svirt_image_t); a bare mkdir leaves it unwritable by QEMU (ADR-0385).
+    await asyncio.to_thread(prepare_pcap_dir, snapshot.system_id)
 
     max_polls = max(1, math.ceil(payload.duration_s / POLL_INTERVAL_SECONDS))
 
@@ -265,6 +268,19 @@ async def capture_traffic_handler(
     try:
         # The whole read also performs the ADR-0223 readback-wall check (PermissionError -> error).
         data = await asyncio.to_thread(read_pcap_bytes, dest)
+        # A successful filter-dump writes the 24-byte libpcap header immediately, so a missing or
+        # short raw file means the hypervisor could not write it (dir not QEMU-writable/labeled) —
+        # a config failure, NOT a valid zero-packet capture (which is exactly the 24-byte header).
+        if len(data) < _PCAP_HEADER_LEN:
+            raise CategorizedError(
+                "traffic capture produced no readable pcap",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={
+                    "reason": "pcap_not_written",
+                    "bytes": len(data),
+                    "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+                },
+            )
         if payload.capture_filter:
             await asyncio.to_thread(trim_pcap, dest, trimmed, payload.capture_filter)
             data = await asyncio.to_thread(read_pcap_bytes, trimmed)

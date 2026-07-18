@@ -55,7 +55,7 @@ class _FakeStore:
 class _FakeCapturer:
     """Records attach/detach; ``attach`` writes ``pcap`` bytes to the dest path."""
 
-    def __init__(self, pcap: bytes = _PCAP_ONE) -> None:
+    def __init__(self, pcap: bytes | None = _PCAP_ONE) -> None:
         self._pcap = pcap
         self.attached: list[str] = []
         self.detached: list[str] = []
@@ -107,7 +107,7 @@ async def _run(pool, store, capturer, job, *, loop_result, monkeypatch):
 
     base = Path(tempfile.mkdtemp(prefix="kdive-pcap-test-"))
     monkeypatch.setattr(capture_traffic, "run_capture_loop", _fake_loop)
-    monkeypatch.setattr(capture_traffic, "pcap_dir", lambda _sid: base)
+    monkeypatch.setattr(capture_traffic, "prepare_pcap_dir", lambda _sid: base)
     monkeypatch.setattr(capture_traffic, "pcap_path", lambda _sid, jid: base / f"{jid}.pcap")
     async with pool.connection() as conn:
         return await capture_traffic.capture_traffic_handler(
@@ -309,3 +309,32 @@ def test_zero_packet_capture_is_success(migrated_url: str, monkeypatch) -> None:
     ref, rows = asyncio.run(_go())
     assert ref is not None  # empty capture is a success
     assert len(rows) == 1
+
+
+def test_unwritten_pcap_is_configuration_error(migrated_url: str, monkeypatch) -> None:
+    # The hypervisor could not write the pcap (dir not QEMU-writable/labeled): the raw file is
+    # absent, so read yields < 24 bytes. This is a loud config failure, not a silent 0-byte success.
+    store = _FakeStore()
+    capturer = _FakeCapturer(pcap=None)  # attach writes nothing → dest never created
+
+    async def _go():
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            run_id = await _seed_ready_run(pool)
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run(
+                    pool,
+                    store,
+                    capturer,
+                    _job(run_id),
+                    loop_result=capture_traffic.LoopResult(False, False),
+                    monkeypatch=monkeypatch,
+                )
+            return excinfo.value, await _artifact_rows(pool, run_id), capturer
+
+    err, rows, capturer = asyncio.run(_go())
+    assert err.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.details["reason"] == "pcap_not_written"
+    assert "remediation" in err.details
+    assert rows == []  # nothing stored
+    assert capturer.detached  # detach still ran

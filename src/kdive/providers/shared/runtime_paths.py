@@ -2,14 +2,38 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
+import pwd
 import re
 from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
+_log = logging.getLogger(__name__)
+
 _CONSOLE_DIR = "/var/lib/kdive/console"
 _PCAP_DIR = "/var/lib/kdive/pcap"
+
+# The qemu:///system hypervisor runtime user (in preference order). QEMU's filter-dump writes the
+# pcap as this unprivileged, SELinux-confined user, so the root worker owns the capture directory
+# to it before attaching the filter.
+_QEMU_RUNTIME_USERS = ("qemu", "libvirt-qemu")
+# libvirt's dynamic-ownership label for a QEMU-writable image; the confined ``svirt_t`` domain
+# (with any MCS categories) can create files under an ``svirt_image_t:s0`` directory.
+_SVIRT_IMAGE_CONTEXT = "system_u:object_r:svirt_image_t:s0"
+
+# Operator guidance when the hypervisor could not write the capture pcap (ADR-0385). The root
+# worker prepares the directory automatically (owns it to the QEMU user + labels it
+# ``svirt_image_t``); a non-root worker cannot, so the directory must be provisioned out of band.
+PCAP_HYPERVISOR_WRITE_REMEDIATION = (
+    f"the qemu:///system hypervisor could not write the capture pcap under {_PCAP_DIR}/; ensure "
+    "that directory is writable by the QEMU runtime user and, on SELinux hosts, labeled "
+    "svirt_image_t. The root worker prepares it automatically; run the worker as root or "
+    "provision the directory out of band"
+)
 
 # Shared operator guidance for the non-root-worker-under-qemu:///system readability wall
 # (ADR-0223): virtlogd writes the console log and QEMU writes the host-dump core as root, so a
@@ -73,6 +97,52 @@ def pcap_dir(system_id: UUID) -> Path:
 def pcap_path(system_id: UUID, job_id: UUID) -> Path:
     """The host pcap path for one capture job (``<pcap_dir>/<job_id>.pcap``)."""
     return pcap_dir(system_id) / f"{job_id}.pcap"
+
+
+def _qemu_runtime_owner() -> tuple[int, int] | None:
+    """Resolve the qemu:///system runtime user's (uid, gid), or ``None`` if no such user exists."""
+    for name in _QEMU_RUNTIME_USERS:
+        try:
+            record = pwd.getpwnam(name)
+        except KeyError:
+            continue
+        return record.pw_uid, record.pw_gid
+    return None
+
+
+def _relabel_svirt_image(directory: Path) -> None:
+    """Best-effort SELinux relabel so the confined hypervisor can create files in ``directory``."""
+    try:
+        import selinux  # noqa: PLC0415 - optional; absent on non-SELinux hosts
+    except ImportError:
+        return
+    try:
+        if selinux.is_selinux_enabled():
+            selinux.setfilecon(str(directory), _SVIRT_IMAGE_CONTEXT)
+    except OSError as err:  # not root / policy denies the relabel — write-failure surfaces at read
+        _log.debug("pcap dir SELinux relabel skipped for %s: %s", directory, err)
+
+
+def prepare_pcap_dir(system_id: UUID) -> Path:
+    """Create the per-System pcap dir and make it writable by the qemu:///system hypervisor.
+
+    QEMU's ``filter-dump`` (added via raw QMP) writes the pcap as the unprivileged, SELinux-confined
+    hypervisor user, but libvirt's dynamic ownership only relabels its own managed devices — not
+    this out-of-band file. So the root worker prepares the directory: owns it to the QEMU runtime
+    user and, on SELinux hosts, labels it ``svirt_image_t`` so the confined domain can create the
+    pcap. Every step is best-effort (a non-root worker cannot chown/relabel); a genuine write
+    failure is caught loudly at readback via :data:`PCAP_HYPERVISOR_WRITE_REMEDIATION`.
+    """
+    directory = pcap_dir(system_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    owner = _qemu_runtime_owner()
+    if owner is not None:
+        with contextlib.suppress(OSError):
+            os.chown(directory, *owner)
+    with contextlib.suppress(OSError):
+        directory.chmod(0o0770)
+    _relabel_svirt_image(directory)
+    return directory
 
 
 def read_pcap_bytes(path: Path) -> bytes:
