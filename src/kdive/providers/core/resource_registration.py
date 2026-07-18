@@ -29,7 +29,14 @@ async def register_discovered_resource(
     pool: str,
     cost_class: str,
 ) -> Resource:
-    """Upsert one discovered Resource by ``(kind, resource_id)``."""
+    """Upsert one discovered Resource by ``(kind, resource_id)``.
+
+    Test seed helper (no production caller): its existing-row branch fully overwrites
+    ``capabilities``/``status``/``pool``/``cost_class``. The production refresh path is
+    :func:`register_or_refresh_discovered_resource`, which merges capabilities only and preserves
+    operator-owned keys (ADR-0384) — do not swap this in on a runtime path, or an operator's
+    ``ops.set_host_capacity`` cap would be silently reverted.
+    """
     resource = _resource_from_record(record, pool=pool, cost_class=cost_class)
     async with (
         conn.transaction(),
