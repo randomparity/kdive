@@ -27,9 +27,11 @@ Receive = Callable[[], Awaitable[Message]]
 Send = Callable[[Message], Awaitable[None]]
 ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
+# No double quotes in this text: it is interpolated raw into the WWW-Authenticate
+# quoted-string (RFC 7235 auth-param), where an unescaped '"' would truncate the value.
 _BARE_TOKEN_DESCRIPTION = (
     "The Authorization header appears to contain a bare token with no auth scheme. "
-    "Prefix the token with 'Bearer ' (e.g. \"Authorization: Bearer <token>\") per "
+    "Prefix the token with 'Bearer ' (e.g. 'Authorization: Bearer <token>') per "
     "RFC 6750; the server requires the scheme prefix and does not accept a bare token."
 )
 
@@ -44,12 +46,9 @@ def _looks_like_bare_jwt(value: str) -> bool:
     """
     token = value.strip()
     return (
-        bool(token)
-        and not token[:1].isspace()
-        and " " not in token
-        and "\t" not in token
-        and token.startswith("eyJ")
+        token.startswith("eyJ")
         and token.count(".") == 2
+        and not any(char.isspace() for char in token)
     )
 
 

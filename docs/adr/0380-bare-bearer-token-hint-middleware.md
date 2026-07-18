@@ -37,9 +37,10 @@ passed through `FastMCP.run_async(transport="http", middleware=[...])` therefore
 ## Decision
 
 We will add a kdive-owned ASGI middleware, `BareBearerHintMiddleware`, injected into
-the FastMCP HTTP app's Starlette `middleware=` list (via
-`kdive.mcp.assembly.http_middleware.http_asgi_middleware`, wired at
-`processes/server.py`). It inspects the raw `Authorization` header and, when the value
+the FastMCP HTTP app's Starlette `middleware=` list — the list is built by
+`server_http_middleware()` in `src/kdive/processes/server.py` and passed to
+`app.run_async(transport="http", middleware=...)`. It inspects the raw
+`Authorization` header and, when the value
 looks like a **bare JWT** — no whitespace, starts with `eyJ`, three dot-separated
 segments, and no `bearer ` scheme prefix — short-circuits with a specific, accurate
 `401` telling the client to prefix the token with `Bearer `. Every other value

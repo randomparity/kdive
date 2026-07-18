@@ -92,6 +92,10 @@ def test_bare_jwt_short_circuits_with_scheme_hint() -> None:
     assert "invalid" not in body["error_description"].lower()  # no misleading claim
     www = rec.header(b"www-authenticate")
     assert www is not None and www.startswith(b"Bearer ")
+    # The header is an RFC 7235 quoted-string channel; the interpolated description must
+    # not contain a bare `"` that would truncate the value at a conforming parser.
+    inner = www.decode("latin-1").split('error_description="', 1)[1].rsplit('"', 1)[0]
+    assert '"' not in inner
 
 
 def test_scheme_prefixed_token_passes_through() -> None:
