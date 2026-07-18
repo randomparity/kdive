@@ -73,9 +73,9 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   `TrafficCapturer` port. The worker creates `/var/lib/kdive/pcap/<system_id>/` (mirroring the
   console-log/host-dump path owner/label handling so QEMU `svirt_t` can write there). Lock-free,
   **the handler owns the poll loop** (the port is thin primitives — see Provider seam): `attach`
-  (`object-del` any stale `kdive-dump-<job_id>` filter, then `object-add` a `filter-dump` with
-  that QOM id on the `SYSTEM_SSH_NETDEV_ID` (`kdivessh`) netdev writing to `<job_id>.pcap` with
-  `maxlen=snaplen`). Then poll every `POLL_INTERVAL`, stopping when `duration_s` elapses, the file
+  (`object-del` any stale `kdive-dump-<job_id>` filter — **tolerating not-found**, since the
+  first-ever capture has none — then `object-add` a `filter-dump` with that QOM id on the
+  `SYSTEM_SSH_NETDEV_ID` (`kdivessh`) netdev writing to `<job_id>.pcap` with `maxlen=snaplen`). Then poll every `POLL_INTERVAL`, stopping when `duration_s` elapses, the file
   reaches `max_bytes` (`truncated=True`), or a direct async read of the owning job row returns
   `CANCELED`. The size read is `os.stat(dest_path).st_size` — visible cross-uid even where the
   ADR-0223 content-read wall blocks the later whole-file read, and the cancel read is a plain
@@ -124,10 +124,11 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
   so a worker `SIGKILL`/host crash between `attach` and `detach` strands it. This is contained
   without a new reconciler port: (1) the deterministic `kdive-dump-<job_id>` id makes the
   at-least-once **retry**'s `attach` (`object-del`-before-`object-add`) clean the stranded filter
-  and never double-attach — the normal recovery; (2) System teardown removes the per-System
-  `/var/lib/kdive/pcap/<system_id>/` directory (the bespoke `_reclaim_*` per-family pattern in
-  `jobs/handlers/systems.py`), sweeping orphaned host pcap files; (3) the filter dies when the
-  domain stops. The one residual — a `SIGKILL` on the *final* attempt with no retry — is bounded:
+  and never double-attach — the normal recovery; (2) System teardown `rmtree`s the per-System
+  `/var/lib/kdive/pcap/<system_id>/` directory (a new host-fs step under the existing best-effort
+  teardown `try/except`; the domain is already destroyed by then, and the worker owns the dir so
+  `unlink` of the QEMU-written files succeeds), sweeping orphaned host pcap files; (3) the filter
+  dies when the domain stops. The one residual — a `SIGKILL` on the *final* attempt with no retry — is bounded:
   the filter captures only low-volume SSH-forward traffic on the default `restrict=on` NIC and is
   freed at the next domain stop. A dedicated `qemuMonitorCommand` reconciler reaper is a named
   follow-up, not warranted at priority:low (see ADR-0384 rejected alternatives).
@@ -152,12 +153,20 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
 - Local impl `LocalLibvirtTrafficCapture` (`providers/local_libvirt/lifecycle/`): narrow
   `_LibvirtConn`/`_LibvirtDomain` Protocols wrapping `libvirt_qemu.qemuMonitorCommand`,
   `object-del`-then-`object-add` of `filter-dump` in `attach`, `object-del` in `detach`. Both
-  offloaded via `asyncio.to_thread`. Unit-tested with a fake connection; the real `libvirt_qemu`
-  adapter is `live_vm`-only.
+  offloaded via `asyncio.to_thread`. `attach`'s leading `object-del` swallows the QMP
+  `DeviceNotFound`/"object not found" error (matched on the QMP error class/message string —
+  `qemuMonitorCommand` yields no distinct `VIR_ERR_*` code, unlike the typed
+  `control._idempotent`/`snapshot._delete_if_exists` swallows); other monitor failures raise
+  `CONTROL_FAILURE`. Unit-tested with a fake connection; the real `libvirt_qemu` adapter is
+  `live_vm`-only.
 - No new reconciler port: worker-crash orphan containment is idempotent re-attach + System
   teardown directory removal (see Behavior contract). System teardown
-  (`jobs/handlers/systems.py`) gains a `_reclaim_pcap_artifacts`-style step that `rm`s the
-  per-System `/var/lib/kdive/pcap/<system_id>/` tree, mirroring `_reclaim_console_artifacts`.
+  (`jobs/handlers/systems.py`) gains a **new host-filesystem** step that `shutil.rmtree`s the
+  per-System `/var/lib/kdive/pcap/<system_id>/` tree (ignore-missing) under the **existing
+  best-effort `try/except`** that already wraps `_reclaim_console_artifacts`/`_reclaim_sysrq_artifacts`,
+  so a filesystem fault is logged-and-continued and never blocks the System reaching
+  `TORN_DOWN`. This is a new operation type — those `_reclaim_*` functions touch only the
+  object store + `artifacts` rows, not the host FS — not a mirror of them.
 
 ## Cross-cutting integration
 
@@ -174,8 +183,9 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
 - `mcp/exposure.py` `_TOOL_SCOPES`: `"control.capture_traffic": _CONTRIBUTOR`.
 - `mcp/tools/lifecycle/systems/view.py`: add `data["supports_traffic_capture"]` from
   `runtime.support` to the `systems.get` envelope (mirrors `supports_snapshots`).
-- `jobs/handlers/systems.py`: teardown removes `/var/lib/kdive/pcap/<system_id>/` (a
-  `_reclaim_pcap_artifacts`-style step alongside `_reclaim_console_artifacts`).
+- `jobs/handlers/systems.py`: teardown `rmtree`s `/var/lib/kdive/pcap/<system_id>/` (ignore-missing)
+  under the existing best-effort teardown `try/except` — a new host-fs reclaim, not an object-store
+  `_reclaim_*` mirror.
 - `RawAsset.PCAP` + an optional `artifact_id` param on `artifacts.fetch_raw`
   (`mcp/tools/catalog/artifacts/raw_fetch.py`; used only for `asset="pcap"`, ignored for the
   singleton `vmcore`/`vmlinux`) + a `_resolve_key` PCAP branch calling a new
@@ -196,7 +206,9 @@ artifact_id=<id>)` (see Egress — a Run has many pcaps, so egress is capture-ad
 - **Provider unit** — fake libvirt connection asserts the exact `attach` QMP JSON (`object-del`
   of a stale filter, then `object-add` qom-type `filter-dump`, `netdev=SYSTEM_SSH_NETDEV_ID`, QOM
   id `kdive-dump-<job_id>`, `maxlen=snaplen`, `file=dest_path`) and that `detach` issues
-  `object-del` for the QOM id.
+  `object-del` for the QOM id. A **first-attach-with-no-stale-filter** vector (the leading
+  `object-del` raises QMP not-found) asserts `attach` swallows it and still issues `object-add`;
+  a non-not-found monitor error raises `CONTROL_FAILURE`.
 - **Capture-loop unit** — the handler-owned poll loop with injected `stat`/sleeper/`read_state`
   (no libvirt), covering: stop-at-duration, stop-at-max_bytes (`truncated=True`), stop-at-cancel
   (no store), and `detach` invoked on every path (success, error, cancel).

@@ -77,7 +77,11 @@ follow-up below).
 `object-del` any stale filter for this job's deterministic QOM id first (idempotent re-attach),
 then `object-add` a `filter-dump` on the `kdivessh` netdev (a shared `SYSTEM_SSH_NETDEV_ID`
 constant, not a re-hardcoded literal) with QOM id `kdive-dump-<job_id>`, `file=<host path>`, and
-`maxlen=snaplen`. The handler then polls `os.stat(dest_path).st_size` on a bounded interval,
+`maxlen=snaplen`. The leading `object-del` **tolerates not-found** — the first-ever capture has
+no stale filter, so a `DeviceNotFound`/"object not found" QMP error is swallowed as success
+(matched on the QMP error class/message text, since `qemuMonitorCommand` surfaces QMP failures
+as a generic `libvirtError` string with no distinct `VIR_ERR_*` code, unlike the typed
+`_idempotent`/`_delete_if_exists` swallows); any other monitor failure is `CONTROL_FAILURE`. The handler then polls `os.stat(dest_path).st_size` on a bounded interval,
 stopping when the window (`duration_s`) elapses, the file reaches `max_bytes` (`truncated=True`),
 or a direct async read of the owning job row returns `CANCELED` (a per-interval cooperative
 check — a mechanism `watch_for_crash` does not have, added because a stray `filter-dump` fills
