@@ -57,6 +57,7 @@ def system_envelope(
     active_debug_session_ids: list[str] | None = None,
     active_run: dict[str, JsonValue] | None = None,
     supports_snapshots: bool | None = None,
+    supports_traffic_capture: bool | None = None,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -90,6 +91,8 @@ def system_envelope(
         data["active_run"] = active_run
     if supports_snapshots is not None:
         data["supports_snapshots"] = supports_snapshots
+    if supports_traffic_capture is not None:
+        data["supports_traffic_capture"] = supports_traffic_capture
     if system.state is SystemState.FAILED:
         return ToolResponse.failure(
             str(system.id),
@@ -176,11 +179,14 @@ async def get_system(
             # resolve a runtime; keep systems.get resilient (its metadata still lets an agent tear
             # the System down) by omitting the field rather than failing the whole read.
             supports_snapshots: bool | None = None
+            supports_traffic_capture: bool | None = None
             try:
                 runtime = await resolver.runtime_for_system(conn, system.id)
                 supports_snapshots = runtime.support.supports_snapshots
+                supports_traffic_capture = runtime.support.supports_traffic_capture
             except CategorizedError:
                 supports_snapshots = None
+                supports_traffic_capture = None
         return system_envelope(
             system,
             resource_kind=resource_kind,
@@ -188,6 +194,7 @@ async def get_system(
             active_debug_session_ids=active_sessions,
             active_run=active_run,
             supports_snapshots=supports_snapshots,
+            supports_traffic_capture=supports_traffic_capture,
         )
 
 
