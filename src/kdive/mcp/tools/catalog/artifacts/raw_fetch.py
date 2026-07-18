@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 import kdive.config as config
 from kdive.artifacts.read_model import (
     RunFetchContext,
+    raw_pcap_key,
     raw_vmcore_key,
     run_fetch_context,
 )
@@ -44,6 +45,7 @@ class RawAsset(StrEnum):
 
     VMCORE = "vmcore"
     VMLINUX = "vmlinux"
+    PCAP = "pcap"
 
 
 class _RawStore(Protocol):
@@ -57,15 +59,18 @@ async def _resolve_key(
     run: RunFetchContext,
     asset: RawAsset,
     run_uid: UUID,
+    artifact_id: str | None,
 ) -> str | ToolResponse:
     """Authorize and resolve the object key for ``asset``, or return a failure envelope.
 
-    Both assets are gated on the **Run's** project: ``vmlinux`` is the Run's ``debuginfo_ref`` and
-    the raw ``vmcore`` is Run-owned (``owner_kind='runs'``, ADR-0244). A bound Run always shares its
-    System's project (enforced at ``services/runs/admission.py`` and ``services/runs/bind.py``), so
-    gating on ``run.project`` preserves the cross-project isolation ADR-0243's System-project
-    re-check provided, with no System indirection. A genuinely-absent asset is a
-    ``configuration_error`` with a ``*_unavailable`` reason.
+    All assets are gated on the **Run's** project: ``vmlinux`` is the Run's ``debuginfo_ref``, the
+    raw ``vmcore`` is Run-owned (``owner_kind='runs'``, ADR-0244), and a ``pcap`` is Run-owned
+    (ADR-0384) — selected by ``artifact_id`` (validated to belong to the Run) or the newest when
+    omitted. A bound Run always shares its System's project (enforced at
+    ``services/runs/admission.py`` and ``services/runs/bind.py``), so gating on ``run.project``
+    preserves the cross-project isolation ADR-0243's System-project re-check provided, with no
+    System indirection. A genuinely-absent asset is a ``configuration_error`` with a
+    ``*_unavailable`` reason.
     """
     run_id = str(run_uid)
     require_role(ctx, run.project, Role.CONTRIBUTOR)
@@ -73,6 +78,14 @@ async def _resolve_key(
         if run.debuginfo_ref is None:
             return _config_error(run_id, data={"reason": "vmlinux_unavailable"})
         return run.debuginfo_ref
+    if asset is RawAsset.PCAP:
+        aid = _as_uuid(artifact_id) if artifact_id is not None else None
+        if artifact_id is not None and aid is None:
+            return _config_error(run_id, data={"reason": "invalid_artifact_id"})
+        pcap_key = await raw_pcap_key(conn, run_uid, aid)
+        if pcap_key is None:
+            return _config_error(run_id, data={"reason": "pcap_unavailable"})
+        return pcap_key
     key = await raw_vmcore_key(conn, run_uid)
     if key is None:
         return _config_error(run_id, data={"reason": "vmcore_unavailable"})
@@ -85,14 +98,17 @@ async def fetch_raw(
     *,
     run_id: str,
     asset: RawAsset,
+    artifact_id: str | None = None,
     store_factory: Callable[[], _RawStore] = object_store_from_env,
 ) -> ToolResponse:
-    """Mint a presigned download URL for a Run's raw ``vmcore`` or ``vmlinux`` (ADR-0243).
+    """Mint a presigned download URL for a Run's raw ``vmcore``, ``vmlinux``, or ``pcap``.
 
     Resolves the asset's object key from existing row data, HEADs the object to confirm it exists,
     presigns a short-lived download URL (``KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS``), and audits the
     egress. Returns the URL under ``refs.download_uri`` with ``data.asset``/``data.size_bytes``;
-    never returns inline bytes. Requires ``contributor`` on the asset's owning project.
+    never returns inline bytes. ``artifact_id`` selects a specific ``pcap`` (a Run may own several;
+    ADR-0384) and is ignored for ``vmcore``/``vmlinux``. Requires ``contributor`` on the asset's
+    owning project.
     """
     uid = _as_uuid(run_id)
     if uid is None:
@@ -102,7 +118,7 @@ async def fetch_raw(
             run = await run_fetch_context(conn, uid)
             if run is None or run.project not in ctx.projects:
                 return _not_found(run_id)
-            resolved = await _resolve_key(conn, ctx, run, asset, uid)
+            resolved = await _resolve_key(conn, ctx, run, asset, uid, artifact_id)
             if isinstance(resolved, ToolResponse):
                 return resolved
             try:
@@ -126,7 +142,8 @@ async def fetch_raw(
                         object_kind="runs",
                         object_id=uid,
                         transition="fetch_raw",
-                        args={"run_id": run_id, "asset": asset.value},
+                        args={"run_id": run_id, "asset": asset.value}
+                        | ({"artifact_id": artifact_id} if artifact_id is not None else {}),
                         project=run.project,
                     ),
                 )

@@ -20,6 +20,16 @@ _RAW_VMCORE_KEY_SQL: LiteralString = (
 _RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
 _REDACTED_VMCORE_LIKE = "%-redacted"
 
+_RAW_PCAP_KEY_BY_ID_SQL: LiteralString = (
+    "SELECT object_key FROM artifacts "
+    "WHERE id = %s AND owner_kind = 'runs' AND owner_id = %s AND retention_class = 'pcap'"
+)
+_RAW_PCAP_NEWEST_KEY_SQL: LiteralString = (
+    "SELECT object_key FROM artifacts "
+    "WHERE owner_kind = 'runs' AND owner_id = %s AND retention_class = 'pcap' "
+    "ORDER BY created_at DESC, id DESC LIMIT 1"
+)
+
 _EFFECTIVE_CONFIG_KEY_SQL: LiteralString = (
     "SELECT object_key FROM artifacts "
     "WHERE owner_kind = 'runs' AND owner_id = %s AND object_key LIKE %s LIMIT 1"
@@ -85,6 +95,22 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
             _RAW_VMCORE_KEY_SQL,
             (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
         )
+        row = await cur.fetchone()
+    return None if row is None else str(row["object_key"])
+
+
+async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | None) -> str | None:
+    """Object key of a Run-owned pcap: the exact one by ``artifact_id``, or the newest (ADR-0384).
+
+    A Run may own several pcaps (one per ``capture_traffic`` job). ``artifact_id`` selects one and
+    validates it belongs to this Run (``owner_kind='runs'``, ``retention_class='pcap'``); ``None``
+    resolves the newest. Returns ``None`` for an absent id, a cross-Run id, or a Run with no pcap.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        if artifact_id is not None:
+            await cur.execute(_RAW_PCAP_KEY_BY_ID_SQL, (artifact_id, run_id))
+        else:
+            await cur.execute(_RAW_PCAP_NEWEST_KEY_SQL, (run_id,))
         row = await cur.fetchone()
     return None if row is None else str(row["object_key"])
 
