@@ -141,16 +141,20 @@ def test_collection_round_trips_through_client() -> None:
     assert errors == []
 
 
-def test_unswept_recursive_schema_fails_to_parse() -> None:
-    """Regression pin: without the sweep the auto-derived recursive schema breaks the client.
+def test_unswept_recursive_schema_now_parses_cleanly() -> None:
+    """Historical regression pin, revisited for the FastMCP upgrade that handles recursive ``$ref``.
 
-    Pinned to fastmcp 3.4.0 client behavior; a major FastMCP upgrade that handles recursive
-    ``$ref`` would make this auto-schema parse cleanly and is the expected reason to revisit it.
+    Before FastMCP handled recursive ``$ref``, the auto-derived ``ToolResponse`` output schema broke
+    the client parser (``.data`` nulled, a parse error logged) — the motivation for the sweep
+    (``advertise_envelope_output_schema``, ADR-0170). FastMCP 3.4.4 parses the recursive schema
+    cleanly, so an unswept call now succeeds. The sweep is retained for its fielded-schema
+    advertising (see the sweep tests above); this pins the client-side change that removed its
+    original parse-failure motivation.
     """
     app = _probe_app()  # NOT swept
     data, errors, _structured = _call_and_capture(app, "scalar.one")
-    assert data is None  # the failed validator nulls .data
-    assert errors  # the parse error is logged
+    assert data is not None  # the recursive schema now parses cleanly
+    assert errors == []  # no parse error logged
 
 
 def test_sweep_raises_on_empty_tool_surface() -> None:
