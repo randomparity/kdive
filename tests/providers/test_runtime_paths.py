@@ -8,12 +8,17 @@ from uuid import UUID
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.shared import runtime_paths
 from kdive.providers.shared.runtime_paths import (
     WORKER_READABILITY_REMEDIATION,
     build_domain_name,
     console_log_path,
     domain_name_for,
+    pcap_dir,
+    pcap_path,
+    prepare_pcap_dir,
     read_console_log,
+    read_pcap_bytes,
     system_id_from_domain_name,
 )
 
@@ -126,3 +131,44 @@ def test_read_console_log_other_oserror_is_infrastructure_failure(
         "path": str(path),
         "error": "OSError",
     }
+
+
+_JOB_ID = UUID("22222222-2222-2222-2222-222222222222")
+
+
+def test_pcap_path_and_dir() -> None:
+    assert pcap_dir(_SYSTEM_ID) == Path("/var/lib/kdive/pcap") / str(_SYSTEM_ID)
+    assert pcap_path(_SYSTEM_ID, _JOB_ID) == pcap_dir(_SYSTEM_ID) / f"{_JOB_ID}.pcap"
+
+
+def test_read_pcap_bytes_missing_is_empty(tmp_path: Path) -> None:
+    assert read_pcap_bytes(tmp_path / "absent.pcap") == b""
+
+
+def test_read_pcap_bytes_permission_error_is_configuration_error(monkeypatch, tmp_path) -> None:
+    target = tmp_path / "denied.pcap"
+    target.write_bytes(b"\xd4\xc3\xb2\xa1")
+
+    def _deny(_self: Path) -> bytes:
+        raise PermissionError("root-owned")
+
+    monkeypatch.setattr(Path, "read_bytes", _deny)
+    with pytest.raises(CategorizedError) as excinfo:
+        read_pcap_bytes(target)
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["remediation"] == WORKER_READABILITY_REMEDIATION
+
+
+def test_prepare_pcap_dir_creates_dir_and_degrades_without_privilege(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # prepare_pcap_dir creates the per-System dir; the chown/SELinux relabel are best-effort, so
+    # in a non-root test they are skipped without raising and the directory still exists.
+    sid = UUID("11111111-1111-1111-1111-111111111111")
+    target = tmp_path / str(sid)
+    monkeypatch.setattr(runtime_paths, "pcap_dir", lambda _sid: target)
+    out = prepare_pcap_dir(sid)
+    assert out == target
+    assert target.is_dir()
+    # Idempotent: a second call on the existing dir does not raise.
+    assert prepare_pcap_dir(sid) == target

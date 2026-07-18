@@ -40,6 +40,9 @@ class JobKind(StrEnum):
     SNAPSHOT = "snapshot"
     RESTORE = "restore"
     DELETE_SNAPSHOT = "delete_snapshot"
+    # Host-side network traffic capture (ADR-0385): async because a filter-dump runs for a bounded
+    # window and stores a Run-owned pcap; contributor-cancelable so a stray capture can be stopped.
+    CAPTURE_TRAFFIC = "capture_traffic"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -75,6 +78,7 @@ CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
         JobKind.SNAPSHOT,
         JobKind.RESTORE,
         JobKind.DELETE_SNAPSHOT,
+        JobKind.CAPTURE_TRAFFIC,
     }
 )
 """Job kinds a contributor may cancel: the leaseholder-lifecycle jobs a contributor (or a lower

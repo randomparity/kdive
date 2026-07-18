@@ -26,6 +26,7 @@
 | [`artifacts.get`](artifacts.md#artifactsget) | `implemented` |
 | [`artifacts.list`](artifacts.md#artifactslist) | `implemented` |
 | [`audit.query`](audit.md#auditquery) | `implemented` |
+| [`control.capture_traffic`](control.md#controlcapture_traffic) | `implemented` |
 | [`control.diagnostic_sysrq`](control.md#controldiagnostic_sysrq) | `implemented` |
 | [`control.force_crash`](control.md#controlforce_crash) | `implemented` |
 | [`control.power`](control.md#controlpower) | `implemented` |

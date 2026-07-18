@@ -44,6 +44,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import (
     authorized_key_customizer,
 )
 from kdive.providers.local_libvirt.lifecycle.snapshot import LocalLibvirtSnapshotter
+from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.providers.local_libvirt.reaping import LibvirtInfraReaper
 from kdive.providers.local_libvirt.retrieve import LocalLibvirtRetrieve
@@ -132,6 +133,7 @@ def build_runtime(
     install = LocalLibvirtInstall.from_env()
     connector = LocalLibvirtConnect.from_env()
     controller = LocalLibvirtControl.from_env()
+    traffic_capturer = LocalLibvirtTrafficCapture.from_env()
     retrieve = LocalLibvirtRetrieve.from_env(secret_registry=secret_registry)
     vmcore_introspector = LocalLibvirtVmcoreIntrospect.from_env(secret_registry=secret_registry)
     live_introspector = LocalLibvirtLiveIntrospect.from_env(secret_registry=secret_registry)
@@ -164,6 +166,8 @@ def build_runtime(
             introspection=frozenset({"offline-vmcore", "live", "live-script"}),
             # Internal libvirt snapshots are supported on the local host (ADR-0378, #1254).
             supports_snapshots=True,
+            # Host-side pcap via QEMU filter-dump on the local guest netdev (ADR-0385, #1258).
+            supports_traffic_capture=True,
         ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,
@@ -187,4 +191,7 @@ def build_runtime(
         # Internal RAM+disk/disk-only domain snapshots (ADR-0378, #1254). Matches
         # ``support.supports_snapshots``; a snapshot-incapable provider leaves both unset.
         snapshot=LocalLibvirtSnapshotter.from_env(),
+        # Host-side filter-dump traffic capture (ADR-0385, #1258). Matches
+        # ``support.supports_traffic_capture``.
+        traffic_capturer=traffic_capturer,
     )

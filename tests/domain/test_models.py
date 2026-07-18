@@ -337,6 +337,9 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         "snapshot",
         "restore",
         "delete_snapshot",
+        # control.capture_traffic enqueues this to run a bounded QEMU filter-dump on a ready
+        # local-libvirt guest's netdev and store a Run-owned SENSITIVE pcap (ADR-0385, #1258).
+        "capture_traffic",
     }
 
 

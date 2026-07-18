@@ -6,7 +6,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import UUID
 
+from kdive.providers.local_libvirt.lifecycle import xml as xmlmod
 from kdive.providers.local_libvirt.lifecycle.xml import render_customization_domain_xml
+
+
+def test_ssh_netdev_id_is_shared_constant() -> None:
+    assert xmlmod.SYSTEM_SSH_NETDEV_ID == "kdivessh"
+
 
 BID = UUID("11111111-2222-3333-4444-555555555555")
 

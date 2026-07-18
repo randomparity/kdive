@@ -28,6 +28,17 @@ each tool's own description.
   console with the `artifacts` tools. Contributor-level, non-destructive. See the
   [race-debugging guide](../../operating/race-debugging.md).
 
+## Capturing guest traffic
+
+- `control.capture_traffic` — capture host-side network traffic from a Run's bound **READY**
+  local-libvirt guest into a Run-owned pcap, for a bounded window. Only the guest's SSH-forward
+  netdev is visible (the guest runs on a restricted user-mode network), so this sees the traffic
+  on that path, not arbitrary guest egress. Contributor-level; it enqueues a fixed-duration job —
+  poll `jobs.wait`, then fetch the pcap with `artifacts.fetch_raw(run_id, asset="pcap",
+  artifact_id=<refs.result>)`. The pcap is sensitive, so it is URL-only (never inline). An optional
+  BPF `capture_filter` (e.g. `tcp port 80`) trims the capture; `snaplen` bounds bytes per packet.
+  Check `systems.get`'s `supports_traffic_capture` before calling.
+
 ## Power
 
 - `control.power` — power actions (`on`/`off`/`cycle`/`reset`) on a **READY** system.

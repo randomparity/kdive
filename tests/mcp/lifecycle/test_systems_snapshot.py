@@ -650,6 +650,26 @@ def test_systems_get_surfaces_supports_snapshots(migrated_url: str) -> None:
     asyncio.run(scenario())
 
 
+def test_systems_get_surfaces_supports_traffic_capture(migrated_url: str) -> None:
+    async def scenario() -> None:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            supported = await get_system(
+                pool, _ctx(), str(sid), resolver=provider_resolver(supports_traffic_capture=True)
+            )
+            assert supported.data["supports_traffic_capture"] is True
+            unsupported = await get_system(
+                pool, _ctx(), str(sid), resolver=provider_resolver(supports_traffic_capture=False)
+            )
+            assert unsupported.data["supports_traffic_capture"] is False
+        finally:
+            await pool.close()
+
+    asyncio.run(scenario())
+
+
 def test_systems_get_resilient_when_provider_unregistered(migrated_url: str) -> None:
     # A System whose provider kind is no longer registered (disabled/uncomposed) cannot resolve a
     # runtime; systems.get must still return the System envelope (so an agent can read state and

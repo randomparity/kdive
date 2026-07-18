@@ -2,6 +2,30 @@
 
 # `control` tools
 
+## `control.capture_traffic`
+
+`implemented`
+
+Capture host-side network traffic from a Run's bound ready local-libvirt guest into a
+Run-owned pcap. Only the guest's SSH-forward netdev is visible (the platform runs the guest
+on a restricted user-mode network), so this sees the traffic on that path, not arbitrary
+guest egress. Requires contributor; enqueues a fixed-duration job and returns
+`{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result` is the
+captured pcap's artifact id; the pcap is sensitive (packet bytes) and is fetched only with
+`artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>)`, which presigns a
+download URL — `artifacts.get` will not serve it. A 24-byte pcap means the capture saw zero
+packets. An unbound Run, a non-ready System, a provider that does not support capture, or an
+invalid `capture_filter` is a `configuration_error`; no job is created.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `capture_filter` | string (nullable) | no | Optional pcap-filter(7)/tcpdump BPF expression applied after capture (e.g. 'tcp port 80'); the interface is fixed by the platform. Omit to keep every captured packet. |
+| `duration_s` | integer | no | Capture window in seconds (1-300); the job auto-stops when it elapses. Cancel early with jobs.cancel. |
+| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `max_bytes` | integer | no | Stop early once the pcap reaches this many bytes (1048576-536870912). |
+| `run_id` | string | yes | The Run whose bound ready local-libvirt System's traffic to capture. |
+| `snaplen` | integer | no | Bytes captured per packet (1-262144); the default 128 captures headers only. Raise it to keep payloads. |
+
 ## `control.diagnostic_sysrq`
 
 `implemented`

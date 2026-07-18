@@ -277,3 +277,56 @@ def test_teardown_handler_deletes_key_row(migrated_url: str) -> None:
             return await _key_row_count(pool, system_id)
 
     assert asyncio.run(_run()) == 0
+
+
+def test_teardown_handler_reclaims_pcap_directory(migrated_url, tmp_path, monkeypatch) -> None:
+    async def _run() -> bool:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(
+                pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
+            )
+            pcap_root = tmp_path / str(system_id)
+            monkeypatch.setattr(systems_handlers, "pcap_dir", lambda _sid: pcap_root)
+            pcap_root.mkdir(parents=True)
+            (pcap_root / "job.pcap").write_bytes(b"\xd4\xc3\xb2\xa1")
+            resolver = provider_resolver(provisioner=_RecordingProvisioner())
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.TEARDOWN,
+                    SystemPayload(system_id=str(system_id)),
+                    {"principal": "alice", "agent_session": "s", "project": "proj"},
+                    f"{system_id}:teardown",
+                )
+            async with pool.connection() as conn:
+                await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+            return pcap_root.exists()
+
+    assert asyncio.run(_run()) is False
+
+
+def test_teardown_handler_pcap_reclaim_tolerates_absent_dir(
+    migrated_url, tmp_path, monkeypatch
+) -> None:
+    async def _run() -> str | None:
+        async with _pool(migrated_url) as pool:
+            system_id = await _seed_system(
+                pool, SystemState.READY, provisioning_profile=PROVISIONING_PROFILE
+            )
+            # pcap_dir points at a path that was never created — teardown must still succeed.
+            monkeypatch.setattr(
+                systems_handlers, "pcap_dir", lambda _sid: tmp_path / "absent" / str(system_id)
+            )
+            resolver = provider_resolver(provisioner=_RecordingProvisioner())
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.TEARDOWN,
+                    SystemPayload(system_id=str(system_id)),
+                    {"principal": "alice", "agent_session": "s", "project": "proj"},
+                    f"{system_id}:teardown",
+                )
+            async with pool.connection() as conn:
+                return await systems_handlers.teardown_handler(conn, job, resolver=resolver)
+
+    assert asyncio.run(_run()) is not None

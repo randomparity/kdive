@@ -170,17 +170,29 @@ def _register_artifacts_fetch_raw(app: FastMCP, pool: AsyncConnectionPool) -> No
         run_id: Annotated[str, Field(description="The Run whose raw asset to fetch.")],
         asset: Annotated[
             artifact_raw_fetch.RawAsset,
-            Field(description="Which raw asset to fetch: vmcore or vmlinux."),
+            Field(description="Which raw asset to fetch: vmcore, vmlinux, or pcap."),
         ],
+        artifact_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Select a specific pcap by id (from the capture job's refs.result); only "
+                    "meaningful when asset='pcap'. Omit to fetch the newest pcap."
+                )
+            ),
+        ] = None,
     ) -> ToolResponse:
-        """Mint a presigned download URL for a Run's raw vmcore or vmlinux. Requires contributor.
+        """Mint a presigned download URL for a Run's raw vmcore, vmlinux, or pcap. Requires
+        contributor.
 
         Returns the URL under `refs.download_uri` with `data.asset`/`data.size_bytes`; never
         inline bytes (these are large binaries). The asset stays sensitive — egress is gated by
-        project membership + contributor on the asset's owning project, not by redaction.
+        project membership + contributor on the asset's owning project, not by redaction. A Run may
+        own several pcaps (one per capture job); pass `artifact_id` to pick one, or omit it for the
+        newest.
         """
         return await artifact_raw_fetch.fetch_raw(
-            pool, current_context(), run_id=run_id, asset=asset
+            pool, current_context(), run_id=run_id, asset=asset, artifact_id=artifact_id
         )
 
 

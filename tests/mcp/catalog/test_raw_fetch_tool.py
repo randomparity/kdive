@@ -86,6 +86,24 @@ async def _seed_raw_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> str:
     return key
 
 
+async def _seed_pcap_row(
+    pool: AsyncConnectionPool, run_id: str, name: str, *, created_at: str
+) -> tuple[str, UUID]:
+    """Insert a Run-owned pcap artifact row (ADR-0385); return (object_key, artifact_id)."""
+    key = f"proj/runs/{run_id}/{name}"
+    async with pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class, created_at) "
+                "VALUES ('runs', %s, %s, 'e', 'sensitive', 'pcap', %s) RETURNING id",
+                (run_id, key, created_at),
+            )
+        ).fetchone()
+    assert row is not None
+    return key, row[0]
+
+
 # --- DB readers (Task 1) ------------------------------------------------------------------
 
 
@@ -290,6 +308,106 @@ def test_fetch_raw_writes_audit_row(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+# --- pcap egress (ADR-0385) ---------------------------------------------------------------
+
+
+def test_fetch_raw_pcap_by_id_presigns_url(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            key, aid = await _seed_pcap_row(
+                pool, run_id, "pcap-job1", created_at="2026-01-01T00:00:00+00:00"
+            )
+            store = _FakeStore()
+            resp = await fetch_raw(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                asset=RawAsset.PCAP,
+                artifact_id=str(aid),
+                store_factory=lambda: store,
+            )
+        assert resp.status == "available"
+        assert resp.data["asset"] == "pcap"
+        assert resp.refs["download_uri"] == store.url
+        assert store.presigned_keys == [key]
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_pcap_without_id_returns_newest(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            await _seed_pcap_row(pool, run_id, "pcap-old", created_at="2026-01-01T00:00:00+00:00")
+            new_key, _ = await _seed_pcap_row(
+                pool, run_id, "pcap-new", created_at="2026-06-01T00:00:00+00:00"
+            )
+            store = _FakeStore()
+            resp = await fetch_raw(
+                pool, _ctx(), run_id=run_id, asset=RawAsset.PCAP, store_factory=lambda: store
+            )
+        assert resp.status == "available"
+        assert store.presigned_keys == [new_key]
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_pcap_cross_run_id_is_unavailable(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            other_run = await _seed_run_with_vmlinux(pool)
+            _, other_aid = await _seed_pcap_row(
+                pool, other_run, "pcap-x", created_at="2026-01-01T00:00:00+00:00"
+            )
+            store = _FakeStore()
+            resp = await fetch_raw(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                asset=RawAsset.PCAP,
+                artifact_id=str(other_aid),
+                store_factory=lambda: store,
+            )
+        assert resp.status == "error"
+        assert resp.data["reason"] == "pcap_unavailable"
+        assert store.presigned_keys == []
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_pcap_invalid_artifact_id_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            resp = await fetch_raw(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                asset=RawAsset.PCAP,
+                artifact_id="not-a-uuid",
+                store_factory=_FakeStore,
+            )
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_artifact_id"
+
+    asyncio.run(_run())
+
+
+def test_fetch_raw_pcap_unavailable_when_no_pcap(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run_with_vmlinux(pool)
+            resp = await fetch_raw(
+                pool, _ctx(), run_id=run_id, asset=RawAsset.PCAP, store_factory=_FakeStore
+            )
+        assert resp.status == "error"
+        assert resp.data["reason"] == "pcap_unavailable"
+
+    asyncio.run(_run())
+
+
 # --- tool registration (Task 4) -----------------------------------------------------------
 
 
@@ -301,6 +419,6 @@ def test_fetch_raw_tool_registered() -> None:
     tool = asyncio.run(app.get_tool("artifacts.fetch_raw"))
     assert tool is not None
     props = tool.parameters["properties"]
-    assert set(props) == {"run_id", "asset"}
+    assert set(props) == {"run_id", "asset", "artifact_id"}
     assert props["asset"]["$ref"] == "#/$defs/RawAsset"
-    assert set(tool.parameters["$defs"]["RawAsset"]["enum"]) == {"vmcore", "vmlinux"}
+    assert set(tool.parameters["$defs"]["RawAsset"]["enum"]) == {"vmcore", "vmlinux", "pcap"}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import shutil
 from collections.abc import Awaitable, Callable
 from typing import LiteralString, Protocol
 from uuid import UUID
@@ -54,7 +55,7 @@ from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.ports.lifecycle import Snapshotter
-from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.providers.shared.runtime_paths import domain_name_for, pcap_dir
 from kdive.security import audit
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore, artifact_key, object_store_from_env
@@ -762,6 +763,11 @@ async def teardown_handler(
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
+    # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
+    # under pcap_dir(system_id), not the object store, so they are removed here rather than through
+    # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
+    # an object-store reclaim failure below cannot skip it (and vice versa).
+    await asyncio.to_thread(shutil.rmtree, str(pcap_dir(system_id)), ignore_errors=True)
     try:
         await _reclaim_console_artifacts(conn, artifact_store, system_id)
         await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
