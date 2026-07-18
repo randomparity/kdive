@@ -112,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make pre-commit hooks ppc64le-portable
 - Pre-build oidc so compose skips a doomed pull
 - Skip oidc pre-build when image already exists locally
+- Bump the github-actions group across 1 directory with 5 updates
 
 ### Scripts
 
