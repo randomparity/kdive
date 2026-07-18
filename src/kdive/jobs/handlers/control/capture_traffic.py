@@ -36,7 +36,6 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
-from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
 from kdive.providers.ports.traffic import TrafficCapturer
 from kdive.providers.shared.runtime_paths import (
     domain_name_for,
@@ -229,7 +228,6 @@ async def capture_traffic_handler(
         snapshot.capturer.attach,
         snapshot.domain_name,
         qom_id=qom_id,
-        netdev_id=SYSTEM_SSH_NETDEV_ID,
         dest_path=str(dest),
         snaplen=payload.snaplen,
     )

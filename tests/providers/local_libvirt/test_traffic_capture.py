@@ -38,7 +38,6 @@ def test_attach_deletes_stale_then_adds_filter_dump() -> None:
     _capturer(monitor).attach(
         "kdive-x",
         qom_id="kdive-dump-J",
-        netdev_id="kdivessh",
         dest_path="/var/lib/kdive/pcap/S/J.pcap",
         snaplen=128,
     )
@@ -50,6 +49,7 @@ def test_attach_deletes_stale_then_adds_filter_dump() -> None:
     args = add["arguments"]
     assert args["qom-type"] == "filter-dump"
     assert args["id"] == "kdive-dump-J"
+    # The captured netdev is the local-libvirt SSH-forward netdev, chosen internally.
     assert args["netdev"] == "kdivessh"
     assert args["file"] == "/var/lib/kdive/pcap/S/J.pcap"
     assert args["maxlen"] == 128
@@ -66,9 +66,7 @@ def test_attach_swallows_object_not_found_on_first_run() -> None:
         return "{}"
 
     # Must NOT raise: the first capture has no stale filter to delete.
-    _capturer(monitor).attach(
-        "kdive-x", qom_id="kdive-dump-J", netdev_id="kdivessh", dest_path="/p.pcap", snaplen=128
-    )
+    _capturer(monitor).attach("kdive-x", qom_id="kdive-dump-J", dest_path="/p.pcap", snaplen=128)
     assert calls == ["object-del", "object-add"]
 
 
@@ -77,9 +75,7 @@ def test_attach_reraises_other_monitor_error_as_control_failure() -> None:
         raise libvirt.libvirtError("some other monitor failure")
 
     with pytest.raises(CategorizedError) as excinfo:
-        _capturer(monitor).attach(
-            "kdive-x", qom_id="q", netdev_id="kdivessh", dest_path="/p", snaplen=128
-        )
+        _capturer(monitor).attach("kdive-x", qom_id="q", dest_path="/p", snaplen=128)
     assert excinfo.value.category is ErrorCategory.CONTROL_FAILURE
 
 

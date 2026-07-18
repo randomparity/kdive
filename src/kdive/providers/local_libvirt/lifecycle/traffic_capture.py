@@ -20,6 +20,7 @@ import libvirt
 
 import kdive.config as config
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
 
@@ -69,10 +70,12 @@ class LocalLibvirtTrafficCapture:
             monitor=libvirt_qemu.qemuMonitorCommand,
         )
 
-    def attach(
-        self, domain_name: str, *, qom_id: str, netdev_id: str, dest_path: str, snaplen: int
-    ) -> None:
-        """Add a filter-dump on ``netdev_id`` writing ``dest_path`` (idempotent re-attach)."""
+    def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
+        """Add a filter-dump on the SSH-forward netdev writing ``dest_path`` (idempotent re-attach).
+
+        The captured netdev is the local-libvirt SSH-forward netdev (``SYSTEM_SSH_NETDEV_ID``), a
+        provider-internal XML detail; the handler never names it.
+        """
         conn = self._open()
         try:
             domain = self._lookup(conn, domain_name)
@@ -83,7 +86,7 @@ class LocalLibvirtTrafficCapture:
                 {
                     "qom-type": "filter-dump",
                     "id": qom_id,
-                    "netdev": netdev_id,
+                    "netdev": SYSTEM_SSH_NETDEV_ID,
                     "file": dest_path,
                     "maxlen": snaplen,
                 },

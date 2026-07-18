@@ -59,7 +59,7 @@ class _FakeCapturer:
         self.attached: list[str] = []
         self.detached: list[str] = []
 
-    def attach(self, domain_name, *, qom_id, netdev_id, dest_path, snaplen) -> None:
+    def attach(self, domain_name, *, qom_id, dest_path, snaplen) -> None:
         self.attached.append(qom_id)
         if self._pcap is not None:
             Path(dest_path).write_bytes(self._pcap)
