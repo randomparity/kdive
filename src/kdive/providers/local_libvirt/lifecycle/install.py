@@ -52,13 +52,14 @@ from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
     repack_modules_subtree,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
+    _POLL_INTERVAL_SECONDS,
     ReadinessResult,
     _real_readiness,
 )
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
 from kdive.providers.local_libvirt.lifecycle.deadlines import tcg_deadline_multiplier
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_path
-from kdive.providers.local_libvirt.settings import LIBVIRT_URI
+from kdive.providers.local_libvirt.settings import LIBVIRT_BOOT_WINDOW_S, LIBVIRT_URI
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.libvirt_xml import register_kdive_namespace, register_qemu_namespace
 from kdive.providers.shared.runtime_paths import domain_name_for
@@ -66,16 +67,22 @@ from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
-_DEFAULT_BOOT_WINDOW_POLLS = 60
+
+# The boot window is derived from KDIVE_LIBVIRT_BOOT_WINDOW_S (default 900 s) divided by the
+# _POLL_INTERVAL_SECONDS cadence (5 s) — 180 polls at the default.  boot()._await_ready loops
+# the poll count; _real_readiness owns the per-poll cadence.  The window accommodates the
+# kdive-ready signal ordering After=kdump.service (#817): a crash-capture guest does not report
+# ready until kdump.service has built the capture initramfs and kexec-loaded it, which on POWER9
+# takes several minutes on the first dracut run.  It is a ceiling, not a fixed wait —
+# _await_ready returns the instant the marker appears, so the wider window costs nothing on a
+# fast boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
+# Operators on very fast hosts can tighten it; operators on slow hosts (POWER, large kdump
+# initramfs) can widen it — all without rebuilding the image.
+def _boot_window_polls() -> int:
+    """Return the number of readiness polls for the configured boot window."""
+    return math.ceil(config.require(LIBVIRT_BOOT_WINDOW_S) / _POLL_INTERVAL_SECONDS)
 
 
-# The boot window is _DEFAULT_BOOT_WINDOW_POLLS × _POLL_INTERVAL_SECONDS = 300s (ADR-0055 §7):
-# boot()._await_ready loops the poll count; _real_readiness owns the per-poll cadence. The window
-# accommodates the kdive-ready signal now ordering After=kdump.service (#817): a crash-capture
-# guest does not report ready until kdump.service has built the capture initramfs and kexec-loaded
-# it, which adds tens of seconds on the first dracut build. It is a timeout, not a fixed wait —
-# _await_ready returns the instant the marker appears, so the wider ceiling costs nothing on a fast
-# boot and the _CRASH_SIGNATURE fail-fast still surfaces a panicked boot immediately.
 class _LibvirtDomain(Protocol):
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
     def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
@@ -139,7 +146,7 @@ class LocalLibvirtBooter:
         *,
         connect: Connect,
         readiness: Readiness,
-        boot_window_polls: int = _DEFAULT_BOOT_WINDOW_POLLS,
+        boot_window_polls: int,
     ) -> None:
         self._connect = connect
         self._readiness = readiness
@@ -484,7 +491,7 @@ class LocalLibvirtInstall:
         fetch_initrd: Fetch,
         readiness: Readiness,
         staging_root: Path,
-        boot_window_polls: int = _DEFAULT_BOOT_WINDOW_POLLS,
+        boot_window_polls: int,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
     ) -> None:
@@ -523,6 +530,7 @@ class LocalLibvirtInstall:
             fetch_initrd=_real_fetch,
             readiness=_real_readiness,
             staging_root=staging_root,
+            boot_window_polls=_boot_window_polls(),
             fetch_modules=_real_fetch,
             kernel_writer=_RealGuestKernelWriter(),
         )

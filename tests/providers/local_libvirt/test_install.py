@@ -962,6 +962,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         fetch_initrd=_initrd_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
+        boot_window_polls=3,
     )
     # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
     installer.install(_request(cmdline="console=ttyS0", method=CaptureMethod.CONSOLE))
