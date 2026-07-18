@@ -26,7 +26,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
-from kdive.db.repositories import ALLOCATIONS, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
@@ -37,6 +37,7 @@ from kdive.jobs import queue
 from kdive.jobs.payloads import (
     WATCH_DEFAULT_DEADLINE_S,
     WATCH_MAX_DEADLINE_S,
+    CaptureTrafficPayload,
     PowerPayload,
     SysRqPayload,
     SystemPayload,
@@ -56,13 +57,22 @@ from kdive.mcp.tools._common import (
     authz_denied as _authz_denied,
 )
 from kdive.mcp.tools._common import (
+    capability_unsupported as _capability_unsupported,
+)
+from kdive.mcp.tools._common import (
     config_error as _config_error,
+)
+from kdive.mcp.tools._common import (
+    invalid_uuid_error as _invalid_uuid_error,
 )
 from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools._idempotency import keyed_mutation
+from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security import audit
+from kdive.security.artifacts.bpf_filter import hygiene_reason
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOp, DestructiveOpDenied, assert_destructive_allowed
 from kdive.security.authz.rbac import Role, require_role
@@ -73,6 +83,19 @@ _POWER_KIND = "control.power"
 _FORCE_CRASH_KIND = "control.force_crash"
 _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
 _WATCH_FOR_CRASH_KIND = "control.watch_for_crash"
+_CAPTURE_TRAFFIC_KIND = "control.capture_traffic"
+
+# capture_traffic bounds (ADR-0384, #1258). Single source of truth for the tool's `Field`
+# constraints and descriptions — interpolated into both so an agent never sees a hardcoded bound.
+CAPTURE_MIN_DURATION_S = 1
+CAPTURE_MAX_DURATION_S = 300
+CAPTURE_DEFAULT_DURATION_S = 30
+CAPTURE_MIN_BYTES = 1048576  # 1 MiB
+CAPTURE_MAX_BYTES = 536870912  # 512 MiB
+CAPTURE_DEFAULT_BYTES = 67108864  # 64 MiB
+CAPTURE_MIN_SNAPLEN = 1
+CAPTURE_MAX_SNAPLEN = 262144
+CAPTURE_DEFAULT_SNAPLEN = 128
 # The agent-facing allowlist rendered into the `command` Field description (single source of
 # truth is `SysRqCommand`; ADR-0285).
 _SYSRQ_COMMANDS = ", ".join(command.value for command in SysRqCommand)
@@ -368,6 +391,125 @@ async def watch_for_crash_system(
             )
 
 
+async def capture_traffic_system(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    resolver: ProviderResolver,
+    run_id: str,
+    duration_s: int,
+    max_bytes: int,
+    snaplen: int,
+    capture_filter: str | None,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
+    """Admit a `capture_traffic` job for a Run whose bound System is a ready local-libvirt guest.
+
+    Run-addressed (like ``vmcore.fetch``): ``with_runtime_for_run`` resolves the Run's bound
+    provider runtime and applies the ``contributor`` role gate (an unbound Run or foreign project is
+    refused there), then the inner path enforces the ``READY`` precondition, the provider's
+    ``supports_traffic_capture`` capability, and BPF-filter hygiene. No job row is created on any
+    rejection.
+    """
+    return await with_runtime_for_run(
+        pool,
+        resolver,
+        ctx,
+        run_id,
+        lambda runtime: _capture_traffic(
+            pool,
+            ctx,
+            run_id=run_id,
+            duration_s=duration_s,
+            max_bytes=max_bytes,
+            snaplen=snaplen,
+            capture_filter=capture_filter,
+            runtime=runtime,
+            idempotency_key=idempotency_key,
+        ),
+        required_role=Role.CONTRIBUTOR,
+    )
+
+
+async def _capture_traffic(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    run_id: str,
+    duration_s: int,
+    max_bytes: int,
+    snaplen: int,
+    capture_filter: str | None,
+    runtime: ProviderRuntime,
+    idempotency_key: str | None = None,
+) -> ToolResponse:
+    uid = _as_uuid(run_id)
+    if uid is None:
+        return _invalid_uuid_error("run_id", run_id)
+    with bind_context(principal=ctx.principal):
+        async with pool.connection() as conn:
+            run = await RUNS.get(conn, uid)
+            if run is None or run.project not in ctx.projects:
+                return _config_error(run_id)
+            if run.system_id is None:
+                return _config_error(
+                    run_id,
+                    detail="run is not bound to a system; cannot capture traffic",
+                    data={"reason": "run_unbound"},
+                )
+            system = await SYSTEMS.get(conn, run.system_id)
+            if system is None:
+                return _config_error(run_id)
+            if system.state is not SystemState.READY:
+                return _config_error(
+                    run_id,
+                    detail=(
+                        "system must be in READY state to capture traffic; current state = "
+                        f"{system.state.value}"
+                    ),
+                    data={"current_status": system.state.value},
+                )
+            if not runtime.support.supports_traffic_capture:
+                return _capability_unsupported(
+                    run_id,
+                    capability="traffic_capture",
+                    provider=runtime.support.component_sources.provider,
+                    supported=[],
+                )
+            reason = hygiene_reason(capture_filter)
+            if reason is not None:
+                return _config_error(
+                    run_id,
+                    detail="capture filter is invalid",
+                    data={"reason": "invalid_filter", "detail": reason},
+                )
+
+            async def _enqueue() -> ToolResponse:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.CAPTURE_TRAFFIC,
+                    CaptureTrafficPayload(
+                        run_id=run_id,
+                        duration_s=duration_s,
+                        max_bytes=max_bytes,
+                        snaplen=snaplen,
+                        capture_filter=capture_filter,
+                    ),
+                    job_authorizing(ctx, run.project),
+                    f"{run_id}:capture_traffic",
+                )
+                return job_envelope(job, "run_id", uid)
+
+            return await keyed_mutation(
+                conn,
+                idempotency_key=idempotency_key,
+                principal=ctx.principal,
+                project=run.project,
+                kind=_CAPTURE_TRAFFIC_KIND,
+                do_work=_enqueue,
+            )
+
+
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `control.*` tools on ``app``, bound to ``pool``."""
 
@@ -518,5 +660,89 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             system_id=system_id,
             deadline_s=deadline_s,
             resolver=resolver,
+            idempotency_key=idempotency_key,
+        )
+
+    @app.tool(
+        name="control.capture_traffic",
+        annotations=_docmeta.mutating(),
+        meta=_docmeta.maturity_meta("implemented"),
+    )
+    async def control_capture_traffic(
+        run_id: Annotated[
+            str,
+            Field(
+                description="The Run whose bound ready local-libvirt System's traffic to capture."
+            ),
+        ],
+        duration_s: Annotated[
+            int,
+            Field(
+                ge=CAPTURE_MIN_DURATION_S,
+                le=CAPTURE_MAX_DURATION_S,
+                description=(
+                    "Capture window in seconds "
+                    f"({CAPTURE_MIN_DURATION_S}-{CAPTURE_MAX_DURATION_S}); the job auto-stops when "
+                    "it elapses. Cancel early with jobs.cancel."
+                ),
+            ),
+        ] = CAPTURE_DEFAULT_DURATION_S,
+        max_bytes: Annotated[
+            int,
+            Field(
+                ge=CAPTURE_MIN_BYTES,
+                le=CAPTURE_MAX_BYTES,
+                description=(
+                    "Stop early once the pcap reaches this many bytes "
+                    f"({CAPTURE_MIN_BYTES}-{CAPTURE_MAX_BYTES})."
+                ),
+            ),
+        ] = CAPTURE_DEFAULT_BYTES,
+        snaplen: Annotated[
+            int,
+            Field(
+                ge=CAPTURE_MIN_SNAPLEN,
+                le=CAPTURE_MAX_SNAPLEN,
+                description=(
+                    "Bytes captured per packet "
+                    f"({CAPTURE_MIN_SNAPLEN}-{CAPTURE_MAX_SNAPLEN}); the default "
+                    f"{CAPTURE_DEFAULT_SNAPLEN} captures headers only. Raise it to keep payloads."
+                ),
+            ),
+        ] = CAPTURE_DEFAULT_SNAPLEN,
+        capture_filter: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional pcap-filter(7)/tcpdump BPF expression applied after capture "
+                    "(e.g. 'tcp port 80'); the interface is fixed by the platform. Omit to keep "
+                    "every captured packet."
+                )
+            ),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
+        ] = None,
+    ) -> ToolResponse:
+        """Capture host-side network traffic from a Run's bound ready local-libvirt guest into a
+        Run-owned pcap. Only the guest's SSH-forward netdev is visible (the platform runs the guest
+        on a restricted user-mode network), so this sees the traffic on that path, not arbitrary
+        guest egress. Requires contributor; enqueues a fixed-duration job and returns
+        `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result` is the
+        captured pcap's artifact id; the pcap is sensitive (packet bytes) and is fetched only with
+        `artifacts.fetch_raw(run_id, asset="pcap", artifact_id=<refs.result>)`, which presigns a
+        download URL — `artifacts.get` will not serve it. A 24-byte pcap means the capture saw zero
+        packets. An unbound Run, a non-ready System, a provider that does not support capture, or an
+        invalid `capture_filter` is a `configuration_error`; no job is created."""
+        return await capture_traffic_system(
+            pool,
+            current_context(),
+            resolver=resolver,
+            run_id=run_id,
+            duration_s=duration_s,
+            max_bytes=max_bytes,
+            snaplen=snaplen,
+            capture_filter=capture_filter,
             idempotency_key=idempotency_key,
         )
