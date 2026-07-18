@@ -120,10 +120,10 @@ class ExpectedBootFailure(DomainBase):
     """Run-scoped expected boot failure metadata (ADR-0064, ADR-0266).
 
     ``kind`` is either the custom-pattern lane ``console_crash`` (the caller supplies
-    ``pattern``) or one of the named presets ``oops``/``panic``/``hung_task``, which resolve to a
-    canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A preset takes
-    no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name and the
-    canonical pattern, so the record states which signature the Run was matched against.
+    ``pattern``) or one of the named presets ``oops``/``panic``/``hung_task``/``ubsan``, which
+    resolve to a canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A
+    preset takes no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name
+    and the canonical pattern, so the record states which signature the Run was matched against.
 
     This model validates the incoming request once and is then persisted as serialized JSON
     (``SerializedExpectedBootFailure``); ``Run.expected_boot_failure`` holds that raw object, not
@@ -133,7 +133,7 @@ class ExpectedBootFailure(DomainBase):
     this model — match on the raw dict, as ``expected_crash_matched_line`` does.
     """
 
-    kind: Literal["console_crash", "oops", "panic", "hung_task"]
+    kind: Literal["console_crash", "oops", "panic", "hung_task", "ubsan"]
     pattern: str = Field(min_length=1, max_length=256)
     description: str | None = Field(default=None, max_length=256)
 

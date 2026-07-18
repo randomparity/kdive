@@ -251,9 +251,9 @@ def _register_runs_create(
                 default=None,
                 description=(
                     "Optional declared boot crash. Use a named preset for a maintained, version- "
-                    "and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, or "
-                    "{'kind':'hung_task'} - a preset takes no 'pattern' and expands to a canonical "
-                    "kernel console signature. For a custom signature use "
+                    "and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, "
+                    "{'kind':'hung_task'}, or {'kind':'ubsan'} - a preset takes no 'pattern' and "
+                    "expands to a canonical kernel console signature. For a custom signature use "
                     "{'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a "
                     "custom 'pattern' are mutually exclusive. The pattern is matched as a "
                     "case-sensitive literal substring (not a regex), tested line-by-line against "

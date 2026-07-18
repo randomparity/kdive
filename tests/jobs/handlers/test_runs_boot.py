@@ -719,3 +719,129 @@ def test_boot_and_capture_forwards_accel_to_booter(monkeypatch: pytest.MonkeyPat
     )
     assert spy.accel_seen == "tcg"
     assert result["boot_outcome"] == "ready"
+
+
+# --- expected_boot_failure evaluated on the ready path (ADR-0383, #1267) ---------------------
+
+
+class _ExpectedFailureRun:
+    """Run stand-in for the ready path carrying a declared expected_boot_failure."""
+
+    def __init__(self, system_id: UUID, expected: object) -> None:
+        self._system_id = system_id
+        self.id = uuid4()
+        self.expected_boot_failure = expected
+
+    def require_system_id(self) -> UUID:
+        return self._system_id
+
+
+class _ReadyBooter:
+    """Booter that returns cleanly — the readiness marker fired."""
+
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        del system_id, accel
+
+
+def _run_ready_path(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    expected: object,
+    console: bytes,
+) -> tuple[BootStepResult, list[object]]:
+    audits: list[object] = []
+
+    async def _cap(*_a: object, **_k: object) -> object:
+        return boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", console)
+
+    async def _audit(_conn: object, _ctx: object, run: object) -> None:
+        audits.append(run)
+
+    async def _system_gone(_conn: object, _sid: object) -> None:
+        return None
+
+    monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _system_gone)
+
+    async def _go() -> BootStepResult:
+        return await runs_boot._run_boot_and_capture_outcome(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, _ExpectedFailureRun(uuid4(), expected)),
+            cast(Booter, _ReadyBooter()),
+            cast(Connector, object()),
+            cast(ProfilePolicy, object()),
+            cast(SecretRegistry, object()),
+            cast(ObjectStore, object()),
+            None,
+            0,
+            accel=None,
+        )
+
+    return asyncio.run(_go()), audits
+
+
+_MARKER_THEN_UBSAN_PANIC = (
+    b"[    1.0] booting\n"
+    b"kdive-ready\n"
+    b"[    2.0] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34\n"
+    b"[    2.1] Kernel panic - not syncing: sanitizer trap\n"
+)
+
+
+def test_ready_boot_downgrades_to_expected_crash_when_panic_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A regression run declaring an expected panic whose splat lands *after* the readiness
+    # marker must record expected_crash_observed, not a false ready (#1267).
+    result, audits = _run_ready_path(
+        monkeypatch,
+        expected={"kind": "panic", "pattern": "Kernel panic"},
+        console=_MARKER_THEN_UBSAN_PANIC,
+    )
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert result["expectation_matched"] is True
+    assert "Kernel panic" in result["matched_line"]
+    # record_expected_crash audits the outcome exactly once; the ready-path audit is skipped.
+    assert len(audits) == 1
+
+
+def test_ready_boot_downgrades_to_expected_crash_when_ubsan_declared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, audits = _run_ready_path(
+        monkeypatch,
+        expected={"kind": "ubsan", "pattern": "UBSAN:"},
+        console=_MARKER_THEN_UBSAN_PANIC,
+    )
+    assert result["boot_outcome"] == "expected_crash_observed"
+    assert "UBSAN:" in result["matched_line"]
+    assert len(audits) == 1
+
+
+def test_ready_boot_stays_ready_when_declared_signature_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Declared expectation, but the console never shows it: the boot is a genuine ready.
+    result, audits = _run_ready_path(
+        monkeypatch,
+        expected={"kind": "panic", "pattern": "Kernel panic"},
+        console=b"[    1.0] booting\nkdive-ready\n[    2.0] all services up\n",
+    )
+    assert result["boot_outcome"] == "ready"
+    assert len(audits) == 1
+
+
+def test_ready_boot_stays_ready_without_expectation_even_with_post_marker_panic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Blast-radius guard: a Run with no expected_boot_failure is never reclassified, even if
+    # its console shows a post-marker panic. Only declared-expectation Runs are downgraded.
+    result, audits = _run_ready_path(
+        monkeypatch,
+        expected=None,
+        console=_MARKER_THEN_UBSAN_PANIC,
+    )
+    assert result["boot_outcome"] == "ready"
+    assert len(audits) == 1

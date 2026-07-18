@@ -346,6 +346,40 @@ async def record_expected_crash(
     }
 
 
+async def evaluate_expected_failure_after_ready(
+    conn: AsyncConnection,
+    job_ctx: RequestContext,
+    run: Run,
+    *,
+    system_id: UUID,
+    profile_policy: ProfilePolicy,
+    artifact: ConsoleArtifact | None,
+) -> BootStepResult | None:
+    """Downgrade a ready boot to ``expected_crash_observed`` iff the declared failure is present.
+
+    The readiness marker fires before a late crash, so ``booter.boot`` returns and the boot
+    reaches the ready path even when the kernel panics *after* ``kdive-ready`` (ADR-0383, #1267).
+    When the Run declared ``expected_boot_failure`` and its captured console — which includes the
+    post-marker output — shows the declared signature, record ``expected_crash_observed`` via the
+    same path the readiness-failure branch uses; otherwise return ``None`` and leave ``ready``
+    intact. Gated on a declared expectation, so a Run without one is never reclassified.
+    """
+    if run.expected_boot_failure is None or artifact is None or not artifact.data:
+        return None
+    matched_line = expected_crash_matched_line(run, artifact.data)
+    if matched_line is None:
+        return None
+    return await record_expected_crash(
+        conn,
+        job_ctx,
+        run,
+        system_id=system_id,
+        profile_policy=profile_policy,
+        artifact=artifact,
+        matched_line=matched_line,
+    )
+
+
 async def record_boot_audit(
     conn: AsyncConnection,
     job_ctx: RequestContext,
