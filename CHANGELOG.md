@@ -117,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skip oidc pre-build when image already exists locally
 - Bump the github-actions group across 1 directory with 5 updates
 - Bump the python-dependencies group across 1 directory with 8 updates
+- Bump the docker-images group across 1 directory with 2 updates
 
 ### Scripts
 
