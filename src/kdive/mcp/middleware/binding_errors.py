@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.server.middleware import Middleware
 from fastmcp.tools.base import ToolResult
 from pydantic import ValidationError
@@ -139,18 +140,43 @@ class BindingErrorMiddleware(Middleware):
         context: Any,
         call_next: Callable[[Any], Any],
     ) -> Any:
-        """Dispatch one call; re-envelope a recognised binding ``ValidationError``."""
+        """Dispatch one call; re-envelope a recognised binding ``ValidationError``.
+
+        FastMCP raises the binding failure two ways: a tool body that rebuilds its
+        payload lets a raw ``pydantic.ValidationError`` escape, while argument binding
+        of a typed parameter wraps it in ``fastmcp.exceptions.ValidationError`` (with the
+        pydantic error as ``__cause__``). Handle both so the envelope is produced
+        regardless of which path FastMCP took.
+        """
         conversion = _BINDING_CONVERSIONS.get(context.message.name)
         if conversion is None:
             return await call_next(context)
         try:
             return await call_next(context)
-        except ValidationError as exc:
-            if not conversion.matches(exc):
+        except FastMCPValidationError as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, ValidationError):
                 raise
-            object_id = _binding_object_id(context, conversion.id_paths)
-            envelope = conversion.build(object_id, exc)
-            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+            envelope = self._enveloped(context, conversion, cause)
+            if envelope is None:
+                raise
+            return envelope
+        except ValidationError as exc:
+            envelope = self._enveloped(context, conversion, exc)
+            if envelope is None:
+                raise
+            return envelope
+
+    @staticmethod
+    def _enveloped(
+        context: Any, conversion: _BindingConversion, exc: ValidationError
+    ) -> ToolResult | None:
+        """The uniform envelope for a recognised binding error, or None to re-raise."""
+        if not conversion.matches(exc):
+            return None
+        object_id = _binding_object_id(context, conversion.id_paths)
+        envelope = conversion.build(object_id, exc)
+        return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
 
 def _binding_object_id(context: Any, id_paths: tuple[tuple[str, ...], ...]) -> str:

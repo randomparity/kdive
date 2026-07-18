@@ -11,6 +11,7 @@ from typing import Annotated, Any, cast
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import NotFoundError, ToolError
+from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools.base import Tool, ToolResult
 from pydantic import Field, ValidationError
 
@@ -151,7 +152,9 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
                 ),
             )
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
-        except ValidationError:
+        except ValidationError, FastMCPValidationError:
+            # FastMCP 3.4.4 wraps a binding pydantic ValidationError in its own
+            # ValidationError; both mean the caller's arguments failed schema validation.
             envelope = ToolResponse.failure(
                 "tools.invoke",
                 ErrorCategory.CONFIGURATION_ERROR,

@@ -69,5 +69,8 @@ def test_invalid_bearer_token_still_gets_vendored_error() -> None:
 def test_missing_authorization_still_gets_vendored_error() -> None:
     resp = _post({})
     assert resp.status_code == 401
-    # No Authorization at all → vendored auth path, not our bare-token hint.
-    assert resp.json()["error"] != "invalid_request"
+    # No Authorization at all → vendored auth path, not our bare-token hint. FastMCP's
+    # RequireAuthMiddleware answers a wholly missing credential with a bodyless 401 carrying a
+    # `WWW-Authenticate: Bearer` challenge, unlike our hint's `invalid_request` JSON body.
+    assert resp.headers.get("www-authenticate", "").startswith("Bearer")
+    assert "invalid_request" not in resp.text
