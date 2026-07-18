@@ -5,6 +5,13 @@ name: Changelog Sync
 # conventional-commit history (git-cliff) and, if it changed, commit the delta
 # straight back to main as a skipped `chore(changelog)` commit.
 #
+# Branch protection: main is guarded by a ruleset (require-PR + required checks)
+# that blocks the default GITHUB_TOKEN, and a personal repo can't grant the
+# GitHub Actions integration a ruleset bypass. So the push authenticates with a
+# write **deploy key** (secret CHANGELOG_DEPLOY_KEY) — the ruleset's `DeployKey`
+# bypass lets only that key push directly; ordinary human pushes still hit the
+# rule. See docs/development/releasing.md → "Changelog automation".
+#
 # Loop-safety: `paths-ignore: CHANGELOG.md` means a push that only touches the
 # changelog (i.e. this workflow's own commit) does not re-trigger it, and the
 # `[skip ci]` marker keeps ci.yml from running on that generated commit.
@@ -33,7 +40,7 @@ jobs:
     name: regenerate Unreleased
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # commits the regenerated CHANGELOG.md back to main
+      contents: read  # the push uses the deploy key over SSH, not GITHUB_TOKEN
     steps:
       - name: Checkout (full history + tags for git-cliff)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -54,9 +61,16 @@ jobs:
       - name: Regenerate CHANGELOG
         run: just changelog
 
-      - name: Commit and push if the changelog changed
+      - name: Configure the deploy key for pushing
         env:
-          GH_TOKEN: ${{ github.token }}
+          DEPLOY_KEY: ${{ secrets.CHANGELOG_DEPLOY_KEY }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/changelog_deploy_key"
+          chmod 600 "$HOME/.ssh/changelog_deploy_key"
+          echo "GIT_SSH_COMMAND=ssh -i $HOME/.ssh/changelog_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" >> "$GITHUB_ENV"
+
+      - name: Commit and push if the changelog changed
         run: |
           if git diff --quiet -- CHANGELOG.md; then
             echo "CHANGELOG already current — nothing to sync."
@@ -66,7 +80,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add CHANGELOG.md
           git commit -m "chore(changelog): sync [Unreleased] section [skip ci]"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # Push over SSH as the deploy key — the ruleset's DeployKey bypass admits it.
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
           if ! git push "$remote" HEAD:main; then
             # main advanced under us (another merge landed); rebase the regen and retry once.
             git pull --rebase "$remote" main

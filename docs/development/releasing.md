@@ -120,10 +120,15 @@ commit — so the `[Unreleased]` section stays current with no manual step. The 
 CI run. `just changelog` remains the manual escape hatch (it is exactly what the workflow runs)
 for previewing the changelog locally.
 
-> **Branch protection.** The workflow pushes to `main` with the built-in `GITHUB_TOKEN`. If
-> `main` is protected against direct pushes, add the `github-actions[bot]` actor (or this
-> workflow) to the rule's bypass list — otherwise the sync push is rejected and the changelog
-> falls stale again.
+> **Branch protection.** `main` is guarded by the *protect main* ruleset (require-PR + required
+> `lint · type · test`, no force-push/deletion, merge/rebase only — squash is blocked to keep
+> `git bisect` history intact). A personal repo **cannot** grant the GitHub Actions integration a
+> ruleset bypass, and a `GITHUB_TOKEN`-opened PR does not trigger the required CI, so the sync
+> can neither push directly nor auto-merge under the default token. Instead the workflow pushes
+> over SSH with a write **deploy key** (Actions secret `CHANGELOG_DEPLOY_KEY`) that the ruleset's
+> `DeployKey` bypass admits — only that key bypasses; human pushes still go through PRs. The key
+> does not expire; to rotate it, generate a new ed25519 keypair, replace the repo deploy key
+> (`changelog-sync (auto)`) and the `CHANGELOG_DEPLOY_KEY` secret.
 
 ## Version reporting
 
