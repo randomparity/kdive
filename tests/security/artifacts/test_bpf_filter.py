@@ -1,4 +1,4 @@
-"""BPF capture-filter hygiene, validation, and trim (ADR-0384)."""
+"""BPF capture-filter hygiene, validation, and trim (ADR-0385)."""
 
 from __future__ import annotations
 

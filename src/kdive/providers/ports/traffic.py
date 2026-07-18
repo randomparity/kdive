@@ -1,4 +1,4 @@
-"""Traffic-capture provider port (ADR-0384): host-side pcap of a running guest's netdev.
+"""Traffic-capture provider port (ADR-0385): host-side pcap of a running guest's netdev.
 
 Thin primitives — the worker handler owns the bounded poll loop and cancellation, so a provider
 only attaches/detaches a capture sink keyed on the provider domain name (DB-free, like the

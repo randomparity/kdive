@@ -1,4 +1,4 @@
-"""Endianness-aware libpcap record counter (ADR-0384).
+"""Endianness-aware libpcap record counter (ADR-0385).
 
 Reads the 4-byte magic to pick byte order (``0xa1b2c3d4`` native / ``0xd4c3b2a1`` swapped, plus the
 nanosecond variants ``0xa1b23c4d`` / ``0x4d3cb2a1``), then walks 16-byte record headers by

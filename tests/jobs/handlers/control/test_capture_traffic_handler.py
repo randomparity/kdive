@@ -1,4 +1,4 @@
-"""Tests for the capture_traffic worker job handler (ADR-0384, #1258).
+"""Tests for the capture_traffic worker job handler (ADR-0385, #1258).
 
 Drives ``capture_traffic_handler`` directly with an in-memory object store and a migrated
 Postgres connection. A fake TrafficCapturer writes a canned pcap to the dest path on ``attach``;

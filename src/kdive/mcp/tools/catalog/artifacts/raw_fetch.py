@@ -65,7 +65,7 @@ async def _resolve_key(
 
     All assets are gated on the **Run's** project: ``vmlinux`` is the Run's ``debuginfo_ref``, the
     raw ``vmcore`` is Run-owned (``owner_kind='runs'``, ADR-0244), and a ``pcap`` is Run-owned
-    (ADR-0384) — selected by ``artifact_id`` (validated to belong to the Run) or the newest when
+    (ADR-0385) — selected by ``artifact_id`` (validated to belong to the Run) or the newest when
     omitted. A bound Run always shares its System's project (enforced at
     ``services/runs/admission.py`` and ``services/runs/bind.py``), so gating on ``run.project``
     preserves the cross-project isolation ADR-0243's System-project re-check provided, with no
@@ -107,7 +107,7 @@ async def fetch_raw(
     presigns a short-lived download URL (``KDIVE_ARTIFACT_DOWNLOAD_TTL_SECONDS``), and audits the
     egress. Returns the URL under ``refs.download_uri`` with ``data.asset``/``data.size_bytes``;
     never returns inline bytes. ``artifact_id`` selects a specific ``pcap`` (a Run may own several;
-    ADR-0384) and is ignored for ``vmcore``/``vmlinux``. Requires ``contributor`` on the asset's
+    ADR-0385) and is ignored for ``vmcore``/``vmlinux``. Requires ``contributor`` on the asset's
     owning project.
     """
     uid = _as_uuid(run_id)

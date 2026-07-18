@@ -40,7 +40,7 @@ class JobKind(StrEnum):
     SNAPSHOT = "snapshot"
     RESTORE = "restore"
     DELETE_SNAPSHOT = "delete_snapshot"
-    # Host-side network traffic capture (ADR-0384): async because a filter-dump runs for a bounded
+    # Host-side network traffic capture (ADR-0385): async because a filter-dump runs for a bounded
     # window and stores a Run-owned pcap; contributor-cancelable so a stray capture can be stopped.
     CAPTURE_TRAFFIC = "capture_traffic"
 

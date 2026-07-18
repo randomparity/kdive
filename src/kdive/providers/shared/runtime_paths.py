@@ -66,7 +66,7 @@ def console_log_path(system_id: UUID) -> Path:
 
 
 def pcap_dir(system_id: UUID) -> Path:
-    """The per-System host directory QEMU writes traffic captures into (ADR-0384)."""
+    """The per-System host directory QEMU writes traffic captures into (ADR-0385)."""
     return Path(_PCAP_DIR) / str(system_id)
 
 

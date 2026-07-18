@@ -89,7 +89,7 @@ async def _seed_raw_vmcore_row(pool: AsyncConnectionPool, run_id: str) -> str:
 async def _seed_pcap_row(
     pool: AsyncConnectionPool, run_id: str, name: str, *, created_at: str
 ) -> tuple[str, UUID]:
-    """Insert a Run-owned pcap artifact row (ADR-0384); return (object_key, artifact_id)."""
+    """Insert a Run-owned pcap artifact row (ADR-0385); return (object_key, artifact_id)."""
     key = f"proj/runs/{run_id}/{name}"
     async with pool.connection() as conn:
         row = await (
@@ -308,7 +308,7 @@ def test_fetch_raw_writes_audit_row(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-# --- pcap egress (ADR-0384) ---------------------------------------------------------------
+# --- pcap egress (ADR-0385) ---------------------------------------------------------------
 
 
 def test_fetch_raw_pcap_by_id_presigns_url(migrated_url: str) -> None:

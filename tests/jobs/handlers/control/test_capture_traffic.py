@@ -1,4 +1,4 @@
-"""Worker handler for capture_traffic: poll loop + snapshot/store (ADR-0384)."""
+"""Worker handler for capture_traffic: poll loop + snapshot/store (ADR-0385)."""
 
 from __future__ import annotations
 

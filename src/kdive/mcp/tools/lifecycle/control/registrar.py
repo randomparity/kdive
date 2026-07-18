@@ -85,7 +85,7 @@ _DIAGNOSTIC_SYSRQ_KIND = "control.diagnostic_sysrq"
 _WATCH_FOR_CRASH_KIND = "control.watch_for_crash"
 _CAPTURE_TRAFFIC_KIND = "control.capture_traffic"
 
-# capture_traffic bounds (ADR-0384, #1258). Single source of truth for the tool's `Field`
+# capture_traffic bounds (ADR-0385, #1258). Single source of truth for the tool's `Field`
 # constraints and descriptions — interpolated into both so an agent never sees a hardcoded bound.
 CAPTURE_MIN_DURATION_S = 1
 CAPTURE_MAX_DURATION_S = 300

@@ -1,4 +1,4 @@
-"""Live proof of ``LocalLibvirtTrafficCapture`` against a real KVM domain (#1258, ADR-0384).
+"""Live proof of ``LocalLibvirtTrafficCapture`` against a real KVM domain (#1258, ADR-0385).
 
 ``live_vm``-gated: the operator points ``KDIVE_LIVE_VM_ROOTFS`` at a bootable qcow2 (any
 kdive-ready rootfs works — the guest need not finish booting, only the QEMU process must run so

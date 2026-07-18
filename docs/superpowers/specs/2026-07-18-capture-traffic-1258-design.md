@@ -1,7 +1,7 @@
 # Spec: Host-side network traffic capture (#1258)
 
 - Issue: #1258 "Add Network Traffic Capture Tool"
-- ADR: [ADR-0384](../../adr/0384-host-side-traffic-capture.md)
+- ADR: [ADR-0385](../../adr/0385-host-side-traffic-capture.md)
 - Status: Design accepted
 
 ## Problem
@@ -137,7 +137,7 @@ below), not the job envelope.
   dies when the domain stops. The one residual — a `SIGKILL` on the *final* attempt with no retry — is bounded:
   the filter captures only low-volume SSH-forward traffic on the default `restrict=on` NIC and is
   freed at the next domain stop. A dedicated `qemuMonitorCommand` reconciler reaper is a named
-  follow-up, not warranted at priority:low (see ADR-0384 rejected alternatives).
+  follow-up, not warranted at priority:low (see ADR-0385 rejected alternatives).
 
 ## Provider seam
 

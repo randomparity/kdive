@@ -272,7 +272,7 @@ class CaptureTrafficPayload(RunPayload):
 
     Run-addressed (like :class:`CaptureVmcorePayload`): the pcap is owned by the Run under
     investigation, and the worker resolves the bound System from ``run_id`` to reach the live
-    guest (ADR-0384).
+    guest (ADR-0385).
     """
 
     duration_s: int

@@ -1,4 +1,4 @@
-# ADR-0384: Host-side network traffic capture on local-libvirt (#1258)
+# ADR-0385: Host-side network traffic capture on local-libvirt (#1258)
 
 - Status: Accepted
 - Date: 2026-07-18

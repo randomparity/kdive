@@ -118,7 +118,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "control.force_crash": _ADMIN,
     "control.diagnostic_sysrq": _CONTRIBUTOR,  # non-destructive diagnostic capture, ADR-0285
     "control.watch_for_crash": _CONTRIBUTOR,  # non-destructive out-of-band console watch, ADR-0367
-    "control.capture_traffic": _CONTRIBUTOR,  # host-side guest pcap capture, ADR-0384
+    "control.capture_traffic": _CONTRIBUTOR,  # host-side guest pcap capture, ADR-0385
     # debug
     "debug.list_breakpoints": _CONTRIBUTOR,
     "debug.get_session": _VIEWER,

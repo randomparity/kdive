@@ -763,7 +763,7 @@ async def teardown_handler(
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
-    # Host-filesystem reclaim (ADR-0384): capture_traffic pcaps are written to local disk by QEMU
+    # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
     # an object-store reclaim failure below cannot skip it (and vice versa).

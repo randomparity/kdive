@@ -1,4 +1,4 @@
-"""Endianness-aware pcap record counting (ADR-0384)."""
+"""Endianness-aware pcap record counting (ADR-0385)."""
 
 from __future__ import annotations
 

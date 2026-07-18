@@ -9,7 +9,7 @@
 **Tech Stack:** Python 3.14, `uv`, FastMCP, psycopg (async), `libvirt`/`libvirt_qemu`, boto3 object store, pytest.
 
 **Spec:** `docs/superpowers/specs/2026-07-18-capture-traffic-1258-design.md`
-**ADR:** `docs/adr/0384-host-side-traffic-capture.md`
+**ADR:** `docs/adr/0385-host-side-traffic-capture.md`
 
 ## Global Constraints
 
@@ -67,7 +67,7 @@
 - [ ] **Step 1: Write the migration.** Create `0072_capture_traffic_job_kind.sql`. Copy the `jobs_kind_check` drop/recreate from `0071_system_snapshots.sql` and append `'capture_traffic'` to the `CHECK (kind IN (...))` list (keep all existing values incl. `snapshot`/`restore`/`delete_snapshot`). Header comment (no `ADR-NNNN` ban applies to SQL comments, but keep it factual):
 
 ```sql
--- 0072_capture_traffic_job_kind.sql — host-side network traffic capture job kind (#1258, ADR-0384).
+-- 0072_capture_traffic_job_kind.sql — host-side network traffic capture job kind (#1258, ADR-0385).
 -- Forward-only (ADR-0015), additive. Widens jobs.kind to admit the `capture_traffic` job kind:
 -- control.capture_traffic enqueues one job whose handler runs a QEMU filter-dump on a ready
 -- local-libvirt guest's netdev for a bounded window, storing a Run-owned SENSITIVE pcap.
@@ -200,7 +200,7 @@ def test_traffic_capture_is_fail_closed_by_default():
 - [ ] **Step 3: Implement the port.** Create `providers/ports/traffic.py`:
 
 ```python
-"""Traffic-capture provider port (ADR-0384): host-side pcap of a running guest's netdev.
+"""Traffic-capture provider port (ADR-0385): host-side pcap of a running guest's netdev.
 
 Thin primitives — the worker handler owns the bounded poll loop and cancellation, so a provider
 only attaches/detaches a capture sink keyed on the provider domain name (DB-free, like Controller).
@@ -393,7 +393,7 @@ def test_not_a_pcap_is_zero():
 - [ ] **Step 3: Implement `pcap_count.py`.**
 
 ```python
-"""Endianness-aware libpcap record counter (ADR-0384).
+"""Endianness-aware libpcap record counter (ADR-0385).
 
 Reads the 4-byte magic to pick byte order (0xa1b2c3d4 native / 0xd4c3b2a1 swapped, plus the
 nanosecond variants 0xa1b23c4d / 0x4d3cb2a1), then walks 16-byte record headers by ``incl_len``.
@@ -528,7 +528,7 @@ def test_validate_bpf_metachars_are_not_shell_interpreted(tmp_path):
 - [ ] **Step 3: Implement.**
 
 ```python
-"""BPF capture-filter hygiene, validation, and post-capture trim (ADR-0384).
+"""BPF capture-filter hygiene, validation, and post-capture trim (ADR-0385).
 
 The agent-supplied filter is the trailing pcap-filter(7) expression of a tcpdump line. It is passed
 to tcpdump as a single argv element (never a shell string), validated compile-only with

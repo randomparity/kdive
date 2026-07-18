@@ -100,7 +100,7 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
 
 
 async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | None) -> str | None:
-    """Object key of a Run-owned pcap: the exact one by ``artifact_id``, or the newest (ADR-0384).
+    """Object key of a Run-owned pcap: the exact one by ``artifact_id``, or the newest (ADR-0385).
 
     A Run may own several pcaps (one per ``capture_traffic`` job). ``artifact_id`` selects one and
     validates it belongs to this Run (``owner_kind='runs'``, ``retention_class='pcap'``); ``None``

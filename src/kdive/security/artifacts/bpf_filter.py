@@ -1,4 +1,4 @@
-"""BPF capture-filter hygiene, validation, and post-capture trim (ADR-0384).
+"""BPF capture-filter hygiene, validation, and post-capture trim (ADR-0385).
 
 The agent-supplied filter is the trailing pcap-filter(7) expression of a tcpdump line. It is passed
 to tcpdump as a single argv element (never a shell string), validated compile-only with

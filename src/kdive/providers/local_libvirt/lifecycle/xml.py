@@ -26,7 +26,7 @@ from kdive.providers.shared.runtime_paths import (
 _LOOPBACK_HOST = "127.0.0.1"
 
 # The netdev id QEMU renders for a ready System's single SSH-forward NIC. Shared so the traffic
-# capture path (ADR-0384) attaches a filter-dump to the same netdev without re-hardcoding the
+# capture path (ADR-0385) attaches a filter-dump to the same netdev without re-hardcoding the
 # literal — a rename here moves both in lockstep.
 SYSTEM_SSH_NETDEV_ID = "kdivessh"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()

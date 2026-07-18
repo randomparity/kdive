@@ -1,4 +1,4 @@
-"""Worker handler for the `capture_traffic` job (ADR-0384, #1258).
+"""Worker handler for the `capture_traffic` job (ADR-0385, #1258).
 
 Runs a QEMU filter-dump on a ready local-libvirt guest's SSH netdev for a bounded window and
 stores the pcap as a Run-owned SENSITIVE artifact. The provider port is thin (attach/detach); this
