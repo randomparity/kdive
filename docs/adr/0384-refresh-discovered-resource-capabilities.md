@@ -55,7 +55,13 @@ guarded so the insert-only safety properties survive.
    the `KDIVE_LIBVIRT_ALLOCATION_CAP` default (fail-open: re-opening placement an operator
    blocked). The overlay keeps that key stable while still rolling out every other discovery
    change. The `UPDATE` is change-guarded — it writes only when the merged value differs from the
-   stored one, so an unchanged discovery source is a pure read.
+   stored one, so an unchanged discovery source is a pure read. The exists-branch existence probe
+   becomes a `SELECT capabilities … FOR UPDATE` (replacing the bare `SELECT 1`): the refresh and
+   `ops.set_host_capacity` derive their *advisory* keys from different columns (`host_uri` vs the
+   NULL `name`) so they do not serialize there, but both touch the same physical row and
+   `set_host_capacity` already reads it `FOR UPDATE`; making the refresh read `FOR UPDATE` too
+   serializes them on the row lock, so a concurrent operator cap change cannot be lost to a stale
+   overlay read.
 
 4. **`creates=True` scope preserves the remote-connect safety structurally.** The registrar
    already returns early for `creates=False`. Only local-libvirt is `creates=True`;
@@ -85,8 +91,16 @@ No schema change, no migration, no new tool, no new error category.
   the next onboard or process start. The #1151-class manual row recreation is no longer needed.
 - The exists branch now re-reads the local discovery source on every registration pass (onboard
   + each process start), inside the per-resource advisory-locked transaction — the same place
-  and lock the absent branch already pays for `list_resources()` on cold start. Bounded local
-  connection; no remote connect.
+  and lock the absent branch already pays for `list_resources()` on cold start. The local
+  connect is **untimed**, exactly as the existing cold-start insert read is (this change adds no
+  new timeout); the property that holds is **no remote connect**, and the reconciler path keeps
+  its `PROVIDER_DISCOVERY_TIMEOUT_SECONDS` bound around `register_all_discovery`. A wedged local
+  `libvirtd` hang is a pre-existing residual, unchanged in kind.
+- `concurrent_allocation_cap` becomes row-authoritative once a row is inserted: because
+  discovery always emits it, the overlay cannot distinguish an operator-set value from the
+  insert-time env default, so a later `KDIVE_LIBVIRT_ALLOCATION_CAP` change does not roll out to
+  existing rows (an operator uses `ops.set_host_capacity`). This matches today's insert-only
+  behavior; rolling an env-default change out to existing rows is out of scope.
 - Latent-status-clobber is avoided: a future health path that sets a resource `DEGRADED`/
   `OFFLINE` will not be reset to `AVAILABLE` by a capability refresh.
 - An operator's `ops.set_host_capacity` change to a discovery host survives a refresh (the

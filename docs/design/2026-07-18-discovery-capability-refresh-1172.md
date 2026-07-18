@@ -60,10 +60,26 @@ properties the insert-only choice was protecting.
 
 `ensure_discovered_resource_registered` currently has two branches inside its per-resource
 advisory-locked transaction: **row exists → return** and **row absent → discover + insert**.
-The change adds a refresh to the *exists* branch: discover the current record and `UPDATE` the
-stored `capabilities` in place. The absent branch is left **byte-for-byte identical** to today,
-so cold-start insert behavior — including its "discovery must succeed or the insert fails" —
-does not change.
+The existence probe is today a bare `SELECT 1` (`_resource_exists`). The change replaces that
+probe with a `SELECT capabilities FROM resources WHERE kind = %s AND host_uri = %s FOR UPDATE`
+that both decides the branch and reads the stored `capabilities` under a row lock:
+
+- **absent** (no row) → discover + insert, **byte-for-byte identical** to today (including
+  "discovery must succeed or the insert fails").
+- **exists** (row locked) → discover the current record, compute the merge (below), and
+  change-guarded `UPDATE` the stored `capabilities`.
+
+The `FOR UPDATE` is load-bearing for concurrency, not decoration. The refresh's advisory lock
+keys on `(kind, host_uri)`, but the operator tool `ops.set_host_capacity` serializes on a
+*different* advisory key — `resource_identity_lock(kind, name)`, and `name` is NULL/`""` for a
+discovery-inserted row — so the two writers do **not** mutually exclude at the advisory layer.
+They *do* both touch the same physical row: `ops.set_host_capacity` reads it `FOR UPDATE`
+(`_lock_host_for_cap`) before merging the cap. Making the refresh's read also `FOR UPDATE`
+serializes the two on the Postgres row lock, so a refresh's read-modify-write of `capabilities`
+cannot lose a concurrent operator cap change (whichever transaction commits second sees the
+other's write). Without it, a refresh carrying a genuine discovery change could overlay a stale
+cap read and clobber a just-committed operator cap — the exact fail-open reversion the overlay
+exists to prevent.
 
 Because the function no longer only *ensures registered*, it is renamed
 `register_or_refresh_discovered_resource` (call sites: `providers/assembly/composition.py` and
@@ -104,6 +120,17 @@ Rationale (full detail in ADR-0384):
   additively-filling) lets the refresh correct a *changed* value of a discovery-owned key — e.g.
   a host that gains an arch reports a new `guest_arches` list under the same key — not only a
   net-new key. Additive-only-by-key (the ADR-0384-rejected merge) would miss that.
+
+**Known limitation — `concurrent_allocation_cap` is row-authoritative once inserted.** Because
+local-libvirt discovery *always* emits `concurrent_allocation_cap` (so the key is present from
+insert onward) and the overlay cannot tell an operator-set value from the insert-time env
+default, the stored value always wins for this key. Consequence: changing
+`KDIVE_LIBVIRT_ALLOCATION_CAP` and redeploying rolls out new capability *keys* to an existing
+row but **not** a new default cap — an operator must use `ops.set_host_capacity` to change a
+registered host's cap. This matches today's behavior (insert-only never refreshed anything), so
+it is not a regression; it is called out so a deployer bumping the env default does not expect
+it to propagate to existing rows. Rolling an env-default change out to existing rows is out of
+scope for #1172.
 - `status` from a local discovery record is a hardcoded `AVAILABLE`. Nothing in production
   transitions a resource to `DEGRADED`/`OFFLINE` today, but the state machine permits it; a
   refresh that also rewrote `status` would silently reset any future operationally-set status
@@ -183,17 +210,20 @@ local discovery source on every registration pass (onboard + each process start)
 3. An operator-set `concurrent_allocation_cap` on an existing row **survives** a refresh even
    though the discovery record reports a different (env-default) value — the stored operator
    value wins, and the row still gains any net-new discovery keys in the same pass.
-4. `status`, `pool`, `cost_class`, and `cordoned` on an existing row are **unchanged** by a
+4. The exists-branch capabilities read is `FOR UPDATE`, so a `ops.set_host_capacity` cap change
+   committed concurrently with a refresh that carries a net-new discovery key is **not** lost —
+   the operator cap is present on the final row regardless of commit order.
+5. `status`, `pool`, `cost_class`, and `cordoned` on an existing row are **unchanged** by a
    refresh even when the discovery record would report different values.
-5. A `creates=False` registration (remote-libvirt, fault-inject) remains a bind-only no-op:
+6. A `creates=False` registration (remote-libvirt, fault-inject) remains a bind-only no-op:
    `list_resources()` is **not** called and no row is written.
-6. On the **absent** path, a discovery failure still raises (insert behavior unchanged).
-7. On the **exists** path, a discovery **read** failure (raise, or target record absent from the
+7. On the **absent** path, a discovery failure still raises (insert behavior unchanged).
+8. On the **exists** path, a discovery **read** failure (raise, or target record absent from the
    result) leaves the stored `capabilities` **unchanged** and does not propagate — the pass logs
    and continues.
-8. Change-guard: a refresh against an unchanged discovery source performs the discovery read but
+9. Change-guard: a refresh against an unchanged discovery source performs the discovery read but
    issues **no** `UPDATE` (end-state identical, no write).
-9. Guardrails green: `just lint`, `just type`, `just test`.
+10. Guardrails green: `just lint`, `just type`, `just test`.
 
 ## Test plan
 
@@ -209,5 +239,13 @@ local discovery source on every registration pass (onboard + each process start)
   still never calls `list_resources`. Update
   `test_ensure_discovered_resource_registered_bootstraps_one_row`'s `discovery.calls` expectation
   to reflect the refresh re-read.
+- Concurrency (`tests/services/test_resource_discovery.py`, disposable-Postgres tier): hold a
+  `SELECT … FOR UPDATE` on the resource row in one transaction (simulating an in-flight
+  `ops.set_host_capacity`) and assert a concurrent refresh **blocks** on the row lock until that
+  transaction commits its cap change, then observe the operator cap on the final row. If a true
+  two-transaction interleave is impractical in the harness, fall back to asserting the narrower
+  invariant that the exists-branch read statement is `FOR UPDATE` (so it participates in the row
+  lock) together with the sequential AC3 preservation — and state that coverage boundary
+  explicitly rather than implying the full race is exercised.
 - Rename ripples: `test_register_discovered_resource_is_idempotent` (the standalone upsert
   helper) is unaffected.
