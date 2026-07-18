@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fetch_raw pcap egress by artifact_id
 - Surface supports_traffic_capture on systems.get
 - Teardown reclaims per-System pcap directory
+- Make service ports configurable and guard HTTP port
 
 ### Changed
 
@@ -136,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fail fast on invalid capture filter, always reclaim pcap
 - Prepare pcap dir for hypervisor write; fail loud if unwritten
 - Scope ty ignore for optional selinux binding
+- Forward relocated backend endpoints to the sudo root worker
 
 ### Build
 
