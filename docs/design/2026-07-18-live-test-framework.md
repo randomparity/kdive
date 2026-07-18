@@ -115,10 +115,12 @@ Two consequences follow, and they correct an easy misconception:
   under TCG is minutes-scale and variable, so this tier carries an explicit job
   timeout and a target boot-to-panic wall-time, and the PR-gate-vs-nightly choice
   is made on the measured wall-time and flake rate, not left as "either". The
-  14 GB runner disk must hold the compose backends **and** the ppc64le image set
-  (rootfs + kernel + matching debuginfo) — a distinct, ephemeral input from the
-  self-hosted warm store. Sub-issue C produces both image sets and keeps them
-  separate.
+  runner's guaranteed ~14 GB workspace is supplemented by a larger (~70 GB)
+  `/mnt` scratch volume, so sub-issue C stages the compose backends and the
+  ppc64le image set (rootfs + kernel + matching debuginfo) there and fetches
+  debuginfo on demand rather than pre-baking it, with a measured disk budget as
+  an acceptance criterion. This image set is a distinct, ephemeral input from the
+  self-hosted warm store; C produces both and keeps them separate.
 - **Self-hosted tier — arch-labeled, native-KVM for the host's own arch.**
   - `[self-hosted, kvm, x64]`, Rocky Linux 10 — provisioned in this phase.
   - `[self-hosted, kvm, ppc64le]`, Rocky Linux 10 ppc64le — the north-star
@@ -157,15 +159,25 @@ report green — the "green run that is no coverage" failure this epic exists to
 kill. So the nightly must declare which families it intends to run, and a
 preflight must **fail loud** (the `require_free_http_port` pattern from
 `scripts/live-stack/lib.sh`) when a declared family's required env is absent,
-rather than skipping to green. Whether the nightly stands up a provisioned
-System (live stack + S3) on the runner or runs only the throwaway-domain family
-is a decision sub-issues C and D must make explicit.
+rather than skipping to green. As a roadmap success criterion, the self-hosted
+KVM nightly **must** run the provisioned-System family natively (kdump/install
+on a real System) — that native depth is why the KVM box exists, and emulated
+TCG does not substitute for it (the design's own point that emulation misses
+"arch/accel on real silicon"). The open C/D detail is *how* the runner stands up
+that System (live stack + S3 on the box, or an externally provisioned System by
+id), not *whether* it runs: the family is declared to the fail-loud preflight so
+a missing System fails the job instead of going green.
 
 Because `pytest -m live_vm` selects both families and no sub-marker exists to
 pick one, sub-issue A must add a **family-selection primitive** — distinct
 `live_vm_throwaway` / `live_vm_provisioned` sub-markers under the `live_vm`
 umbrella, or a documented keyword convention — so "declare which families" has a
-real handle and D's fail-loud preflight has a declared-family input.
+real handle and D's fail-loud preflight has a declared-family input. The
+sub-markers are **additive**: every test keeps the bare `live_vm` marker and
+adds its sub-marker, so `-m live_vm` still selects both and the shipped
+`test-live` recipe (`-m "live_vm and not live_vm_tcg"`) is unaffected. Registering
+the new markers in `pyproject.toml` `[tool.pytest.ini_options].markers` is
+required — the tcg lane runs under `--strict-markers`.
 
 ### The environment contract (the seam)
 

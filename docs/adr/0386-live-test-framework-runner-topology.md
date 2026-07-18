@@ -92,11 +92,14 @@ No database migration: this is test infrastructure only.
 - **Keep the tier but leave it dispatch-only and manual.** Rejected: an
   always-skipped suite is not a gate, rots between manual runs, and reads as
   coverage in a green run when it is none.
-- **Run the KVM tier on hosted runners.** Rejected: GitHub documents nested
-  virtualization as unsupported and experimental, and KVM/libvirt specifically
-  is reported to fail there (software emulation is the only reliable hosted
-  path); the 14 GB runner disk cannot hold kdump/vmcore and debuginfo. The
-  hosted runner is kept for the TCG tier, where no `/dev/kvm` is needed.
+- **Run the KVM tier on hosted runners.** Rejected on the binding ground that
+  GitHub documents nested virtualization as unsupported and experimental and
+  KVM/libvirt is reported to fail there (software emulation is the only reliable
+  hosted path), and native-silicon depth needs real hardware regardless. Disk is
+  not the deciding factor — a vmcore and its debuginfo are the same size under
+  either accelerator, and the hosted runner's larger `/mnt` scratch can stage big
+  images — so the hosted runner is kept for the TCG tier, where no `/dev/kvm` is
+  needed.
 - **x86-only harness now, generalize later.** Rejected: retrofitting arch into a
   hardened harness is the expensive path, and ppc64le is the primary target.
   Parameterizing arch from the start makes the POWER runner a drop-in.
