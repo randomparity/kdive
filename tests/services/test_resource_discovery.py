@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import ResourceStatus
@@ -229,6 +231,28 @@ def test_absent_branch_discovery_failure_raises(migrated_url: str) -> None:
                 await cur.execute("SELECT count(*) FROM resources")
                 row = await cur.fetchone()
         assert row is not None and row[0] == 0  # nothing inserted
+
+    asyncio.run(_run())
+
+
+_REFRESH_LOGGER = "kdive.providers.core.resource_registration"
+
+
+def test_refresh_logs_changed_keys_on_write_and_is_silent_when_unchanged(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            await _ensure(pool, _Discovery())
+            with caplog.at_level(logging.INFO, logger=_REFRESH_LOGGER):
+                caplog.clear()
+                await _ensure(pool, _Discovery(extra={"pseries_fadump": True}))
+                wrote = [r.getMessage() for r in caplog.records if r.name == _REFRESH_LOGGER]
+                caplog.clear()
+                await _ensure(pool, _Discovery(extra={"pseries_fadump": True}))
+                unchanged = [r.getMessage() for r in caplog.records if r.name == _REFRESH_LOGGER]
+        assert any("pseries_fadump" in m for m in wrote)  # write names the changed key
+        assert unchanged == []  # change-guarded no-op logs nothing
 
     asyncio.run(_run())
 

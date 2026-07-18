@@ -136,6 +136,13 @@ async def _refresh_capabilities(
     merged = _merge_capabilities(record["capabilities"], stored)
     if merged == stored:
         return
+    changed = sorted(k for k in merged.keys() | stored.keys() if merged.get(k) != stored.get(k))
+    # A refresh that writes rolls out admission-affecting capability keys (e.g. pseries_fadump,
+    # guest_arches, accel). Log the changed keys at INFO so a capability rollout that alters a
+    # host's admission behavior is greppable during incident diagnosis (#1172 / #1151).
+    _log.info(
+        "refreshing capabilities for %s:%s; changed keys: %s", kind.value, resource_id, changed
+    )
     async with conn.cursor() as cur:
         await cur.execute(
             "UPDATE resources SET capabilities = %s WHERE kind = %s AND host_uri = %s",
