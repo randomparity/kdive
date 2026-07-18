@@ -8,6 +8,13 @@ export KDIVE_DATABASE_URL="${KDIVE_DATABASE_URL:-${default_database_url}}"
 export KDIVE_OIDC_ISSUER="${KDIVE_OIDC_ISSUER:-http://localhost:8090/default}"
 export KDIVE_OIDC_JWKS_URI="${KDIVE_OIDC_JWKS_URI:-http://localhost:8090/default/jwks}"
 export KDIVE_OIDC_AUDIENCE="${KDIVE_OIDC_AUDIENCE:-kdive}"
+# Lifetime (seconds) of the demo token onboard.sh and examples/local-libvirt/mint-token.sh mint.
+# Single source of truth: both scripts source this file, so this one default reaches both. The
+# bundled mock issuer accepts any caller and enforces no maximum, so locally the lifetime is a UX
+# choice, not a security boundary — default 30d so a multi-day build->boot->debug->capture cycle
+# never hits mid-session expiry (each expiry forces a re-mint AND an MCP client reconnect, since
+# the client only re-reads ${KDIVE_TOKEN} on reconnect). Overridable; DEMO ONLY.
+export KDIVE_TOKEN_TTL="${KDIVE_TOKEN_TTL:-2592000}"
 # On QEMU-emulated ppc64le hosts the maven builder stage's JVM TLS is unreliable
 # (reproducible bad_record_mac / Tag mismatch fetching runtime jars from Maven Central,
 # with `curl` from the same container succeeding — a JDK-on-emulated-POWER crypto path

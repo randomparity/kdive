@@ -81,10 +81,11 @@ def test_happy_path_migrates_seeds_verifies_and_mints(tmp_path: Path) -> None:
     assert "run python -m kdive migrate" in logged
     assert "run python -m kdive seed-project --project demo" in logged
     assert "run python -m kdive verify-project --project demo" in logged
-    assert "86400" in logged  # the mint heredoc TTL
+    assert "2592000" in logged  # the mint heredoc TTL, defaulted from live-stack/env.sh (30d)
     assert 'projects:["demo"]' in result.stdout
     assert 'roles:{"demo":"admin"}' in result.stdout
     assert 'project arg: "demo"' in result.stdout
+    assert "expires in 30d" in result.stdout  # TTL rendered human-readable, not "720h"
     assert "export KDIVE_TOKEN=FAKETOKEN" in result.stdout
 
 
@@ -97,6 +98,16 @@ def test_project_override_threads_one_name(tmp_path: Path) -> None:
     assert "seed-project --project acme" in logged
     assert "verify-project --project acme" in logged
     assert 'projects:["acme"]' in result.stdout
+
+
+def test_token_ttl_override_is_threaded_and_rendered_in_hours(tmp_path: Path) -> None:
+    _bindir, env = _healthy_env(tmp_path)
+    env["KDIVE_TOKEN_TTL"] = "3600"  # a sub-day override exercises the hours branch
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
+    logged = (tmp_path / "uv.log").read_text()
+    assert "3600" in logged  # override threaded into the mint call
+    assert "expires in 1h" in result.stdout  # not "1d", not a bare second count
 
 
 def test_preflight_failure_is_advisory(tmp_path: Path) -> None:

@@ -255,7 +255,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
 | `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
-| `KDIVE_TOKEN_TTL` | `86400` | Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` mints (default 24h). |
+| `KDIVE_TOKEN_TTL` | `2592000` | Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` and `examples/local-libvirt/mint-token.sh` mint; default from `scripts/live-stack/env.sh` (default 30d). Positive integer; the mock issuer enforces no maximum. |
 | `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
 
 ## In-guest helpers

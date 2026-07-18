@@ -393,9 +393,10 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
     ExternalEnvVar(
         "KDIVE_TOKEN_TTL",
         "script",
-        "86400",
-        "Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` mints "
-        "(default 24h).",
+        "2592000",
+        "Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` and "
+        "`examples/local-libvirt/mint-token.sh` mint; default from `scripts/live-stack/env.sh` "
+        "(default 30d). Positive integer; the mock issuer enforces no maximum.",
     ),
     ExternalEnvVar(
         "KDIVE_LIMIT_KCU",
