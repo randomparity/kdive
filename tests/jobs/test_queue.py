@@ -16,7 +16,12 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import RETIRED_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import Authorizing, InstallPayload, SystemPayload
+from kdive.jobs.payloads import (
+    AuthorizeSshKeyPayload,
+    Authorizing,
+    InstallPayload,
+    SystemPayload,
+)
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -816,6 +821,61 @@ def test_recent_jobs_investigation_filter_excludes_other_project(migrated_url: s
                 conn, limit=10, projects=["proj"], investigation_id=inv_row[0]
             )
         assert recent == []
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_filters_by_system_id(migrated_url: str) -> None:
+    async def _run() -> None:
+        target = uuid4()
+        async with await _connect(migrated_url) as conn:
+            await _enqueue_with_state(
+                conn,
+                JobKind.AUTHORIZE_SSH_KEY,
+                JobState.SUCCEEDED,
+                "mine",
+                payload=AuthorizeSshKeyPayload(
+                    system_id=str(target), public_key="ssh-ed25519 AAAA"
+                ).model_dump(mode="json"),
+            )
+            await _enqueue_with_state(
+                conn,
+                JobKind.AUTHORIZE_SSH_KEY,
+                JobState.SUCCEEDED,
+                "other-system",
+                payload=SystemPayload(system_id=str(uuid4())).model_dump(mode="json"),
+            )
+            recent = await queue.recent_jobs(conn, limit=10, projects=["proj"], system_id=target)
+        assert [j.dedup_key for j in recent] == ["mine"]
+
+    asyncio.run(_run())
+
+
+def test_recent_jobs_system_scoped_job_excluded_from_investigation_filter(
+    migrated_url: str,
+) -> None:
+    async def _run() -> None:
+        target = uuid4()
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run_in_investigation(conn)
+            inv_row = await (
+                await conn.execute("SELECT investigation_id FROM runs WHERE id = %s", (run_id,))
+            ).fetchone()
+            assert inv_row is not None
+            # A check_ssh_reachable job carries system_id but no run_id.
+            await _enqueue_with_state(
+                conn,
+                JobKind.CHECK_SSH_REACHABLE,
+                JobState.SUCCEEDED,
+                "ssh-probe",
+                payload=SystemPayload(system_id=str(target)).model_dump(mode="json"),
+            )
+            by_system = await queue.recent_jobs(conn, limit=10, projects=["proj"], system_id=target)
+            by_investigation = await queue.recent_jobs(
+                conn, limit=10, projects=["proj"], investigation_id=inv_row[0]
+            )
+        assert [j.dedup_key for j in by_system] == ["ssh-probe"]
+        assert [j.dedup_key for j in by_investigation] == []
 
     asyncio.run(_run())
 

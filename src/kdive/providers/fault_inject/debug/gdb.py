@@ -98,6 +98,18 @@ class FaultInjectDebugEngine:
     def continue_(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
         return GdbStopRecord(reason="breakpoint-hit", stopped_thread="1")
 
+    def step(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        return GdbStopRecord(reason="end-stepping-range", stopped_thread="1")
+
+    def next(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        return GdbStopRecord(reason="end-stepping-range", stopped_thread="1")
+
+    def step_instruction(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        return GdbStopRecord(reason="end-stepping-range", stopped_thread="1")
+
+    def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        return GdbStopRecord(reason="function-finished", stopped_thread="1")
+
     def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         return GdbStopRecord(reason="signal-received", stopped_thread="1")
 

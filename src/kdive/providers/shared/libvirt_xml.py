@@ -167,12 +167,33 @@ def parse_host_capabilities_cpu(caps_xml: str) -> ParsedHostCpu | None:
 
 
 def parse_selectable_cpus(dom_caps_xml: str) -> list[str]:
-    """Sorted, de-duplicated ``custom``-mode ``usable='yes'`` model names (ADR-0369).
+    """Sorted, de-duplicated ``custom``-mode pinnable model names (ADR-0369).
 
-    The exact set libvirt accepts in a ``<cpu mode='custom'><model>`` for this ``(arch, machine,
-    virttype)`` — the host-derived allow-list for a guest CPU pin. Returns ``[]`` on a parse fault,
-    an unsupported custom mode, or an empty usable set (discovery omits the key rather than
-    advertising ``[]``). Parsed with ``defusedxml`` (crosses the libvirtd trust boundary).
+    Includes models whose ``usable`` attribute is ``'yes'`` **or** ``'unknown'``, and excludes
+    only explicit ``'no'``.
+
+    **Rationale.** On x86_64 hosts, QEMU probes each custom model against KVM capabilities and
+    reports ``yes``/``no`` definitively. On ppc64le (and other non-x86 arches) the QEMU/libvirt
+    driver does not implement this probe — it reports every model as ``'unknown'``. ``'unknown'``
+    therefore means "QEMU did not check" rather than "this host cannot run it". Excluding
+    ``'unknown'`` on ppc64le would leave ``selectable_cpus`` empty even though ``POWER9``,
+    ``POWER10``, etc. are perfectly valid pins on a native KVM-HV POWER host (``virsh define``
+    with ``<cpu mode='custom'><model>POWER9</model>`` succeeds without error).
+
+    The conservative boundary is ``usable='no'``, which is libvirt's explicit "this host provably
+    cannot run this model" signal. Everything else — ``yes``, ``unknown``, and a missing
+    ``usable`` attribute (treated as ``unknown``: "QEMU did not check") — is admitted.
+
+    **Guard strength varies by arch.** On x86_64 the ``yes``/``no`` probe makes this an accurate
+    host-deliverable allow-list. On probe-less arches (ppc64le) where every model is ``unknown``,
+    the allow-list degrades to "not explicitly refused": it admits the full QEMU-known model set,
+    including generations newer than the host (e.g. ``POWER11`` on a POWER9). Such a pin passes
+    admission and fails later at domain define / boot rather than at selection — an unavoidable
+    consequence of the missing probe, not a check that can be tightened here.
+
+    Returns ``[]`` on a parse fault, an unsupported custom mode, or an empty set after filtering.
+    Discovery omits the arch key rather than advertising ``[]``. Parsed with ``defusedxml``
+    (crosses the libvirtd trust boundary).
     """
     try:
         root: ET.Element = _safe_fromstring(dom_caps_xml)
@@ -184,7 +205,7 @@ def parse_selectable_cpus(dom_caps_xml: str) -> list[str]:
         for mode in root.findall("./cpu/mode")
         if mode.get("name") == "custom" and mode.get("supported") != "no"
         for model in mode.findall("model")
-        if model.get("usable") == "yes" and (name := (model.text or "")).strip()
+        if model.get("usable") != "no" and (name := (model.text or "")).strip()
     }
     return sorted(models)
 

@@ -75,9 +75,9 @@ class ExecutionControl:
     ) -> GdbStopRecord:
         if timeout_sec < 0 or not math.isfinite(timeout_sec):
             raise CategorizedError(
-                "gdb/MI continue timeout must be a finite non-negative number",
+                "gdb/MI resume timeout must be a finite non-negative number",
                 category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"code": "bad_continue_timeout", "timeout_sec": timeout_sec},
+                details={"code": "bad_resume_timeout", "timeout_sec": timeout_sec},
             )
         requested = math.ceil(timeout_sec) if timeout_sec else MAX_INTERACTIVE_WAIT_SEC
         bounded = max(1, min(requested, MAX_INTERACTIVE_WAIT_SEC))

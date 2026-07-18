@@ -79,6 +79,10 @@ _AUDITED_OPS: frozenset[str] = frozenset(
         "debug.clear_watchpoint",
         "debug.continue",
         "debug.interrupt",
+        "debug.step",
+        "debug.next",
+        "debug.step_instruction",
+        "debug.finish",
         "debug.load_module_symbols",
     }
 )

@@ -334,12 +334,10 @@ def test_lifecycle_allocation_wrappers_roundtrip_through_fastmcp(
                     "allocations.request",
                     {
                         "project": "proj",
-                        "request": {
-                            "vcpus": 1,
-                            "memory_gb": 1,
-                            "disk_gb": 10,
-                            "resource": {"mode": "kind", "kind": "local-libvirt"},
-                        },
+                        "vcpus": 1,
+                        "memory_gb": 1,
+                        "disk_gb": 10,
+                        "resource": {"mode": "kind", "kind": "local-libvirt"},
                     },
                 )
                 fetched = await _call_tool(
@@ -379,12 +377,10 @@ def test_systems_provision_resolves_fault_inject_runtime(
                     "allocations.request",
                     {
                         "project": "proj",
-                        "request": {
-                            "vcpus": 4,
-                            "memory_gb": 4,
-                            "disk_gb": 20,
-                            "resource": {"mode": "id", "resource_id": resource_id},
-                        },
+                        "vcpus": 4,
+                        "memory_gb": 4,
+                        "disk_gb": 20,
+                        "resource": {"mode": "id", "resource_id": resource_id},
                     },
                 )
                 provisioned = await _call_tool(
@@ -449,12 +445,10 @@ def test_runs_wrappers_roundtrip_create_and_validation_through_fastmcp(
                     client,
                     "runs.create",
                     {
-                        "request": {
-                            "investigation_id": investigation_id,
-                            "system_id": system_id,
-                            "build_profile": _RUN_BUILD_PROFILE,
-                            "reuse_requirement": {"vcpus": 1, "memory_gb": 1, "disk_gb": 1},
-                        }
+                        "investigation_id": investigation_id,
+                        "system_id": system_id,
+                        "build_profile": _RUN_BUILD_PROFILE,
+                        "reuse_requirement": {"vcpus": 1, "memory_gb": 1, "disk_gb": 1},
                     },
                 )
                 invalid = await _call_tool(client, "runs.get", {"run_id": "not-a-uuid"})

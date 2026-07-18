@@ -311,7 +311,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                         op,
                         "allocations.request",
                         project=_PROJECT,
-                        request={
+                        **{
                             "vcpus": 2,
                             "memory_gb": 2,
                             "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -352,7 +352,7 @@ def test_post_readiness_console_parts_grow_beyond_run_evidence() -> None:
                     await scalar(
                         op,
                         "runs.create",
-                        request={
+                        **{
                             "investigation_id": investigation_id,
                             "system_id": system_id,
                             "build_profile": _build_profile(),

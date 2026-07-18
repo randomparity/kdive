@@ -178,16 +178,63 @@ def test_artifacts_list_returns_redacted_only(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_artifacts_list_carries_total_and_truncated(migrated_url: str) -> None:
+def test_artifacts_list_bounded_page_carries_truncated_and_null_cursor(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, _, _ = await _seed_system_with_artifacts(pool)
             resp = await artifacts_list(pool, _ctx(), system_id=sys_id)
-        assert resp.data["total"] == len(resp.items)
         assert resp.data["truncated"] is False
-        assert "next_cursor" not in resp.data  # bounded set; no cursor
+        assert resp.data["next_cursor"] is None  # a page that fits carries no continuation
+        assert "total" not in resp.data  # keyset lists report truncation, not a page-size total
 
     asyncio.run(_run())
+
+
+def test_artifacts_list_keyset_paginates_over_limit(migrated_url: str) -> None:
+    """An over-limit System scope surfaces truncated + next_cursor and pages without overlap."""
+
+    async def _seed_console(pool: AsyncConnectionPool, sys_id: str, name: str) -> str:
+        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class) VALUES ('systems', %s, %s, 'e', 'redacted', 'console') "
+                "RETURNING id",
+                (sys_id, f"k/systems/{sys_id}/{name}"),
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            return str(row["id"])
+
+    async def _run() -> tuple[set[str], list[str], bool, bool]:
+        async with _pool(migrated_url) as pool:
+            sys_id = await seed_crashed_system(pool)
+            seeded = {await _seed_console(pool, sys_id, f"console-{i:03d}") for i in range(3)}
+            first = await artifacts_list(pool, _ctx(), system_id=sys_id, limit=2)
+            cursor = first.data["next_cursor"]
+            assert isinstance(cursor, str)
+            second = await artifacts_list(pool, _ctx(), system_id=sys_id, limit=2, cursor=cursor)
+        collected = [r.object_id for r in first.items] + [r.object_id for r in second.items]
+        return seeded, collected, bool(first.data["truncated"]), bool(second.data["truncated"])
+
+    seeded, collected, first_truncated, second_truncated = asyncio.run(_run())
+    assert first_truncated is True
+    assert second_truncated is False
+    assert len(collected) == 3  # no overlap across the two pages
+    assert set(collected) == seeded
+
+
+def test_artifacts_list_rejects_foreign_cursor(migrated_url: str) -> None:
+    """A cursor minted by a different tool is an invalid_cursor error, not a silent first page."""
+
+    async def _run() -> Any:
+        async with _pool(migrated_url) as pool:
+            sys_id, _, _ = await _seed_system_with_artifacts(pool)
+            return await artifacts_list(pool, _ctx(), system_id=sys_id, cursor="not-a-valid-cursor")
+
+    resp = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
+    assert data_str(resp, "reason") == "invalid_cursor"
 
 
 def test_artifacts_list_requires_viewer_role(migrated_url: str) -> None:

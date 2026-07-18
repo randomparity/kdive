@@ -26,6 +26,8 @@ _IDLE_PUMP_BACKOFF_SECONDS = 0.5
 _RUNNING_SYSTEM_STATE_VALUES = (
     SystemState.READY.value,
     SystemState.REPROVISIONING.value,
+    SystemState.RESTORING.value,  # keep streaming the console across a revert (ADR-0378)
+    SystemState.PAUSED.value,  # keep streaming while the guest is suspended (ADR-0378)
     SystemState.CRASHING.value,  # keep streaming the crash-window console (#1078)
     SystemState.CRASHED.value,
 )

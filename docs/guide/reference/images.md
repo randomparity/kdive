@@ -10,13 +10,9 @@ Enqueue an image build job.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Public image build request. |
-
-`request` fields:
-
-- `provider` (`string`, required) — The provider whose plane builds or built the image.
-- `name` (`string`, required) — The catalog image name.
-- `packages` (`array<string>`, optional) — Optional package override; omitted uses the provider catalog default.
+| `name` | string | yes | The catalog image name. |
+| `packages` | array<string> | no | Optional package override; omitted uses the provider catalog default. |
+| `provider` | string | yes | The provider whose plane builds or built the image. |
 
 ## `images.delete`
 
@@ -132,13 +128,9 @@ Publish a built image into the catalog.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Public image publish request. |
-
-`request` fields:
-
-- `provider` (`string`, required) — The provider whose plane builds or built the image.
-- `name` (`string`, required) — The catalog image name.
-- `packages` (`array<string>`, optional) — Optional package override; omitted uses the provider catalog default.
+| `name` | string | yes | The catalog image name. |
+| `packages` | array<string> | no | Optional package override; omitted uses the provider catalog default. |
+| `provider` | string | yes | The provider whose plane builds or built the image. |
 
 ## `images.upload`
 
@@ -148,12 +140,8 @@ Create an image upload request.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Private image upload registration request. |
-
-`request` fields:
-
-- `project` (`string`, required) — The owning project for the private image.
-- `name` (`string`, required) — The catalog image name.
-- `arch` (`string`, required) — The target architecture.
-- `quarantine_key` (`string`, required) — The object-store key of the quarantined upload.
-- `lifetime_seconds` (`integer (nullable)`, optional) — TTL seconds (clamped to the ceiling); default applies.
+| `arch` | string | yes | The target architecture. |
+| `lifetime_seconds` | integer (nullable) | no | TTL seconds (clamped to the ceiling); default applies. |
+| `name` | string | yes | The catalog image name. |
+| `project` | string | yes | The owning project for the private image. |
+| `quarantine_key` | string | yes | The object-store key of the quarantined upload. |

@@ -38,6 +38,7 @@ from kdive.providers.ports.lifecycle import (
     TransportHandleKind,
 )
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.debug.sessions import active_session_ids_for_run, active_session_ids_for_system
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
@@ -475,7 +476,9 @@ def test_runs_get_surfaces_active_debug_session_ids(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id, run_id, _ = await _seeded_session(pool, DebugSessionState.LIVE)
-            resp = await _get_run(pool, _ctx(), run_id, resolver=provider_resolver())
+            resp = await _get_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(), secret_registry=SecretRegistry()
+            )
         assert resp.data["active_debug_session_ids"] == [session_id]
 
     asyncio.run(_run())
@@ -485,7 +488,7 @@ def test_systems_get_surfaces_active_debug_session_ids(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id, _, sys_id = await _seeded_session(pool, DebugSessionState.LIVE)
-            resp = await _get_system(pool, _ctx(), sys_id)
+            resp = await _get_system(pool, _ctx(), sys_id, resolver=provider_resolver())
         assert resp.data["active_debug_session_ids"] == [session_id]
 
     asyncio.run(_run())
@@ -495,7 +498,9 @@ def test_runs_get_active_debug_session_ids_empty_when_detached(migrated_url: str
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             _, run_id, _ = await _seeded_session(pool, DebugSessionState.DETACHED)
-            resp = await _get_run(pool, _ctx(), run_id, resolver=provider_resolver())
+            resp = await _get_run(
+                pool, _ctx(), run_id, resolver=provider_resolver(), secret_registry=SecretRegistry()
+            )
         assert resp.data["active_debug_session_ids"] == []
 
     asyncio.run(_run())

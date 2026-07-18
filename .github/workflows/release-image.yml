@@ -29,16 +29,31 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify tag matches pyproject version
+        # A v* tag build bakes RELEASE=true (X.Y.Z+g<sha>), so the tag must equal the packaged
+        # version or the image self-reports a version that disagrees with its :X.Y.Z tag. Mirror
+        # the guard release.yml enforces for the wheel (this job has no runtime --version gate) and
+        # the git-derived stamp-buildinfo.sh path — so an operator's forgotten pyproject bump fails
+        # here instead of publishing a signed, mislabeled release image (ADR-0370).
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          expected="v$version"
+          if [ "${GITHUB_REF_NAME}" != "$expected" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != pyproject $expected" >&2
+            exit 1
+          fi
+
       - name: Set up QEMU
         # Registers binfmt_misc handlers so buildx can build the linux/ppc64le layer
         # under emulation on this amd64 runner (ADR-0359). No POWER runner is required.
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -46,7 +61,7 @@ jobs:
 
       - name: Derive image tags and labels
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/randomparity/kdive
           # On main: a moving :edge plus an immutable :sha-<short>. On a v* tag:
@@ -61,12 +76,29 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
+      - name: Resolve build provenance
+        # The short SHA baked into the image (ADR-0370). --short=12 pins the width so it matches
+        # the wheel built by release.yml for the same tag; this shallow checkout still has HEAD.
+        # Fail loudly on an empty SHA: this job has no runtime --version assertion (the multi-arch
+        # manifest is pushed, never loaded/run), so a silent empty SHA would skip the Dockerfile
+        # stamp and publish a release image mislabeled X.Y.Z-dev with no gate to catch it.
+        id: prov
+        run: |
+          sha="$(git rev-parse --short=12 HEAD)"
+          [ -n "$sha" ] || { echo "::error::empty provenance SHA from git rev-parse" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
+          # Bake honest version provenance into the running image (ADR-0370): a v* tag is a
+          # release (X.Y.Z+g<sha>), a main push is not (X.Y.Z-dev+g<sha>).
+          build-args: |
+            KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
+            KDIVE_RELEASE=${{ startsWith(github.ref, 'refs/tags/v') }}
           # Publish a multi-arch manifest (ADR-0359). ppc64le builds under QEMU emulation,
           # which compiles the sdist-only deps (grpcio, drgn, libvirt-python) from source and
           # is the slow leg of this job; the tradeoff and its alternatives are recorded in the

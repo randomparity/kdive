@@ -62,8 +62,7 @@ _PLACEHOLDER_BASE_IMAGE = "REPLACE_ME-base-image-volume"
 # disk-image example omits it entirely. kernel_source_ref is an inert provenance annotation with
 # no runtime reader and no valid-value set to discover — any non-empty string is accepted, so the
 # example value below is illustrative, not something the caller must look up or match. It is kept
-# non-URI-looking anyway, only so it isn't mistaken for the unrelated runs.create structured
-# {"git": {...}} build source, which has real dispatch semantics.
+# non-URI-looking anyway, only so it isn't mistaken for a fetchable reference.
 _PLACEHOLDER_KERNEL_SOURCE = "example-baseline-label"
 
 _REPLACE_NOTE = (
@@ -71,15 +70,14 @@ _REPLACE_NOTE = (
     "reference) with a real value for your host before provisioning. kernel_source_ref is an "
     "arbitrary provenance label you choose (any non-empty string) for the baseline kernel — there "
     "is no valid-value set to discover or match against, so the example value can be kept as-is or "
-    'replaced with any label meaningful to you. It is unrelated to the structured {"git": '
-    '{"remote": ..., "ref": ...}} build source at runs.create. The disk-image example needs no '
-    "kernel_source_ref: it boots the operator-staged base image's own kernel. The local-libvirt "
-    "example's provider.local-libvirt.debug block (gdbstub/preserve_on_crash) is bound at "
-    "systems.provision: set it here if you intend to debug or triage this System, since it cannot "
-    "be added to a System that is already provisioned without reprovisioning. The provider "
-    "destructive_ops list opts into force_crash (deliberate kernel crash / fault injection) "
-    "only; leave it empty unless you need that. control.power (reboot/off/cycle/reset) and "
-    "systems.reprovision are contributor lifecycle and do not require it."
+    "replaced with any label meaningful to you; it is not a fetchable reference. The disk-image "
+    "example needs no kernel_source_ref: it boots the operator-staged base image's own kernel. "
+    "The local-libvirt example's provider.local-libvirt.debug block (gdbstub/preserve_on_crash) "
+    "is bound at systems.provision: set it here if you intend to debug or triage this System, "
+    "since it cannot be added to a System that is already provisioned without reprovisioning. "
+    "The provider destructive_ops list opts into force_crash (deliberate kernel crash / fault "
+    "injection) only; leave it empty unless you need that. control.power (reboot/off/cycle/reset) "
+    "and systems.reprovision are contributor lifecycle and do not require it."
 )
 
 # Sizing guidance (#461): the example carries concrete vcpu/memory_mb/disk_gb so it parses alone

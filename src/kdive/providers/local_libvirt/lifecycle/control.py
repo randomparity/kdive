@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, assert_never
 
 import libvirt
 
@@ -53,6 +53,7 @@ class _LibvirtDomain(Protocol):
     def destroy(self) -> int: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
+    def resume(self) -> int: ...
     def injectNMI(self, flags: int) -> int: ...
     def sendKey(  # noqa: N802 - mirrors the libvirt binding name
         self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
@@ -165,8 +166,17 @@ class LocalLibvirtControl:
                 self._idempotent(domain.destroy, "stopping", domain_name)
             elif action is PowerAction.RESET:
                 domain.reset(0)
-            else:  # PowerAction.CYCLE
+            elif action is PowerAction.RESUME:
+                # Idempotent like on/off: resuming an already-running domain (a completion-window
+                # redelivery after the resume already landed) raises OPERATION_INVALID, the
+                # achieved post-state, and is treated as success.
+                self._idempotent(domain.resume, "resuming", domain_name)
+            elif action is PowerAction.CYCLE:
                 domain.reboot(0)
+            else:
+                # Explicit exhaustiveness: a new PowerAction can never silently fall through to a
+                # guest reboot (ADR-0378). ``assert_never`` fails type-check if a member is missed.
+                assert_never(action)
         except libvirt.libvirtError as exc:
             raise self._control_failure(f"{action.value}-ing", domain_name) from exc
 

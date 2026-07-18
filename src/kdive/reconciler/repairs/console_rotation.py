@@ -30,8 +30,12 @@ _log = logging.getLogger(__name__)
 # A System whose libvirt domain has booted and is not yet torn down: its console log is growing
 # (or holds a captured crash), so rotation must keep running. `defined`/`provisioning` have not
 # booted; `reprovisioning` is mid-rebuild with the domain down; `torn_down`/`failed` are gone.
+# `restoring` (mid snapshot-revert, domain up) and `paused` (suspended guest, domain up) keep a
+# live/growing console (ADR-0378).
 _LIVE_SYSTEM_STATES: tuple[str, ...] = (
     SystemState.READY.value,
+    SystemState.RESTORING.value,
+    SystemState.PAUSED.value,
     SystemState.CRASHING.value,
     SystemState.CRASHED.value,
 )

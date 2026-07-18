@@ -126,6 +126,10 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "debug.end_session": _CONTRIBUTOR,
     "debug.continue": _CONTRIBUTOR,
     "debug.interrupt": _CONTRIBUTOR,
+    "debug.step": _CONTRIBUTOR,
+    "debug.next": _CONTRIBUTOR,
+    "debug.step_instruction": _CONTRIBUTOR,
+    "debug.finish": _CONTRIBUTOR,
     "debug.set_breakpoint": _CONTRIBUTOR,
     "debug.clear_breakpoint": _CONTRIBUTOR,
     "debug.read_memory": _CONTRIBUTOR,
@@ -223,6 +227,10 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.ssh_info": _VIEWER,
     "systems.check_ssh_reachable": _VIEWER,
     "systems.authorize_ssh_key": _CONTRIBUTOR,  # add a key to a VM the caller already sudos
+    "systems.snapshot": _CONTRIBUTOR,  # checkpoint a leaseholder's own transient VM (ADR-0378)
+    "systems.restore": _CONTRIBUTOR,
+    "systems.list_snapshots": _VIEWER,
+    "systems.delete_snapshot": _CONTRIBUTOR,
     # vmcore
     "vmcore.list": _VIEWER,
     "vmcore.fetch": _CONTRIBUTOR,

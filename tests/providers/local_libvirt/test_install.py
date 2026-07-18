@@ -43,6 +43,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
 from kdive.providers.local_libvirt.lifecycle.install import (
     Fetch,
     LocalLibvirtInstall,
+    _boot_window_polls,
     _stage_object,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
@@ -243,6 +244,24 @@ def _install(
         fetch_modules=fetch_modules or fetch,
         kernel_writer=kernel_writer,
     )
+
+
+def test_boot_window_polls_default_is_180(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 900 s default / 5 s poll cadence = 180 polls (the widened POWER9-friendly window).
+    monkeypatch.delenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", raising=False)
+    assert _boot_window_polls() == 180
+
+
+def test_boot_window_polls_rounds_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A window not divisible by the 5 s cadence rounds up (math.ceil), so the last partial
+    # interval is still polled — 902 / 5 = 180.4 -> 181, never truncated to 180.
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "902")
+    assert _boot_window_polls() == 181
+
+
+def test_boot_window_polls_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIBVIRT_BOOT_WINDOW_S", "1000")
+    assert _boot_window_polls() == 200
 
 
 def _request(
@@ -962,6 +981,7 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
         fetch_initrd=_initrd_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
+        boot_window_polls=3,
     )
     # CONSOLE + no initrd_ref: no initrd fetched, no <initrd> rendered.
     installer.install(_request(cmdline="console=ttyS0", method=CaptureMethod.CONSOLE))
@@ -1124,6 +1144,7 @@ _MARKER = "kdive-ready"
         "[   22.10] Unable to handle kernel paging request at virtual address 0",
         "[   22.10] BUG: KASAN: slab-out-of-bounds in __d_lookup+0x1a/0x2b",
         "[   22.10] BUG: KFENCE: use-after-free read in d_lookup",
+        "[   22.10] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34",
         "[   22.10] rcu: INFO: rcu_sched self-detected stall on CPU",
     ],
 )
@@ -1135,6 +1156,34 @@ def test_classify_crash_signatures_resolve_crashed(signature_line: str) -> None:
 def test_classify_marker_line_alone_is_ready() -> None:
     data = b"[    0.00] booting\n[    3.40] systemd: reached target\nkdive-ready\n"
     assert classify_console(data, marker=_MARKER) == "ready"
+
+
+def test_classify_marker_after_getty_login_prefix_is_ready() -> None:
+    # #1266: getty prints `kdive login: ` with no trailing newline, so the readiness unit's
+    # marker echoes onto the same line. The marker bytes are present after a token boundary
+    # (the space in `login: `) → ready, not a false boot_timeout.
+    data = b"[    3.40] systemd: reached target\nkdive login: kdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "ready"
+
+
+def test_classify_marker_after_getty_prefix_without_trailing_newline_is_ready() -> None:
+    # The real capture has no trailing newline after the marker on the getty line.
+    data = b"[    3.40] systemd: reached target\nkdive login: kdive-ready"
+    assert classify_console(data, marker=_MARKER) == "ready"
+
+
+def test_classify_marker_glued_to_prefix_token_is_pending() -> None:
+    # A non-whitespace prefix glued to the marker (no token boundary) must not fire, so
+    # `kdive-ready` appearing mid-token elsewhere does not false-positive.
+    data = b"[    3.40] fookdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "pending"
+
+
+def test_classify_getty_prefix_preserves_pre_marker_crash_region() -> None:
+    # The crash scan region ends at the marker; a getty-prefixed marker line must not mask a
+    # crash that preceded it.
+    data = b"[    1.0] Kernel panic - not syncing\nkdive login: kdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "crashed"
 
 
 def test_classify_empty_is_pending() -> None:
@@ -1187,6 +1236,7 @@ def test_classify_malformed_utf8_does_not_raise() -> None:
         ("[22.1] Unable to handle kernel paging request", "Unable to handle kernel"),
         ("[22.1] BUG: KASAN: slab-out-of-bounds in __d_lookup", "BUG:"),
         ("[22.1] BUG: KFENCE: use-after-free read in d_lookup", "BUG:"),
+        ("[22.1] UBSAN: shift-out-of-bounds in kernel/foo.c:12:34", "UBSAN:"),
         ("[22.1] rcu: INFO: rcu_sched self-detected stall on CPU", "detected stall"),
     ],
 )

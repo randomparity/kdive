@@ -57,13 +57,17 @@ def _healthy_local(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     boot.mkdir()
     (boot / "vmlinuz-test").write_text("")
     # Stub bin first so it shadows real python3/virsh/etc.; system bins follow so the
-    # scripts' `dirname` (and other coreutils) resolve.
+    # scripts' `dirname` (and other coreutils) resolve. Point KDIVE_PYTHON at the stub
+    # explicitly: check-local-libvirt.sh now prefers `.venv/bin/python` (present on
+    # dev checkouts and on CI once `uv sync` runs) over the PATH `python3`, and that
+    # venv interpreter does NOT have the stubbed `-c "import guestfs, drgn"` behavior.
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
         "HOME": str(tmp_path),
         "KDIVE_KVM_NODE": str(kvm),
         "KDIVE_INSTALL_STAGING": str(staging),
         "KDIVE_BOOT_DIR": str(boot),
+        "KDIVE_PYTHON": str(bindir / "python3"),
     }
     return bindir, env, calllog
 

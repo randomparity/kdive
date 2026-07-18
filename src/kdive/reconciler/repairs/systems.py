@@ -9,8 +9,8 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import SYSTEMS
-from kdive.domain.capacity.state import AllocationState, JobState, SystemState
+from kdive.db.repositories import SNAPSHOTS, SYSTEMS
+from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState, SystemState
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -130,6 +130,87 @@ async def repair_stalled_crashing_systems(conn: AsyncConnection) -> int:
             await _detach_sessions_reconciler(conn, system)
         recovered += 1
         _log.info("reconciler: stalled crashing system %s -> crashed", system_id)
+    return recovered
+
+
+async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
+    """Recover a `restoring` System whose restore job can never run again -> `failed` (ADR-0378).
+
+    A `restoring` System is fenced (reprovision/power/teardown/snapshot all require `ready`), so a
+    restore whose worker died mid-revert, dead-lettered, or was canceled would strand the System in
+    `restoring` forever — the R3 limbo. If no `restore` job for this System is still active
+    (`queued`/`running`), the handler stopped before committing, and a half-reverted guest is
+    indeterminate, so resolve to `failed` (never back to `ready`). A still-active job is left to the
+    normal retry path. Runs after `repair_abandoned_jobs`, which dead-letters an exhausted job.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT s.id, s.project FROM systems s "
+            "WHERE s.state = %s "
+            "  AND NOT EXISTS ( "
+            "    SELECT 1 FROM jobs j "
+            "    WHERE j.kind = %s "
+            "      AND j.payload->>'system_id' = s.id::text "
+            "      AND j.state = ANY(%s) "
+            "  )",
+            (SystemState.RESTORING.value, JobKind.RESTORE.value, list(_ACTIVE_JOB_STATE_VALUES)),
+        )
+        candidates = [(row["id"], row["project"]) for row in await cur.fetchall()]
+    recovered = 0
+    for system_id, project in candidates:
+        async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system_id):
+            system = await SYSTEMS.get(conn, system_id)
+            if system is None or system.state is not SystemState.RESTORING:
+                continue
+            await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+            await audit.record_system(
+                conn,
+                principal=SYSTEM_RECONCILER_PRINCIPAL,
+                event=audit.AuditEvent(
+                    tool="systems.restore",
+                    object_kind="systems",
+                    object_id=system_id,
+                    transition="restoring->failed",
+                    args={"system_id": str(system_id)},
+                    project=project,
+                ),
+            )
+        recovered += 1
+        _log.info("reconciler: stalled restoring system %s -> failed", system_id)
+    return recovered
+
+
+async def repair_stalled_creating_snapshots(conn: AsyncConnection) -> int:
+    """Recover a `creating` snapshot row whose capture job can never finish -> `failed` (ADR-0378).
+
+    A `SNAPSHOT` worker that died (or a cancel that raced the handler) can strand a `snapshots` row
+    in `creating` with no active job. Resolve it to `failed` so the failed-row recycle path can
+    reclaim the name; the orphaned libvirt snapshot (if the create materialized) is reaped by a
+    same-name re-create's defensive pre-delete, `systems.delete_snapshot`, or teardown's
+    `delete_all`. A still-active `snapshot` job is left to the normal retry path.
+    """
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT sn.id FROM snapshots sn "
+            "WHERE sn.state = %s "
+            "  AND NOT EXISTS ( "
+            "    SELECT 1 FROM jobs j "
+            "    WHERE j.kind = %s "
+            "      AND j.payload->>'snapshot_id' = sn.id::text "
+            "      AND j.state = ANY(%s) "
+            "  )",
+            (SnapshotState.CREATING.value, JobKind.SNAPSHOT.value, list(_ACTIVE_JOB_STATE_VALUES)),
+        )
+        candidates = [row["id"] for row in await cur.fetchall()]
+    recovered = 0
+    for snapshot_id in candidates:
+        async with conn.transaction():
+            snapshot = await SNAPSHOTS.get(conn, snapshot_id)
+            if snapshot is None or snapshot.state is not SnapshotState.CREATING:
+                continue
+            await SNAPSHOTS.update_state(conn, snapshot_id, SnapshotState.FAILED)
+        recovered += 1
+        _log.info("reconciler: stalled creating snapshot %s -> failed", snapshot_id)
     return recovered
 
 

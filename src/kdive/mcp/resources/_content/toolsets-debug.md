@@ -34,6 +34,10 @@ misconfiguration.
 
 - `debug.continue` — resume a halted kernel.
 - `debug.interrupt` — halt a running kernel to inspect it.
+- `debug.step` — advance one source line, into called functions.
+- `debug.next` — advance one source line, over called functions.
+- `debug.step_instruction` — advance one machine instruction (works without debug symbols).
+- `debug.finish` — resume until the current function returns.
 
 ## Breakpoints and watchpoints
 

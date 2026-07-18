@@ -20,6 +20,7 @@ from kdive.domain.capacity.state import (
     JobState,
     ResourceStatus,
     RunState,
+    SnapshotState,
     SystemState,
     can_transition,
     ensure_transition,
@@ -70,9 +71,17 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
             SystemState.CRASHING,
             SystemState.TORN_DOWN,
             SystemState.REPROVISIONING,
+            SystemState.RESTORING,
             SystemState.FAILED,
         },
         SystemState.REPROVISIONING: {SystemState.READY, SystemState.FAILED},
+        SystemState.RESTORING: {
+            SystemState.READY,
+            SystemState.PAUSED,
+            SystemState.TORN_DOWN,
+            SystemState.FAILED,
+        },
+        SystemState.PAUSED: {SystemState.READY, SystemState.TORN_DOWN, SystemState.FAILED},
         SystemState.CRASHING: {
             SystemState.CRASHED,
             SystemState.FAILED,
@@ -103,6 +112,11 @@ LEGAL: dict[type[StrEnum], dict[StrEnum, set[StrEnum]]] = {
         DebugSessionState.ATTACH: {DebugSessionState.LIVE, DebugSessionState.DETACHED},
         DebugSessionState.LIVE: {DebugSessionState.DETACHED},
         DebugSessionState.DETACHED: set(),
+    },
+    SnapshotState: {
+        SnapshotState.CREATING: {SnapshotState.AVAILABLE, SnapshotState.FAILED},
+        SnapshotState.AVAILABLE: {SnapshotState.FAILED},
+        SnapshotState.FAILED: set(),
     },
     JobState: {
         JobState.QUEUED: {JobState.RUNNING, JobState.CANCELED},
@@ -232,3 +246,31 @@ def test_system_crashing_edges() -> None:
     assert can_transition(SystemState.CRASHING, SystemState.TORN_DOWN)
     # crashing cannot go back to ready (evidence-first; recovery is to crashed).
     assert not can_transition(SystemState.CRASHING, SystemState.READY)
+
+
+def test_system_restore_and_pause_edges_are_legal() -> None:
+    # #1254: restore fences a ready System through ready -> restoring -> {ready|paused|failed};
+    # a paused (start_paused) restore lands in `paused`, resumed via control.power back to ready.
+    assert can_transition(SystemState.READY, SystemState.RESTORING) is True
+    assert can_transition(SystemState.RESTORING, SystemState.READY) is True
+    assert can_transition(SystemState.RESTORING, SystemState.PAUSED) is True
+    assert can_transition(SystemState.RESTORING, SystemState.FAILED) is True
+    assert can_transition(SystemState.PAUSED, SystemState.READY) is True
+    assert can_transition(SystemState.PAUSED, SystemState.TORN_DOWN) is True
+    assert can_transition(SystemState.PAUSED, SystemState.FAILED) is True
+    # Both restoring and paused hold a live domain, so teardown can reap them (like crashing).
+    assert can_transition(SystemState.RESTORING, SystemState.TORN_DOWN) is True
+    # A restore cannot jump straight past its fence, and paused is not a crash/reprovision path.
+    assert can_transition(SystemState.READY, SystemState.PAUSED) is False
+    assert can_transition(SystemState.PAUSED, SystemState.CRASHING) is False
+
+
+def test_snapshot_state_edges() -> None:
+    # #1254: a snapshot ledger row is minted `creating`, resolves to `available` or `failed`;
+    # `available -> failed` covers a later invalidation, and `failed` is terminal.
+    assert can_transition(SnapshotState.CREATING, SnapshotState.AVAILABLE) is True
+    assert can_transition(SnapshotState.CREATING, SnapshotState.FAILED) is True
+    assert can_transition(SnapshotState.AVAILABLE, SnapshotState.FAILED) is True
+    assert can_transition(SnapshotState.AVAILABLE, SnapshotState.CREATING) is False
+    with pytest.raises(IllegalTransition):
+        ensure_transition(SnapshotState.FAILED, SnapshotState.AVAILABLE)

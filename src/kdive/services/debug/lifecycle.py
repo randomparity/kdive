@@ -94,7 +94,9 @@ async def insert_session_locked(
     """Re-check conflict + ready under the per-System lock, then insert + drive `-> live`."""
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, request.system.id):
         current = await SYSTEMS.get(conn, request.system.id)
-        if current is None or current.state is not SystemState.READY:
+        # PAUSED is admitted (ADR-0378): the only inspection path for a start_paused-restored
+        # suspended guest is a gdbstub session; every other non-READY state is refused.
+        if current is None or current.state not in (SystemState.READY, SystemState.PAUSED):
             await close_transport(request.connector, str(handle))
             status = current.state.value if current else "torn_down"
             return DebugSessionRejected(

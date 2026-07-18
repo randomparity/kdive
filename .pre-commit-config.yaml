@@ -18,14 +18,25 @@ repos:
       - id: check-executables-have-shebangs
       - id: end-of-file-fixer
       - id: trailing-whitespace
-  - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.11.0
+  - repo: local
     hooks:
       - id: shellcheck
+        name: shellcheck
+        # Delegates to the host's shellcheck binary rather than the upstream docker
+        # image: koalaman/shellcheck ships no ppc64le manifest, so the docker_image
+        # hook fails to pull on POWER. check-setup-deps.sh already requires shellcheck
+        # as a recommended host package, and `just lint-shell` uses PATH shellcheck.
+        entry: shellcheck
+        language: system
+        types: [shell]
   - repo: https://github.com/scop/pre-commit-shfmt
     rev: v3.13.1-1
     hooks:
-      - id: shfmt
+      # shfmt-src builds shfmt from Go source (like the rhysd/actionlint hook below).
+      # The default `shfmt` id pulls the shfmt-py wrapper, which downloads a prebuilt
+      # binary; upstream publishes no ppc64le release, so that variant fails to install
+      # on POWER. shfmt-src is pure Go and builds natively on any arch with a toolchain.
+      - id: shfmt-src
         args: [-i, "2", -d]
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12

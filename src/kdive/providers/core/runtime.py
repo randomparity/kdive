@@ -30,6 +30,7 @@ from kdive.providers.ports.lifecycle import (
     Installer,
     IntrospectionMode,
     Provisioner,
+    Snapshotter,
 )
 from kdive.providers.ports.retrieve import (
     CrashPostmortem,
@@ -69,6 +70,10 @@ class ProviderSupport:
     capture_methods: frozenset[CaptureMethod] = frozenset()
     debug_transports: frozenset[DebugTransportKind] = frozenset()
     introspection: frozenset[IntrospectionMode] = frozenset()
+    # System snapshot/restore support (ADR-0378). A static provider property (no libvirt I/O),
+    # read at admission and surfaced on ``systems.get`` so an agent can discover it before use.
+    # Fail-closed default: a future bare-metal provider leaves it False.
+    supports_snapshots: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +141,9 @@ class ProviderRuntime:
     console: ConsoleCapabilities | None = None
     bootstrap_key: BootstrapKeyCapabilities | None = None
     binding: ResourceBindingCapabilities | None = None
+    # System snapshot port (ADR-0378); ``None`` when the provider does not support snapshots
+    # (kept consistent with ``support.supports_snapshots is False``).
+    snapshot: Snapshotter | None = None
 
     async def register_discovery(self, pool: AsyncConnectionPool) -> None:
         if self.discovery_registrar is not None:

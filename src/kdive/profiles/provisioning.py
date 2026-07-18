@@ -311,7 +311,7 @@ class ProvisioningProfile(_ProfileBase):
             "value set to discover, and is never read by provisioning or job code: any non-empty "
             "string is accepted. Required for boot_method 'direct-kernel' (the System must reach "
             "'ready' on a baseline kernel before its Runs iterate kernels, so the lane needs one "
-            "named here) and not a URL — runs.create takes the structured git source separately. "
+            "named here); it is an opaque label only, not a URL or fetchable reference. "
             "Omit it for boot_method 'disk-image': that lane boots the operator-staged base "
             "image's own kernel and never reads this field."
         ),

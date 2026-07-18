@@ -52,13 +52,69 @@ def _register_resources_register_remote_libvirt(app: FastMCP, pool: AsyncConnect
         meta={"maturity": "implemented"},
     )
     async def resources_register_remote_libvirt(
-        request: Annotated[
-            RemoteLibvirtResourceRegistration,
-            Field(description="Remote-libvirt runtime resource registration request."),
+        name: Annotated[str, Field(description="The (kind, name) identity for the new resource.")],
+        cost_class: Annotated[str, Field(description="The cost class for pricing.")],
+        vcpus: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's vCPU size ceiling. Admission rejects a selector larger than this, "
+                    "so a host registered without it is un-grantable."
+                ),
+            ),
         ],
+        memory_mb: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's memory size ceiling in MiB (admission ≤-resource-caps check)."
+                ),
+            ),
+        ],
+        host_uri: Annotated[str, Field(description="Remote-libvirt provider host URI.")],
+        base_image: Annotated[str, Field(description="Registered remote-libvirt base image name.")],
+        concurrent_allocation_cap: Annotated[
+            int, Field(default=1, description="Per-host concurrent-allocation cap (> 0).")
+        ] = 1,
+        secret_refs: Annotated[
+            tuple[str, ...],
+            Field(
+                default=(),
+                description=(
+                    "Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. "
+                    "Only the references are stored; secret bytes are never fetched or logged."
+                ),
+            ),
+        ] = (),
+        owner_project: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Owning project; defaults to the single registering project. Pass '*' for a "
+                    "global (any-project) resource."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Register a remote-libvirt runtime resource."""
-        return await register_remote_libvirt_resource(pool, current_context(), request)
+        return await register_remote_libvirt_resource(
+            pool,
+            current_context(),
+            RemoteLibvirtResourceRegistration(
+                name=name,
+                cost_class=cost_class,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                host_uri=host_uri,
+                base_image=base_image,
+                concurrent_allocation_cap=concurrent_allocation_cap,
+                secret_refs=secret_refs,
+                owner_project=owner_project,
+            ),
+        )
 
 
 def _register_resources_register_local_libvirt(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -68,13 +124,67 @@ def _register_resources_register_local_libvirt(app: FastMCP, pool: AsyncConnecti
         meta={"maturity": "implemented"},
     )
     async def resources_register_local_libvirt(
-        request: Annotated[
-            LocalLibvirtResourceRegistration,
-            Field(description="Local-libvirt runtime resource registration request."),
+        name: Annotated[str, Field(description="The (kind, name) identity for the new resource.")],
+        cost_class: Annotated[str, Field(description="The cost class for pricing.")],
+        vcpus: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's vCPU size ceiling. Admission rejects a selector larger than this, "
+                    "so a host registered without it is un-grantable."
+                ),
+            ),
         ],
+        memory_mb: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's memory size ceiling in MiB (admission ≤-resource-caps check)."
+                ),
+            ),
+        ],
+        host_uri: Annotated[str, Field(description="Local-libvirt provider host URI.")],
+        concurrent_allocation_cap: Annotated[
+            int, Field(default=1, description="Per-host concurrent-allocation cap (> 0).")
+        ] = 1,
+        secret_refs: Annotated[
+            tuple[str, ...],
+            Field(
+                default=(),
+                description=(
+                    "Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. "
+                    "Only the references are stored; secret bytes are never fetched or logged."
+                ),
+            ),
+        ] = (),
+        owner_project: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Owning project; defaults to the single registering project. Pass '*' for a "
+                    "global (any-project) resource."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Register a local-libvirt runtime resource."""
-        return await register_local_libvirt_resource(pool, current_context(), request)
+        return await register_local_libvirt_resource(
+            pool,
+            current_context(),
+            LocalLibvirtResourceRegistration(
+                name=name,
+                cost_class=cost_class,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                host_uri=host_uri,
+                concurrent_allocation_cap=concurrent_allocation_cap,
+                secret_refs=secret_refs,
+                owner_project=owner_project,
+            ),
+        )
 
 
 def _register_resources_register_fault_inject(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -84,13 +194,65 @@ def _register_resources_register_fault_inject(app: FastMCP, pool: AsyncConnectio
         meta={"maturity": "implemented"},
     )
     async def resources_register_fault_inject(
-        request: Annotated[
-            FaultInjectResourceRegistration,
-            Field(description="Fault-inject runtime resource registration request."),
+        name: Annotated[str, Field(description="The (kind, name) identity for the new resource.")],
+        cost_class: Annotated[str, Field(description="The cost class for pricing.")],
+        vcpus: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's vCPU size ceiling. Admission rejects a selector larger than this, "
+                    "so a host registered without it is un-grantable."
+                ),
+            ),
         ],
+        memory_mb: Annotated[
+            int,
+            Field(
+                gt=0,
+                description=(
+                    "The host's memory size ceiling in MiB (admission ≤-resource-caps check)."
+                ),
+            ),
+        ],
+        concurrent_allocation_cap: Annotated[
+            int, Field(default=1, description="Per-host concurrent-allocation cap (> 0).")
+        ] = 1,
+        secret_refs: Annotated[
+            tuple[str, ...],
+            Field(
+                default=(),
+                description=(
+                    "Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. "
+                    "Only the references are stored; secret bytes are never fetched or logged."
+                ),
+            ),
+        ] = (),
+        owner_project: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Owning project; defaults to the single registering project. Pass '*' for a "
+                    "global (any-project) resource."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Register a fault-inject runtime resource."""
-        return await register_fault_inject_resource(pool, current_context(), request)
+        return await register_fault_inject_resource(
+            pool,
+            current_context(),
+            FaultInjectResourceRegistration(
+                name=name,
+                cost_class=cost_class,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                concurrent_allocation_cap=concurrent_allocation_cap,
+                secret_refs=secret_refs,
+                owner_project=owner_project,
+            ),
+        )
 
 
 def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> None:

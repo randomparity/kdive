@@ -116,6 +116,16 @@ async def _run_boot_and_capture_outcome(
         snapshotter=snapshotter,
         mark=mark,
     )
+    downgraded = await boot_evidence.evaluate_expected_failure_after_ready(
+        conn,
+        job_ctx,
+        run,
+        system_id=system_id,
+        profile_policy=profile_policy,
+        artifact=artifact,
+    )
+    if downgraded is not None:
+        return downgraded
     await boot_evidence.record_boot_audit(conn, job_ctx, run)
     result: BootStepResult = {
         "system_id": str(system_id),

@@ -87,6 +87,21 @@ def test_from_job_failed_exposes_failure_context() -> None:
     }
 
 
+def test_from_job_appends_extra_next_actions_after_lifecycle() -> None:
+    # A tool-specific steer is appended after the state's lifecycle actions, order preserved.
+    resp = ToolResponse.from_job(_BUILD_JOB, extra_next_actions=["systems.authorize_ssh_key"])
+    assert resp.suggested_next_actions == [
+        "jobs.wait",
+        "jobs.cancel",
+        "systems.authorize_ssh_key",
+    ]
+
+
+def test_from_job_extra_next_actions_defaults_to_lifecycle_only() -> None:
+    # Backward compatibility: omitting the kwarg leaves the generic lifecycle set untouched.
+    assert ToolResponse.from_job(_BUILD_JOB).suggested_next_actions == ["jobs.wait", "jobs.cancel"]
+
+
 def test_from_job_canceled_has_no_actions() -> None:
     resp = ToolResponse.from_job(_BUILD_JOB.model_copy(update={"state": JobState.CANCELED}))
     assert resp.status == "canceled"

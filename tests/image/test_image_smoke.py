@@ -13,6 +13,7 @@ and the worker toolchain resolves on PATH for the non-root user.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -64,6 +65,16 @@ def test_each_command_dispatches_past_argparse() -> None:
         combined = res.stdout + res.stderr
         assert "configuration" in combined.lower(), f"{cmd}: not a config failure: {combined}"
         assert "invalid choice" not in combined, f"{cmd}: argparse rejected the subcommand"
+
+
+def test_version_reports_baked_provenance() -> None:
+    # ADR-0370: CI builds this image with KDIVE_COMMIT + KDIVE_RELEASE=false, so the running
+    # binary must self-report a dev build with a baked 12+ hex commit — proving _buildinfo.py
+    # survived the multi-stage COPY and the PYTHONPATH import, not just that the wiring exists.
+    # {12,} tolerates git extending the abbreviation on a (astronomically unlikely) collision.
+    res = _run(_image(), "--version")
+    assert res.returncode == 0, res.stderr
+    assert re.match(r"^kdive \d+\.\d+\.\d+-dev\+g[0-9a-f]{12,}$", res.stdout.strip()), res.stdout
 
 
 def test_worker_toolchain_on_path() -> None:

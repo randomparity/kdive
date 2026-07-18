@@ -89,10 +89,8 @@ def test_guard_ignores_non_kind_selectors() -> None:
 
 _NON_COMPOSED_REQUEST_ARGS: dict[str, Any] = {
     "project": "proj",
-    "request": {
-        "resource": {"mode": "kind", "kind": "fault-inject"},
-        "shape": "small",
-    },
+    "resource": {"mode": "kind", "kind": "fault-inject"},
+    "shape": "small",
 }
 
 

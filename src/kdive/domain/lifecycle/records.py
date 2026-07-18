@@ -14,6 +14,7 @@ from kdive.domain.capacity.state import (
     DebugSessionState,
     InvestigationState,
     RunState,
+    SnapshotState,
     SystemState,
 )
 from kdive.domain.catalog.resources import ResourceKind
@@ -88,6 +89,20 @@ class System(DomainModel, Attribution):
     resolved_cpu: dict[str, JsonValue] | None = None
 
 
+class Snapshot(DomainModel, Attribution):
+    """A named checkpoint of a System — a child ledger row (ADR-0378, #1254).
+
+    Postgres is the index-of-record for `systems.list_snapshots`, audit, and teardown cleanup;
+    libvirt holds the actual RAM+disk data inside the System's qcow2. `include_memory` records
+    whether the checkpoint captured live RAM+CPU (a full system checkpoint) or disk only.
+    """
+
+    system_id: UUID
+    name: str
+    include_memory: bool
+    state: SnapshotState
+
+
 class Investigation(DomainModel, Attribution):
     """A project-scoped campaign grouping Runs toward a goal."""
 
@@ -105,10 +120,10 @@ class ExpectedBootFailure(DomainBase):
     """Run-scoped expected boot failure metadata (ADR-0064, ADR-0266).
 
     ``kind`` is either the custom-pattern lane ``console_crash`` (the caller supplies
-    ``pattern``) or one of the named presets ``oops``/``panic``/``hung_task``, which resolve to a
-    canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A preset takes
-    no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name and the
-    canonical pattern, so the record states which signature the Run was matched against.
+    ``pattern``) or one of the named presets ``oops``/``panic``/``hung_task``/``ubsan``, which
+    resolve to a canonical literal console pattern (`crash_signatures.CRASH_SIGNATURE_PRESETS`). A
+    preset takes no ``pattern``; supplying both is rejected. The resolved doc keeps the preset name
+    and the canonical pattern, so the record states which signature the Run was matched against.
 
     This model validates the incoming request once and is then persisted as serialized JSON
     (``SerializedExpectedBootFailure``); ``Run.expected_boot_failure`` holds that raw object, not
@@ -118,7 +133,7 @@ class ExpectedBootFailure(DomainBase):
     this model — match on the raw dict, as ``expected_crash_matched_line`` does.
     """
 
-    kind: Literal["console_crash", "oops", "panic", "hung_task"]
+    kind: Literal["console_crash", "oops", "panic", "hung_task", "ubsan"]
     pattern: str = Field(min_length=1, max_length=256)
     description: str | None = Field(default=None, max_length=256)
 
@@ -226,6 +241,7 @@ __all__ = [
     "ExternalRef",
     "Investigation",
     "Run",
+    "Snapshot",
     "System",
     "SystemShape",
 ]

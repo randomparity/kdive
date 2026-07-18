@@ -31,11 +31,13 @@ Return one durable job visible to the caller.
 
 `implemented` · `read-only`
 
-List jobs visible to the caller, newest first, filterable by status/kind/investigation.
+List the caller's jobs newest first, filterable by status/kind/investigation/system_id.
 
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
 ``cursor`` to read the next page. Filters compose with the cursor. The ``kind`` filter
 accepts active job kinds only; historical retired build jobs remain readable by id.
+The ``system_id`` filter reaches the system-scoped jobs (authorize_ssh_key,
+check_ssh_reachable) that ``investigation_id`` excludes (they carry no run_id).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -44,8 +46,9 @@ accepts active job kinds only; historical retired build jobs remain readable by 
 `request` fields:
 
 - `status` (``queued`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only jobs in this lifecycle state.
-- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable`, `watch_for_crash` (nullable)`, optional) — Only active jobs of this kind.
-- `investigation_id` (`string (nullable)`, optional) — Only active run-bearing jobs whose Run belongs to this Investigation.
+- `kind` (``provision`, `reprovision`, `teardown`, `build`, `install`, `boot`, `force_crash`, `power`, `capture_vmcore`, `image_build`, `diagnostics_worker_check`, `build_install_boot`, `authorize_ssh_key`, `console_rotate`, `diagnostic_sysrq`, `check_ssh_reachable`, `watch_for_crash`, `snapshot`, `restore`, `delete_snapshot` (nullable)`, optional) — Only active jobs of this kind.
+- `investigation_id` (`string (nullable)`, optional) — Only active run-bearing jobs whose Run belongs to this Investigation. System-scoped jobs (authorize_ssh_key, check_ssh_reachable) carry no run_id and are excluded; reach them with the system_id filter instead.
+- `system_id` (`string (nullable)`, optional) — Only jobs carrying this System in their payload — the system-scoped kinds (authorize_ssh_key, check_ssh_reachable, provision, …) that no run_id filter reaches.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 

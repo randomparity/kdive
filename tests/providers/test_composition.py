@@ -23,7 +23,10 @@ from kdive.domain.catalog.resources import ResourceKind
 from kdive.observability.console_telemetry import ConsoleTelemetry
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly import composition
-from kdive.providers.core.discovery_registration import ProviderDiscoveryRegistration
+from kdive.providers.core.discovery_registration import (
+    DiscoveryRegistrationTarget,
+    ProviderDiscoveryRegistration,
+)
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.providers.fault_inject.profile_policy import FaultInjectProfilePolicy
 from kdive.providers.infra.reaping import OwnedDomain
@@ -741,6 +744,30 @@ def test_remote_discovery_registration_is_bind_only() -> None:
 
     assert registration.kind is ResourceKind.REMOTE_LIBVIRT
     assert registration.creates is False
+
+
+def test_creates_false_registrar_never_resolves_target_or_writes() -> None:
+    # The creates=False early return in _discovery_registrar must fire before the discovery
+    # target is resolved, so remote/fault-inject stay bind-only no-ops and never reach
+    # register_or_refresh_discovered_resource (preserving the no-remote-connect safety, ADR-0384).
+    resolved = False
+
+    def _target_factory() -> DiscoveryRegistrationTarget:
+        nonlocal resolved
+        resolved = True
+        raise AssertionError("creates=False must not resolve the discovery target")
+
+    registration = ProviderDiscoveryRegistration(
+        target_factory=_target_factory,
+        kind=ResourceKind.FAULT_INJECT,
+        pool_name="fault-inject",
+        cost_class="fault",
+        creates=False,
+    )
+    registrar = composition._discovery_registrar(registration)
+    # A sentinel pool: the no-op must never touch it.
+    asyncio.run(registrar(cast(AsyncConnectionPool, object())))
+    assert resolved is False
 
 
 def test_build_runtime_helpers_thread_registry_and_real_discovery_registration(

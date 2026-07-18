@@ -368,6 +368,26 @@ async def all_recent_jobs(
     return [Job.model_validate(row) for row in rows]
 
 
+async def latest_succeeded_job_for_system(
+    conn: AsyncConnection, kind: JobKind, system_id: UUID
+) -> Job | None:
+    """Return the most recent ``succeeded`` ``kind`` job for ``system_id``, or ``None``.
+
+    Matches on the job payload's ``system_id`` (the system-scoped kinds carry it) and
+    ``state = succeeded`` so only a job that actually ran — and therefore carries a
+    ``result_ref`` verdict — is returned. Newest first by ``(created_at, id)``. Used by the
+    ``runs.get`` liveness read to fold in the latest ``check_ssh_reachable`` verdict (ADR-0373).
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM jobs WHERE kind = %s AND payload->>'system_id' = %s "
+            "AND state = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            (kind.value, str(system_id), JobState.SUCCEEDED.value),
+        )
+        row = await cur.fetchone()
+    return Job.model_validate(row) if row is not None else None
+
+
 async def queue_depth(conn: AsyncConnection) -> dict[str, int]:
     """Return the cross-project job count per state (the platform queue depth).
 
@@ -389,6 +409,7 @@ async def recent_jobs(
     status: JobState | None = None,
     kind: JobKind | None = None,
     investigation_id: UUID | None = None,
+    system_id: UUID | None = None,
 ) -> list[Job]:
     """Return the caller's most recent jobs, newest first, capped at ``limit``.
 
@@ -413,6 +434,11 @@ async def recent_jobs(
       ``jobs.payload->>'run_id'``; only run-bearing kinds (``build``/``install``/``boot``)
       carry a ``run_id``, so non-run-bearing jobs never match. The project predicate still
       gates every row, so an Investigation in an unreadable project yields no rows.
+    - ``system_id`` filters to the system-scoped jobs carrying that System in their payload
+      (``authorize_ssh_key``/``check_ssh_reachable``/provision/…), an equality predicate on
+      ``j.payload->>'system_id'`` — the same key ``latest_succeeded_job_for_system`` matches.
+      These jobs carry no ``run_id``, so ``investigation_id`` never reaches them; ``system_id``
+      is how an agent lists them (ADR-0376).
     """
     # Qualify every job column so the optional `runs` join cannot make `created_at`/`id`
     # ambiguous, and so `j.*` returns only `jobs` columns (a bare `*` would pull `runs`
@@ -431,6 +457,9 @@ async def recent_jobs(
     if kind is not None:
         clauses.append(sql.SQL("j.kind = %s"))
         params.append(kind.value)
+    if system_id is not None:
+        clauses.append(sql.SQL("j.payload->>'system_id' = %s"))
+        params.append(str(system_id))
     if after is not None:
         clauses.append(sql.SQL("(j.created_at, j.id) < (%s, %s)"))
         params.extend(after)

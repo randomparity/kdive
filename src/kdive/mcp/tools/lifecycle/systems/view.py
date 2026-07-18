@@ -28,6 +28,7 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.lifecycle._recovery import iso, provisioning_profile_summary
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.debug.sessions import active_session_ids_for_system
@@ -55,6 +56,7 @@ def system_envelope(
     resource_id: str | None = None,
     active_debug_session_ids: list[str] | None = None,
     active_run: dict[str, JsonValue] | None = None,
+    supports_snapshots: bool | None = None,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -86,6 +88,8 @@ def system_envelope(
         data["active_debug_session_ids"] = list(active_debug_session_ids)
     if active_run is not None:
         data["active_run"] = active_run
+    if supports_snapshots is not None:
+        data["supports_snapshots"] = supports_snapshots
     if system.state is SystemState.FAILED:
         return ToolResponse.failure(
             str(system.id),
@@ -147,7 +151,11 @@ async def _active_run_for_system(
 
 
 async def get_system(
-    pool: AsyncConnectionPool, ctx: RequestContext, system_id: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: str,
+    *,
+    resolver: ProviderResolver,
 ) -> ToolResponse:
     """Return a System the caller's project owns, or a not-found-shaped error."""
     uid = _as_uuid(system_id)
@@ -162,12 +170,24 @@ async def get_system(
             resource_id, resource_kind = await _placement_for_system(conn, system.allocation_id)
             active_sessions = await active_session_ids_for_system(conn, system.id)
             active_run = await _active_run_for_system(conn, system.id)
+            # In-memory capability read (no libvirt round-trip): whether this System's provider can
+            # snapshot/restore, surfaced so an agent discovers support before calling the tools.
+            # A System whose provider kind is no longer registered (disabled/uncomposed) cannot
+            # resolve a runtime; keep systems.get resilient (its metadata still lets an agent tear
+            # the System down) by omitting the field rather than failing the whole read.
+            supports_snapshots: bool | None = None
+            try:
+                runtime = await resolver.runtime_for_system(conn, system.id)
+                supports_snapshots = runtime.support.supports_snapshots
+            except CategorizedError:
+                supports_snapshots = None
         return system_envelope(
             system,
             resource_kind=resource_kind,
             resource_id=resource_id,
             active_debug_session_ids=active_sessions,
             active_run=active_run,
+            supports_snapshots=supports_snapshots,
         )
 
 

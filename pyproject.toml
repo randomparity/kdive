@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "kdive"
-version = "0.3.0"
+version = "0.4.0"
 description = "Kernel Debug, Inspect, Validate, Explore — MCP platform for kernel build-boot-debug workflows"
 license = "Apache-2.0"
 authors = [{ name = "David Christensen" }]

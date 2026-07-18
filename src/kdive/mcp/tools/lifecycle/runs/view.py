@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import JOBS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState
+from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.lifecycle.records import Run, System
 from kdive.domain.lifecycle.run_steps import RUN_STEP_SUCCEEDED
 from kdive.domain.operations.jobs import Job
@@ -22,9 +23,16 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
-from kdive.services.artifacts.listing import ConsoleManifest, list_run_console_artifacts
+from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.services.artifacts.listing import (
+    ConsoleManifest,
+    latest_run_console_artifact_id,
+    list_run_console_artifacts,
+)
 from kdive.services.debug.sessions import active_session_ids_for_run
+from kdive.services.runs.liveness import Liveness, derive_liveness
 from kdive.services.runs.steps import (
+    READY_BOOT_OUTCOME,
     BootAttempt,
     BuildStepResult,
     StepProgress,
@@ -48,6 +56,8 @@ class RunReadDetails:
     boot_readiness: BootAttempt | None
     build_result: BuildStepResult | None
     console_manifest: ConsoleManifest | None
+    latest_console_id: str | None
+    liveness: Liveness | None
 
 
 async def get_run(
@@ -56,6 +66,7 @@ async def get_run(
     run_id: str,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
     include_console_artifacts: bool = False,
 ) -> ToolResponse:
     """Return a Run the caller's project owns, advertising the boot's required cmdline.
@@ -77,6 +88,7 @@ async def get_run(
                 conn,
                 run,
                 resolver=resolver,
+                secret_registry=secret_registry,
                 include_console_artifacts=include_console_artifacts,
             )
         return envelope_for_run(
@@ -90,6 +102,8 @@ async def get_run(
                 details.build_result.build_provenance if details.build_result is not None else None
             ),
             console_manifest=details.console_manifest,
+            latest_console_ref=details.latest_console_id,
+            liveness=details.liveness,
         )
 
 
@@ -98,6 +112,7 @@ async def _load_run_read_details(
     run: Run,
     *,
     resolver: ProviderResolver,
+    secret_registry: SecretRegistry,
     include_console_artifacts: bool,
 ) -> RunReadDetails:
     system = await SYSTEMS.get(conn, run.system_id) if run.system_id is not None else None
@@ -111,7 +126,37 @@ async def _load_run_read_details(
         boot_readiness=await _boot_readiness(conn, run, progress),
         build_result=await _build_result(conn, run),
         console_manifest=await _console_manifest(conn, run, include_console_artifacts),
+        latest_console_id=await _latest_console_id(conn, run),
+        liveness=await _liveness(conn, run, progress, secret_registry),
     )
+
+
+async def _latest_console_id(conn: AsyncConnection, run: Run) -> str | None:
+    # The newest-console shortcut ref (ADR-0374, #1238): a single indexed LIMIT 1 read, no opt-in
+    # (avoiding the manifest round-trip is the point). Skipped when no correlated console can exist
+    # — a failed Run (whose envelope surfaces no console refs) or an unbound/pre-boot Run.
+    if run.state is RunState.FAILED or run.system_id is None:
+        return None
+    return await latest_run_console_artifact_id(conn, run.id)
+
+
+async def _liveness(
+    conn: AsyncConnection,
+    run: Run,
+    progress: StepProgress | None,
+    secret_registry: SecretRegistry,
+) -> Liveness | None:
+    # Gated to a ready-booted local-libvirt Run — the only place a "healthy vs wedged" question is
+    # meaningful, and the only provider whose console log and loopback SSH forward live on this host
+    # (ADR-0373). Mirrors the data.boot_outcome gate in envelope_for_run.
+    if (
+        run.system_id is None
+        or run.target_kind is not ResourceKind.LOCAL_LIBVIRT
+        or progress is None
+        or progress.boot_outcome != READY_BOOT_OUTCOME
+    ):
+        return None
+    return await derive_liveness(conn, run.system_id, secret_registry)
 
 
 def _required_cmdline(system: System | None, runtime: ProviderRuntime | None) -> str | None:

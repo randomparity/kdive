@@ -18,7 +18,7 @@ Price a hypothetical selector over a window without writing anything. Requires v
 - `vcpus` (`integer`, required)
 - `memory_gb` (`integer`, required)
 - `window` (`number \| string`, required) — Lease window length in hours, e.g. 24.
-- `cost_class` (`string`, optional) — Hypothetical cost class to price against (default 'local'); selects the per-class pricing coefficient. This is a what-if input, not the class you are billed under: actual usage is billed under the persisted cost_class of the resource the allocation books. To get an estimate that matches the bill, pass the cost_class of the resource you intend to allocate on (read it from `catalog.resources`). An unknown class is a configuration_error.
+- `cost_class` (`string`, optional) — Hypothetical cost class to price against (default 'local'); selects the per-class pricing coefficient. This is a what-if input, not the class you are billed under: actual usage is billed under the persisted cost_class of the resource the allocation books. To get an estimate that matches the bill, pass the cost_class of the resource you intend to allocate on (read it from `resources.describe`). An unknown class is a configuration_error.
 - `accel` (`string (nullable)`, optional) — Optional accelerator to price the estimate at: 'kvm' (native) or 'tcg' (foreign-arch emulation). Omit for the native baseline. A TCG guest is priced above a same-size KVM guest — price both to compare architectures before you allocate. This is a what-if input; the host resolves the real accelerator for your arch at provision. An unknown value is a configuration_error.
 
 ## `accounting.report_all_projects`
@@ -71,14 +71,10 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object | yes | Project concurrency quota update request. |
-
-`request` fields:
-
-- `project` (`string`, required) — Project to set concurrency caps for.
-- `max_concurrent_allocations` (`integer`, required) — Maximum concurrent allocations allowed (>= 0).
-- `max_concurrent_systems` (`integer`, required) — Maximum concurrent Systems allowed (>= 0).
-- `max_pending_allocations` (`integer`, optional) — Maximum queued (requested) allocations (>= 0); 0 = no queue.
+| `max_concurrent_allocations` | integer | yes | Maximum concurrent allocations allowed (>= 0). |
+| `max_concurrent_systems` | integer | yes | Maximum concurrent Systems allowed (>= 0). |
+| `max_pending_allocations` | integer | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
+| `project` | string | yes | Project to set concurrency caps for. |
 
 ## `accounting.usage_investigation`
 

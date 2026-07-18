@@ -84,9 +84,28 @@ LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S = Setting(
     suggest="set an integer number of seconds > 0 (default 1800 = 30 min native-KVM base window)",
 )
 
+LIBVIRT_BOOT_WINDOW_S = Setting(
+    name="KDIVE_LIBVIRT_BOOT_WINDOW_S",
+    parse=_parse_positive_int,
+    default="900",
+    group="local-libvirt",
+    processes=_RT,
+    help=(
+        "Native-KVM base window (seconds) for the regular boot readiness poll — the window "
+        "within which the guest must emit the kdive-ready marker after domain start. "
+        "Defaults to 900 s (15 min), which accommodates kdump.service arming (the "
+        "kdive-ready marker orders After=kdump.service) on slow hosts such as POWER9 and "
+        "large first-dracut builds. Foreign (TCG-emulated) guests scale this by "
+        "tcg_deadline_multiplier(accel) (ADR-0341). The window is a ceiling, not a fixed "
+        "wait — boot returns the instant the marker appears."
+    ),
+    suggest="set an integer number of seconds > 0 (default 900 = 15 min native-KVM base window)",
+)
+
 SETTINGS = [
     LIBVIRT_URI,
     LIBVIRT_ALLOCATION_CAP,
     LIBVIRT_TCG_DEADLINE_MULTIPLIER,
     LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
+    LIBVIRT_BOOT_WINDOW_S,
 ]

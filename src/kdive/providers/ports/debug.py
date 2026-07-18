@@ -229,6 +229,58 @@ class GdbMiEngine(Protocol):
         """
         ...
 
+    def step(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one source line, into called functions, and return the resulting stop.
+
+        Same resume/wait/interrupt-on-timeout semantics as ``continue_``. In a region with no
+        function-bounds symbol gdb returns ``^error`` (``Cannot find bounds of current
+        function``), surfaced as ``DEBUG_ATTACH_FAILURE``; use ``step_instruction`` there.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for invalid timeout values,
+                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def next(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one source line, over called functions, and return the resulting stop.
+
+        Same semantics and symbol-poor behavior as ``step``.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for invalid timeout values,
+                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def step_instruction(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Step one machine instruction and return the resulting stop.
+
+        Works without line tables, so it is the fallback for symbol-poor regions.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for invalid timeout values,
+                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
+    def finish(self, attachment: GdbMiAttachment, *, timeout_sec: float) -> GdbStopRecord:
+        """Resume until the current (innermost) frame returns and return the resulting stop.
+
+        Acts on gdb's selected frame (frame #0 after any stop). In the outermost frame gdb
+        returns ``^error``, surfaced as ``DEBUG_ATTACH_FAILURE``. A frame that does not return
+        within the wait interrupts back with ``timed_out=True``, like ``continue_``.
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for invalid timeout values,
+                ``DEBUG_ATTACH_FAILURE`` for gdb/MI command failures, or
+                ``INFRASTRUCTURE_FAILURE`` for command timeouts.
+        """
+        ...
+
     def interrupt(self, attachment: GdbMiAttachment) -> GdbStopRecord | None:
         """Interrupt execution and return the stop record when one is reported.
 

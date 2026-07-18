@@ -72,7 +72,7 @@ The tar must also contain:
 
 | Member | What it is | Rule |
 |---|---|---|
-| `lib/modules/<release>/…` | the `make modules_install` tree for that kernel | at least one `lib/modules/` member must be present |
+| `lib/modules/<release>/…` | the `make modules_install` tree for that kernel | at least one real kernel-module file (`*.ko`, `.ko.xz`, `.ko.gz`, or `.ko.zst`) under `lib/modules/<release>/` must be present — a bare directory or a `modules.dep` with no module is rejected |
 
 The declared `arch` and the payload must agree: an x86 bzImage under `arch: ppc64le`, or an ELF
 (or non-ppc64 ELF) under `arch: x86_64`, is rejected. Learn the exact per-arch magic bytes from
@@ -90,6 +90,21 @@ Two further rules come from how the artifact is validated and consumed:
 - **drop the back-reference symlinks** — `make modules_install` plants `build` and `source`
   symlinks under `lib/modules/<release>/` that point at absolute paths in your build tree.
   Exclude them; left in, they become dangling links inside the guest.
+
+### Packaging speed: parallel gzip and command timeouts
+
+A debug kernel plus its full module tree is large — typically hundreds of MiB to a few
+GiB uncompressed — and single-threaded `gzip` (what `tar -czf` uses) can take several
+minutes to compress an archive that size. Size the packaging step's command timeout for a
+multi-minute, single-core compress; a short default timeout will expire mid-compress.
+
+When `pigz` (parallel gzip) is installed, prefer it: it spreads the compression work across
+cores and cuts wall-clock time roughly in proportion to core count. `pigz` emits a standard
+gzip stream, so its output passes validation identically to `tar -czf` (same `\x1f\x8b`
+magic at offset 0), and `tar` — not `pigz` — still controls member order, so the
+"`boot/vmlinuz` first" rule above is preserved. If `pigz` is not installed, use the plain
+`tar -czf` form unchanged. When compression time dominates, `pigz -1` (or `gzip -1`) trades
+ratio for speed.
 
 ### The recipe (x86_64)
 
@@ -112,6 +127,17 @@ tar -czf kernel.tar.gz \
 the back-reference symlinks; listing `arch/x86/boot/bzImage` before `lib/modules` keeps the
 boot image first.
 
+When `pigz` is available, swap the compressor to parallelize the compress — same members,
+same order, valid gzip:
+
+```bash
+tar -I "pigz -p $(nproc)" -cf kernel.tar.gz \
+  --exclude='*/build' --exclude='*/source' \
+  --transform='s|^arch/x86/boot/bzImage$|boot/vmlinuz|' \
+  -C "$KBUILD"  arch/x86/boot/bzImage \
+  -C "$MODROOT" lib/modules
+```
+
 ### The recipe (ppc64le)
 
 powerpc has no bzImage — the boot member is the **stripped** ELF kernel. Strip the build-tree
@@ -133,6 +159,27 @@ tar -czf kernel.tar.gz \
 
 Declare `arch: ppc64le` in the build profile at `runs.create`. The unstripped DWARF `vmlinux`
 goes in the optional `vmlinux` artifact (below), not the boot member.
+
+When `pigz` is available, swap the compressor to parallelize the compress — same members,
+same order, valid gzip:
+
+```bash
+tar -I "pigz -p $(nproc)" -cf kernel.tar.gz \
+  --exclude='*/build' --exclude='*/source' \
+  --transform='s|^vmlinuz$|boot/vmlinuz|' \
+  -C /tmp        vmlinuz \
+  -C "$MODROOT"  lib/modules
+```
+
+### Verify the layout before uploading
+
+Compression and upload are the slow steps, so catch a layout mistake here rather than after a
+full compress-and-upload round-trip that `runs.complete_build` would then reject. List the
+archive and confirm `boot/vmlinuz` is the **first** member with the module tree following:
+
+```bash
+tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<release>/… follows
+```
 
 ## Optional artifacts
 

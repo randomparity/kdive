@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -14,8 +15,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.catalog.discovery import DiscoverySource, ResourceRecord
+from kdive.domain.catalog.resource_capabilities import OPERATOR_OWNED_CAP_KEYS
 from kdive.domain.catalog.resources import ManagedBy, Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+
+_log = logging.getLogger(__name__)
 
 
 async def register_discovered_resource(
@@ -25,7 +29,14 @@ async def register_discovered_resource(
     pool: str,
     cost_class: str,
 ) -> Resource:
-    """Upsert one discovered Resource by ``(kind, resource_id)``."""
+    """Upsert one discovered Resource by ``(kind, resource_id)``.
+
+    Test seed helper (no production caller): its existing-row branch fully overwrites
+    ``capabilities``/``status``/``pool``/``cost_class``. The production refresh path is
+    :func:`register_or_refresh_discovered_resource`, which merges capabilities only and preserves
+    operator-owned keys (ADR-0384) — do not swap this in on a runtime path, or an operator's
+    ``ops.set_host_capacity`` cap would be silently reverted.
+    """
     resource = _resource_from_record(record, pool=pool, cost_class=cost_class)
     async with (
         conn.transaction(),
@@ -57,7 +68,7 @@ async def register_discovered_resource(
     return Resource.model_validate(row)
 
 
-async def ensure_discovered_resource_registered(
+async def register_or_refresh_discovered_resource(
     pool: AsyncConnectionPool,
     discovery: DiscoverySource,
     *,
@@ -66,13 +77,23 @@ async def ensure_discovered_resource_registered(
     pool_name: str,
     cost_class: str,
 ) -> None:
-    """Insert the target discovered Resource only when it is absent."""
+    """Insert the target discovered Resource when absent, else refresh its capabilities.
+
+    On an existing row the refresh is discovery-authoritative except for operator-owned keys
+    (``OPERATOR_OWNED_CAP_KEYS``), best-effort (a discovery-read failure keeps the stored
+    capabilities), and change-guarded. The existence probe is ``SELECT ... FOR UPDATE`` so the
+    read-modify-write serializes against ``ops.set_host_capacity`` on the row lock (ADR-0384).
+    """
     async with (
         pool.connection() as conn,
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.RESOURCE, _resource_key(kind, resource_id)),
     ):
-        if await _resource_exists(conn, kind, resource_id):
+        stored = await _locked_capabilities(conn, kind, resource_id)
+        if stored is not None:
+            await _refresh_capabilities(
+                conn, discovery, kind=kind, resource_id=resource_id, stored=stored
+            )
             return
         records = await asyncio.to_thread(discovery.list_resources)
         record = _select_record(records, kind=kind, resource_id=resource_id)
@@ -81,13 +102,68 @@ async def ensure_discovered_resource_registered(
             await _insert_resource(cur, resource)
 
 
-async def _resource_exists(conn: AsyncConnection, kind: ResourceKind, resource_id: str) -> bool:
-    async with conn.cursor() as cur:
+async def _locked_capabilities(
+    conn: AsyncConnection, kind: ResourceKind, resource_id: str
+) -> dict[str, Any] | None:
+    """Lock the row ``FOR UPDATE`` and return its capabilities, or ``None`` when it is absent."""
+    async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT 1 FROM resources WHERE kind = %s AND host_uri = %s",
+            "SELECT capabilities FROM resources WHERE kind = %s AND host_uri = %s FOR UPDATE",
             (kind.value, resource_id),
         )
-        return await cur.fetchone() is not None
+        row = await cur.fetchone()
+    return row["capabilities"] if row is not None else None
+
+
+async def _refresh_capabilities(
+    conn: AsyncConnection,
+    discovery: DiscoverySource,
+    *,
+    kind: ResourceKind,
+    resource_id: str,
+    stored: dict[str, Any],
+) -> None:
+    """Best-effort refresh of an existing (already ``FOR UPDATE``-locked) row's capabilities.
+
+    The ``try`` wraps only the discovery read + record selection; a failure logs and keeps the
+    stored capabilities. The change-guarded ``UPDATE`` runs outside the catch, so a genuine DB
+    write error propagates rather than poisoning the outer transaction.
+    """
+    try:
+        records = await asyncio.to_thread(discovery.list_resources)
+        record = _select_record(records, kind=kind, resource_id=resource_id)
+    except Exception:  # noqa: BLE001 - best-effort refresh keeps the existing row on any read fault
+        _log.warning(
+            "capability refresh skipped for %s:%s; keeping existing capabilities",
+            kind.value,
+            resource_id,
+            exc_info=True,
+        )
+        return
+    merged = _merge_capabilities(record["capabilities"], stored)
+    if merged == stored:
+        return
+    changed = sorted(k for k in merged.keys() | stored.keys() if merged.get(k) != stored.get(k))
+    # A refresh that writes rolls out admission-affecting capability keys (e.g. pseries_fadump,
+    # guest_arches, accel). Log the changed keys at INFO so a capability rollout that alters a
+    # host's admission behavior is greppable during incident diagnosis (#1172 / #1151).
+    _log.info(
+        "refreshing capabilities for %s:%s; changed keys: %s", kind.value, resource_id, changed
+    )
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE resources SET capabilities = %s WHERE kind = %s AND host_uri = %s",
+            (Jsonb(merged), kind.value, resource_id),
+        )
+
+
+def _merge_capabilities(fresh: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
+    """Discovery-authoritative merge that overlays operator-owned keys from the stored row."""
+    merged = dict(fresh)
+    for key in OPERATOR_OWNED_CAP_KEYS:
+        if key in stored:
+            merged[key] = stored[key]
+    return merged
 
 
 def _select_record(

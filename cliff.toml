@@ -40,15 +40,15 @@ footer = """
     {% if release.version -%}
         {% if release.previous.version -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}\
+                https://github.com/randomparity/kdive\
                     /compare/{{ release.previous.version }}..{{ release.version }}
         {% else -%}
             [{{ release.version | trim_start_matches(pat="v") }}]: \
-                https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}\
+                https://github.com/randomparity/kdive\
                     /tree/{{ release.version }}
         {% endif -%}
     {% else -%}
-        [unreleased]: https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}\
+        [unreleased]: https://github.com/randomparity/kdive\
             /compare/{{ release.previous.version }}..HEAD
     {% endif -%}
 {% endfor %}
@@ -58,6 +58,11 @@ footer = """
 trim = true
 
 [git]
+# Only SemVer release tags (v0.1.0, v0.2.0, …) mark a release boundary. Without this, git-cliff
+# treats every git tag — including dev/backup refs like `pre-M2` and `backup/*` — as a release,
+# which pollutes the changelog and points a release's compare link at a backup branch instead of
+# the prior version.
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 # Parse commits according to the conventional commits specification.
 # See https://www.conventionalcommits.org
 conventional_commits = true
@@ -91,6 +96,8 @@ topo_order = false
 # Allowed values: newest, oldest
 sort_commits = "oldest"
 
-[remote.github]
-owner = "randomparity"
-repo = "kdive"
+# No [remote.github]: the templates use only local git data (commit message/group) plus a static
+# repo slug in the footer links, so the GitHub API integration adds nothing — and configuring it
+# makes git-cliff eagerly page every commit through api.github.com, which fails on deep pagination
+# (503 past ~40 pages) and breaks the full-history `just changelog` regen. release.yml scopes its
+# own run with `--latest`, so it never paginated far enough to hit this.

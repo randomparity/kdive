@@ -8,11 +8,13 @@ schema live in each tool's own description.
 ## Reaching tools
 
 Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdive__*`) is
-the canonical path — by default the server lists its full catalog. `tools.search` and
-`tools.invoke` are a discovery gateway for hosts without lazy tool loading; prefer direct
-calls when your host lists the tools. Both paths enforce the same RBAC. If an operator
-enables the core-set gateway, only a small core set is listed directly, so reach everything
-else through `tools.search` / `tools.invoke`.
+the canonical path — by default the server lists its full catalog. If a capability you need
+is not a callable tool in your client — including lazy-loading hosts that materialize only
+some of the ~100 tools and may never bind `tools.invoke` — reach it through the gateway:
+`tools.search` finds the name and schema, and `tools.invoke(name, arguments)` executes any
+registered tool. `tools.search` and `tools.invoke` are always available. Both paths enforce
+the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
+directly, so reach everything else through `tools.search` / `tools.invoke`.
 
 ## The typical session
 
@@ -36,8 +38,10 @@ the first tool to call.
    succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,
    then run or stress it). This is where most investigation time goes; see the
    reproduce-and-capture loop below.
-7. **Observe evidence** — `runs.get` for status and console access, `artifacts.list` and
-   `artifacts.get` for logs and other files.
+7. **Observe evidence** — `runs.get` for status and console access: `refs.latest_console` jumps
+   to the newest console artifact, and `include_console_artifacts=true` returns the full
+   Run-scoped console manifest (`data.console_artifacts`). Use `artifacts.get` to read an artifact
+   and `artifacts.list` (keyset-paginated) for the System's other logs and files.
 8. **Debug live** — `debug.start_session`, then breakpoints, memory, and stack tools; or
    `debug.start_session(transport="drgn-live")` followed by `introspect.run`/`introspect.script`
    for non-halting drgn introspection against that session. See the debug and introspect guides.
@@ -77,14 +81,21 @@ Most real investigation time is spent here, not in the setup stages. After
    via debugfs, if you built the kernel with `CONFIG_FAULT_INJECTION`), tracing (`ftrace`,
    `bpftrace`), and stress are all in-guest-over-SSH activities using tools you installed
    (see "The guest is yours" above). **To target one allocation site** instead of whatever
-   fires first: set `ignore-gfp-wait=N` (`Y`, the debugfs default, skips every `GFP_KERNEL`
-   allocation before `cache-filter`/`fail-nth` even run), pin `cache-filter` to the exact
-   slab-cache name from `/proc/slabinfo`, and boot with `slab_nomerge` so SLUB doesn't
-   merge same-size caches out from under your filter. Prefer `probability` over
-   `/proc/self/fail-nth` when more than one site can fire — `fail-nth` is global and trips
-   on the first eligible call in the process (e.g. `fail_usercopy`'s
-   `strncpy_from_user`), not necessarily the one you're after. This is manual guest-side
-   work today; #918 and #919 track a debugfs-driven fault-injection tool surface.
+   fires first, default to the *bounded* knob: write `1` to `/proc/self/fail-nth` so exactly
+   one eligible allocation fails and the injector then disarms — it cannot storm. Scope which
+   allocations count as eligible with `cache-filter` (pin it to the exact slab-cache name from
+   `/proc/slabinfo`) and boot `slab_nomerge` so SLUB doesn't merge same-size caches out from
+   under your filter. To reach a `GFP_KERNEL` site you must also set `ignore-gfp-wait=N` (`Y`,
+   the debugfs default, skips every `GFP_KERNEL` allocation before `cache-filter`/`fail-nth`
+   even run); with `fail-nth=1` that stays bounded. **Do not reach for `probability` on a
+   targeted reproducer:** `probability` together with `ignore-gfp-wait=N` fails `GFP_KERNEL`
+   allocations *persistently*, and when one such failure lands in the page-fault path the
+   kernel retries `handle_mm_fault` forever — a `VM_FAULT_OOM` retry storm that livelocks the
+   guest (nothing detects a livelock; it is worse than a crash). Reserve `probability` for
+   stress/soak runs, not surgical single-site reproducers. The old caveat that `fail-nth`
+   "trips on the first eligible call, not necessarily the one you're after" only holds when
+   you *cannot* scope — `cache-filter` scopes it. This is manual guest-side work today; #918
+   and #919 track a debugfs-driven fault-injection tool surface.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
 whatever you were watching over SSH is gone. The **serial-console is the durable record** — it
@@ -95,6 +106,23 @@ if none appeared). Poll it with `jobs.wait`. If your SSH loop dies but the watch
 the crash was outside the watched window — read the console directly with `runs.get` (console
 access) and the `artifacts` tools. Do not rely on SSH output as your capture of a panic; rely on
 the console.
+
+**Checkpoint a configured guest to restore between attempts.** When each reproducer attempt leaves
+the guest dirty (or crashes it), `systems.snapshot` a fully-configured guest once — packages
+installed, reproducer staged, kdump armed — then `systems.restore` back to that checkpoint in
+seconds between attempts instead of reprovisioning from scratch. `systems.get`'s
+`data.supports_snapshots` tells you whether the provider supports this. A memory checkpoint
+(`include_memory=true`) resumes the guest exactly where it was; `start_paused=true` lands it
+`paused` for a gdbstub `debug.start_session` before execution resumes, then
+`control.power(action="resume")` runs it. See the systems guide.
+
+**Scope resource-exhaustion reproducers to a throwaway uid.** Reproducing a per-uid or
+per-cgroup quota bug (inotify watches, file descriptors, pending signals, and the like) by
+running the workload as root exhausts *root's own* quota — starving root-owned services such as
+sshd's session setup and systemd, which hangs new SSH logins and looks exactly like a guest
+wedge. Run the reproducer under a throwaway unprivileged uid instead, e.g. `setpriv --reuid
+$(id -u nobody) --clear-groups ...`, so the exhaustion is scoped to that uid and your SSH/control
+channel stays reachable and recoverable.
 
 ## Decide before you provision
 

@@ -31,7 +31,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libvirt-dev
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
@@ -167,22 +167,36 @@ jobs:
           persist-credentials: false
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Resolve build provenance
+        # Bake the same provenance the release path does (ADR-0370) so the smoke step can prove
+        # the running image self-reports X.Y.Z-dev+g<sha>. A PR build is never a release, so
+        # KDIVE_RELEASE is false. An empty sha would skip the stamp and fail the smoke assertion;
+        # fail loudly here anyway so the cause is the SHA step, not a puzzling smoke mismatch.
+        id: prov
+        run: |
+          sha="$(git rev-parse --short=12 HEAD)"
+          [ -n "$sha" ] || { echo "::error::empty provenance SHA from git rev-parse" >&2; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Build image (no push)
         # Exercises the Dockerfile on every PR (ADR-0088 decision 8). The build-time
         # tool-verification RUN fails the build if a worker tool is missing, so a broken
         # toolchain fails here, not at release time. load:true puts kdive:ci in the local
         # daemon so the smoke step can run it.
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: false
           load: true
           tags: kdive:ci
+          build-args: |
+            KDIVE_COMMIT=${{ steps.prov.outputs.sha }}
+            KDIVE_RELEASE=false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
@@ -219,7 +233,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
@@ -240,10 +254,27 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
+
+      - name: Install pinned shellcheck
+        # The shellcheck hook is `language: system` (koalaman/shellcheck ships no
+        # ppc64le manifest, so the docker_image variant broke POWER dev). Ubuntu's
+        # apt shellcheck is older than 0.11.0 and emits info-level findings 0.11.0
+        # dropped (SC2015/SC2002 on `A && B || C` and `cat | tr` shapes that are
+        # correct by construction). Install the same pinned 0.11.0 tarball the
+        # lint-type-test job uses so both jobs enforce one standard.
+        run: |
+          sc_ver=v0.11.0
+          sc_sha=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${sc_ver}/shellcheck-${sc_ver}.linux.x86_64.tar.xz"
+          echo "${sc_sha}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          sudo install "/tmp/shellcheck-${sc_ver}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
 
       - name: Run hooks
         # The ty hook shells out to `uv run ty check`, which would sync the whole
@@ -266,7 +297,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
@@ -284,7 +315,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true
@@ -313,7 +344,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: "0.11.18"
           enable-cache: true

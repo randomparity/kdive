@@ -8,6 +8,21 @@ name: publish-mock-oidc
 # Triggered only when the mirror source changes (a version/base bump under deploy/mock-oidc),
 # which is exactly when a NEW digest must be produced and re-pinned in docker-compose.yml, and
 # on manual dispatch. An unrelated push to main does not republish (no digest thrash).
+#
+# ONE-TIME SETUP (per package, not per run): the `ghcr.io/randomparity/mock-oauth2-server`
+# package was first pushed by a workflow that did NOT emit `org.opencontainers.image.source`,
+# so GHCR created it UNLINKED from any source repository. GITHUB_TOKEN from this repo can only
+# `packages: write` to a package that is either owned by this repo (via image.source at first
+# push) or explicitly grants that repo Actions access. This workflow now emits the source label
+# on every push via docker/metadata-action, so a FUTURE re-created package auto-links; the
+# already-live package still needs the one-time UI link — the GitHub REST API exposes no
+# endpoint to relink an existing package. Perform once, then GITHUB_TOKEN pushes succeed:
+#
+#   https://github.com/users/randomparity/packages/container/mock-oauth2-server/settings
+#   → "Manage Actions access" → "Add repository" → randomparity/kdive
+#
+# Verification: the sibling `ghcr.io/randomparity/kdive` package IS linked, which is why the
+# release-image.yml workflow's GITHUB_TOKEN push has always worked without a PAT.
 on:
   push:
     branches: [main]
@@ -40,45 +55,74 @@ jobs:
       # emulation (ADR-0357). Contrast release-image.yml, whose app build compiles ppc64le
       # deps from source and therefore does need QEMU (ADR-0359).
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Derive image tags
-        id: tags
+      - name: Read pinned mock-oauth2-server version
         # The one version pin lives in the Dockerfile ARG (kept in lockstep with pom.xml); read
-        # it here so the tag never drifts from the jar the image actually resolves. Publish an
-        # immutable `<version>-<short-sha>` plus the human-facing `<version>`; the compose pin
-        # uses the @sha256 digest (output below), so neither tag is load-bearing for resolution.
+        # it here so the tag never drifts from the jar the image actually resolves. Validate the
+        # extracted string against a strict semver-ish regex before writing to $GITHUB_OUTPUT so
+        # a malformed / multi-line ARG cannot inject additional outputs (this workflow is main-
+        # branch-triggered, so the ARG line is already code-reviewed, but the regex keeps the
+        # step honest under any future trigger change). Also emit the 12-char short SHA — the
+        # original hand-rolled tag scheme used 12 (not the metadata-action default of 7); keeping
+        # the width means an old and a new republish of the same commit produce the same tag.
+        id: version
         env:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          version="$(grep -oP '^ARG MOCK_OAUTH2_SERVER_VERSION=\K.*' deploy/mock-oidc/Dockerfile)"
+          version="$(grep -oP '^ARG MOCK_OAUTH2_SERVER_VERSION=\K[^[:space:]]+' deploy/mock-oidc/Dockerfile)"
           if [[ -z "${version}" ]]; then
             echo "::error::could not read MOCK_OAUTH2_SERVER_VERSION from deploy/mock-oidc/Dockerfile" >&2
             exit 1
           fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::MOCK_OAUTH2_SERVER_VERSION='${version}' is not a MAJOR.MINOR.PATCH(-suffix) string" >&2
+            exit 1
+          fi
           short="${SHA:0:12}"
-          image=ghcr.io/randomparity/mock-oauth2-server
           {
-            echo "tags=${image}:${version},${image}:${version}-${short}"
-            echo "image=${image}"
+            echo "version=${version}"
+            echo "sha_short=${short}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Derive image tags and labels
+        id: meta
+        # metadata-action emits `org.opencontainers.image.source=${{ github.server_url }}/${{
+        # github.repository }}` (plus the sibling revision/created labels) at build time. GHCR
+        # reads that label at FIRST push to auto-link a new package to its source repo, which is
+        # what grants the workflow's GITHUB_TOKEN write access on subsequent pushes. Mirrors the
+        # release-image.yml pattern for the kdive app image, which is why that publish succeeds
+        # via GITHUB_TOKEN — an existing package that was created without the label (as this one
+        # was) stays unlinked until an operator connects it once via the package settings UI
+        # (see the workflow-level comment at the top of this file); the label ensures a future
+        # re-creation auto-links without any UI step.
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/randomparity/mock-oauth2-server
+          # Publish an immutable `<version>-<short-sha>` plus the human-facing `<version>`; the
+          # compose pin uses the @sha256 digest (verify-step output below), so neither tag is
+          # load-bearing for resolution.
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.version }}-${{ steps.version.outputs.sha_short }}
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: deploy/mock-oidc
           push: true
           platforms: linux/amd64,linux/ppc64le
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           # Reproducibility of the mirror is driven by the pinned bases + checksum-verified
           # Maven closure; SBOM/provenance attestations add non-deterministic layers and are
           # unnecessary for a dev-tooling mirror, so keep the manifest lean.
@@ -89,7 +133,7 @@ jobs:
         # Fail if the pushed manifest is missing a required platform (e.g. a base image that
         # silently dropped ppc64le), so a broken publish never masquerades as green.
         env:
-          IMAGE: ${{ steps.tags.outputs.image }}
+          IMAGE: ghcr.io/randomparity/mock-oauth2-server
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail

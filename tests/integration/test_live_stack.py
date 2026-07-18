@@ -415,7 +415,7 @@ def test_viewer_denied_operator_op_over_the_wire() -> None:
                 await viewer.call_tool(
                     "allocations.request",
                     project=_PROJECT,
-                    request={"vcpus": 1, "memory_gb": 1, "resource": {"mode": "kind"}},
+                    **{"vcpus": 1, "memory_gb": 1, "resource": {"mode": "kind"}},
                 )
 
     asyncio.run(_run())
@@ -470,7 +470,7 @@ def test_spine_over_the_wire() -> None:
                         op,
                         "allocations.request",
                         project=_PROJECT,
-                        request={
+                        **{
                             "vcpus": 2,
                             "memory_gb": 2,
                             "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -497,7 +497,7 @@ def test_spine_over_the_wire() -> None:
                     await scalar(
                         op,
                         "investigations.open",
-                        request={"project": _PROJECT, "title": "spine"},
+                        **{"project": _PROJECT, "title": "spine"},
                     ),
                     "open-investigation",
                 )
@@ -600,7 +600,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                         op,
                         "allocations.request",
                         project=_PROJECT,
-                        request={
+                        **{
                             "vcpus": 2,
                             "memory_gb": 2,
                             "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -627,7 +627,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                     await scalar(
                         op,
                         "investigations.open",
-                        request={"project": _PROJECT, "title": "sweep"},
+                        **{"project": _PROJECT, "title": "sweep"},
                     ),
                     "create-run",
                 )
@@ -692,7 +692,7 @@ def test_spine_live_script_over_the_wire() -> None:
                         op,
                         "allocations.request",
                         project=_PROJECT,
-                        request={
+                        **{
                             "vcpus": 2,
                             "memory_gb": 2,
                             "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -719,7 +719,7 @@ def test_spine_live_script_over_the_wire() -> None:
                     await scalar(
                         op,
                         "investigations.open",
-                        request={"project": _PROJECT, "title": "live-script"},
+                        **{"project": _PROJECT, "title": "live-script"},
                     ),
                     "open-investigation",
                 )
@@ -879,7 +879,7 @@ def test_family_guest_is_ssh_reachable_over_the_wire(family: str) -> None:
                             op,
                             "allocations.request",
                             project=_PROJECT,
-                            request={
+                            **{
                                 "vcpus": 2,
                                 "memory_gb": 2,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -1003,7 +1003,7 @@ def test_ppc64le_guest_is_ssh_reachable_over_the_wire() -> None:
                             op,
                             "allocations.request",
                             project=_PROJECT,
-                            request={
+                            **{
                                 "vcpus": 2,
                                 "memory_gb": 2,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -1145,7 +1145,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                             op,
                             "allocations.request",
                             project=_PROJECT,
-                            request={
+                            **{
                                 "vcpus": 2,
                                 "memory_gb": 2,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -1172,7 +1172,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         await scalar(
                             op,
                             "investigations.open",
-                            request={"project": _PROJECT, "title": "ppc64le-bundle-1146"},
+                            **{"project": _PROJECT, "title": "ppc64le-bundle-1146"},
                         ),
                         "ppc64le-bundle:create-run",
                     )
@@ -1180,7 +1180,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         await scalar(
                             op,
                             "runs.create",
-                            request={
+                            **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
                                 "build_profile": {"schema_version": 1, "arch": "ppc64le"},
@@ -1365,7 +1365,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                             project=_PROJECT,
                             # memory_gb=4 is the fadump RAM floor (ADR-0363, #1181); the reconciled
                             # profile size must not fall below it, unlike the kdump proof's 2 GiB.
-                            request={
+                            **{
                                 "vcpus": 2,
                                 "memory_gb": 4,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -1390,7 +1390,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(
                             op,
                             "investigations.open",
-                            request={"project": _PROJECT, "title": "ppc64le-fadump-1151"},
+                            **{"project": _PROJECT, "title": "ppc64le-fadump-1151"},
                         ),
                         "ppc64le-fadump:create-run",
                     )
@@ -1398,7 +1398,7 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(
                             op,
                             "runs.create",
-                            request={
+                            **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
                                 "build_profile": {"schema_version": 1, "arch": "ppc64le"},
@@ -1537,7 +1537,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                             op,
                             "allocations.request",
                             project=_PROJECT,
-                            request={
+                            **{
                                 "vcpus": 2,
                                 "memory_gb": 2,
                                 "disk_gb": LOCAL_ALLOCATION_DISK_GB,
@@ -1562,7 +1562,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(
                             op,
                             "investigations.open",
-                            request={"project": _PROJECT, "title": "ppc64le-kdump-1148"},
+                            **{"project": _PROJECT, "title": "ppc64le-kdump-1148"},
                         ),
                         "ppc64le-kdump:create-run",
                     )
@@ -1570,7 +1570,7 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         await scalar(
                             op,
                             "runs.create",
-                            request={
+                            **{
                                 "investigation_id": env.object_id,
                                 "system_id": system_id,
                                 "build_profile": {"schema_version": 1, "arch": "ppc64le"},

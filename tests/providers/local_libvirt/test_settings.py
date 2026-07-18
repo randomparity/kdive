@@ -79,10 +79,33 @@ def test_customization_boot_window_rejects_non_positive() -> None:
         settings.LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S.parse("-1")
 
 
+def test_boot_window_setting_fields() -> None:
+    s = settings.LIBVIRT_BOOT_WINDOW_S
+    assert s.name == "KDIVE_LIBVIRT_BOOT_WINDOW_S"
+    assert s.default == "900"
+    assert s.group == "local-libvirt"
+    assert s.processes == _RT
+    assert s.secret is False
+
+
+def test_boot_window_default_parses_to_900() -> None:
+    s = settings.LIBVIRT_BOOT_WINDOW_S
+    assert s.default is not None
+    assert s.parse(s.default) == 900
+
+
+def test_boot_window_rejects_non_positive() -> None:
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_BOOT_WINDOW_S.parse("0")
+    with pytest.raises(ValueError):
+        settings.LIBVIRT_BOOT_WINDOW_S.parse("-1")
+
+
 def test_settings_list_is_the_declared_settings_in_order() -> None:
     assert settings.SETTINGS == [
         settings.LIBVIRT_URI,
         settings.LIBVIRT_ALLOCATION_CAP,
         settings.LIBVIRT_TCG_DEADLINE_MULTIPLIER,
         settings.LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S,
+        settings.LIBVIRT_BOOT_WINDOW_S,
     ]

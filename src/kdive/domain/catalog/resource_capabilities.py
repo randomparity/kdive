@@ -18,6 +18,13 @@ if TYPE_CHECKING:
 CONCURRENT_ALLOCATION_CAP_KEY = "concurrent_allocation_cap"
 PCIE_DEVICES_KEY = "pcie_devices"
 
+# Capability keys a platform_operator writes directly onto a resource row (ops.set_host_capacity,
+# ADR-0384). The discovery capability refresh preserves the stored value of each of these instead
+# of overwriting it with the discovery record, so an audited operator change is not reverted on a
+# redeploy/process-start. Grow this set when a new operator tool writes another capability key
+# onto a discovery/runtime row.
+OPERATOR_OWNED_CAP_KEYS = frozenset({CONCURRENT_ALLOCATION_CAP_KEY})
+
 # The bootable guest arches a host advertises, each with its accelerator (``kvm``/``tcg``) and
 # emulator path (ADR-0338). Populated by local-libvirt discovery from the libvirt capabilities
 # ``<guest>`` blocks; admission validates a profile arch against this set.

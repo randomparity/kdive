@@ -31,6 +31,7 @@ from kdive.mcp.tools.lifecycle.runs.complete_build import CompleteBuildHandlers
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role
+from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.complete_build_support import (
     FakeValidator as _FakeValidator,
 )
@@ -59,6 +60,7 @@ def _combined_kernel_tar() -> bytes:
         for name, data in (
             ("boot/vmlinuz", b"\x00" * 0x202 + b"HdrS" + b"\x00" * 16),
             ("lib/modules/6.9.0/modules.dep", b""),
+            ("lib/modules/6.9.0/kernel/drivers/foo.ko", b"\x7fELFmod"),
         ):
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -148,7 +150,9 @@ async def _artifact_keys(pool, run_id) -> set[str]:
 
 
 async def _get_run_data(pool, run_id) -> dict[str, Any]:
-    resp = await _get_run(pool, _ctx(), str(run_id), resolver=provider_resolver())
+    resp = await _get_run(
+        pool, _ctx(), str(run_id), resolver=provider_resolver(), secret_registry=SecretRegistry()
+    )
     assert resp.status == RunState.SUCCEEDED.value, resp
     return resp.data
 

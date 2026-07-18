@@ -113,6 +113,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_LIBVIRT_ALLOCATION_CAP` | reconciler, worker | `1` | no | Per-host concurrent-Allocation cap. |
+| `KDIVE_LIBVIRT_BOOT_WINDOW_S` | reconciler, worker | `900` | no | Native-KVM base window (seconds) for the regular boot readiness poll — the window within which the guest must emit the kdive-ready marker after domain start. Defaults to 900 s (15 min), which accommodates kdump.service arming (the kdive-ready marker orders After=kdump.service) on slow hosts such as POWER9 and large first-dracut builds. Foreign (TCG-emulated) guests scale this by tcg_deadline_multiplier(accel) (ADR-0341). The window is a ceiling, not a fixed wait — boot returns the instant the marker appears. |
 | `KDIVE_LIBVIRT_CUSTOMIZATION_BOOT_WINDOW_S` | reconciler, worker | `1800` | no | Native-KVM base window (seconds) for the customization boot's completion poll. 30 minutes. Foreign (TCG-emulated) guests scale this by tcg_deadline_multiplier(accel) (ADR-0341). This is a provisional default absorbing mirror/network fetch variance; a live-proof measurement will re-pin it. |
 | `KDIVE_LIBVIRT_TCG_DEADLINE_MULTIPLIER` | reconciler, worker | `10.0` | no | Multiplier applied to boot-readiness deadlines for non-KVM (TCG-emulated) guests, keyed off the System's persisted accelerator. KVM guests are unscaled (1.0); TCG and unknown accelerators scale by this factor. Must be >= 1.0; 1.0 disables scaling. |
 | `KDIVE_LIBVIRT_URI` | reconciler, worker | `qemu:///system` | no | libvirt connection URI for the local host. |
@@ -189,7 +190,7 @@
 
 # Test, tooling, and guest-helper variables
 
-Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, and the in-guest capture/install helpers. Catalogued in `src/kdive/config/external_env.py`.
+Non-registry `KDIVE_*` variables read outside the process config registry — by the gated test suites, the operator setup/live-stack shell scripts, the in-guest capture/install helpers, and the image/wheel build. Catalogued in `src/kdive/config/external_env.py`.
 
 ## Test (gated suites)
 
@@ -208,6 +209,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_LIVE_VM_GDBMI_MODULE_KO` | — | Path to a loaded module .ko for the optional gated gdb-MI module-symbol load smoke. Unset → that portion of the test skips. |
 | `KDIVE_LIVE_VM_GDBMI_MODULE_NAME` | — | Loaded module name matching KDIVE_LIVE_VM_GDBMI_MODULE_KO for the optional gated gdb-MI module-symbol load smoke. Defaults to the .ko path stem. |
 | `KDIVE_LIVE_VM_GDBMI_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_BZIMAGE for the gated gdb-MI debug tool smoke. Unset → that test skips. |
+| `KDIVE_LIVE_VM_ROOTFS` | — | Path to a bootable rootfs qcow2 for the gated live_vm snapshot/revert/resume proof (#1254); unset → that test skips. |
 | `KDIVE_LIVE_VM_SYSTEM_ID` | — | System id of a pre-provisioned live VM for the gated local-libvirt install test. |
 | `KDIVE_LIVE_VM_VMCORE` | — | Path to a real captured vmcore for the live_vm crash(8) postmortem test (#816); paired with KDIVE_LIVE_VM_VMLINUX. Unset → that test skips. |
 | `KDIVE_LIVE_VM_VMLINUX` | — | Path to the vmlinux debuginfo matching KDIVE_LIVE_VM_VMCORE for the live_vm crash(8) postmortem test (#816). Unset → that test skips. |
@@ -264,3 +266,11 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DMESG_CAP_BYTES` | `1048576` | Byte cap on the inline dmesg `kdive-capture-vmcore` emits (default 1 MiB). |
 | `KDIVE_TITLE` | `kdive` | grub menu title the `kdive-install-kernel` helper assigns the kdive boot slot. |
 | `KDIVE_VMCORE_PATH` | `/var/crash/*/vmcore` | Override the vmcore path `kdive-capture-vmcore` reads (default: the kdump-utils path). |
+
+## Build-time (image/wheel provenance)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KDIVE_BUILDINFO_COMMIT` | — | Short commit SHA `scripts/stamp-buildinfo.sh` bakes into `_buildinfo.py` when set — the container build passes it in, having no `.git`; unset → derived from live git (ADR-0370). |
+| `KDIVE_COMMIT` | — | Docker build arg carrying the short commit SHA the image bakes as provenance; passed by ci.yml and release-image.yml. Empty → the stamp is skipped, image reports X.Y.Z-dev (ADR-0370). |
+| `KDIVE_RELEASE` | `false` | Docker build arg: `true` on a `vX.Y.Z` tag build (image reports X.Y.Z+g<sha>), `false` otherwise (X.Y.Z-dev+g<sha>) (ADR-0370). |

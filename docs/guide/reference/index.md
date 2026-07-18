@@ -36,6 +36,7 @@
 | [`debug.continue`](debug.md#debugcontinue) | `implemented` |
 | [`debug.disassemble`](debug.md#debugdisassemble) | `implemented` |
 | [`debug.end_session`](debug.md#debugend_session) | `implemented` |
+| [`debug.finish`](debug.md#debugfinish) | `implemented` |
 | [`debug.get_session`](debug.md#debugget_session) | `implemented` |
 | [`debug.interrupt`](debug.md#debuginterrupt) | `implemented` |
 | [`debug.list_breakpoints`](debug.md#debuglist_breakpoints) | `implemented` |
@@ -43,6 +44,7 @@
 | [`debug.list_sessions`](debug.md#debuglist_sessions) | `implemented` |
 | [`debug.list_watchpoints`](debug.md#debuglist_watchpoints) | `implemented` |
 | [`debug.load_module_symbols`](debug.md#debugload_module_symbols) | `implemented` |
+| [`debug.next`](debug.md#debugnext) | `implemented` |
 | [`debug.read_frame`](debug.md#debugread_frame) | `implemented` |
 | [`debug.read_memory`](debug.md#debugread_memory) | `implemented` |
 | [`debug.read_registers`](debug.md#debugread_registers) | `implemented` |
@@ -50,6 +52,8 @@
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `implemented` |
 | [`debug.set_watchpoint`](debug.md#debugset_watchpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
+| [`debug.step`](debug.md#debugstep) | `implemented` |
+| [`debug.step_instruction`](debug.md#debugstep_instruction) | `implemented` |
 | [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.build`](images.md#imagesbuild) | `implemented` |
@@ -123,12 +127,16 @@
 | [`systems.authorize_ssh_key`](systems.md#systemsauthorize_ssh_key) | `implemented` |
 | [`systems.check_ssh_reachable`](systems.md#systemscheck_ssh_reachable) | `implemented` |
 | [`systems.define`](systems.md#systemsdefine) | `implemented` |
+| [`systems.delete_snapshot`](systems.md#systemsdelete_snapshot) | `implemented` |
 | [`systems.get`](systems.md#systemsget) | `implemented` |
 | [`systems.list`](systems.md#systemslist) | `implemented` |
+| [`systems.list_snapshots`](systems.md#systemslist_snapshots) | `implemented` |
 | [`systems.profile_examples`](systems.md#systemsprofile_examples) | `implemented` |
 | [`systems.provision`](systems.md#systemsprovision) | `implemented` |
 | [`systems.provision_defined`](systems.md#systemsprovision_defined) | `implemented` |
 | [`systems.reprovision`](systems.md#systemsreprovision) | `implemented` |
+| [`systems.restore`](systems.md#systemsrestore) | `implemented` |
+| [`systems.snapshot`](systems.md#systemssnapshot) | `implemented` |
 | [`systems.ssh_info`](systems.md#systemsssh_info) | `implemented` |
 | [`systems.teardown`](systems.md#systemsteardown) | `implemented` |
 | [`tools.invoke`](tools.md#toolsinvoke) | `implemented` |

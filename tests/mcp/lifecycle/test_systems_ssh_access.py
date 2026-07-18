@@ -302,6 +302,39 @@ def test_check_ssh_reachable_unprovisioned_is_config_error(migrated_url: str) ->
     asyncio.run(_run())
 
 
+def test_check_ssh_reachable_suggests_authorize_ssh_key(migrated_url: str) -> None:
+    # The auth-free probe must point a contributor at authorize_ssh_key so reachable=true is not
+    # misread as login-ready (#1250); the generic lifecycle actions stay present too.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await check_ssh_reachable(
+                pool, _ctx(role=Role.CONTRIBUTOR), sys_id, resolver=resolver
+            )
+        assert "systems.authorize_ssh_key" in resp.suggested_next_actions
+        assert "jobs.wait" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+def test_check_ssh_reachable_viewer_omits_authorize_next_action(migrated_url: str) -> None:
+    # authorize_ssh_key is CONTRIBUTOR-gated; a viewer-only caller must not see it as a next action.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resolver = _provider_resolver(connector=_FakeConnector(("127.0.0.1", 22022)))
+            resp = await check_ssh_reachable(
+                pool, _ctx(role=Role.VIEWER), sys_id, resolver=resolver
+            )
+        assert "systems.authorize_ssh_key" not in resp.suggested_next_actions
+        assert "jobs.wait" in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
 def test_ssh_info_suggests_check_ssh_reachable(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

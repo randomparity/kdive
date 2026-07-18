@@ -337,6 +337,42 @@ def test_power_non_ready_system_is_config_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_resume_admitted_only_from_paused(migrated_url: str) -> None:
+    # #1254: resume is the one action admitted from PAUSED (a start_paused restore's guest).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PAUSED)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="resume")
+        assert resp.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_resume_refused_from_ready(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="resume")
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "ready"
+
+    asyncio.run(_run())
+
+
+def test_non_resume_action_refused_from_paused(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PAUSED)
+            resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="off")
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.data["current_status"] == "paused"
+
+    asyncio.run(_run())
+
+
 @pytest.mark.parametrize("action", ["on", "off", "cycle", "reset"])
 def test_power_on_crashed_system_is_config_error(migrated_url: str, action: str) -> None:
     # A CRASHED System holds crash evidence: power is refused, protecting it (ADR-0320).

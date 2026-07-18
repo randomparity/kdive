@@ -10,13 +10,15 @@ parse/level/discovery/render/read wiring with fakes):
 
 1. ``test_local_discovery_advertises_host_cpu_and_selectable`` — running ``LocalLibvirtDiscovery``
    against the real host advertises a non-empty native ``host_cpu`` and a per-arch
-   ``selectable_cpus`` whose native-arch set is non-empty. The ``host_cpu`` model is one the host
-   can actually deliver (it appears in the native arch's ``selectable_cpus`` **or** the derived
-   ``baseline_level`` is ``≥ x86-64-v2`` / absent — never a wrong level).
+   ``selectable_cpus`` whose native-arch set is non-empty. On x86_64, ``selectable_cpus`` holds
+   ``usable='yes'`` models only. On ppc64le, QEMU does not implement the usability probe and
+   reports all models as ``usable='unknown'``; ``parse_selectable_cpus`` treats ``unknown`` as
+   includable (only ``usable='no'`` is excluded), so ``POWER9``/``POWER10`` etc. appear on a
+   native POWER9 KVM-HV host.
 2. ``test_pinned_model_is_host_usable`` — a portable rung an agent would pin (an ``x86-64-vN`` the
    host advertises) is genuinely in the host's ``getDomainCapabilities`` custom usable set, so an
    admission-accepted pin renders a domain the host will define. Skips with a recorded reason if the
-   host advertises no ``x86-64-vN`` rung.
+   host advertises no ``x86-64-vN`` rung (e.g. on ppc64le, where no such rungs exist).
 """
 
 from __future__ import annotations

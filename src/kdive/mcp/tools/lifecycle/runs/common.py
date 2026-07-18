@@ -19,6 +19,7 @@ from kdive.mcp.tools._common import job_envelope
 from kdive.mcp.tools.lifecycle.vmcore.view import CONSOLE_CRASH_GUIDANCE
 from kdive.services.artifacts.listing import ConsoleManifest
 from kdive.services.runs import states as run_states
+from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import (
     READY_BOOT_OUTCOME,
     BootAttempt,
@@ -105,7 +106,11 @@ _CONSOLE_ACCESS_HINT: dict[str, str] = {
 
 
 def _run_artifact_refs(
-    run: Run, *, console_ref: str | None = None, build_log_ref: str | None = None
+    run: Run,
+    *,
+    console_ref: str | None = None,
+    latest_console_ref: str | None = None,
+    build_log_ref: str | None = None,
 ) -> dict[str, str]:
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
@@ -114,9 +119,12 @@ def _run_artifact_refs(
     or searched via ``artifacts.find``, and ``data["console_access"]`` names those paths
     (``_CONSOLE_ACCESS_HINT``, ADR-0262/0283) so the agent need not know it out of band. It is
     supplied only on the ``runs.get`` success path (which loads the boot step), and omitted when no
-    boot step recorded evidence. ``build_log_ref`` is the failed build's build-log artifact id
-    (ADR-0238), surfaced as ``build-log`` on the failed-Run path; omitted when the build captured
-    no log.
+    boot step recorded evidence. ``latest_console_ref`` is the newest console artifact correlated
+    to the Run (ADR-0374, #1238) — the boot snapshot or, on a chatty Run, the newest rotating part
+    — surfaced as ``latest_console`` so an agent jumps to the newest console evidence without the
+    opt-in manifest; read the same way as ``console`` and equal to it when only the boot snapshot
+    exists. ``build_log_ref`` is the failed build's build-log artifact id (ADR-0238), surfaced as
+    ``build-log`` on the failed-Run path; omitted when the build captured no log.
     """
     refs: dict[str, str] = {}
     if run.kernel_ref:
@@ -125,6 +133,8 @@ def _run_artifact_refs(
         refs["debuginfo"] = run.debuginfo_ref
     if console_ref is not None:
         refs["console"] = console_ref
+    if latest_console_ref is not None:
+        refs["latest_console"] = latest_console_ref
     if build_log_ref is not None:
         refs["build-log"] = build_log_ref
     return refs
@@ -178,7 +188,7 @@ def _required_cmdline_data(required_cmdline: str | None) -> dict[str, JsonValue]
     if required_cmdline is None:
         return {}
     # The platform-owned boot args (#748). Extra kernel debug args are set via runs.install.cmdline
-    # (per-boot, no rebuild) or runs.complete_build.request.cmdline (at build finalization).
+    # (per-boot, no rebuild) or the runs.complete_build cmdline field (at build finalization).
     return {"required_cmdline": required_cmdline}
 
 
@@ -252,6 +262,17 @@ def _console_access_data(console_ref: str | None) -> dict[str, JsonValue]:
     return {"console_access": cast(JsonValue, dict(_CONSOLE_ACCESS_HINT))}
 
 
+def _liveness_data(liveness: Liveness | None) -> dict[str, JsonValue]:
+    """The Run's combined liveness verdict (ADR-0373, #1237), for the envelope ``data`` slot.
+
+    Supplied only for a ready-booted local-libvirt Run (the read path gates it); omitted entirely
+    otherwise, so an absent key is never read as a claim of health.
+    """
+    if liveness is None:
+        return {}
+    return {"liveness": cast(JsonValue, liveness.as_data())}
+
+
 def _console_manifest_data(console_manifest: ConsoleManifest | None) -> dict[str, JsonValue]:
     """The Run-scoped console manifest (ADR-0279): the correlated console artifacts for this Run.
 
@@ -282,6 +303,8 @@ def envelope_for_run(
     boot_readiness: BootAttempt | None = None,
     build_provenance: dict[str, str | bool | list[str]] | None = None,
     console_manifest: ConsoleManifest | None = None,
+    latest_console_ref: str | None = None,
+    liveness: Liveness | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -301,6 +324,14 @@ def envelope_for_run(
     `data.boot_readiness` on the `SUCCEEDED` success path so a caller can distinguish a failed
     boot (whose `run_steps` row was deleted to `pending` by the ADR-0185 recycle) from a
     never-attempted one. The read path passes it only when the boot step is not yet succeeded.
+
+    `liveness` (#1237, ADR-0373) is the combined console-storm + SSH-reachability verdict,
+    surfaced as `data.liveness` so an agent can tell a healthy guest from one that livelocked
+    after a ready boot. The read path passes it only for a ready-booted local-libvirt Run.
+
+    `latest_console_ref` (#1238, ADR-0374) is the newest console artifact id correlated to the Run,
+    surfaced as `refs.latest_console` so an agent jumps straight to the newest console evidence
+    without the opt-in manifest. The read path passes it for any non-failed Run that has one.
     """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -330,12 +361,15 @@ def envelope_for_run(
         **_run_recovery(run),
         **_console_access_data(console_ref),
         **_console_manifest_data(console_manifest),
+        **_liveness_data(liveness),
     }
     return ToolResponse.success(
         str(run.id),
         run.state.value,
         suggested_next_actions=actions,
-        refs=_run_artifact_refs(run, console_ref=console_ref),
+        refs=_run_artifact_refs(
+            run, console_ref=console_ref, latest_console_ref=latest_console_ref
+        ),
         data=data,
     )
 

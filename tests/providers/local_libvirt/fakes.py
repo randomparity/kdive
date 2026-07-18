@@ -76,6 +76,11 @@ class FakeDomain:
         self._maybe_raise("undefine")
         return 0
 
+    def undefineFlags(self, flags: int) -> int:  # noqa: N802 - mirrors the libvirt binding name
+        self.calls.append("undefine")
+        self._maybe_raise("undefine")
+        return 0
+
     def reset(self, flags: int = 0) -> int:
         self.calls.append("reset")
         self._maybe_raise("reset")
@@ -84,6 +89,11 @@ class FakeDomain:
     def reboot(self, flags: int = 0) -> int:
         self.calls.append("reboot")
         self._maybe_raise("reboot")
+        return 0
+
+    def resume(self) -> int:
+        self.calls.append("resume")
+        self._maybe_raise("resume")
         return 0
 
     def injectNMI(self, flags: int = 0) -> int:  # noqa: N802 - mirrors the libvirt binding name

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from decimal import Decimal
+from typing import Annotated, Literal
 
 from fastmcp import FastMCP
 from opentelemetry import metrics as otel_metrics
@@ -13,7 +14,12 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.schema.tool_payloads import AllocationRequestPayload, ToolPayload
+from kdive.mcp.schema.tool_payloads import (
+    AllocationRequestPayload,
+    ResourceByKind,
+    ResourceSelector,
+    ToolPayload,
+)
 from kdive.mcp.tools import _docmeta
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from kdive.mcp.tools.lifecycle.allocations.common import MAX_WAIT_S
@@ -41,6 +47,9 @@ from kdive.mcp.tools.lifecycle.allocations.view import (
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.services.allocation.admission.metrics import AdmissionMetrics
+
+_DEFAULT_RESOURCE_SELECTOR: ResourceSelector = ResourceByKind()
+_DEFAULT_PCIE_DEVICES: list[str] = []
 
 
 class _AllocationsListPayload(ToolPayload):
@@ -93,10 +102,91 @@ def _register_allocations_request(
     )
     async def allocations_request(
         project: Annotated[str, Field(description="Project to admit the allocation for.")],
-        request: Annotated[
-            AllocationRequestPayload,
-            Field(description="Allocation request payload: size, lease window, resource selector."),
-        ],
+        shape: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Named size from `shapes.list`; mutually exclusive with "
+                    "vcpus/memory_gb/disk_gb (supply exactly one sizing source)."
+                ),
+            ),
+        ] = None,
+        vcpus: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description=("Guest vCPUs (part of the custom triple; omit when using a shape)."),
+            ),
+        ] = None,
+        memory_gb: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description=(
+                    "Guest memory in GB (part of the custom triple; omit when using a shape)."
+                ),
+            ),
+        ] = None,
+        disk_gb: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description=(
+                    "Guest disk in GB (part of the custom triple; omit when using a shape). Sizes "
+                    "the guest's usable disk — the filesystem grows to fill it on first boot — so "
+                    "allow headroom for tool installs + build artifacts + a vmcore. Bounded by the "
+                    "host disk ceiling (over-ceiling is a configuration_error)."
+                ),
+            ),
+        ] = None,
+        window: Annotated[
+            Decimal | None,
+            Field(default=None, gt=0, description="Lease window length in hours, e.g. 24."),
+        ] = None,
+        resource: Annotated[
+            ResourceSelector,
+            Field(
+                discriminator="mode",
+                description=(
+                    "Resource selector chosen by its 'mode': by kind (default), by id, or by "
+                    "pool. Omit to select any resource of the default kind."
+                ),
+            ),
+        ] = _DEFAULT_RESOURCE_SELECTOR,
+        arch: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Guest architecture to place and price for (e.g. 'ppc64le'); omit for an "
+                    "architecture-blind request. When set, only hosts that can boot it are "
+                    "candidates (a host advertising other guest arches is skipped; one "
+                    "advertising none is still eligible), and the reserved cost reflects the "
+                    "host's accelerator for this arch — an emulated (TCG) guest is priced above a "
+                    "native (KVM) one. The bill is finalized from the System's provisioned "
+                    "architecture."
+                ),
+            ),
+        ] = None,
+        pcie_devices: Annotated[
+            list[str],
+            Field(
+                description="PCIe match specs ('vendor:device' or 'class=NN') to resolve + claim.",
+            ),
+        ] = _DEFAULT_PCIE_DEVICES,
+        on_capacity: Annotated[
+            Literal["deny", "queue"],
+            Field(
+                default="deny",
+                description=(
+                    "On a capacity denial (host cap / concurrency quota): 'deny' (default) returns "
+                    "the denial; 'queue' enqueues a durable 'requested' allocation holding a queue "
+                    "position (no budget/lease/occupancy). Budget and configuration denials always "
+                    "hard-deny."
+                ),
+            ),
+        ] = "deny",
         idempotency_key: Annotated[
             str | None,
             Field(description="Replay-safe key; a repeated key returns the prior grant."),
@@ -113,11 +203,22 @@ def _register_allocations_request(
 
         Two outcomes on success: the allocation is admitted immediately (state
         ``granted``, ready to use), or — when a capacity denial is hit with
-        ``request.on_capacity="queue"`` — it comes back queued (state ``requested``)
+        ``on_capacity="queue"`` — it comes back queued (state ``requested``)
         holding a queue position instead of a live grant. A queued allocation is not
         usable yet; poll `allocations.wait` on its id until it leaves the ``requested``
         state before treating it as granted.
         """
+        request = AllocationRequestPayload(
+            shape=shape,
+            vcpus=vcpus,
+            memory_gb=memory_gb,
+            disk_gb=disk_gb,
+            window=window,
+            resource=resource,
+            arch=arch,
+            pcie_devices=pcie_devices,
+            on_capacity=on_capacity,
+        )
         try:
             _guard_resource_kind(request, resolver)  # ADR-0269: on the shared handler path
         except CategorizedError as exc:

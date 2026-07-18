@@ -290,7 +290,7 @@ def test_remote_spine_over_the_wire() -> None:
                         op,
                         "allocations.request",
                         project=_PROJECT,
-                        request={
+                        **{
                             "vcpus": 2,
                             "memory_gb": 2,
                             "disk_gb": 10,
@@ -317,7 +317,7 @@ def test_remote_spine_over_the_wire() -> None:
                     await scalar(
                         op,
                         "investigations.open",
-                        request={"project": _PROJECT, "title": "remote-spine"},
+                        **{"project": _PROJECT, "title": "remote-spine"},
                     ),
                     "open-investigation",
                 )
@@ -527,7 +527,7 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                     await scalar(
                         op,
                         "investigations.open",
-                        request={"project": _FOUR_METHOD_PROJECT, "title": "capstone-B"},
+                        **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-B"},
                     ),
                     "open-investigation-B",
                 )

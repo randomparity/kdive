@@ -18,6 +18,7 @@ _EXTERNAL_SCOPE_TITLES: tuple[tuple[str, str], ...] = (
     ("test", "Test (gated suites)"),
     ("script", "Operator scripts"),
     ("guest", "In-guest helpers"),
+    ("build", "Build-time (image/wheel provenance)"),
 )
 
 _HEADER = (
@@ -69,8 +70,8 @@ def render_external(variables: Sequence[ExternalEnvVar]) -> str:
         "# Test, tooling, and guest-helper variables",
         "",
         "Non-registry `KDIVE_*` variables read outside the process config registry — by the gated "
-        "test suites, the operator setup/live-stack shell scripts, and the in-guest "
-        "capture/install helpers. Catalogued in `src/kdive/config/external_env.py`.",
+        "test suites, the operator setup/live-stack shell scripts, the in-guest capture/install "
+        "helpers, and the image/wheel build. Catalogued in `src/kdive/config/external_env.py`.",
         "",
     ]
     for scope, title in _EXTERNAL_SCOPE_TITLES:

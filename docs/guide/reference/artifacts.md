@@ -202,16 +202,25 @@ Requires viewer; sensitive ids are not-found.
 
 `implemented` · `read-only`
 
-List a System's redacted artifacts. Requires viewer.
+List a System's redacted artifacts, newest-first. Requires viewer.
 
 This listing is **System-scoped**: it returns every redacted artifact owned by the System
-and so mixes all of the System's Runs and debug sessions. Console artifacts use two naming
-conventions — `console-<run_id>` is a Run's one-time boot-window snapshot, and
-`console-part-<gen>-<index>` are the rotating post-readiness console parts. Neither is
-correlated to a Run by this listing; to get the console artifacts for a specific Run, call
-`runs.get` with `include_console_artifacts=true` and read its opt-in
-`data.console_artifacts` (the Run-scoped console manifest) instead.
+and so mixes all of the System's Runs and debug sessions. It is **keyset-paginated** and
+not naturally bounded — a System accrues a redacted artifact per boot/console rotation, so
+pass `limit` and page with `cursor`: when `data.truncated` is true, pass
+`data.next_cursor` back as `cursor` for the next (older) page. A cursor not minted by this
+tool is rejected with configuration_error `data.reason=invalid_cursor`, never a silent
+first page.
+
+Console artifacts use two naming conventions — `console-<run_id>` is a Run's one-time
+boot-window snapshot, and `console-part-<gen>-<index>` are the rotating post-readiness
+console parts. Neither is correlated to a Run by this listing. To get the console artifacts
+for a specific Run, prefer `runs.get`: `refs.latest_console` jumps straight to the newest
+console artifact, and `include_console_artifacts=true` returns the full Run-scoped console
+manifest under `data.console_artifacts`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `cursor` | string (nullable) | no | Opaque continuation cursor from a prior page's data.next_cursor. |
+| `limit` | integer | no | Maximum rows returned (default 50, capped at 200). |
 | `system_id` | string | yes | The System whose redacted artifacts to list. |

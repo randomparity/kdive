@@ -96,6 +96,7 @@ class _LibvirtDomain(Protocol):
     def create(self) -> int: ...
     def destroy(self) -> int: ...
     def undefine(self) -> int: ...
+    def undefineFlags(self, flags: int) -> int: ...  # noqa: N802 - mirrors the binding name
     def XMLDesc(self, flags: int) -> str: ...  # noqa: N802 - mirrors the libvirt binding name
 
 
@@ -598,7 +599,10 @@ class LocalLibvirtProvisioning:
                 if exc.get_error_code() != libvirt.VIR_ERR_OPERATION_INVALID:
                     raise self._infra("destroying", domain_name) from exc
             try:
-                domain.undefine()
+                # SNAPSHOTS_METADATA so a snapshotted domain (ADR-0378) undefines cleanly rather
+                # than libvirt refusing on residual snapshot metadata; internal snapshot *data*
+                # is freed with the overlay qcow2 this teardown reclaims.
+                domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA)
             except libvirt.libvirtError as exc:
                 if exc.get_error_code() != libvirt.VIR_ERR_NO_DOMAIN:
                     raise self._infra("undefining", domain_name) from exc

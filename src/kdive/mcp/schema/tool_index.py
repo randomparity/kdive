@@ -55,10 +55,11 @@ tools.invoke(name, arguments) to execute it."""
 _GATEWAY_OFF_SURFACE = """\
 This server exposes its full tool catalog directly: every capability is a first-class
 tool, surfaced by lazy-loading hosts as mcp__kdive__* deferred tools. Call tools directly
-by name — this is the primary surface. A discovery gateway is also available for hosts
-without lazy tool loading: tools.search takes a short description of what you want to do
-and returns the best matching tool names and schemas, and tools.invoke(name, arguments)
-executes any registered tool."""
+by name when your host lists them. If a capability you need is not a callable tool in your
+client — including lazy-loading hosts that materialize only some of the tools — use the
+gateway: tools.search takes a short description of what you want to do and returns the best
+matching tool names and schemas, and tools.invoke(name, arguments) executes any registered
+tool. tools.search and tools.invoke are always available."""
 
 
 def build_instructions(gateway_enabled: bool) -> str:
@@ -69,7 +70,8 @@ def build_instructions(gateway_enabled: bool) -> str:
 
     - Gateway off (the default): the full RBAC catalog is listed directly, so the text
       names the direct ``mcp__kdive__*`` tools as the primary surface and the gateway as
-      an alternative for hosts without lazy tool loading.
+      the fallback for any capability that is not a callable tool in the client — including
+      lazy-loading hosts that materialize only a subset of the tools.
     - Gateway on: ``list_tools`` is clipped to the core set, so the text describes the
       ``tools.search`` / ``tools.invoke`` discovery pattern first.
 
@@ -152,6 +154,12 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.end_session": frozenset({"session", "end", "stop", "gdb", "debug"}),
     "debug.continue": frozenset({"continue", "resume", "run", "debug"}),
     "debug.interrupt": frozenset({"interrupt", "pause", "break", "debug"}),
+    "debug.step": frozenset({"step", "into", "line", "stepi", "debug"}),
+    "debug.next": frozenset({"next", "step", "over", "line", "debug"}),
+    "debug.step_instruction": frozenset(
+        {"step", "instruction", "stepi", "asm", "single-step", "debug"}
+    ),
+    "debug.finish": frozenset({"finish", "return", "step", "out", "debug"}),
     "debug.get_session": frozenset({"session", "get", "status", "debug"}),
     "debug.list_sessions": frozenset({"sessions", "list", "debug"}),
     # introspect plane

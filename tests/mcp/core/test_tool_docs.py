@@ -71,6 +71,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.clear_breakpoint": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.backtrace": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.continue": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.step": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.next": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.step_instruction": ("tests/mcp/debug/test_debug_ops.py",),
+    "debug.finish": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.disassemble": ("tests/mcp/debug/test_debug_ops.py",),
     "debug.end_session": (
         "tests/mcp/debug/test_debug_tools.py",
@@ -172,6 +176,10 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.provision_defined": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.reprovision": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.teardown": ("tests/mcp/lifecycle/test_systems_tools.py",),
+    "systems.snapshot": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
+    "systems.restore": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
+    "systems.list_snapshots": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
+    "systems.delete_snapshot": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
     "tools.invoke": ("tests/mcp/tools/test_gateway_invoke.py",),
     "tools.search": ("tests/mcp/tools/test_gateway_search.py",),
     "vmcore.fetch": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
@@ -338,9 +346,11 @@ def test_filtered_list_tools_use_request_payloads() -> None:
         assert set(_request_properties(params)) == fields
 
 
-def test_composite_mutations_use_request_payloads() -> None:
+def test_composite_mutations_use_flat_top_level_params() -> None:
+    # ADR-0372: every mutation tool takes flat top-level params, never a nested `request`
+    # wrapper. This pins the flat schema for a representative slice of the flattened surface.
     tools = {t.name: t for t in TOOLS}
-    request_only_fields = {
+    flat_fields = {
         "accounting.set_quota": {
             "project",
             "max_concurrent_allocations",
@@ -355,21 +365,38 @@ def test_composite_mutations_use_request_payloads() -> None:
             "idempotency_key",
         },
         "shapes.set": {"name", "vcpus", "memory_mb", "disk_gb", "pcie_match"},
+        "runs.complete_build": {
+            "run_id",
+            "cmdline",
+            "build_id",
+            "source_label",
+            "source_ref",
+        },
     }
 
-    for tool_name, fields in request_only_fields.items():
+    for tool_name, fields in flat_fields.items():
         params = tools[tool_name].parameters
-        assert set(params["properties"]) == {"request"}
-        assert set(_request_properties(params)) == fields
+        assert set(params["properties"]) == fields
+        assert "request" not in params["properties"]
 
-    complete_build_params = tools["runs.complete_build"].parameters
-    assert set(complete_build_params["properties"]) == {"run_id", "request"}
-    assert set(_request_properties(complete_build_params)) == {
-        "cmdline",
-        "build_id",
-        "source_label",
-        "source_ref",
-    }
+
+def test_every_mutation_tool_takes_flat_top_level_params() -> None:
+    # ADR-0372: the project convention is that every mutation tool (mutating or destructive,
+    # i.e. readOnlyHint is False) exposes its arguments as flat top-level params and never nests
+    # them under a `request` wrapper, so a black-box agent can predict a mutation's argument
+    # shape without fetching the schema first. Read/query tools may keep a `request` filter
+    # wrapper (guarded by test_filtered_list_tools_use_request_payloads). A new wrapped mutation
+    # tool must break here.
+    offenders = [
+        t.name
+        for t in TOOLS
+        if t.annotations is not None
+        and t.annotations.readOnlyHint is False
+        and "request" in cast(dict[str, object], t.parameters.get("properties", {}))
+    ]
+    assert offenders == [], (
+        f"mutation tools still nesting args under `request`: {sorted(offenders)}"
+    )
 
 
 def test_platform_auditor_reads_keep_pagination_inside_request_payloads() -> None:
@@ -397,7 +424,7 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
     for tool_name in ("runs.complete_build",):
         schema = cast(
             dict[str, object],
-            _request_properties(tools[tool_name].parameters)["cmdline"],
+            tools[tool_name].parameters["properties"]["cmdline"],
         )
         description = schema["description"]
         assert isinstance(description, str)
@@ -406,15 +433,30 @@ def test_run_cmdline_docs_describe_debug_args_only() -> None:
         assert "root=/dev/vda" not in description
 
 
+def test_complete_build_cmdline_advertises_iteration_without_rebuild() -> None:
+    # #1256: an agent that sets cmdline at runs.complete_build reads only that field, and its
+    # "fixed at build" mental model is what drives the ask for a phantom boot-time override. The
+    # field must tell them the value is NOT locked in — it can be changed against the built kernel
+    # via runs.install with no rebuild — so they find the real knob (#988) instead of a rebuild.
+    tools = {t.name: t for t in TOOLS}
+    schema = cast(
+        dict[str, object],
+        tools["runs.complete_build"].parameters["properties"]["cmdline"],
+    )
+    description = schema["description"]
+    assert isinstance(description, str)
+    lowered = description.lower()
+    assert "runs.install" in lowered
+    assert "without a rebuild" in lowered or "no rebuild" in lowered
+
+
 def test_runs_create_build_profile_documents_arch() -> None:
     # The nested build_profile.arch is agent-facing (ADR-0343): its description must name the
     # allowed values. test_every_parameter_has_a_description checks only top-level params, so
     # this guards the nested field explicitly.
     tools = {t.name: t for t in TOOLS}
     params = tools["runs.create"].parameters
-    build_profile = _object_schema(
-        cast(dict[str, object], _request_properties(params)["build_profile"])
-    )
+    build_profile = _object_schema(cast(dict[str, object], params["properties"]["build_profile"]))
     ref = build_profile.get("$ref")
     if isinstance(ref, str) and ref.startswith("#/$defs/"):
         defs = cast(dict[str, object], params["$defs"])
@@ -432,8 +474,8 @@ def test_run_lifecycle_tools_cross_reference_real_cmdline_parameters() -> None:
     tools = {t.name: t for t in TOOLS}
 
     create = tools["runs.create"]
-    request_props = create.parameters["properties"]["request"]["properties"]
-    create_text = (create.description or "") + request_props["build_profile"]["description"]
+    create_props = create.parameters["properties"]
+    create_text = (create.description or "") + create_props["build_profile"]["description"]
     assert "runs.build.cmdline" not in create_text
     assert "runs.complete_build" in create_text
     assert "cmdline" in create_text
@@ -494,8 +536,8 @@ def test_expected_boot_failure_documents_match_contract() -> None:
     # schema text must spell out that contract, not just give one example, so a black-box caller
     # writes a matching pattern from the surface alone.
     tools = {t.name: t for t in TOOLS}
-    request_props = tools["runs.create"].parameters["properties"]["request"]["properties"]
-    description = request_props["expected_boot_failure"]["description"]
+    create_props = tools["runs.create"].parameters["properties"]
+    description = create_props["expected_boot_failure"]["description"]
     lowered = description.lower()
     assert "substring" in lowered
     assert "case-sensitive" in lowered
@@ -511,8 +553,12 @@ def test_expected_boot_failure_documents_match_contract() -> None:
 def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     tools = {t.name: t for t in TOOLS}
 
-    allocation_request = tools["allocations.request"].parameters["properties"]["request"]
-    assert set(allocation_request["properties"]) == {
+    # ADR-0372: allocations.request is flat (project + idempotency_key + the sizing fields at
+    # top level). accounting.estimate is a read tool and keeps its request-filter wrapper.
+    allocation_params = tools["allocations.request"].parameters["properties"]
+    assert set(allocation_params) == {
+        "project",
+        "idempotency_key",
         "arch",
         "disk_gb",
         "memory_gb",
@@ -548,22 +594,14 @@ def test_resource_register_tools_are_variant_specific() -> None:
         "vcpus",
         "memory_mb",
     }
+    # ADR-0372: each register_* tool exposes its fields flat at top level (no `request` wrapper).
     remote_params = set(tools["resources.register_remote_libvirt"].parameters["properties"])
-    assert remote_params == {"request"}
-    remote_request = tools["resources.register_remote_libvirt"].parameters["properties"]["request"]
-    remote_params = set(remote_request["properties"])
     assert remote_params == common | {"base_image", "host_uri"}
 
     local_params = set(tools["resources.register_local_libvirt"].parameters["properties"])
-    assert local_params == {"request"}
-    local_request = tools["resources.register_local_libvirt"].parameters["properties"]["request"]
-    local_params = set(local_request["properties"])
     assert local_params == common | {"host_uri"}
 
     fault_params = set(tools["resources.register_fault_inject"].parameters["properties"])
-    assert fault_params == {"request"}
-    fault_request = tools["resources.register_fault_inject"].parameters["properties"]["request"]
-    fault_params = set(fault_request["properties"])
     assert fault_params == common
 
 

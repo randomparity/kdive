@@ -56,6 +56,7 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import CONSOLE_MANIFEST_MAX, ConsoleManifest
 from kdive.services.runs import steps as run_steps
 from kdive.services.runs.admission import RunCreateResult
+from kdive.services.runs.liveness import Liveness
 from kdive.services.runs.steps import StepProgress, ready_boot_outcome, step_progress
 from tests.db_waits import wait_until_any_backend_waiting
 from tests.mcp.systems_support import provider_resolver
@@ -148,6 +149,7 @@ async def get_run(
         ctx,
         run_id,
         resolver=provider_resolver(),
+        secret_registry=SecretRegistry(),
         include_console_artifacts=include_console_artifacts,
     )
 
@@ -749,6 +751,55 @@ def test_envelope_for_run_surfaces_console_access_hint() -> None:
     assert "artifacts.fetch_raw" not in console_access.values()
 
 
+def test_envelope_for_run_surfaces_degraded_liveness() -> None:
+    # A guest that livelocked after a ready boot reads state=degraded (#1237, ADR-0373).
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+        liveness=Liveness(
+            state="degraded",
+            console_storm=True,
+            ssh_reachable=False,
+            checked_at="2026-07-16T00:00:00+00:00",
+        ),
+    )
+
+    assert resp.data["liveness"] == {
+        "state": "degraded",
+        "console_storm": True,
+        "ssh_reachable": False,
+        "checked_at": "2026-07-16T00:00:00+00:00",
+    }
+
+
+def test_envelope_for_run_surfaces_healthy_liveness() -> None:
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+        liveness=Liveness(
+            state="healthy",
+            console_storm=False,
+            ssh_reachable=True,
+            checked_at="2026-07-16T00:00:00+00:00",
+        ),
+    )
+
+    liveness = resp.data["liveness"]
+    assert isinstance(liveness, dict)
+    assert liveness["state"] == "healthy"
+    assert liveness["console_storm"] is False
+
+
+def test_envelope_for_run_omits_liveness_when_absent() -> None:
+    # No liveness passed (non-ready or non-local-libvirt Run): the key is omitted, not a null claim.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="succeeded", boot_outcome="ready"),
+    )
+
+    assert "liveness" not in resp.data
+
+
 def _manifest_entry(name: str) -> dict[str, str]:
     return {"artifact_id": str(uuid4()), "object_key": name, "created_at": "2026-01-01T00:00:00+00"}
 
@@ -836,6 +887,55 @@ def test_get_run_includes_console_manifest_when_opted_in(migrated_url: str) -> N
     assert len(listed) == 1
     assert listed[0]["object_key"].endswith(f"console-{run_id}")
     assert set(listed[0]) == {"artifact_id", "object_key", "created_at"}
+
+
+async def _seed_run_console_artifact_at(
+    pool: AsyncConnectionPool, run_id: str, name: str, *, created: datetime
+) -> str:
+    """Insert a Run-correlated console artifact at ``created``; return its id."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT system_id FROM runs WHERE id = %s", (run_id,))
+        sys_row = await cur.fetchone()
+        assert sys_row is not None
+        sys_id = sys_row["system_id"]
+        await cur.execute(
+            "INSERT INTO artifacts (created_at, updated_at, owner_kind, owner_id, object_key, "
+            "etag, sensitivity, retention_class, run_id) "
+            "VALUES (%s, %s, 'systems', %s, %s, 'e', 'redacted', 'console', %s) RETURNING id",
+            (created, created, sys_id, f"local/systems/{sys_id}/{name}", run_id),
+        )
+        art = await cur.fetchone()
+    assert art is not None
+    return str(art["id"])
+
+
+def test_get_run_surfaces_latest_console_ref_newest(migrated_url: str) -> None:
+    # ADR-0374 (#1238): refs.latest_console jumps to the newest correlated console artifact
+    # without the opt-in manifest — the rotating part here, not the older boot snapshot.
+    async def _run() -> tuple[ToolResponse, str]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _seed_run_console_artifact_at(pool, run_id, f"console-{run_id}", created=_DT)
+            newest = await _seed_run_console_artifact_at(
+                pool,
+                run_id,
+                "console-part-0-000001",
+                created=_DT.replace(hour=1),
+            )
+            return await get_run(pool, _ctx(), run_id), newest
+
+    resp, newest = asyncio.run(_run())
+    assert resp.refs["latest_console"] == newest
+
+
+def test_get_run_omits_latest_console_ref_without_console(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            return await get_run(pool, _ctx(), run_id)
+
+    resp = asyncio.run(_run())
+    assert "latest_console" not in resp.refs
 
 
 def test_envelope_for_run_console_access_hint_for_expected_crash() -> None:
@@ -3698,7 +3798,11 @@ def test_runs_get_omits_root_for_provider_without_platform_root(migrated_url: st
                 pool, provisioning_profile=_profile_dump(crashkernel="256M")
             )
             resp = await _get_run(
-                pool, _ctx(), run_id, resolver=provider_resolver(platform_root_cmdline=None)
+                pool,
+                _ctx(),
+                run_id,
+                resolver=provider_resolver(platform_root_cmdline=None),
+                secret_registry=SecretRegistry(),
             )
         assert resp.data["required_cmdline"] == "console=ttyS0 crashkernel=256M"  # no root=
 

@@ -596,6 +596,24 @@ def test_start_session_non_ready_system_is_config_error(migrated_url: str) -> No
     asyncio.run(_run())
 
 
+def test_start_session_admitted_on_paused_system(migrated_url: str) -> None:
+    # #1254: a start_paused restore leaves the guest PAUSED; a gdbstub attach is the only way to
+    # inspect/breakpoint it before resuming, so debug.start_session must admit PAUSED.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PAUSED)
+            run_id = await _seed_run(pool, sys_id)
+            conn_fake = _FakeConnector()
+            resp = await _start_session(
+                pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
+            )
+        assert resp.status == "live"
+        assert conn_fake.opened == [("kdive-x", "gdbstub")]
+
+    asyncio.run(_run())
+
+
 def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

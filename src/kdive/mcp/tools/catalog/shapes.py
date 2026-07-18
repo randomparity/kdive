@@ -256,13 +256,32 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def shapes_set(
-        request: Annotated[
-            ShapeSetRequest,
-            Field(description="Complete shape definition to upsert."),
-        ],
+        name: Annotated[str, Field(description="Shape name to upsert (e.g. 'medium').")],
+        vcpus: Annotated[int, Field(description="Virtual CPU count (> 0).")],
+        memory_mb: Annotated[int, Field(description="Memory in MiB, a whole-GB multiple (> 0).")],
+        disk_gb: Annotated[int, Field(description="Disk size in GiB (> 0).")],
+        pcie_match: Annotated[
+            str | None,
+            Field(
+                default=None,
+                description=(
+                    "Optional PCIe match spec ('<4hex>:<4hex>' or 'class=' plus 2 or 4 hex)."
+                ),
+            ),
+        ] = None,
     ) -> ToolResponse:
         """Create or update a system shape."""
-        return await set_shape(pool, current_context(), request)
+        return await set_shape(
+            pool,
+            current_context(),
+            ShapeSetRequest(
+                name=name,
+                vcpus=vcpus,
+                memory_mb=memory_mb,
+                disk_gb=disk_gb,
+                pcie_match=pcie_match,
+            ),
+        )
 
     @app.tool(
         name=_DELETE_TOOL,

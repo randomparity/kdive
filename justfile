@@ -106,6 +106,16 @@ stack-migrate:
 # stack report exit 1. Run that init separately to completion — its exit code still propagates,
 # so a real bucket-creation failure fails the recipe.
 stack-up:
+    # Pre-build oidc when using the local build path (KDIVE_OIDC_IMAGE unset). ADR-0357
+    # has compose build kdive-mock-oidc:dev from ./deploy/mock-oidc; without this pre-build,
+    # `compose up` first tries to PULL that local-only tag and prints a confusing "pull
+    # access denied" warning before falling back to build. Skip the build entirely when the
+    # image already exists — the Dockerfile inputs (pom.xml + Dockerfile) change rarely and
+    # `docker compose build` re-contacts the registry on every call even when fully cached.
+    # The skip is announced (not silent) so an operator editing deploy/mock-oidc knows to
+    # `docker rmi kdive-mock-oidc:dev` to force a rebuild. Skipped entirely when
+    # KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
+    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"; else docker compose build oidc; fi; fi
     docker compose up -d --wait postgres minio oidc
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh
@@ -271,7 +281,7 @@ release VERSION:
     git tag -a "v{{VERSION}}" -m "Release v{{VERSION}}"
     git push origin "v{{VERSION}}"
     echo "Pushed tag v{{VERSION}}. NEXT: open a 'chore(release): begin <next>-dev' PR"
-    echo "(just set-version <next>; just changelog) — see docs/development/releasing.md."
+    echo "(just set-version <next>) — CHANGELOG auto-syncs on merge; see docs/development/releasing.md."
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:

@@ -47,7 +47,7 @@ class _DomainExitProbe(NamedTuple):
 def classify_console(data: bytes, *, marker: str = _READINESS_MARKER) -> ConsoleVerdict:
     """Classify a console capture as ready, crashed, or pending."""
     text = data.decode("utf-8", errors="replace")
-    marker_re = re.compile(rf"^[^\S\n]*{re.escape(marker)}[^\S\n]*$", re.MULTILINE)
+    marker_re = re.compile(rf"(?:^|[^\S\n]){re.escape(marker)}[^\S\n]*$", re.MULTILINE)
     marker_match = marker_re.search(text)
     region = text if marker_match is None else text[: marker_match.start()]
     if first_crash_signature(region) is not None:

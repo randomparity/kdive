@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from psycopg_pool import AsyncConnectionPool
+from starlette.middleware import Middleware
 
 from kdive.db.pool import create_pool
+from kdive.mcp.middleware.bare_bearer_hint import BareBearerHintMiddleware
 from kdive.processes.runtime import HEARTBEAT_STALE_SECONDS, run_process_runtime
 
 if TYPE_CHECKING:
@@ -20,6 +22,16 @@ HTTP_KEEPALIVE_S = 65.0
 
 def server_uvicorn_config() -> dict[str, Any]:
     return {"timeout_keep_alive": HTTP_KEEPALIVE_S}
+
+
+def server_http_middleware() -> list[Middleware]:
+    """ASGI middleware injected ahead of FastMCP's vendored auth endpoint (ADR-0380).
+
+    `BareBearerHintMiddleware` turns a bare-JWT `Authorization` header (no `Bearer `
+    scheme prefix) into an accurate 401 before the vendored path emits its misleading
+    "token invalid/expired" error.
+    """
+    return [Middleware(BareBearerHintMiddleware)]
 
 
 async def run_server(
@@ -46,7 +58,11 @@ async def run_server(
         del heartbeat, probe
         app = build_app(pool, secret_registry=secret_registry)
         await app.run_async(
-            transport="http", host=host, port=port, uvicorn_config=server_uvicorn_config()
+            transport="http",
+            host=host,
+            port=port,
+            uvicorn_config=server_uvicorn_config(),
+            middleware=server_http_middleware(),
         )
 
     await run_process_runtime(

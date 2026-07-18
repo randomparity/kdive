@@ -14,9 +14,10 @@ from kdive.security.artifacts.artifact_search import parse_literal_terms, search
 
 def test_console_crash_kinds_is_console_crash_plus_presets() -> None:
     assert CONSOLE_CRASH_KIND == "console_crash"
-    assert frozenset({"console_crash", "oops", "panic", "hung_task"}) == CONSOLE_CRASH_KINDS
+    expected = frozenset({"console_crash", "oops", "panic", "hung_task", "ubsan"})
+    assert expected == CONSOLE_CRASH_KINDS
     assert CONSOLE_CRASH_KIND not in CRASH_SIGNATURE_PRESETS
-    assert set(CRASH_SIGNATURE_PRESETS) == {"oops", "panic", "hung_task"}
+    assert set(CRASH_SIGNATURE_PRESETS) == {"oops", "panic", "hung_task", "ubsan"}
 
 
 @pytest.mark.parametrize("preset", sorted(CRASH_SIGNATURE_PRESETS))
@@ -74,3 +75,19 @@ def test_oops_preset_ignores_unrelated_console() -> None:
 )
 def test_hung_task_preset_matches_hung_task_variants(console_line: str) -> None:
     assert _matches("hung_task", f"prior\n{console_line}\nafter\n")
+
+
+@pytest.mark.parametrize(
+    "console_line",
+    [
+        "UBSAN: shift-out-of-bounds in kernel/foo.c:12:34",
+        "UBSAN: array-index-out-of-bounds in drivers/bar.c:5:6",
+        "UBSAN: signed-integer-overflow in net/baz.c:7:8",
+    ],
+)
+def test_ubsan_preset_matches_ubsan_report_variants(console_line: str) -> None:
+    assert _matches("ubsan", f"prior\n{console_line}\nafter\n")
+
+
+def test_ubsan_preset_ignores_unrelated_console() -> None:
+    assert not _matches("ubsan", "loaded module\nstarting services\n")
