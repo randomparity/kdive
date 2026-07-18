@@ -11,7 +11,12 @@ from kdive.__main__ import build_parser
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.planes.base import RootfsBuildOutput
 from kdive.images.rootfs.command import run_build_fs
-from kdive.processes.server import HTTP_KEEPALIVE_S, server_uvicorn_config
+from kdive.mcp.middleware.bare_bearer_hint import BareBearerHintMiddleware
+from kdive.processes.server import (
+    HTTP_KEEPALIVE_S,
+    server_http_middleware,
+    server_uvicorn_config,
+)
 
 
 def _patch_plane(monkeypatch: pytest.MonkeyPatch, plane: object) -> None:
@@ -49,6 +54,12 @@ def test_server_uvicorn_config_sets_explicit_keepalive() -> None:
     """
     assert HTTP_KEEPALIVE_S == 65.0
     assert server_uvicorn_config() == {"timeout_keep_alive": 65.0}
+
+
+def test_server_http_middleware_injects_bare_bearer_hint() -> None:
+    """The server wires the bare-JWT hint middleware ahead of vendored auth (ADR-0380)."""
+    middleware = server_http_middleware()
+    assert [m.cls for m in middleware] == [BareBearerHintMiddleware]
 
 
 def test_build_fs_subcommand_parses_with_defaults() -> None:
