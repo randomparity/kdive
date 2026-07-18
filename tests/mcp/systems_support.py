@@ -143,6 +143,8 @@ def provider_resolver(
     ),
     snapshotter: object | None = None,
     supports_snapshots: bool = True,
+    traffic_capturer: object | None = None,
+    supports_traffic_capture: bool = True,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -196,6 +198,7 @@ def provider_resolver(
                 else INTROSPECTION_MODES
             ),
             supports_snapshots=supports_snapshots,
+            supports_traffic_capture=supports_traffic_capture,
         ),
         rootfs=RootfsCapabilities(validator=lambda _: None),
         platform_root_cmdline=platform_root_cmdline,
@@ -205,6 +208,7 @@ def provider_resolver(
             else BootstrapKeyCapabilities(customizer=bootstrap_key_customizer)
         ),
         snapshot=cast(Any, snapshotter) if snapshotter is not None else None,
+        traffic_capturer=cast(Any, traffic_capturer) if traffic_capturer is not None else None,
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 

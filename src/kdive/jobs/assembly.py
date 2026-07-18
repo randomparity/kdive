@@ -125,6 +125,19 @@ def _diagnostic_sysrq_handler_registrar(
     return _register
 
 
+def _capture_traffic_handler_registrar(
+    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
+) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        from kdive.jobs.handlers.control import capture_traffic
+
+        capture_traffic.register_handlers(
+            registry, resolver=resolver, artifact_store=object_stores.store
+        )
+
+    return _register
+
+
 def _watch_for_crash_handler_registrar(
     *, resolver: ProviderResolver, secret_registry: SecretRegistry
 ) -> HandlerRegistrar:
@@ -190,6 +203,9 @@ def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRe
             resolver=assembly.resolver,
             secret_registry=assembly.secret_registry,
             object_stores=assembly.object_stores,
+        ),
+        _capture_traffic_handler_registrar(
+            resolver=assembly.resolver, object_stores=assembly.object_stores
         ),
         _watch_for_crash_handler_registrar(
             resolver=assembly.resolver, secret_registry=assembly.secret_registry
