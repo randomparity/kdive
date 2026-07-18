@@ -109,6 +109,17 @@ def test_restart_host_processes_starts_all_three() -> None:
     assert "-m kdive worker" in text
 
 
+def test_sudo_root_worker_forwards_backend_endpoints() -> None:
+    # sudo resets the environment, so the root worker re-sources env.sh and would re-default any
+    # relocated backend port. The resolved DB + S3 endpoints must be forwarded into the sudo shell
+    # so a KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT override reaches the worker, not just the same-user
+    # server/reconciler. The forward must appear inside the `sudo bash -c` block.
+    text = (ROOT / "scripts/live-stack/lib.sh").read_text()
+    sudo_block = text[text.index("sudo bash -c") : text.index("-m kdive worker >>")]
+    assert "KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}'" in sudo_block
+    assert "KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}'" in sudo_block
+
+
 def test_grafana_gate_skips_ppc64le_and_keeps_other_arches() -> None:
     """The arch gate must skip grafana only where it has no manifest (ppc64le), not elsewhere.
 

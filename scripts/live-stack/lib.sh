@@ -80,7 +80,11 @@ require_free_http_port() {
   command -v ss >/dev/null 2>&1 || return 0
   # `sport = :N` matches only that exact port (not :N-suffixed ports); -H drops the header, -p adds
   # the owning process when visible (a foreign owner's pid needs privilege, but the LISTEN line
-  # still prints without it, so the bind is detected regardless).
+  # still prints without it, so the bind is detected regardless). The match is port-wide (any
+  # address), not scoped to KDIVE_HTTP_HOST: the common conflicts — a 0.0.0.0 or 127.0.0.1 listener —
+  # genuinely collide with the server's bind, and erring toward a clear, actionable message beats
+  # reverting to the silent bind-race death. A listener on a different specific IP over-reports; the
+  # remediation (override KDIVE_HTTP_PORT) still applies.
   holder="$(ss -ltnpH "sport = :${port}" 2>/dev/null)"
   [[ -n "$holder" ]] || return 0
   {
@@ -114,11 +118,17 @@ restart_host_processes() {
   setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
   setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
   if [[ "$worker_as_root" == "1" && "$(id -un)" != "root" ]]; then
-    # The worker needs root (install staging + libvirt/VM ops). Export KDIVE_KERNEL_SRC *before*
-    # sourcing env.sh so env.sh honors it verbatim instead of defaulting to ${HOME}/src/linux,
-    # which under sudo (HOME=/root) would silently point at a nonexistent /root/src/linux.
+    # The worker needs root (install staging + libvirt/VM ops). sudo resets the environment, so any
+    # override the invoking user set is stripped before env.sh re-runs under sudo and re-defaults it.
+    # Forward the vars the root worker actually consumes so env.sh honors them verbatim (via its
+    # `:-` defaults) instead of silently reverting: KDIVE_KERNEL_SRC (else HOME=/root points at a
+    # nonexistent /root/src/linux) and the resolved backend endpoints KDIVE_DATABASE_URL +
+    # KDIVE_S3_ENDPOINT_URL — without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would
+    # leave the worker connecting to the default host ports (nothing published there) while the
+    # same-user server/reconciler use the overridden ones.
     sudo bash -c "cd '${repo_root}' \
       && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
+      && export KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
       && source scripts/live-stack/env.sh \
       && setsid nohup '${py}' -m kdive worker >>'${log_dir}/worker-root.log' 2>&1 </dev/null &"
   else
