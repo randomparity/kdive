@@ -36,6 +36,9 @@ EFFECTIVE_CONFIG_MAX_BYTES = 1024 * 1024
 # The combined `kernel` artifact is a gzip tar of boot/vmlinuz + lib/modules/<ver>/ (ADR-0234 §2).
 _KERNEL_BOOT_MEMBER = "boot/vmlinuz"
 _MODULES_MEMBER_PREFIX = "lib/modules/"
+# A real kernel module under lib/modules/<release>/ ends in one of these; a bare directory or a
+# metadata file (modules.dep, modules.order) does not satisfy the requirement (#1273, ADR-0381).
+_MODULE_SUFFIXES = (".ko", ".ko.xz", ".ko.gz", ".ko.zst")
 # Bound on *decompressed* output the shape scan reads: boot/vmlinuz is the first member, so the
 # first lib/modules header is reached only after the bzImage payload (tens of MB). The cap sits
 # well above a real bzImage so a large-but-legal kernel passes, while a gzip bomb (tiny gzip →
@@ -187,8 +190,11 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
                 path=_MODULES_MEMBER_PREFIX,
                 required=True,
                 note=(
-                    "The `make modules_install` tree: one or more lib/modules/<release>/ dirs. "
-                    "Exclude the `build` and `source` back-reference symlinks."
+                    "The `make modules_install` tree: one or more lib/modules/<release>/ dirs "
+                    "holding at least one real kernel module file (a *.ko, .ko.xz, .ko.gz, or "
+                    ".ko.zst under lib/modules/<release>/); a bare directory or a modules.dep "
+                    "with no module is rejected. Exclude the `build` and `source` "
+                    "back-reference symlinks."
                 ),
             ),
         ),
@@ -399,27 +405,41 @@ def _check_kernel_combined_tar(
     """Validate the external `kernel` upload is a combined kernel+modules tar (ADR-0234 §2).
 
     The artifact must be a gzip stream whose tar holds ``boot/vmlinuz`` (matching ``boot_format``
-    for the declared arch — a bzImage for x86_64, an ELF kernel for ppc64le) and at least one
-    ``lib/modules/<ver>/`` member. The scan decompresses at most
-    :data:`_KERNEL_TAR_SCAN_MAX_BYTES` so a gzip bomb cannot make this read unbounded; if both
-    members are not seen within that bound the upload is rejected.
+    for the declared arch — a bzImage for x86_64, an ELF kernel for ppc64le) and at least one real
+    kernel-module file under ``lib/modules/<release>/`` (a ``*.ko``/``.ko.xz``/``.ko.gz``/
+    ``.ko.zst``). The scan decompresses at most :data:`_KERNEL_TAR_SCAN_MAX_BYTES` so a gzip bomb
+    cannot make this read unbounded; if both members are not seen within that bound the upload is
+    rejected. A stream that ends below the cap without reaching its gzip trailer — or with a corrupt
+    CRC/ISIZE trailer — is rejected as truncated/corrupt rather than silently accepted (#1273).
     """
     if store.get_range(key, start=0, length=2) != _GZIP_MAGIC:
         raise _build_failure("kernel artifact is not a gzip-compressed combined tar", name=name)
-    data, cap_reached = _decompress_bounded(
-        store, key, total_size=size_bytes, max_out=_KERNEL_TAR_SCAN_MAX_BYTES
+    data, cap_reached, gzip_complete = _decompress_bounded(
+        store, key, name, total_size=size_bytes, max_out=_KERNEL_TAR_SCAN_MAX_BYTES
     )
+    if not cap_reached and not gzip_complete:
+        # The stream ended below the scan cap without reaching a clean gzip EOF: the trailer is
+        # missing, so the archive was truncated in transit or at the source (#1273, ADR-0381).
+        # Over the cap this is not decidable without unbounded decompression, so it is only a
+        # signal below it — exactly where the gzip-bomb guard is not engaged.
+        raise _build_failure(
+            "kernel artifact gzip stream is truncated: it ended before the gzip trailer, so the "
+            "combined tar is incomplete; re-upload the full archive",
+            name=name,
+        )
     _verify_combined_tar_shape(data, name, boot_format, cap_reached=cap_reached)
 
 
 def _decompress_bounded(
-    store: ValidatorStore, key: str, *, total_size: int, max_out: int
-) -> tuple[bytes, bool]:
+    store: ValidatorStore, key: str, name: str, *, total_size: int, max_out: int
+) -> tuple[bytes, bool, bool]:
     """Gunzip ``key`` via sequential ranged reads, stopping at ``max_out`` decompressed bytes.
 
-    Returns the decompressed prefix and ``cap_reached`` (``True`` when the ``max_out`` bound cut
-    the stream short rather than reaching a clean gzip EOF), which lets the caller tell an
-    oversized boot member from a genuinely short tar.
+    Returns ``(data, cap_reached, gzip_complete)``: the decompressed prefix, ``cap_reached``
+    (``True`` when the ``max_out`` bound cut the stream short rather than reaching a clean gzip
+    EOF), and ``gzip_complete`` (``decompressor.eof`` — the gzip trailer was reached and its
+    CRC/ISIZE verified). A corrupt trailer makes ``zlib`` raise, which is categorized here as a
+    build failure rather than surfacing as an uncategorized error (#1273, ADR-0381).
     """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     out = bytearray()
@@ -430,10 +450,17 @@ def _decompress_bounded(
         if not chunk:
             break
         offset += len(chunk)
-        out += decompressor.decompress(chunk, max_out - len(out))
+        try:
+            out += decompressor.decompress(chunk, max_out - len(out))
+        except zlib.error as exc:
+            raise _build_failure(
+                "kernel artifact gzip stream is corrupt: decompression failed; re-upload the "
+                "archive",
+                name=name,
+            ) from exc
         if decompressor.eof:
             break
-    return bytes(out), len(out) >= max_out
+    return bytes(out), len(out) >= max_out, decompressor.eof
 
 
 def _verify_combined_tar_shape(
@@ -449,14 +476,16 @@ def _verify_combined_tar_shape(
                 if path == _KERNEL_BOOT_MEMBER and member.isfile():
                     boot_seen = True
                     boot_ok = _member_matches_format(archive, member, boot_format)
-                elif path.startswith(_MODULES_MEMBER_PREFIX):
+                elif _is_kernel_module_member(path, member):
                     modules_ok = True
                 if boot_ok and modules_ok:
                     break
     except tarfile.TarError as exc:
         # An open failure (not a tar at all) is fatal; a truncation mid-iteration is the expected
         # outcome when the decompress bound cut the tail — fall through to the member checks so a
-        # gzip bomb surfaces as a precise "no lib/modules within the scan bound".
+        # gzip bomb surfaces as a precise "no lib/modules within the scan bound". Content integrity
+        # of a complete (sub-cap) gzip is already guaranteed by its CRC/ISIZE trailer, verified in
+        # _decompress_bounded, so a mid-stream corruption never reaches here as a valid tar.
         if not (boot_ok or modules_ok):
             raise _build_failure("kernel artifact is not a readable tar", name=name) from exc
     if not boot_ok:
@@ -496,6 +525,21 @@ def _member_matches_format(
         return False
     head = extracted.read(max(offset + len(want) for offset, want in pins))
     return all(head[offset : offset + len(want)] == want for offset, want in pins)
+
+
+def _is_kernel_module_member(path: str, member: tarfile.TarInfo) -> bool:
+    """Whether ``path`` is a real kernel-module file under ``lib/modules/<release>/`` (#1273).
+
+    A bare ``lib/modules/`` directory member or a metadata file (``modules.dep``) satisfied the
+    old shallow prefix match; the requirement is now a regular file at
+    ``lib/modules/<release>/…`` whose name ends in ``.ko``/``.ko.xz``/``.ko.gz``/``.ko.zst``.
+    """
+    if not member.isfile() or not path.startswith(_MODULES_MEMBER_PREFIX):
+        return False
+    remainder = path[len(_MODULES_MEMBER_PREFIX) :]
+    if "/" not in remainder:  # need a <release>/ segment before the module file
+        return False
+    return path.endswith(_MODULE_SUFFIXES)
 
 
 def _normalized_member_name(name: str) -> str:
