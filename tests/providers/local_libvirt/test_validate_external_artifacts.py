@@ -39,15 +39,26 @@ def _tar_add(tar: tarfile.TarFile, name: str, data: bytes) -> None:
 
 
 def _combined_kernel_tar(
-    *, boot: bytes | None = _BZIMAGE_BODY, with_modules: bool = True, version: str = "6.9.0"
+    *,
+    boot: bytes | None = _BZIMAGE_BODY,
+    with_modules: bool = True,
+    real_module: bool = True,
+    version: str = "6.9.0",
 ) -> bytes:
-    """A gzip combined tar: boot/vmlinuz (optional) + lib/modules/<ver>/ (optional)."""
+    """A gzip combined tar: boot/vmlinuz (optional) + lib/modules/<ver>/ (optional).
+
+    ``real_module`` controls whether the modules tree carries an actual ``*.ko`` file
+    (the validator's requirement) or only a ``modules.dep`` with no kernel module — the
+    shallow-prefix blind spot #1273 closes.
+    """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         if boot is not None:
             _tar_add(tar, "boot/vmlinuz", boot)
         if with_modules:
             _tar_add(tar, f"lib/modules/{version}/modules.dep", b"")
+            if real_module:
+                _tar_add(tar, f"lib/modules/{version}/kernel/drivers/foo.ko", b"\x7fELFmod")
     return buf.getvalue()
 
 
@@ -212,6 +223,40 @@ def test_kernel_tar_scan_is_bounded_against_a_decompression_bomb(
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(_combined_kernel_tar(boot=b"\x00" * (4 * 1024)))
     assert e.value.category is ErrorCategory.BUILD_FAILURE
+
+
+def test_kernel_tar_modules_prefix_without_ko_is_build_failure() -> None:
+    # A modules tree that has lib/modules/<ver>/modules.dep but no real *.ko file: the shallow
+    # startswith("lib/modules/") match used to accept it (#1273); a real module is now required.
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(_combined_kernel_tar(real_module=False))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "lib/modules" in str(e.value)
+
+
+def test_kernel_tar_truncated_tail_is_build_failure() -> None:
+    # A .tar.gz whose gzip trailer (CRC32+ISIZE) was cut off: the deflate content still inflates
+    # to the full tar (boot + a real .ko are present), so the pre-#1273 scan accepted it. The
+    # stream never reaches a clean gzip EOF below the scan cap, so it is now rejected at upload.
+    blob = _combined_kernel_tar()[:-8]
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(blob)
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    # Names the truncated-stream cause specifically (not the generic missing-modules message),
+    # so a mutant that drops the gzip-completeness gate fails rather than mislabeling.
+    assert "truncated" in str(e.value) and "gzip" in str(e.value)
+
+
+def test_kernel_tar_corrupt_gzip_trailer_is_build_failure() -> None:
+    # A .tar.gz whose prefix inflates cleanly but whose gzip trailer is corrupt (ISIZE byte
+    # flipped): zlib raises when it consumes the bad trailer. Pre-#1273 that surfaced as an
+    # uncategorized zlib.error; it must be a categorized BUILD_FAILURE.
+    blob = bytearray(_combined_kernel_tar())
+    blob[-1] ^= 0xFF  # corrupt the gzip ISIZE trailer -> zlib "incorrect length check"
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(bytes(blob))
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "corrupt" in str(e.value) and "gzip" in str(e.value)
 
 
 def test_happy_path_kernel_only_returns_build_output() -> None:
