@@ -427,6 +427,19 @@ def test_parse_selectable_cpus_empty_on_no_custom_mode_or_malformed() -> None:
     assert parse_selectable_cpus(unsupported) == []
 
 
+def test_parse_selectable_cpus_missing_usable_attr_included() -> None:
+    # A <model> with no usable attribute at all is treated as unknown ("QEMU did not check")
+    # and admitted — only an explicit usable='no' excludes.
+    no_attr = (
+        "<domainCapabilities><cpu>"
+        "<mode name='custom' supported='yes'>"
+        "<model>POWER9</model>"
+        "<model usable='no'>POWER10</model>"
+        "</mode></cpu></domainCapabilities>"
+    )
+    assert parse_selectable_cpus(no_attr) == ["POWER9"]
+
+
 def test_parse_selectable_cpus_all_no_returns_empty() -> None:
     # A mode where every model is explicitly usable='no' yields no selectable cpus.
     all_no = (

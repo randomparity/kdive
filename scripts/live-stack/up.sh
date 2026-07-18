@@ -65,10 +65,13 @@ banner "backends"
 # failure before compose falls back to build anyway. Skip the build when the image
 # already exists: the Dockerfile inputs (pom.xml + Dockerfile) change rarely, and
 # `docker compose build` re-contacts the registry on every invocation to resolve the
-# pinned base-image digests even when every layer is cached.
+# pinned base-image digests even when every layer is cached. The skip is announced (not
+# silent) so an operator editing deploy/mock-oidc knows to remove the tag to force a rebuild.
 if [[ -z "${KDIVE_OIDC_IMAGE:-}" ]]; then
   if ! docker image inspect kdive-mock-oidc:dev >/dev/null 2>&1; then
     docker compose build oidc
+  else
+    echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc" >&2
   fi
 fi
 docker compose up -d "${KDIVE_BACKEND_SERVICES[@]}"

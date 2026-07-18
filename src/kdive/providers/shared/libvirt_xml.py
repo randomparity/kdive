@@ -181,7 +181,15 @@ def parse_selectable_cpus(dom_caps_xml: str) -> list[str]:
     with ``<cpu mode='custom'><model>POWER9</model>`` succeeds without error).
 
     The conservative boundary is ``usable='no'``, which is libvirt's explicit "this host provably
-    cannot run this model" signal. Everything else — ``yes`` and ``unknown`` — is admitted.
+    cannot run this model" signal. Everything else — ``yes``, ``unknown``, and a missing
+    ``usable`` attribute (treated as ``unknown``: "QEMU did not check") — is admitted.
+
+    **Guard strength varies by arch.** On x86_64 the ``yes``/``no`` probe makes this an accurate
+    host-deliverable allow-list. On probe-less arches (ppc64le) where every model is ``unknown``,
+    the allow-list degrades to "not explicitly refused": it admits the full QEMU-known model set,
+    including generations newer than the host (e.g. ``POWER11`` on a POWER9). Such a pin passes
+    admission and fails later at domain define / boot rather than at selection — an unavoidable
+    consequence of the missing probe, not a check that can be tightened here.
 
     Returns ``[]`` on a parse fault, an unsupported custom mode, or an empty set after filtering.
     Discovery omits the arch key rather than advertising ``[]``. Parsed with ``defusedxml``

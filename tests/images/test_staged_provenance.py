@@ -38,6 +38,14 @@ def test_round_trip_returns_exact_provenance(tmp_path: Path) -> None:
     assert read_sidecar(qcow2) == _PROVENANCE
 
 
+def test_sidecar_is_world_readable(tmp_path: Path) -> None:
+    """mkstemp creates 0600; the published sidecar must be 0644 so a reader running as a
+    different user (reconcile-systems) can read it back (the bug the chmod fixes)."""
+    qcow2 = tmp_path / "image.qcow2"
+    write_sidecar(qcow2, provenance=_PROVENANCE)
+    assert sidecar_path(qcow2).stat().st_mode & 0o777 == 0o644
+
+
 def test_written_document_is_schema_wrapped(tmp_path: Path) -> None:
     qcow2 = tmp_path / "image.qcow2"
     write_sidecar(qcow2, provenance=_PROVENANCE)
@@ -129,6 +137,14 @@ def test_config_sibling_round_trip(tmp_path: Path) -> None:
     config = b"CONFIG_KASAN=y\nCONFIG_DEBUG_INFO_BTF=y\n"
     write_config_sibling(qcow2, config=config)
     assert read_config_sibling(qcow2) == config
+
+
+def test_config_sibling_is_world_readable(tmp_path: Path) -> None:
+    """The .config sibling must land 0644 (not mkstemp's 0600) for the same reason as the
+    sidecar: a non-root reconcile-systems reads it to recover kernel-config_key."""
+    qcow2 = tmp_path / "image.qcow2"
+    write_config_sibling(qcow2, config=b"CONFIG_KASAN=y\n")
+    assert config_sibling_path(qcow2).stat().st_mode & 0o777 == 0o644
 
 
 def test_read_config_sibling_absent_returns_none(tmp_path: Path) -> None:

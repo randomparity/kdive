@@ -112,8 +112,10 @@ stack-up:
     # access denied" warning before falling back to build. Skip the build entirely when the
     # image already exists — the Dockerfile inputs (pom.xml + Dockerfile) change rarely and
     # `docker compose build` re-contacts the registry on every call even when fully cached.
-    # Skipped entirely when KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
-    if [ -z "${KDIVE_OIDC_IMAGE:-}" ] && ! docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then docker compose build oidc; fi
+    # The skip is announced (not silent) so an operator editing deploy/mock-oidc knows to
+    # `docker rmi kdive-mock-oidc:dev` to force a rebuild. Skipped entirely when
+    # KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
+    if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"; else docker compose build oidc; fi; fi
     docker compose up -d --wait postgres minio oidc
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh

@@ -78,6 +78,11 @@ meanwhile.
 4. Let `publish-mock-oidc.yml` republish (it fires on the `deploy/mock-oidc/` change); it
    prints the new `@sha256:` digest to export via `KDIVE_OIDC_IMAGE` (see above).
 
+> **Local rebuild after editing:** `scripts/live-stack/up.sh` and `just stack-up` skip
+> `docker compose build oidc` when the `kdive-mock-oidc:dev` tag already exists (they print
+> `using cached kdive-mock-oidc:dev …`). After editing the `Dockerfile` or `pom.xml`, remove
+> the tag so the next run rebuilds: `docker rmi kdive-mock-oidc:dev`.
+
 ## Configuration
 
 The container reproduces the retired upstream service's config: it reads `SERVER_PORT`
