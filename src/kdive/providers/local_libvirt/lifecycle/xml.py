@@ -24,6 +24,11 @@ from kdive.providers.shared.runtime_paths import (
 
 # loopback-only: local transports never listen off-host (ADR-0210/0218).
 _LOOPBACK_HOST = "127.0.0.1"
+
+# The netdev id QEMU renders for a ready System's single SSH-forward NIC. Shared so the traffic
+# capture path (ADR-0384) attaches a filter-dump to the same netdev without re-hardcoding the
+# literal — a rename here moves both in lockstep.
+SYSTEM_SSH_NETDEV_ID = "kdivessh"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()
 # The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); the serial `console=` (ttyS0 on
 # x86, hvc0 on pseries — see kdive.domain.platform) makes the readiness tail and SSH/drgn path
@@ -356,11 +361,14 @@ def _append_ssh_forward(
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
     restrict = "off" if guest_egress else "on"
-    netdev = f"user,id=kdivessh,restrict={restrict},hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    netdev = (
+        f"user,id={SYSTEM_SSH_NETDEV_ID},restrict={restrict},"
+        f"hostfwd=tcp:{_LOOPBACK_HOST}:{ssh_port}-:22"
+    )
     _append_virtio_nic(
         _qemu_commandline(domain),
         netdev_value=netdev,
-        netdev_id="kdivessh",
+        netdev_id=SYSTEM_SSH_NETDEV_ID,
         pin_nic_slot=pin_nic_slot,
     )
 
