@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh existing resource capabilities on registration
 - Log changed keys when a capability refresh writes
 - Consolidate demo token TTL to a 30d default
+- Add capture_traffic job kind + migration 0072
+- Add CaptureTrafficPayload
+- Add TrafficCapturer port + fail-closed capability
+- Local-libvirt filter-dump TrafficCapturer
+- Pcap packet counter + host pcap path helpers
+- BPF filter hygiene/validate/trim
+- Capture_traffic worker handler + registration
+- Control.capture_traffic admission tool
+- Fetch_raw pcap egress by artifact_id
+- Surface supports_traffic_capture on systems.get
+- Teardown reclaims per-System pcap directory
 
 ### Changed
 
@@ -40,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dedup debug field descriptions via shared helpers
 - Decouple prometheus from grafana, pin gate behaviorally
 - Rename to register_or_refresh_discovered_resource
+- Extract SYSTEM_SSH_NETDEV_ID constant
+- Keep capture netdev id inside local-libvirt provider
 
 ### Documentation
 
@@ -80,6 +93,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make plan Step 2 fail/pass expectations precise
 - Caveat register_discovered_resource as test-only overwrite
 - Regenerate tool reference for fastmcp-slim 3.4.4
+- Spec + ADR-0384 for host-side traffic capture
+- Harden capture-traffic spec after adversarial review
+- Simplify reaper + cancel design after review iter 2
+- Fix attach not-found swallow + teardown precedent (iter 3)
+- Correct empty-capture signal to fetch_raw size_bytes
+- Implementation plan for capture_traffic
+- Fix plan after adversarial review
+- Regenerate tool reference + rbac matrix for capture_traffic
+- Reconcile ADR/spec with put_artifact + thin capture port
 
 ### Fixed
 
@@ -110,6 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Evaluate expected_boot_failure after ready; add ubsan preset
 - Model read-only protocol members for ty 0.0.57
 - Adapt error handling and tests to fastmcp-slim 3.4.4
+- Make repeated capture_traffic calls distinct jobs
+- Fail fast on invalid capture filter, always reclaim pcap
+- Prepare pcap dir for hypervisor write; fail loud if unwritten
+- Scope ty ignore for optional selinux binding
 
 ### Build
 
