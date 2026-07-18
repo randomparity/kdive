@@ -18,7 +18,7 @@
 # them natively on the amd64 CI runner instead of running Maven's JVM under qemu-user
 # emulation — which segfaults for ppc64le (ADR-0355). The runtime stage below is the only
 # arch-specific layer, and it merely COPYs jars, so no target-arch code executes at build.
-FROM --platform=$BUILDPLATFORM maven:3.9-eclipse-temurin-21@sha256:2b4496088e7b80ae10a8c9f74e574ea21380325a006ec684532ad6bad5bc7273 AS builder
+FROM --platform=$BUILDPLATFORM maven:3-eclipse-temurin-26@sha256:d5617b9a6307e1b51dc7c55edf09bacb66f1c91fb861949c34a3a0d4e16bd241 AS builder
 
 # The one version pin that drives the image; keep in lockstep with pom.xml.
 ARG MOCK_OAUTH2_SERVER_VERSION=3.0.3
@@ -38,7 +38,7 @@ RUN mvn --batch-mode --strict-checksums \
         | sha256sum --check --strict
 
 # --- runtime: the resolved classpath on a bare multi-arch JRE ---------------------------
-FROM eclipse-temurin:21-jre@sha256:d2b9f8f12212cadcfdf889461531784e8fd097feade954d65b31ee7a71c473ec
+FROM eclipse-temurin:25-jre@sha256:d0eb1b9018b3044da1b7346f39e945f71095749853d69a3aa16b8c99dad9bb45
 
 # Reproduce the compose service contract: the standalone main reads SERVER_PORT (default
 # 8080) and serves the `/default` issuer's discovery/JWKS/token endpoints. aud=kdive is
