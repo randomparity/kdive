@@ -232,7 +232,7 @@ different modes:
 | --- | --- | --- | --- |
 | **A** | `live_vm` harness + environment contract | code | — |
 | **B** | Self-hosted KVM runner: reproducible, arch-parameterized host setup | infra/ops | A (contract) |
-| **C** | Guest-image + debuginfo provisioning — self-hosted warm store **and** the hosted TCG image set (≤14 GB) | code + ops | A |
+| **C** | Guest-image + debuginfo provisioning — self-hosted warm store **and** the hosted TCG image set (staged on `/mnt` scratch, measured budget) | code + ops | A |
 | **D** | CI wiring — TCG on hosted; finish the self-hosted `live_vm` job; fail-loud env preflight | code | A, B, C |
 | **E** | Migrate + prune `live_vm` tests — throwaway family onto `boot_throwaway_domain`, provisioned-System family onto the shared `require_live_vm_*` gates | code | A |
 | **F** | Discoverability — canonical guide + `AGENTS.md` pointer + runbook | docs | A–E |
@@ -258,7 +258,8 @@ than skipping to green.
   `schedule` + `workflow_dispatch` only, never on fork pull requests.
 - **Disk and debuginfo cost** — kdump/vmcore and matching `vmlinux` debuginfo
   are large. Mitigation: persistent, warm storage on the self-hosted host
-  (sub-issue C), sized for it; the hosted tier stays limited to what fits 14 GB.
+  (sub-issue C), sized for it; the hosted tier stages images on the ~70 GB
+  `/mnt` scratch and fetches debuginfo on demand, under a measured budget.
 - **Rocky 10 ppc64le availability** — confirmed at provisioning time, not
   assumed; it does not block the x86_64 phase.
 

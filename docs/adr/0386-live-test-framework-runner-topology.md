@@ -80,7 +80,8 @@ Harder / new obligations:
 - The nightly must declare which `live_vm` families it runs and fail loud on
   missing required env, or it reports green while skipping a whole family.
 - Guest-image and debuginfo provisioning becomes a maintained input to CI — a
-  self-hosted warm store and a separate hosted-runner image set that fits 14 GB.
+  self-hosted warm store and a separate hosted-runner image set staged on the
+  runner's `/mnt` scratch under a measured budget.
 
 No database migration: this is test infrastructure only.
 
