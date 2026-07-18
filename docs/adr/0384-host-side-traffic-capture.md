@@ -1,0 +1,145 @@
+# ADR-0384: Host-side network traffic capture on local-libvirt (#1258)
+
+- Status: Accepted
+- Date: 2026-07-18
+
+## Context
+
+Network-stack kernel bugs are hard to observe from inside the guest. In-guest `tcpdump`
+perturbs the very stack under test and dies with the guest on a panic, so the packets around
+the failure are exactly the ones lost. Capturing on the host side of the guest's virtual NIC
+observes without touching guest state and survives the panic. Issue #1258 asks for a
+`control.capture_traffic` tool that produces such a host-side pcap and slots it into the
+existing artifact model.
+
+The literal request — "host-side pcap on the tap device" — assumes a host tap interface. The
+default provider has none: local-libvirt's only guest NIC is a QEMU **SLIRP user-mode**
+netdev (`-netdev user,id=kdivessh,...`, `providers/local_libvirt/lifecycle/xml.py`), an
+in-process userspace NAT with no `vnet`/tap device on the host to run `tcpdump -i` against.
+Remote-libvirt does have a real tap (a libvirt-managed `<interface type="network">`), but it
+is an operator opt-in provider and needs runtime netdev/tap discovery and a remote→worker
+file transport that do not exist yet.
+
+QEMU's built-in `filter-dump` netfilter object dumps a netdev's packets to a libpcap file
+regardless of netdev type, so it captures SLIRP traffic that no host tap exposes. It is
+host-side (the QEMU process, not the guest), survives a guest panic, and its `maxlen` option
+is a per-packet snaplen. It has no BPF filter and no other tcpdump flags — it captures every
+packet on the netdev. It is added and removed at runtime through libvirt's QMP passthrough
+(`libvirt_qemu.qemuMonitorCommand`, already used in-tree by
+`providers/remote_libvirt/connection/transport_reset.py` and the remote guest agent).
+
+The existing artifact model already handles a large, unredactable binary captured from a
+guest: the raw `vmcore` (ADR-0031/0244). It is written `SENSITIVE`, is never inline-served,
+is owned by the crashing Run (`owner_kind='runs'`), and is egressed only through
+`artifacts.fetch_raw` — a presigned-URL tool gated on `contributor` over the Run's project,
+whose `RawAsset` enum is a closed egress allow-list (`vmcore`, `vmlinux`). A pcap is the same
+shape: a raw binary whose packet payloads no regex redactor can safely scrub.
+
+## Decision
+
+Add a single fixed-duration, contributor-gated MCP tool, backed by a new provider capability
+port, that captures host-side traffic on a running local-libvirt guest into a Run-owned pcap
+egressed through the existing raw-fetch path.
+
+**Tool — `control.capture_traffic` (Run-addressed, contributor).** Mirrors `vmcore.fetch`
+(ADR-0244): resolves the Run, derives its bound System, and requires the System `READY` and
+local-libvirt (a running guest). Parameters:
+
+- `run_id` — the investigation Run the capture is evidence for.
+- `duration_s` — capture window (default 30, bounded 1–300).
+- `max_bytes` — hard file-size cap that stops the capture early (default 64 MiB, bounded
+  1 MiB–512 MiB).
+- `snaplen` — per-packet bytes captured (default 128 — header-focused, small files, less
+  payload exposure; bounded 1–262144).
+- `capture_filter` — optional pcap-filter(7)/tcpdump BPF expression (e.g.
+  `tcp port 80 and host 10.0.0.5`), applied after capture; omitted means capture all.
+- `idempotency_key` — optional, via the shared `keyed_mutation`.
+
+The tool enqueues a durable `CAPTURE_TRAFFIC` job (`JobKind`), returns
+`{job_id, status: running}`, and is contributor-cancelable like `watch_for_crash`. No agent
+inline packet bytes are ever returned.
+
+**Provider port — `TrafficCapturer` (fail-closed).** A new typed port on `ProviderRuntime`
+(`traffic_capturer: TrafficCapturer | None = None`) plus a static
+`ProviderSupport.supports_traffic_capture` flag, following ADR-0378's `supports_snapshots`
+pattern. A provider that does not implement it yields `capability_unsupported`. Local-libvirt
+implements it via `filter-dump`; remote-libvirt leaves it `None` (see follow-up below).
+
+**Local-libvirt implementation.** Over `qemuMonitorCommand` on the running domain: `object-add`
+a `filter-dump` on the `kdivessh` netdev with `file=<host path>` and `maxlen=snaplen`; poll
+the file size on a bounded interval, stopping at `duration_s` or when the file reaches
+`max_bytes`; `object-del` the filter. The pcap is written under `/var/lib/kdive/pcap/` — the
+same host-writable location class as the console log and host-dump core.
+
+**Worker capture, filter, store.** The handler mirrors `diagnostic_sysrq`: a per-System-locked
+snapshot verifies `READY`+local and resolves the port; the capture runs lock-free; a second
+locked transaction stores and audits. The worker reads the raw pcap off host disk (the
+qemu:///system cross-uid readability wall, ADR-0223, applies unchanged — a `PermissionError`
+becomes a `CONFIGURATION_ERROR` carrying `WORKER_READABILITY_REMEDIATION`). If `capture_filter`
+is set, the worker trims the raw pcap with `tcpdump -r <raw> -w <out> <expr>`; the expression
+is validated with `tcpdump -d <expr>` (compile-only, no capture) and passed as a single argv
+element (never a shell string). The stored object is written **`SENSITIVE`**,
+`retention_class="pcap"`, `owner_kind="runs"`, streamed from disk via `put_stream`
+(disk-backed, sha256-bound, constant memory). The handler inserts the artifact row
+insert-if-absent on the object key (at-least-once safe), audits the capture, deletes the host
+files, and returns the artifact id as the job `result_ref`.
+
+**Egress.** `RawAsset` gains a `PCAP` member and `artifacts.fetch_raw` gains a `_resolve_key`
+branch (a `raw_pcap_key(conn, run_id)` mirroring `raw_vmcore_key`), so the agent fetches the
+pcap through the existing presigned-URL path: `artifacts.fetch_raw(run_id, asset="pcap")`,
+gated on `contributor` over the Run's project. `artifacts.get`/`find` continue to serve only
+`REDACTED` rows, so the pcap is never inline-served.
+
+## Consequences
+
+- A new contributor-gated tool and a new `JobKind`, `CaptureTrafficPayload`, provider port,
+  local implementation, and one `RawAsset` egress member. The agent surface grows by one tool
+  and one `fetch_raw` asset value.
+- The capability port keeps every non-local provider fail-closed; remote-libvirt drops in
+  later with no change to the agent-facing contract.
+- The `capture_filter` is applied **after** capture, not on the wire, because `filter-dump`
+  cannot filter. The filter therefore shrinks what is stored/returned, not what QEMU pulls off
+  the netdev; the raw intermediate is snaplen- and `max_bytes`-bounded and deleted immediately.
+- A supplied `capture_filter` requires `tcpdump` on the worker host; the snaplen-only path does
+  not. A malformed filter fails the job as `CONFIGURATION_ERROR` (from `tcpdump -d`), not at
+  admission — the server stays non-blocking (admission does a length/printable-character
+  hygiene check only, no subprocess).
+- The pcap is `SENSITIVE` and retained like a `vmcore` (reclaimed on owner teardown; no TTL
+  sweep). A busy link at a raised snaplen can produce a large object bounded only by
+  `max_bytes` per capture.
+- `qemuMonitorCommand` is libvirt's "unsupported" QMP passthrough; a QEMU/libvirt version
+  whose `filter-dump` QOM schema changes could break the object-add. The op fails as
+  `CONTROL_FAILURE`, observable via per-kind job telemetry.
+
+## Considered & rejected
+
+- **Real `tcpdump -i <tap>` on local-libvirt** — rejected: SLIRP user-mode networking exposes
+  no host tap/`vnet` interface to capture on. Physically impossible without reconfiguring the
+  netdev.
+- **Capturing the loopback `hostfwd` port** — rejected: only sees the SSH forward, not the
+  guest's network stack under test.
+- **System-owned pcap addressed by `system_id`** (mirroring `diagnostic_sysrq`) — rejected:
+  the raw-binary egress path (`artifacts.fetch_raw`) is cleanly Run-keyed, so System ownership
+  would require grafting a parallel System-keyed egress onto it or adding a second egress tool.
+  Run ownership reuses `fetch_raw` wholesale and matches the `vmcore`/`vmlinux` precedent for a
+  large `SENSITIVE` guest binary; a traffic capture is evidence for a specific investigation
+  Run.
+- **A free-form tcpdump command-line string** — rejected: `filter-dump` is not tcpdump and most
+  flags are meaningless here; a raw command string is a command-injection surface with no
+  upside. The agent controls the two parts that map onto the mechanism — `snaplen` and the BPF
+  `capture_filter` — as typed parameters.
+- **A `REDACTED` text sibling** (a scrubbed flow digest, as `vmcore` emits a scrubbed dmesg) —
+  rejected for now: a pcap is a binary-analysis artifact fetched whole, like `vmlinux` (which
+  has no redacted sibling). No `tshark`/summariser dependency is justified at priority:low.
+- **A TTL GC sweep for `retention_class="pcap"`** — rejected: `vmcore` (the same large
+  `SENSITIVE` Run-owned binary) has none; adding one only for pcap is inconsistent and
+  speculative. Unbounded artifact accumulation is a broader retention concern for `vmcore` and
+  pcap together, out of scope here.
+- **A start/stop capture pair** — rejected: the fixed-duration job is one tool with bounded
+  resource use and no live-capture state for the reconciler to reap; the operator selected it.
+- **Remote-libvirt in this change** — rejected for now (documented follow-up): remote's
+  data-plane traffic rides a libvirt-managed NIC whose netdev id libvirt auto-generates (not
+  `kdivessh`, which carries only its SSH forward), needs runtime netdev/tap discovery, and the
+  pcap is written on the remote host and must be streamed back to the worker. Remote could also
+  use real `tcpdump -i vnetN` on its `vnet` tap. It drops into the `TrafficCapturer` port later
+  with no agent-surface change.
