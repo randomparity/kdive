@@ -1157,6 +1157,34 @@ def test_classify_marker_line_alone_is_ready() -> None:
     assert classify_console(data, marker=_MARKER) == "ready"
 
 
+def test_classify_marker_after_getty_login_prefix_is_ready() -> None:
+    # #1266: getty prints `kdive login: ` with no trailing newline, so the readiness unit's
+    # marker echoes onto the same line. The marker bytes are present after a token boundary
+    # (the space in `login: `) → ready, not a false boot_timeout.
+    data = b"[    3.40] systemd: reached target\nkdive login: kdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "ready"
+
+
+def test_classify_marker_after_getty_prefix_without_trailing_newline_is_ready() -> None:
+    # The real capture has no trailing newline after the marker on the getty line.
+    data = b"[    3.40] systemd: reached target\nkdive login: kdive-ready"
+    assert classify_console(data, marker=_MARKER) == "ready"
+
+
+def test_classify_marker_glued_to_prefix_token_is_pending() -> None:
+    # A non-whitespace prefix glued to the marker (no token boundary) must not fire, so
+    # `kdive-ready` appearing mid-token elsewhere does not false-positive.
+    data = b"[    3.40] fookdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "pending"
+
+
+def test_classify_getty_prefix_preserves_pre_marker_crash_region() -> None:
+    # The crash scan region ends at the marker; a getty-prefixed marker line must not mask a
+    # crash that preceded it.
+    data = b"[    1.0] Kernel panic - not syncing\nkdive login: kdive-ready\n"
+    assert classify_console(data, marker=_MARKER) == "crashed"
+
+
 def test_classify_empty_is_pending() -> None:
     assert classify_console(b"", marker=_MARKER) == "pending"
 
