@@ -17,6 +17,7 @@ from kdive.jobs.payloads import (
     WATCH_MAX_DEADLINE_S,
     Authorizing,
     BuildPayload,
+    CaptureTrafficPayload,
     CaptureVmcorePayload,
     DiagnosticsWorkerCheckPayload,
     InstallPayload,
@@ -303,6 +304,46 @@ def test_capture_payload_dumps_json_and_loads_enum() -> None:
     assert payload == {"run_id": str(run_id), "method": "host_dump"}
     assert decoded.run_id == str(run_id)
     assert decoded.method is CaptureMethod.HOST_DUMP
+
+
+def test_capture_traffic_payload_roundtrips_and_is_registered() -> None:
+    run_id = uuid4()
+    now = datetime.now(UTC)
+
+    payload = dump_payload(
+        JobKind.CAPTURE_TRAFFIC,
+        {
+            "run_id": str(run_id),
+            "duration_s": 30,
+            "max_bytes": 67108864,
+            "snaplen": 128,
+            "capture_filter": "tcp port 80",
+        },
+    )
+    job = Job(
+        id=uuid4(),
+        created_at=now,
+        updated_at=now,
+        kind=JobKind.CAPTURE_TRAFFIC,
+        payload=payload,
+        state=JobState.QUEUED,
+        max_attempts=3,
+        authorizing={"principal": "alice", "agent_session": None, "project": "kernel-team"},
+        dedup_key="capture",
+    )
+
+    decoded = load_payload(job, CaptureTrafficPayload)
+
+    assert decoded.run_id == str(run_id)
+    assert decoded.duration_s == 30
+    assert decoded.max_bytes == 67108864
+    assert decoded.snaplen == 128
+    assert decoded.capture_filter == "tcp port 80"
+
+
+def test_capture_traffic_payload_capture_filter_is_optional() -> None:
+    payload = CaptureTrafficPayload(run_id=str(uuid4()), duration_s=5, max_bytes=1048576, snaplen=1)
+    assert payload.capture_filter is None
 
 
 def test_power_payload_dumps_json_and_loads_enum() -> None:

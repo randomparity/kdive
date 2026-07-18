@@ -267,6 +267,20 @@ class CaptureVmcorePayload(RunPayload):
     method: CaptureMethod
 
 
+class CaptureTrafficPayload(RunPayload):
+    """A `capture_traffic` job: the Run + capture window/size/snaplen and an optional BPF filter.
+
+    Run-addressed (like :class:`CaptureVmcorePayload`): the pcap is owned by the Run under
+    investigation, and the worker resolves the bound System from ``run_id`` to reach the live
+    guest (ADR-0384).
+    """
+
+    duration_s: int
+    max_bytes: int
+    snaplen: int
+    capture_filter: str | None = None
+
+
 class ImageBuildPayload(_PayloadBase):
     """The inputs an ``IMAGE_BUILD`` job carries: provider catalog identity + row scope.
 
@@ -355,6 +369,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.DIAGNOSTIC_SYSRQ: SysRqPayload,
     JobKind.WATCH_FOR_CRASH: WatchForCrashPayload,
     JobKind.CAPTURE_VMCORE: CaptureVmcorePayload,
+    JobKind.CAPTURE_TRAFFIC: CaptureTrafficPayload,
     JobKind.IMAGE_BUILD: ImageBuildPayload,
     JobKind.DIAGNOSTICS_WORKER_CHECK: DiagnosticsWorkerCheckPayload,
     JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
