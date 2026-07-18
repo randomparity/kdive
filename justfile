@@ -281,7 +281,7 @@ release VERSION:
     git tag -a "v{{VERSION}}" -m "Release v{{VERSION}}"
     git push origin "v{{VERSION}}"
     echo "Pushed tag v{{VERSION}}. NEXT: open a 'chore(release): begin <next>-dev' PR"
-    echo "(just set-version <next>; just changelog) — see docs/development/releasing.md."
+    echo "(just set-version <next>) — CHANGELOG auto-syncs on merge; see docs/development/releasing.md."
 
 # Regenerate the agent-facing tool reference from the live registry (mutating).
 docs:

@@ -5,6 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Surface data.liveness on runs.get for a wedged-after-ready guest
+- Cap artifacts.list, add latest_console ref, promote Observe step
+- Add system_id filter to jobs.list
+- Point check_ssh_reachable at authorize_ssh_key
+- Snapshot domain enums + migration 0071
+- Snapshotter port + supports_snapshots capability
+- Local-libvirt snapshotter
+- Snapshots repository + Snapshot model
+- Snapshot/restore/delete job handlers
+- Reconciler repairs for stranded restore/snapshot
+- Count RESTORING/PAUSED live at every state-keyed site
+- Control.power resume + debug PAUSED gate + state-site sweep
+- Reclaim snapshots at teardown and reprovision
+- Systems.snapshot/restore/list_snapshots/delete_snapshot tools
+- Add step/next/step_instruction/finish to the gdb-MI engine
+- Expose debug.step/next/step_instruction/finish tools
+- Skip grafana on ppc64le, keep prometheus in live-stack
+- Flag the live_vm/kdump host packages, add ppc64le drgn build deps
+
+### Changed
+
+- Tighten latest_console gate, refresh generated docs
+- Flatten mutation-tool args to top-level params
+- Extract shared snapshot admission and binding helpers
+- Dedup debug field descriptions via shared helpers
+- Decouple prometheus from grafana, pin gate behaviorally
+
+### Documentation
+
+- Lead fault-injection guidance with bounded fail-nth
+- Note throwaway-uid scoping for resource-exhaustion repros
+- Spec + ADR-0378 for system snapshot/restore/list
+- Harden snapshot spec+ADR from adversarial review
+- Second review pass — debug-attach, exclusivity, async delete
+- Third review pass — reprovision, creating-limbo, cross-op races
+- Fourth review pass — symmetric delete/restore fences
+- Fifth review pass — fix resume path (control.power) + guard sweep
+- Implementation plan for system snapshot/restore/list
+- Harden plan from adversarial review — ordering + per-commit-green
+- Plan review pass 2 — control.power wrapper text + T12 ordering
+- Plan review pass 3 — locate the virDomainResume dispatch
+- Plan review pass 4 — sweep guard is whole-tree, not hand-picked
+- Plan review pass 5 — reconcile Task 11 gates with the sweep
+- Document the snapshot/restore workflow in the systems guide
+- Spec + ADR-0379 for gdb stepping over the gdbstub
+- Harden stepping spec/ADR per spec review
+- Fix stepping no-hang proof reachability + audit backstop
+- Implementation plan for gdb stepping tools
+- Cover the no-symbol-bounds step/next error case
+- Fix plan commit boundaries and live-proof context
+- Name a non-scheduler symbol for the live finish proof
+- Capture rip via read_registers for the PC-advance proof
+- Make smoke step gate timed_out=False, rip-advance a diagnostic
+- Surface no-rebuild cmdline iteration on runs.complete_build
+- Clarify object_id polymorphism in response envelope
+- Add typical per-operation duration guidance
+- Add pigz recipe, size/time expectations, pre-flight verify
+
+### Fixed
+
+- Scope git-cliff to SemVer tags, drop unused GitHub fetch
+- Point cost_class estimate hint at resources.describe
+- Remove stale runs.create git-source prose from agent surface
+- Re-scope gateway clause for lazy subset-loading hosts
+- Make snapshot_handler retry-safe on the completion window
+- Make control.power resume retry-safe and let teardown reap RESTORING
+- Mark a failed restore terminal so it does not report success
+- Keep systems.get resilient when the provider is unregistered
+- Anchor snapshot delete on snapshot_id to prevent an ABA delete
+- Default oidc image to the published mirror on emulated ppc64le
+- Stop status.sh double-printing curl's 000 code
+- Default KDIVE_PYTHON to the checkout's .venv
+- Drop `dirname` dep, sync vmlinu?-* hint test
+- Pin shellcheck 0.11.0 in pre-commit job + point tests at stub python
+- Chmod sidecar and config sibling to 0644 after mkstemp
+- Add KDIVE_LIBVIRT_BOOT_WINDOW_S to tune the run-boot readiness window
+- Include usable='unknown' CPU models in selectable_cpus
+- Suppress non-root WARN when KDIVE_WORKER_AS_ROOT=1
+- Resolve code review findings for PR #1274
+- Match readiness marker after a getty login prefix
+- Reject truncated/trailer-corrupt kernel-tar uploads (#1273)
+- Prefer pigz and bound the combined-kernel tar step
+- Clear 401 for a bare-JWT Authorization header (#1268)
+- Escape-safe WWW-Authenticate and simpler bare-JWT check (#1268)
+- Evaluate expected_boot_failure after ready; add ubsan preset
+
+### Build
+
+- Make pre-commit hooks ppc64le-portable
+- Pre-build oidc so compose skips a doomed pull
+- Skip oidc pre-build when image already exists locally
+
+### Scripts
+
+- Improve check-local-libvirt.sh output formatting
+
 ## [0.3.0] - 2026-07-16
 
 ### ⚠ Breaking Changes
@@ -4404,6 +4504,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add psycopg-pool and testcontainers; pin .sql to LF
 
+[unreleased]: https://github.com/randomparity/kdive/compare/v0.3.0..HEAD
 [0.3.0]: https://github.com/randomparity/kdive/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/randomparity/kdive/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/randomparity/kdive/tree/v0.1.0
