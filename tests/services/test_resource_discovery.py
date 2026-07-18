@@ -233,6 +233,41 @@ def test_absent_branch_discovery_failure_raises(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_concurrent_operator_cap_is_not_lost_by_refresh(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=4) as pool:
+            await _ensure(pool, _Discovery(cap=1))
+            async with _pg(migrated_url) as op_conn:
+                await op_conn.execute("BEGIN")
+                await op_conn.execute(
+                    "SELECT id FROM resources WHERE kind = %s AND host_uri = %s FOR UPDATE",
+                    ("local-libvirt", "qemu:///system"),
+                )
+                # Refresh carries a net-new key; it must block on the row lock op_conn holds.
+                refresh = asyncio.create_task(
+                    _ensure(pool, _Discovery(cap=1, extra={"pseries_fadump": True}))
+                )
+                await asyncio.sleep(0.3)
+                assert not refresh.done()  # blocked on the FOR UPDATE row lock
+                await op_conn.execute(
+                    "UPDATE resources SET capabilities = "
+                    "capabilities || jsonb_build_object('concurrent_allocation_cap', 5)"
+                )
+                await op_conn.execute("COMMIT")
+                await asyncio.wait_for(refresh, timeout=5)
+        async with _pg(migrated_url) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT capabilities->>'concurrent_allocation_cap', "
+                "capabilities->>'pseries_fadump' FROM resources"
+            )
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "5"  # operator cap read under the lock and preserved
+        assert row[1] == "true"  # refresh still rolled out the net-new key
+
+    asyncio.run(_run())
+
+
 async def _ensure(pool: AsyncConnectionPool, discovery: _Discovery) -> None:
     await register_or_refresh_discovered_resource(
         pool,
