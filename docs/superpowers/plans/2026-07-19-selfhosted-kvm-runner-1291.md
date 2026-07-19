@@ -16,7 +16,7 @@
 - **Branch:** `feat/selfhosted-kvm-runner-1291`; base `main`. Never commit on `main`.
 - **Guardrails (run before every commit; CI gates these individually):** `just lint-ansible` (yamllint + ansible-lint over `deploy/ansible`), `just test-ansible`, `just lint-shell` (shellcheck), `just docs-links`, `just docs-paths`, `just adr-status-check`, and `prek run` (secret-scan, EOF, trailing-ws). `just lint-workflows` only if a workflow file is touched (this plan touches none — CI job is sub-issue D).
 - **FQCN required:** ansible-lint mandates fully-qualified module names (`ansible.builtin.*`, `community.general.*`, `ansible.posix.*`). Every task needs `changed_when`/`creates`/`register` where a `command`/`shell` runs. Name every task and play.
-- **Doc-style guard (project-wide):** plain, factual prose in all docs/comments/commit messages; never "critical", "crucial", "essential", "significant", "comprehensive", "robust", "elegant", "seamless", "Sprint". Use "Milestone".
+- **Doc-style guard (project-wide):** plain, factual prose in all docs, comments, and commit messages; never "critical", "crucial", "essential", "significant", "comprehensive", "robust", "elegant", "seamless", "Sprint". Use "Milestone".
 - **Secrets:** `github_runner_registration_token` is `no_log`, supplied at runtime via `--extra-vars`/vault — never written to `host_vars`, defaults, or a commit. The prek `detect-secrets` hook gates this.
 - **Commit style:** Conventional commits, imperative ≤72-char subject, one logical change per commit, ending with the trailer:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
@@ -41,7 +41,7 @@
 - `deploy/ansible/tests/github_runner_preflight.yml` — the harness driver playbook.
 - `deploy/ansible/tests/run-github-runner-preflight.sh` — the regression harness runner.
 - `deploy/ansible/tests/fake-config-sh` — a fake `config.sh` (records/refuses calls).
-- `docs/operating/runbooks/self-hosted-kvm-runner.md` — the runbook.
+- `self-hosted-kvm-runner.md` under `docs/operating/runbooks/` — the runbook.
 
 **Modify:**
 - `deploy/ansible/inventory/hosts.yml` — add the `live_vm_runners` group.
@@ -251,15 +251,24 @@ git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runne
     - ansible_os_family == 'RedHat'
     - ansible_architecture in live_vm_foreign_qemu_map
 
-- name: Make /boot kernels group-readable for the service account (RHEL 0600 default)
+- name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Stock RHEL/Rocky ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
   # build (ADR-0222, #694/#1156) — probed by check-local-libvirt.sh as a FAIL — needs them
   # readable by the non-root runner user. Re-apply after a kernel upgrade (see runbook).
-  ansible.builtin.shell: 'chmod 0644 /boot/vmlinu?-*'
-  register: live_vm_boot_chmod
-  changed_when: true
-  failed_when: >-
-    live_vm_boot_chmod.rc != 0 and 'No such file' not in live_vm_boot_chmod.stderr
+  ansible.builtin.find:
+    paths: /boot
+    patterns: ["vmlinuz-*", "vmlinux-*"]
+  register: live_vm_boot_kernels
+
+- name: Make the host kernels group-readable for the service account
+  # file+mode reports changed only when a mode actually changes, so a converged re-run is
+  # 0-changed (the spec's idempotence bar) — unlike a blanket chmod with changed_when: true.
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0644"
+  loop: "{{ live_vm_boot_kernels.files }}"
+  loop_control:
+    label: "{{ item.path }}"
 
 - name: Enable linger so /run/user/<uid> exists with no login session
   ansible.builtin.command: "loginctl enable-linger {{ github_runner_user }}"
@@ -294,6 +303,22 @@ git commit -m "feat(1291): live_vm_host groups, toolchain, /boot readability, li
 
 - [ ] **Step 1: Append the venv-provisioning tasks.**
 ```yaml
+- name: Install uv system-wide (the venv builder; not in the debug toolchain)
+  # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
+  # system PATH, not a per-user install. pip installs the console script to /usr/local/bin.
+  ansible.builtin.pip:
+    name: uv
+    state: present
+
+- name: Create the venv root owned by the service account
+  # /opt is root-owned 0755, so a non-root `git` clone cannot mkdir it — create it first.
+  ansible.builtin.file:
+    path: "{{ live_vm_venv }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+
 - name: Check out the project source for the venv
   ansible.builtin.git:
     repo: "{{ live_vm_repo_url }}"
@@ -438,6 +463,17 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
 `deploy/ansible/roles/live_vm_host/tasks/verify.yml`:
 ```yaml
 ---
+# Resolve the service-account uid up front; ansible_facts.getent_passwd is populated only
+# after this task runs (gather_facts does NOT populate it), and the /run/user path needs it.
+- name: Look up the service account's passwd entry
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+
+- name: Record the service-account uid
+  ansible.builtin.set_fact:
+    github_runner_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+
 # Part 1: check-local-libvirt.sh (KVM / daemons / venv-import / network / install-staging
 # writability / /boot readability), run AS the service account after a connection reset so the
 # just-added kvm/libvirt group membership is live, with KDIVE_PYTHON pointing at the venv.
@@ -455,8 +491,11 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
   changed_when: false
 
 # Part 2: the delta check-local-libvirt.sh does not cover.
+# Read the ACTUAL on-disk label with `ls -Zd` (its 4th field is the SELinux context, which
+# includes the type). NOT `matchpathcon -V` — on a correctly-labeled path that prints
+# "<path> verified." with no type string, so a `virt_image_t in stdout` assert would be inverted.
 - name: Read the SELinux label of both staging dirs
-  ansible.builtin.command: "matchpathcon -V {{ item }}"
+  ansible.builtin.command: "ls -Zd {{ item }}"
   loop:
     - "{{ live_vm_staging_dir }}"
     - "{{ install_staging_dir }}"
@@ -469,6 +508,8 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
     that: "'virt_image_t' in item.stdout"
     fail_msg: "{{ item.item }} is not labeled virt_image_t (system-mode boot would be sVirt-denied)"
   loop: "{{ live_vm_labels.results }}"
+  loop_control:
+    label: "{{ item.item }}"
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
 
 - name: Assert the service account is in kvm and libvirt
@@ -479,12 +520,12 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
 
 - name: Assert /run/user/<uid> exists for the service account
   ansible.builtin.stat:
-    path: "/run/user/{{ (getent_passwd[github_runner_user][1] | default(ansible_facts.getent_passwd[github_runner_user][1])) }}"
+    path: "/run/user/{{ github_runner_uid }}"
   register: live_vm_xdg
   failed_when: not live_vm_xdg.stat.exists
 ```
 
-> Implementer note: resolve the service-account uid with `ansible.builtin.getent` (`database: passwd, key: {{ github_runner_user }}`) at the top of `verify.yml` and use `ansible_facts.getent_passwd[github_runner_user][1]` for the `/run/user/<uid>` path. The service-unit `XDG_RUNTIME_DIR=` assertion is deferred to `github_runner` (Task 7) since it owns the unit file.
+> The service-unit `XDG_RUNTIME_DIR=` assertion is deferred to `github_runner` (Task 7), which owns the unit/`.env` file.
 
 - [ ] **Step 2: Verify lint + syntax.**
 ```bash
@@ -495,7 +536,24 @@ ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
 ```
 Expected: no errors.
 
-- [ ] **Step 3: Commit.**
+- [ ] **Step 3: Exercise the Part-2 gate logic in-branch (dev KVM host).** `--syntax-check` and
+ansible-lint do not evaluate the `ls -Zd` command output or the `getent` uid build, so run the two
+load-bearing mechanisms against real state once, non-invasively (no host mutation), to prove the
+corrected assertions evaluate the way the gate expects:
+```bash
+# The label read the gate relies on: an existing virt_image_t path must contain the type string
+# (this is what would have caught the matchpathcon -V inversion).
+ls -Zd /var/lib/libvirt/images | grep -q virt_image_t && echo "ls -Zd label read OK"
+# The getent uid mechanism the /run/user path build relies on (any existing user):
+ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with 'ansible-core==2.21.1' \
+  ansible localhost -m ansible.builtin.getent -a 'database=passwd key=root' | grep -q '"root"' \
+  && echo "getent passwd mechanism OK"
+```
+Expected: both lines print `OK`. (A full `ansible-playbook runner.yml` apply — which creates the
+service account, chmods `/boot`, clones the repo, and registers a runner — is the operator step in
+Task 9's note, not this branch.)
+
+- [ ] **Step 4: Commit.**
 ```bash
 git add deploy/ansible/roles/live_vm_host/tasks/verify.yml deploy/ansible/roles/live_vm_host/tasks/main.yml
 git commit -m "feat(1291): live_vm_host two-part host-contract gate"
@@ -568,7 +626,11 @@ export ANSIBLE_INVENTORY_UNPARSED_WARNING=False
 export FAKE_CONFIG_LOG="$work/config.log"
 
 fail=0
-play() { ansible-playbook "$playbook" -e "@$1" >"$2" 2>&1; }
+# --tags github_runner_register isolates the registration branch (arch resolve + marker stat +
+# fail-closed/fail-loud + download + config.sh), exactly as the gdbstub harness isolates its
+# prune task. The svc.sh-install / .env / systemd tasks are UNtagged, so they never run here —
+# they need root/systemd and cannot execute in a localhost harness.
+play() { ansible-playbook "$playbook" --tags github_runner_register -e "@$1" >"$2" 2>&1; }
 
 # Case 1: token fail-closed — empty token in the register branch must fail, no config.sh run.
 : >"$FAKE_CONFIG_LOG"
@@ -659,15 +721,20 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
 - [ ] **Step 1: Replace the placeholder with the full task file.**
 ```yaml
 ---
+# The set_fact + marker stat are tagged github_runner_register too, so a `--tags
+# github_runner_register` run (the regression harness) evaluates the skip decision; the
+# svc.sh / .env / systemd tasks below are UNtagged, so the harness never reaches them.
 - name: Resolve the runner asset + label for this arch
   ansible.builtin.set_fact:
     github_runner_asset: "{{ github_runner_arch_map[ansible_architecture].asset | default('') }}"
     github_runner_label_token: "{{ github_runner_arch_map[ansible_architecture].label | default('') }}"
+  tags: [github_runner_register]
 
 - name: Detect an existing registration (idempotence + liveness guard)
   ansible.builtin.stat:
     path: "{{ github_runner_install_dir }}/.runner"
   register: github_runner_marker
+  tags: [github_runner_register]
 
 - name: Register the runner (first-time branch)
   when: not github_runner_marker.stat.exists
@@ -704,13 +771,17 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
         mode: "0755"
 
     - name: Download + checksum-verify the runner tarball (operator-pinned sha256)
+      # ALWAYS download (the next task unarchives it). Only the checksum is conditional: a
+      # pinned sha256 is enforced when set; an override tarball with no pin uses `omit` (a
+      # discouraged path the runbook flags — pin the override sha too when possible).
       ansible.builtin.get_url:
         url: "{{ github_runner_url }}"
         dest: "{{ github_runner_install_dir }}/runner.tar.gz"
-        checksum: "sha256:{{ github_runner_sha256 }}"
+        checksum: >-
+          {{ ('sha256:' ~ github_runner_sha256)
+             if github_runner_sha256 not in ['', 'SET-AT-IMPLEMENTATION'] else omit }}
         owner: "{{ github_runner_user }}"
         mode: "0644"
-      when: github_runner_tarball_url | length == 0 or github_runner_sha256 != 'SET-AT-IMPLEMENTATION'
 
     - name: Extract the runner
       ansible.builtin.unarchive:
@@ -738,6 +809,13 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
     creates: "/etc/systemd/system/actions.runner.{{ github_runner_repo_url | basename }}.service"
   when: github_runner_marker.stat.exists or github_runner_registration_token | length > 0
 
+- name: Look up the service account uid for the runner env
+  # github_runner may run standalone; populate getent_passwd here rather than relying on
+  # live_vm_host's getent from earlier in the play.
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+
 - name: Set XDG_RUNTIME_DIR + KDIVE_SECRETS_ROOT on the runner service
   ansible.builtin.copy:
     dest: "{{ github_runner_install_dir }}/.env"
@@ -756,7 +834,7 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
   when: github_runner_service_enabled | bool
 ```
 
-> Implementer notes: (a) add an `ansible.builtin.getent` for the passwd uid before the `.env` task, as in Task 5. (b) The liveness/re-register-on-stale check when enabling (spec's stale-registration guard) is a follow-up refinement — for this task, ship the marker-based idempotence + install-stopped; add a runbook note that enabling after a long stop should confirm the runner shows online, and the recovery is `config.sh remove` + re-run. Keep the role lint-clean; a full `config.sh --check`/API liveness probe can be a small follow-up task if `just test-ansible` and review call for it.
+> Implementer note: the liveness/re-register-on-stale check when enabling (spec's stale-registration guard) is a follow-up refinement — for this task, ship the marker-based idempotence + install-stopped; the runbook (Task 8) notes that enabling after a long stop should confirm the runner shows online, with `config.sh remove` + re-run as recovery. Keep the role lint-clean; a full `config.sh --check`/API liveness probe can be a small follow-up if `just test-ansible` and review call for it.
 
 - [ ] **Step 2: Run the harness — expect all three cases PASS.**
 ```bash
@@ -787,17 +865,17 @@ git commit -m "feat(1291): github_runner arch-resolve, checksum download, regist
 **Where it fits:** The "stop the relearning" deliverable — the operator-facing bring-up guide and the pointers that make it discoverable.
 
 **Files:**
-- Create: `docs/operating/runbooks/self-hosted-kvm-runner.md`
+- Create: `self-hosted-kvm-runner.md` under `docs/operating/runbooks/`
 - Modify: `deploy/ansible/README.md`
 - Modify: `AGENTS.md`
 
 **Interfaces:** none (docs).
 
-- [ ] **Step 1: Write the runbook** (`docs/operating/runbooks/self-hosted-kvm-runner.md`) covering, in order: prerequisites (Rocky 10, `just`/`uv`, collections via `ansible-galaxy install -r requirements.yml`); the `ansible-playbook playbooks/runner.yml` command and what each role does; the persistent venv + the `KDIVE_PYTHON` contract sub-issue D reuses (do not rebuild per job); obtaining a registration token; **the ordered security steps — apply the repo "Require approval for all outside collaborators" setting and D's `if:` guard BEFORE setting `github_runner_service_enabled: true`**; the offline-removal warning (leaving the service stopped past GitHub's ~14-day window invalidates the registration; recovery is `config.sh remove` then re-run with a fresh token); wiring `KDIVE_S3_*` repo/org secrets and where the credential material lands (C/D/operator, since A's resolver does not check it); the ppc64le `github_runner_tarball_url` override; re-applying the `/boot` chmod after a kernel upgrade; deregistration; and the verification steps (idempotence `0 changed` on an already-registered host + off-host `check-local-libvirt`). Follow the operator-doc convention: use `ansible-playbook`/`scripts/*.sh`, not `just`, in the walkthrough. Keep prose plain (no banned words).
+- [ ] **Step 1: Write the runbook** (`self-hosted-kvm-runner.md` under `docs/operating/runbooks/`) covering, in order: prerequisites (Rocky 10, `just`/`uv`, collections via `ansible-galaxy install -r requirements.yml`); the `ansible-playbook playbooks/runner.yml` command and what each role does; the persistent venv + the `KDIVE_PYTHON` contract sub-issue D reuses (do not rebuild per job); obtaining a registration token; **the ordered security steps — apply the repo "Require approval for all outside collaborators" setting and D's `if:` guard BEFORE setting `github_runner_service_enabled: true`**; the offline-removal warning (leaving the service stopped past GitHub's ~14-day window invalidates the registration; recovery is `config.sh remove` then re-run with a fresh token); wiring `KDIVE_S3_*` repo/org secrets and where the credential material lands (C/D/operator, since A's resolver does not check it); the ppc64le `github_runner_tarball_url` override; re-applying the `/boot` chmod after a kernel upgrade; deregistration; and the verification steps (idempotence `0 changed` on an already-registered host + off-host `check-local-libvirt`). Follow the operator-doc convention: use `ansible-playbook`/`scripts/*.sh`, not `just`, in the walkthrough. Keep prose plain (no banned words).
 
 - [ ] **Step 2: Add a runner section to `deploy/ansible/README.md`** — a short subsection under Layout/Usage pointing at `playbooks/runner.yml`, the two new roles, and the runbook, noting it is the local-libvirt CI-runner path (distinct from the remote-libvirt provider bring-up).
 
-- [ ] **Step 3: Add a one-line pointer to `AGENTS.md`** in the `live_vm` conventions area, e.g. after the three-live-tiers note: "The self-hosted KVM runner host is codified in `deploy/ansible/playbooks/runner.yml` + `docs/operating/runbooks/self-hosted-kvm-runner.md` (ADR-0387, #1291)."
+- [ ] **Step 3: Add a one-line pointer to `AGENTS.md`** in the `live_vm` conventions area, e.g. after the three-live-tiers note: "The self-hosted KVM runner host is codified in `deploy/ansible/playbooks/runner.yml` + the `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/` (ADR-0387, #1291)."
 
 - [ ] **Step 4: Verify doc guards.**
 ```bash
@@ -844,5 +922,6 @@ Expected: `check-local-libvirt.sh` reports the host ready (exit 0) or names conc
 ## Self-Review (completed against the spec)
 
 - **Spec coverage:** reuse boundary (Task 1 playbook) · single service account (Tasks 1–7 use `github_runner_user`) · toolchain + foreign qemu (Task 2) · /boot readability (Task 2) · venv + ABI match + KDIVE_PYTHON contract (Task 3) · both staging dirs + virt_image_t (Task 4) · two-part gate incl. both-dir label + group membership + XDG dir (Task 5) · arch fail-loud + tarball override seam (Task 7) · pinned checksum (Task 7) · idempotence marker guard + token fail-closed + install-stopped (Task 7) · service XDG/secrets env (Task 7) · regression harness for the three behaviors (Tasks 6–7) · runbook + pointers + trusted-events ordering + offline-window recovery + credential-ownership note (Task 8) · local validation (Task 9). The stale-registration *liveness* probe is scoped as a Task 7 follow-up note (spec allows the marker guard + runbook recovery as the floor).
-- **Placeholders:** none — every code step carries actual YAML/Bash.
+- **Placeholders:** none — every code step carries actual YAML/Bash; the `getent` uid lookups are shown explicitly (verify.yml + github_runner), not left as prose.
 - **Type/name consistency:** `github_runner_user`, `live_vm_staging_dir`, `install_staging_dir`, `live_vm_venv`, `github_runner_arch_map`, `github_runner_install_dir`, tag `github_runner_register` are used identically across tasks.
+- **Plan-review fixes folded in:** harness isolates the register branch via `--tags github_runner_register` (so case 3 never reaches `svc.sh`); the label gate reads `ls -Zd` (not the inverted `matchpathcon -V`); `/boot` uses find+file for 0-changed idempotence; the venv root is pre-created + `uv` installed before the clone; the runner tarball always downloads (only the checksum is conditional); and Task 5 exercises the corrected `ls -Zd`/`getent` mechanisms in-branch.
