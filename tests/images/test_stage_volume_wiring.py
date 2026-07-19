@@ -12,8 +12,8 @@ production and are out of scope here.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import uuid4
 
 import psycopg
@@ -49,29 +49,24 @@ def test_resolve_single_remote_config_wrong_provider_is_configuration_error() ->
     assert excinfo.value.details == {"provider": "local-libvirt"}
 
 
-def test_resolve_single_remote_config_zero_instances_is_configuration_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(wiring, "all_remote_configs_by_name", lambda: [])
-    with pytest.raises(CategorizedError) as excinfo:
-        _resolve_single_remote_config("remote-libvirt")
-    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert excinfo.value.details == {"instances": ""}
-
-
-def test_resolve_single_remote_config_many_instances_is_configuration_error(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("names", "expected_instances"),
+    [
+        pytest.param([], "", id="zero"),
+        pytest.param(["host-b", "host-a"], "host-a, host-b", id="many"),
+    ],
+)
+def test_resolve_single_remote_config_wrong_count_is_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, names: list[str], expected_instances: str
 ) -> None:
     monkeypatch.setattr(
-        wiring,
-        "all_remote_configs_by_name",
-        lambda: [("host-b", _remote_config()), ("host-a", _remote_config())],
+        wiring, "all_remote_configs_by_name", lambda: [(n, _remote_config()) for n in names]
     )
     with pytest.raises(CategorizedError) as excinfo:
         _resolve_single_remote_config("remote-libvirt")
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     # sorted, so an operator sees a stable, alphabetized fix-hint regardless of declaration order
-    assert excinfo.value.details == {"instances": "host-a, host-b"}
+    assert excinfo.value.details == {"instances": expected_instances}
 
 
 def test_resolve_single_remote_config_returns_the_lone_instance(
@@ -119,16 +114,12 @@ class _FakeConn:
         self.committed = True
 
 
-def _stub_connect(conn: _FakeConn) -> Callable[[str], AbstractContextManager[_FakeConn]]:
+def _patch_db(monkeypatch: pytest.MonkeyPatch, conn: _FakeConn) -> None:
     @contextmanager
     def _connect(_conninfo: str) -> Iterator[_FakeConn]:
         yield conn
 
-    return _connect
-
-
-def _patch_db(monkeypatch: pytest.MonkeyPatch, conn: _FakeConn) -> None:
-    monkeypatch.setattr(wiring.psycopg, "connect", _stub_connect(conn))
+    monkeypatch.setattr(wiring.psycopg, "connect", _connect)
     monkeypatch.setattr(wiring.config, "require", lambda _setting: "postgresql://db")
 
 
