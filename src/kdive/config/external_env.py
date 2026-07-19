@@ -239,6 +239,58 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(#975, ADR-0297).",
     ),
     # --- operator shell scripts -----------------------------------------------------------
+    # live-vm guest-image stores (#1292, ADR-0388): scripts/live-vm/{warm-store,stage-tcg-images}.sh
+    ExternalEnvVar(
+        "KDIVE_WARM_STORE_DIR",
+        "script",
+        "/var/lib/kdive/warm-store",
+        "Persistent warm-store directory `warm-store.sh` refreshes (rootfs + kernel + matching "
+        "debuginfo); the `live_vm_host` Ansible role owns it.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WARM_STORE_TARGET_NVR",
+        "script",
+        None,
+        "Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the "
+        "operator/CI computes it from the base image; no live distro query). Unset → the script "
+        "dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WARM_STORE_IMAGE",
+        "script",
+        None,
+        "Catalog rootfs image `warm-store.sh` passes to `python -m kdive build-fs`. Unset → the "
+        "script dies.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_WARM_STORE_FORCE",
+        "script",
+        "0",
+        "When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a "
+        "distro that rebuilt the kernel under an unchanged NVR.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TCG_STAGE_DIR",
+        "script",
+        "/mnt/kdive-tcg",
+        "Hosted-runner `/mnt` scratch directory `stage-tcg-images.sh` stages the ephemeral ppc64le "
+        "TCG image set into.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TCG_IMAGE",
+        "script",
+        None,
+        "ppc64le catalog rootfs image `stage-tcg-images.sh` passes to `python -m kdive build-fs`. "
+        "Unset → the script dies.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TCG_BUDGET_BYTES",
+        "script",
+        "7000000000",
+        "Enforced `/mnt` disk-budget ceiling for the hosted TCG set (~7 GB): a pre-stage "
+        "free-space check for the whole budget and a post-stage staged-set footprint cap, each "
+        "failing loud.",
+    ),
     ExternalEnvVar(
         "KDIVE_KVM_NODE",
         "script",

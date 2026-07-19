@@ -261,7 +261,14 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
 | `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
+| `KDIVE_TCG_BUDGET_BYTES` | `7000000000` | Enforced `/mnt` disk-budget ceiling for the hosted TCG set (~7 GB): a pre-stage free-space check for the whole budget and a post-stage staged-set footprint cap, each failing loud. |
+| `KDIVE_TCG_IMAGE` | — | ppc64le catalog rootfs image `stage-tcg-images.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
+| `KDIVE_TCG_STAGE_DIR` | `/mnt/kdive-tcg` | Hosted-runner `/mnt` scratch directory `stage-tcg-images.sh` stages the ephemeral ppc64le TCG image set into. |
 | `KDIVE_TOKEN_TTL` | `2592000` | Lifetime in seconds of the demo token `scripts/live-stack/onboard.sh` and `examples/local-libvirt/mint-token.sh` mint; default from `scripts/live-stack/env.sh` (default 30d). Positive integer; the mock issuer enforces no maximum. |
+| `KDIVE_WARM_STORE_DIR` | `/var/lib/kdive/warm-store` | Persistent warm-store directory `warm-store.sh` refreshes (rootfs + kernel + matching debuginfo); the `live_vm_host` Ansible role owns it. |
+| `KDIVE_WARM_STORE_FORCE` | `0` | When `1`, `warm-store.sh` skips the warm fast-path and rebuilds — the escape hatch for a distro that rebuilt the kernel under an unchanged NVR. |
+| `KDIVE_WARM_STORE_IMAGE` | — | Catalog rootfs image `warm-store.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
+| `KDIVE_WARM_STORE_TARGET_NVR` | — | Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the operator/CI computes it from the base image; no live distro query). Unset → the script dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`. |
 | `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
 
 ## In-guest helpers

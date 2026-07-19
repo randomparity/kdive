@@ -10,6 +10,8 @@ live_vm_host_packages:
   - kdump-tools        # Debian name for kdump-utils
   - gdb
   - python3-guestfs    # the system libguestfs binding, built for Ubuntu 26.04's Python 3.14
+  - elfutils           # eu-readelf: the live-vm store scripts read the kernel/debuginfo build-id (#1292)
+  - debuginfod         # debuginfod-find: fetch matching vmlinux debuginfo by build-id (#1292)
   - git
   - python3-pip        # Ubuntu ships no pip for the system python; uv needs it
   - build-essential    # gcc/make: uv builds drgn + libvirt-python from source

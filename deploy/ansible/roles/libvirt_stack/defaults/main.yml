@@ -4,6 +4,7 @@ libvirt_stack_packages_debian:
   - libvirt-clients
   - qemu-utils
   - libguestfs-tools
+  - e2fsprogs           # host tune2fs: build-fs repack strips the ext4 orphan_file feature (ADR-0351)
   - virtinst
   - gnutls-bin
   # community.libvirt modules run on the target and import these; Ubuntu does not
@@ -15,6 +16,7 @@ libvirt_stack_packages_redhat:
   - libvirt-client
   - qemu-img
   - libguestfs-tools-c
+  - e2fsprogs           # host tune2fs: build-fs repack strips the ext4 orphan_file feature (ADR-0351)
   - virt-install
   - gnutls-utils
   - python3-libvirt
