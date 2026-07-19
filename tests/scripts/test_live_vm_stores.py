@@ -334,3 +334,97 @@ def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
         env=_warm_env(bindir, store, KDIVE_WARM_STORE_FORCE="1"),
     )
     assert marker.read_text().count("x") == 2  # force skips the warm fast-path
+
+
+STAGE = ROOT / "scripts" / "live-vm" / "stage-tcg-images.sh"
+
+
+def test_stage_tcg_syntax_valid() -> None:
+    assert subprocess.run([BASH, "-n", str(STAGE)], check=False).returncode == 0
+
+
+def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "KDIVE_PYTHON": "python3",
+        "KDIVE_TCG_STAGE_DIR": str(stage),
+        "KDIVE_TCG_IMAGE": "rocky10-ppc64le-debug",
+        "KDIVE_TCG_BUDGET_BYTES": "1000000000",  # 1 GB, generous for the stubbed tiny files
+    }
+    env.update(extra)
+    return env
+
+
+def _stage_stubs(bindir: Path) -> None:
+    _produce_stubs(bindir, build_id="cafe02")  # python3/virt-ls/virt-copy-out/eu-readelf
+    _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
+
+
+def _debuginfod_ok_stage(bindir: Path) -> None:
+    _stub(
+        bindir,
+        "debuginfod-find",
+        'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; '
+        'printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
+    )
+
+
+def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()  # /mnt; the script creates the stage dir itself
+    _stage_stubs(bindir)
+    _debuginfod_ok_stage(bindir)
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert r.returncode == 0, r.stderr
+    keys = sorted(ln.split("=", 1)[0] for ln in r.stdout.splitlines() if ln.strip())
+    assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
+
+
+def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
+    _stage_stubs(bindir)
+    _stub(bindir, "debuginfod-find", "exit 1")  # not-found (index lag)
+    lag = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert lag.returncode != 0 and "not yet published" in lag.stderr
+    infra = subprocess.run(  # DEBUGINFOD_URLS unset -> fails before the build
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage),
+    )
+    assert infra.returncode != 0 and "not configured" in infra.stderr
+
+
+def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
+    _stage_stubs(bindir)
+    _stub(bindir, "df", "echo Avail; echo 10")  # only 10 bytes free
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert r.returncode != 0 and "free" in r.stderr
