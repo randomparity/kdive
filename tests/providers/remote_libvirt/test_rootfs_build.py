@@ -176,7 +176,7 @@ def _no_versions(_qcow2: Path) -> dict[str, str]:
 class _Recorder:
     """A ``virt_builder`` stub recording its calls; writes the scratch qcow2 unless told not to."""
 
-    order: list[str] = field(default_factory=list)
+    called: bool = False
     virt_builder_calls: list[dict[str, object]] = field(default_factory=list)
     payload: bytes = b"remote-qcow2-bytes"
     write_output: bool = True
@@ -184,7 +184,7 @@ class _Recorder:
     def virt_builder(
         self, *, releasever: str, packages: tuple[str, ...], qcow2: Path, size: str
     ) -> None:
-        self.order.append("virt-builder")
+        self.called = True
         self.virt_builder_calls.append(
             {"releasever": releasever, "packages": packages, "qcow2": qcow2, "size": size}
         )
@@ -249,7 +249,7 @@ def test_build_rejects_a_name_that_would_escape_the_workspace(
     with pytest.raises(CategorizedError) as exc:
         _plane(tmp_path, rec).build(_spec(name=bad_name))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert rec.order == [], "an unsafe name is rejected before virt-builder runs"
+    assert not rec.called, "an unsafe name is rejected before virt-builder runs"
 
 
 def test_build_missing_output_raises_provisioning_failure(tmp_path: Path) -> None:
@@ -262,34 +262,21 @@ def test_build_missing_output_raises_provisioning_failure(tmp_path: Path) -> Non
     assert exc.value.details == {"stage": "virt-builder"}
 
 
-def test_build_propagates_virt_builder_missing_dependency(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "category",
+    [ErrorCategory.MISSING_DEPENDENCY, ErrorCategory.INFRASTRUCTURE_FAILURE],
+)
+def test_build_propagates_a_virt_builder_categorized_error_unchanged(
+    tmp_path: Path, category: ErrorCategory
+) -> None:
     def _boom(**_kwargs: object) -> NoReturn:
-        raise CategorizedError(
-            "virt-builder is not installed; cannot build the remote base image",
-            category=ErrorCategory.MISSING_DEPENDENCY,
-            details={"stage": "virt-builder", "tool": "virt-builder"},
-        )
+        raise CategorizedError("virt-builder failed", category=category)
 
     tools = RemoteRootfsBuildTools(virt_builder=_boom)
     plane = RemoteLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=tools)
     with pytest.raises(CategorizedError) as exc:
         plane.build(_spec())
-    assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
-
-
-def test_build_propagates_virt_builder_infrastructure_failure(tmp_path: Path) -> None:
-    def _boom(**_kwargs: object) -> NoReturn:
-        raise CategorizedError(
-            "failed to launch virt-builder for virt-builder",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"stage": "virt-builder", "tool": "virt-builder", "error": "PermissionError"},
-        )
-
-    tools = RemoteRootfsBuildTools(virt_builder=_boom)
-    plane = RemoteLibvirtRootfsBuildPlane(workspace=tmp_path / "work", tools=tools)
-    with pytest.raises(CategorizedError) as exc:
-        plane.build(_spec())
-    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert exc.value.category is category
 
 
 # --- Provenance / _capture_versions -------------------------------------------------------------
@@ -341,12 +328,13 @@ def test_provenance_versions_absent_for_unreported_request(tmp_path: Path) -> No
     assert out.provenance["package_versions"] == {"drgn": "0.0.28"}
 
 
-def test_capture_versions_degrades_to_empty_on_inspector_failure(tmp_path: Path) -> None:
-    def _boom(_q: Path) -> dict[str, str]:
-        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
+def _failing_inspector(_q: Path) -> dict[str, str]:
+    raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
 
+
+def test_capture_versions_degrades_to_empty_on_inspector_failure(tmp_path: Path) -> None:
     rec = _Recorder()
-    out = _plane(tmp_path, rec, inspect_versions=_boom).build(_spec())
+    out = _plane(tmp_path, rec, inspect_versions=_failing_inspector).build(_spec())
     assert "package_versions" not in out.provenance, (
         "a failed capture degrades to an empty map, which to_dict() omits (ADR-0252)"
     )
@@ -355,12 +343,9 @@ def test_capture_versions_degrades_to_empty_on_inspector_failure(tmp_path: Path)
 def test_capture_versions_logs_a_warning_on_inspector_failure(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def _boom(_q: Path) -> dict[str, str]:
-        raise CategorizedError("no tool", category=ErrorCategory.MISSING_DEPENDENCY)
-
     rec = _Recorder()
     with caplog.at_level(logging.WARNING):
-        _plane(tmp_path, rec, inspect_versions=_boom).build(_spec())
+        _plane(tmp_path, rec, inspect_versions=_failing_inspector).build(_spec())
 
     assert any(
         "package-version capture failed; provenance omits package_versions" in record.message
