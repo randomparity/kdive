@@ -139,21 +139,42 @@ it ships in the kernel source scripts, so symlink it (per running kernel):
 `sudo ln -sf "/usr/src/linux-headers-$(uname -r)/scripts/extract-vmlinux" /usr/local/bin/`.
 A bare-`vmlinux`-ELF guest kernel (ppc64le pseries) does not need it.
 
-### Disk budget (derived; record the measured actual from the first run)
+### Disk budget
 
-| Component | Derived size | Gate |
-| --- | --- | --- |
-| rootfs qcow2 | ~2 GB | staged-set cap |
-| kernel (image + initramfs) | ~0.1 GB | staged-set cap |
-| matching `vmlinux` debuginfo | ~1.2 GB | staged-set cap |
-| transient debuginfod cache copy | ~1.2 GB | pre-stage free-space |
-| kdump/vmcore + working headroom | ~2 GB | pre-stage free-space |
-| **whole `/mnt` budget** | **~7 GB** | `require_free_space` (pre-stage) |
+| Component | Derived | Measured (Fedora 44 x86_64, see below) | Gate |
+| --- | --- | --- | --- |
+| rootfs qcow2 | ~2 GB | 1.4 GB | staged-set cap |
+| kernel (`vmlinux`) | ~0.1 GB | 18 MB | staged-set cap |
+| matching `vmlinux` debuginfo | ~1.2 GB | 488 MB | staged-set cap |
+| transient debuginfod cache copy | ~1.2 GB | ~488 MB (freed after `mv`) | pre-stage free-space |
+| kdump/vmcore + working headroom | ~2 GB | (run-time, guest-RAM-dependent) | pre-stage free-space |
+| **produced set total** | — | **1.80 GB** | — |
+| **whole `/mnt` budget (TCG)** | **~7 GB** | (headroom generous) | `require_free_space` (pre-stage) |
 
-The ~2 GB vmcore headroom assumes a TCG guest of ≤~2 GB RAM (a vmcore scales
-with populated guest memory); raise `KDIVE_TCG_BUDGET_BYTES` if the guest RAM
-rises. These are derived; the scripts print the **measured actual** on stderr
-(the `live-vm usage:` line) — record the first real measurement here.
+The ~2 GB vmcore headroom assumes a guest of ≤~2 GB RAM (a vmcore scales with
+populated guest memory); raise `KDIVE_TCG_BUDGET_BYTES` if the guest RAM rises.
+The scripts print the measured actual on stderr (the `live-vm usage:` line).
+
+**Live proof (2026-07-19, Ubuntu 26.04 runner, `github-runner`, KVM).** The real
+pipeline — `build-fs fedora-kdive-ready-44` (session mode) → `/boot` kernel
+extract → `debuginfod-find` from `debuginfod.fedoraproject.org` — produced kernel
+`6.19.10-300.fc44.x86_64` with build-id `ac46f500…`, and the fetched debuginfo
+carried the **same** build-id (the match-by-construction guarantee, proven on real
+artifacts). The scripts' `require_tools` preflight and the missing-pin `die` were
+confirmed to fail loud on the same host.
+
+### Operational prerequisites for the warm-store refresh
+
+`warm-store.sh` invokes `build-fs`, whose customize-via-boot step (ADR-0345) boots
+the guest under libvirt. On the runner that requires, beyond the tools above:
+
+- **`e2fsprogs`** (`tune2fs`/`mkfs.ext4`) on `PATH` including `/usr/sbin` — a
+  `build-fs` dependency for the ext4 repack.
+- **`KDIVE_LIBVIRT_URI=qemu:///session`** so qemu runs as the runner user: the
+  default `qemu:///system` writes a root-owned console log the non-root runner
+  cannot read (the root-readback wall), and its qemu (uid `libvirt-qemu`) cannot
+  traverse the runner-owned build workspace. Session mode sidesteps both; keep
+  `XDG_RUNTIME_DIR` short (e.g. `/run/user/<uid>`) for the QMP socket path.
 
 ### Producing each store (operator)
 
@@ -161,8 +182,9 @@ The pins are supplied inputs (the operator/CI compute the NVR from the base
 image; the scripts run no live distro query), and an unset input fails loud:
 
 ```sh
-# Self-hosted warm store (native KVM):
-DEBUGINFOD_URLS=<distro-debuginfod> \
+# Self-hosted warm store (native KVM), run as the runner service account:
+DEBUGINFOD_URLS=<distro-debuginfod> KDIVE_LIBVIRT_URI=qemu:///session \
+  KDIVE_PYTHON=<venv>/bin/python \
   KDIVE_WARM_STORE_TARGET_NVR=<pinned-kernel-nvr> \
   KDIVE_WARM_STORE_IMAGE=<catalog-rootfs-image> \
   scripts/live-vm/warm-store.sh
