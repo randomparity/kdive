@@ -49,3 +49,58 @@
   ansible.builtin.command: "loginctl enable-linger {{ github_runner_user }}"
   args:
     creates: "/var/lib/systemd/linger/{{ github_runner_user }}"
+
+- name: Install uv system-wide (the venv builder; not in the debug toolchain)
+  # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
+  # system PATH, not a per-user install. pip installs the console script to /usr/local/bin.
+  ansible.builtin.pip:
+    name: uv
+    state: present
+
+- name: Create the venv root owned by the service account
+  # /opt is root-owned 0755, so a non-root `git` clone cannot mkdir it — create it first.
+  ansible.builtin.file:
+    path: "{{ live_vm_venv }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+
+- name: Check out the project source for the venv
+  ansible.builtin.git:
+    repo: "{{ live_vm_repo_url }}"
+    dest: "{{ live_vm_venv }}"
+    version: "{{ live_vm_repo_version }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+
+- name: Build the venv against the SYSTEM interpreter (ABI-match python3-libguestfs)
+  # uv defaults to a managed CPython whose minor version may differ from the distro's
+  # python3-libguestfs .so; pin to /usr/bin/python3 so the symlinked native module ABI-matches.
+  ansible.builtin.command:
+    cmd: uv sync --python /usr/bin/python3 --group live
+    chdir: "{{ live_vm_venv }}"
+    creates: "{{ live_vm_venv }}/.venv/bin/python"
+  become: true
+  become_user: "{{ github_runner_user }}"
+
+- name: Locate the system libguestfs binding files
+  ansible.builtin.find:
+    paths: /usr/lib64/python3*/site-packages
+    patterns: ["guestfs.py", "libguestfsmod*.so"]
+    recurse: true
+  register: live_vm_host_libguestfs_files
+
+- name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      {{ live_vm_venv }}/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
