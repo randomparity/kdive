@@ -14,11 +14,17 @@ IMAGE="${KDIVE_TCG_IMAGE:?set KDIVE_TCG_IMAGE to the ppc64le catalog rootfs imag
 mnt_root="$(dirname -- "$STAGE")"
 
 # Floor guard before the recursive delete: refuse a root or top-level KDIVE_TCG_STAGE_DIR override
-# (e.g. `/` or `/mnt`) so a misconfigured value cannot rm -rf a mount root.
+# (e.g. `/` or `/mnt`) so a misconfigured value cannot rm -rf a mount root. Runs first — a
+# dangerous path must be rejected before anything else.
 case "$STAGE" in
 "" | /) die "refusing to operate on '${STAGE}'" ;;
 esac
 [ "$mnt_root" = "/" ] && die "refusing rm -rf on the top-level path ${STAGE}; use a subdirectory"
+
+require_tools \
+  "${KDIVE_PYTHON:-python3}:the kdive venv (set KDIVE_PYTHON), runs build-fs" \
+  "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
+  "eu-readelf:elfutils" "debuginfod-find:debuginfod"
 
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
 rm -rf -- "$STAGE"

@@ -9,6 +9,22 @@ die() {
   exit 1
 }
 
+# Preflight required host tools BEFORE any slow work, naming each missing binary and how to get it
+# (a missing tool otherwise surfaces as a misleading downstream failure — e.g. an empty build-id or
+# an rc=127 "transient" fetch error). Each arg is "cmd:where-to-get-it".
+require_tools() {
+  local spec cmd hint missing=0
+  for spec in "$@"; do
+    cmd="${spec%%:*}"
+    hint="${spec#*:}"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      printf 'live-vm store: missing required tool: %s (%s)\n' "$cmd" "$hint" >&2
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 0 ] || die "install the missing tool(s) above and re-run"
+}
+
 # Apparent size of PATH in bytes.
 du_bytes() {
   du -sb -- "$1" | cut -f1
@@ -76,6 +92,8 @@ kernel_build_id() {
   if [ "$magic" = "7f454c46" ]; then
     vmlinux="$image"
   else
+    command -v extract-vmlinux >/dev/null 2>&1 ||
+      die "compressed kernel ${image} needs 'extract-vmlinux' (ships in linux-headers .../scripts) on PATH"
     vmlinux="$(mktemp)"
     extract-vmlinux "$image" >"$vmlinux" 2>/dev/null || die "cannot extract vmlinux from ${image}"
   fi

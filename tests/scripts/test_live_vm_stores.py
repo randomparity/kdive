@@ -402,6 +402,7 @@ def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
 
 def _stage_stubs(bindir: Path) -> None:
     _produce_stubs(bindir, build_id="cafe02")  # python3/virt-ls/virt-copy-out/eu-readelf
+    _debuginfod_ok(bindir)  # present for require_tools; individual tests override as needed
     _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
 
 
@@ -481,3 +482,30 @@ def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert r.returncode != 0 and "free" in r.stderr
+
+
+def test_require_tools_passes_and_names_missing(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "present-tool", "exit 0")
+    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    ok = _run('require_tools "$1"', "present-tool:somepkg", env=env)
+    assert ok.returncode == 0, ok.stderr
+    miss = _run(
+        'require_tools "$1" "$2"', "present-tool:somepkg", "absent-xyz:get-it-here", env=env
+    )
+    assert miss.returncode != 0
+    assert "absent-xyz" in miss.stderr and "get-it-here" in miss.stderr
+    assert "present-tool" not in miss.stderr  # only the missing one is named
+
+
+def test_kernel_build_id_names_extract_vmlinux_when_missing(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # A non-ELF (compressed) kernel image, with extract-vmlinux absent from PATH.
+    kimg = tmp_path / "bzImage"
+    kimg.write_bytes(b"\x1f\x8b\x08" + b"\x00" * 60)  # gzip magic, not ELF
+    _stub(bindir, "eu-readelf", 'echo "    Build ID: x"')  # present, but not reached
+    env = {"PATH": f"{bindir}:/usr/bin:/bin"}  # no extract-vmlinux
+    r = _run('kernel_build_id "$1"', str(kimg), env=env)
+    assert r.returncode != 0 and "extract-vmlinux" in r.stderr

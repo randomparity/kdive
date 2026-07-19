@@ -12,6 +12,12 @@ STORE="${KDIVE_WARM_STORE_DIR:-/var/lib/kdive/warm-store}"
 # Supplied pins (the operator/D compute the NVR from the base image; no live distro query here).
 TARGET="${KDIVE_WARM_STORE_TARGET_NVR:?set KDIVE_WARM_STORE_TARGET_NVR to the pinned kernel NVR}"
 IMAGE="${KDIVE_WARM_STORE_IMAGE:?set KDIVE_WARM_STORE_IMAGE to the catalog rootfs image}"
+
+require_tools \
+  "${KDIVE_PYTHON:-python3}:the kdive venv (set KDIVE_PYTHON), runs build-fs" \
+  "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
+  "eu-readelf:elfutils" "debuginfod-find:debuginfod"
+
 mkdir -p -- "$STORE"
 
 # Serialize refreshes; the consuming boot (sub-issue D) takes a shared lock on the same file.

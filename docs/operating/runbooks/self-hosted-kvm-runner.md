@@ -126,8 +126,18 @@ as two deliberately-separate stores:
   footprint cap (`KDIVE_TCG_BUDGET_BYTES`, default ~7 GB), each failing loud.
 
 Both fetch debuginfo by the kernel's build-id via `debuginfod-find`, so they
-require `DEBUGINFOD_URLS` pointing at a server that indexes the guest kernel's
-debuginfo (e.g. `debuginfod.ubuntu.com`).
+require `DEBUGINFOD_URLS` pointing at a server that indexes **the guest kernel's**
+debuginfo — the *guest* distro's debuginfod, not the runner's (e.g. a Fedora
+guest → `https://debuginfod.fedoraproject.org`).
+
+**Host tool prerequisites.** The scripts preflight these and fail loud (naming the
+package) if any is absent: `virt-ls`/`virt-copy-out` (libguestfs-tools),
+`eu-readelf` (`elfutils`), and `debuginfod-find` (`debuginfod`) — the last two are
+in the `live_vm_host` role package set. A **compressed** guest kernel (x86 bzImage)
+additionally needs `extract-vmlinux` on `PATH`; it is not a standalone package —
+it ships in the kernel source scripts, so symlink it (per running kernel):
+`sudo ln -sf "/usr/src/linux-headers-$(uname -r)/scripts/extract-vmlinux" /usr/local/bin/`.
+A bare-`vmlinux`-ELF guest kernel (ppc64le pseries) does not need it.
 
 ### Disk budget (derived; record the measured actual from the first run)
 
