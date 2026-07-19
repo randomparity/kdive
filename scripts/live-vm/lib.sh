@@ -137,3 +137,24 @@ prune_other_sets() {
     [ "$(basename -- "$d")" = "$keep" ] || rm -rf -- "$d"
   done
 }
+
+# Build a rootfs for IMAGE into DEST/rootfs.qcow2 (the REAL builder: `python -m kdive build-fs`,
+# NOT a `build-fs` PATH binary), then extract the rootfs's own /boot/vmlinuz-* to DEST/vmlinux as
+# the direct-boot kernel. Prints the kernel build-id. Host-only (build-fs + libguestfs); tests stub
+# python3/virt-ls/virt-copy-out/eu-readelf. build-fs's own eval-safe stdout is discarded (never
+# passed through to the caller's wiring block). --workspace is pinned to a subdir of DEST so the
+# multi-GB build lands on the budgeted, runner-owned filesystem (build-fs defaults it to the
+# root-owned /var/lib/kdive/build/images, which is off-budget and unwritable to the runner); it is
+# removed after the build so it does not inflate the staged-set footprint enforce_budget measures.
+produce_rootfs_and_kernel() {
+  local dest="$1" image="$2" py vmlinuz
+  py="${KDIVE_PYTHON:-python3}"
+  "$py" -m kdive build-fs --image "$image" --workspace "${dest}/.build" \
+    --dest "${dest}/rootfs.qcow2" >/dev/null
+  rm -rf -- "${dest}/.build"
+  vmlinuz="$(virt-ls -a "${dest}/rootfs.qcow2" /boot | grep -m1 '^vmlinuz-')" ||
+    die "no /boot/vmlinuz-* in the rootfs built for image ${image}"
+  virt-copy-out -a "${dest}/rootfs.qcow2" "/boot/${vmlinuz}" "$dest"
+  mv -- "${dest}/${vmlinuz}" "${dest}/vmlinux"
+  kernel_build_id "${dest}/vmlinux"
+}

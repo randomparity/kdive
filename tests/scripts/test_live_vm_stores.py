@@ -9,14 +9,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / "scripts" / "live-vm" / "lib.sh"
-BASH = shutil.which("bash")
+BASH = shutil.which("bash") or "bash"
 
 
 def _run(
     snippet: str, *args: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Source lib.sh, then run ``snippet`` with positional args $1.. — capturing output."""
-    assert BASH is not None, "bash is required"
     return subprocess.run(
         [BASH, "-c", f'source "{LIB}" && {snippet}', "_", *args],
         capture_output=True,
@@ -177,3 +176,161 @@ def test_commit_set_flips_symlink_and_prunes(tmp_path: Path) -> None:
     _run('prune_other_sets "$1"', str(store))
     remaining = sorted(p.name for p in store.glob("set-*"))
     assert remaining == ["set-ccc"]  # only the pointed-at set survives
+
+
+def _produce_stubs(
+    bindir: Path, build_id: str = "beef01", build_marker: Path | None = None
+) -> None:
+    """Stub the host-only tools produce_rootfs_and_kernel drives: build-fs (via python3), the
+    libguestfs kernel-extract pair, and eu-readelf."""
+    mark = f'echo x >> "{build_marker}"; ' if build_marker else ""
+    _stub(
+        bindir,
+        "python3",
+        f'{mark}dest=""; ws=""; want=""; for a in "$@"; do '
+        'case "$want" in dest) dest="$a";; ws) ws="$a";; esac; want=""; '
+        '[ "$a" = "--dest" ] && want=dest; [ "$a" = "--workspace" ] && want=ws; done; '
+        '[ -n "$ws" ] && mkdir -p "$ws"; '
+        'echo "$@" > "$(dirname "$dest")/build-fs.argv"; : > "$dest"',
+    )
+    _stub(bindir, "virt-ls", 'printf "config-6.1\\nvmlinuz-6.1-test\\ninitrd.img\\n"')
+    _stub(
+        bindir,
+        "virt-copy-out",
+        'src=""; for a in "$@"; do case "$a" in /boot/*) src="$a";; esac; destdir="$a"; done; '
+        'printf "\\x7fELF" > "${destdir}/$(basename "$src")"',
+    )
+    _stub(bindir, "eu-readelf", f'echo "    Build ID: {build_id}"')
+
+
+def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    dest = tmp_path / "set"
+    dest.mkdir()
+    _produce_stubs(bindir)
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "KDIVE_PYTHON": "python3"}
+    r = _run('produce_rootfs_and_kernel "$1" "$2"', str(dest), "rocky10-debug", env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "beef01"
+    assert (dest / "rootfs.qcow2").exists()
+    assert (dest / "vmlinux").exists()  # the rootfs's own kernel, extracted
+    argv = (dest / "build-fs.argv").read_text()
+    assert "--workspace" in argv and str(dest) in argv
+    assert not (dest / ".build").exists()
+
+
+WARM = ROOT / "scripts" / "live-vm" / "warm-store.sh"
+
+
+def _warm_env(bindir: Path, store: Path, **extra: str) -> dict[str, str]:
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "KDIVE_PYTHON": "python3",
+        "KDIVE_WARM_STORE_DIR": str(store),
+        "KDIVE_WARM_STORE_TARGET_NVR": "kernel-6.1-test",
+        "KDIVE_WARM_STORE_IMAGE": "rocky10-debug",
+    }
+    env.update(extra)
+    return env
+
+
+def _debuginfod_ok(bindir: Path) -> None:
+    # Cache under a build-id subdir (distinct from the script's vmlinux.debug destination).
+    _stub(
+        bindir,
+        "debuginfod-find",
+        'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; '
+        'printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
+    )
+
+
+def test_warm_store_syntax_valid() -> None:
+    assert subprocess.run([BASH, "-n", str(WARM)], check=False).returncode == 0
+
+
+def test_warm_store_requires_the_pins(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "KDIVE_WARM_STORE_DIR": str(store)}  # no pins
+    r = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
+    assert r.returncode != 0
+    assert "KDIVE_WARM_STORE_TARGET_NVR" in r.stderr
+
+
+def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode == 0, r.stderr
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    keys = sorted(ln.split("=", 1)[0] for ln in lines)
+    assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
+    for ln in lines:  # every path resolves through current/, none leaks a build-fs/mktemp path
+        assert "/current/" in ln.split("=", 1)[1]
+
+
+def test_warm_store_dies_on_debuginfo_kernel_mismatch(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
+    # eu-readelf returns a DIFFERENT id for the fetched debuginfo than for the kernel -> the REAL
+    # match reads the debuginfo and dies (proves the assertion is not kernel-vs-itself).
+    _stub(
+        bindir,
+        "eu-readelf",
+        'for a; do last="$a"; done; case "$last" in *vmlinux.debug) echo "    Build ID: WRONG";; '
+        '*) echo "    Build ID: beef01";; esac',
+    )
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode != 0 and "mismatch" in r.stderr
+
+
+def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
+    env = _warm_env(bindir, store)
+    first = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
+    assert second.returncode == 0, second.stderr
+    assert marker.read_text().count("x") == 1  # warm: build ran once, not twice
+
+
+def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
+    subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_warm_env(bindir, store, KDIVE_WARM_STORE_FORCE="1"),
+    )
+    assert marker.read_text().count("x") == 2  # force skips the warm fast-path
