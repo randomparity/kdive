@@ -1,0 +1,7 @@
+---
+- name: Relabel staging dirs
+  ansible.builtin.command: "restorecon -R {{ item }}"
+  loop:
+    - "{{ live_vm_staging_dir }}"
+    - "{{ install_staging_dir }}"
+  changed_when: false

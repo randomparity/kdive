@@ -104,3 +104,40 @@
     label: "{{ item.path }}"
   become: true
   become_user: "{{ github_runner_user }}"
+
+- name: Create the staging directories owned by the service account
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+  loop:
+    - "{{ live_vm_staging_dir }}"
+    - "{{ install_staging_dir }}"
+
+- name: Ensure the /var/lib/kdive parent is world-traversable
+  ansible.builtin.file:
+    path: /var/lib/kdive
+    state: directory
+    mode: "0755"
+
+- name: Persist the virt_image_t fcontext on both staging trees
+  community.general.sefcontext:
+    target: "{{ item }}(/.*)?"
+    setype: virt_image_t
+    state: present
+  loop:
+    - "{{ live_vm_staging_dir }}"
+    - "{{ install_staging_dir }}"
+  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
+  notify: Relabel staging dirs
+
+- name: Apply the SELinux label now (do not wait for the handler)
+  ansible.builtin.command: "restorecon -R {{ item }}"
+  loop:
+    - "{{ live_vm_staging_dir }}"
+    - "{{ install_staging_dir }}"
+  register: live_vm_host_restorecon
+  changed_when: live_vm_host_restorecon.stdout | length > 0
+  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
