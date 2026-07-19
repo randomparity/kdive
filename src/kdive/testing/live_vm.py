@@ -37,12 +37,14 @@ import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.platform.arch_traits import arch_traits
 from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
 from kdive.providers.shared.libvirt_xml import QEMU_NS, register_qemu_namespace
@@ -51,6 +53,7 @@ _LOOPBACK_HOST = "127.0.0.1"
 _PANIC_MARKER = "Kernel panic"
 _SSH_ID_PREFIX = b"SSH-"
 _POLL_INTERVAL_S = 0.5
+_VALID_WAITS = ("active", "panic", "ssh")
 
 LIVE_VM_ROOTFS_ENV = "KDIVE_LIVE_VM_ROOTFS"
 LIVE_VM_SYSTEM_ID_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
@@ -236,6 +239,26 @@ class _ActiveDomain(Protocol):
     def isActive(self) -> int: ...  # noqa: N802 - mirrors the libvirt binding name
 
 
+class _ThrowawayDomain(_ActiveDomain, Protocol):
+    """The libvirt ``virDomain`` slice ``boot_throwaway_domain`` drives (no libvirt stubs).
+
+    The action methods are typed ``-> object`` so both the real binding (which returns ``int``)
+    and a test fake (which returns ``None``) structurally satisfy the protocol; the harness never
+    reads the return values.
+    """
+
+    def create(self) -> object: ...
+    def destroy(self) -> object: ...
+    def undefineFlags(self, flags: int) -> object: ...  # noqa: N802 - libvirt binding name
+
+
+class _ThrowawayConn(Protocol):
+    """The libvirt ``virConnect`` slice ``boot_throwaway_domain`` drives (no libvirt stubs)."""
+
+    def defineXML(self, xml: str) -> _ThrowawayDomain: ...  # noqa: N802 - libvirt binding name
+    def close(self) -> object: ...
+
+
 def wait_for_active(
     domain: _ActiveDomain, deadline_s: float, *, sleep: Callable[[float], None] = time.sleep
 ) -> bool:
@@ -363,8 +386,154 @@ def prepare_session_runtime(uri: str) -> _SessionRuntime | None:
     return _SessionRuntime(prior=prior, short_dir=short_dir)
 
 
-def connect_libvirt(uri: str) -> object:  # pragma: no cover - live_vm
-    """Open a libvirt connection. Call ``prepare_session_runtime`` first for a session URI."""
+def connect_libvirt(uri: str) -> _ThrowawayConn:  # pragma: no cover - live_vm
+    """Open a libvirt connection. Call ``prepare_session_runtime`` first for a session URI.
+
+    ``virConnect`` structurally satisfies the narrow ``_ThrowawayConn`` protocol.
+    """
     import libvirt  # noqa: PLC0415  # operator-provided
 
     return libvirt.open(uri)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveDomain:
+    """A booted throwaway domain the harness yields: the live libvirt handles + boot inputs."""
+
+    name: str
+    domain: object
+    conn: object
+    uri: str
+    ssh_port: int | None
+    console_log: Path | None
+
+
+class LiveVmBootTimeout(Exception):
+    """A throwaway domain did not reach its wait condition before the deadline."""
+
+
+def _validate_wait(
+    wait_for: str, *, ssh_hostfwd_port: int | None, console_log: Path | None
+) -> None:
+    if wait_for not in _VALID_WAITS:
+        raise CategorizedError(
+            f"unknown wait_for {wait_for!r}; expected one of {_VALID_WAITS}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if wait_for == "ssh" and ssh_hostfwd_port is None:
+        raise CategorizedError(
+            'wait_for="ssh" requires ssh_hostfwd_port so the probe has a port to reach',
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if wait_for == "panic" and console_log is None:
+        raise CategorizedError(
+            'wait_for="panic" requires console_log so the panic-wait can read the serial console',
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+
+def _await_condition(
+    wait_for: str,
+    domain: _ActiveDomain,
+    *,
+    deadline_s: float,
+    ssh_port: int | None,
+    console_log: Path | None,
+) -> bool:
+    if wait_for == "active":
+        return wait_for_active(domain, deadline_s)
+    if wait_for == "panic":
+        assert console_log is not None
+        return wait_for_panic(console_log, deadline_s)
+    assert ssh_port is not None
+    return wait_for_ssh(_LOOPBACK_HOST, ssh_port, deadline_s)
+
+
+@contextmanager
+def boot_throwaway_domain(
+    rootfs: Path,
+    *,
+    arch: str,
+    name: str,
+    mode: str = "qemu:///system",
+    memory_mb: int = 1024,
+    vcpu: int = 1,
+    ssh_hostfwd_port: int | None = None,
+    kernel_path: Path | None = None,
+    cmdline: str | None = None,
+    console_log: Path | None = None,
+    wait_for: str = "active",
+    wait_timeout_s: float = 30.0,
+    settle_s: float = 0.0,
+    _connect: Callable[[str], _ThrowawayConn] = connect_libvirt,
+    _overlay: Callable[[Path, Path], None] = create_overlay,
+    _sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[LiveDomain]:
+    """Boot a throwaway libvirt domain, wait for ``wait_for``, yield it, and guarantee teardown.
+
+    See the module docstring for the environment contract. ``settle_s`` sleeps after the condition
+    is reached (preserves the legacy ``create(); sleep(2)`` window). ``_connect``/``_overlay``/
+    ``_sleep`` are injection seams for the unit tests; live callers use the defaults.
+
+    ``import libvirt`` happens **only in the finally**, and only when a domain was defined — so the
+    ``wait_for`` precondition guards raise before any libvirt import (they run on a libvirt-less
+    host) and a boot unit test can stub ``sys.modules["libvirt"]`` to exercise the real teardown.
+    """
+    _validate_wait(wait_for, ssh_hostfwd_port=ssh_hostfwd_port, console_log=console_log)
+    dest = rootfs.with_name(f"{name}.qcow2")
+    runtime = prepare_session_runtime(mode)
+    conn: _ThrowawayConn | None = None
+    domain: _ThrowawayDomain | None = None
+    try:
+        _overlay(rootfs, dest)
+        conn = _connect(mode)
+        xml = throwaway_domain_xml(
+            name=name,
+            arch=arch,
+            disk_path=str(dest),
+            memory_mb=memory_mb,
+            vcpu=vcpu,
+            kernel_path=kernel_path,
+            cmdline=cmdline,
+            console_log=console_log,
+            ssh_hostfwd_port=ssh_hostfwd_port,
+        )
+        domain = conn.defineXML(xml)
+        domain.create()
+        if not _await_condition(
+            wait_for,
+            domain,
+            deadline_s=wait_timeout_s,
+            ssh_port=ssh_hostfwd_port,
+            console_log=console_log,
+        ):
+            raise LiveVmBootTimeout(
+                f"domain {name!r} (mode {mode}) did not reach wait_for={wait_for!r} in "
+                f"{wait_timeout_s}s"
+            )
+        if settle_s > 0:
+            _sleep(settle_s)
+        yield LiveDomain(
+            name=name,
+            domain=domain,
+            conn=conn,
+            uri=mode,
+            ssh_port=ssh_hostfwd_port,
+            console_log=console_log,
+        )
+    finally:
+        if domain is not None:
+            import libvirt  # noqa: PLC0415  # operator-provided; only reached once a domain exists
+
+            with contextlib.suppress(libvirt.libvirtError):
+                if domain.isActive():
+                    domain.destroy()
+            with contextlib.suppress(libvirt.libvirtError):
+                domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA)
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+        with contextlib.suppress(OSError):
+            dest.unlink(missing_ok=True)
+        if runtime is not None:
+            runtime.restore()

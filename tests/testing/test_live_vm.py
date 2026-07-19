@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -9,7 +11,9 @@ import pytest
 
 from kdive.domain.errors import CategorizedError
 from kdive.testing.live_vm import (
+    LiveVmBootTimeout,
     LiveVmEnvState,
+    boot_throwaway_domain,
     prepare_session_runtime,
     resolve_provisioned_contract,
     resolve_throwaway_contract,
@@ -18,6 +22,164 @@ from kdive.testing.live_vm import (
     wait_for_panic,
     wait_for_ssh,
 )
+
+
+def _fake_libvirt_module() -> types.SimpleNamespace:
+    """A stub ``libvirt`` module for the teardown branch: its libvirtError + undefine flag constant.
+
+    boot_throwaway_domain imports libvirt lazily *inside its finally* (only when a domain was
+    defined), so a boot unit test injects this via ``monkeypatch.setitem(sys.modules, "libvirt",
+    ...)`` and the teardown runs without real libvirt — proving the fake path and letting the boot
+    tests pass on a libvirt-less host.
+    """
+    mod = types.SimpleNamespace()
+    mod.libvirtError = Exception
+    mod.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA = 1
+    return mod
+
+
+class _FakeDomain:
+    def __init__(self, *, boot_succeeds: bool = True) -> None:
+        # boot_succeeds models whether create() actually brings the domain up. The timeout test
+        # sets it False so create() does NOT flip active True — otherwise create() would override
+        # the 'never active' intent and wait_for_active would return True.
+        self.boot_succeeds = boot_succeeds
+        self.active = False
+        self.destroyed = False
+        self.undefined = False
+
+    def isActive(self) -> bool:  # noqa: N802 - libvirt name
+        return self.active
+
+    def create(self) -> None:
+        if self.boot_succeeds:
+            self.active = True
+
+    def destroy(self) -> None:
+        self.destroyed = True
+        self.active = False
+
+    def undefineFlags(self, _flags: int) -> None:  # noqa: N802 - libvirt name
+        self.undefined = True
+
+
+class _FakeConn:
+    def __init__(self, *, boot_succeeds: bool = True) -> None:
+        self.domain = _FakeDomain(boot_succeeds=boot_succeeds)
+        self.define_calls = 0
+        self.closed = False
+
+    def defineXML(self, _xml: str) -> _FakeDomain:  # noqa: N802 - libvirt name
+        self.define_calls += 1
+        return self.domain
+
+    def close(self) -> int:
+        self.closed = True
+        return 0
+
+
+def _fake_conn_factory(conn: _FakeConn):
+    return lambda _uri: conn
+
+
+def _write_overlay(_base: Path, dest: Path) -> None:
+    dest.write_bytes(b"overlay")
+
+
+def test_boot_yields_and_tears_down_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeConn()
+    overlays: list[Path] = []
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+
+    def fake_overlay(_base: Path, dest: Path) -> None:
+        dest.write_bytes(b"overlay")
+        overlays.append(dest)
+
+    with boot_throwaway_domain(
+        rootfs,
+        arch="x86_64",
+        name="kdive-t",
+        mode="qemu:///system",
+        _connect=_fake_conn_factory(conn),
+        _overlay=fake_overlay,
+    ) as live:
+        assert live.name == "kdive-t"
+        assert conn.define_calls == 1
+        assert overlays and overlays[0].exists()
+    assert conn.domain.destroyed and conn.domain.undefined and conn.closed
+    assert not overlays[0].exists()  # overlay unlinked
+
+
+def test_boot_raises_before_define_on_ssh_without_port(tmp_path: Path) -> None:
+    # No libvirt stub: the precondition must raise BEFORE the try body (no overlay, no connect,
+    # no libvirt import), so this passes on a libvirt-less host.
+    conn = _FakeConn()
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    with (
+        pytest.raises(CategorizedError),
+        boot_throwaway_domain(
+            rootfs,
+            arch="x86_64",
+            name="k",
+            wait_for="ssh",
+            _connect=_fake_conn_factory(conn),
+            _overlay=_write_overlay,
+        ),
+    ):
+        pass
+    assert conn.define_calls == 0  # failed the precondition before defining
+
+
+def test_boot_timeout_raises_and_tears_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeConn(boot_succeeds=False)  # create() leaves it inactive → never reaches condition
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    with (
+        pytest.raises(LiveVmBootTimeout),
+        boot_throwaway_domain(
+            rootfs,
+            arch="x86_64",
+            name="k",
+            wait_timeout_s=-1.0,
+            _connect=_fake_conn_factory(conn),
+            _overlay=_write_overlay,
+        ),
+    ):
+        pass
+    assert conn.closed  # teardown still ran
+
+
+def test_boot_session_mode_restores_xdg_even_on_body_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
+    conn = _FakeConn()
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    with (
+        pytest.raises(RuntimeError),
+        boot_throwaway_domain(
+            rootfs,
+            arch="x86_64",
+            name="k",
+            mode="qemu:///session",
+            _connect=_fake_conn_factory(conn),
+            _overlay=_write_overlay,
+        ),
+    ):
+        raise RuntimeError("body boom")
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
 
 
 def _root(xml: str) -> ET.Element:
