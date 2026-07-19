@@ -10,9 +10,13 @@ import pytest
 from kdive.domain.errors import CategorizedError
 from kdive.testing.live_vm import (
     LiveVmEnvState,
+    prepare_session_runtime,
     resolve_provisioned_contract,
     resolve_throwaway_contract,
     throwaway_domain_xml,
+    wait_for_active,
+    wait_for_panic,
+    wait_for_ssh,
 )
 
 
@@ -83,6 +87,86 @@ def test_builder_direct_kernel_and_default_console_cmdline(tmp_path: Path) -> No
 def test_builder_unknown_arch_raises_configuration_error() -> None:
     with pytest.raises(CategorizedError):
         throwaway_domain_xml(name="a", arch="riscv64", disk_path="/d.qcow2")
+
+
+def test_wait_for_active_returns_true_when_domain_active() -> None:
+    class _Dom:
+        def isActive(self) -> bool:  # noqa: N802 - libvirt name
+            return True
+
+    assert wait_for_active(_Dom(), deadline_s=1.0) is True
+
+
+def test_wait_for_panic_true_after_marker_appears(tmp_path: Path) -> None:
+    console = tmp_path / "c.log"
+    console.write_text("booting...\n")
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            console.write_text("booting...\nKernel panic - not syncing\n")
+
+    assert wait_for_panic(console, deadline_s=100.0, sleep=fake_sleep) is True
+
+
+def test_wait_for_panic_false_at_deadline(tmp_path: Path) -> None:
+    console = tmp_path / "c.log"
+    console.write_text("no panic here\n")
+    assert wait_for_panic(console, deadline_s=-1.0) is False  # already past deadline
+
+
+def test_wait_for_ssh_true_when_probe_eventually_succeeds() -> None:
+    seq = iter([False, False, True])
+
+    def probe(_host: str, _port: int) -> bool:
+        return next(seq)
+
+    assert (
+        wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None)
+        is True
+    )
+
+
+def test_wait_for_ssh_false_at_deadline_when_probe_never_succeeds() -> None:
+    def probe(_host: str, _port: int) -> bool:
+        return False
+
+    assert wait_for_ssh("127.0.0.1", 2222, deadline_s=-1.0, probe=probe) is False
+
+
+def test_wait_for_ssh_survives_probe_oserror() -> None:
+    calls = {"n": 0}
+
+    def probe(_host: str, _port: int) -> bool:
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise OSError("connection refused")
+        return True
+
+    assert (
+        wait_for_ssh("127.0.0.1", 2222, deadline_s=100.0, probe=probe, sleep=lambda _s: None)
+        is True
+    )
+
+
+def test_prepare_session_runtime_none_for_system_mode() -> None:
+    assert prepare_session_runtime("qemu:///system") is None
+
+
+def test_prepare_session_runtime_sets_short_xdg_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
+    runtime = prepare_session_runtime("qemu:///session")
+    assert runtime is not None
+    short = os.environ["XDG_CONFIG_HOME"]
+    assert short != "/original" and len(short) < 40
+    runtime.restore()
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"
+    assert not Path(short).exists()
 
 
 def test_throwaway_absent_when_rootfs_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
