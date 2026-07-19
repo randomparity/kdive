@@ -10,13 +10,15 @@ follow-up sweep. See `mutation-testing.md` for how `just mutate` itself works.
 - **407** source modules → **273** container-free "fast" targets (have at least one
   covering test that does not use the Postgres fixtures), **112** Postgres-backed targets,
   and the modules with no direct unit test (originally ~22; a reproducible scan found **25** on
-  `main`). The no-direct-test bucket is now closed (#665, ADR-0229) — see below.
+  `main`). The no-direct-test bucket was closed by #665, reopened by post-sweep modules, and
+  re-closed by #1298 / #1304 — see below.
 - The 273 fast targets were swept in 30 weight-balanced buckets, each killing surviving
   mutants and then passing an adversarial `/challenge` review of the added tests.
 - **~3,700 mutants killed across ~210 commits.** Every bucket's added tests pass the full
   gate: `just lint`, `just type` (whole-tree), and `just test` (6,349 passed).
 - **46** fast targets could not be swept in that run (categorized below); the 112 PG-backed and
-  the no-direct-test targets were out of scope for the 2026-06-21 sweep (the latter closed by #665).
+  the no-direct-test targets were out of scope for the 2026-06-21 sweep (the latter first closed
+  by #665, then re-closed by #1298 / #1304 after post-sweep modules reopened it).
 
 ## Reusable tooling workarounds
 
@@ -74,12 +76,18 @@ these spins up testcontainers per run (slow, can leak/collide under parallelism)
 serially in a dedicated session. Subsystems: `services/`, `store/`, `db/`, most
 `jobs/handlers/`, and the Postgres-backed `inventory/`/`reconciler/` paths.
 
-### No direct unit test — DONE (#665, ADR-0229)
+### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 
-This bucket is closed. A reproducible AST scan (no test under `tests/` imports the module by
+**The invariant.** Every source module is imported by at least one test that mirrors it, so mutmut
+can attribute a killing test to the module: a mutant in a module that no test imports directly
+survives unattributably even when cross-file tests exercise its behavior. This invariant
+originates in #665 — *not* ADR-0229, which only folds the mutmut env shims into the `just mutate`
+recipe (its clean "0 mutants generated" report for import-time-only modules is referenced below).
+
+**#665 (2026-06-21).** A reproducible AST scan (no test under `tests/` imports the module by
 dotted path) found **25** such modules on `main` (the original "22" was approximate;
 `config/manifest.py` had since gained a test, and the scan surfaced a few small contract
-modules). Each now has a direct unit test; per module:
+modules). Each gained a direct unit test; per module:
 
 - **Mutated to 0 surviving (function-body targets):** `mcp/middleware/shared` (12),
   `mcp/middleware/telemetry` (126), `mcp/middleware/usage` (77), `mcp/middleware/exposure` (19),
@@ -101,6 +109,17 @@ modules). Each now has a direct unit test; per module:
   failure.
 - **Covered, but reclassified to "could not be swept" (below):** `inventory/_row_typing` and
   `mcp/middleware/binding_errors`.
+
+**Reopened by post-sweep modules; re-closed by #1298 / #1304.** Between 2026-06-27 and 2026-07-16,
+**13** new modules landed with no test importing them directly (verified by git add-dates + an
+import scan on 2026-07-19). They were behaviorally covered *indirectly* (89–100% line coverage via
+MCP-layer tests), so the gap was mutation-attributability, not behavior. `images/rootfs/stage_volume_wiring.py`
+— also a real coverage gap — was closed by #1298; the other **12** gained direct mirror unit tests
+in #1304 (each imports its module by dotted path; PG-independent "fast" targets):
+`services/investigations/{metadata,lifecycle,view}`, `mcp/tools/ops/audit/{read_pipeline,registrar}`,
+`mcp/tools/ops/inventory/registrar`, `mcp/tools/_vmcore_kdump_gate`,
+`images/cataloging/{object_keys,read_model}`, `images/rootfs/baseline`, `providers/shared/host_cpu`,
+`jobs/handlers/runs/ports`. The bucket is closed again.
 
 ### Could not be swept this run (46)
 
@@ -132,6 +151,6 @@ modules). Each now has a direct unit test; per module:
 ## Resuming
 
 The mapping is reproducible. Re-running a bucket is cheap: already-clean modules report
-0 surviving and are skipped. The "no direct unit test" bucket is now closed (#665); the next
-sweep's remaining work is the 112 PG-backed targets (serial, dedicated run with `docker ps`
-cleanup afterward) and the tooling/structure-blocked set above.
+0 surviving and are skipped. The "no direct unit test" bucket is closed (#665, re-closed by
+#1298 / #1304); the next sweep's remaining work is the 112 PG-backed targets (serial, dedicated
+run with `docker ps` cleanup afterward) and the tooling/structure-blocked set above.
