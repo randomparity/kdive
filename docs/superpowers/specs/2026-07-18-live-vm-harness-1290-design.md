@@ -88,6 +88,16 @@ client mechanism, imports no pytest) versus `require_issuer` / `require_stack`
 Consumers import the mechanism from `kdive.testing.live_vm` and the gate from
 `tests.live_vm`.
 
+**Concurrency contract (session mode).** `connect_libvirt` mutates
+`XDG_CONFIG_HOME` process-globally for the duration of a session-mode boot (the
+QMP socket-path fix), so two session-mode boots **in the same process** (nested
+or threaded) would corrupt each other's save/restore chain. `pytest-xdist`
+workers are separate processes with independent `os.environ`, so xdist
+parallelism across live_vm tests is unaffected; the hazard is only concurrent
+same-process session boots, which the tier does not do — the module docstring
+states "one session-mode boot at a time per process". System-mode boots mutate
+no env and carry no such constraint.
+
 ### `boot_throwaway_domain` (the mechanism)
 
 ```python
@@ -131,19 +141,26 @@ Behavior:
    `/tmp/kdive-cl-<hex>` path (the QMP UNIX-socket 108-byte limit) and
    **records the prior value and the short dir on the returned handle**; system
    mode is untouched and records nothing. The restore/cleanup happens in
-   teardown (step 6) — the module is pytest-free, so it cannot lean on
+   teardown (step 7) — the module is pytest-free, so it cannot lean on
    `monkeypatch` and must save/restore the process env explicitly.
-3. `throwaway_domain_xml(...)` renders the domain (below); `defineXML` +
+3. **Validate the `wait_for` prerequisites before any boot** (fail loud, don't
+   yield a domain that can never reach its condition): `wait_for="ssh"` requires
+   `ssh_hostfwd_port` set (the probe targets `127.0.0.1:ssh_hostfwd_port`);
+   `wait_for="panic"` requires `console_log` set (the loop reads that file);
+   an unknown `wait_for` value is rejected. Each raises
+   `CategorizedError(CONFIGURATION_ERROR)` naming the missing pairing. `"active"`
+   has no prerequisite.
+4. `throwaway_domain_xml(...)` renders the domain (below); `defineXML` +
    `create()`.
-4. Wait on the chosen condition (below) up to `wait_timeout_s`.
-5. If `settle_s > 0`, sleep `settle_s` after the condition is reached, then
+5. Wait on the chosen condition (below) up to `wait_timeout_s`.
+6. If `settle_s > 0`, sleep `settle_s` after the condition is reached, then
    `yield` the `LiveDomain`. `settle_s` preserves the exact
    `create(); sleep(2)` settle window the two existing tests use before their
    provider op touches the domain (see the dogfood section) — `wait_for`
    yields as soon as `isActive()` is true, which is earlier than `sleep(2)`, so
    a caller that needs the SLIRP netdev fully wired passes `settle_s=2.0`. It
    defaults to `0.0` (no settle).
-6. `finally`, each step guarded so one failure does not mask the rest and
+7. `finally`, each step guarded so one failure does not mask the rest and
    teardown runs whether the body raised or the wait timed out: `destroy()` if
    active, `undefineFlags(...SNAPSHOTS_METADATA)`, `conn.close()`,
    `dest.unlink(missing_ok=True)`, then — for a session-mode boot — **restore
@@ -157,11 +174,25 @@ overlay + connect + teardown discipline without the full builder.
 ### `throwaway_domain_xml` (the arch builder)
 
 Builds the domain with `xml.etree.ElementTree` (no string interpolation, so no
-path injects XML), consuming `arch_traits(arch)` for the arch-varying facts:
+path injects XML), consuming **all** the arch-varying facts of `arch_traits(arch)`
+— the "single source of truth" claim would be false if it silently dropped the
+load-bearing ones:
 
 - `<os><type arch machine>` — `machine` from `traits.machine` (`q35` / `pseries`).
 - `<domain type>` — `kvm` (throwaway domains run natively on the KVM host; TCG
   throwaway domains are out of scope for A, per the epic spec).
+- `<cpu mode=traits.kvm_cpu_mode>` — `host-passthrough` on x86, `host-model` on
+  pseries. This is **load-bearing under KVM (ADR-0294)**: QEMU/KVM's default
+  `qemu64` model is x86-64-v1, but EL9/RHEL-family glibc requires x86-64-v2, so
+  a domain with no `<cpu>` aborts `ld.so` on PID 1 and never reaches userspace
+  — which would make `wait_for="ssh"` on the primary RHEL-family rootfs time out
+  for a reason the harness induced. Emitting it matches production
+  `render_domain_xml`. (A's two dogfood tests only need the QEMU process, so
+  they would not catch its absence — all the more reason to get it right here.)
+- `<features><acpi/><vmcoreinfo state="on"/></features>` when
+  `traits.emit_acpi_features` (x86 only) — matches production, so a crash-capable
+  throwaway (E's panic/host_dump tests) locates fw_cfg/VMCOREINFO the same way a
+  real System does.
 - serial console `<log file=console_log append="off">` when `console_log` is
   given, so `wait_for="panic"` can read it.
 - optional direct-kernel `<os><kernel>` + `<cmdline>` when `kernel_path` is
@@ -176,8 +207,9 @@ path injects XML), consuming `arch_traits(arch)` for the arch-varying facts:
 
 The builder deliberately does **not** require a `ProvisioningProfile` (unlike
 production `render_domain_xml`), because a throwaway domain has no System, no
-metadata row, and no mandatory SSH forward. Reusing `arch_traits` — not copying
-its table — is the single source of truth for the arch branch.
+metadata row, and no mandatory SSH forward. Reusing every relevant field of
+`arch_traits` — not copying its table — is the single source of truth for the
+arch branch.
 
 ### Wait predicates
 
@@ -233,8 +265,17 @@ class ProvisionedContract:
     # KDIVE_S3_* presence asserted here (fail-loud when partially set)
 
 def resolve_throwaway_contract(default_uri: str) -> EnvResolution[ThrowawayContract]: ...
-def resolve_provisioned_contract() -> EnvResolution[ProvisionedContract]: ...
+def resolve_provisioned_contract(default_uri: str) -> EnvResolution[ProvisionedContract]: ...
 ```
+
+Both resolvers take a `default_uri` and resolve the URI identically
+(`KDIVE_LIBVIRT_URI` when set, else `default_uri`) — the signatures are
+symmetric. For the provisioned-System family, a missing `KDIVE_LIVE_VM_SYSTEM_ID`
+is **ABSENT** (skip — the family is simply not configured on this runner); a
+present System id with a partial `KDIVE_S3_*` set is **MISCONFIGURED** (fail
+loud). The URI never triggers ABSENT on its own: it always resolves to
+`KDIVE_LIBVIRT_URI` or the caller's `default_uri`, so a declared family cannot
+skip merely because the URI env is unset.
 
 `EnvResolution` carries the `LiveVmEnvState` and either the contract (AVAILABLE)
 or a human reason (ABSENT / MISCONFIGURED). The **skip vs. fail** discipline
@@ -389,10 +430,16 @@ faithful to real libvirt.
 Unit tests (no KVM host — run in `just ci`):
 
 - `throwaway_domain_xml`: parametrized over `x86_64` and `ppc64le`, assert the
-  emitted `<os type machine>` is `q35`/`pseries`, the cmdline console is
-  `ttyS0`/`hvc0`, the NIC slot is pinned only on q35, and the SSH netdev is
-  present iff `ssh_hostfwd_port` is set. Assert an unknown arch raises
-  `CONFIGURATION_ERROR`.
+  emitted `<os type machine>` is `q35`/`pseries`, the `<cpu mode>` is
+  `host-passthrough`/`host-model`, the `<features><acpi/>` block is present only
+  on x86, the cmdline console is `ttyS0`/`hvc0`, the NIC slot is pinned only on
+  q35, and the SSH netdev is present iff `ssh_hostfwd_port` is set. Assert an
+  unknown arch raises `CONFIGURATION_ERROR`.
+- `wait_for` precondition guards: `boot_throwaway_domain(wait_for="ssh")` with
+  `ssh_hostfwd_port=None` and `boot_throwaway_domain(wait_for="panic")` with
+  `console_log=None` each raise `CONFIGURATION_ERROR` **before** defining a
+  domain (assert the fake conn's `defineXML` was never called); an unknown
+  `wait_for` value raises too.
 - `boot_throwaway_domain` teardown + overlay: inject a fake libvirt conn/domain
   (the `FakeLibvirtConn`/`FakeDomain` pattern already in the repo) and a fake
   `create_overlay`; assert define→create→wait→yield ordering, that teardown
@@ -419,7 +466,15 @@ Unit tests (no KVM host — run in `just ci`):
 - Family-marker additivity meta-test (above).
 
 Live acceptance (maintainer host, `just test-live`): the two migrated tests pass
-unchanged in behavior.
+unchanged in behavior. Both use `wait_for="active"`, so **`wait_for="panic"` and
+`wait_for="ssh"` ship in A with unit coverage only (fake domain / fake console /
+injected probe) and no live proof in this sub-issue** — a bounded, stated risk.
+Sub-issue E's debug/panic migration is the first live exercise of
+`wait_for="panic"`; a booting-guest test is the first live exercise of
+`wait_for="ssh"` (which the `<cpu>` pin above makes reachable on a RHEL-family
+guest). The precondition guards (`ssh` needs a port, `panic` needs a console_log)
+are unit-tested in A so a mis-called mode fails loud rather than mis-reporting a
+`LiveVmBootTimeout`.
 
 ## Acceptance criteria
 
