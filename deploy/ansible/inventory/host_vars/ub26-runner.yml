@@ -1,0 +1,8 @@
+---
+# x86_64 Ubuntu 26.04 LTS self-hosted KVM runner (epic #1289 sub-issue B, ADR-0387). Ubuntu is
+# the runner base because it ships a system Python 3.14 with a matching python3-guestfs binding
+# (RHEL/Rocky top out at 3.12). ppc64le is a drop-in: a new host under live_vm_runners with
+# github_runner_tarball_url pointing at a ppc64le runner build (Ubuntu has a ppc64el port).
+ansible_host: runner-pdx-kdive-ub26.dev.pdx.drc.nz
+github_runner_repo_url: https://github.com/randomparity/kdive
+# github_runner_registration_token supplied at runtime, never here.

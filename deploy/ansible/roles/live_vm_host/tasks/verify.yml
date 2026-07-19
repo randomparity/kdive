@@ -27,26 +27,9 @@
   become_user: "{{ github_runner_user }}"
   changed_when: false
 
-# Part 2: the delta check-local-libvirt.sh does not cover.
-# Read the ACTUAL on-disk label with `ls -Zd` (its 4th field is the SELinux context, which
-# includes the type). NOT `matchpathcon -V` — on a correctly-labeled path that prints
-# "<path> verified." with no type string, so a `virt_image_t in stdout` assert would be inverted.
-- name: Read the SELinux label of both staging dirs
-  ansible.builtin.command: "ls -Zd {{ item }}"
-  loop: "{{ live_vm_staging_dirs }}"
-  register: live_vm_host_labels
-  changed_when: false
-  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
-
-- name: Assert both staging dirs carry virt_image_t
-  ansible.builtin.assert:
-    that: "'virt_image_t' in item.stdout"
-    fail_msg: "{{ item.item }} is not labeled virt_image_t (system-mode boot would be sVirt-denied)"
-  loop: "{{ live_vm_host_labels.results }}"
-  loop_control:
-    label: "{{ item.item }}"
-  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
-
+# Part 2: the delta check-local-libvirt.sh does not cover. On the Ubuntu target there is no
+# static disk label to assert (AppArmor/virt-aa-helper permits each domain's disk paths
+# dynamically), so the gate verifies group membership and the short XDG_RUNTIME_DIR directly.
 - name: Assert the service account is in kvm and libvirt
   ansible.builtin.command: "id -nG {{ github_runner_user }}"
   register: live_vm_host_groups

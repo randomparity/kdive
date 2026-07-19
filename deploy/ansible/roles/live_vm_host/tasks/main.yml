@@ -1,4 +1,14 @@
 ---
+- name: Assert the runner host is Ubuntu/Debian (system Python 3.14 + python3-guestfs, ADR-0387)
+  # The venv strategy relies on the system interpreter being Python 3.14 with a matching
+  # python3-guestfs binding. Ubuntu 26.04 ships both; RHEL/Rocky ship Python 3.12 and no 3.14
+  # libguestfs, so the contract cannot be met there. Fail loud rather than half-provision.
+  ansible.builtin.assert:
+    that: ansible_os_family == 'Debian'
+    fail_msg: >-
+      live_vm_host targets the Ubuntu 26.04 runner base (ADR-0387); this host is
+      {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
 - name: Ensure the runner service account exists in kvm and libvirt
   ansible.builtin.user:
     name: "{{ github_runner_user }}"
@@ -8,22 +18,14 @@
     groups: [kvm, libvirt]
     append: true
 
-- name: Install the kernel-debug toolchain (RHEL-family)
-  ansible.builtin.dnf:
+- name: Install the kernel-debug toolchain + venv build deps (Debian)
+  ansible.builtin.apt:
     name: "{{ live_vm_host_packages }}"
     state: present
-  when: ansible_os_family == 'RedHat'
-
-- name: Install the foreign qemu emulator for cross-arch TCG (RHEL-family)
-  ansible.builtin.dnf:
-    name: "{{ live_vm_host_foreign_qemu_map[ansible_architecture] }}"
-    state: present
-  when:
-    - ansible_os_family == 'RedHat'
-    - ansible_architecture in live_vm_host_foreign_qemu_map
+    update_cache: true
 
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
-  # Stock RHEL/Rocky ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
+  # Ubuntu ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
   # build (ADR-0222, #694/#1156) — probed by check-local-libvirt.sh as a FAIL — needs them
   # readable by the non-root runner user. Re-apply after a kernel upgrade (see runbook).
   ansible.builtin.find:
@@ -52,7 +54,7 @@
 - name: Install uv system-wide (the venv builder; not in the debug toolchain)
   # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
   # system PATH, not a per-user install. pip installs the console script to /usr/local/bin.
-  # --break-system-packages: RHEL/Rocky 10's platform Python is PEP 668 externally-managed,
+  # --break-system-packages: Ubuntu 26.04's system Python is PEP 668 externally-managed,
   # so a plain system `pip install` errors; the flag is accepted (and a no-op) on pip >= 23.
   ansible.builtin.pip:
     name: uv
@@ -77,17 +79,18 @@
   become_user: "{{ github_runner_user }}"
   register: live_vm_host_checkout
 
-- name: Build the venv against the SYSTEM interpreter (ABI-match python3-libguestfs)  # noqa: no-handler
+- name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
   # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs
   # symlink task later in THIS play, but handlers run post-play (too late on first provision).
   # uv defaults to a managed CPython whose minor version may differ from the distro's
-  # python3-libguestfs .so; pin to /usr/bin/python3 so the symlinked native module ABI-matches.
+  # python3-guestfs .so; pin to /usr/bin/python3 (Ubuntu 26.04's 3.14) so the symlinked native
+  # module ABI-matches.
   # Run whenever the checkout advanced (main is a moving ref), NOT `creates:`-gated — a creates
   # guard would freeze the venv's deps at first-provision while the source moved on, so a live
   # dependency added to main would never reach the venv the worker imports from. On a converged
   # host (main unchanged) the git task is unchanged, so uv sync is skipped and the run is 0-changed.
   ansible.builtin.command:
-    cmd: uv sync --python /usr/bin/python3 --group live
+    cmd: "{{ live_vm_host_uv_bin }} sync --python /usr/bin/python3 --group live"
     chdir: "{{ live_vm_venv }}"
   become: true
   become_user: "{{ github_runner_user }}"
@@ -95,12 +98,12 @@
   changed_when: true
 
 - name: Locate the system libguestfs binding files
-  # find's `paths` is a LITERAL directory — it does NOT glob-expand (unlike `patterns`), so a
-  # wildcard like /usr/lib64/python3*/site-packages matches nothing and returns an empty list.
-  # Build the concrete site-packages path from the interpreter facts (the same version the venv
-  # dest below uses, so source and dest stay consistent).
+  # Debian installs python3-guestfs into the version-agnostic /usr/lib/python3/dist-packages
+  # (not a per-version site-packages): guestfs.py plus libguestfsmod.cpython-<abi>.so, built for
+  # Ubuntu 26.04's system Python 3.14 — the same interpreter the venv is pinned to above, so the
+  # symlinked native module ABI-matches.
   ansible.builtin.find:
-    paths: "/usr/lib64/python{{ ansible_python.version.major }}.{{ ansible_python.version.minor }}/site-packages"
+    paths: /usr/lib/python3/dist-packages
     patterns: ["guestfs.py", "libguestfsmod*.so"]
   register: live_vm_host_libguestfs_files
 
@@ -110,8 +113,8 @@
   ansible.builtin.assert:
     that: live_vm_host_libguestfs_files.matched > 0
     fail_msg: >-
-      guestfs.py / libguestfsmod*.so not found under the system python site-packages —
-      is python3-libguestfs installed (it is in live_vm_host_packages) and does the ansible
+      guestfs.py / libguestfsmod*.so not found under /usr/lib/python3/dist-packages —
+      is python3-guestfs installed (it is in live_vm_host_packages) and does the ansible
       interpreter match /usr/bin/python3 (the venv's --python)?
 
 - name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
@@ -143,24 +146,10 @@
     state: directory
     mode: "0755"
 
-- name: Persist the virt_image_t fcontext on both staging trees
-  community.general.sefcontext:
-    target: "{{ item }}(/.*)?"
-    setype: virt_image_t
-    state: present
-  loop: "{{ live_vm_staging_dirs }}"
-  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
-
-- name: Apply the SELinux label now
-  # -v so restorecon prints "Relabeled …" for each file it changes; without it restorecon is
-  # silent and the stdout-length changed_when would always report ok even when it relabeled.
-  # Runs inline (not a handler) so the label is applied in time and covers any content staged
-  # into the dirs out of band.
-  ansible.builtin.command: "restorecon -Rv {{ item }}"
-  loop: "{{ live_vm_staging_dirs }}"
-  register: live_vm_host_restorecon
-  changed_when: live_vm_host_restorecon.stdout | length > 0
-  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
+# No static disk labeling on the Ubuntu target: libvirt confines qemu with AppArmor, and
+# virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
+# domain XML. The world-traversable, runner-owned staging dirs above therefore need no static
+# sVirt label (the SELinux virt_image_t equivalent RHEL required).
 
 - name: Run the host-contract gate
   ansible.builtin.import_tasks: verify.yml
