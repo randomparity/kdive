@@ -35,12 +35,20 @@ and adding two new roles plus a `playbooks/runner.yml`:
 - `live_vm_host` — the contract delta: the kernel-debug toolchain (`drgn`,
   `crash`, `makedumpfile`, `kexec-tools`, `kdump-utils`, `gdb`, foreign qemu per
   arch), a world-traversable `virt_image_t`-labeled staged-rootfs directory,
-  `loginctl enable-linger` for a short `XDG_RUNTIME_DIR`, and a
-  `scripts/check-local-libvirt.sh` verification gate.
+  `loginctl enable-linger` for a short `XDG_RUNTIME_DIR`, and a **two-part
+  verification gate**: `scripts/check-local-libvirt.sh` (run after a connection
+  reset so the just-added group membership is live) for the KVM/daemon/toolchain
+  contract it covers, plus the role's own assertions for the staging-dir label,
+  parent traversability, and short `XDG_RUNTIME_DIR` that the script does not.
 - `github_runner` — arch-selected runner asset + `[self-hosted, kvm, <arch>]`
-  label, checksum-verified download, registration as a non-root systemd service,
-  a `no_log` registration token that **fails closed** when empty, and
-  `KDIVE_SECRETS_ROOT` wired for the provisioned-System family's S3 credentials.
+  label, download verified against an operator-pinned SHA-256 (not a same-origin
+  fetch), a `.runner`-marker idempotence guard so a re-run of an already-registered
+  host is `0 changed` and needs no token, registration as a non-root systemd
+  service (with `Environment=XDG_RUNTIME_DIR` set, since `enable-linger` alone
+  does not export it), a `no_log` registration token that **fails closed** when
+  empty in the first-time branch, and `KDIVE_SECRETS_ROOT` wired as the pointer to
+  the provisioned-System family's S3 credentials (B sets the pointer; C/D or the
+  operator populate the credential files).
 
 Every host-build step resolves by architecture. The one step that is **not** a
 free ppc64le drop-in — the `actions/runner` binary, for which upstream ships no
