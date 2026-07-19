@@ -141,3 +141,6 @@
   register: live_vm_host_restorecon
   changed_when: live_vm_host_restorecon.stdout | length > 0
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
+
+- name: Run the host-contract gate
+  ansible.builtin.import_tasks: verify.yml

@@ -1,0 +1,64 @@
+---
+# Resolve the service-account uid up front; ansible_facts.getent_passwd is populated only
+# after this task runs (gather_facts does NOT populate it), and the /run/user path needs it.
+- name: Look up the service account's passwd entry
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+
+- name: Record the service-account uid
+  ansible.builtin.set_fact:
+    live_vm_host_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+
+# Part 1: check-local-libvirt.sh (KVM / daemons / venv-import / network / install-staging
+# writability / /boot readability), run AS the service account after a connection reset so the
+# just-added kvm/libvirt group membership is live, with KDIVE_PYTHON pointing at the venv.
+- name: Reset the connection so new group membership is read
+  ansible.builtin.meta: reset_connection
+
+- name: Run check-local-libvirt.sh as the service account
+  ansible.builtin.command: ./scripts/check-local-libvirt.sh
+  args:
+    chdir: "{{ live_vm_venv }}"
+  environment:
+    KDIVE_PYTHON: "{{ live_vm_venv }}/.venv/bin/python"
+    KDIVE_INSTALL_STAGING: "{{ install_staging_dir }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  changed_when: false
+
+# Part 2: the delta check-local-libvirt.sh does not cover.
+# Read the ACTUAL on-disk label with `ls -Zd` (its 4th field is the SELinux context, which
+# includes the type). NOT `matchpathcon -V` — on a correctly-labeled path that prints
+# "<path> verified." with no type string, so a `virt_image_t in stdout` assert would be inverted.
+- name: Read the SELinux label of both staging dirs
+  ansible.builtin.command: "ls -Zd {{ item }}"
+  loop:
+    - "{{ live_vm_staging_dir }}"
+    - "{{ install_staging_dir }}"
+  register: live_vm_host_labels
+  changed_when: false
+  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
+
+- name: Assert both staging dirs carry virt_image_t
+  ansible.builtin.assert:
+    that: "'virt_image_t' in item.stdout"
+    fail_msg: "{{ item.item }} is not labeled virt_image_t (system-mode boot would be sVirt-denied)"
+  loop: "{{ live_vm_host_labels.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
+
+- name: Assert the service account is in kvm and libvirt
+  ansible.builtin.command: "id -nG {{ github_runner_user }}"
+  register: live_vm_host_groups
+  changed_when: false
+  failed_when: >-
+    'kvm' not in live_vm_host_groups.stdout.split()
+    or 'libvirt' not in live_vm_host_groups.stdout.split()
+
+- name: Assert /run/user/<uid> exists for the service account
+  ansible.builtin.stat:
+    path: "/run/user/{{ live_vm_host_uid }}"
+  register: live_vm_host_xdg
+  failed_when: not live_vm_host_xdg.stat.exists
