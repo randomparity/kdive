@@ -179,6 +179,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share one deadline-poll loop across the waiters (#1290)
 - Trim duplication in remote-libvirt rootfs_build tests
 
+### Style
+
+- Format test_read_model after type-fix reflow (#1304)
+
 ## [0.3.0] - 2026-07-16
 
 ### ⚠ Breaking Changes
