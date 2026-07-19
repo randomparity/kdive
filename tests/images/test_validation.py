@@ -113,15 +113,18 @@ def test_empty_required_is_a_no_op(tmp_path: Path) -> None:
 
 def _patch_run(
     monkeypatch: pytest.MonkeyPatch, result: subprocess.CompletedProcess[str] | BaseException
-) -> None:
-    """Make the real ``guestfish`` invocation return or raise ``result``."""
+) -> list[dict[str, object]]:
+    """Make the real ``guestfish`` invocation return or raise ``result``; return the calls made."""
+    calls: list[dict[str, object]] = []
 
     def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"argv": argv, **kwargs})
         if isinstance(result, BaseException):
             raise result
         return result
 
     monkeypatch.setattr(validation.subprocess, "run", _run)
+    return calls
 
 
 def test_real_inspect_maps_missing_guestfish_to_missing_dependency(
@@ -139,7 +142,7 @@ def test_real_inspect_maps_missing_guestfish_to_missing_dependency(
 def test_real_inspect_maps_timeout_to_infrastructure_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_run(
+    calls = _patch_run(
         monkeypatch,
         subprocess.TimeoutExpired(cmd="guestfish", timeout=validation._GUESTFISH_TIMEOUT_S),
     )
@@ -149,6 +152,18 @@ def test_real_inspect_maps_timeout_to_infrastructure_failure(
 
     assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert caught.value.details == {"timeout_s": validation._GUESTFISH_TIMEOUT_S}
+    # The mapped timeout_s must be the one guestfish was actually run with, not just a value the
+    # error carries coincidentally — otherwise a dropped `timeout=` kwarg would still pass.
+    assert calls == [
+        {
+            "argv": ["guestfish", "--ro", "-a", "img.qcow2", "-i"],
+            "input": "exists /some/path\n",
+            "capture_output": True,
+            "text": True,
+            "timeout": validation._GUESTFISH_TIMEOUT_S,
+            "check": False,
+        }
+    ]
 
 
 def test_real_inspect_maps_nonzero_exit_to_infrastructure_failure_with_truncated_stderr(
@@ -176,11 +191,16 @@ def test_real_inspect_verdict_parsing_drops_candidates_past_the_last_reported_li
     # indistinguishable from an explicit "false". This test locks in that lenient behavior so a
     # future change to it is a deliberate decision, not an accidental regression.
     candidates = ["/present", "/explicitly-absent", "/never-reported"]
-    _patch_run(
+    calls = _patch_run(
         monkeypatch,
         subprocess.CompletedProcess(args=["guestfish"], returncode=0, stdout="true\nfalse\n"),
     )
 
     present = DEFAULT_INSPECT(Path("img.qcow2"), candidates)
+    # All three candidates were requested, one `exists` line per candidate — only guestfish's
+    # (truncated) reply drops the tail, not the request we sent it.
+    assert calls[0]["input"] == (
+        "exists /present\nexists /explicitly-absent\nexists /never-reported\n"
+    )
 
     assert present == {"/present"}
