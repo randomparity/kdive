@@ -10,3 +10,9 @@ live_vm_host_packages:
   - python3-libguestfs
   - policycoreutils-python-utils  # semanage
   - git
+
+# Foreign qemu emulator per non-native arch (TCG) — role-owned data, so it lives here rather
+# than in inventory. On a native-x86 host the ppc64le emulator, and vice versa.
+live_vm_host_foreign_qemu_map:
+  x86_64: qemu-system-ppc
+  ppc64le: qemu-system-x86

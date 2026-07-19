@@ -58,8 +58,7 @@
         url: "{{ github_runner_url }}"
         dest: "{{ github_runner_install_dir }}/runner.tar.gz"
         checksum: >-
-          {{ ('sha256:' ~ github_runner_sha256)
-             if github_runner_sha256 not in ['', 'SET-AT-IMPLEMENTATION'] else omit }}
+          {{ ('sha256:' ~ github_runner_sha256) if github_runner_sha256 | length > 0 else omit }}
         owner: "{{ github_runner_user }}"
         mode: "0644"
 
@@ -85,11 +84,12 @@
 
 - name: Set XDG_RUNTIME_DIR + KDIVE_SECRETS_ROOT for the runner job process
   # actions-runner loads <install_dir>/.env into every job process, so this is where the short
-  # QMP-socket base (#1258) + the S3 secrets pointer reach the test process. getent_passwd was
-  # populated by live_vm_host earlier in the play (and again here if github_runner runs alone).
+  # QMP-socket base (#1258) + the S3 secrets pointer reach the test process. live_vm_host already
+  # populated getent_passwd earlier in runner.yml; only look it up here if github_runner runs alone.
   ansible.builtin.getent:
     database: passwd
     key: "{{ github_runner_user }}"
+  when: github_runner_user not in (ansible_facts.getent_passwd | default({}))
 
 - name: Write the runner .env
   ansible.builtin.copy:

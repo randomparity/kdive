@@ -28,7 +28,12 @@ fail=0
 # fail-closed/fail-loud + resolve-URL + download + config.sh), exactly as the gdbstub harness
 # isolates its prune task. The svc.sh-install / .env / systemd tasks are UNtagged, so they never
 # run here — they need root/systemd and cannot execute in a localhost harness.
-play() { ansible-playbook "$playbook" --tags github_runner_register -e "@$1" >"$2" 2>&1; }
+# A trailing `-e install_dir` wins over the heredoc vars, so the per-case install dir is passed
+# on the command line — no PLACEHOLDER + sed dance, and the heredocs stay literal (single-quoted).
+play() {
+  ansible-playbook "$playbook" --tags github_runner_register \
+    -e "@$1" -e "github_runner_install_dir=$3" >"$2" 2>&1
+}
 # The register flow reached the resolve-URL stage (past both gates and the skip). Offline-hermetic.
 # A SKIPPED task still prints its "TASK [...]" header, so match the RESULT line after it
 # (ok:/changed:), not the task name — otherwise a correctly-skipped block reads as "ran".
@@ -38,10 +43,8 @@ reached_register() { grep -A1 'Resolve the download URL' "$1" | grep -qE '^(ok|c
 cat >"$work/case1.yml" <<'YAML'
 github_runner_repo_url: https://github.com/x/y
 github_runner_registration_token: ""
-github_runner_install_dir: "PLACEHOLDER"
 YAML
-sed -i "s#PLACEHOLDER#$work/runner1#" "$work/case1.yml"
-if play "$work/case1.yml" "$work/case1.out"; then
+if play "$work/case1.yml" "$work/case1.out" "$work/runner1"; then
   echo "FAIL case1: empty token did not fail the play"
   fail=1
 elif reached_register "$work/case1.out"; then
@@ -56,10 +59,8 @@ github_runner_registration_token: tok
 github_runner_tarball_url: ""
 github_runner_arch_map:
   x86_64: {asset: "", label: x64}
-github_runner_install_dir: "PLACEHOLDER"
 YAML
-sed -i "s#PLACEHOLDER#$work/runner2#" "$work/case2.yml"
-if play "$work/case2.yml" "$work/case2.out"; then
+if play "$work/case2.yml" "$work/case2.out" "$work/runner2"; then
   echo "FAIL case2: missing asset+override did not fail"
   fail=1
 elif ! grep -qi 'ppc64le\|no upstream asset\|github_runner_tarball_url' "$work/case2.out"; then
@@ -77,10 +78,8 @@ echo '{}' >"$work/runner3/.credentials"
 cat >"$work/case3.yml" <<'YAML'
 github_runner_repo_url: https://github.com/x/y
 github_runner_registration_token: tok
-github_runner_install_dir: "PLACEHOLDER"
 YAML
-sed -i "s#PLACEHOLDER#$work/runner3#" "$work/case3.yml"
-if ! play "$work/case3.yml" "$work/case3.out"; then
+if ! play "$work/case3.yml" "$work/case3.out" "$work/runner3"; then
   echo "FAIL case3: already-registered run failed (should skip register)"
   cat "$work/case3.out"
   fail=1

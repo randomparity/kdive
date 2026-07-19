@@ -1,14 +1,10 @@
 ---
-- name: Ensure the runner service account exists
+- name: Ensure the runner service account exists in kvm and libvirt
   ansible.builtin.user:
     name: "{{ github_runner_user }}"
     system: true
     create_home: true
     shell: /bin/bash
-
-- name: Add the runner service account to kvm and libvirt
-  ansible.builtin.user:
-    name: "{{ github_runner_user }}"
     groups: [kvm, libvirt]
     append: true
 
@@ -20,11 +16,11 @@
 
 - name: Install the foreign qemu emulator for cross-arch TCG (RHEL-family)
   ansible.builtin.dnf:
-    name: "{{ live_vm_foreign_qemu_map[ansible_architecture] }}"
+    name: "{{ live_vm_host_foreign_qemu_map[ansible_architecture] }}"
     state: present
   when:
     - ansible_os_family == 'RedHat'
-    - ansible_architecture in live_vm_foreign_qemu_map
+    - ansible_architecture in live_vm_host_foreign_qemu_map
 
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Stock RHEL/Rocky ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
@@ -139,9 +135,7 @@
     owner: "{{ github_runner_user }}"
     group: "{{ github_runner_user }}"
     mode: "0755"
-  loop:
-    - "{{ live_vm_staging_dir }}"
-    - "{{ install_staging_dir }}"
+  loop: "{{ live_vm_staging_dirs }}"
 
 - name: Ensure the /var/lib/kdive parent is world-traversable
   ansible.builtin.file:
@@ -154,19 +148,16 @@
     target: "{{ item }}(/.*)?"
     setype: virt_image_t
     state: present
-  loop:
-    - "{{ live_vm_staging_dir }}"
-    - "{{ install_staging_dir }}"
+  loop: "{{ live_vm_staging_dirs }}"
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
-  notify: Relabel staging dirs
 
-- name: Apply the SELinux label now (do not wait for the handler)
+- name: Apply the SELinux label now
   # -v so restorecon prints "Relabeled …" for each file it changes; without it restorecon is
   # silent and the stdout-length changed_when would always report ok even when it relabeled.
+  # Runs inline (not a handler) so the label is applied in time and covers any content staged
+  # into the dirs out of band.
   ansible.builtin.command: "restorecon -Rv {{ item }}"
-  loop:
-    - "{{ live_vm_staging_dir }}"
-    - "{{ install_staging_dir }}"
+  loop: "{{ live_vm_staging_dirs }}"
   register: live_vm_host_restorecon
   changed_when: live_vm_host_restorecon.stdout | length > 0
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'

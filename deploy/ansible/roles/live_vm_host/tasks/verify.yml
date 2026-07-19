@@ -33,9 +33,7 @@
 # "<path> verified." with no type string, so a `virt_image_t in stdout` assert would be inverted.
 - name: Read the SELinux label of both staging dirs
   ansible.builtin.command: "ls -Zd {{ item }}"
-  loop:
-    - "{{ live_vm_staging_dir }}"
-    - "{{ install_staging_dir }}"
+  loop: "{{ live_vm_staging_dirs }}"
   register: live_vm_host_labels
   changed_when: false
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
