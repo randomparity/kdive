@@ -87,14 +87,20 @@ documented disk budget. Four decisions:
    debuginfo truncated after its `.note.gnu.build-id` (near the ELF header, before
    the large DWARF sections) keeps a valid build-id but has lost its symbols; only
    a content digest catches that, and the break would otherwise persist every
-   nightly. Otherwise the refresh builds into a **same-filesystem sibling temp
-   dir** (so the swap is a real atomic `rename`, asserted, not a cross-fs copy),
-   verifies build-id + digests there, **atomically swaps** it into place, then
-   removes only sets whose NVR **differs** from the one just written — so a
-   same-NVR corruption rebuild cannot delete its own fresh output, and the store
-   still holds exactly one set rather than accumulating ~1.2 GB of debuginfo per
-   past kernel. A cleanup `trap` and an entry-sweep reclaim a crashed refresh's
-   temp set so the report-only store does not leak. Freshness is keyed on the NVR
+   nightly. Otherwise the refresh builds into a fresh `mktemp -d` set dir (a
+   same-filesystem sibling, asserted), verifies build-id + digests there, and
+   **commits by a single atomic rename of a `current` symlink** onto the new set
+   dir — the symlink flip, not a directory rename, is the commit point, because a
+   directory rename cannot atomically replace a *populated* destination (the
+   same-NVR corruption-rebuild case) whereas the pointer swap is one atomic op
+   regardless. After the flip it prunes set dirs no longer pointed at, so the store
+   holds one live set rather than accumulating ~1.2 GB of debuginfo per past
+   kernel; a crash mid-prune leaves an orphan the sweep reclaims, never a torn live
+   set. `build-fs`'s own eval-safe stdout is captured (not passed through) so the
+   store emits a single authoritative three-var wiring block through `current/…`,
+   never a duplicate or a pre-commit build path. A cleanup `trap` and an entry
+   sweep reclaim a crashed refresh's orphan dirs so the report-only store does not
+   leak. Freshness is keyed on the NVR
    label (the base image is the pin); a same-NVR distro rebuild is not
    auto-detected — the store serves its self-consistent old set until an operator
    forces a refresh, the intentional boundary (not a correctness hazard: the
@@ -134,10 +140,13 @@ Easier:
 Harder / new obligations:
 
 - The `debuginfod` path is a runtime dependency: `DEBUGINFOD_URLS` must point at a
-  server that indexes the distro's kernel debuginfo. A kernel bump can outrun the
-  debuginfod index, so the fetch distinguishes three fail-loud outcomes — infra
-  not configured, debuginfo-not-yet-published (index lag), and transient error —
-  rather than staging mismatched or missing debuginfo.
+  server that indexes the distro's kernel debuginfo, and `DEBUGINFOD_CACHE_PATH`
+  must be pinned onto the budgeted filesystem (`debuginfod-find` caches the
+  ~1.2 GB download under `$HOME` by default — the small root fs on the hosted
+  runner — an `ENOSPC` no budget gate would otherwise see). A kernel bump can
+  outrun the debuginfod index, so the fetch distinguishes three fail-loud outcomes
+  — infra not configured, debuginfo-not-yet-published (index lag), and transient
+  error — rather than staging mismatched or missing debuginfo.
 - The warm store is persistent state on the runner host that an operator must
   provision (the dir); the refresh replaces the superseded NVR's artifacts and a
   cleanup trap/entry-sweep reclaims a crashed refresh's temp set, so the

@@ -100,16 +100,20 @@ bounds the hosted store's disk use.
    presence and build-id alone are not warm, because a debuginfo truncated after
    its `.note.gnu.build-id` (which sits near the ELF header, before the large
    DWARF sections) keeps a valid build-id but has lost its symbols; only a content
-   digest catches that. Otherwise the refresh builds into a **temp location that
-   is a sibling inside the store** (same filesystem, so the swap is a real atomic
-   `rename` — `assert_same_fs` guards this), verifies build-ids + digests there,
-   **atomically swaps** it into place, then removes only artifact sets whose NVR
-   *differs* from the one just written (so a same-NVR corruption rebuild cannot
-   delete its own fresh output). A cleanup `trap` removes the in-progress temp set
-   on any non-swap exit, and a stale-sibling sweep reclaims a prior crashed
-   refresh's temp set, so a report-only store does not silently leak ~3.5 GB per
-   crash. The refresh holds an exclusive `flock` so a slow nightly and a
-   concurrent operator run cannot interleave writes. The manifest predicate, the build-id/digest checks,
+   digest catches that. Otherwise the refresh builds into a fresh **`mktemp -d`
+   set dir that is a sibling inside the store** (same filesystem — `assert_same_fs`
+   guards this), verifies build-ids + digests there, and **commits by a single
+   atomic rename of the `current` symlink** to point at the new set dir. The
+   symlink flip — not a directory rename — is the atomic commit point, because a
+   directory rename cannot atomically replace a *populated* destination (the
+   same-NVR corruption-rebuild case), whereas swapping the `current` pointer is one
+   atomic op regardless of whether a prior same-NVR set exists. After the flip it
+   prunes set dirs no longer pointed at (rm; a crash mid-prune leaves an orphan the
+   sweep reclaims, never a torn live set). A cleanup `trap` removes the in-progress
+   `mktemp` dir on any pre-commit exit, and an entry sweep reclaims a prior crashed
+   refresh's orphan dirs, so a report-only store does not silently leak. The
+   refresh holds an exclusive `flock` so a slow nightly and a concurrent operator
+   run cannot interleave writes. The manifest predicate, the build-id/digest checks,
    and the budget gates are the unit-tested seam.
 
 ## Architecture
@@ -170,8 +174,8 @@ mutation-proven shell-test pattern, e.g. `tests/scripts/test_setup_local_libvirt
 ### `scripts/live-vm/warm-store.sh` — self-hosted warm store refresh
 
 Idempotent, holds an exclusive `flock` on the store for the whole refresh, and
-installs a cleanup `trap` (removes the in-progress temp set on any non-swap exit;
-sweeps a prior crashed refresh's stale sibling temp dir on entry).
+installs a cleanup `trap` (removes the in-progress `mktemp` set dir on any
+pre-commit exit; sweeps a prior crashed refresh's orphan set dirs on entry).
 `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir B's Ansible
 owns).
 
@@ -184,14 +188,17 @@ owns).
    `build_id`. Any failure → treat as stale (rebuild), not warm. On warm:
    `report_usage`, emit the full wiring block, exit 0. **`KDIVE_WARM_STORE_FORCE=1`
    skips the warm fast-path** (the escape hatch below).
-3. **Refresh** (into a same-filesystem sibling temp dir, then atomic swap) — build
-   the rootfs via `build-fs` (host-only, libguestfs); `kernel_build_id` the staged
-   kernel; fetch the matching debuginfo by that build-id (`debuginfod-find`);
-   `build_ids_match` the fetched debuginfo against the kernel (fail loud on
-   mismatch — never stage mismatched debuginfo); digest all three files;
-   `assert_same_fs` then **atomically swap** the temp set into place;
-   `write_manifest`; **remove only sets whose NVR differs** from the one just
-   written; `report_usage`; emit the wiring block.
+3. **Refresh** (into a `mktemp -d` set dir, then commit by `current`-symlink flip)
+   — build the rootfs via `build-fs` (host-only, libguestfs), **capturing
+   `build-fs`'s own eval-safe stdout into a variable** (never passing it through —
+   it names the rootfs at its pre-commit build path); `kernel_build_id` the staged
+   kernel; fetch the matching debuginfo by that build-id (`debuginfod-find`, with
+   `DEBUGINFOD_CACHE_PATH` pinned into the store so the ~1.2 GB download lands on
+   the budgeted filesystem, not `$HOME`); `build_ids_match` the fetched debuginfo
+   against the kernel (fail loud on mismatch — never stage mismatched debuginfo);
+   digest all three files into the manifest; `assert_same_fs` then **atomically
+   flip the `current` symlink** to the new set dir; **prune set dirs no longer
+   pointed at**; `report_usage`; emit the wiring block.
 
 **Freshness boundary.** The warm re-checks establish the staged set's *internal
 completeness* (nothing corrupt/truncated), **not** its currency against the
@@ -204,32 +211,39 @@ operator knows the distro moved under a stable NVR.
 
 **Wiring block** (both paths) — the store produces three matched artifacts, so it
 emits all three env vars the `live_vm` consumers read (`external_env.py`), not
-just the rootfs, as eval-safe stdout lines:
+just the rootfs, as eval-safe stdout lines. The paths resolve through the stable
+`current` symlink (the committed set), **not** the `mktemp` build dir, and
+`build-fs`'s own stdout is captured upstream so it never leaks into this block —
+warm-store emits exactly these three authoritative lines and nothing else:
 
-- `KDIVE_LIVE_VM_ROOTFS=<rootfs.qcow2>`
-- `KDIVE_LIVE_VM_BZIMAGE=<kernel image>`
-- `KDIVE_LIVE_VM_VMLINUX=<vmlinux debuginfo>` (the same path also satisfies
+- `KDIVE_LIVE_VM_ROOTFS=<store>/current/rootfs.qcow2`
+- `KDIVE_LIVE_VM_BZIMAGE=<store>/current/<kernel image>`
+- `KDIVE_LIVE_VM_VMLINUX=<store>/current/vmlinux` (the same path also satisfies
   `KDIVE_LIVE_VM_GDBMI_VMLINUX`, and pairs with a run-captured
   `KDIVE_LIVE_VM_VMCORE`).
 
-Stdout is the eval-safe wiring block only (like `build-fs`); the human summary
-goes to stderr.
+Stdout is the eval-safe wiring block only; the human summary goes to stderr.
 
 ### `scripts/live-vm/stage-tcg-images.sh` — hosted TCG image set on `/mnt`
 
 Runs on the hosted `ubuntu-latest` (**x86_64**) runner but stages a **ppc64le**
 set, so debuginfo is fetched cross-arch — which the build-id `debuginfod` path
 handles arch-neutrally. `KDIVE_TCG_STAGE_DIR` (default `/mnt/kdive-tcg`),
-`KDIVE_TCG_BUDGET_BYTES` (default = the documented ceiling). A cleanup `trap`
-removes a partially-staged dir on any failure, so a failed run never leaves a
-half-populated `/mnt` that the next run reads as complete.
+`KDIVE_TCG_BUDGET_BYTES` (default = the documented ceiling). It pins
+`DEBUGINFOD_CACHE_PATH` under `KDIVE_TCG_STAGE_DIR` so `debuginfod-find`'s ~1.2 GB
+download lands on `/mnt` (the budgeted filesystem) rather than the small root fs
+that `$HOME` defaults to — otherwise the download fills root with an `ENOSPC` no
+budget gate sees. A cleanup `trap` removes a partially-staged dir on any failure,
+so a failed run never leaves a half-populated `/mnt` that the next run reads as
+complete.
 
-1. `require_free_space /mnt <whole budget + margin> "hosted TCG image set"`
-   **before** any fetch — the eviction guard: refuse to start if `/mnt` lacks room
-   for the staged set *and* the run-time vmcore headroom, rather than filling it
-   and evicting the compose backends mid-stage.
+1. `require_free_space /mnt <whole budget + cache copy + margin> "hosted TCG image
+   set"` **before** any fetch — refuse to start if `/mnt` lacks room for the staged
+   set, the transient debuginfod cache copy (peak ~2× the debuginfo, since the
+   cached download is then copied into the staged set), *and* the run-time vmcore
+   headroom.
 2. Stage the ppc64le rootfs + kernel into the stage dir; `kernel_build_id` the
-   staged ppc64le kernel (`extract-vmlinux` decompresses regardless of host arch).
+   staged ppc64le kernel (bare-ELF read or `extract-vmlinux`, per the arch format).
 3. Fetch the matching debuginfo by that build-id **on demand** (not pre-baked) via
    `debuginfod-find debuginfo <build-id>` — the committed mechanism; its
    prerequisite is `DEBUGINFOD_URLS` set to a server that indexes the distro's
@@ -274,8 +288,9 @@ does not fail — it is the host's own disk). Derivation for the ceiling:
 | distro kernel (image + initramfs) | ~0.1 GB | staged set (`enforce_budget`) |
 | matching `vmlinux` debuginfo | ~1.2 GB | staged set (`enforce_budget`) |
 | **staged-set ceiling** | **~3.5 GB** | `enforce_budget` (post-stage cap) |
+| transient debuginfod cache copy | ~1.2 GB | `require_free_space` (pinned onto `/mnt`, freed after copy) |
 | kdump/vmcore + working headroom | ~2 GB | pre-checked up front, captured at run time |
-| **whole budget** | **~6 GB** (well under `/mnt`'s ~70 GB) | `require_free_space` (pre-stage) |
+| **whole budget** | **~7 GB** (well under `/mnt`'s ~70 GB) | `require_free_space` (pre-stage) |
 
 These are *derived* sizes. The scripts print the **measured actual**; the runbook
 records the first real measurement from an operator run (the same
@@ -321,12 +336,17 @@ set that grew past its derivation. Both fail loud with the measured number.
     note** (digest differs) → the warm predicate rejects (rebuild), does not
     report warm. Same for a byte-changed rootfs or kernel image. This is the case
     build-id alone misses.
-  - **Same-NVR rebuild removal**: a corruption-triggered rebuild with an unchanged
-    NVR removes only differing-NVR sets and never deletes its own freshly-swapped
-    output (a `write_manifest`-then-prune sequence over a stubbed store layout).
-  - **Crash-cleanup**: a refresh killed mid-build (before the swap) leaves no
-    orphan temp set — the entry-sweep + `trap` reclaims it, so the report-only
-    warm store does not leak.
+  - **`current`-symlink commit**: the commit helper flips `current` to a new set
+    dir atomically and prunes only unpointed dirs; a same-NVR rebuild (new set dir,
+    same NVR) commits and leaves the just-committed set pointed-at (the swap
+    replaces a *populated* prior same-NVR set without a dir-rename `ENOTEMPTY`).
+  - **Crash-cleanup**: a refresh killed mid-build (before the commit) leaves no
+    orphan set dir — the entry-sweep + `trap` reclaims it, so the report-only warm
+    store does not leak; the still-pointed `current` set is untouched.
+  - **Wiring-block purity**: warm-store stdout is **exactly** the three
+    `KDIVE_LIVE_VM_ROOTFS`/`BZIMAGE`/`VMLINUX` lines through `current/…` — no
+    captured `build-fs`-origin duplicate and no `mktemp` build-dir path (stub
+    `build-fs` to print its own `KDIVE_*` block; assert it does not leak).
 - The Ansible dir change is covered by `live_vm_host`'s existing verify gate and
   idempotence (`test-ansible`); no new role test needed for one loop entry.
 - The heavy operations (real `build-fs`, real debuginfo download, real boot) are
