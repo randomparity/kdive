@@ -367,17 +367,30 @@ source "${here}/lib.sh"
 eval "$("${here}/../live-stack/onboard.sh")"
 [ -n "${KDIVE_TOKEN:-}" ] || die "onboard.sh did not mint a token"
 
-# 2. allocate -> provision (arch=native) from KDIVE_LIVE_VM_ROOTFS -> poll systems.get until ready,
-#    then print the System id. Drive the lifecycle over MCP HTTP; the reference is
-#    scripts/live-debug.py:_provision_boot_run (investigation -> allocation -> provision), reused with
-#    KDIVE_TOKEN and KDIVE_STACK_BASE_URL. Implement with `${py[@]:-uv run python}` (honoring
-#    KDIVE_PYTHON) invoking a small in-repo helper or `kdivectl tool call`, and echo ONLY the id.
-system_id="$( ... )"   # implementer fills the lifecycle per the reference above
+# 2. Drive the lifecycle over MCP HTTP with `kdivectl tool call` (the generic passthrough,
+#    src/kdive/cli/__main__.py; mutating tools need --allow-mutating), parsing JSON with jq. Use the
+#    EXACT tool names the spine uses (tests/integration/live_stack/spine.py:218,243,
+#    scripts/live-debug.py:375-416):
+#      investigations.open  {project, title}
+#      allocations.request  {project, ... }          # --allow-mutating
+#      allocations.list     {project}                # -> allocation_id (object_id of the new alloc)
+#      systems.provision    {allocation_id, profile} # --allow-mutating; profile carries the warm
+#                                                     # rootfs KDIVE_LIVE_VM_ROOTFS + arch=<native>,
+#                                                     # shaped like spine.py _provision_profile()
+#      systems.get          {system_id}              # POLL until .status == "ready" (bounded loop + die on timeout)
+#    NOTE: do NOT reuse scripts/live-debug.py:_provision_boot_run wholesale — it goes PAST ready
+#    (upload/install/boot/run, returning a run_id); mint-system.sh stops at the ready System id.
+#    Run kdivectl via the KDIVE_PYTHON-honoring interpreter (`"${py[@]}"` when KDIVE_PYTHON is set,
+#    else `uv run python -m kdive.cli`); echo ONLY the id (all progress -> stderr).
+py=("${KDIVE_PYTHON:+"$KDIVE_PYTHON" -m kdive.cli}")
+[[ ${#py[@]} -eq 0 ]] && py=(uv run python -m kdive.cli)
+# ... investigations.open / allocations.request / allocations.list / systems.provision as above ...
+system_id="..."   # object_id from systems.provision, then poll systems.get until status==ready
 [ -n "$system_id" ] || die "provisioning did not yield a ready System id"
 printf '%s\n' "$system_id"
 ```
 
-Keep stdout to the id alone (progress → stderr), so `KDIVE_LIVE_VM_SYSTEM_ID="$(mint-system.sh)"` is clean. Honor `KDIVE_PYTHON` for any Python invocation (Task 1's pattern).
+Keep stdout to the id alone (progress → stderr), so `KDIVE_LIVE_VM_SYSTEM_ID="$(mint-system.sh)"` is clean. If the bash+`kdivectl`+jq lifecycle proves unwieldy, a small in-repo Python helper using `LiveStackClient` (the spine's client, honoring `KDIVE_PYTHON`) that prints the ready id is an acceptable equivalent — but it must stop at `ready`, not boot/run. The live mint is exercised by Task 7's native local proof; ordinary CI proves only the preconditions (Step 1's test).
 
 - [ ] **Step 4: Run the test + shellcheck to verify green**
 
@@ -566,8 +579,12 @@ jobs:
           persist-credentials: false
       # ONE run: block with KDIVE_PYTHON=/opt/kdive/.venv/bin/python, PYTHONPATH=$GITHUB_WORKSPACE/src:
       #   reaper (virsh destroy kdive-* ; docker compose down -v) -> eval warm-store.sh ->
-      #   KDIVE_WORKER_AS_ROOT=0 up.sh --skip-obs -> KDIVE_LIVE_VM_SYSTEM_ID="$(mint-system.sh)" ->
-      #   preflight-env.sh throwaway provisioned -> just test-live
+      #   KDIVE_WORKER_AS_ROOT=0 up.sh --skip-obs ->
+      #   source scripts/live-stack/env.sh   # REQUIRED: up.sh sources env.sh in its OWN process, so
+      #                                       # KDIVE_LIBVIRT_URI + KDIVE_S3_* are unset in this shell
+      #                                       # until sourced here — the preflight + suite need them
+      #   -> KDIVE_LIVE_VM_SYSTEM_ID="$(mint-system.sh)"
+      #   -> preflight-env.sh throwaway provisioned -> just test-live
 ```
 
 Reference `ci.yml`'s existing `live-vm` job (before removal) for the uv/checkout step shapes and the libvirt-dev note.
@@ -617,9 +634,9 @@ git commit -m "docs(1293): document live-gate env + operator enabling order"
 
 ---
 
-### Task 7: Local TCG live proof — measure the timeout, flip the ADR to Accepted
+### Task 7: Local live proofs (TCG + native) — measure the timeout, flip the ADR to Accepted
 
-Grounds Decision 1's `timeout-minutes` in a real number and moves ADR-0389 from Proposed to Accepted. On this x86_64 host, ppc64le is foreign → TCG, so the hosted-gate boot path is reproducible locally.
+Grounds Decision 1's `timeout-minutes` in a real number and moves ADR-0389 from Proposed to Accepted. On this x86_64 host, ppc64le is foreign → TCG (so the hosted-gate boot path is reproducible locally) **and** the host runs native KVM/libvirt directly (so the native gate's env.sh wiring + `mint-system.sh` + a throwaway boot can be smoke-proven pre-merge — catching the two things ordinary CI cannot: the `source env.sh` sequencing and a working mint, before the first post-merge nightly).
 
 **Files:**
 - Modify: `.github/workflows/live.yml` (the `tcg` job's `timeout-minutes`)
@@ -640,16 +657,31 @@ Record the wall-clock of the three core proofs (skip the bundle proof — `KDIVE
 
 Set the `tcg` job's `timeout-minutes` = `ceil(measured_minutes × 1.5)`, floored at 30. Update `live.yml`.
 
-- [ ] **Step 4: Record the number + flip the ADR to Accepted**
+- [ ] **Step 4: Native smoke proof on this KVM host (validates the parts CI cannot)**
 
-In `docs/adr/0389-ci-live-vm-gates.md`, replace the "Measured wall-time" placeholder with the measured value + the resulting `timeout-minutes`, and change Status `Proposed` → `Accepted`. Update the same row's Status in `docs/adr/README.md`. Add the number to the spec's Testing section.
+Assemble and run the native job's `run:` block by hand on this host (it runs KVM/libvirt directly). At minimum, in one shell with `KDIVE_PYTHON=/opt/kdive/.venv/bin/python` (or the local `.venv`) + `PYTHONPATH=$PWD/src`:
 
-- [ ] **Step 5: Verify the doc + workflow guards**
+```bash
+KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
+source scripts/live-stack/env.sh
+eval "$(scripts/live-vm/warm-store.sh)"
+KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
+scripts/live-vm/preflight-env.sh throwaway provisioned   # must pass now that env.sh is sourced
+just test-live
+```
+
+Confirm: `preflight-env.sh` passes (proving the `source env.sh` fix, finding 1), `mint-system.sh` prints a real ready System id (proving the mint is not a stub, finding 2), and at least one throwaway boot runs. Record the outcome in the spec's Testing section. If a full native run is infeasible, run at least through the `preflight-env.sh` line and record how far it got — do not claim a proof that did not happen.
+
+- [ ] **Step 5: Record the number + flip the ADR to Accepted**
+
+In `docs/adr/0389-ci-live-vm-gates.md`, replace the "Measured wall-time" placeholder with the measured value + the resulting `timeout-minutes`, and change Status `Proposed` → `Accepted`. Update the same row's Status in `docs/adr/README.md`. Add both the TCG number and the native-smoke outcome to the spec's Testing section.
+
+- [ ] **Step 6: Verify the doc + workflow guards**
 
 Run: `just adr-status-check && just lint-workflows`
 Expected: ADR status guard reports the index in sync (Accepted matches the row); actionlint/zizmor clean.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add .github/workflows/live.yml docs/adr/0389-ci-live-vm-gates.md docs/adr/README.md docs/superpowers/specs/2026-07-19-ci-live-vm-gates-1293-design.md
