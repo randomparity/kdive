@@ -486,12 +486,15 @@ def _produce_stubs(bindir: Path, build_id: str = "beef01", build_marker: Path | 
     """Stub the host-only tools produce_rootfs_and_kernel drives: build-fs (via python3), the
     libguestfs kernel-extract pair, and eu-readelf."""
     mark = f'echo x >> "{build_marker}"; ' if build_marker else ""
-    # `python3 -m kdive build-fs --image X --dest DEST/rootfs.qcow2` → create the rootfs at --dest.
+    # `python3 -m kdive build-fs --image X --workspace W --dest DEST/rootfs.qcow2`: record the argv
+    # (so a test can assert --workspace), create the workspace dir, and create the rootfs at --dest.
     _stub(
         bindir,
         "python3",
-        f'{mark}dest=""; want=0; for a in "$@"; do '
-        '[ "$want" = 1 ] && { dest="$a"; want=0; }; [ "$a" = "--dest" ] && want=1; done; : > "$dest"',
+        f'{mark}dest=""; ws=""; want=""; for a in "$@"; do '
+        'case "$want" in dest) dest="$a";; ws) ws="$a";; esac; want=""; '
+        '[ "$a" = "--dest" ] && want=dest; [ "$a" = "--workspace" ] && want=ws; done; '
+        '[ -n "$ws" ] && mkdir -p "$ws"; echo "$@" > "$(dirname "$dest")/build-fs.argv"; : > "$dest"',
     )
     _stub(bindir, "virt-ls", 'printf "config-6.1\\nvmlinuz-6.1-test\\ninitrd.img\\n"')
     # `virt-copy-out -a img /boot/<vmlinuz> <destdir>` → materialize <destdir>/<vmlinuz>.
@@ -516,6 +519,11 @@ def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
     assert r.stdout.strip() == "beef01"
     assert (dest / "rootfs.qcow2").exists()
     assert (dest / "vmlinux").exists()  # the rootfs's own kernel, extracted
+    # build-fs must be pointed at an on-budget, runner-writable --workspace under $dest, and it
+    # must be cleaned up (not left inflating the staged footprint).
+    argv = (dest / "build-fs.argv").read_text()
+    assert "--workspace" in argv and str(dest) in argv
+    assert not (dest / ".build").exists()
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -530,11 +538,16 @@ Expected: FAIL (`produce_rootfs_and_kernel` not defined).
 # NOT a `build-fs` PATH binary), then extract the rootfs's own /boot/vmlinuz-* to DEST/vmlinux as
 # the direct-boot kernel. Prints the kernel build-id. Host-only (build-fs + libguestfs); tests stub
 # python3/virt-ls/virt-copy-out/eu-readelf. build-fs's own eval-safe stdout is discarded (never
-# passed through to the caller's wiring block).
+# passed through to the caller's wiring block). --workspace is pinned to a subdir of DEST so the
+# multi-GB build lands on the budgeted, runner-owned filesystem (build-fs defaults it to the
+# root-owned /var/lib/kdive/build/images, which is off-budget and unwritable to the runner); it is
+# removed after the build so it does not inflate the staged-set footprint enforce_budget measures.
 produce_rootfs_and_kernel() {
   local dest="$1" image="$2" py vmlinuz
   py="${KDIVE_PYTHON:-python3}"
-  "$py" -m kdive build-fs --image "$image" --dest "${dest}/rootfs.qcow2" >/dev/null
+  "$py" -m kdive build-fs --image "$image" --workspace "${dest}/.build" \
+    --dest "${dest}/rootfs.qcow2" >/dev/null
+  rm -rf -- "${dest}/.build"
   vmlinuz="$(virt-ls -a "${dest}/rootfs.qcow2" /boot | grep -m1 '^vmlinuz-')" ||
     die "no /boot/vmlinuz-* in the rootfs built for image ${image}"
   virt-copy-out -a "${dest}/rootfs.qcow2" "/boot/${vmlinuz}" "$dest"
