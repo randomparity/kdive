@@ -203,7 +203,8 @@ def _produce_stubs(
         bindir,
         "virt-copy-out",
         'src=""; for a in "$@"; do case "$a" in /boot/*) src="$a";; esac; destdir="$a"; done; '
-        'printf "\\x7fELF" > "${destdir}/$(basename "$src")"',
+        # octal \177 == 0x7f: portable across dash and bash (printf \xHH is a bash-only extension).
+        'printf "\\177ELF" > "${destdir}/$(basename "$src")"',
     )
     _stub(bindir, "eu-readelf", f'echo "    Build ID: {build_id}"')
 
@@ -248,7 +249,7 @@ def _debuginfod_ok(bindir: Path) -> None:
         bindir,
         "debuginfod-find",
         'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; '
-        'printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
+        'printf "\\177ELF" > "$d/debuginfo"; echo "$d/debuginfo"',
     )
 
 
