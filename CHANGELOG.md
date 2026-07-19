@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Arch-parameterized throwaway_domain_xml builder (#1290)
 - Wait predicates, overlay + session-XDG helpers (#1290)
 - Boot_throwaway_domain context manager (#1290)
+- Scaffold live_vm_host + github_runner roles and runner.yml
+- Live_vm_host groups, toolchain, /boot readability, linger
+- Live_vm_host provisions the ABI-matched guestfs/drgn venv
+- Live_vm_host stages and virt_image_t-labels both dirs
+- Live_vm_host two-part host-contract gate
+- Github_runner registration role + regression harness
+- Retarget the live_vm runner host to Ubuntu 26.04
 
 ### Changed
 
@@ -121,6 +128,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TDD implementation plan for live_vm harness (#1290)
 - Fix four plan-review executability findings (#1290)
 - Scope the wiring test docstring to the declared error branches
+- Spec + ADR-0387 for self-hosted KVM runner codification
+- Harden spec+ADR from spec review (6 findings)
+- Harden spec+ADR from spec review round 2 (5 findings)
+- Harden spec+ADR from spec review round 3 (4 findings)
+- Harden spec+ADR from spec review round 4 (2 findings)
+- Implementation plan for self-hosted KVM runner
+- Fix plan from plan review (7 findings)
+- Fix plan+spec from plan review round 2 (3 findings)
+- Fix plan from plan review round 3 (var-naming lint)
+- Fix plan from plan review round 4 (import ordering)
+- Prefix live_vm_host in-task vars (plan review round 5)
+- Self-hosted KVM runner runbook + discoverability pointers
+- Reconcile ADR XDG wording with the .env mechanism
+- Reconcile ADR/spec/runbook to the Ubuntu 26.04 runner
 
 ### Fixed
 
@@ -156,6 +177,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prepare pcap dir for hypervisor write; fail loud if unwritten
 - Scope ty ignore for optional selinux binding
 - Forward relocated backend endpoints to the sudo root worker
+- Enforce runner service disabled+stopped on the default run
+- PEP668-safe uv install; drop no_log on the token-length assert
+- Re-sync venv on checkout change; tighten kernel grant; restorecon -v
+- Locate libguestfs via a concrete site-packages path, assert found
 
 ### Build
 
@@ -178,6 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Share one deadline-poll loop across the waiters (#1290)
 - Trim duplication in remote-libvirt rootfs_build tests
+- Merge tasks, hoist shared lists, drop dead code
 
 ### Style
 
