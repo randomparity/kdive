@@ -45,9 +45,13 @@ documented disk budget. Four decisions:
    `debuginfod`.** The rootfs is built on a stock distro base (the base image is
    the pin) via the existing `build-fs` plane; the guest boots that distro's own
    kernel. The kernel's ELF build-id is **extracted from the staged kernel
-   artifact** (`extract-vmlinux` decompresses the `bzImage`/`vmlinuz`, then
+   artifact** (a bare `vmlinux` ELF — common for ppc64le `pseries` — is read
+   directly; a compressed `bzImage`/`vmlinuz` is first `extract-vmlinux`'d; then
    `eu-readelf -n`), and the matching debuginfo is fetched by that build-id
-   (`debuginfod-find`). Fetching by build-id makes the debuginfo match the booted
+   (`debuginfod-find`). An empty or unparseable extraction is **fatal**, and the
+   match compare rejects an empty id even against another empty id, so a failed
+   extraction can never pass the guard vacuously. Fetching by build-id makes the
+   debuginfo match the booted
    kernel *by construction* (`debuginfod` returns the debuginfo for exactly that
    id or nothing) and is arch-neutral, so a ppc64le kernel's debuginfo is fetched
    from an x86_64 host by the same mechanism. The kernel NVR is a recorded label,
@@ -61,13 +65,19 @@ documented disk budget. Four decisions:
    for* its content — persistent, on the host's own disk, generous headroom for
    kdump/vmcore + debuginfo — and only **reports** measured usage. The hosted
    `/mnt` set is *under a measured budget* — ephemeral, shared scratch — and its
-   staging script gates it two ways at two times: a **pre-stage free-space check**
-   that reserves the *whole* budget (staged set + run-time vmcore headroom +
-   margin) before any write — *preventing* eviction of the compose backends and
-   securing room for the vmcore captured later — plus a **post-stage footprint
-   cap** on the *staged set only*, which fails loud if it grew past its
-   derivation. Enforcement lives where blowing the budget evicts other tenants of
-   the disk (the hosted scratch), not where it does not (the dedicated host).
+   staging script gates it two ways at two times: a **pre-stage free-space
+   pre-check** for the *whole* budget (staged set + run-time vmcore headroom +
+   margin) before any write, plus a **post-stage footprint cap** on the *staged
+   set only*, which fails loud if it grew past its derivation. The pre-check is a
+   best-effort `df` read, **not a reservation** — on a `/mnt` shared with the
+   compose backends and `$GITHUB_WORKSPACE` it catches "already too full to start"
+   but does not hold space against a co-tenant that grows afterward; the run-time
+   vmcore is captured later and a hard reservation (a `fallocate` placeholder the
+   capture consumes) belongs to sub-issue D, which owns that capture. The vmcore
+   headroom assumes a ≤~2 GB-RAM guest; D must keep guest RAM within it or raise
+   `KDIVE_TCG_BUDGET_BYTES`. Enforcement lives where blowing the budget can evict
+   other tenants of the disk (the hosted scratch), not where it does not (the
+   dedicated host).
 
 3. **Idempotent refresh keeps the store warm, integrity-verified, temp-then-swap.**
    The manifest records the NVR label, the build-id, and a `sha256` for each of
@@ -77,12 +87,19 @@ documented disk budget. Four decisions:
    debuginfo truncated after its `.note.gnu.build-id` (near the ELF header, before
    the large DWARF sections) keeps a valid build-id but has lost its symbols; only
    a content digest catches that, and the break would otherwise persist every
-   nightly. Otherwise the refresh builds into a **temp location**, verifies
-   build-id + digests there, **atomically swaps** it into place, then removes only
-   sets whose NVR **differs** from the one just written — so a same-NVR corruption
-   rebuild cannot delete its own fresh output, and the store still holds exactly
-   one set rather than accumulating ~1.2 GB of debuginfo per past kernel. The
-   refresh holds an exclusive `flock`; the consuming boot (sub-issue D) takes a
+   nightly. Otherwise the refresh builds into a **same-filesystem sibling temp
+   dir** (so the swap is a real atomic `rename`, asserted, not a cross-fs copy),
+   verifies build-id + digests there, **atomically swaps** it into place, then
+   removes only sets whose NVR **differs** from the one just written — so a
+   same-NVR corruption rebuild cannot delete its own fresh output, and the store
+   still holds exactly one set rather than accumulating ~1.2 GB of debuginfo per
+   past kernel. A cleanup `trap` and an entry-sweep reclaim a crashed refresh's
+   temp set so the report-only store does not leak. Freshness is keyed on the NVR
+   label (the base image is the pin); a same-NVR distro rebuild is not
+   auto-detected — the store serves its self-consistent old set until an operator
+   forces a refresh, the intentional boundary (not a correctness hazard: the
+   staged set is internally matched either way). The refresh holds an exclusive
+   `flock`; the consuming boot (sub-issue D) takes a
    *shared* lock on the same file so a refresh cannot swap artifacts out from
    under an in-flight domain. The manifest predicate, the build-id/digest checks,
    and the budget gates are the unit-tested seam (`lib.sh`, subprocess-source
@@ -103,8 +120,10 @@ Easier:
 - The self-hosted nightly reuses a warm rootfs+kernel+debuginfo instead of
   rebuilding and refetching ~1 GB every run; a kernel bump is the only trigger
   for a rebuild.
-- The hosted TCG set cannot silently overrun `/mnt` and evict the compose
-  backends — the budget gate fails loud with the measured size.
+- The hosted TCG set is bounded on `/mnt`: a pre-stage `df` pre-check refuses to
+  start when the disk is already too full, and a post-stage cap fails loud with
+  the measured size if the staged set grew past its derivation (the pre-check is
+  best-effort on shared scratch, not a hard reservation — see Decision 2).
 - Kernel/debuginfo agreement is a recorded, checkable pin (the manifest build-id,
   verified on both the refresh and the warm path), not an assumption, so a
   mismatched — or corrupt-but-present — introspection input is caught before it
@@ -120,10 +139,12 @@ Harder / new obligations:
   not configured, debuginfo-not-yet-published (index lag), and transient error —
   rather than staging mismatched or missing debuginfo.
 - The warm store is persistent state on the runner host that an operator must
-  provision (the dir); the refresh itself replaces the superseded NVR's
-  artifacts, so the store holds one live set and does not accumulate old
-  debuginfo across kernel bumps. The `flock` makes concurrent refreshes safe but
-  means a second run blocks on the first rather than racing.
+  provision (the dir); the refresh replaces the superseded NVR's artifacts and a
+  cleanup trap/entry-sweep reclaims a crashed refresh's temp set, so the
+  report-only store holds one live set and does not accumulate old debuginfo or
+  leaked temp sets. The `flock` makes concurrent refreshes safe but means a second
+  run blocks on the first rather than racing. A same-NVR distro rebuild is not
+  auto-detected; an operator forces the refresh (`KDIVE_WARM_STORE_FORCE=1`).
 - The measured disk budget is a *derived* ceiling until an operator records the
   first real measurement (the scripts print it); like A/B, the live proof is an
   operator step, not a CI check.

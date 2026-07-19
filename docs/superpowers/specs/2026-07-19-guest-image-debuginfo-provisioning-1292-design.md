@@ -70,7 +70,8 @@ bounds the hosted store's disk use.
    the pin); the guest boots that distro's own kernel. The kernel's ELF build-id
    is **extracted from the staged kernel artifact** (decompress the
    `bzImage`/`vmlinuz` to the `vmlinux` ELF via `extract-vmlinux`, then
-   `eu-readelf -n`), and the matching debuginfo is fetched by that build-id
+   `eu-readelf -n`; a **failed or empty extraction is fatal**, never a vacuous
+   match), and the matching debuginfo is fetched by that build-id
    (`debuginfod-find debuginfo <build-id>`). Fetching by build-id means the
    debuginfo matches the booted kernel *by construction* — `debuginfod` returns
    the debuginfo for exactly that build-id or nothing — and it is arch-neutral, so
@@ -83,12 +84,15 @@ bounds the hosted store's disk use.
    (persistent, on the host's own disk, generous headroom) and only **reports**
    measured usage. The hosted `/mnt` set is *under a measured budget* (ephemeral,
    shared scratch) and gated twice: a **pre-stage `require_free_space`** that
-   reserves the *whole* budget (staged set + run-time vmcore headroom + margin)
-   before any write, preventing co-tenant eviction, and a **post-stage
-   `enforce_budget`** that caps only the *staged set's* footprint. The staging
-   gate bounds what C stages; the run-time vmcore is captured later and lives
-   inside the space the pre-stage reservation already secured (its runtime
-   capture is sub-issue D's boot concern).
+   requires free space for the *whole* budget (staged set + run-time vmcore
+   headroom + margin) before any write, and a **post-stage `enforce_budget`** that
+   caps only the *staged set's* footprint. `require_free_space` is a best-effort
+   `df` **pre-check, not a reservation** — on a `/mnt` shared with the compose
+   backends and `$GITHUB_WORKSPACE` it does not hold space against a co-tenant that
+   grows after the check, and the run-time vmcore is captured later (sub-issue D's
+   boot concern). It catches the common "already too full to start" case and
+   documents the headroom; a *hard* guarantee would need a `fallocate` placeholder
+   D consumes at capture, which is D's to own.
 3. **Idempotent refresh, integrity-verified, temp-then-swap.** A store manifest
    records the kernel NVR (label), the build-id, and a `sha256` for each of the
    rootfs, kernel image, and debuginfo. The refresh is warm only when the build-id
@@ -96,12 +100,16 @@ bounds the hosted store's disk use.
    presence and build-id alone are not warm, because a debuginfo truncated after
    its `.note.gnu.build-id` (which sits near the ELF header, before the large
    DWARF sections) keeps a valid build-id but has lost its symbols; only a content
-   digest catches that. Otherwise the refresh builds into a **temp location**,
-   verifies build-ids + digests there, **atomically swaps** it into place, then
-   removes only artifact sets whose NVR *differs* from the one just written (so a
-   same-NVR corruption rebuild cannot delete its own fresh output). The refresh
-   holds an exclusive `flock` so a slow nightly and a concurrent operator run
-   cannot interleave writes. The manifest predicate, the build-id/digest checks,
+   digest catches that. Otherwise the refresh builds into a **temp location that
+   is a sibling inside the store** (same filesystem, so the swap is a real atomic
+   `rename` — `assert_same_fs` guards this), verifies build-ids + digests there,
+   **atomically swaps** it into place, then removes only artifact sets whose NVR
+   *differs* from the one just written (so a same-NVR corruption rebuild cannot
+   delete its own fresh output). A cleanup `trap` removes the in-progress temp set
+   on any non-swap exit, and a stale-sibling sweep reclaims a prior crashed
+   refresh's temp set, so a report-only store does not silently leak ~3.5 GB per
+   crash. The refresh holds an exclusive `flock` so a slow nightly and a
+   concurrent operator run cannot interleave writes. The manifest predicate, the build-id/digest checks,
    and the budget gates are the unit-tested seam.
 
 ## Architecture
@@ -130,14 +138,22 @@ mutation-proven shell-test pattern, e.g. `tests/scripts/test_setup_local_libvirt
   than detecting one after the disk is already full. `NEEDED_BYTES` is the *whole*
   budget (staged set + vmcore headroom + margin), so the run-time vmcore has
   reserved room even though it is captured after staging.
-- `kernel_build_id KERNEL_IMAGE` — decompress the `bzImage`/`vmlinuz` to a
-  `vmlinux` ELF (`extract-vmlinux`) and read its `.note.gnu.build-id`
-  (`eu-readelf -n`). Reads the id from the **actual staged artifact**, not repo
-  metadata, so a corrupted/swapped image is caught. Host-only; the string it
-  returns is the testable input.
-- `build_ids_match A B` — return 0 iff two build-id strings are equal; `die` with
-  both ids on mismatch. The post-fetch sanity assertion; the string compare is the
-  testable seam.
+- `kernel_build_id KERNEL_IMAGE` — read the `.note.gnu.build-id` from the
+  **actual staged artifact** (not repo metadata), so a corrupted/swapped image is
+  caught. Handles both accepted target formats: a bare `vmlinux` ELF (common for
+  ppc64le `pseries`) is read directly with `eu-readelf -n`; a compressed
+  `bzImage`/`vmlinuz` (x86) is first decompressed via `extract-vmlinux`. **`die`
+  if extraction yields an empty or unparseable id** — an empty build-id must never
+  flow into the match (it would make the guard pass vacuously). Host-only; the
+  returned string is the testable input.
+- `build_ids_match A B` — `die` if **either** id is empty (even if both are), else
+  return 0 iff the two strings are equal and `die` with both ids on mismatch. The
+  post-fetch sanity assertion; the string compare (incl. the empty-id rejection)
+  is the testable seam.
+- `assert_same_fs A B` — `die` unless `A` and `B` are on the same filesystem
+  device (`stat -c %d`). Called before every atomic swap / `rename`, because
+  `rename(2)` is atomic only within one filesystem; a cross-fs temp silently
+  degrades to a non-atomic copy+unlink.
 - `sha256_of FILE` / `verify_sha256 FILE EXPECTED` — content digest and its
   fail-loud re-check, used symmetrically for rootfs, kernel image, and debuginfo
   (build-id proves identity, not completeness — only a digest catches truncation).
@@ -153,7 +169,9 @@ mutation-proven shell-test pattern, e.g. `tests/scripts/test_setup_local_libvirt
 
 ### `scripts/live-vm/warm-store.sh` — self-hosted warm store refresh
 
-Idempotent, holds an exclusive `flock` on the store for the whole refresh.
+Idempotent, holds an exclusive `flock` on the store for the whole refresh, and
+installs a cleanup `trap` (removes the in-progress temp set on any non-swap exit;
+sweeps a prior crashed refresh's stale sibling temp dir on entry).
 `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir B's Ansible
 owns).
 
@@ -164,14 +182,25 @@ owns).
    three staged files (`rootfs`, kernel image, debuginfo) re-hash to their
    recorded digests **and** the staged debuginfo's build-id equals the manifest
    `build_id`. Any failure → treat as stale (rebuild), not warm. On warm:
-   `report_usage`, emit the full wiring block, exit 0.
-3. **Refresh** (into a temp dir, then atomic swap) — build the rootfs via
-   `build-fs` (host-only, libguestfs); `kernel_build_id` the staged kernel; fetch
-   the matching debuginfo by that build-id (`debuginfod-find`); `build_ids_match`
-   the fetched debuginfo against the kernel (fail loud on mismatch — never stage
-   mismatched debuginfo); digest all three files; **atomically swap** the temp set
-   into place; `write_manifest`; **remove only sets whose NVR differs** from the
-   one just written; `report_usage`; emit the wiring block.
+   `report_usage`, emit the full wiring block, exit 0. **`KDIVE_WARM_STORE_FORCE=1`
+   skips the warm fast-path** (the escape hatch below).
+3. **Refresh** (into a same-filesystem sibling temp dir, then atomic swap) — build
+   the rootfs via `build-fs` (host-only, libguestfs); `kernel_build_id` the staged
+   kernel; fetch the matching debuginfo by that build-id (`debuginfod-find`);
+   `build_ids_match` the fetched debuginfo against the kernel (fail loud on
+   mismatch — never stage mismatched debuginfo); digest all three files;
+   `assert_same_fs` then **atomically swap** the temp set into place;
+   `write_manifest`; **remove only sets whose NVR differs** from the one just
+   written; `report_usage`; emit the wiring block.
+
+**Freshness boundary.** The warm re-checks establish the staged set's *internal
+completeness* (nothing corrupt/truncated), **not** its currency against the
+distro: the freshness trigger is the NVR label, so a distro that rebuilds the
+*same* NVR with a new build-id is not auto-detected — the store keeps serving its
+self-consistent old set. This is the intentional boundary (the base image is the
+pin; same-NVR rebuilds are rare and never produce wrong symbols within the staged
+set); the `KDIVE_WARM_STORE_FORCE=1` escape hatch forces a rebuild when an
+operator knows the distro moved under a stable NVR.
 
 **Wiring block** (both paths) — the store produces three matched artifacts, so it
 emits all three env vars the `live_vm` consumers read (`external_env.py`), not
@@ -245,19 +274,21 @@ does not fail — it is the host's own disk). Derivation for the ceiling:
 | distro kernel (image + initramfs) | ~0.1 GB | staged set (`enforce_budget`) |
 | matching `vmlinux` debuginfo | ~1.2 GB | staged set (`enforce_budget`) |
 | **staged-set ceiling** | **~3.5 GB** | `enforce_budget` (post-stage cap) |
-| kdump/vmcore + working headroom | ~2 GB | reserved up front, captured at run time |
-| **whole budget reserved** | **~6 GB** (well under `/mnt`'s ~70 GB) | `require_free_space` (pre-stage) |
+| kdump/vmcore + working headroom | ~2 GB | pre-checked up front, captured at run time |
+| **whole budget** | **~6 GB** (well under `/mnt`'s ~70 GB) | `require_free_space` (pre-stage) |
 
 These are *derived* sizes. The scripts print the **measured actual**; the runbook
 records the first real measurement from an operator run (the same
-CI-cannot-prove-it-live posture A and B shipped).
+CI-cannot-prove-it-live posture A and B shipped). The **~2 GB vmcore headroom
+assumes a TCG guest of ≤~2 GB RAM** with `makedumpfile` compression (a vmcore
+scales with populated guest memory); D sets the guest RAM, so if D raises it the
+headroom (via `KDIVE_TCG_BUDGET_BYTES`) must rise with it — the derivation states
+the assumption so the reservation and the actual capture come from one number.
 
-The two gates bound **different things at different times**, so the derivation and
-the enforcement agree on what each covers. `require_free_space` reserves the
-*whole* ~6 GB (staged set + vmcore headroom + margin) *before* any write — the
-"don't evict co-tenants" guarantee, and it is what secures room for the run-time
-vmcore that is captured *after* staging (that capture is sub-issue D's boot
-concern, into the space this reservation already holds). `enforce_budget` caps
+The two gates bound **different things at different times**. `require_free_space`
+is a best-effort `df` pre-check for the *whole* ~6 GB *before* any write — it
+catches "already too full to start" and does not hold space on the shared `/mnt`
+against a co-tenant that grows afterward (see Decision 2). `enforce_budget` caps
 only the *staged set's* ~3.5 GB footprint *after* staging — catching an artifact
 set that grew past its derivation. Both fail loud with the measured number.
 
@@ -268,8 +299,15 @@ set that grew past its derivation. Both fail loud with the measured number.
     the measured size + ceiling) over ceiling; boundary at exactly the ceiling.
   - `require_free_space`: passes when free ≥ needed; fails loud when free <
     needed (stubbed `df`, so the test is deterministic and host-independent).
-  - `build_ids_match`: returns 0 on equal ids; fails loud naming both on
-    mismatch — the post-fetch match assertion.
+  - `build_ids_match`: returns 0 on equal non-empty ids; fails loud naming both on
+    mismatch; **fails loud when either id is empty even if both are** — the
+    vacuous-match guard.
+  - `kernel_build_id`: reads the id from a bare-ELF fixture directly and from a
+    compressed fixture via `extract-vmlinux`; **fails loud (not empty) when the
+    artifact yields no build-id** (the ppc64le-bare-ELF / unrecognized-format
+    case).
+  - `assert_same_fs`: passes for two paths on one device; fails loud for a
+    cross-device pair (stubbed `stat`) — the atomic-`rename` precondition.
   - `verify_sha256`: passes on a matching digest; fails loud on a byte-changed or
     truncated file — the completeness check build-id cannot give.
   - `report_usage`: stable, greppable format.
@@ -286,6 +324,9 @@ set that grew past its derivation. Both fail loud with the measured number.
   - **Same-NVR rebuild removal**: a corruption-triggered rebuild with an unchanged
     NVR removes only differing-NVR sets and never deletes its own freshly-swapped
     output (a `write_manifest`-then-prune sequence over a stubbed store layout).
+  - **Crash-cleanup**: a refresh killed mid-build (before the swap) leaves no
+    orphan temp set — the entry-sweep + `trap` reclaims it, so the report-only
+    warm store does not leak.
 - The Ansible dir change is covered by `live_vm_host`'s existing verify gate and
   idempotence (`test-ansible`); no new role test needed for one loop entry.
 - The heavy operations (real `build-fs`, real debuginfo download, real boot) are
