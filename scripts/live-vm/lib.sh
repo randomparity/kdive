@@ -165,3 +165,32 @@ produce_rootfs_and_kernel() {
   mv -- "${dest}/${vmlinuz}" "${dest}/vmlinux"
   kernel_build_id "${dest}/vmlinux"
 }
+
+# Fetch the vmlinux debuginfo matching BUILD_ID into DEST/vmlinux.debug via debuginfod. The download
+# is cached in a scratch subdir on DEST's filesystem and moved (same-fs rename, not a ~1 GB copy)
+# into place, then the cache is pruned so it is neither committed nor budget-counted. Three distinct
+# fail-loud outcomes separate fetch-infra / index-lag / transient. Asserts the FETCHED debuginfo's
+# own build-id equals BUILD_ID (reads the debuginfo, not the kernel again). Requires DEBUGINFOD_URLS.
+fetch_debuginfo() {
+  local dest="$1" build_id="$2" dbg rc
+  export DEBUGINFOD_CACHE_PATH="${dest}/.dbgcache"
+  if dbg="$(debuginfod-find debuginfo "$build_id" 2>/dev/null)"; then
+    mv -- "$dbg" "${dest}/vmlinux.debug"
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      die "debuginfo not yet published for build-id ${build_id} (distro index lag)"
+    fi
+    die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
+  fi
+  rm -rf -- "${dest}/.dbgcache"
+  build_ids_match "$build_id" "$(elf_build_id "${dest}/vmlinux.debug")"
+}
+
+# Emit the eval-safe three-var wiring block for a set rooted at BASE (stdout is this block only).
+emit_wiring() {
+  local base="$1"
+  printf 'KDIVE_LIVE_VM_ROOTFS=%s/rootfs.qcow2\n' "$base"
+  printf 'KDIVE_LIVE_VM_BZIMAGE=%s/vmlinux\n' "$base"
+  printf 'KDIVE_LIVE_VM_VMLINUX=%s/vmlinux.debug\n' "$base"
+}

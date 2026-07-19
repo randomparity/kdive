@@ -23,10 +23,6 @@ esac
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
 rm -rf -- "$STAGE"
 mkdir -p -- "$STAGE"
-# Cache the download under the stage dir (on /mnt, the budgeted fs, not the small root fs), then
-# prune it after copying so enforce_budget measures only the staged set, not a doubled cache.
-export DEBUGINFOD_CACHE_PATH="${STAGE}/.dbgcache"
-
 # 1. Pre-stage best-effort free-space check for the WHOLE budget (staged set + cache copy + vmcore).
 require_free_space "$mnt_root" "$BUDGET" "hosted TCG image set"
 
@@ -36,27 +32,14 @@ require_free_space "$mnt_root" "$BUDGET" "hosted TCG image set"
 
 # 3. Build the ppc64le rootfs + extract its own kernel; read the build-id from the actual artifact.
 build_id="$(produce_rootfs_and_kernel "$STAGE" "$IMAGE")"
+rm -f -- "${STAGE}/.kver" # produce records the pin marker; the TCG set has no NVR pin, so drop it.
 
-# 4. Fetch matching debuginfo by build-id, with three DISTINCT fail-loud outcomes.
-if dbg="$(debuginfod-find debuginfo "$build_id" 2>/dev/null)"; then
-  cp -- "$dbg" "${STAGE}/vmlinux.debug"
-else
-  rc=$?
-  # debuginfod-find: exit 1 == not found (index lag); other non-zero == transient/network.
-  if [ "$rc" -eq 1 ]; then
-    die "debuginfo not yet published for build-id ${build_id} (distro index lag)"
-  fi
-  die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
-fi
-rm -rf -- "${STAGE}/.dbgcache" "${STAGE}/.kver" # keep only the wired artifacts in the staged set.
-# REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
-build_ids_match "$build_id" "$(elf_build_id "${STAGE}/vmlinux.debug")"
+# 4. Fetch the matching debuginfo by build-id (caches under the stage dir, prunes it, verifies match).
+fetch_debuginfo "$STAGE" "$build_id"
 
 # 5. Post-stage footprint cap on the staged set only.
 enforce_budget "$STAGE" "$BUDGET" "hosted TCG image set"
 
 trap - EXIT # staged successfully; keep the set.
 report_usage "tcg-stage" "$STAGE"
-printf 'KDIVE_LIVE_VM_ROOTFS=%s/rootfs.qcow2\n' "$STAGE"
-printf 'KDIVE_LIVE_VM_BZIMAGE=%s/vmlinux\n' "$STAGE"
-printf 'KDIVE_LIVE_VM_VMLINUX=%s/vmlinux.debug\n' "$STAGE"
+emit_wiring "$STAGE"

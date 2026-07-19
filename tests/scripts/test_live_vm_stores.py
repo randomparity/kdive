@@ -404,22 +404,13 @@ def _stage_stubs(bindir: Path) -> None:
     _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
 
 
-def _debuginfod_ok_stage(bindir: Path) -> None:
-    _stub(
-        bindir,
-        "debuginfod-find",
-        'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; '
-        'printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
-    )
-
-
 def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stage = tmp_path / "mnt" / "kdive-tcg"
     stage.parent.mkdir()  # /mnt; the script creates the stage dir itself
     _stage_stubs(bindir)
-    _debuginfod_ok_stage(bindir)
+    _debuginfod_ok(bindir)  # shared with the warm-store tests
     r = subprocess.run(
         [BASH, str(STAGE)],
         capture_output=True,

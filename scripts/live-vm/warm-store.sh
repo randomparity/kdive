@@ -18,17 +18,8 @@ mkdir -p -- "$STORE"
 exec 9>"${STORE}/.lock"
 flock 9
 
-manifest() { printf '%s/current/MANIFEST' "$STORE"; }
-
-emit_wiring() {
-  printf 'KDIVE_LIVE_VM_ROOTFS=%s/current/rootfs.qcow2\n' "$STORE"
-  printf 'KDIVE_LIVE_VM_BZIMAGE=%s/current/vmlinux\n' "$STORE"
-  printf 'KDIVE_LIVE_VM_VMLINUX=%s/current/vmlinux.debug\n' "$STORE"
-}
-
 is_warm() {
-  local cur="${STORE}/current" m
-  m="$(manifest)"
+  local cur="${STORE}/current" m="${STORE}/current/MANIFEST"
   [ "${KDIVE_WARM_STORE_FORCE:-0}" = "1" ] && return 1
   [ -e "$m" ] || return 1
   store_manifest_matches "$m" "$TARGET" || return 1
@@ -39,7 +30,7 @@ is_warm() {
 }
 
 main() {
-  local new dbg build_id kver rc
+  local new build_id kver
   # Fail fast on a fetch-infra misconfig BEFORE the minutes-long, multi-GB build (else a
   # misconfigured nightly builds a rootfs only to discard it when debuginfod-find dies).
   [ -n "${DEBUGINFOD_URLS:-}" ] ||
@@ -48,7 +39,7 @@ main() {
 
   if is_warm; then
     report_usage "warm-store" "$STORE"
-    emit_wiring
+    emit_wiring "${STORE}/current"
     return 0
   fi
 
@@ -66,21 +57,7 @@ main() {
   esac
   rm -f -- "${new}/.kver"
 
-  # Cache the download in a scratch subdir on the store's filesystem, then keep only the copy — so
-  # the ~1.2 GB cache subtree is not committed into current/ alongside vmlinux.debug.
-  export DEBUGINFOD_CACHE_PATH="${new}/.dbgcache"
-  if dbg="$(debuginfod-find debuginfo "$build_id" 2>/dev/null)"; then
-    cp -- "$dbg" "${new}/vmlinux.debug"
-  else
-    rc=$?
-    if [ "$rc" -eq 1 ]; then
-      die "debuginfo not yet published for build-id ${build_id} (distro index lag)"
-    fi
-    die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
-  fi
-  rm -rf -- "${new}/.dbgcache"
-  # REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
-  build_ids_match "$build_id" "$(elf_build_id "${new}/vmlinux.debug")"
+  fetch_debuginfo "$new" "$build_id"
 
   write_manifest "${new}/MANIFEST" "$TARGET" "$build_id" \
     "$(sha256_of "${new}/rootfs.qcow2")" "$(sha256_of "${new}/vmlinux")" \
@@ -90,7 +67,7 @@ main() {
   trap - EXIT # committed: the set is now live, do not remove it.
   prune_other_sets "$STORE"
   report_usage "warm-store" "$STORE"
-  emit_wiring
+  emit_wiring "${STORE}/current"
 }
 
 main "$@"
