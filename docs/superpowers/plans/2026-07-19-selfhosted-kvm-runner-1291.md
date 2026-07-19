@@ -106,7 +106,7 @@ live_vm_host_packages:
 `deploy/ansible/roles/live_vm_host/tasks/main.yml`:
 ```yaml
 ---
-- name: live_vm_host placeholder (filled by later tasks)
+- name: Placeholder for live_vm_host (filled by later tasks)
   ansible.builtin.debug:
     msg: "live_vm_host role scaffold"
 ```
@@ -431,10 +431,12 @@ git commit -m "feat(1291): live_vm_host provisions the ABI-matched guestfs/drgn 
   register: live_vm_restorecon
   changed_when: live_vm_restorecon.stdout | length > 0
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
-
-- name: Run the host-contract gate
-  ansible.builtin.import_tasks: verify.yml
 ```
+
+> Do **not** add the `import_tasks: verify.yml` line here — `verify.yml` does not exist yet, and
+> `import_tasks` is a static include resolved at parse time, so ansible-lint's internal
+> `--syntax-check` would fatally error on a missing file and `just lint-ansible` would go red. The
+> import line is added in Task 5 Step 1, in the same commit that creates `verify.yml`.
 
 - [ ] **Step 2: Add the handler** (`deploy/ansible/roles/live_vm_host/handlers/main.yml`):
 ```yaml
@@ -467,12 +469,13 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
 
 **Files:**
 - Create: `deploy/ansible/roles/live_vm_host/tasks/verify.yml`
+- Modify: `deploy/ansible/roles/live_vm_host/tasks/main.yml` (append the import line — in the same commit that creates `verify.yml`, so no lint pass ever sees a dangling static import)
 
 **Interfaces:**
 - Consumes: all Task 2–4 outputs + `live_vm_venv`, staging dirs, `github_runner_user`.
 - Produces: a play failure if any contract item is unmet.
 
-- [ ] **Step 1: Write the gate.**
+- [ ] **Step 1: Write the gate, then wire it into `main.yml`.**
 
 `deploy/ansible/roles/live_vm_host/tasks/verify.yml`:
 ```yaml
@@ -540,6 +543,13 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
 ```
 
 > The service-unit `XDG_RUNTIME_DIR=` assertion is deferred to `github_runner` (Task 7), which owns the unit/`.env` file.
+
+Now append the import to the end of `deploy/ansible/roles/live_vm_host/tasks/main.yml` (this
+is the first commit in which `verify.yml` exists, so the static import always resolves):
+```yaml
+- name: Run the host-contract gate
+  ansible.builtin.import_tasks: verify.yml
+```
 
 - [ ] **Step 2: Verify lint + syntax.**
 ```bash
