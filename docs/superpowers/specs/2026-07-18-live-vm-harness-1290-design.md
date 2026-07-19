@@ -193,8 +193,14 @@ load-bearing ones:
   `traits.emit_acpi_features` (x86 only) — matches production, so a crash-capable
   throwaway (E's panic/host_dump tests) locates fw_cfg/VMCOREINFO the same way a
   real System does.
-- serial console `<log file=console_log append="off">` when `console_log` is
-  given, so `wait_for="panic"` can read it.
+- `<serial type="pty">` + `<console type="pty">` are **always** emitted (matching
+  production `_append_serial_console`, and matching the unconditional `<serial>`
+  in both inline dogfood domains). When `console_log` is given, a
+  `<log file=console_log append="off">` sink is layered onto the serial device
+  so `wait_for="panic"` can read it; when it is not, the serial device is still
+  present (just without a file sink). Gating the whole serial device on
+  `console_log` would silently drop a device the migrated domains had — the log
+  sink is the only conditional part.
 - optional direct-kernel `<os><kernel>` + `<cmdline>` when `kernel_path` is
   given; the cmdline defaults to `root=/dev/vda console=<traits.console_device>
   rw` (`ttyS0` / `hvc0`) when `cmdline` is `None`. Kernel *format* (`vmlinux`
@@ -396,12 +402,28 @@ guard as if it were completeness.
   Its snapshot create/revert/delete assertions are unchanged.
 
 Both are **live-run on the maintainer's KVM host** as an acceptance step (this
-host runs `live_vm` directly). Preserving `settle_s=2.0` keeps the migration a
-true no-behavior-change: `wait_for="active"` alone yields as soon as
-`isActive()` is true — earlier than the old `sleep(2)` — so without the settle
-the traffic filter-dump could race the netdev it did not race before. A
-no-behavior-change migration that still passes live is the proof the harness is
-faithful to real libvirt.
+host runs `live_vm` directly). The **provider op under test is unchanged** — the
+filter-dump attach/detach + pcap assertion and the snapshot create/revert/delete
+assertions are byte-for-byte the same. The **domain XML is not** byte-identical
+to the prior inline XML, and deliberately so: the harness domain is
+*production-faithful* where the hand-written inline XML was not. The intentional
+deltas, each benign for these two ops:
+
+- **adds `<cpu mode="host-passthrough">`** (x86 KVM) — the inline domains relied
+  on QEMU's implicit `qemu64`; both tests only need the QEMU process running
+  (their docstrings say the guest need not boot), so neither exercised the
+  x86-64-v2 gap, but the harness domain is now correct for a booting guest too.
+- **adds `<features><acpi/><vmcoreinfo state="on"/></features>`** (x86) — matches
+  production; inert for the netdev filter-dump and the memory snapshot.
+- **`settle_s=2.0` preserves** the `create(); sleep(2)` window: `wait_for="active"`
+  yields as soon as `isActive()` is true — earlier than the old `sleep(2)` — so
+  without the settle the traffic filter-dump could race the netdev it did not
+  race before.
+
+The serial device is **not** a delta — the builder always emits `<serial>`, as
+the inline domains did. So the live run proves the intended thing: the provider
+op still works against a production-faithful domain built by the shared harness
+— not a byte-identity the migration does not (and should not) claim.
 
 ## Error handling
 
@@ -433,8 +455,9 @@ Unit tests (no KVM host — run in `just ci`):
   emitted `<os type machine>` is `q35`/`pseries`, the `<cpu mode>` is
   `host-passthrough`/`host-model`, the `<features><acpi/>` block is present only
   on x86, the cmdline console is `ttyS0`/`hvc0`, the NIC slot is pinned only on
-  q35, and the SSH netdev is present iff `ssh_hostfwd_port` is set. Assert an
-  unknown arch raises `CONFIGURATION_ERROR`.
+  q35, and the SSH netdev is present iff `ssh_hostfwd_port` is set. Assert
+  `<serial>` is always emitted and its `<log>` sink is present iff `console_log`
+  is set. Assert an unknown arch raises `CONFIGURATION_ERROR`.
 - `wait_for` precondition guards: `boot_throwaway_domain(wait_for="ssh")` with
   `ssh_hostfwd_port=None` and `boot_throwaway_domain(wait_for="panic")` with
   `console_log=None` each raise `CONFIGURATION_ERROR` **before** defining a
