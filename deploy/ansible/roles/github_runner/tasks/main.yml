@@ -118,9 +118,12 @@
     src: "{{ github_runner_install_dir }}/.service"
   register: github_runner_unit_file
 
-- name: Enable + start the runner service only when the trust posture is confirmed
+- name: Enforce the runner service posture (disabled+stopped until the trust posture is set)
+  # Unconditional on purpose: `svc.sh install` runs `systemctl enable`, so a bare run
+  # (github_runner_service_enabled=false) would leave the unit ENABLED and auto-arm on the next
+  # reboot — a fork-PR/self-hosted RCE window before sub-issue D's `if:` guard exists. Driving
+  # enabled/state from the flag on EVERY run actively reverses that enable on the default path.
   ansible.builtin.systemd_service:
     name: "{{ (github_runner_unit_file.content | b64decode).strip() }}"
-    enabled: "{{ github_runner_service_enabled }}"
-    state: "{{ 'started' if github_runner_service_enabled else 'stopped' }}"
-  when: github_runner_service_enabled | bool
+    enabled: "{{ github_runner_service_enabled | bool }}"
+    state: "{{ 'started' if github_runner_service_enabled | bool else 'stopped' }}"
