@@ -1,0 +1,4 @@
+---
+- name: Placeholder for live_vm_host (filled by later tasks)
+  ansible.builtin.debug:
+    msg: "live_vm_host role scaffold"

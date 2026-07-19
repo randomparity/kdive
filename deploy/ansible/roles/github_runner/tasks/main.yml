@@ -1,0 +1,4 @@
+---
+- name: Placeholder for github_runner (filled by later tasks)
+  ansible.builtin.debug:
+    msg: "github_runner role scaffold"

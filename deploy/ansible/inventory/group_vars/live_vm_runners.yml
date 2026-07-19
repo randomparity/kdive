@@ -1,0 +1,13 @@
+---
+# Throwaway-rootfs overlay area (KDIVE_LIVE_VM_ROOTFS's parent) + the provisioned-System
+# install staging check-local-libvirt.sh asserts. Both labeled virt_image_t, both traversable.
+live_vm_staging_dir: /var/lib/kdive/live-vm
+install_staging_dir: /var/lib/kdive/install
+# Persistent repo checkout + venv the worker's guestfs/drgn import uses; D reuses via KDIVE_PYTHON.
+live_vm_venv: /opt/kdive
+live_vm_repo_url: https://github.com/randomparity/kdive.git
+live_vm_repo_version: main
+# Foreign qemu emulator per non-native arch (TCG). Arch-keyed, mirrors libvirt_stack.
+live_vm_foreign_qemu_map:
+  x86_64: qemu-system-ppc  # a native-x86 host can emulate ppc64le under TCG
+  ppc64le: qemu-system-x86  # a native-ppc host can emulate x86_64 under TCG

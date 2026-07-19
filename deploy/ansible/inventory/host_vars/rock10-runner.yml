@@ -1,0 +1,6 @@
+---
+# x86_64 Rocky 10 self-hosted KVM runner (epic #1289 sub-issue B). ppc64le is a drop-in:
+# a new host under live_vm_runners with github_runner_tarball_url pointing at a ppc64le runner.
+ansible_host: rock10-runner.dev.pdx.drc.nz
+github_runner_repo_url: https://github.com/randomparity/kdive
+# github_runner_registration_token supplied at runtime, never here.

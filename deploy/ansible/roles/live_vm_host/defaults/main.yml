@@ -1,0 +1,12 @@
+---
+# Kernel-debug toolchain the live_vm contract needs beyond libvirt_stack.
+live_vm_host_packages:
+  - drgn
+  - crash
+  - makedumpfile
+  - kexec-tools
+  - kdump-utils
+  - gdb
+  - python3-libguestfs
+  - policycoreutils-python-utils  # semanage
+  - git
