@@ -45,9 +45,11 @@ host is "green but not ready" one layer down.
   `guestfs`/`drgn` import needs (`uv sync --python /usr/bin/python3 --group live`
   + the `libguestfs` symlink, ABI-matched to the system interpreter) at a **pinned
   persistent path** D reuses via `KDIVE_PYTHON` rather than rebuilding per job,
-  since system packages are not importable from the venv; both a
-  world-traversable `virt_image_t`-labeled live-VM staging dir and the
-  install-staging dir the gate checks; `loginctl enable-linger` for a short
+  since system packages are not importable from the venv; group-readable `/boot`
+  kernels for the service account (stock RHEL ships them `0600 root:root`, which
+  fails libguestfs' appliance build); both a world-traversable
+  `virt_image_t`-labeled live-VM staging dir and the install-staging dir the gate
+  checks (label asserted on both); `loginctl enable-linger` for a short
   `XDG_RUNTIME_DIR`; and a **two-part verification gate** run as the service
   account after a connection reset — `scripts/check-local-libvirt.sh` (KVM /
   daemon / venv-import / network) plus the role's own assertions for group

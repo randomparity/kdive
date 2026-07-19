@@ -186,6 +186,17 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
   system-mode staged images are not denied by sVirt. (Session mode needs no
   relabel — qemu runs as the invoking user — but the label is correct for both
   modes.)
+- **`/boot` kernel readability for the service account (RHEL-family).**
+  `check-local-libvirt.sh`'s `_host_kernels_readable` is a **FAIL** (not a warn)
+  when any `/boot/vmlinuz-*` / `/boot/vmlinux-*` is unreadable by the invoking
+  user — libguestfs builds its supermin appliance from a host kernel (ADR-0222,
+  #694/#1156). A stock Rocky 10 host ships `/boot/vmlinuz-*` mode `0600 root:root`
+  (RHEL hardening), so the gate run as the non-root `github_runner_user` would
+  fail. The role therefore makes the host kernels group-readable for the service
+  account (`chmod 0644 /boot/vmlinu?-*`, matching both arches' names), and the
+  runbook notes this **must be re-applied after a kernel upgrade** (a
+  `dpkg-statoverride`-equivalent is Debian-only; on RHEL the chmod is re-run — the
+  runner is Rocky, so a one-shot chmod plus the upgrade note is the mechanism).
 - **Short `XDG_RUNTIME_DIR`:** `loginctl enable-linger github_runner_user` so
   `/run/user/<uid>` exists with no login session. `enable-linger` alone does
   **not** put `XDG_RUNTIME_DIR` in a system service's process environment, so the
@@ -196,21 +207,28 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
 - **Verification (the host-contract gate).** The role fails if any part fails.
   `scripts/check-local-libvirt.sh` alone is **not** sufficient — it checks
   `/dev/kvm`, the modular daemons, the venv `guestfs`/`drgn` import, the `default`
-  network, and its own `KDIVE_INSTALL_STAGING`, but it has **no SELinux-label
-  check, no `XDG_RUNTIME_DIR` check, and does not look at `live_vm_staging_dir`**.
-  So the gate is two parts, both run as `github_runner_user`:
+  network, its own `KDIVE_INSTALL_STAGING` **writability**, and `/boot`
+  kernel readability, but it has **no SELinux-label check, no `XDG_RUNTIME_DIR`
+  check, and does not look at `live_vm_staging_dir`** (and checks the
+  install-staging dir's *writability* only, not its label). So the gate is two
+  parts, both run as `github_runner_user`:
   1. Run `scripts/check-local-libvirt.sh` with `become_user: github_runner_user`,
      `KDIVE_PYTHON` set to the provisioned venv, asserting exit 0 — for the KVM /
-     daemon / venv-import / network / install-staging contract it covers. Because
-     `live_vm_host` adds `github_runner_user` to `kvm`/`libvirt` **in the same
-     run** and supplementary-group membership is not live in an already-open
-     session, this runs after a `meta: reset_connection` so the group probes read
-     the new membership.
+     daemon / venv-import / network / install-staging-writability / `/boot`-kernel
+     contract it covers (the `/boot` FAIL is why the role makes the kernels
+     readable above). Because `live_vm_host` adds `github_runner_user` to
+     `kvm`/`libvirt` **in the same run** and supplementary-group membership is not
+     live in an already-open session, this runs after a `meta: reset_connection`
+     so the group probes read the new membership.
   2. `live_vm_host`'s **own** assertions for the delta the script does not cover:
-     - `live_vm_staging_dir` carries the `virt_image_t` type (assert on `ls -Z` /
-       `matchpathcon`), is mode `0755`, and is writable by `github_runner_user`;
-     - every parent of `live_vm_staging_dir` is `o+x`, so a system-mode boot is
-       not blocked by a `0700` ancestor;
+     - **both** `live_vm_staging_dir` **and** the install-staging dir carry the
+       `virt_image_t` type (assert on `ls -Z` / `matchpathcon`) — the script
+       checks the install-staging dir's writability but not its label, and a
+       restorecon that silently failed for either dir would otherwise sVirt-deny a
+       system-mode boot at live-test time; both are asserted mode `0755` and
+       writable by `github_runner_user`;
+     - every parent of both staging dirs is `o+x`, so a system-mode boot is not
+       blocked by a `0700` ancestor;
      - `github_runner_user` is a member of `kvm` and `libvirt`;
      - `/run/user/<github_runner_uid>` exists (post-`enable-linger`) **and** the
        installed runner service unit's `Environment=` carries
@@ -322,7 +340,8 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 | Service account not in `kvm`/`libvirt` (runs as a different user than the play connects as) | `live_vm_host` adds `github_runner_user` (not `ansible_user_id`) to `kvm`/`libvirt`; the gate asserts that membership, so a mismatched account fails at provisioning instead of at CI-boot time. |
 | Venv cannot `import guestfs, drgn` on a fresh host | `live_vm_host` provisions the venv (`uv sync --group live` + the `libguestfs` symlink) and the gate runs against it via `KDIVE_PYTHON` — reproducible, not dev-host-only. |
 | Staging dir mis-pointed into `$HOME` / a `0700` ancestor | `live_vm_host`'s own gate asserts every parent of `live_vm_staging_dir` is `o+x`; a non-traversable ancestor fails the play (`check-local-libvirt.sh` cannot see the traversal problem). |
-| SELinux `virt_image_t` not applied | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label via `ls -Z`/`matchpathcon` — a missing label fails the play at provisioning, not silently at live-test time. |
+| SELinux `virt_image_t` not applied (either staging dir) | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label on **both** the live-VM and install-staging dirs via `ls -Z`/`matchpathcon` — a missing label on either fails the play at provisioning, not silently at live-test time. |
+| Stock Rocky 10 ships `/boot/vmlinuz-*` `0600 root:root` → gate fails as non-root | `live_vm_host` makes the host kernels group-readable (`chmod 0644 /boot/vmlinu?-*`) so `check-local-libvirt.sh`'s `_host_kernels_readable` passes for the service account; runbook flags re-applying after a kernel upgrade. |
 | Runner service missing a short `XDG_RUNTIME_DIR` | `live_vm_host`'s gate asserts `/run/user/<uid>` exists **and** the service unit's `Environment=` carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
 | Runner registered but starts listening before the trust posture is set | The service installs **stopped/disabled**; the role starts it only on explicit `github_runner_service_enabled: true`, so a bare `runner.yml` leaves no fork-PR-exploitable listener. |
 | Locally registered but removed server-side (offline past GitHub's ~14-day window, or admin-removed) | Enabling the service runs a liveness check; if the local `.runner` markers exist but GitHub no longer knows the runner, the role re-registers (fresh token) instead of starting a dead runner. Recovery (`config.sh remove` + re-run) and the offline-window warning are in the runbook. |
