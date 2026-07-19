@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: live_vm_host
+  author: kdive
+  description: live_vm environment-contract delta for a self-hosted KVM CI runner (#1291).
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions: [all]
+dependencies: []

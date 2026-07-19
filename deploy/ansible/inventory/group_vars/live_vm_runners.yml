@@ -1,0 +1,13 @@
+---
+# Throwaway-rootfs overlay area (KDIVE_LIVE_VM_ROOTFS's parent) + the provisioned-System
+# install staging check-local-libvirt.sh asserts. Both labeled virt_image_t, both traversable.
+live_vm_staging_dir: /var/lib/kdive/live-vm
+install_staging_dir: /var/lib/kdive/install
+# The staging dirs live_vm_host creates, labels, and asserts — one source of truth for the loops.
+live_vm_staging_dirs:
+  - "{{ live_vm_staging_dir }}"
+  - "{{ install_staging_dir }}"
+# Persistent repo checkout + venv the worker's guestfs/drgn import uses; D reuses via KDIVE_PYTHON.
+live_vm_venv: /opt/kdive
+live_vm_repo_url: https://github.com/randomparity/kdive.git
+live_vm_repo_version: main

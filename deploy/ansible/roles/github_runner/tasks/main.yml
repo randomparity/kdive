@@ -1,0 +1,131 @@
+---
+# The set_fact + marker stat are tagged github_runner_register too, so a `--tags
+# github_runner_register` run (the regression harness) evaluates the skip decision; the
+# svc.sh / .env / systemd tasks below are UNtagged, so the harness never reaches them.
+- name: Resolve the runner asset + label for this arch
+  ansible.builtin.set_fact:
+    github_runner_asset: "{{ github_runner_arch_map[ansible_architecture].asset | default('') }}"
+    github_runner_label_token: "{{ github_runner_arch_map[ansible_architecture].label | default('') }}"
+  tags: [github_runner_register]
+
+- name: Detect an existing registration (idempotence + liveness guard)
+  ansible.builtin.stat:
+    path: "{{ github_runner_install_dir }}/.runner"
+  register: github_runner_marker
+  tags: [github_runner_register]
+
+- name: Register the runner (first-time branch)
+  when: not github_runner_marker.stat.exists
+  tags: [github_runner_register]
+  block:
+    - name: Fail closed when no registration token is supplied
+      # No no_log here: the assert tests only the token's length (the value is never rendered),
+      # so no_log would hide nothing sensitive while censoring the actionable fail_msg. The token
+      # value is protected where it is actually used — the `config.sh` command task is no_log.
+      ansible.builtin.assert:
+        that: github_runner_registration_token | length > 0
+        fail_msg: "github_runner_registration_token is required to register a new runner"
+
+    - name: Fail loud when this arch has no runner asset and no override URL
+      ansible.builtin.fail:
+        msg: >-
+          No actions/runner asset for {{ ansible_architecture }} and github_runner_tarball_url
+          is unset. Upstream ships no ppc64le asset; build one and set github_runner_tarball_url.
+      when:
+        - github_runner_asset | length == 0
+        - github_runner_tarball_url | length == 0
+
+    - name: Resolve the download URL
+      ansible.builtin.set_fact:
+        github_runner_url: >-
+          {{ github_runner_tarball_url if github_runner_tarball_url | length > 0 else
+             'https://github.com/actions/runner/releases/download/v' ~ github_runner_version ~
+             '/actions-runner-linux-' ~ github_runner_asset ~ '-' ~ github_runner_version ~ '.tar.gz' }}
+
+    - name: Create the runner install dir
+      ansible.builtin.file:
+        path: "{{ github_runner_install_dir }}"
+        state: directory
+        owner: "{{ github_runner_user }}"
+        group: "{{ github_runner_user }}"
+        mode: "0755"
+
+    - name: Download + checksum-verify the runner tarball (operator-pinned sha256)
+      # ALWAYS download (the next task unarchives it). Only the checksum is conditional: a
+      # pinned sha256 is enforced when set; an override tarball with no pin uses `omit` (a
+      # discouraged path the runbook flags — pin the override sha too when possible).
+      ansible.builtin.get_url:
+        url: "{{ github_runner_url }}"
+        dest: "{{ github_runner_install_dir }}/runner.tar.gz"
+        checksum: >-
+          {{ ('sha256:' ~ github_runner_sha256) if github_runner_sha256 | length > 0 else omit }}
+        owner: "{{ github_runner_user }}"
+        mode: "0644"
+
+    - name: Extract the runner
+      ansible.builtin.unarchive:
+        src: "{{ github_runner_install_dir }}/runner.tar.gz"
+        dest: "{{ github_runner_install_dir }}"
+        remote_src: true
+        owner: "{{ github_runner_user }}"
+
+    - name: Configure (register) the runner
+      ansible.builtin.command:
+        cmd: >-
+          ./config.sh --unattended --replace
+          --url {{ github_runner_repo_url }}
+          --token {{ github_runner_registration_token }}
+          --labels {{ (github_runner_extra_labels + [github_runner_label_token]) | join(',') }}
+        chdir: "{{ github_runner_install_dir }}"
+        creates: "{{ github_runner_install_dir }}/.runner"
+      become: true
+      become_user: "{{ github_runner_user }}"
+      no_log: true
+
+- name: Set XDG_RUNTIME_DIR + KDIVE_SECRETS_ROOT for the runner job process
+  # actions-runner loads <install_dir>/.env into every job process, so this is where the short
+  # QMP-socket base (#1258) + the S3 secrets pointer reach the test process. live_vm_host already
+  # populated getent_passwd earlier in runner.yml; only look it up here if github_runner runs alone.
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ github_runner_user }}"
+  when: github_runner_user not in (ansible_facts.getent_passwd | default({}))
+
+- name: Write the runner .env
+  ansible.builtin.copy:
+    dest: "{{ github_runner_install_dir }}/.env"
+    content: |
+      XDG_RUNTIME_DIR=/run/user/{{ ansible_facts.getent_passwd[github_runner_user][1] }}
+      KDIVE_SECRETS_ROOT={{ github_runner_secrets_root }}
+      KDIVE_PYTHON={{ live_vm_venv }}/.venv/bin/python
+    owner: "{{ github_runner_user }}"
+    mode: "0640"
+
+- name: Assert the runner .env carries the short XDG_RUNTIME_DIR (#1258 provisioning check)
+  ansible.builtin.command: "grep -q '^XDG_RUNTIME_DIR=/run/user/' {{ github_runner_install_dir }}/.env"
+  changed_when: false
+
+- name: Install the runner service (as the service account)
+  # svc.sh writes the generated unit name into <install_dir>/.service; guard the install on
+  # that marker (the unit name is actions.runner.<owner>-<repo>.<runner>.service — NOT derivable
+  # from the URL basename, so do not hard-code it).
+  ansible.builtin.command:
+    cmd: "./svc.sh install {{ github_runner_user }}"
+    chdir: "{{ github_runner_install_dir }}"
+    creates: "{{ github_runner_install_dir }}/.service"
+  when: github_runner_marker.stat.exists or github_runner_registration_token | length > 0
+
+- name: Read the generated systemd unit name
+  ansible.builtin.slurp:
+    src: "{{ github_runner_install_dir }}/.service"
+  register: github_runner_unit_file
+
+- name: Enforce the runner service posture (disabled+stopped until the trust posture is set)
+  # Unconditional on purpose: `svc.sh install` runs `systemctl enable`, so a bare run
+  # (github_runner_service_enabled=false) would leave the unit ENABLED and auto-arm on the next
+  # reboot — a fork-PR/self-hosted RCE window before sub-issue D's `if:` guard exists. Driving
+  # enabled/state from the flag on EVERY run actively reverses that enable on the default path.
+  ansible.builtin.systemd_service:
+    name: "{{ (github_runner_unit_file.content | b64decode).strip() }}"
+    enabled: "{{ github_runner_service_enabled | bool }}"
+    state: "{{ 'started' if github_runner_service_enabled | bool else 'stopped' }}"

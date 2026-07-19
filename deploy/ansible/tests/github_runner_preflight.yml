@@ -1,0 +1,7 @@
+---
+- name: Exercise github_runner registration preflight in isolation (regression harness)
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  roles:
+    - role: github_runner

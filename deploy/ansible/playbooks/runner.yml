@@ -1,0 +1,10 @@
+---
+- name: Bring up a self-hosted KVM live-VM runner (arch-additive)
+  hosts: live_vm_runners
+  become: true
+  gather_facts: true
+  roles:
+    - libvirt_stack
+    - libvirt_pool_net
+    - live_vm_host
+    - github_runner

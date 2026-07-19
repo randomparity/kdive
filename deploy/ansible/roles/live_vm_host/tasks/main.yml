@@ -1,0 +1,155 @@
+---
+- name: Assert the runner host is Ubuntu/Debian (system Python 3.14 + python3-guestfs, ADR-0387)
+  # The venv strategy relies on the system interpreter being Python 3.14 with a matching
+  # python3-guestfs binding. Ubuntu 26.04 ships both; RHEL/Rocky ship Python 3.12 and no 3.14
+  # libguestfs, so the contract cannot be met there. Fail loud rather than half-provision.
+  ansible.builtin.assert:
+    that: ansible_os_family == 'Debian'
+    fail_msg: >-
+      live_vm_host targets the Ubuntu 26.04 runner base (ADR-0387); this host is
+      {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+- name: Ensure the runner service account exists in kvm and libvirt
+  ansible.builtin.user:
+    name: "{{ github_runner_user }}"
+    system: true
+    create_home: true
+    shell: /bin/bash
+    groups: [kvm, libvirt]
+    append: true
+
+- name: Install the kernel-debug toolchain + venv build deps (Debian)
+  ansible.builtin.apt:
+    name: "{{ live_vm_host_packages }}"
+    state: present
+    update_cache: true
+
+- name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
+  # Ubuntu ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
+  # build (ADR-0222, #694/#1156) — probed by check-local-libvirt.sh as a FAIL — needs them
+  # readable by the non-root runner user. Re-apply after a kernel upgrade (see runbook).
+  ansible.builtin.find:
+    paths: /boot
+    patterns: ["vmlinuz-*", "vmlinux-*"]
+  register: live_vm_host_boot_kernels
+
+- name: Make the host kernels kvm-group-readable for the service account
+  # 0640 root:kvm, not 0644: the runner user is in the kvm group (added above), so this is
+  # genuinely group-scoped rather than world-readable — it does not fully undo the distro's
+  # 0600 hardening for every local uid. file+mode reports changed only when the mode/group
+  # actually changes, so a converged re-run is 0-changed (the spec's idempotence bar).
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    group: kvm
+    mode: "0640"
+  loop: "{{ live_vm_host_boot_kernels.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Enable linger so /run/user/<uid> exists with no login session
+  ansible.builtin.command: "loginctl enable-linger {{ github_runner_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ github_runner_user }}"
+
+- name: Install uv system-wide (the venv builder; not in the debug toolchain)
+  # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
+  # system PATH, not a per-user install. pip installs the console script to /usr/local/bin.
+  # --break-system-packages: Ubuntu 26.04's system Python is PEP 668 externally-managed,
+  # so a plain system `pip install` errors; the flag is accepted (and a no-op) on pip >= 23.
+  ansible.builtin.pip:
+    name: uv
+    state: present
+    extra_args: --break-system-packages
+
+- name: Create the venv root owned by the service account
+  # /opt is root-owned 0755, so a non-root `git` clone cannot mkdir it — create it first.
+  ansible.builtin.file:
+    path: "{{ live_vm_venv }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+
+- name: Check out the project source for the venv
+  ansible.builtin.git:
+    repo: "{{ live_vm_repo_url }}"
+    dest: "{{ live_vm_venv }}"
+    version: "{{ live_vm_repo_version }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  register: live_vm_host_checkout
+
+- name: Build the venv against the SYSTEM interpreter (ABI-match python3-guestfs)  # noqa: no-handler
+  # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs
+  # symlink task later in THIS play, but handlers run post-play (too late on first provision).
+  # uv defaults to a managed CPython whose minor version may differ from the distro's
+  # python3-guestfs .so; pin to /usr/bin/python3 (Ubuntu 26.04's 3.14) so the symlinked native
+  # module ABI-matches.
+  # Run whenever the checkout advanced (main is a moving ref), NOT `creates:`-gated — a creates
+  # guard would freeze the venv's deps at first-provision while the source moved on, so a live
+  # dependency added to main would never reach the venv the worker imports from. On a converged
+  # host (main unchanged) the git task is unchanged, so uv sync is skipped and the run is 0-changed.
+  ansible.builtin.command:
+    cmd: "{{ live_vm_host_uv_bin }} sync --python /usr/bin/python3 --group live"
+    chdir: "{{ live_vm_venv }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+  when: live_vm_host_checkout is changed
+  changed_when: true
+
+- name: Locate the system libguestfs binding files
+  # Debian installs python3-guestfs into the version-agnostic /usr/lib/python3/dist-packages
+  # (not a per-version site-packages): guestfs.py plus libguestfsmod.cpython-<abi>.so, built for
+  # Ubuntu 26.04's system Python 3.14 — the same interpreter the venv is pinned to above, so the
+  # symlinked native module ABI-matches.
+  ansible.builtin.find:
+    paths: /usr/lib/python3/dist-packages
+    patterns: ["guestfs.py", "libguestfsmod*.so"]
+  register: live_vm_host_libguestfs_files
+
+- name: Assert the libguestfs binding was found (fail loud, not an empty symlink loop)
+  # Without this, a missing binding (wrong path / python3-libguestfs absent) would make the
+  # symlink loop a silent no-op and only surface one task later at the check-local-libvirt gate.
+  ansible.builtin.assert:
+    that: live_vm_host_libguestfs_files.matched > 0
+    fail_msg: >-
+      guestfs.py / libguestfsmod*.so not found under /usr/lib/python3/dist-packages —
+      is python3-guestfs installed (it is in live_vm_host_packages) and does the ansible
+      interpreter match /usr/bin/python3 (the venv's --python)?
+
+- name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
+  ansible.builtin.file:
+    src: "{{ item.path }}"
+    dest: >-
+      {{ live_vm_venv }}/.venv/lib/python{{ ansible_python.version.major }}.{{
+      ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
+    state: link
+    force: true
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  become: true
+  become_user: "{{ github_runner_user }}"
+
+- name: Create the staging directories owned by the service account
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ github_runner_user }}"
+    group: "{{ github_runner_user }}"
+    mode: "0755"
+  loop: "{{ live_vm_staging_dirs }}"
+
+- name: Ensure the /var/lib/kdive parent is world-traversable
+  ansible.builtin.file:
+    path: /var/lib/kdive
+    state: directory
+    mode: "0755"
+
+# No static disk labeling on the Ubuntu target: libvirt confines qemu with AppArmor, and
+# virt-aa-helper adds each domain's disk paths to its per-domain profile dynamically from the
+# domain XML. The world-traversable, runner-owned staging dirs above therefore need no static
+# sVirt label (the SELinux virt_image_t equivalent RHEL required).
+
+- name: Run the host-contract gate
+  ansible.builtin.import_tasks: verify.yml
