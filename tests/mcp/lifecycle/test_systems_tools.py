@@ -1569,13 +1569,19 @@ async def _seed_run(pool: AsyncConnectionPool, sys_id: str, state: RunState) -> 
 
 
 async def _reprovision(
-    pool: AsyncConnectionPool, ctx: RequestContext, system_id: str, profile: dict[str, Any]
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    system_id: str,
+    profile: dict[str, Any],
+    *,
+    idempotency_key: str | None = None,
 ):
     return await _SYSTEM_ADMIN_HANDLERS.reprovision_system(
         pool,
         ctx,
         system_id=system_id,
         profile=profile,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -1693,6 +1699,53 @@ def test_reprovision_different_profile_is_new_job(migrated_url: str) -> None:
                 await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
                 n = await cur.fetchone()
         assert n is not None and n["n"] == 2
+
+    asyncio.run(_run())
+
+
+def test_reprovision_invalid_idempotency_key_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            resp = await _reprovision(
+                pool, _ctx(), sys_id, _active_allocation_profile(), idempotency_key=""
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                sys_row = await cur.fetchone()
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                jobs = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.object_id == "idempotency_key"
+        assert resp.data["reason"] == "idempotency_key_invalid"
+        assert sys_row is not None and sys_row["state"] == "ready"  # unchanged, no mutation
+        assert jobs is not None and jobs["n"] == 0  # no reprovision job enqueued
+
+    asyncio.run(_run())
+
+
+def test_reprovision_keyed_retry_replays_stored_envelope(migrated_url: str) -> None:
+    """A keyed retry replays the first envelope (admin.py:91-97) rather than re-checking state."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            p = _active_allocation_profile()
+            first = await _reprovision(pool, _ctx(), sys_id, p, idempotency_key="k1")
+            second = await _reprovision(pool, _ctx(), sys_id, p, idempotency_key="k1")
+            assert first.model_dump() == second.model_dump()  # replay, not a fresh evaluation
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM jobs WHERE kind = 'reprovision'")
+                job_n = await cur.fetchone()
+                await cur.execute(
+                    "SELECT count(*) AS n FROM idempotency_keys WHERE kind = 'systems.reprovision'"
+                )
+                key_n = await cur.fetchone()
+        assert job_n is not None and job_n["n"] == 1  # replayed, not re-enqueued
+        assert key_n is not None and key_n["n"] == 1
 
     asyncio.run(_run())
 
