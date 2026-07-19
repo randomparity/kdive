@@ -39,6 +39,7 @@ from kdive.domain.capacity.state import AllocationState
 from kdive.domain.catalog.resources import ManagedBy, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.tools.ops.resources import deregister as deregister_module
 from kdive.mcp.tools.ops.resources import host_ops as resources_host_ops
 from kdive.mcp.tools.ops.resources import register as register_module
 from kdive.mcp.tools.ops.resources import registrar as resources_registrar
@@ -49,12 +50,16 @@ from kdive.mcp.tools.ops.resources._common import (
     REGISTER_REMOTE_LIBVIRT_TOOL,
     RENEW_TOOL,
     ResourceProbe,
+    TcpResourceProbe,
+    _host_port,
 )
 from kdive.mcp.tools.ops.resources.deregister import deregister_resource
 from kdive.mcp.tools.ops.resources.register import (
     FaultInjectResourceRegistration,
+    LocalLibvirtResourceRegistration,
     RemoteLibvirtResourceRegistration,
     register_fault_inject_resource,
+    register_local_libvirt_resource,
     register_remote_libvirt_resource,
 )
 from kdive.mcp.tools.ops.resources.renew import renew_resource
@@ -277,6 +282,27 @@ def _remote_request(
         cost_class=cost_class,
         host_uri=host_uri,
         base_image=base_image,
+        concurrent_allocation_cap=concurrent_allocation_cap,
+        vcpus=8,
+        memory_mb=16384,
+        secret_refs=secret_refs,
+        owner_project=owner_project,
+    )
+
+
+def _local_request(
+    name: str,
+    *,
+    cost_class: str = "standard",
+    host_uri: str = "qemu+tcp://localhost/system",
+    concurrent_allocation_cap: int = 1,
+    secret_refs: tuple[str, ...] = (),
+    owner_project: str | None = None,
+) -> LocalLibvirtResourceRegistration:
+    return LocalLibvirtResourceRegistration(
+        name=name,
+        cost_class=cost_class,
+        host_uri=host_uri,
         concurrent_allocation_cap=concurrent_allocation_cap,
         vcpus=8,
         memory_mb=16384,
@@ -987,3 +1013,174 @@ def test_probe_protocol_is_satisfied_by_fakes() -> None:
     assert isinstance(_Reachable(), ResourceProbe)
     assert isinstance(_Unreachable(), ResourceProbe)
     assert ResourceKind.FAULT_INJECT.value == "fault-inject"
+
+
+# --- _host_port URI parsing (the real TcpResourceProbe target, never exercised by the fakes) ---
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("qemu+tls://198.51.100.5:1234/system", ("198.51.100.5", 1234)),
+        ("qemu+tls://198.51.100.5/system", ("198.51.100.5", 16514)),
+        ("qemu+tls:///system", None),
+        ("not-a-uri-at-all", None),
+    ],
+)
+def test_host_port_parses_uri_table(uri: str, expected: tuple[str, int] | None) -> None:
+    assert _host_port(uri) == expected
+
+
+# --- TcpResourceProbe.probe (real TCP connect, no injected fakes) ---
+
+
+def test_tcp_probe_succeeds_against_listening_socket() -> None:
+    async def _run() -> None:
+        server = await asyncio.start_server(lambda _r, _w: None, "127.0.0.1", 0)
+        try:
+            port = server.sockets[0].getsockname()[1]
+            probe = TcpResourceProbe()
+            assert await probe.probe(f"qemu+tcp://127.0.0.1:{port}/system") is True
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(_run())
+
+
+def test_tcp_probe_refused_returns_false() -> None:
+    async def _run() -> None:
+        import socket
+
+        # Bind then immediately close: the OS keeps the port free for us, but nothing is
+        # listening, so the connect is refused (fast, deterministic — no real network hop).
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        probe = TcpResourceProbe(timeout_s=2.0)
+        assert await probe.probe(f"qemu+tcp://127.0.0.1:{port}/system") is False
+
+    asyncio.run(_run())
+
+
+def test_tcp_probe_timeout_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _hang(_host: str, _port: int) -> tuple[object, object]:
+        await asyncio.sleep(999)
+        raise AssertionError("unreachable")  # pragma: no cover - never runs before the timeout
+
+    async def _run() -> None:
+        import kdive.mcp.tools.ops.resources._common as common_module
+
+        monkeypatch.setattr(common_module.asyncio, "open_connection", _hang)
+        probe = TcpResourceProbe(timeout_s=0.01)
+        assert await probe.probe("qemu+tls://example.invalid:16514/system") is False
+
+    asyncio.run(_run())
+
+
+def test_tcp_probe_hostless_uri_returns_false() -> None:
+    async def _run() -> None:
+        probe = TcpResourceProbe()
+        assert await probe.probe("not-a-uri-at-all") is False
+
+    asyncio.run(_run())
+
+
+# --- register.py error branches not reached by the per-kind preflight tests above ---
+
+
+def test_remote_libvirt_register_rejects_blank_host_uri(migrated_url: str, tmp_path: Path) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_remote_libvirt_resource(
+                pool,
+                _admin_ctx(),
+                _remote_request("rl-blank", host_uri="   "),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+    asyncio.run(_run())
+
+
+def test_local_libvirt_register_rejects_blank_host_uri(migrated_url: str, tmp_path: Path) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_local_libvirt_resource(
+                pool,
+                _admin_ctx(),
+                _local_request("ll-blank", host_uri="   "),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+    asyncio.run(_run())
+
+
+def test_local_libvirt_register_succeeds(migrated_url: str, tmp_path: Path) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_local_libvirt_resource(
+                pool,
+                _admin_ctx(),
+                _local_request("ll-ok", owner_project="*"),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+        assert resp.status == "registered", resp.model_dump()
+        row = await _resource_row(migrated_url, str(resp.data["id"]))
+        assert row is not None
+
+    asyncio.run(_run())
+
+
+def test_register_rejects_non_positive_concurrent_allocation_cap(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await register_fault_inject_resource(
+                pool,
+                _admin_ctx(),
+                _fault_request("fi-cap0", concurrent_allocation_cap=0),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+    asyncio.run(_run())
+
+
+# --- deregister.py error branches not reached by the ownership-gate tests above ---
+
+
+def test_deregister_rejects_invalid_uuid(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await deregister_resource(pool, _admin_ctx(), resource_id="not-a-uuid")
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+    asyncio.run(_run())
+
+
+def test_deregister_config_remote_libvirt_lost_race_not_found(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row pruned by a concurrent reconcile between the dispatch read and the locked re-read."""
+
+    async def _fake_classify(_pool: AsyncConnectionPool, _uid: UUID) -> tuple[str, str, str]:
+        return (ManagedBy.CONFIG.value, ResourceKind.REMOTE_LIBVIRT.value, "ghost")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            monkeypatch.setattr(deregister_module, "_classify_ownership", _fake_classify)
+            resp = await deregister_resource(
+                pool, _admin_ctx(), resource_id=str(uuid4()), reason="lost race"
+            )
+        assert resp.error_category == ErrorCategory.NOT_FOUND.value
+
+    asyncio.run(_run())
