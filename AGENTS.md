@@ -174,6 +174,9 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   proofs, run over the `live_stack` vehicle, selected by `just test-live-tcg`); `live_stack`
   (full HTTP transport). `just test-live` is native-only (`-m "live_vm and not live_vm_tcg"`);
   the TCG tier skips cleanly on a host without the foreign qemu emulator (`require_guest_arch`).
+  The self-hosted native-KVM runner host is codified in `deploy/ansible/playbooks/runner.yml`
+  (+ the `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`), built to the
+  `live_vm` environment contract in `tests/live_vm/__init__.py` (ADR-0387, #1291).
 - Tests mirror the package tree under `tests/`; `tests/adversarial/` holds concurrency /
   property-based (hypothesis) race tests, `tests/integration/` holds the end-to-end
   milestone exercises.
