@@ -108,54 +108,96 @@ The remote-only roles (`libvirt_tls`, `gdbstub_acl`, `remote_libvirt_facts`) are
 **not** used — the CI runner is a local-libvirt host with no TLS listener and no
 raw-TCP gdbstub egress to firewall.
 
+### The single service account (`github_runner_user`)
+
+The whole contract is delivered to **one** Linux account — the account the
+runner *service* runs as — and the spec names it `github_runner_user` (a
+required var, default `github-runner`). This is deliberately **not**
+`ansible_user_id`: operators typically run the play over SSH as `root`/`deploy`,
+while the runner service runs as a dedicated non-root account. The reused
+`libvirt_stack` role adds `ansible_user_id` to the `kvm`/`libvirt` groups for its
+own remote-provider purpose; the CI runner needs the *service* account in those
+groups, so **`live_vm_host` explicitly adds `github_runner_user` to `kvm` and
+`libvirt`** rather than relying on `libvirt_stack`'s connection-user add. Every
+contract step below — group membership, staging ownership, `enable-linger`,
+`XDG_RUNTIME_DIR`, and the readiness gate's `become_user` — targets
+`github_runner_user`. If the service account were not in `kvm`/`libvirt` (or got
+the wrong `/run/user/<uid>`), every live-VM boot would fail at CI time while every
+provisioning gate passed as the become user — the "green but not ready" trap one
+layer down. The gate closes it by asserting `github_runner_user`'s group
+membership and running as that user.
+
 ### New role `live_vm_host` — the contract delta
 
 Everything the two reused roles do not cover, RHEL-family (both target arches are
-Rocky, so SELinux applies to both):
+Rocky, so SELinux applies to both), all targeting `github_runner_user`:
 
+- **Service-account groups:** add `github_runner_user` to `kvm` and `libvirt`.
 - **Debug toolchain:** install `drgn`, `crash`, `makedumpfile`, `kexec-tools`,
   `kdump-utils`, `gdb`, and — for each non-native supported arch — the foreign
   `qemu-system-<arch>` (arch-keyed map, mirroring `libvirt_stack_qemu_package_map`).
-- **Staged-rootfs directory:** create `live_vm_staging_dir` (default
-  `/var/lib/kdive/live-vm`) owned by the runner user, mode `0755`, with **every
-  parent component world-traversable** (`o+x` up the tree) — never under `$HOME`,
-  whose `0700` mode hides it from the qemu user. Apply a persistent SELinux
-  `virt_image_t` fcontext (`sefcontext` + `restorecon`) so system-mode staged
-  images are not denied by sVirt. Session-mode tests need no relabel (qemu runs
-  as the invoking user), but the label is correct for both modes and harmless in
-  session mode.
-- **Short `XDG_RUNTIME_DIR`:** `loginctl enable-linger` for the runner user so
-  `/run/user/<uid>` exists even with no login session. `enable-linger` alone does
+- **Project venv for the `guestfs`/`drgn` import contract.** `check-local-libvirt.sh`
+  probes that the *worker's* interpreter can `import guestfs, drgn`, and that
+  interpreter is the project `.venv`, not system `python3` — system-package `drgn`
+  is not importable from the venv, and `libguestfs` has no PyPI wheel (the known
+  symlink dance, `docs/operating/runbooks/four-method-live-run.md` §4b). So the
+  role provisions the venv the same way the worker uses it: `uv sync --group live`
+  (drgn) in the repo checkout, install `python3-libguestfs`, and symlink its
+  `guestfs.py` + `libguestfsmod*.so` into the venv `site-packages` (matching
+  Python versions). The gate then runs with `KDIVE_PYTHON` pointed at that venv
+  interpreter, so "reaches green" is reproducible on a fresh runner, not only on a
+  host whose venv is already wired.
+- **Staging directories.** Create the `/var/lib/kdive` tree owned by
+  `github_runner_user`, with **both** staging areas the live tests need, because
+  `check-local-libvirt.sh` requires its install-staging path writable and the
+  provisioned-System family (kdump/install) genuinely uses it:
+  - `live_vm_staging_dir` (default `/var/lib/kdive/live-vm`) — the throwaway-rootfs
+    overlay area (`KDIVE_LIVE_VM_ROOTFS`'s parent);
+  - the install-staging path `check-local-libvirt.sh` checks (default
+    `/var/lib/kdive/install`, `KDIVE_INSTALL_STAGING`) — the provisioned-System
+    kernel/initrd stage.
+  Both are mode `0755` with **every parent component world-traversable** (`o+x`) —
+  never under `$HOME`, whose `0700` hides it from the qemu user — and both carry a
+  persistent SELinux `virt_image_t` fcontext (`sefcontext` + `restorecon`) so
+  system-mode staged images are not denied by sVirt. (Session mode needs no
+  relabel — qemu runs as the invoking user — but the label is correct for both
+  modes.)
+- **Short `XDG_RUNTIME_DIR`:** `loginctl enable-linger github_runner_user` so
+  `/run/user/<uid>` exists with no login session. `enable-linger` alone does
   **not** put `XDG_RUNTIME_DIR` in a system service's process environment, so the
   `github_runner` role also sets `Environment=XDG_RUNTIME_DIR=/run/user/<uid>` on
-  the runner service (below); the two together are what deliver the short QMP
-  socket base (#1258) to the actual test process. `enable-linger` keeps
-  `/run/user/<uid>` alive between jobs.
+  the runner service unit (below). The two together deliver the short QMP-socket
+  base (#1258) to the actual test process; `enable-linger` keeps the dir alive
+  between jobs.
 - **Verification (the host-contract gate).** The role fails if any part fails.
   `scripts/check-local-libvirt.sh` alone is **not** sufficient — it checks
-  `/dev/kvm`, the modular daemons, the toolchain imports, the `default` network,
-  and its own `KDIVE_INSTALL_STAGING`, but it has **no SELinux-label check, no
-  `XDG_RUNTIME_DIR` check, and does not look at `live_vm_staging_dir`**. So the
-  gate is two parts:
-  1. Run `scripts/check-local-libvirt.sh` as the runner user, asserting exit 0,
-     for the KVM / daemon / toolchain / network / install-staging contract it
-     does cover. Because `libvirt_stack` adds the runner user to the `kvm` and
-     `libvirt` groups **in the same run** and supplementary-group membership is
-     not live in an already-open session, this task runs after a
-     `meta: reset_connection` (fresh `become` session) so the group probes read
-     the new membership rather than false-failing or passing in a stale context.
-  2. `live_vm_host`'s **own** assertions for the delta this role uniquely owns,
-     which `check-local-libvirt.sh` does not cover:
+  `/dev/kvm`, the modular daemons, the venv `guestfs`/`drgn` import, the `default`
+  network, and its own `KDIVE_INSTALL_STAGING`, but it has **no SELinux-label
+  check, no `XDG_RUNTIME_DIR` check, and does not look at `live_vm_staging_dir`**.
+  So the gate is two parts, both run as `github_runner_user`:
+  1. Run `scripts/check-local-libvirt.sh` with `become_user: github_runner_user`,
+     `KDIVE_PYTHON` set to the provisioned venv, asserting exit 0 — for the KVM /
+     daemon / venv-import / network / install-staging contract it covers. Because
+     `live_vm_host` adds `github_runner_user` to `kvm`/`libvirt` **in the same
+     run** and supplementary-group membership is not live in an already-open
+     session, this runs after a `meta: reset_connection` so the group probes read
+     the new membership.
+  2. `live_vm_host`'s **own** assertions for the delta the script does not cover:
      - `live_vm_staging_dir` carries the `virt_image_t` type (assert on `ls -Z` /
-       `matchpathcon`), is mode `0755`, and is writable by the runner user;
-     - every parent of `live_vm_staging_dir` is `o+x` (traversable by the qemu
-       user), so a system-mode boot is not blocked by a `0700` ancestor;
-     - `XDG_RUNTIME_DIR` resolves to a short (`/run/user/<uid>`-length) path.
+       `matchpathcon`), is mode `0755`, and is writable by `github_runner_user`;
+     - every parent of `live_vm_staging_dir` is `o+x`, so a system-mode boot is
+       not blocked by a `0700` ancestor;
+     - `github_runner_user` is a member of `kvm` and `libvirt`;
+     - `/run/user/<github_runner_uid>` exists (post-`enable-linger`) **and** the
+       installed runner service unit's `Environment=` carries
+       `XDG_RUNTIME_DIR=/run/user/<uid>` (assert on the unit file /
+       `systemctl show`). This checks what is verifiable at provisioning time; it
+       does **not** claim to observe the service process's live environment.
   The **definitive** proof that the *runner service* process (not the Ansible
-  `become` session) can boot a domain is a smoke run through the registered
-  runner — that lives in sub-issue D's job and the runbook; the in-play gate is
-  the provisioning-time sanity check, and the spec does not claim the two are the
-  same context.
+  `become` session) boots a domain with a short QMP base is a smoke run through
+  the registered runner — sub-issue D's job and the runbook. The in-play gate is
+  the provisioning-time sanity check, and the spec does not conflate the two
+  contexts.
 
 ### New role `github_runner` — register the Actions runner
 
@@ -185,18 +227,26 @@ Rocky, so SELinux applies to both):
   empty** (mirrors the `gdb_addr` fail-closed precedent). The token assert lives
   inside this branch, so an idempotent re-run of an already-registered host needs
   no token.
-- **Service:** install the runner's `svc.sh` systemd service running as the
-  non-root user, with `Environment=` carrying `XDG_RUNTIME_DIR=/run/user/<uid>`
-  (the short QMP-socket base, paired with `live_vm_host`'s `enable-linger`) and
-  `KDIVE_SECRETS_ROOT` (the pointer to the file-based S3 credentials — B sets the
-  pointer; the credential material is populated by C/D or the operator).
-- **Trusted-events posture (documented + asserted where it can be):** the
-  runner *binary* cannot enforce which events dispatch to it — that is the
-  workflow `if:` guard (sub-issue D) plus the repository setting "Require
-  approval for all outside collaborators' workflows." The role/runbook states
-  this as a hard requirement and the ADR records why (fork-PR + self-hosted =
-  RCE). The `KDIVE_S3_*` secrets ride repo/org secrets, readable by `schedule` /
-  `workflow_dispatch` but never by fork PRs.
+- **Service, installed stopped (closes the B-before-D RCE window).** Install the
+  runner's `svc.sh` systemd service as `github_runner_user`, with `Environment=`
+  carrying `XDG_RUNTIME_DIR=/run/user/<uid>` (the short QMP-socket base, paired
+  with `live_vm_host`'s `enable-linger`) and `KDIVE_SECRETS_ROOT` (the pointer to
+  the file-based S3 credentials — B sets the pointer; C/D or the operator populate
+  the material). The service is installed **not started and not enabled** by
+  default: a bare `runner.yml` run registers the runner but leaves **no listener**
+  picking up jobs. Only when `github_runner_service_enabled: true` is set — after
+  the operator has applied the trusted-events posture — does the role start/enable
+  it. This is because B is sequenced before D: until D's `if:` guard and the repo
+  approval setting exist, a listening self-hosted runner on
+  `[self-hosted, kvm, <arch>]` is an arbitrary-code-execution target for a fork PR.
+  Installing stopped makes the automation itself fail-safe, not just the runbook.
+- **Trusted-events posture (ordered, not merely documented):** the runner
+  *binary* cannot enforce which events dispatch to it — that is the workflow `if:`
+  guard (sub-issue D) plus the repository setting "Require approval for all
+  outside collaborators' workflows." The runbook **orders** that repo setting (and
+  D's guard) **before** enabling the service, and the ADR records why (fork-PR +
+  self-hosted = RCE). The `KDIVE_S3_*` secrets ride repo/org secrets, readable by
+  `schedule` / `workflow_dispatch` but never by fork PRs.
 
 ### The arch seam (the one non-additive step, made explicit)
 
@@ -232,10 +282,13 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 | Registration token absent (first-time branch) | Fail closed in the register branch (`assert`, `no_log`), like `gdb_addr`. On an already-registered host the branch is skipped, so no token is needed. |
 | Host arch has no runner asset + no override URL | Fail loud naming the ppc64le gap and the `github_runner_tarball_url` knob. |
 | Downloaded runner tarball checksum mismatch | `get_url` with `checksum:` (an operator-pinned `github_runner_sha256`, not a same-origin fetch) fails the task; nothing is extracted. |
-| `/dev/kvm` / daemons / tools not reachable | `check-local-libvirt.sh` gate task (run after a `reset_connection` so group membership is live) exits non-zero → play fails with the script's actionable FAIL lines. |
-| Staging dir mis-pointed into `$HOME` / a `0700` ancestor | `live_vm_host`'s own gate asserts every parent of `live_vm_staging_dir` is `o+x`; a non-traversable ancestor fails the play (`check-local-libvirt.sh` does **not** cover this — it checks a different dir and cannot see the traversal problem). |
+| `/dev/kvm` / daemons / venv-import not reachable | `check-local-libvirt.sh` gate (run as `github_runner_user`, `KDIVE_PYTHON`=venv, after `reset_connection` so group membership is live) exits non-zero → play fails with the script's actionable FAIL lines. |
+| Service account not in `kvm`/`libvirt` (runs as a different user than the play connects as) | `live_vm_host` adds `github_runner_user` (not `ansible_user_id`) to `kvm`/`libvirt`; the gate asserts that membership, so a mismatched account fails at provisioning instead of at CI-boot time. |
+| Venv cannot `import guestfs, drgn` on a fresh host | `live_vm_host` provisions the venv (`uv sync --group live` + the `libguestfs` symlink) and the gate runs against it via `KDIVE_PYTHON` — reproducible, not dev-host-only. |
+| Staging dir mis-pointed into `$HOME` / a `0700` ancestor | `live_vm_host`'s own gate asserts every parent of `live_vm_staging_dir` is `o+x`; a non-traversable ancestor fails the play (`check-local-libvirt.sh` cannot see the traversal problem). |
 | SELinux `virt_image_t` not applied | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label via `ls -Z`/`matchpathcon` — a missing label fails the play at provisioning, not silently at live-test time. |
-| Runner service missing a short `XDG_RUNTIME_DIR` | `live_vm_host`'s gate asserts `XDG_RUNTIME_DIR` resolves to a `/run/user/<uid>`-length path; the service `Environment=` sets it, `enable-linger` keeps the dir alive. |
+| Runner service missing a short `XDG_RUNTIME_DIR` | `live_vm_host`'s gate asserts `/run/user/<uid>` exists **and** the service unit's `Environment=` carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
+| Runner registered but starts listening before the trust posture is set | The service installs **stopped/disabled**; the role starts it only on explicit `github_runner_service_enabled: true`, so a bare `runner.yml` leaves no fork-PR-exploitable listener. |
 
 ## Testing
 
@@ -264,19 +317,28 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
   part of the `0 changed` bar — the bar asserts a second run of a converged host
   is a no-op. Noted in the runbook.
 - **Local host-contract validation:** on this dev KVM host, `live_vm_host`'s
-  two-part gate reaches green — `check-local-libvirt.sh` for the KVM / daemon /
-  toolchain / network contract it covers, plus the role's own assertions for the
-  `virt_image_t` label, parent traversability, and short `XDG_RUNTIME_DIR` that
-  the script does not cover.
+  two-part gate reaches green — `check-local-libvirt.sh` (run as
+  `github_runner_user` against the provisioned venv) for the KVM / daemon /
+  venv-import / network contract it covers, plus the role's own assertions for the
+  service-account group membership, `virt_image_t` label, parent traversability,
+  and the `/run/user/<uid>` + service-unit `XDG_RUNTIME_DIR` that the script does
+  not cover. The runner-service *process*-context proof (a job actually booting a
+  domain) is deferred to D's smoke run.
 
 ## Runbook
 
 A `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`:
-prerequisites, the three
-playbook commands, obtaining a registration token, the trusted-events repo
-settings, wiring `KDIVE_S3_*` secrets, the ppc64le override, and the verification
-steps (idempotence + off-host `check-local-libvirt`). An `AGENTS.md` /
-`deploy/ansible/README.md` pointer so the runner build is discoverable.
+prerequisites; the playbook commands (`libvirt_stack` → `libvirt_pool_net` →
+`live_vm_host` → `github_runner` via `runner.yml`); provisioning the venv;
+obtaining a registration token; **the ordered security steps — apply the repo
+"require approval for all outside collaborators" setting (and D's `if:` guard)
+BEFORE setting `github_runner_service_enabled: true`**, so the runner never
+listens without the trust posture; wiring `KDIVE_S3_*` secrets and where the
+credential material lands (C/D/operator); the ppc64le `github_runner_tarball_url`
+override; deregistration (`config.sh remove` / `svc.sh uninstall`); and the
+verification steps (idempotence `0 changed` on an already-registered host +
+off-host `check-local-libvirt`). An `AGENTS.md` / `deploy/ansible/README.md`
+pointer so the runner build is discoverable.
 
 ## Rollout / rollback
 

@@ -32,23 +32,36 @@ reusing `libvirt_stack` (qemu/libvirt/libguestfs install, RHEL→modular-daemon
 switch, KVM assertion) and `libvirt_pool_net` (`default` pool + network) as-is,
 and adding two new roles plus a `playbooks/runner.yml`:
 
-- `live_vm_host` — the contract delta: the kernel-debug toolchain (`drgn`,
-  `crash`, `makedumpfile`, `kexec-tools`, `kdump-utils`, `gdb`, foreign qemu per
-  arch), a world-traversable `virt_image_t`-labeled staged-rootfs directory,
-  `loginctl enable-linger` for a short `XDG_RUNTIME_DIR`, and a **two-part
-  verification gate**: `scripts/check-local-libvirt.sh` (run after a connection
-  reset so the just-added group membership is live) for the KVM/daemon/toolchain
-  contract it covers, plus the role's own assertions for the staging-dir label,
-  parent traversability, and short `XDG_RUNTIME_DIR` that the script does not.
+The **entire contract targets one account** — `github_runner_user`, the account
+the runner *service* runs as, deliberately distinct from the Ansible connection
+user (`ansible_user_id`). `live_vm_host` adds *that* account to `kvm`/`libvirt`
+(not the connection user `libvirt_stack` adds), owns its staging and linger, and
+the gate runs as it — otherwise the service process is not in the groups and the
+host is "green but not ready" one layer down.
+
+- `live_vm_host` — the contract delta, all for `github_runner_user`: the
+  kernel-debug toolchain (`drgn`, `crash`, `makedumpfile`, `kexec-tools`,
+  `kdump-utils`, `gdb`, foreign qemu per arch); the project `.venv` the worker's
+  `guestfs`/`drgn` import needs (`uv sync --group live` + the `libguestfs`
+  symlink), since system packages are not importable from the venv; both a
+  world-traversable `virt_image_t`-labeled live-VM staging dir and the
+  install-staging dir the gate checks; `loginctl enable-linger` for a short
+  `XDG_RUNTIME_DIR`; and a **two-part verification gate** run as the service
+  account after a connection reset — `scripts/check-local-libvirt.sh` (KVM /
+  daemon / venv-import / network) plus the role's own assertions for group
+  membership, the staging-dir label, parent traversability, and the
+  `/run/user/<uid>` + service-unit `XDG_RUNTIME_DIR` the script does not cover.
 - `github_runner` — arch-selected runner asset + `[self-hosted, kvm, <arch>]`
   label, download verified against an operator-pinned SHA-256 (not a same-origin
   fetch), a `.runner`-marker idempotence guard so a re-run of an already-registered
-  host is `0 changed` and needs no token, registration as a non-root systemd
-  service (with `Environment=XDG_RUNTIME_DIR` set, since `enable-linger` alone
-  does not export it), a `no_log` registration token that **fails closed** when
-  empty in the first-time branch, and `KDIVE_SECRETS_ROOT` wired as the pointer to
-  the provisioned-System family's S3 credentials (B sets the pointer; C/D or the
-  operator populate the credential files).
+  host is `0 changed` and needs no token, registration as the non-root
+  `github_runner_user` systemd service (with `Environment=XDG_RUNTIME_DIR` set,
+  since `enable-linger` alone does not export it) **installed stopped/disabled**
+  until `github_runner_service_enabled` is set so a bare run leaves no unguarded
+  listener, a `no_log` registration token that **fails closed** when empty in the
+  first-time branch, and `KDIVE_SECRETS_ROOT` wired as the pointer to the
+  provisioned-System family's S3 credentials (B sets the pointer; C/D or the
+  operator populate the material).
 
 Every host-build step resolves by architecture. The one step that is **not** a
 free ppc64le drop-in — the `actions/runner` binary, for which upstream ships no
@@ -56,9 +69,13 @@ ppc64le asset — is made an explicit parameterized seam: `github_runner_tarball
 overrides the derived asset URL, and with neither an upstream asset nor an
 override the role fails loud naming the gap. The trusted-events posture
 (`schedule` + `workflow_dispatch` only; never fork PRs; `KDIVE_S3_*` on repo/org
-secrets) is a documented, runbook-enforced requirement, since the runner binary
-cannot enforce event trust itself — the workflow `if:` guard (sub-issue D) and
-the repo's outside-collaborator-approval setting do.
+secrets) is enforced by *ordering*, not documentation alone: because B is
+sequenced before D, the runner service installs **stopped** and the runbook
+requires the repo outside-collaborator-approval setting and D's `if:` guard
+before the operator enables it — so a bare `runner.yml` run never leaves an
+unguarded listener a fork PR could target. The runner binary cannot enforce
+event trust itself; the workflow `if:` guard (sub-issue D) and the repo setting
+do, and installing stopped keeps the window closed until they exist.
 
 ## Consequences
 
