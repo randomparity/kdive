@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface supports_traffic_capture on systems.get
 - Teardown reclaims per-System pcap directory
 - Make service ports configurable and guard HTTP port
+- Env-contract resolvers for the live_vm harness (#1290)
+- Arch-parameterized throwaway_domain_xml builder (#1290)
+- Wait predicates, overlay + session-XDG helpers (#1290)
+- Boot_throwaway_domain context manager (#1290)
 
 ### Changed
 
@@ -54,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename to register_or_refresh_discovered_resource
 - Extract SYSTEM_SSH_NETDEV_ID constant
 - Keep capture netdev id inside local-libvirt provider
+- Satisfy config-env + provider-boundary guards (#1290)
 
 ### Documentation
 
@@ -108,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settle disk, native-System coverage, additive markers
 - Propagate accel-neutral disk model to all sizing sites
 - Link epic #1289 and sub-issues in live-test-framework spec
+- Live_vm harness + environment contract spec (#1290)
+- Harden live_vm harness spec after adversarial review (#1290)
+- Resolve iteration-2 review findings on live_vm spec (#1290)
+- Always emit serial + soften dogfood parity claim (#1290)
+- TDD implementation plan for live_vm harness (#1290)
+- Fix four plan-review executability findings (#1290)
 
 ### Fixed
 
@@ -153,9 +164,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the python-dependencies group across 1 directory with 8 updates
 - Bump the docker-images group across 1 directory with 2 updates
 
+### Harden
+
+- Guard panic-wait + overlay collisions from branch review (#1290)
+
 ### Scripts
 
 - Improve check-local-libvirt.sh output formatting
+
+### Simplify
+
+- Share one deadline-poll loop across the waiters (#1290)
 
 ## [0.3.0] - 2026-07-16
 
