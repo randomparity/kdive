@@ -103,6 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix plan after adversarial review
 - Regenerate tool reference + rbac matrix for capture_traffic
 - Reconcile ADR/spec with put_artifact + thin capture port
+- Add live-test framework epic spec and ADR-0386
+- Correct live_vm_tcg vehicle and per-test mode in epic spec
+- Settle disk, native-System coverage, additive markers
+- Propagate accel-neutral disk model to all sizing sites
+- Link epic #1289 and sub-issues in live-test-framework spec
 
 ### Fixed
 
