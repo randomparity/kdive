@@ -27,9 +27,7 @@ class _FakeCursor:
 
 
 def _run(cursor: _FakeCursor, row_id: UUID) -> bool:
-    return asyncio.run(
-        image_referenced_by_live_system(cast(AsyncCursor[DictRow], cursor), row_id)
-    )
+    return asyncio.run(image_referenced_by_live_system(cast(AsyncCursor[DictRow], cursor), row_id))
 
 
 def test_absent_image_is_not_referenced() -> None:
