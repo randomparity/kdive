@@ -32,12 +32,13 @@ drgn-live/kdump image.
 - `site.yml` — full **remote-libvirt provider** host bring-up: stack → tls →
   pool/net → acl → emit facts.
 - `playbooks/runner.yml` — a distinct path: the **local-libvirt self-hosted CI
-  runner** for the native-KVM `live_vm` tier (epic #1289 sub-issue B, #1291). It
-  reuses `libvirt_stack` + `libvirt_pool_net` and adds `live_vm_host` (the
-  `live_vm` environment-contract delta — toolchain, venv, `virt_image_t` staging,
-  short `XDG_RUNTIME_DIR`, host-contract gate) and `github_runner` (register a
-  runner, installed stopped until the trusted-events posture is set). No TLS
-  listener, no gdbstub ACL. Walkthrough:
+  runner** (Ubuntu 26.04 LTS) for the native-KVM `live_vm` tier (epic #1289
+  sub-issue B, #1291). It reuses `libvirt_stack` + `libvirt_pool_net` and adds
+  `live_vm_host` (the `live_vm` environment-contract delta — toolchain, the
+  system-3.14 venv, AppArmor-confined staging, short `XDG_RUNTIME_DIR`,
+  host-contract gate) and `github_runner` (register a runner, installed stopped
+  until the trusted-events posture is set). No TLS listener, no gdbstub ACL.
+  Walkthrough:
   [`docs/operating/runbooks/self-hosted-kvm-runner.md`](../../docs/operating/runbooks/self-hosted-kvm-runner.md).
 - `playbooks/pki.yml` — controller-side CA + per-host server certs + worker client
   bundle. Run once. The client bundle is written to `artifacts/client/` (gitignored,

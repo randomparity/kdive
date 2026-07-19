@@ -179,11 +179,12 @@ install_staging_dir: /var/lib/kdive/install
 live_vm_venv: /opt/kdive
 live_vm_repo_url: https://github.com/randomparity/kdive.git
 live_vm_repo_version: main
-# Foreign qemu emulator per non-native arch (TCG). Arch-keyed, mirrors libvirt_stack.
-live_vm_foreign_qemu_map:
-  x86_64: qemu-system-ppc  # a native-x86 host can emulate ppc64le under TCG
-  ppc64le: qemu-system-x86  # a native-ppc host can emulate x86_64 under TCG
 ```
+
+> **Live-validation correction (#1291):** an earlier draft installed a foreign
+> qemu emulator here for cross-arch TCG. Removed — this native-KVM host runs the
+> `live_vm` native tier only (cross-arch TCG rides hosted runners, ADR-0353), and
+> RHEL/Rocky's `qemu-kvm` ships no `qemu-system-*` foreign targets to install.
 
 - [ ] **Step 4: Create the runner playbook.**
 
@@ -231,7 +232,7 @@ git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runne
 - Modify: `deploy/ansible/roles/live_vm_host/tasks/main.yml`
 
 **Interfaces:**
-- Consumes: `github_runner_user`, `live_vm_host_packages`, `live_vm_foreign_qemu_map` (Task 1 defaults).
+- Consumes: `github_runner_user`, `live_vm_host_packages` (Task 1 defaults).
 - Produces: the service account in `kvm`/`libvirt`, the toolchain installed, `/boot` kernels readable, `enable-linger` set — all asserted by Task 5's gate.
 
 - [ ] **Step 1: Replace the placeholder with the service-account + toolchain tasks.**
@@ -257,14 +258,6 @@ git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runne
     name: "{{ live_vm_host_packages }}"
     state: present
   when: ansible_os_family == 'RedHat'
-
-- name: Install the foreign qemu emulator for cross-arch TCG (RHEL-family)
-  ansible.builtin.dnf:
-    name: "{{ live_vm_foreign_qemu_map[ansible_architecture] }}"
-    state: present
-  when:
-    - ansible_os_family == 'RedHat'
-    - ansible_architecture in live_vm_foreign_qemu_map
 
 - name: Find the host kernels under /boot (vmlinuz-* x86, vmlinux-* ppc64le)
   # Stock RHEL/Rocky ships /boot/vmlinuz-* 0600 root:root; libguestfs' supermin appliance
@@ -962,7 +955,7 @@ Expected: `check-local-libvirt.sh` reports the host ready (exit 0) or names conc
 
 ## Self-Review (completed against the spec)
 
-- **Spec coverage:** reuse boundary (Task 1 playbook) · single service account (Tasks 1–7 use `github_runner_user`) · toolchain + foreign qemu (Task 2) · /boot readability (Task 2) · venv + ABI match + KDIVE_PYTHON contract (Task 3) · both staging dirs + virt_image_t (Task 4) · two-part gate incl. both-dir label + group membership + XDG dir (Task 5) · arch fail-loud + tarball override seam (Task 7) · pinned checksum (Task 7) · idempotence marker guard + token fail-closed + install-stopped (Task 7) · service XDG/secrets env (Task 7) · regression harness for the three behaviors (Tasks 6–7) · runbook + pointers + trusted-events ordering + offline-window recovery + credential-ownership note (Task 8) · local validation (Task 9). The stale-registration *liveness* probe is scoped as a Task 7 follow-up note (spec allows the marker guard + runbook recovery as the floor).
+- **Spec coverage:** reuse boundary (Task 1 playbook) · single service account (Tasks 1–7 use `github_runner_user`) · toolchain (Task 2) · /boot readability (Task 2) · venv + ABI match + KDIVE_PYTHON contract (Task 3) · both staging dirs + virt_image_t (Task 4) · two-part gate incl. both-dir label + group membership + XDG dir (Task 5) · arch fail-loud + tarball override seam (Task 7) · pinned checksum (Task 7) · idempotence marker guard + token fail-closed + install-stopped (Task 7) · service XDG/secrets env (Task 7) · regression harness for the three behaviors (Tasks 6–7) · runbook + pointers + trusted-events ordering + offline-window recovery + credential-ownership note (Task 8) · local validation (Task 9). The stale-registration *liveness* probe is scoped as a Task 7 follow-up note (spec allows the marker guard + runbook recovery as the floor).
 - **Placeholders:** none — every code step carries actual YAML/Bash; the `getent` uid lookups are shown explicitly (verify.yml + github_runner), not left as prose.
 - **Type/name consistency:** `github_runner_user`, `live_vm_staging_dir`, `install_staging_dir`, `live_vm_venv`, `github_runner_arch_map`, `github_runner_install_dir`, tag `github_runner_register` are used identically across tasks.
 - **Plan-review fixes folded in:** harness isolates the register branch via `--tags github_runner_register` (so case 3 never reaches `svc.sh`); the label gate reads `ls -Zd` (not the inverted `matchpathcon -V`); `/boot` uses find+file for 0-changed idempotence; the venv root is pre-created + `uv` installed before the clone; the runner tarball always downloads (only the checksum is conditional); and Task 5 exercises the corrected `ls -Zd`/`getent` mechanisms in-branch.

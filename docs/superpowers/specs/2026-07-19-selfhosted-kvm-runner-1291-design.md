@@ -1,7 +1,18 @@
-# Self-hosted Rocky 10 KVM runner, codified (epic #1289, sub-issue B)
+# Self-hosted Ubuntu 26.04 KVM runner, codified (epic #1289, sub-issue B)
 
 - **Date:** 2026-07-19
 - **Status:** Draft
+
+> **Retargeted to Ubuntu 26.04 LTS during live validation.** This spec was
+> authored for Rocky Linux 10. Live-testing the codified roles against a real host
+> found that kdive requires Python 3.14, which Rocky 10 cannot provide (it ships
+> 3.12 with a 3.12-only libguestfs binding). Ubuntu 26.04 LTS ships a system 3.14
+> with a matching `python3-guestfs`, so the runner base is Ubuntu 26.04. The
+> **authoritative current record is [ADR-0387](../../adr/0387-selfhosted-kvm-runner-host-codification.md)**
+> and the runbook; where sections below still say Rocky/RHEL/SELinux/`dnf`, read
+> the Ubuntu equivalents (apt, monolithic `libvirtd`, AppArmor/`virt-aa-helper`
+> instead of SELinux `virt_image_t`, `python3-guestfs`, `kdump-tools`). Key
+> corrections are inlined; the deep implementation prose is superseded by the ADR.
 - **Issue:** [#1291](https://github.com/randomparity/kdive/issues/1291)
 - **Epic:** [#1289](https://github.com/randomparity/kdive/issues/1289) · epic spec
   [`docs/design/2026-07-18-live-test-framework.md`](../../design/2026-07-18-live-test-framework.md)
@@ -12,7 +23,7 @@
 
 ## Problem
 
-The `live_vm` native-KVM tier needs a real host to run on: Rocky Linux 10 with
+The `live_vm` native-KVM tier needs a real host to run on: Ubuntu 26.04 LTS with
 libvirt, qemu, the kernel-debug toolchain, and a registered GitHub Actions
 runner. Today that host is tribal knowledge — no reproducible build, so a fresh
 runner (or the north-star ppc64le POWER runner) is a from-memory bring-up.
@@ -28,13 +39,18 @@ contract" section and enforced by `tests/live_vm/__init__.py`:
 
 - **KVM + native qemu:** `/dev/kvm` readable/writable by the runner user; the
   host's native `qemu-system-<arch>` present.
-- **Modular libvirt daemons:** `virtqemud` / `virtnetworkd` (RHEL-family model).
+- **libvirt daemon:** the monolithic `libvirtd` (the Ubuntu/Debian model;
+  `libvirt_stack` is OS-branched and does not switch Ubuntu to modular daemons).
 - **`default` storage pool + network:** active and autostarted.
-- **Kernel-debug toolchain:** `drgn`, `crash`, `makedumpfile`, `kexec-tools`,
-  `kdump-utils`, `gdb`, plus the foreign qemu emulator per non-native arch (TCG).
+- **Kernel-debug toolchain:** `crash`, `makedumpfile`, `kexec-tools`,
+  `kdump-tools`, `gdb`, `python3-guestfs` (`drgn` + `libvirt-python` build into the
+  venv from PyPI). No foreign qemu emulator: this host runs the native-KVM
+  `live_vm` tier only (`-m "live_vm and not live_vm_tcg"`); cross-arch TCG rides
+  hosted runners (ADR-0353), so the native runner never needs it.
 - **Staged rootfs location:** a writable, **world-traversable** directory (never
-  `$HOME`, whose `0700` mode hides it from the qemu user) that carries the
-  SELinux `virt_image_t` label so system-mode staged images boot.
+  `$HOME`, whose `0700` mode hides it from the qemu user). On Ubuntu no static
+  disk label is needed — libvirt confines qemu with AppArmor, and `virt-aa-helper`
+  permits each domain's disk paths dynamically from the domain XML.
 - **Short `XDG_RUNTIME_DIR`:** `/run/user/<uid>` present for the runner user, so
   session-mode QEMU's QMP socket path stays under the length limit (#1258).
 - **Object-store env pointer for the provisioned-System family:** the runner
@@ -111,7 +127,7 @@ reused as-is:
 
 | Reused role | What it already delivers toward the contract |
 | --- | --- |
-| `libvirt_stack` | qemu / qemu-img / libvirt / libguestfs / virtinst install (arch-keyed qemu package map); RHEL→modular-daemon switch (`virtqemud`/`virtnetworkd`); runner user in `kvm`+`libvirt` groups; `virt-host-validate` KVM assertion. |
+| `libvirt_stack` | qemu / qemu-img / libvirt / libguestfs / virtinst install (OS-branched apt/dnf + arch-keyed qemu package map); OS-branched daemon model (modular on RHEL, monolithic `libvirtd` on Debian/Ubuntu); runner user in `kvm`+`libvirt` groups; `virt-host-validate` KVM assertion. |
 | `libvirt_pool_net` | `default` dir storage pool + active/autostarted `default` network (which `check-local-libvirt.sh` asserts). |
 
 The remote-only roles (`libvirt_tls`, `gdbstub_acl`, `remote_libvirt_facts`) are
@@ -139,8 +155,9 @@ membership and running as that user.
 
 ### New role `live_vm_host` — the contract delta
 
-Everything the two reused roles do not cover, RHEL-family (both target arches are
-Rocky, so SELinux applies to both), all targeting `github_runner_user`:
+Everything the two reused roles do not cover, on the Ubuntu 26.04 base (both
+target arches are Ubuntu; qemu is AppArmor-confined, not SELinux), all targeting
+`github_runner_user`:
 
 - **Service-account groups:** add `github_runner_user` to `kvm` and `libvirt`.
 - **Debug toolchain:** install `drgn`, `crash`, `makedumpfile`, `kexec-tools`,
@@ -330,8 +347,8 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 - `playbooks/runner.yml`: applies `libvirt_stack` → `libvirt_pool_net` →
   `live_vm_host` → `github_runner` to a new `live_vm_runners` inventory group.
 - Inventory: a `live_vm_runners` group in `hosts.yml` and a host_vars file for
-  the x86_64 runner (the existing `rock10-big` is a remote-libvirt host; the
-  runner is a distinct role for a host, so it gets its own group membership).
+  the x86_64 runner (`ub26-runner`) — a distinct role for a host, with its own
+  group membership, separate from the remote-libvirt provider hosts.
 
 ## Failure modes and how they are handled
 
@@ -344,8 +361,8 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 | Service account not in `kvm`/`libvirt` (runs as a different user than the play connects as) | `live_vm_host` adds `github_runner_user` (not `ansible_user_id`) to `kvm`/`libvirt`; the gate asserts that membership, so a mismatched account fails at provisioning instead of at CI-boot time. |
 | Venv cannot `import guestfs, drgn` on a fresh host | `live_vm_host` provisions the venv (`uv sync --group live` + the `libguestfs` symlink) and the gate runs against it via `KDIVE_PYTHON` — reproducible, not dev-host-only. |
 | Staging dir mis-pointed into `$HOME` / a `0700` ancestor | `live_vm_host`'s own gate asserts every parent of `live_vm_staging_dir` is `o+x`; a non-traversable ancestor fails the play (`check-local-libvirt.sh` cannot see the traversal problem). |
-| SELinux `virt_image_t` not applied (either staging dir) | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label on **both** the live-VM and install-staging dirs via `ls -Z`/`matchpathcon` — a missing label on either fails the play at provisioning, not silently at live-test time. |
-| Stock Rocky 10 ships `/boot/vmlinuz-*` `0600 root:root` → gate fails as non-root | `live_vm_host` makes the host kernels group-readable (`chmod 0644 /boot/vmlinu?-*`) so `check-local-libvirt.sh`'s `_host_kernels_readable` passes for the service account; runbook flags re-applying after a kernel upgrade. |
+| Staged image denied by qemu confinement | On Ubuntu, AppArmor's `virt-aa-helper` permits each domain's disk paths dynamically from the domain XML, so the world-traversable, runner-owned staging dirs need no static label — there is no SELinux `virt_image_t` step to fail. |
+| Stock Ubuntu ships `/boot/vmlinuz-*` `0600 root:root` → gate fails as non-root | `live_vm_host` makes the host kernels group-readable (`0640 root:kvm`, service account in `kvm`) so `check-local-libvirt.sh`'s `_host_kernels_readable` passes; runbook flags re-applying after a kernel upgrade. |
 | Runner service missing a short `XDG_RUNTIME_DIR` | The gate asserts `/run/user/<uid>` exists and `github_runner` asserts the runner `.env` (loaded into job processes) carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
 | Runner registered but starts listening before the trust posture is set | The service installs **stopped/disabled**; the role starts it only on explicit `github_runner_service_enabled: true`, so a bare `runner.yml` leaves no fork-PR-exploitable listener. |
 | Locally registered but removed server-side (offline past GitHub's ~14-day window, or admin-removed) | Enabling the service runs a liveness check; if the local `.runner` markers exist but GitHub no longer knows the runner, the role re-registers (fresh token) instead of starting a dead runner. Recovery (`config.sh remove` + re-run) and the offline-window warning are in the runbook. |
@@ -376,14 +393,15 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
   registration is inherently a change (it configures a new runner) and is not
   part of the `0 changed` bar — the bar asserts a second run of a converged host
   is a no-op. Noted in the runbook.
-- **Local host-contract validation:** on this dev KVM host, `live_vm_host`'s
-  two-part gate reaches green — `check-local-libvirt.sh` (run as
-  `github_runner_user` against the provisioned venv) for the KVM / daemon /
-  venv-import / network contract it covers, plus the role's own assertions for the
-  service-account group membership, `virt_image_t` label, parent traversability,
-  and the `/run/user/<uid>` + service-unit `XDG_RUNTIME_DIR` that the script does
-  not cover. The runner-service *process*-context proof (a job actually booting a
-  domain) is deferred to D's smoke run.
+- **Live host-contract validation:** proven end to end on a fresh Ubuntu 26.04
+  host — `runner.yml` converges (`failed=0`), `live_vm_host`'s two-part gate
+  reaches green (`check-local-libvirt.sh` as `github_runner_user` against the
+  provisioned venv, plus the role's own assertions for group membership, parent
+  traversability, and `/run/user/<uid>` + service-unit `XDG_RUNTIME_DIR`), the venv
+  imports `guestfs`/`drgn`/`libvirt` at 3.14, the runner registers offline with its
+  service `disabled`+`inactive`, and a converged re-run is `changed=0`. The
+  runner-service *process*-context proof (a job actually booting a domain) is
+  deferred to D's smoke run.
 
 ## Runbook
 

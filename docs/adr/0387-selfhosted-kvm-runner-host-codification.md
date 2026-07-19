@@ -7,17 +7,30 @@
 ## Context
 
 Epic #1289 (directional ADR-0386) runs the native-KVM `live_vm` tier on per-arch
-self-hosted Rocky Linux 10 runners. Sub-issue A (#1290) fixed the test-side
-environment contract in code. Sub-issue B (#1291) must build the **host side** of
-that contract — libvirt, qemu, the kernel-debug toolchain, a staged-rootfs
-location with the right SELinux label, and a registered GitHub Actions runner —
-as reproducible automation, not tribal knowledge.
+self-hosted runners; this ADR settles their base OS as **Ubuntu 26.04 LTS**
+(rationale below). Sub-issue A (#1290) fixed the test-side environment contract in
+code. Sub-issue B (#1291) must build the **host side** of that contract — libvirt,
+qemu, the kernel-debug toolchain, a staged-rootfs location the qemu confinement
+can read, and a registered GitHub Actions runner — as reproducible automation,
+not tribal knowledge.
 
 The `deploy/ansible` tree already automates a *remote-libvirt provider* host
 (TLS listener, PKI, gdbstub ACL). A CI runner is a *local-libvirt* host with a
 different contract: no TLS, no raw-TCP gdbstub egress, but it does need the
 `live_vm` quirks (session-mode-capable QEMU, short `XDG_RUNTIME_DIR`,
-`virt_image_t`-labeled staging) and a registered runner gated to trusted events.
+AppArmor-confined staging) and a registered runner gated to trusted events.
+
+**Runner base OS — Ubuntu 26.04 LTS.** The `live_vm` worker imports `guestfs`
+and `drgn` from the project venv, and kdive requires Python 3.14. Only Ubuntu
+26.04 LTS ships a *system* Python 3.14 with a matching `python3-guestfs`
+binding; Rocky/RHEL 10 ship Python 3.12 with a 3.12-only libguestfs and no 3.14
+path, and no modern RHEL-family release exists yet. On Ubuntu the venv pins the
+system 3.14 interpreter and symlinks the system libguestfs binding — no
+`requires-python` change and no from-source libguestfs build, both of which the
+Rocky path forced (live-discovered on a Rocky 10 host, see Alternatives). Ubuntu
+confines qemu with AppArmor (`virt-aa-helper`), not SELinux, so the staging tree
+needs no static disk label. `libvirt_stack`/`libvirt_pool_net` are already
+OS-branched (monolithic `libvirtd` on Debian/Ubuntu), so the role reuse holds.
 
 Two forces shape the decision. First, the epic's primary target is ppc64le;
 x86_64 is the cost-effective proof of concept, so the host build must be
@@ -28,9 +41,10 @@ security boundary, not a preference.
 ## Decision
 
 We will codify the runner host as **Ansible roles under `deploy/ansible`**,
-reusing `libvirt_stack` (qemu/libvirt/libguestfs install, RHEL→modular-daemon
-switch, KVM assertion) and `libvirt_pool_net` (`default` pool + network) as-is,
-and adding two new roles plus a `playbooks/runner.yml`:
+reusing `libvirt_stack` (qemu/libvirt/libguestfs install — already OS-branched:
+modular daemons on RHEL, monolithic `libvirtd` on Debian/Ubuntu — plus the KVM
+assertion) and `libvirt_pool_net` (`default` pool + network) as-is, and adding
+two new roles plus a `playbooks/runner.yml`:
 
 The **entire contract targets one account** — `github_runner_user`, the account
 the runner *service* runs as, deliberately distinct from the Ansible connection
@@ -40,20 +54,23 @@ the gate runs as it — otherwise the service process is not in the groups and t
 host is "green but not ready" one layer down.
 
 - `live_vm_host` — the contract delta, all for `github_runner_user`: the
-  kernel-debug toolchain (`drgn`, `crash`, `makedumpfile`, `kexec-tools`,
-  `kdump-utils`, `gdb`, foreign qemu per arch); the project `.venv` the worker's
-  `guestfs`/`drgn` import needs (`uv sync --python /usr/bin/python3 --group live`
-  + the `libguestfs` symlink, ABI-matched to the system interpreter) at a **pinned
-  persistent path** D reuses via `KDIVE_PYTHON` rather than rebuilding per job,
-  since system packages are not importable from the venv; group-readable `/boot`
-  kernels for the service account (stock RHEL ships them `0600 root:root`, which
-  fails libguestfs' appliance build); both a world-traversable
-  `virt_image_t`-labeled live-VM staging dir and the install-staging dir the gate
-  checks (label asserted on both); `loginctl enable-linger` for a short
-  `XDG_RUNTIME_DIR`; and a **two-part verification gate** run as the service
-  account after a connection reset — `scripts/check-local-libvirt.sh` (KVM /
-  daemon / venv-import / network) plus the role's own assertions for group
-  membership, the staging-dir label, parent traversability, and the
+  kernel-debug toolchain (`crash`, `makedumpfile`, `kexec-tools`, `kdump-tools`,
+  `gdb`, `python3-guestfs`) plus the venv build deps (`build-essential`,
+  `libvirt-dev`, `libelf-dev`/`libdw-dev`/`libkdumpfile-dev`); the project `.venv`
+  the worker's `guestfs`/`drgn` import needs (`uv sync --python /usr/bin/python3
+  --group live` builds `drgn`+`libvirt-python` from PyPI and the `libguestfs`
+  binding is symlinked from the system `python3-guestfs`, ABI-matched because the
+  system interpreter *is* the required 3.14) at a **pinned persistent path** D
+  reuses via `KDIVE_PYTHON` rather than rebuilding per job, since system packages
+  are not importable from the venv; group-readable `/boot` kernels for the service
+  account (stock Ubuntu ships them `0600 root:root`, which fails libguestfs'
+  appliance build); both a world-traversable live-VM staging dir and the
+  install-staging dir the gate checks (no static disk label — AppArmor's
+  `virt-aa-helper` permits each domain's disk paths dynamically); `loginctl
+  enable-linger` for a short `XDG_RUNTIME_DIR`; and a **two-part verification
+  gate** run as the service account after a connection reset —
+  `scripts/check-local-libvirt.sh` (KVM / daemon / venv-import / network) plus the
+  role's own assertions for group membership, parent traversability, and the
   `/run/user/<uid>` + service-unit `XDG_RUNTIME_DIR` the script does not cover.
 - `github_runner` — arch-selected runner asset + `[self-hosted, kvm, <arch>]`
   label, download verified against an operator-pinned SHA-256 (not a same-origin
@@ -93,6 +110,10 @@ Easier:
   host build — the primary target is unblocked by construction.
 - The host-contract check is codified: the role runs `check-local-libvirt.sh` and
   fails if the host is not ready, so "green but not actually ready" is caught.
+- Live-validated end to end on a fresh Ubuntu 26.04 host: `runner.yml` converges
+  (`failed=0`), the gate passes, the venv imports `guestfs`/`drgn`/`libvirt` at
+  3.14, the runner registers offline with its service `disabled`+`inactive`, and a
+  converged re-run is `changed=0`.
 
 Harder / new obligations:
 
@@ -109,6 +130,16 @@ the host and secrets model this decision produces.
 
 ## Alternatives considered
 
+- **Rocky Linux 10 / RHEL family as the runner base** (ADR-0386's assumption).
+  Rejected — **live-discovered** on a Rocky 10 host: kdive requires Python 3.14,
+  but Rocky 10 ships 3.12 with a 3.12-only `python3-libguestfs` and no 3.14 path
+  (EPEL tops out at 3.13). Reaching the contract there forced one of two costs —
+  relax kdive's `requires-python` (product-wide), or build the libguestfs binding
+  from the libguestfs source tree at 3.14 (needs the full autotools build:
+  `config.h` + generated common headers). Ubuntu 26.04 LTS avoids both: a system
+  3.14 with a matching `python3-guestfs` makes the symlink strategy correct as-is.
+  ppc64le parity is preserved via Ubuntu's ppc64el port. Considered but not taken:
+  keeping 3.14 and deferring libguestfs (would drop the provisioned-System tier).
 - **A standalone `scripts/setup-live-vm-runner.sh` shell script.** Rejected:
   weaker idempotence, no `ansible-lint`/`test-ansible` coverage, and
   arch-parameterization becomes hand-rolled `case` logic — the exact
