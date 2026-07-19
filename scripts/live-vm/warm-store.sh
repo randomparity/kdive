@@ -39,7 +39,11 @@ is_warm() {
 }
 
 main() {
-  local new dbg build_id
+  local new dbg build_id kver rc
+  # Fail fast on a fetch-infra misconfig BEFORE the minutes-long, multi-GB build (else a
+  # misconfigured nightly builds a rootfs only to discard it when debuginfod-find dies).
+  [ -n "${DEBUGINFOD_URLS:-}" ] ||
+    die "debuginfod fetch infra not configured: set DEBUGINFOD_URLS to a server indexing the guest kernel debuginfo"
   prune_other_sets "$STORE" # entry sweep: reclaim any crashed refresh's orphan set dirs.
 
   if is_warm; then
@@ -52,11 +56,29 @@ main() {
   # shellcheck disable=SC2064  # expand $new now so the trap cleans this exact dir on any pre-commit exit.
   trap "rm -rf -- '$new'" EXIT
 
-  export DEBUGINFOD_CACHE_PATH="${new}" # pin the ~1.2 GB download onto the store's filesystem.
   build_id="$(produce_rootfs_and_kernel "$new" "$IMAGE")"
-  dbg="$(debuginfod-find debuginfo "$build_id")" ||
-    die "debuginfod-find failed for build-id ${build_id} (DEBUGINFOD_URLS set? kernel published?)"
-  cp -- "$dbg" "${new}/vmlinux.debug"
+  # Tie the supplied pin to the artifact: the built kernel's uname release must appear in TARGET,
+  # catching a KDIVE_WARM_STORE_IMAGE/pin mismatch rather than silently mislabelling the manifest.
+  kver="$(cat "${new}/.kver")"
+  case "$TARGET" in
+  *"$kver"*) ;;
+  *) die "pinned NVR '${TARGET}' does not contain the built kernel version '${kver}' (image/pin mismatch?)" ;;
+  esac
+  rm -f -- "${new}/.kver"
+
+  # Cache the download in a scratch subdir on the store's filesystem, then keep only the copy — so
+  # the ~1.2 GB cache subtree is not committed into current/ alongside vmlinux.debug.
+  export DEBUGINFOD_CACHE_PATH="${new}/.dbgcache"
+  if dbg="$(debuginfod-find debuginfo "$build_id" 2>/dev/null)"; then
+    cp -- "$dbg" "${new}/vmlinux.debug"
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      die "debuginfo not yet published for build-id ${build_id} (distro index lag)"
+    fi
+    die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
+  fi
+  rm -rf -- "${new}/.dbgcache"
   # REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
   build_ids_match "$build_id" "$(elf_build_id "${new}/vmlinux.debug")"
 

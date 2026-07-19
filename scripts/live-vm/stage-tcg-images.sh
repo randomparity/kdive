@@ -13,10 +13,19 @@ BUDGET="${KDIVE_TCG_BUDGET_BYTES:-7000000000}" # ~7 GB whole-budget ceiling (see
 IMAGE="${KDIVE_TCG_IMAGE:?set KDIVE_TCG_IMAGE to the ppc64le catalog rootfs image}"
 mnt_root="$(dirname -- "$STAGE")"
 
+# Floor guard before the recursive delete: refuse a root or top-level KDIVE_TCG_STAGE_DIR override
+# (e.g. `/` or `/mnt`) so a misconfigured value cannot rm -rf a mount root.
+case "$STAGE" in
+"" | /) die "refusing to operate on '${STAGE}'" ;;
+esac
+[ "$mnt_root" = "/" ] && die "refusing rm -rf on the top-level path ${STAGE}; use a subdirectory"
+
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
 rm -rf -- "$STAGE"
 mkdir -p -- "$STAGE"
-export DEBUGINFOD_CACHE_PATH="$STAGE" # pin the ~1.2 GB download onto /mnt, not the small root fs.
+# Cache the download under the stage dir (on /mnt, the budgeted fs, not the small root fs), then
+# prune it after copying so enforce_budget measures only the staged set, not a doubled cache.
+export DEBUGINFOD_CACHE_PATH="${STAGE}/.dbgcache"
 
 # 1. Pre-stage best-effort free-space check for the WHOLE budget (staged set + cache copy + vmcore).
 require_free_space "$mnt_root" "$BUDGET" "hosted TCG image set"
@@ -39,6 +48,7 @@ else
   fi
   die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
 fi
+rm -rf -- "${STAGE}/.dbgcache" "${STAGE}/.kver" # keep only the wired artifacts in the staged set.
 # REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
 build_ids_match "$build_id" "$(elf_build_id "${STAGE}/vmlinux.debug")"
 

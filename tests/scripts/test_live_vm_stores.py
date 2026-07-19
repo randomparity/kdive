@@ -193,7 +193,12 @@ def _produce_stubs(
         '[ -n "$ws" ] && mkdir -p "$ws"; '
         'echo "$@" > "$(dirname "$dest")/build-fs.argv"; : > "$dest"',
     )
-    _stub(bindir, "virt-ls", 'printf "config-6.1\\nvmlinuz-6.1-test\\ninitrd.img\\n"')
+    # /boot has a rescue kernel too; the deterministic selection must skip it (it sorts first).
+    _stub(
+        bindir,
+        "virt-ls",
+        'printf "config-6.1\\nvmlinuz-0-rescue-abc\\nvmlinuz-6.1-test\\ninitrd.img\\n"',
+    )
     _stub(
         bindir,
         "virt-copy-out",
@@ -215,6 +220,7 @@ def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
     assert r.stdout.strip() == "beef01"
     assert (dest / "rootfs.qcow2").exists()
     assert (dest / "vmlinux").exists()  # the rootfs's own kernel, extracted
+    assert (dest / ".kver").read_text() == "6.1-test"  # rescue kernel skipped, real one chosen
     argv = (dest / "build-fs.argv").read_text()
     assert "--workspace" in argv and str(dest) in argv
     assert not (dest / ".build").exists()
@@ -228,8 +234,9 @@ def _warm_env(bindir: Path, store: Path, **extra: str) -> dict[str, str]:
         "PATH": f"{bindir}:/usr/bin:/bin",
         "KDIVE_PYTHON": "python3",
         "KDIVE_WARM_STORE_DIR": str(store),
-        "KDIVE_WARM_STORE_TARGET_NVR": "kernel-6.1-test",
+        "KDIVE_WARM_STORE_TARGET_NVR": "kernel-6.1-test",  # contains the built kver "6.1-test"
         "KDIVE_WARM_STORE_IMAGE": "rocky10-debug",
+        "DEBUGINFOD_URLS": "https://debuginfod.example",
     }
     env.update(extra)
     return env
@@ -260,6 +267,38 @@ def test_warm_store_requires_the_pins(tmp_path: Path) -> None:
     assert "KDIVE_WARM_STORE_TARGET_NVR" in r.stderr
 
 
+def test_warm_store_requires_debuginfod_urls_before_building(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
+    env = _warm_env(bindir, store)
+    del env["DEBUGINFOD_URLS"]  # misconfigured: no fetch infra
+    r = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
+    assert r.returncode != 0 and "not configured" in r.stderr
+    assert not marker.exists()  # failed fast — the multi-GB build never ran
+
+
+def test_warm_store_dies_on_pin_kernel_mismatch(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)  # builds kernel version "6.1-test"
+    _debuginfod_ok(bindir)
+    r = subprocess.run(
+        [BASH, str(WARM)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_warm_env(bindir, store, KDIVE_WARM_STORE_TARGET_NVR="kernel-9.9-wrong"),
+    )
+    assert r.returncode != 0 and "does not contain" in r.stderr
+
+
 def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -276,6 +315,11 @@ def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None
     assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
     for ln in lines:  # every path resolves through current/, none leaks a build-fs/mktemp path
         assert "/current/" in ln.split("=", 1)[1]
+    # The committed set holds the wired artifacts and no debuginfod cache / kver scratch
+    # (build-fs.argv is a test-stub artifact the real build-fs never writes).
+    names = {p.name for p in (store / "current").iterdir()}
+    assert {"MANIFEST", "rootfs.qcow2", "vmlinux", "vmlinux.debug"} <= names
+    assert ".dbgcache" not in names and ".kver" not in names
 
 
 def test_warm_store_dies_on_debuginfo_kernel_mismatch(tmp_path: Path) -> None:
@@ -411,6 +455,23 @@ def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
         env=_stage_env(bindir, stage),
     )
     assert infra.returncode != 0 and "not configured" in infra.stderr
+
+
+def test_stage_tcg_refuses_top_level_stage_dir(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stage_stubs(bindir)
+    # A top-level override (dirname == "/") must be refused BEFORE any rm -rf of the mount root.
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(
+            bindir, Path("/kdive-tcg-nonexistent"), DEBUGINFOD_URLS="https://debuginfod.example"
+        ),
+    )
+    assert r.returncode != 0 and "refusing" in r.stderr.lower()
 
 
 def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:

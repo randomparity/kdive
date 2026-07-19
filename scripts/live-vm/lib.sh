@@ -147,13 +147,20 @@ prune_other_sets() {
 # root-owned /var/lib/kdive/build/images, which is off-budget and unwritable to the runner); it is
 # removed after the build so it does not inflate the staged-set footprint enforce_budget measures.
 produce_rootfs_and_kernel() {
-  local dest="$1" image="$2" py vmlinuz
+  local dest="$1" image="$2" py boot_ls vmlinuz
   py="${KDIVE_PYTHON:-python3}"
   "$py" -m kdive build-fs --image "$image" --workspace "${dest}/.build" \
     --dest "${dest}/rootfs.qcow2" >/dev/null
   rm -rf -- "${dest}/.build"
-  vmlinuz="$(virt-ls -a "${dest}/rootfs.qcow2" /boot | grep -m1 '^vmlinuz-')" ||
-    die "no /boot/vmlinuz-* in the rootfs built for image ${image}"
+  # Choose the kernel deterministically: skip rescue kernels (which sort before the real one) and
+  # take the highest version, so a /boot with more than one vmlinuz-* is not resolved by listing
+  # order. `|| true` tolerates a no-match so the check below gives a clean message under set -e.
+  boot_ls="$(virt-ls -a "${dest}/rootfs.qcow2" /boot)"
+  vmlinuz="$(printf '%s\n' "$boot_ls" | grep '^vmlinuz-' | grep -v -- '-rescue-' |
+    sort -V | tail -n1 || true)"
+  [ -n "$vmlinuz" ] || die "no non-rescue /boot/vmlinuz-* in the rootfs built for image ${image}"
+  # Record the kernel uname release (the vmlinuz suffix) so the caller can check it against its pin.
+  printf '%s' "${vmlinuz#vmlinuz-}" >"${dest}/.kver"
   virt-copy-out -a "${dest}/rootfs.qcow2" "/boot/${vmlinuz}" "$dest"
   mv -- "${dest}/${vmlinuz}" "${dest}/vmlinux"
   kernel_build_id "${dest}/vmlinux"
