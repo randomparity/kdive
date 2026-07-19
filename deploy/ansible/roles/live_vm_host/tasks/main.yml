@@ -53,9 +53,12 @@
 - name: Install uv system-wide (the venv builder; not in the debug toolchain)
   # The service account runs `uv sync` below; /opt is root-owned so uv must be on the
   # system PATH, not a per-user install. pip installs the console script to /usr/local/bin.
+  # --break-system-packages: RHEL/Rocky 10's platform Python is PEP 668 externally-managed,
+  # so a plain system `pip install` errors; the flag is accepted (and a no-op) on pip >= 23.
   ansible.builtin.pip:
     name: uv
     state: present
+    extra_args: --break-system-packages
 
 - name: Create the venv root owned by the service account
   # /opt is root-owned 0755, so a non-root `git` clone cannot mkdir it — create it first.

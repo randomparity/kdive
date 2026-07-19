@@ -19,10 +19,12 @@
   tags: [github_runner_register]
   block:
     - name: Fail closed when no registration token is supplied
+      # No no_log here: the assert tests only the token's length (the value is never rendered),
+      # so no_log would hide nothing sensitive while censoring the actionable fail_msg. The token
+      # value is protected where it is actually used — the `config.sh` command task is no_log.
       ansible.builtin.assert:
         that: github_runner_registration_token | length > 0
         fail_msg: "github_runner_registration_token is required to register a new runner"
-      no_log: true
 
     - name: Fail loud when this arch has no runner asset and no override URL
       ansible.builtin.fail:
