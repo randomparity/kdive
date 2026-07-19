@@ -41,9 +41,19 @@ contract" section and enforced by `tests/live_vm/__init__.py`:
   service carries `KDIVE_SECRETS_ROOT` (and the `KDIVE_S3_*` values ride repo/org
   secrets into the workflow). B provisions only the *pointer* and the secrets
   directory; **placing the actual credential files** under `KDIVE_SECRETS_ROOT`
-  is owned by sub-issue C/D or the operator (see "B does not own" below). The
-  resolver fails loud on missing credentials, so a runner that lacks them fails a
-  declared provisioned-System run rather than skipping to green.
+  is owned by sub-issue C/D or the operator (see "B does not own" below).
+  **Important correction to a tempting assumption:** sub-issue A's resolver
+  (`require_live_vm_provisioned`, `tests/live_vm/__init__.py`) validates only the
+  `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` *env* — it explicitly does **not**
+  check the credential *material* under `KDIVE_SECRETS_ROOT` (its docstring: "S3
+  credentials are NOT env vars … out of this resolver's env scope"). So a runner
+  with the S3 env set but an empty secrets dir resolves `AVAILABLE`, not
+  misconfigured. Catching missing credential material is therefore **not** A's
+  job; it belongs to D's declared-family fail-loud preflight (or the ADR-0089
+  worker-boundary secrets loader, which errors when it resolves a referenced
+  secret that is absent). D must not be built on the false premise that A's
+  resolver fails loud on missing credentials — this spec makes that D dependency
+  explicit rather than assuming a guarantee A does not provide.
 
 And the runner-registration requirements from the issue:
 
@@ -136,17 +146,31 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
 - **Debug toolchain:** install `drgn`, `crash`, `makedumpfile`, `kexec-tools`,
   `kdump-utils`, `gdb`, and — for each non-native supported arch — the foreign
   `qemu-system-<arch>` (arch-keyed map, mirroring `libvirt_stack_qemu_package_map`).
-- **Project venv for the `guestfs`/`drgn` import contract.** `check-local-libvirt.sh`
-  probes that the *worker's* interpreter can `import guestfs, drgn`, and that
-  interpreter is the project `.venv`, not system `python3` — system-package `drgn`
-  is not importable from the venv, and `libguestfs` has no PyPI wheel (the known
-  symlink dance, `docs/operating/runbooks/four-method-live-run.md` §4b). So the
-  role provisions the venv the same way the worker uses it: `uv sync --group live`
-  (drgn) in the repo checkout, install `python3-libguestfs`, and symlink its
-  `guestfs.py` + `libguestfsmod*.so` into the venv `site-packages` (matching
-  Python versions). The gate then runs with `KDIVE_PYTHON` pointed at that venv
-  interpreter, so "reaches green" is reproducible on a fresh runner, not only on a
-  host whose venv is already wired.
+- **Project venv for the `guestfs`/`drgn` import contract, at a pinned persistent
+  path.** `check-local-libvirt.sh` probes that the *worker's* interpreter can
+  `import guestfs, drgn`, and that interpreter is the project `.venv`, not system
+  `python3` — system-package `drgn` is not importable from the venv, and
+  `libguestfs` has no PyPI wheel (the known symlink dance,
+  `docs/operating/runbooks/four-method-live-run.md` §4b). The role provisions the
+  venv the way the worker uses it: a **persistent repo checkout + venv at a
+  stable, host-owned path** `live_vm_venv` (default `/opt/kdive`), `uv sync
+  --group live` for drgn, install `python3-libguestfs`, and symlink its
+  `guestfs.py` + `libguestfsmod*.so` into the venv `site-packages`. Two mechanized
+  details, not left to assumption:
+  - **ABI match:** `uv sync --python /usr/bin/python3` pins the venv to the
+    *system* interpreter `python3-libguestfs` is built for, so the symlinked
+    native module ABI-matches — uv's default managed CPython could otherwise be a
+    different minor version and fail the import at runtime. The gate asserts the
+    venv Python minor equals the system one.
+  - **The contract D consumes:** `KDIVE_PYTHON` points at
+    `<live_vm_venv>/.venv/bin/python`, a **persistent** path — the gate uses it,
+    and **D's per-job workflow must reuse this venv, not build a throwaway one**
+    in the ephemeral `$GITHUB_WORKSPACE` (a fresh `uv sync` there gets drgn but
+    not the libguestfs symlinks, so `guestfs` would fail to import at live-test
+    time). This spec states that path as a host-contract output B owns, so the
+    provisioning-time green and the live-test-time import are the same venv.
+  So "reaches green" is reproducible on a fresh runner and across the B/D seam,
+  not only on a host whose venv is already hand-wired.
 - **Staging directories.** Create the `/var/lib/kdive` tree owned by
   `github_runner_user`, with **both** staging areas the live tests need, because
   `check-local-libvirt.sh` requires its install-staging path writable and the
@@ -216,10 +240,22 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
 - **Registration idempotence guard (reconciles fail-closed with `0 changed`).**
   A GitHub registration token is single-use and expires (~1h), so re-running the
   play with the same token cannot work and re-registering an already-correct
-  runner would report *changed*. The role therefore keys on the runner's
-  `.runner` + `.credentials` marker files: **if the runner is already configured,
-  skip the download, the token assert, and `config.sh` entirely** (0 changed);
-  only the not-yet-registered branch downloads and registers.
+  runner would report *changed*. The role keys on the runner's `.runner` +
+  `.credentials` marker files: **if the runner is already configured, skip the
+  download, the token assert, and `config.sh`** (0 changed); only the
+  not-yet-registered branch downloads and registers. **Divergence caveat (local
+  markers can lie).** GitHub auto-removes a self-hosted runner that stays offline
+  past its window (~14 days), and B installs the service *stopped* — so a runner
+  registered by B and left stopped while D/trust-posture work drags on can be
+  removed server-side while the local markers persist, after which a naive
+  marker-only guard would skip re-registration and the operator would enable a
+  runner GitHub no longer knows. So the guard is "markers present **and** the
+  runner is not stale": when enabling the service (`github_runner_service_enabled`)
+  the role runs a liveness check (`config.sh --check` / the service's connection
+  status) and, if the local markers exist but the runner is unknown to GitHub,
+  **re-registers** (needs a fresh token then) rather than starting a dead runner.
+  The stale-registration failure mode and its `config.sh remove` recovery are in
+  the failure table and runbook.
 - **Register (first-time branch only):** configure with `--unattended --replace`,
   labels `self-hosted,kvm,<arch-token>`, a dedicated non-root
   `github_runner_user`, the repo/org URL, and a **registration token**
@@ -289,6 +325,7 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 | SELinux `virt_image_t` not applied | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label via `ls -Z`/`matchpathcon` — a missing label fails the play at provisioning, not silently at live-test time. |
 | Runner service missing a short `XDG_RUNTIME_DIR` | `live_vm_host`'s gate asserts `/run/user/<uid>` exists **and** the service unit's `Environment=` carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
 | Runner registered but starts listening before the trust posture is set | The service installs **stopped/disabled**; the role starts it only on explicit `github_runner_service_enabled: true`, so a bare `runner.yml` leaves no fork-PR-exploitable listener. |
+| Locally registered but removed server-side (offline past GitHub's ~14-day window, or admin-removed) | Enabling the service runs a liveness check; if the local `.runner` markers exist but GitHub no longer knows the runner, the role re-registers (fresh token) instead of starting a dead runner. Recovery (`config.sh remove` + re-run) and the offline-window warning are in the runbook. |
 
 ## Testing
 
@@ -329,16 +366,20 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 
 A `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`:
 prerequisites; the playbook commands (`libvirt_stack` → `libvirt_pool_net` →
-`live_vm_host` → `github_runner` via `runner.yml`); provisioning the venv;
-obtaining a registration token; **the ordered security steps — apply the repo
-"require approval for all outside collaborators" setting (and D's `if:` guard)
-BEFORE setting `github_runner_service_enabled: true`**, so the runner never
-listens without the trust posture; wiring `KDIVE_S3_*` secrets and where the
-credential material lands (C/D/operator); the ppc64le `github_runner_tarball_url`
-override; deregistration (`config.sh remove` / `svc.sh uninstall`); and the
-verification steps (idempotence `0 changed` on an already-registered host +
-off-host `check-local-libvirt`). An `AGENTS.md` / `deploy/ansible/README.md`
-pointer so the runner build is discoverable.
+`live_vm_host` → `github_runner` via `runner.yml`); provisioning the persistent
+venv at `live_vm_venv` and the `KDIVE_PYTHON` contract D consumes (reuse this
+venv, do not build a per-job one); obtaining a registration token; **the ordered
+security steps — apply the repo "require approval for all outside collaborators"
+setting (and D's `if:` guard) BEFORE setting `github_runner_service_enabled:
+true`**, so the runner never listens without the trust posture; **the offline-
+removal warning — leaving the service stopped past GitHub's ~14-day window
+invalidates the registration; recovery is `config.sh remove` then re-run with a
+fresh token**; wiring `KDIVE_S3_*` secrets and where the credential material lands
+(C/D/operator, since A's resolver does not check it); the ppc64le
+`github_runner_tarball_url` override; deregistration (`config.sh remove` /
+`svc.sh uninstall`); and the verification steps (idempotence `0 changed` on an
+already-registered host + off-host `check-local-libvirt`). An `AGENTS.md` /
+`deploy/ansible/README.md` pointer so the runner build is discoverable.
 
 ## Rollout / rollback
 
