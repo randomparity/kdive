@@ -26,9 +26,13 @@ literal.
 
 A source module fails unless its dotted name is in that set, with two exemptions:
 
-- a package initializer (``__init__.py``) that defines no function or class. mutmut (3.6.0)
-  mutates only code inside a top-level function or method, so such a module — a structural
-  re-export / aggregator — has no mutant for a killing test to be attributed to. A logic-bearing
+- a package initializer (``__init__.py``) that defines no function or class — a structural
+  re-export / aggregator, not a behavioral unit. The names it re-exports are defined in (and
+  directly tested via) their own modules, and with no def/class it also has no mutmut mutant to
+  attribute. A *non*-``__init__`` module is deliberately **not** exempt even when it defines no
+  function or class: its declarations (defaults, enum members, field sets) are a behavioral
+  surface #665 pins with a direct test that "catch[es] a changed default, dropped state, renamed
+  enum value, or altered field set" though mutmut generates no mutant for it. A logic-bearing
   ``__init__`` such as ``kdive.config`` *does* define functions, is therefore not exempt, and is
   covered by its own direct test; and
 - an explicit, justified :data:`_ALLOWLIST` entry (protocol-only / typing-only modules that carry
@@ -202,10 +206,20 @@ def test_module_name_maps_package_init_to_package() -> None:
     assert _module_name(_SRC / "config" / "manifest.py") == "kdive.config.manifest"
 
 
-def test_aggregator_detection_distinguishes_defs_from_reexport() -> None:
+def test_defines_function_or_class_detects_any_def_or_class() -> None:
     reexport = ast.parse('"""doc"""\nimport a.b\nfrom c import d\n__all__ = ["d"]\n')
     assert not _defines_function_or_class(reexport)
-    # A pure-data module (no def/class) has no mutmut surface, even with a module-level call.
     assert not _defines_function_or_class(ast.parse("import a\nVALUE = a.compute()\n"))
     assert _defines_function_or_class(ast.parse("def f():\n    return 1\n"))
     assert _defines_function_or_class(ast.parse("class C:\n    x = 1\n"))
+
+
+def test_only_a_def_free_init_is_exempt() -> None:
+    reexport = ast.parse('"""doc"""\nimport a.b\n__all__ = ["b"]\n')
+    assert _is_pure_aggregator_init(Path("kdive/pkg/__init__.py"), reexport)
+    # A def/class-free *non*-__init__ module is a behavioral unit (#665 pins its declarations),
+    # so it is required to be directly imported — not exempt.
+    assert not _is_pure_aggregator_init(Path("kdive/pkg/tables.py"), reexport)
+    # A logic-bearing __init__ (defines a function) is not exempt.
+    logic_init = ast.parse("def f():\n    return 1\n")
+    assert not _is_pure_aggregator_init(Path("kdive/pkg/__init__.py"), logic_init)
