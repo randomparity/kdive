@@ -238,6 +238,24 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    overlay before the suite runs, so a dependency drift fails loud at the job
    boundary — the documented limitation, not a silent mis-test.)* The runner `.env`
    already supplies `XDG_RUNTIME_DIR` and `KDIVE_SECRETS_ROOT` to every job process.
+
+   **The interpreter must reach the *stack*, not just pytest (a real gap in the
+   reused scripts).** `scripts/live-stack/lib.sh` hardcodes
+   `py="${repo_root}/.venv/bin/python"` and *dies* if that workspace `.venv` is
+   absent (`lib.sh:8,109`), and launches the **worker** — which imports `guestfs`
+   at provision time — under that same `$py` (`lib.sh:118-135`), while
+   `onboard.sh` drives `uv run python -m kdive` (which would sync the forbidden
+   workspace venv). None honor `KDIVE_PYTHON`, so as-is the worker would run under a
+   non-libguestfs interpreter (or up.sh would die at its own preflight) — the exact
+   trap the overlay exists to prevent. D therefore **teaches the live-stack scripts
+   to honor `KDIVE_PYTHON`** as a backward-compatible override, mirroring the
+   `scripts/live-vm/lib.sh:169` precedent (`py="${KDIVE_PYTHON:-python3}"`):
+   `scripts/live-stack/lib.sh` → `py="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"`
+   (default unchanged when unset, so operator use is untouched), and `onboard.sh` →
+   run under `"${KDIVE_PYTHON:-uv run python}"`. These two script edits are
+   deliverables. The worker inherits `PYTHONPATH=$GITHUB_WORKSPACE/src` from the job
+   shell (`setsid` inherits the environment), so it imports the tested sources under
+   the libguestfs-bearing venv.
 3. **Pre-job reaper** — before any bring-up, `virsh destroy` any leftover
    `kdive-*` domains and `docker compose down -v` a stale stack (idempotent), so a
    prior run cancelled mid-boot (below) cannot collide with this run's on-box
@@ -246,9 +264,14 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    `KDIVE_LIVE_VM_ROOTFS` / `KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` from
    the committed `current/` set (the throwaway family's rootfs).
 5. **Stand up the provisioned-System family on the box** (ADR-0389, Decision 2) —
-   `scripts/live-stack/up.sh --skip-obs` brings up the compose backends (MinIO with
-   the well-known `minioadmin` root, docker-compose.yml) + host processes on the
-   runner (the box has libvirt from `libvirt_stack`). The on-box MinIO **is** the
+   `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs` brings up the compose
+   backends (MinIO with the well-known `minioadmin` root, docker-compose.yml) + host
+   processes on the runner (the box has libvirt from `libvirt_stack`).
+   `KDIVE_WORKER_AS_ROOT=0` runs the worker **as the runner user** (already in the
+   `libvirt`/`kvm` groups from B's role), which both sidesteps `sudo`'s env-stripping
+   — so the inherited `KDIVE_PYTHON` + `PYTHONPATH` actually reach the worker — and
+   keeps the provisioning worker on the `qemu:///system` libvirt the family needs.
+   The on-box MinIO **is** the
    object store, so `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are the
    `minioadmin` default `scripts/live-stack/env.sh` supplies — not a repo secret;
    an external-S3 deployment is out of scope for the nightly. Then a **new
@@ -379,7 +402,14 @@ split into what ordinary CI proves and what the operator/local proof proves:
   - `actionlint` + `zizmor` (`just lint-workflows`) on the new `live.yml` — syntax,
     pinned-SHA, and security posture (`permissions`, no `pull_request_target`).
     These fail the PR if a pin or a trigger is wrong.
-  - `shellcheck` + `shfmt` (`just lint-shell`) on `preflight-env.sh`.
+  - `shellcheck` + `shfmt` (`just lint-shell`) on `preflight-env.sh`,
+    `mint-system.sh`, and the edited `scripts/live-stack/{lib.sh,onboard.sh}`.
+  - **`KDIVE_PYTHON`-override behavioral test** — a subprocess test asserting
+    `scripts/live-stack/lib.sh` resolves `py` to `$KDIVE_PYTHON` when set (falling
+    back to the workspace `.venv` when unset, so operator use is unchanged), the
+    guard that keeps the reused stack bring-up on the libguestfs venv. The worker's
+    *actual* `guestfs` import under that interpreter is proven by the local live
+    proof / operator nightly (it needs the real libguestfs venv), not ordinary CI.
   - **`tests/scripts/test_live_vm_preflight.py`** — subprocess-source the preflight
     (the pattern C's `test_live_vm_stores.py` uses), asserting for each family:
     present env → exit 0; each required var missing → non-zero, message names the
@@ -420,8 +450,11 @@ split into what ordinary CI proves and what the operator/local proof proves:
   `live_vm_host` Ansible role edit declaring `docker` + the compose plugin,
   `scripts/live-vm/preflight-env.sh` + its test, **`scripts/live-vm/mint-system.sh`**
   (fund/onboard → token → allocate → provision → poll-ready → print id) + its
-  shell lint/behavioral coverage, the workflow-shape guard, ADR-0389, this spec,
-  the plan, and the operator CI notes. `ci.yml`'s existing
+  shell lint/behavioral coverage, backward-compatible `KDIVE_PYTHON`-override edits
+  to **`scripts/live-stack/lib.sh` + `scripts/live-stack/onboard.sh`** (so the
+  reused stack bring-up runs the worker under the libguestfs venv, not a workspace
+  `.venv`), the workflow-shape guard, ADR-0389, this spec, the plan, and the
+  operator CI notes. `ci.yml`'s existing
   jobs are otherwise untouched, so **no existing job gains a nightly run** (the
   separate `on:` is why). Any new `KDIVE_*` the preflight introduces is added to
   `external_env.py` (env-docs guard); the vars it *reads* are already documented

@@ -142,6 +142,13 @@ Harder / new obligations:
   → token → allocate → provision → poll-ready → print id); minting the System is a
   real deliverable, not folded into "allocate → provision", and funding is a stated
   prerequisite, not an assumption.
+- The reused `scripts/live-stack/{lib.sh,onboard.sh}` hardcode the workspace
+  `.venv` / `uv run` and ignore `KDIVE_PYTHON`, so as-is they would run the
+  provisioning worker (which imports `guestfs`) under a non-libguestfs interpreter.
+  D gives them a **backward-compatible `KDIVE_PYTHON` override** (default unchanged
+  when unset) so the on-box stack runs under the libguestfs venv; the worker runs
+  non-root (`KDIVE_WORKER_AS_ROOT=0`, the runner user in the `libvirt` group) to
+  keep `sudo` from stripping the inherited `KDIVE_PYTHON`/`PYTHONPATH`.
 - The hosted TCG job maps C's `KDIVE_LIVE_VM_ROOTFS` output onto the spine's
   `KDIVE_GUEST_IMAGE_PPC64LE` and supplies `KDIVE_KERNEL_SRC` from the
   fetch-kernel-tree fixture — an explicit job step, asserted by the preflight, so a
