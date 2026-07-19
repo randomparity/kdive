@@ -35,12 +35,15 @@
     patterns: ["vmlinuz-*", "vmlinux-*"]
   register: live_vm_host_boot_kernels
 
-- name: Make the host kernels group-readable for the service account
-  # file+mode reports changed only when a mode actually changes, so a converged re-run is
-  # 0-changed (the spec's idempotence bar) — unlike a blanket chmod with changed_when: true.
+- name: Make the host kernels kvm-group-readable for the service account
+  # 0640 root:kvm, not 0644: the runner user is in the kvm group (added above), so this is
+  # genuinely group-scoped rather than world-readable — it does not fully undo the distro's
+  # 0600 hardening for every local uid. file+mode reports changed only when the mode/group
+  # actually changes, so a converged re-run is 0-changed (the spec's idempotence bar).
   ansible.builtin.file:
     path: "{{ item.path }}"
-    mode: "0644"
+    group: kvm
+    mode: "0640"
   loop: "{{ live_vm_host_boot_kernels.files }}"
   loop_control:
     label: "{{ item.path }}"
@@ -76,16 +79,24 @@
     version: "{{ live_vm_repo_version }}"
   become: true
   become_user: "{{ github_runner_user }}"
+  register: live_vm_host_checkout
 
-- name: Build the venv against the SYSTEM interpreter (ABI-match python3-libguestfs)
+- name: Build the venv against the SYSTEM interpreter (ABI-match python3-libguestfs)  # noqa: no-handler
+  # noqa no-handler: not a handler on purpose — the venv must exist before the libguestfs
+  # symlink task later in THIS play, but handlers run post-play (too late on first provision).
   # uv defaults to a managed CPython whose minor version may differ from the distro's
   # python3-libguestfs .so; pin to /usr/bin/python3 so the symlinked native module ABI-matches.
+  # Run whenever the checkout advanced (main is a moving ref), NOT `creates:`-gated — a creates
+  # guard would freeze the venv's deps at first-provision while the source moved on, so a live
+  # dependency added to main would never reach the venv the worker imports from. On a converged
+  # host (main unchanged) the git task is unchanged, so uv sync is skipped and the run is 0-changed.
   ansible.builtin.command:
     cmd: uv sync --python /usr/bin/python3 --group live
     chdir: "{{ live_vm_venv }}"
-    creates: "{{ live_vm_venv }}/.venv/bin/python"
   become: true
   become_user: "{{ github_runner_user }}"
+  when: live_vm_host_checkout is changed
+  changed_when: true
 
 - name: Locate the system libguestfs binding files
   ansible.builtin.find:
@@ -137,7 +148,9 @@
   notify: Relabel staging dirs
 
 - name: Apply the SELinux label now (do not wait for the handler)
-  ansible.builtin.command: "restorecon -R {{ item }}"
+  # -v so restorecon prints "Relabeled …" for each file it changes; without it restorecon is
+  # silent and the stdout-length changed_when would always report ok even when it relabeled.
+  ansible.builtin.command: "restorecon -Rv {{ item }}"
   loop:
     - "{{ live_vm_staging_dir }}"
     - "{{ install_staging_dir }}"
