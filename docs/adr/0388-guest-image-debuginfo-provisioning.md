@@ -41,42 +41,52 @@ Provide the two stores as three bash scripts under `scripts/live-vm/` (a shared
 a persistent warm-store directory owned by B's `live_vm_host` Ansible role and a
 documented disk budget. Four decisions:
 
-1. **Provenance — distro stock kernel + on-demand distro debuginfo, matched by
-   build-id.** The rootfs is built on a stock distro base via the existing
-   `build-fs` plane; the guest boots that distro's own **pinned kernel NVR**; the
-   matching `vmlinux` debuginfo is fetched for that exact NVR. The NVR pins which
-   build to fetch, but the **match guarantee is the ELF build-id** — the fetched
-   debuginfo's `.note.gnu.build-id` must equal the kernel image's, or the refresh
-   fails loud and stages nothing. NVR-string equality is not a match proof (a
-   distro can rebuild an NVR; a foreign-arch package can carry the same NVR), so
-   the build-id is the recorded, checked pin; the manifest stores NVR + build-id +
-   rootfs digest.
+1. **Provenance — distro stock kernel; debuginfo fetched *by build-id* via
+   `debuginfod`.** The rootfs is built on a stock distro base (the base image is
+   the pin) via the existing `build-fs` plane; the guest boots that distro's own
+   kernel. The kernel's ELF build-id is **extracted from the staged kernel
+   artifact** (`extract-vmlinux` decompresses the `bzImage`/`vmlinuz`, then
+   `eu-readelf -n`), and the matching debuginfo is fetched by that build-id
+   (`debuginfod-find`). Fetching by build-id makes the debuginfo match the booted
+   kernel *by construction* (`debuginfod` returns the debuginfo for exactly that
+   id or nothing) and is arch-neutral, so a ppc64le kernel's debuginfo is fetched
+   from an x86_64 host by the same mechanism. The kernel NVR is a recorded label,
+   **not** the match key — NVR-string equality was rejected as a match proof (a
+   distro can rebuild an NVR; a foreign-arch package can carry the same NVR). The
+   manifest stores NVR, build-id, and a `sha256` for each of the rootfs, kernel
+   image, and debuginfo; a post-fetch `build_ids_match` is a belt-and-suspenders
+   assertion.
 
 2. **Two asymmetric stores, asymmetric enforcement.** The warm store is *sized
    for* its content — persistent, on the host's own disk, generous headroom for
    kdump/vmcore + debuginfo — and only **reports** measured usage. The hosted
    `/mnt` set is *under a measured budget* — ephemeral, shared scratch — and its
-   staging script gates it two ways: a **pre-stage free-space check** (refuse to
-   start if `/mnt` free space is below the ceiling + margin) that *prevents*
-   evicting the compose backends, plus a **post-stage footprint cap** that fails
-   loud if the staged set grew past the derivation. Enforcement lives where
-   blowing the budget evicts other tenants of the disk (the hosted scratch), not
-   where it does not (the dedicated host).
+   staging script gates it two ways at two times: a **pre-stage free-space check**
+   that reserves the *whole* budget (staged set + run-time vmcore headroom +
+   margin) before any write — *preventing* eviction of the compose backends and
+   securing room for the vmcore captured later — plus a **post-stage footprint
+   cap** on the *staged set only*, which fails loud if it grew past its
+   derivation. Enforcement lives where blowing the budget evicts other tenants of
+   the disk (the hosted scratch), not where it does not (the dedicated host).
 
-3. **NVR-pinned idempotent refresh keeps the store warm, integrity-verified.** A
-   manifest records the pinned kernel NVR, the build-id, and the rootfs digest.
-   The refresh is a no-op ("warm") only when the manifest NVR equals the target
-   **and** the staged rootfs re-hashes to the recorded digest **and** the staged
-   debuginfo build-id still matches — presence alone is not warm, because a
-   truncated debuginfo or corrupted rootfs is present but broken and would
-   persist that break every subsequent nightly. Otherwise it rebuilds, **replaces
-   the superseded NVR's artifacts** (so the store holds exactly one set, not an
-   accumulating pile of ~1.2 GB debuginfo per past kernel), and rewrites the
-   manifest atomically. The refresh holds an exclusive `flock` so a slow nightly
-   and a concurrent operator run cannot interleave large-artifact writes. The
-   manifest predicate, the build-id compare, and the budget gates are the
-   unit-tested seam (`lib.sh`, exercised by subprocess-source behavioral tests,
-   the repo's mutation-proven shell-test pattern).
+3. **Idempotent refresh keeps the store warm, integrity-verified, temp-then-swap.**
+   The manifest records the NVR label, the build-id, and a `sha256` for each of
+   the rootfs, kernel image, and debuginfo. The refresh is a no-op ("warm") only
+   when the build-id matches **and all three staged files re-hash to their
+   recorded digests** — build-id and presence alone are not warm, because a
+   debuginfo truncated after its `.note.gnu.build-id` (near the ELF header, before
+   the large DWARF sections) keeps a valid build-id but has lost its symbols; only
+   a content digest catches that, and the break would otherwise persist every
+   nightly. Otherwise the refresh builds into a **temp location**, verifies
+   build-id + digests there, **atomically swaps** it into place, then removes only
+   sets whose NVR **differs** from the one just written — so a same-NVR corruption
+   rebuild cannot delete its own fresh output, and the store still holds exactly
+   one set rather than accumulating ~1.2 GB of debuginfo per past kernel. The
+   refresh holds an exclusive `flock`; the consuming boot (sub-issue D) takes a
+   *shared* lock on the same file so a refresh cannot swap artifacts out from
+   under an in-flight domain. The manifest predicate, the build-id/digest checks,
+   and the budget gates are the unit-tested seam (`lib.sh`, subprocess-source
+   behavioral tests, the repo's mutation-proven shell-test pattern).
 
 4. **Scope boundary — tooling only; CI wiring and System stand-up are D.** C
    ships the scripts, the persistent dir, the budget doc, and their tests. It
@@ -104,9 +114,11 @@ Easier:
 
 Harder / new obligations:
 
-- A distro kernel bump changes the pinned NVR, so the matching debuginfo must be
-  available in the distro debuginfo repo for that NVR; if the repo lags the
-  kernel, the refresh fails loud rather than staging mismatched debuginfo.
+- The `debuginfod` path is a runtime dependency: `DEBUGINFOD_URLS` must point at a
+  server that indexes the distro's kernel debuginfo. A kernel bump can outrun the
+  debuginfod index, so the fetch distinguishes three fail-loud outcomes — infra
+  not configured, debuginfo-not-yet-published (index lag), and transient error —
+  rather than staging mismatched or missing debuginfo.
 - The warm store is persistent state on the runner host that an operator must
   provision (the dir); the refresh itself replaces the superseded NVR's
   artifacts, so the store holds one live set and does not accumulate old
@@ -130,6 +142,18 @@ produces.
   already publishes. The product's own build→boot→debug path is exercised
   elsewhere; the live tiers need a *stable, matched* kernel, which the distro
   provides most cheaply.
+- **Fetch debuginfo by NVR from the distro debuginfo repo (not `debuginfod` by
+  build-id).** Rejected: keying the fetch on the NVR string is the match weakness
+  this ADR set out to avoid, and it forces the hosted x86_64 runner to configure a
+  foreign-arch (ppc64le) debuginfo repo. Fetching by the build-id extracted from
+  the staged kernel makes the match hold by construction and is arch-neutral, so
+  the same command works cross-arch with only `DEBUGINFOD_URLS` as a prerequisite.
+- **Verify the kernel↔debuginfo match by NVR string equality alone.** Rejected: an
+  NVR can be rebuilt and a foreign-arch package can carry the same NVR, so string
+  equality does not prove the debuginfo describes the booted binary. The build-id
+  extracted from the staged artifact is the real identity; a content `sha256` is
+  what proves completeness (a truncated debuginfo keeps its build-id but loses its
+  DWARF), so the manifest records both and the warm path re-checks both.
 - **One symmetric store for both tiers.** Rejected: the tiers have opposite
   lifetimes (persistent-warm vs ephemeral-budgeted) and opposite failure modes
   (waste vs eviction). Forcing one policy either re-fetches on the warm host
