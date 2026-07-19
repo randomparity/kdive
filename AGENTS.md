@@ -177,6 +177,14 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   The self-hosted native-KVM runner host is codified in `deploy/ansible/playbooks/runner.yml`
   (+ the `self-hosted-kvm-runner.md` runbook under `docs/operating/runbooks/`), built to the
   `live_vm` environment contract in `tests/live_vm/__init__.py` (ADR-0387, #1291).
+- **Provisioning parity is the extender's job.** The runner is a cattle host, reprovisioned
+  from these Ansible roles — nothing is hand-installed. So when you extend the live stack with
+  a new host tool or system package (a `subprocess`-invoked binary, a build-fs/libguestfs
+  dependency, an introspection tool), you MUST declare it in the role that owns that layer in
+  the same change: general build-host FS/virt tools in `libvirt_stack`, the `live_vm` debug
+  toolchain and store-script deps in `live_vm_host`. An undeclared host dep passes on your
+  already-warmed dev box and silently breaks the next clean runner reprovision. If a live proof
+  makes you `apt install` something by hand, that package is a role edit you still owe.
 - Tests mirror the package tree under `tests/`; `tests/adversarial/` holds concurrency /
   property-based (hypothesis) race tests, `tests/integration/` holds the end-to-end
   milestone exercises.
