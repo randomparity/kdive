@@ -15,7 +15,8 @@
 
 - **Branch:** `feat/selfhosted-kvm-runner-1291`; base `main`. Never commit on `main`.
 - **Guardrails (run before every commit; CI gates these individually):** `just lint-ansible` (yamllint + ansible-lint over `deploy/ansible`), `just test-ansible`, `just lint-shell` (shellcheck), `just docs-links`, `just docs-paths`, `just adr-status-check`, and `prek run` (secret-scan, EOF, trailing-ws). `just lint-workflows` only if a workflow file is touched (this plan touches none — CI job is sub-issue D).
-- **FQCN required:** ansible-lint mandates fully-qualified module names (`ansible.builtin.*`, `community.general.*`, `ansible.posix.*`). Every task needs `changed_when`/`creates`/`register` where a `command`/`shell` runs. Name every task and play.
+- **FQCN required:** ansible-lint mandates fully-qualified module names (`ansible.builtin.*`, `community.general.*`, `ansible.posix.*`). Every task needs `changed_when`/`creates`/`register` where a `command`/`shell` runs. Name every task and play (task names start with a capital letter — `name[casing]`).
+- **`var-naming[no-role-prefix]` covers `set_fact`/`register`, not just `defaults/`:** every variable a role *defines* in-task — every `register:` and `set_fact:` key — must start with the **exact** containing-role name plus underscore (`live_vm_host_…` in `live_vm_host`, `github_runner_…` in `github_runner`). A truncated prefix like `live_vm_` is rejected. Cross-role shared vars go in `group_vars` (exempt). This is a whole-tree lint error, so an unprefixed in-task var fails `just lint-ansible`.
 - **Doc-style guard (project-wide):** plain, factual prose in all docs, comments, and commit messages; never "critical", "crucial", "essential", "significant", "comprehensive", "robust", "elegant", "seamless", "Sprint". Use "Milestone".
 - **Secrets:** `github_runner_registration_token` is `no_log`, supplied at runtime via `--extra-vars`/vault — never written to `host_vars`, defaults, or a commit. The prek `detect-secrets` hook gates this.
 - **Commit style:** Conventional commits, imperative ≤72-char subject, one logical change per commit, ending with the trailer:
@@ -272,7 +273,7 @@ git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runne
   ansible.builtin.find:
     paths: /boot
     patterns: ["vmlinuz-*", "vmlinux-*"]
-  register: live_vm_boot_kernels
+  register: live_vm_host_boot_kernels
 
 - name: Make the host kernels group-readable for the service account
   # file+mode reports changed only when a mode actually changes, so a converged re-run is
@@ -280,7 +281,7 @@ git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runne
   ansible.builtin.file:
     path: "{{ item.path }}"
     mode: "0644"
-  loop: "{{ live_vm_boot_kernels.files }}"
+  loop: "{{ live_vm_host_boot_kernels.files }}"
   loop_control:
     label: "{{ item.path }}"
 
@@ -354,7 +355,7 @@ git commit -m "feat(1291): live_vm_host groups, toolchain, /boot readability, li
     paths: /usr/lib64/python3*/site-packages
     patterns: ["guestfs.py", "libguestfsmod*.so"]
     recurse: true
-  register: live_vm_libguestfs_files
+  register: live_vm_host_libguestfs_files
 
 - name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
   ansible.builtin.file:
@@ -364,7 +365,7 @@ git commit -m "feat(1291): live_vm_host groups, toolchain, /boot readability, li
       ansible_python.version.minor }}/site-packages/{{ item.path | basename }}
     state: link
     force: true
-  loop: "{{ live_vm_libguestfs_files.files }}"
+  loop: "{{ live_vm_host_libguestfs_files.files }}"
   become_user: "{{ github_runner_user }}"
 ```
 
@@ -428,8 +429,8 @@ git commit -m "feat(1291): live_vm_host provisions the ABI-matched guestfs/drgn 
   loop:
     - "{{ live_vm_staging_dir }}"
     - "{{ install_staging_dir }}"
-  register: live_vm_restorecon
-  changed_when: live_vm_restorecon.stdout | length > 0
+  register: live_vm_host_restorecon
+  changed_when: live_vm_host_restorecon.stdout | length > 0
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
 ```
 
@@ -489,7 +490,7 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
 
 - name: Record the service-account uid
   ansible.builtin.set_fact:
-    github_runner_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
+    live_vm_host_uid: "{{ ansible_facts.getent_passwd[github_runner_user][1] }}"
 
 # Part 1: check-local-libvirt.sh (KVM / daemons / venv-import / network / install-staging
 # writability / /boot readability), run AS the service account after a connection reset so the
@@ -516,7 +517,7 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
   loop:
     - "{{ live_vm_staging_dir }}"
     - "{{ install_staging_dir }}"
-  register: live_vm_labels
+  register: live_vm_host_labels
   changed_when: false
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
 
@@ -524,22 +525,22 @@ git commit -m "feat(1291): live_vm_host stages and virt_image_t-labels both dirs
   ansible.builtin.assert:
     that: "'virt_image_t' in item.stdout"
     fail_msg: "{{ item.item }} is not labeled virt_image_t (system-mode boot would be sVirt-denied)"
-  loop: "{{ live_vm_labels.results }}"
+  loop: "{{ live_vm_host_labels.results }}"
   loop_control:
     label: "{{ item.item }}"
   when: ansible_selinux.status is defined and ansible_selinux.status == 'enabled'
 
 - name: Assert the service account is in kvm and libvirt
   ansible.builtin.command: "id -nG {{ github_runner_user }}"
-  register: live_vm_groups
+  register: live_vm_host_groups
   changed_when: false
-  failed_when: "'kvm' not in live_vm_groups.stdout.split() or 'libvirt' not in live_vm_groups.stdout.split()"
+  failed_when: "'kvm' not in live_vm_host_groups.stdout.split() or 'libvirt' not in live_vm_host_groups.stdout.split()"
 
 - name: Assert /run/user/<uid> exists for the service account
   ansible.builtin.stat:
-    path: "/run/user/{{ github_runner_uid }}"
-  register: live_vm_xdg
-  failed_when: not live_vm_xdg.stat.exists
+    path: "/run/user/{{ live_vm_host_uid }}"
+  register: live_vm_host_xdg
+  failed_when: not live_vm_host_xdg.stat.exists
 ```
 
 > The service-unit `XDG_RUNTIME_DIR=` assertion is deferred to `github_runner` (Task 7), which owns the unit/`.env` file.
