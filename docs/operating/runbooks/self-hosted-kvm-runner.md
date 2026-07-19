@@ -108,6 +108,66 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
 unchanged. With neither an upstream asset nor an override URL, the role fails loud
 naming the gap rather than downloading a wrong-arch binary.
 
+## Guest-image stores and disk budget
+
+The live tiers boot a rootfs, its kernel, and matching `vmlinux` debuginfo. Two
+scripts produce these (#1292, [ADR-0388](../../adr/0388-guest-image-debuginfo-provisioning.md)),
+as two deliberately-separate stores:
+
+- **Self-hosted warm store** — `scripts/live-vm/warm-store.sh`, persistent at
+  `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir
+  `live_vm_host` creates). Idempotent: it rebuilds only when the pinned kernel
+  changes or a staged file fails its recorded digest, and otherwise reuses the
+  warm set. It only **reports** usage — the host's own disk is not budget-gated.
+- **Hosted TCG set** — `scripts/live-vm/stage-tcg-images.sh`, ephemeral on the
+  hosted runner's `/mnt` scratch (`KDIVE_TCG_STAGE_DIR`, default
+  `/mnt/kdive-tcg`). It fetches debuginfo on demand and **enforces** a disk
+  budget: a pre-stage free-space check for the whole budget, then a post-stage
+  footprint cap (`KDIVE_TCG_BUDGET_BYTES`, default ~7 GB), each failing loud.
+
+Both fetch debuginfo by the kernel's build-id via `debuginfod-find`, so they
+require `DEBUGINFOD_URLS` pointing at a server that indexes the guest kernel's
+debuginfo (e.g. `debuginfod.ubuntu.com`).
+
+### Disk budget (derived; record the measured actual from the first run)
+
+| Component | Derived size | Gate |
+| --- | --- | --- |
+| rootfs qcow2 | ~2 GB | staged-set cap |
+| kernel (image + initramfs) | ~0.1 GB | staged-set cap |
+| matching `vmlinux` debuginfo | ~1.2 GB | staged-set cap |
+| transient debuginfod cache copy | ~1.2 GB | pre-stage free-space |
+| kdump/vmcore + working headroom | ~2 GB | pre-stage free-space |
+| **whole `/mnt` budget** | **~7 GB** | `require_free_space` (pre-stage) |
+
+The ~2 GB vmcore headroom assumes a TCG guest of ≤~2 GB RAM (a vmcore scales
+with populated guest memory); raise `KDIVE_TCG_BUDGET_BYTES` if the guest RAM
+rises. These are derived; the scripts print the **measured actual** on stderr
+(the `live-vm usage:` line) — record the first real measurement here.
+
+### Producing each store (operator)
+
+The pins are supplied inputs (the operator/CI compute the NVR from the base
+image; the scripts run no live distro query), and an unset input fails loud:
+
+```sh
+# Self-hosted warm store (native KVM):
+DEBUGINFOD_URLS=<distro-debuginfod> \
+  KDIVE_WARM_STORE_TARGET_NVR=<pinned-kernel-nvr> \
+  KDIVE_WARM_STORE_IMAGE=<catalog-rootfs-image> \
+  scripts/live-vm/warm-store.sh
+
+# Hosted TCG set (on the runner's /mnt):
+DEBUGINFOD_URLS=<distro-debuginfod> KDIVE_TCG_IMAGE=<ppc64le-rootfs-image> \
+  scripts/live-vm/stage-tcg-images.sh
+```
+
+Each prints the eval-safe `KDIVE_LIVE_VM_ROOTFS` / `KDIVE_LIVE_VM_BZIMAGE` /
+`KDIVE_LIVE_VM_VMLINUX` wiring block on stdout for the boot step to consume.
+The warm-store refresh holds an exclusive `flock` on `<store>/.lock`; the
+consuming boot (sub-issue D) takes a **shared** lock on the same file so a
+refresh cannot swap the artifacts out from under an in-flight domain.
+
 ## Maintenance
 
 - **After a kernel upgrade**, re-run `playbooks/runner.yml` (which re-applies
