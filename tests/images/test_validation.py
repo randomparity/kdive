@@ -7,6 +7,7 @@ libguestfs probe is an injected seam so these tests run without libguestfs.
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -14,7 +15,9 @@ import pytest
 
 from kdive.domain.catalog.images import Capability
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.images.cataloging import validation
 from kdive.images.cataloging.validation import (
+    DEFAULT_INSPECT,
     GUEST_CONTRACT_PATHS,
     InspectSeam,
     validate_guest_contract,
@@ -106,3 +109,78 @@ def test_empty_required_is_a_no_op(tmp_path: Path) -> None:
     image = tmp_path / "img.qcow2"
     image.write_bytes(b"")
     validate_guest_contract(image, required=[], inspect=_present())
+
+
+def _patch_run(
+    monkeypatch: pytest.MonkeyPatch, result: subprocess.CompletedProcess[str] | BaseException
+) -> None:
+    """Make the real ``guestfish`` invocation return or raise ``result``."""
+
+    def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(validation.subprocess, "run", _run)
+
+
+def test_real_inspect_maps_missing_guestfish_to_missing_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(monkeypatch, FileNotFoundError("guestfish"))
+
+    with pytest.raises(CategorizedError) as caught:
+        DEFAULT_INSPECT(Path("img.qcow2"), ["/some/path"])
+
+    assert caught.value.category is ErrorCategory.MISSING_DEPENDENCY
+    assert caught.value.details == {"tool": "guestfish"}
+
+
+def test_real_inspect_maps_timeout_to_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_run(
+        monkeypatch,
+        subprocess.TimeoutExpired(cmd="guestfish", timeout=validation._GUESTFISH_TIMEOUT_S),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        DEFAULT_INSPECT(Path("img.qcow2"), ["/some/path"])
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"timeout_s": validation._GUESTFISH_TIMEOUT_S}
+
+
+def test_real_inspect_maps_nonzero_exit_to_infrastructure_failure_with_truncated_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr = "x" * 2100
+    _patch_run(
+        monkeypatch,
+        subprocess.CompletedProcess(args=["guestfish"], returncode=1, stdout="", stderr=stderr),
+    )
+
+    with pytest.raises(CategorizedError) as caught:
+        DEFAULT_INSPECT(Path("img.qcow2"), ["/some/path"])
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert caught.value.details == {"stderr": stderr[-2000:]}
+
+
+def test_real_inspect_verdict_parsing_drops_candidates_past_the_last_reported_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # If guestfish emits fewer true/false lines than requested candidates (e.g. it crashed
+    # mid-script after printing some verdicts), `zip(..., strict=False)` silently truncates:
+    # candidates past the last reported line are dropped rather than raising, so they come back
+    # indistinguishable from an explicit "false". This test locks in that lenient behavior so a
+    # future change to it is a deliberate decision, not an accidental regression.
+    candidates = ["/present", "/explicitly-absent", "/never-reported"]
+    _patch_run(
+        monkeypatch,
+        subprocess.CompletedProcess(args=["guestfish"], returncode=0, stdout="true\nfalse\n"),
+    )
+
+    present = DEFAULT_INSPECT(Path("img.qcow2"), candidates)
+
+    assert present == {"/present"}
