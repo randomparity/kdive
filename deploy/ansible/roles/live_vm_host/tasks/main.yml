@@ -99,11 +99,24 @@
   changed_when: true
 
 - name: Locate the system libguestfs binding files
+  # find's `paths` is a LITERAL directory — it does NOT glob-expand (unlike `patterns`), so a
+  # wildcard like /usr/lib64/python3*/site-packages matches nothing and returns an empty list.
+  # Build the concrete site-packages path from the interpreter facts (the same version the venv
+  # dest below uses, so source and dest stay consistent).
   ansible.builtin.find:
-    paths: /usr/lib64/python3*/site-packages
+    paths: "/usr/lib64/python{{ ansible_python.version.major }}.{{ ansible_python.version.minor }}/site-packages"
     patterns: ["guestfs.py", "libguestfsmod*.so"]
-    recurse: true
   register: live_vm_host_libguestfs_files
+
+- name: Assert the libguestfs binding was found (fail loud, not an empty symlink loop)
+  # Without this, a missing binding (wrong path / python3-libguestfs absent) would make the
+  # symlink loop a silent no-op and only surface one task later at the check-local-libvirt gate.
+  ansible.builtin.assert:
+    that: live_vm_host_libguestfs_files.matched > 0
+    fail_msg: >-
+      guestfs.py / libguestfsmod*.so not found under the system python site-packages —
+      is python3-libguestfs installed (it is in live_vm_host_packages) and does the ansible
+      interpreter match /usr/bin/python3 (the venv's --python)?
 
 - name: Symlink the libguestfs binding into the venv site-packages (no PyPI wheel exists)
   ansible.builtin.file:
