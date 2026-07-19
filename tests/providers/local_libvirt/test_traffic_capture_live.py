@@ -53,6 +53,9 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
     from kdive.providers.local_libvirt.lifecycle.traffic_capture import (  # noqa: PLC0415
         LocalLibvirtTrafficCapture,
     )
+    from kdive.providers.local_libvirt.lifecycle.xml import (  # noqa: PLC0415
+        SYSTEM_SSH_NETDEV_ID,
+    )
 
     name = f"kdive-cap-live-{uuid.uuid4().hex[:12]}"
     port = _free_port()
@@ -69,6 +72,7 @@ def test_live_vm_traffic_capture_filter_dump() -> None:  # pragma: no cover - li
             name=name,
             mode=contract.libvirt_uri,
             ssh_hostfwd_port=port,
+            ssh_netdev_id=SYSTEM_SSH_NETDEV_ID,  # match the netdev the filter-dump targets
             wait_for="active",
             settle_s=2.0,
         ):
