@@ -3,8 +3,11 @@
 ``stage_volume_wiring`` is the impure half of ``stage-volume`` (a sync DB connection, the
 object store, and the remote-libvirt config resolver); ``test_stage_volume.py`` covers the
 pure orchestration via a fake ``StageVolumeDeps``. These tests exercise the wiring functions
-directly against psycopg/config/object-store doubles so the module's error branches run
-without a live database.
+directly against psycopg/config/object-store doubles so the module's four declared
+``CategorizedError`` branches (provider mismatch, wrong declared-instance count, absent
+staged row, and the ``psycopg.Error`` -> ``INFRASTRUCTURE_FAILURE`` mapping) run without a
+live database. ``_find_staged_row``'s own connection/query failures are not categorized in
+production and are out of scope here.
 """
 
 from __future__ import annotations
