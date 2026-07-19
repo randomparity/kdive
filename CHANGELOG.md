@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extract SYSTEM_SSH_NETDEV_ID constant
 - Keep capture netdev id inside local-libvirt provider
 - Satisfy config-env + provider-boundary guards (#1290)
+- Simplify the wiring-test doubles and parametrize a pair
 
 ### Documentation
 
@@ -119,6 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Always emit serial + soften dogfood parity claim (#1290)
 - TDD implementation plan for live_vm harness (#1290)
 - Fix four plan-review executability findings (#1290)
+- Scope the wiring test docstring to the declared error branches
 
 ### Fixed
 
