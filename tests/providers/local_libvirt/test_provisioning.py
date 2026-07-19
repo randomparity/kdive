@@ -1633,6 +1633,67 @@ def test_real_remove_overlay_absent_file_is_noop(tmp_path: Path) -> None:
     storage_module._real_remove_overlay(str(tmp_path / "gone-overlay.qcow2"))
 
 
+def test_real_overlay_virtual_size_unparseable_json_is_provisioning_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _info(args: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout='{"format": "qcow2"}')
+
+    monkeypatch.setattr(storage_module.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(storage_module.subprocess, "run", _info)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_overlay_virtual_size("/overlay.qcow2")
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == (
+        "qemu-img info returned no readable virtual-size for the per-System overlay"
+    )
+    assert caught.value.details == {
+        "op": "overlay_info",
+        "overlay": "overlay.qcow2",
+        "tool": "qemu-img",
+    }
+
+
+def test_real_remove_baseline_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _rmtree_failed(_path: object, *_: object, **__: object) -> None:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(storage_module.shutil, "rmtree", _rmtree_failed)
+    baseline = storage_module.baseline_dir(_SYS)
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._real_remove_baseline(baseline)
+
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(caught.value) == "failed to remove the per-System baseline kernel directory"
+    assert caught.value.details == {
+        "op": "remove_baseline",
+        "baseline": Path(baseline).name,
+    }
+
+
+def test_prepare_console_log_oserror_is_provisioning_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _mkdir_failed(self: object, *args: object, **kwargs: object) -> None:
+        del self, args, kwargs
+        raise OSError("disk full")
+
+    monkeypatch.setattr(storage_module.Path, "mkdir", _mkdir_failed)
+    path = Path(f"/var/log/kdive/{_SYS}/console.log")
+
+    with pytest.raises(CategorizedError) as caught:
+        storage_module._prepare_console_log(path)
+
+    assert caught.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert str(caught.value) == "failed to prepare libvirt console log"
+    assert caught.value.details == {"path": str(path)}
+
+
 def test_teardown_removes_the_overlay() -> None:
     removed: list[str] = []
     name = domain_name_for(_SYS)
