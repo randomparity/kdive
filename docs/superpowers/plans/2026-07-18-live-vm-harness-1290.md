@@ -14,7 +14,7 @@
 - **Guardrails before every commit:** `just ci` (lint = `ruff check` + `ruff format --check`; type = `ty check` whole-tree src+tests; lint-shell; lint-workflows; check-mermaid; test). Live proof: `just test-live` (this host runs KVM/libvirt directly).
 - **Ruff:** line length 100; lint set `E,F,I,UP,B,SIM`. Absolute imports only (no `..`).
 - **`src/` stays pytest-free:** no `import pytest` in `src/kdive/testing/live_vm.py`. Lazy `import libvirt` / `import libvirt_qemu` inside functions only; live-only real code carries `# pragma: no cover - live_vm`.
-- **Markers register under `--strict-markers`:** every new marker must be added to `pyproject.toml` `[tool.pytest.ini_options].markers` or its use errors.
+- **Register new markers in `pyproject.toml` `[tool.pytest.ini_options].markers`.** The default run uses `addopts = "-ra"` (no `--strict-markers`), so an unregistered marker does *not* error a normal `just test` — `--strict-markers` is enforced only in the `test-live-tcg`/`test-live-stack` recipes. Verify registration explicitly (Task 1 Step 4), not by assuming the default run catches it.
 - **Doc-style:** plain prose; never "critical/robust/comprehensive/elegant"; "Milestone" not "Sprint" (applies to docstrings + commit messages).
 - **Commits:** Conventional Commits; imperative ≤72-char subject; stage explicit paths (never `git add -A`); end body with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 - **Spec:** `docs/superpowers/specs/2026-07-18-live-vm-harness-1290-design.md` is authoritative. ADR: `docs/adr/0386-live-test-framework-runner-topology.md` (implemented, not modified).
@@ -140,10 +140,16 @@ def test_every_family_submarker_test_also_carries_live_vm() -> None:
 Run: `uv run python -m pytest tests/live_vm/test_family_markers.py -q`
 Expected: PASS (no test carries a family sub-marker yet, so the offender set is empty).
 
-- [ ] **Step 4: Verify markers are registered (no strict-markers error)**
+- [ ] **Step 4: Verify markers are actually registered**
 
-Run: `uv run python -m pytest --collect-only -q -m live_vm_throwaway 2>&1 | tail -3`
-Expected: collects 0 items with **no** "Unknown pytest.mark.live_vm_throwaway" error (registration succeeded).
+The default `addopts` is `-ra` with **no** `--strict-markers` (it lives only in the `test-live-tcg`
+/ `test-live-stack` justfile recipes, which select `live_vm_tcg` / `live_stack` — not these
+markers), so a plain collect would pass even if registration were omitted. Enforce it two ways:
+
+Run: `uv run python -m pytest --collect-only -q --strict-markers -m live_vm_throwaway 2>&1 | tail -3`
+Expected: collects 0 items with **no** `'live_vm_throwaway' not found in markers configuration` error — with `--strict-markers` an unregistered marker errors, so a clean run proves registration.
+Run: `rg -n "live_vm_throwaway|live_vm_provisioned" pyproject.toml`
+Expected: both marker strings appear in the `[tool.pytest.ini_options].markers` list.
 
 - [ ] **Step 5: Commit**
 
@@ -258,14 +264,17 @@ def test_provisioned_absent_when_system_id_unset(monkeypatch: pytest.MonkeyPatch
 def test_provisioned_misconfigured_on_partial_s3(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_LIVE_VM_SYSTEM_ID", "sys-123")
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://localhost:9000")
-    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
-    monkeypatch.delenv("KDIVE_S3_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)  # a real required var, left unset
     result = resolve_provisioned_contract("qemu:///system")
     assert result.state is LiveVmEnvState.MISCONFIGURED
-    assert "KDIVE_S3_" in result.reason
+    assert "KDIVE_S3_BUCKET" in result.reason
 ```
 
-> **Note on the S3 env names:** before implementing, confirm the exact `KDIVE_S3_*` variable names in `src/kdive/config/` (grep `KDIVE_S3_`). Use the real names in both the resolver and the test. The plan uses `KDIVE_S3_ENDPOINT_URL` / `KDIVE_S3_BUCKET` / `KDIVE_S3_ACCESS_KEY_ID` as the illustrative set — replace with the actual required set.
+> **S3 env (verified, do not re-guess):** `src/kdive/config/core_settings.py` requires exactly
+> `KDIVE_S3_ENDPOINT_URL` and `KDIVE_S3_BUCKET`; `KDIVE_S3_REGION` is defaulted. There is **no**
+> `KDIVE_S3_ACCESS_KEY_ID` env var — S3 credentials are file-based under `KDIVE_SECRETS_ROOT`
+> (ADR-0089), so the resolver checks only endpoint+bucket presence and treats credential
+> completeness as out of its env scope.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -324,9 +333,12 @@ LIVE_VM_ROOTFS_ENV = "KDIVE_LIVE_VM_ROOTFS"
 LIVE_VM_SYSTEM_ID_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
 LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 
-# The KDIVE_S3_* variables a provisioned-System live run needs. Confirm against src/kdive/config/
-# before implementing and use the real names here.
-_S3_REQUIRED_ENV = ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET", "KDIVE_S3_ACCESS_KEY_ID")
+# The object-store env a provisioned-System live run needs. Verified against
+# src/kdive/config/core_settings.py: KDIVE_S3_ENDPOINT_URL and KDIVE_S3_BUCKET are the required
+# env settings; KDIVE_S3_REGION is defaulted (not required). S3 *credentials* are NOT env vars —
+# they are file-based under KDIVE_SECRETS_ROOT (ADR-0089), so credential completeness is out of
+# this resolver's env scope; the resolver checks only that the endpoint+bucket env is present.
+_S3_REQUIRED_ENV = ("KDIVE_S3_ENDPOINT_URL", "KDIVE_S3_BUCKET")
 
 
 class LiveVmEnvState(Enum):
@@ -1075,12 +1087,33 @@ git commit -m "feat(live-vm): wait predicates, overlay + session-XDG helpers (#1
 Add to `tests/testing/test_live_vm.py`:
 
 ```python
+import sys
+import types
+
 from kdive.testing.live_vm import LiveVmBootTimeout, boot_throwaway_domain
 
 
+def _fake_libvirt_module() -> types.SimpleNamespace:
+    """A stub `libvirt` module for the teardown branch: its libvirtError + undefine flag constant.
+
+    boot_throwaway_domain imports libvirt lazily *inside its finally* (only when a domain was
+    defined), so a boot unit test injects this via monkeypatch.setitem(sys.modules, "libvirt", ...)
+    and the teardown runs without real libvirt — proving the fake path, and letting the four boot
+    tests pass on a libvirt-less host.
+    """
+    mod = types.SimpleNamespace()
+    mod.libvirtError = Exception
+    mod.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA = 1
+    return mod
+
+
 class _FakeDomain:
-    def __init__(self) -> None:
-        self.active = True
+    def __init__(self, *, boot_succeeds: bool = True) -> None:
+        # boot_succeeds models whether create() actually brings the domain up. The timeout test
+        # sets it False so create() does NOT flip active True — otherwise create() would override
+        # the 'never active' intent and wait_for_active would return True.
+        self.boot_succeeds = boot_succeeds
+        self.active = False
         self.destroyed = False
         self.undefined = False
 
@@ -1088,7 +1121,8 @@ class _FakeDomain:
         return self.active
 
     def create(self) -> None:
-        self.active = True
+        if self.boot_succeeds:
+            self.active = True
 
     def destroy(self) -> None:  # noqa: D401
         self.destroyed = True
@@ -1099,8 +1133,8 @@ class _FakeDomain:
 
 
 class _FakeConn:
-    def __init__(self) -> None:
-        self.domain = _FakeDomain()
+    def __init__(self, *, boot_succeeds: bool = True) -> None:
+        self.domain = _FakeDomain(boot_succeeds=boot_succeeds)
         self.define_calls = 0
         self.closed = False
 
@@ -1118,7 +1152,7 @@ def _fake_conn_factory(conn: _FakeConn):
 
 
 def test_boot_yields_and_tears_down_in_order(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr("kdive.testing.live_vm.libvirt", _fake_libvirt_module(), raising=False)
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
     conn = _FakeConn()
     overlays: list[Path] = []
     rootfs = tmp_path / "rootfs.qcow2"
@@ -1139,11 +1173,13 @@ def test_boot_yields_and_tears_down_in_order(tmp_path, monkeypatch) -> None:
     assert not overlays[0].exists()  # overlay unlinked
 
 
-def test_boot_raises_bemfore_define_on_ssh_without_port(tmp_path, monkeypatch) -> None:
+def test_boot_raises_before_define_on_ssh_without_port(tmp_path) -> None:
+    # No libvirt stub: the precondition must raise BEFORE the try body (no overlay, no connect,
+    # no libvirt import), so this passes on a libvirt-less host.
     conn = _FakeConn()
     rootfs = tmp_path / "rootfs.qcow2"
     rootfs.write_bytes(b"qcow2")
-    with pytest.raises(Exception):  # CategorizedError
+    with pytest.raises(CategorizedError):
         with boot_throwaway_domain(
             rootfs, arch="x86_64", name="k", wait_for="ssh",
             _connect=_fake_conn_factory(conn), _overlay=lambda b, d: d.write_bytes(b""),
@@ -1153,8 +1189,8 @@ def test_boot_raises_bemfore_define_on_ssh_without_port(tmp_path, monkeypatch) -
 
 
 def test_boot_timeout_raises_and_tears_down(tmp_path, monkeypatch) -> None:
-    conn = _FakeConn()
-    conn.domain.active = False  # never becomes active
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeConn(boot_succeeds=False)  # create() leaves it inactive → never reaches condition
     rootfs = tmp_path / "rootfs.qcow2"
     rootfs.write_bytes(b"qcow2")
     with pytest.raises(LiveVmBootTimeout):
@@ -1168,6 +1204,7 @@ def test_boot_timeout_raises_and_tears_down(tmp_path, monkeypatch) -> None:
 
 def test_boot_session_mode_restores_xdg_even_on_body_error(tmp_path, monkeypatch) -> None:
     import os as _os
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
     monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
     conn = _FakeConn()
     rootfs = tmp_path / "rootfs.qcow2"
@@ -1181,16 +1218,13 @@ def test_boot_session_mode_restores_xdg_even_on_body_error(tmp_path, monkeypatch
     assert _os.environ["XDG_CONFIG_HOME"] == "/original"
 ```
 
-> The `_fake_libvirt_module()` helper stubs the module-level `libvirt` name the teardown references for `libvirt.libvirtError` and `libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA`. Define it in the test:
-> ```python
-> def _fake_libvirt_module():
->     import types
->     mod = types.SimpleNamespace()
->     mod.libvirtError = Exception
->     mod.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA = 1
->     return mod
-> ```
-> The implementation imports `libvirt` lazily *inside* `boot_throwaway_domain` for the teardown suppression; the test injects the stub via `monkeypatch.setattr` on the module attribute, or — cleaner — the implementation accepts the caught exception type through a small internal indirection. Simplest: teardown does `import libvirt` lazily and the test sets `monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())` before entering. Use whichever keeps the teardown real; verify the fake path in step 4.
+> `_fake_libvirt_module()` (defined at the top of this test block) stubs the `libvirt` name the
+> teardown imports (`libvirt.libvirtError`, `VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA`). Every boot
+> test that reaches teardown injects it via `monkeypatch.setitem(sys.modules, "libvirt", ...)`
+> **before** entering the `with`; the precondition test does not, proving that path runs without
+> libvirt. Because the implementation's `import libvirt` lives in the `finally` (only when a domain
+> was defined), `setitem` on `sys.modules` is what the import resolves — `setattr` on a module
+> attribute would be inert for a function-local import.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1274,9 +1308,11 @@ def boot_throwaway_domain(
     See the module docstring for the environment contract. ``settle_s`` sleeps after the condition
     is reached (preserves the legacy ``create(); sleep(2)`` window). ``_connect``/``_overlay``/
     ``_sleep`` are injection seams for the unit tests; live callers use the defaults.
-    """
-    import libvirt  # noqa: PLC0415  # operator-provided; teardown suppresses its libvirtError
 
+    ``import libvirt`` happens **only in the finally**, and only when a domain was defined — so the
+    ``wait_for`` precondition guards raise before any libvirt import (they run on a libvirt-less
+    host) and a boot unit test can stub ``sys.modules["libvirt"]`` to exercise the real teardown.
+    """
     _validate_wait(wait_for, ssh_hostfwd_port=ssh_hostfwd_port, console_log=console_log)
     dest = rootfs.with_name(f"{name}.qcow2")
     runtime = prepare_session_runtime(mode)
@@ -1314,6 +1350,8 @@ def boot_throwaway_domain(
         )
     finally:
         if domain is not None:
+            import libvirt  # noqa: PLC0415  # operator-provided; only reached once a domain exists
+
             with contextlib.suppress(libvirt.libvirtError):
                 if domain.isActive():
                     domain.destroy()
@@ -1328,12 +1366,15 @@ def boot_throwaway_domain(
             runtime.restore()
 ```
 
-> The lazy `import libvirt` at the top of the function is what the unit tests stub via `sys.modules`. Confirm in step 4 the injected fake makes the teardown branch run without a real libvirt. If stubbing `sys.modules["libvirt"]` proves awkward, an acceptable alternative is a module-level `import libvirt` guarded so the tests patch `kdive.testing.live_vm.libvirt`; keep the teardown suppression real either way.
+> The `import libvirt` lives in the `finally` (only when `domain is not None`), so it is reached
+> only for a boot that got as far as defining a domain — never for a precondition failure. The unit
+> tests stub it via `monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())`. Confirm
+> in step 4 the four boot tests pass; they exercise the real teardown against the fake libvirt.
 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `uv run python -m pytest tests/testing/test_live_vm.py -k boot -q`
-Expected: PASS (fix the deliberate `bemfore` typo in the test name if copied — rename to `test_boot_raises_before_define_on_ssh_without_port`).
+Expected: PASS (4 boot tests). If you `pip uninstall libvirt-python` locally to prove it, they must still pass — the precondition test needs no libvirt, and the other three stub `sys.modules["libvirt"]`.
 
 - [ ] **Step 5: Full mechanism suite + guardrails + commit**
 
