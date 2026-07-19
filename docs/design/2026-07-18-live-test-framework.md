@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-18
 - **Status:** Draft
-- **Epic:** _(GitHub `type:epic` issue — to be filed)_
+- **Epic:** [#1289](https://github.com/randomparity/kdive/issues/1289) (sub-issues #1290–#1295)
 - **ADR:** [0386 — live-test framework and arch-additive runner topology](../adr/0386-live-test-framework-runner-topology.md)
 
 ## Problem
