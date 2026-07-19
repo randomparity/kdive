@@ -19,18 +19,17 @@ recipe. The issue title's "ADR-0229 scan" is a misnomer; the citation is #665 / 
 ``tests/deploy/grafana_catalog.py``, ...) that imports the module counts, because a test using that
 fixture loads the module into its runtime import graph, which is the signal mutmut attributes on.
 Two forms that do *not* load the module at runtime are excluded so they cannot mask a real gap:
+imports under an ``if TYPE_CHECKING:`` guard (evaluated only by type checkers), and relative
+imports (never used by a test here and never naming a ``kdive`` source module). One dynamic form
+*is* counted so a mirror test may use it: ``importlib.import_module("kdive…")`` with a string
+literal.
 
-- imports under an ``if TYPE_CHECKING:`` guard (evaluated only by type checkers); and
+A source module fails unless its dotted name is in that set, with two exemptions:
 
-and one dynamic form *is* counted so a mirror test may use it: ``importlib.import_module("kdive…")``
-with a string-literal argument.
-
-A source module fails unless its dotted name is in that set, with two exemptions — both because
-there is nothing for mutmut to attribute a killing test to:
-
-- a package initializer (``__init__.py``) with no mutatable surface: no function or class and no
-  non-trivial module-level statement (only imports, the docstring, and constant / ``__all__``
-  assignments). A logic-bearing ``__init__`` such as ``kdive.config`` is *not* exempt and is
+- a package initializer (``__init__.py``) that defines no function or class. mutmut (3.6.0)
+  mutates only code inside a top-level function or method, so such a module — a structural
+  re-export / aggregator — has no mutant for a killing test to be attributed to. A logic-bearing
+  ``__init__`` such as ``kdive.config`` *does* define functions, is therefore not exempt, and is
   covered by its own direct test; and
 - an explicit, justified :data:`_ALLOWLIST` entry (protocol-only / typing-only modules that carry
   no unit-testable logic). Kept minimal — currently empty.
@@ -125,37 +124,16 @@ def _test_imports() -> set[str]:
     return out
 
 
-def _is_trivial_value(value: ast.expr | None) -> bool:
-    """True for an assignment RHS mutmut cannot mutate: a constant or a constant-only collection."""
-    if value is None or isinstance(value, ast.Constant):
-        return True
-    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
-        return all(isinstance(elt, ast.Constant) for elt in value.elts)
-    return False
-
-
-def _has_mutatable_surface(tree: ast.Module) -> bool:
-    """True if the module body carries anything mutmut could mutate.
-
-    A function/class definition, or any module-level statement beyond imports, the docstring, and
-    trivial name / constant / ``__all__`` assignments (a computed RHS, a bare call, a branch, a
-    loop) — all of which mutmut can mutate even with no ``def``/``class`` present.
-    """
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return True
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            continue
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
-            continue  # docstring or bare literal
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and _is_trivial_value(node.value):
-            continue
-        return True
-    return False
+def _defines_function_or_class(tree: ast.Module) -> bool:
+    """True if the module defines a function or class anywhere — mutmut's only mutation surface."""
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for node in ast.walk(tree)
+    )
 
 
 def _is_pure_aggregator_init(path: Path, tree: ast.Module) -> bool:
-    return path.name == "__init__.py" and not _has_mutatable_surface(tree)
+    return path.name == "__init__.py" and not _defines_function_or_class(tree)
 
 
 def _undirected_modules() -> list[str]:
@@ -224,8 +202,10 @@ def test_module_name_maps_package_init_to_package() -> None:
     assert _module_name(_SRC / "config" / "manifest.py") == "kdive.config.manifest"
 
 
-def test_aggregator_detection_distinguishes_logic_from_reexport() -> None:
+def test_aggregator_detection_distinguishes_defs_from_reexport() -> None:
     reexport = ast.parse('"""doc"""\nimport a.b\nfrom c import d\n__all__ = ["d"]\n')
-    assert not _has_mutatable_surface(reexport)
-    assert _has_mutatable_surface(ast.parse("def f():\n    return 1\n"))
-    assert _has_mutatable_surface(ast.parse("import a\nVALUE = a.compute()\n"))
+    assert not _defines_function_or_class(reexport)
+    # A pure-data module (no def/class) has no mutmut surface, even with a module-level call.
+    assert not _defines_function_or_class(ast.parse("import a\nVALUE = a.compute()\n"))
+    assert _defines_function_or_class(ast.parse("def f():\n    return 1\n"))
+    assert _defines_function_or_class(ast.parse("class C:\n    x = 1\n"))
