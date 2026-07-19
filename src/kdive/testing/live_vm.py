@@ -161,16 +161,28 @@ class _ThrowawayConn(Protocol):
     def close(self) -> object: ...
 
 
+def _poll_until(
+    predicate: Callable[[], bool], deadline_s: float, *, sleep: Callable[[float], None]
+) -> bool:
+    """Poll ``predicate()`` every ``_POLL_INTERVAL_S`` until it is true or the deadline passes.
+
+    One deadline-arithmetic site shared by the non-socket waiters. A negative ``deadline_s`` starts
+    already past the deadline, so the loop is skipped and only the final check runs — the clean way
+    the unit tests exercise the timeout branch without a real wait.
+    """
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        sleep(_POLL_INTERVAL_S)
+    return predicate()
+
+
 def wait_for_active(
     domain: _ActiveDomain, deadline_s: float, *, sleep: Callable[[float], None] = time.sleep
 ) -> bool:
     """Poll ``domain.isActive()`` until true or the deadline passes."""
-    deadline = time.monotonic() + deadline_s
-    while time.monotonic() < deadline:
-        if domain.isActive():
-            return True
-        sleep(_POLL_INTERVAL_S)
-    return bool(domain.isActive())
+    return _poll_until(lambda: bool(domain.isActive()), deadline_s, sleep=sleep)
 
 
 def _console_has_panic(console_log: Path) -> bool:
@@ -190,12 +202,7 @@ def wait_for_panic(
     console_log: Path, deadline_s: float, *, sleep: Callable[[float], None] = time.sleep
 ) -> bool:
     """Poll the serial console file for the panic marker until it appears or the deadline passes."""
-    deadline = time.monotonic() + deadline_s
-    while time.monotonic() < deadline:
-        if _console_has_panic(console_log):
-            return True
-        sleep(_POLL_INTERVAL_S)
-    return _console_has_panic(console_log)
+    return _poll_until(lambda: _console_has_panic(console_log), deadline_s, sleep=sleep)
 
 
 def _ssh_banner_verdict(buffer: bytes) -> bool | None:
