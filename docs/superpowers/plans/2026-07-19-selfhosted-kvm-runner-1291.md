@@ -38,6 +38,7 @@
 - `deploy/ansible/roles/github_runner/tasks/main.yml` — arch resolve, download, idempotence, register, service, liveness.
 - `deploy/ansible/playbooks/runner.yml` — the runner bring-up playbook.
 - `deploy/ansible/inventory/host_vars/rock10-runner.yml` — the x86_64 runner host.
+- `deploy/ansible/inventory/group_vars/live_vm_runners.yml` — cross-role shared contract vars (kept out of role `defaults/` to satisfy the `no-role-prefix` lint rule).
 - `deploy/ansible/tests/github_runner_preflight.yml` — the harness driver playbook.
 - `deploy/ansible/tests/run-github-runner-preflight.sh` — the regression harness runner.
 - `deploy/ansible/tests/fake-config-sh` — a fake `config.sh` (records/refuses calls).
@@ -82,20 +83,13 @@ galaxy_info:
 dependencies: []
 ```
 
-`deploy/ansible/roles/live_vm_host/defaults/main.yml`:
+`deploy/ansible/roles/live_vm_host/defaults/main.yml` — only role-prefixed,
+role-owned vars live here; ansible-lint's `production` profile enforces
+`var-naming[no-role-prefix]`, so a non-`live_vm_host_` name in a role default is a
+lint error. The cross-role shared contract vars go in group_vars (Step 4 below),
+which the rule exempts.
 ```yaml
 ---
-# The single service account the whole contract targets (distinct from ansible_user_id).
-github_runner_user: github-runner
-# Throwaway-rootfs overlay area (KDIVE_LIVE_VM_ROOTFS's parent) + the provisioned-System
-# install staging check-local-libvirt.sh asserts. Both labeled virt_image_t, both traversable.
-live_vm_staging_dir: /var/lib/kdive/live-vm
-install_staging_dir: /var/lib/kdive/install
-# Persistent repo checkout + venv the worker's guestfs/drgn import uses; D reuses via KDIVE_PYTHON.
-live_vm_venv: /opt/kdive
-# The repo to check out for the venv (the runner needs the project source for `uv sync`).
-live_vm_repo_url: https://github.com/randomparity/kdive.git
-live_vm_repo_version: main
 # Kernel-debug toolchain the live_vm contract needs beyond libvirt_stack.
 live_vm_host_packages:
   - drgn
@@ -107,10 +101,6 @@ live_vm_host_packages:
   - python3-libguestfs
   - policycoreutils-python-utils  # semanage
   - git
-# Foreign qemu emulator per non-native arch (TCG). Arch-keyed, mirrors libvirt_stack.
-live_vm_foreign_qemu_map:
-  x86_64: qemu-system-ppc  # a native-x86 host can emulate ppc64le under TCG
-  ppc64le: qemu-system-x86  # a native-ppc host can emulate x86_64 under TCG
 ```
 
 `deploy/ansible/roles/live_vm_host/tasks/main.yml`:
@@ -171,6 +161,29 @@ github_runner_repo_url: https://github.com/randomparity/kdive
 # github_runner_registration_token supplied at runtime, never here.
 ```
 
+`deploy/ansible/inventory/group_vars/live_vm_runners.yml` — the cross-role shared
+contract vars. They live here (not a role `defaults/`) because ansible-lint's
+`production` profile rejects a role default whose name is not `<role>_`-prefixed,
+and these are consumed by BOTH `live_vm_host` and `github_runner`. group_vars are
+exempt from that rule and apply to every host in the play. (`github_runner_user`
+stays in `github_runner/defaults` — it is already role-prefixed and the localhost
+test harness, which does not load this group_vars, needs a default for it.)
+```yaml
+---
+# Throwaway-rootfs overlay area (KDIVE_LIVE_VM_ROOTFS's parent) + the provisioned-System
+# install staging check-local-libvirt.sh asserts. Both labeled virt_image_t, both traversable.
+live_vm_staging_dir: /var/lib/kdive/live-vm
+install_staging_dir: /var/lib/kdive/install
+# Persistent repo checkout + venv the worker's guestfs/drgn import uses; D reuses via KDIVE_PYTHON.
+live_vm_venv: /opt/kdive
+live_vm_repo_url: https://github.com/randomparity/kdive.git
+live_vm_repo_version: main
+# Foreign qemu emulator per non-native arch (TCG). Arch-keyed, mirrors libvirt_stack.
+live_vm_foreign_qemu_map:
+  x86_64: qemu-system-ppc  # a native-x86 host can emulate ppc64le under TCG
+  ppc64le: qemu-system-x86  # a native-ppc host can emulate x86_64 under TCG
+```
+
 - [ ] **Step 4: Create the runner playbook.**
 
 `deploy/ansible/playbooks/runner.yml`:
@@ -202,7 +215,8 @@ Expected: yamllint + ansible-lint report no errors; `--syntax-check` prints the 
 ```bash
 git add deploy/ansible/roles/live_vm_host deploy/ansible/roles/github_runner \
         deploy/ansible/playbooks/runner.yml deploy/ansible/inventory/hosts.yml \
-        deploy/ansible/inventory/host_vars/rock10-runner.yml
+        deploy/ansible/inventory/host_vars/rock10-runner.yml \
+        deploy/ansible/inventory/group_vars/live_vm_runners.yml
 git commit -m "feat(1291): scaffold live_vm_host + github_runner roles and runner.yml"
 ```
 
