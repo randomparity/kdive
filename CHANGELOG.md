@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live_vm_host two-part host-contract gate
 - Github_runner registration role + regression harness
 - Retarget the live_vm runner host to Ubuntu 26.04
+- Live-vm store disk/budget helpers
+- Live-vm store manifest + atomic set-commit helpers
+- Warm-store.sh + shared rootfs/kernel production helper
+- Stage-tcg-images.sh hosted /mnt image set under budget
+- Add persistent warm-store dir to the live_vm runner host
 
 ### Changed
 
@@ -67,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep capture netdev id inside local-libvirt provider
 - Satisfy config-env + provider-boundary guards (#1290)
 - Simplify the wiring-test doubles and parametrize a pair
+- Extract fetch_debuginfo + emit_wiring shared helpers
 
 ### Documentation
 
@@ -142,6 +148,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Self-hosted KVM runner runbook + discoverability pointers
 - Reconcile ADR XDG wording with the .env mechanism
 - Reconcile ADR/spec/runbook to the Ubuntu 26.04 runner
+- Spec + ADR-0388 for guest-image + debuginfo provisioning
+- Harden spec+ADR — build-id match, integrity, free-space gate
+- Fetch debuginfo by build-id via debuginfod; digest+swap hardening
+- Tighten build-id extraction, swap atomicity, budget honesty
+- Symlink-commit swap, capture build-fs stdout, pin debuginfod cache
+- Implementation plan (TDD, 7 tasks)
+- Fix plan — real build-fs contract, non-vacuous match, honest verification
+- Pin build-fs --workspace on-budget in produce helper
+- Document the guest-image stores and disk budget
+- Document live-vm store env vars; accept ADR-0388
+- Record the Ubuntu 26.04 live proof + measured budget
+- State live-stack provisioning-parity convention
 
 ### Fixed
 
@@ -181,6 +199,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PEP668-safe uv install; drop no_log on the token-length assert
 - Re-sync venv on checkout change; tighten kernel grant; restorecon -v
 - Locate libguestfs via a concrete site-packages path, assert found
+- Harden stores from branch review
+- Fail loud on missing host tools; declare the deps
+- Declare e2fsprogs host dep for build-fs repack
 
 ### Build
 
