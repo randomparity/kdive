@@ -179,9 +179,10 @@ pre-commit exit; sweeps a prior crashed refresh's orphan set dirs on entry).
 `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir B's Ansible
 owns).
 
-1. Resolve the target kernel NVR label from the distro base. If resolution fails
-   (distro metadata unreachable), `die` — do not silently serve a stale set as if
-   current.
+1. Read the target kernel NVR pin from `KDIVE_WARM_STORE_TARGET_NVR` and the
+   catalog image name from `KDIVE_WARM_STORE_IMAGE` (supplied inputs — the
+   operator/D compute the pin from the base image; the script runs no live distro
+   query). Either unset → `die` with a clear message, never a silent stale serve.
 2. **Warm check** — declare warm only when `store_manifest_matches` **and** all
    three staged files (`rootfs`, kernel image, debuginfo) re-hash to their
    recorded digests **and** the staged debuginfo's build-id equals the manifest
@@ -189,10 +190,12 @@ owns).
    `report_usage`, emit the full wiring block, exit 0. **`KDIVE_WARM_STORE_FORCE=1`
    skips the warm fast-path** (the escape hatch below).
 3. **Refresh** (into a `mktemp -d` set dir, then commit by `current`-symlink flip)
-   — build the rootfs via `build-fs` (host-only, libguestfs), **capturing
-   `build-fs`'s own eval-safe stdout into a variable** (never passing it through —
-   it names the rootfs at its pre-commit build path); `kernel_build_id` the staged
-   kernel; fetch the matching debuginfo by that build-id (`debuginfod-find`, with
+   — build the rootfs via `python -m kdive build-fs --image <KDIVE_WARM_STORE_IMAGE>`
+   (host-only, libguestfs), **capturing `build-fs`'s own eval-safe stdout into a
+   variable** (never passing it through); **extract the rootfs's own kernel** from
+   its `/boot/vmlinuz-*` (host-only `virt-copy-out`) as the direct-boot kernel;
+   `kernel_build_id` that staged kernel; fetch the matching debuginfo by that
+   build-id (`debuginfod-find`, with
    `DEBUGINFOD_CACHE_PATH` pinned into the store so the ~1.2 GB download lands on
    the budgeted filesystem, not `$HOME`); `build_ids_match` the fetched debuginfo
    against the kernel (fail loud on mismatch — never stage mismatched debuginfo);
@@ -323,8 +326,9 @@ set that grew past its derivation. Both fail loud with the measured number.
     case).
   - `assert_same_fs`: passes for two paths on one device; fails loud for a
     cross-device pair (stubbed `stat`) — the atomic-`rename` precondition.
-  - `verify_sha256`: passes on a matching digest; fails loud on a byte-changed or
-    truncated file — the completeness check build-id cannot give.
+  - `sha256_ok`: non-fatal digest predicate — status 0 on a matching digest,
+    status 1 (not a `die`) on a byte-changed or truncated file, so the warm check
+    rebuilds rather than aborting. The completeness check build-id cannot give.
   - `report_usage`: stable, greppable format.
   - `store_manifest_matches` / `manifest_field`: warm (NVR equal), stale (NVR
     differ), absent manifest (stale, not error); round-trip of every field
@@ -347,8 +351,11 @@ set that grew past its derivation. Both fail loud with the measured number.
     `KDIVE_LIVE_VM_ROOTFS`/`BZIMAGE`/`VMLINUX` lines through `current/…` — no
     captured `build-fs`-origin duplicate and no `mktemp` build-dir path (stub
     `build-fs` to print its own `KDIVE_*` block; assert it does not leak).
-- The Ansible dir change is covered by `live_vm_host`'s existing verify gate and
-  idempotence (`test-ansible`); no new role test needed for one loop entry.
+- The Ansible dir change is one additive loop entry: `just lint-ansible` checks
+  its syntax, and the operator live proof (an idempotent `runner.yml` re-run that
+  creates `warm_store_dir`) confirms it. `just test-ansible` does **not** exercise
+  the `live_vm_host` role (it runs only the gdbstub-acl-prune + github-runner
+  harnesses), so it does not verify this entry — the claim must not be made.
 - The heavy operations (real `build-fs`, real debuginfo download, real boot) are
   host-only and land as the operator live-proof, not a CI check — a clean skip in
   CI is correct.

@@ -20,7 +20,8 @@
 - **Consumer env vars (verbatim, from `src/kdive/config/external_env.py`):** `KDIVE_LIVE_VM_ROOTFS` (bootable rootfs qcow2), `KDIVE_LIVE_VM_BZIMAGE` (kernel image), `KDIVE_LIVE_VM_VMLINUX` (vmlinux debuginfo; also satisfies `KDIVE_LIVE_VM_GDBMI_VMLINUX`).
 - **Line length ≤100; absolute imports only in Python; Google-style docstrings on non-trivial Python.**
 - **Guardrail suite:** `just lint-shell lint-ansible test-ansible test` (plus the doc guards for Task 7). CI runs each recipe individually.
-- **No new dependency.** `du`, `df`, `sha256sum`, `numfmt`, `stat`, `sed`, `awk`, `mktemp`, `flock`, `ln`, `mv` are coreutils/util-linux; `eu-readelf`, `debuginfod-find`, `extract-vmlinux` are host-only tools exercised in the live proof, stubbed in tests.
+- **No new dependency.** `du`, `df`, `sha256sum`, `numfmt`, `stat`, `sed`, `awk`, `mktemp`, `flock`, `ln`, `mv`, `grep`, `od` are coreutils/util-linux. **Host-only tools** (exercised in the operator live proof, stubbed on PATH in CI tests): `python -m kdive build-fs` (the real rootfs builder — `python3`/`$KDIVE_PYTHON`, NOT a `build-fs` PATH binary), `virt-ls`/`virt-copy-out` (libguestfs, to extract the rootfs's own kernel), `eu-readelf`, `debuginfod-find`, `extract-vmlinux`. There is **no** `stage-ppc64le-set` command — both stores share one production path.
+- **Supplied inputs (the pins).** `KDIVE_WARM_STORE_TARGET_NVR` + `KDIVE_WARM_STORE_IMAGE` for the warm store; `KDIVE_TCG_IMAGE` + `DEBUGINFOD_URLS` for the TCG set. The scripts run no live distro query; the NVR pin is supplied (operator/D compute it from the base image). Unset required input → `die`.
 - **Scope fences:** do **not** edit `.github/workflows/*`; do **not** add live-stack/System bring-up. Those are sub-issue D.
 
 ---
@@ -190,22 +191,20 @@ git commit -m "feat(1292): live-vm store disk/budget helpers"
 - Test: `tests/scripts/test_live_vm_stores.py`
 
 **Interfaces:**
-- Produces: `sha256_of FILE` → prints digest; `verify_sha256 FILE EXPECTED` (die on mismatch); `build_ids_match A B` (die if either empty or unequal); `kernel_build_id KERNEL_IMAGE` → prints build-id (die on empty); `assert_same_fs A B` (die if different device).
+- Produces: `sha256_of FILE` → prints digest; `sha256_ok FILE EXPECTED` (non-fatal predicate — status 0 iff the file re-hashes to EXPECTED; the warm check treats a mismatch as rebuild, not `die`); `build_ids_match A B` (die if either empty or unequal); `elf_build_id FILE` → prints an ELF's `.note.gnu.build-id` (die on empty — used for the fetched debuginfo, which is a bare ELF); `kernel_build_id KERNEL_IMAGE` → prints build-id, resolving a compressed image to an ELF first, then calling `elf_build_id`; `assert_same_fs A B` (die if different device).
 
 - [ ] **Step 1: Write the failing tests (append to `tests/scripts/test_live_vm_stores.py`)**
 
 ```python
-def test_verify_sha256_roundtrip_and_mismatch(tmp_path: Path) -> None:
+def test_sha256_ok_roundtrip_and_mismatch(tmp_path: Path) -> None:
     f = tmp_path / "art"
     f.write_bytes(b"payload")
     digest = _run('sha256_of "$1"', str(f)).stdout.strip()
     assert len(digest) == 64
-    ok = _run('verify_sha256 "$1" "$2"', str(f), digest)
-    assert ok.returncode == 0
+    assert _run('sha256_ok "$1" "$2"', str(f), digest).returncode == 0
     f.write_bytes(b"payload-truncated-changed")  # byte change -> digest differs
-    bad = _run('verify_sha256 "$1" "$2"', str(f), digest)
-    assert bad.returncode != 0
-    assert "digest mismatch" in bad.stderr
+    bad = _run('sha256_ok "$1" "$2"', str(f), digest)
+    assert bad.returncode != 0  # non-fatal: a mismatch is status 1 (rebuild), not a die
 
 
 def test_build_ids_match_equal_mismatch_and_empty() -> None:
@@ -240,10 +239,24 @@ def test_assert_same_fs_same_and_cross_device(tmp_path: Path) -> None:
     env = {"PATH": f"{bindir}:/usr/bin:/bin"}
     same = _run('assert_same_fs "$1" "$2"', "/a", "/b", env=env)
     assert same.returncode == 0, same.stderr
-    _stub(bindir, "stat", 'case "$3" in */a) echo 1;; *) echo 2;; esac')
+    # `stat -c %d -- <path>` puts the path LAST, not at $3 (which is `--`). Key on the last arg.
+    _stub(bindir, "stat", 'for a; do last="$a"; done; case "$last" in */a) echo 1;; *) echo 2;; esac')
     env2 = {"PATH": f"{bindir}:/usr/bin:/bin"}
     cross = _run('assert_same_fs "$1" "$2"', "/a", "/b", env=env2)
     assert cross.returncode != 0 and "filesystem" in cross.stderr
+
+
+def test_elf_build_id_reads_and_dies_on_empty(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    dbg = tmp_path / "vmlinux.debug"
+    dbg.write_bytes(b"\x7fELF" + b"\x00" * 60)
+    _stub(bindir, "eu-readelf", 'echo "    Build ID: dbg99"')
+    env = {"PATH": f"{bindir}:/usr/bin:/bin"}
+    assert _run('elf_build_id "$1"', str(dbg), env=env).stdout.strip() == "dbg99"
+    _stub(bindir, "eu-readelf", "true")  # no id
+    none = _run('elf_build_id "$1"', str(dbg), env=env)
+    assert none.returncode != 0 and "build-id" in none.stderr
 ```
 
 - [ ] **Step 2: Run to verify the new tests fail**
@@ -259,11 +272,11 @@ sha256_of() {
   sha256sum -- "$1" | cut -d' ' -f1
 }
 
-# Re-check FILE against EXPECTED digest (completeness — build-id survives truncation, a digest does not).
-verify_sha256() {
-  local file="$1" expected="$2" actual
-  actual="$(sha256_of "$file")"
-  [ "$actual" = "$expected" ] || die "digest mismatch for ${file}: got ${actual}, expected ${expected}"
+# Non-fatal digest predicate (completeness — build-id survives truncation, a digest does not).
+# Status 0 iff FILE re-hashes to EXPECTED. The warm check treats a mismatch as rebuild, so this
+# must NOT die (unlike the fail-loud helpers).
+sha256_ok() {
+  [ "$(sha256_of "$1")" = "$2" ]
 }
 
 # Post-fetch match assertion. Die if EITHER id is empty (even if both are) — no vacuous match.
@@ -273,11 +286,19 @@ build_ids_match() {
   [ "$a" = "$b" ] || die "build-id mismatch: kernel=${a} debuginfo=${b}"
 }
 
-# Read the .note.gnu.build-id from the ACTUAL staged kernel artifact (not repo metadata).
-# Bare vmlinux ELF (common for ppc64le pseries) is read directly; a compressed bzImage/vmlinuz is
-# first decompressed. Die (never empty) if no id — an empty id must not flow into the match.
+# Read the .note.gnu.build-id from an ELF FILE (the fetched debuginfo is a bare ELF). Die (never
+# empty) if no id — an empty id must not flow into the match guard.
+elf_build_id() {
+  local file="$1" id
+  id="$(eu-readelf -n "$file" 2>/dev/null | awk '/Build ID:/{print $NF}')"
+  [ -n "$id" ] || die "no build-id in ELF ${file}"
+  printf '%s\n' "$id"
+}
+
+# Read the build-id from the ACTUAL staged kernel artifact (not repo metadata). A bare vmlinux ELF
+# (common for ppc64le pseries) is read directly; a compressed bzImage/vmlinuz is first decompressed.
 kernel_build_id() {
-  local image="$1" magic vmlinux id
+  local image="$1" magic vmlinux
   magic="$(head -c4 -- "$image" | od -An -tx1 | tr -d ' ')"
   if [ "$magic" = "7f454c46" ]; then
     vmlinux="$image"
@@ -285,9 +306,7 @@ kernel_build_id() {
     vmlinux="$(mktemp)"
     extract-vmlinux "$image" >"$vmlinux" 2>/dev/null || die "cannot extract vmlinux from ${image}"
   fi
-  id="$(eu-readelf -n "$vmlinux" 2>/dev/null | awk '/Build ID:/{print $NF}')"
-  [ -n "$id" ] || die "no build-id in kernel image ${image}"
-  printf '%s\n' "$id"
+  elf_build_id "$vmlinux"
 }
 
 # rename(2) is atomic only within one filesystem: die unless A and B share a device.
@@ -453,28 +472,124 @@ git commit -m "feat(1292): live-vm store manifest + atomic set-commit helpers"
 
 **Interfaces:**
 - Consumes: every `lib.sh` helper from Tasks 1–3.
-- Produces: an executable script that emits the three-var wiring block on stdout. Env: `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`), `KDIVE_WARM_STORE_FORCE` (skip warm fast-path). Reads target NVR + builds via `build-fs`; fetches debuginfo via `debuginfod-find` with `DEBUGINFOD_CACHE_PATH` pinned into the store.
+- Adds to `lib.sh`: `produce_rootfs_and_kernel DEST IMAGE` → builds a rootfs for `IMAGE` via `python -m kdive build-fs`, extracts the rootfs's own `/boot/vmlinuz-*` to `DEST/vmlinux`, prints the kernel build-id. Shared with Task 5.
+- Produces: an executable `warm-store.sh` that emits the three-var wiring block on stdout. Required env: `KDIVE_WARM_STORE_TARGET_NVR` (the supplied kernel pin), `KDIVE_WARM_STORE_IMAGE` (catalog rootfs image). Optional: `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`), `KDIVE_WARM_STORE_FORCE` (skip warm fast-path), `KDIVE_PYTHON`. Fetches debuginfo by the kernel build-id via `debuginfod-find` with `DEBUGINFOD_CACHE_PATH` pinned into the store; asserts the **fetched debuginfo's** build-id matches the kernel.
 
 - [ ] **Step 1: Write the failing behavioral tests (append)**
 
-These stub `build-fs`, `debuginfod-find`, `eu-readelf`, `extract-vmlinux`, and the distro-NVR resolver on PATH so the orchestration is exercised without a real host. The script reads the target NVR from `KDIVE_WARM_STORE_TARGET_NVR` when set (the seam the test drives; the real default resolves from the distro base).
+First add the shared production helper to `lib.sh`, then build `warm-store.sh` on it. Tests stub the real host-only tools on PATH (`python3` for `build-fs`, `virt-ls`/`virt-copy-out`, `eu-readelf`, `debuginfod-find`), the repo's PATH-stub pattern (`tests/scripts/test_setup_local_libvirt.py`).
+
+- [ ] **Step 1: Write the failing test for `produce_rootfs_and_kernel` (append)**
 
 ```python
+def _produce_stubs(bindir: Path, build_id: str = "beef01", build_marker: Path | None = None) -> None:
+    """Stub the host-only tools produce_rootfs_and_kernel drives: build-fs (via python3), the
+    libguestfs kernel-extract pair, and eu-readelf."""
+    mark = f'echo x >> "{build_marker}"; ' if build_marker else ""
+    # `python3 -m kdive build-fs --image X --dest DEST/rootfs.qcow2` → create the rootfs at --dest.
+    _stub(
+        bindir,
+        "python3",
+        f'{mark}dest=""; want=0; for a in "$@"; do '
+        '[ "$want" = 1 ] && { dest="$a"; want=0; }; [ "$a" = "--dest" ] && want=1; done; : > "$dest"',
+    )
+    _stub(bindir, "virt-ls", 'printf "config-6.1\\nvmlinuz-6.1-test\\ninitrd.img\\n"')
+    # `virt-copy-out -a img /boot/<vmlinuz> <destdir>` → materialize <destdir>/<vmlinuz>.
+    _stub(
+        bindir,
+        "virt-copy-out",
+        'src=""; for a in "$@"; do case "$a" in /boot/*) src="$a";; esac; destdir="$a"; done; '
+        'printf "\\x7fELF" > "${destdir}/$(basename "$src")"',
+    )
+    _stub(bindir, "eu-readelf", f'echo "    Build ID: {build_id}"')
+
+
+def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    dest = tmp_path / "set"
+    dest.mkdir()
+    _produce_stubs(bindir)
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "KDIVE_PYTHON": "python3"}
+    r = _run('produce_rootfs_and_kernel "$1" "$2"', str(dest), "rocky10-debug", env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "beef01"
+    assert (dest / "rootfs.qcow2").exists()
+    assert (dest / "vmlinux").exists()  # the rootfs's own kernel, extracted
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `uv run python -m pytest tests/scripts/test_live_vm_stores.py -q -k produce`
+Expected: FAIL (`produce_rootfs_and_kernel` not defined).
+
+- [ ] **Step 3: Add `produce_rootfs_and_kernel` to `scripts/live-vm/lib.sh`**
+
+```bash
+# Build a rootfs for IMAGE into DEST/rootfs.qcow2 (the REAL builder: `python -m kdive build-fs`,
+# NOT a `build-fs` PATH binary), then extract the rootfs's own /boot/vmlinuz-* to DEST/vmlinux as
+# the direct-boot kernel. Prints the kernel build-id. Host-only (build-fs + libguestfs); tests stub
+# python3/virt-ls/virt-copy-out/eu-readelf. build-fs's own eval-safe stdout is discarded (never
+# passed through to the caller's wiring block).
+produce_rootfs_and_kernel() {
+  local dest="$1" image="$2" py vmlinuz
+  py="${KDIVE_PYTHON:-python3}"
+  "$py" -m kdive build-fs --image "$image" --dest "${dest}/rootfs.qcow2" >/dev/null
+  vmlinuz="$(virt-ls -a "${dest}/rootfs.qcow2" /boot | grep -m1 '^vmlinuz-')" ||
+    die "no /boot/vmlinuz-* in the rootfs built for image ${image}"
+  virt-copy-out -a "${dest}/rootfs.qcow2" "/boot/${vmlinuz}" "$dest"
+  mv -- "${dest}/${vmlinuz}" "${dest}/vmlinux"
+  kernel_build_id "${dest}/vmlinux"
+}
+```
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `uv run python -m pytest tests/scripts/test_live_vm_stores.py -q -k produce`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing `warm-store.sh` behavioral tests (append)**
+
+The `debuginfod-find` stub writes into a build-id **subdir** (as the real client cache does) so the script's copy to `vmlinux.debug` is a genuine copy, not a same-file `cp` that aborts under `set -e`.
+
+```python
+WARM = ROOT / "scripts" / "live-vm" / "warm-store.sh"
+
+
 def _warm_env(bindir: Path, store: Path, **extra: str) -> dict[str, str]:
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
+        "KDIVE_PYTHON": "python3",
         "KDIVE_WARM_STORE_DIR": str(store),
         "KDIVE_WARM_STORE_TARGET_NVR": "kernel-6.1-test",
+        "KDIVE_WARM_STORE_IMAGE": "rocky10-debug",
     }
     env.update(extra)
     return env
 
 
-WARM = ROOT / "scripts" / "live-vm" / "warm-store.sh"
+def _debuginfod_ok(bindir: Path) -> None:
+    # Cache under a build-id subdir (distinct from the script's vmlinux.debug destination).
+    _stub(
+        bindir,
+        "debuginfod-find",
+        'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
+    )
 
 
 def test_warm_store_syntax_valid() -> None:
     assert subprocess.run([BASH, "-n", str(WARM)], check=False).returncode == 0
+
+
+def test_warm_store_requires_the_pins(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "KDIVE_WARM_STORE_DIR": str(store)}  # no pins
+    r = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
+    assert r.returncode != 0
+    assert "KDIVE_WARM_STORE_TARGET_NVR" in r.stderr
 
 
 def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None:
@@ -482,27 +597,38 @@ def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None
     bindir.mkdir()
     store = tmp_path / "store"
     store.mkdir()
-    # build-fs writes rootfs + kernel into $1 (the set dir) and prints ITS OWN eval-safe block,
-    # which warm-store must capture and NOT leak.
-    _stub(
-        bindir,
-        "build-fs",
-        'dst="$1"; : > "$dst/rootfs.qcow2"; printf "\\x7fELF" > "$dst/vmlinux"; '
-        'echo "KDIVE_LIVE_VM_ROOTFS=$dst/rootfs.qcow2"',
-    )
-    _stub(bindir, "eu-readelf", 'echo "    Build ID: beef01"')
-    _stub(bindir, "debuginfod-find", 'p="$DEBUGINFOD_CACHE_PATH/vmlinux.debug"; echo dbg > "$p"; echo "$p"')
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
     r = subprocess.run(
-        [BASH, str(WARM)], capture_output=True, text=True, check=False,
-        env=_warm_env(bindir, store),
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
     )
     assert r.returncode == 0, r.stderr
     lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     keys = sorted(ln.split("=", 1)[0] for ln in lines)
     assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
-    # No build-fs-origin duplicate and no mktemp build-dir path — every path is under current/.
-    for ln in lines:
+    for ln in lines:  # every path resolves through current/, none leaks a build-fs/mktemp path
         assert "/current/" in ln.split("=", 1)[1]
+
+
+def test_warm_store_dies_on_debuginfo_kernel_mismatch(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
+    # eu-readelf returns a DIFFERENT id for the fetched debuginfo than for the kernel -> the REAL
+    # match reads the debuginfo and dies (proves the assertion is not kernel-vs-itself).
+    _stub(
+        bindir,
+        "eu-readelf",
+        'for a; do last="$a"; done; case "$last" in *vmlinux.debug) echo "    Build ID: WRONG";; '
+        '*) echo "    Build ID: beef01";; esac',
+    )
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode != 0 and "mismatch" in r.stderr
 
 
 def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
@@ -510,20 +636,15 @@ def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
     bindir.mkdir()
     store = tmp_path / "store"
     store.mkdir()
-    marker = tmp_path / "build-fs.calls"
-    _stub(
-        bindir,
-        "build-fs",
-        f'echo x >> "{marker}"; dst="$1"; : > "$dst/rootfs.qcow2"; printf "\\x7fELF" > "$dst/vmlinux"',
-    )
-    _stub(bindir, "eu-readelf", 'echo "    Build ID: beef01"')
-    _stub(bindir, "debuginfod-find", 'p="$DEBUGINFOD_CACHE_PATH/vmlinux.debug"; echo dbg > "$p"; echo "$p"')
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
     env = _warm_env(bindir, store)
     first = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
     assert first.returncode == 0, first.stderr
     second = subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
     assert second.returncode == 0, second.stderr
-    assert marker.read_text().count("x") == 1  # warm: build-fs ran once, not twice
+    assert marker.read_text().count("x") == 1  # warm: build ran once, not twice
 
 
 def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
@@ -531,31 +652,27 @@ def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
     bindir.mkdir()
     store = tmp_path / "store"
     store.mkdir()
-    marker = tmp_path / "build-fs.calls"
-    _stub(
-        bindir,
-        "build-fs",
-        f'echo x >> "{marker}"; dst="$1"; : > "$dst/rootfs.qcow2"; printf "\\x7fELF" > "$dst/vmlinux"',
+    marker = tmp_path / "build.calls"
+    _produce_stubs(bindir, build_marker=marker)
+    _debuginfod_ok(bindir)
+    subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store))
+    subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False,
+        env=_warm_env(bindir, store, KDIVE_WARM_STORE_FORCE="1"),
     )
-    _stub(bindir, "eu-readelf", 'echo "    Build ID: beef01"')
-    _stub(bindir, "debuginfod-find", 'p="$DEBUGINFOD_CACHE_PATH/vmlinux.debug"; echo dbg > "$p"; echo "$p"')
-    env = _warm_env(bindir, store)
-    subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env)
-    env_force = _warm_env(bindir, store, KDIVE_WARM_STORE_FORCE="1")
-    subprocess.run([BASH, str(WARM)], capture_output=True, text=True, check=False, env=env_force)
     assert marker.read_text().count("x") == 2  # force skips the warm fast-path
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 6: Run to verify failure**
 
 Run: `uv run python -m pytest tests/scripts/test_live_vm_stores.py -q -k warm`
 Expected: FAIL (warm-store.sh missing).
 
-- [ ] **Step 3: Write `scripts/live-vm/warm-store.sh`**
+- [ ] **Step 7: Write `scripts/live-vm/warm-store.sh`**
 
 ```bash
 #!/usr/bin/env bash
-# Refresh the self-hosted live-vm warm store: a bootable rootfs + kernel + matching vmlinux
+# Refresh the self-hosted live-vm warm store: a bootable rootfs + its kernel + matching vmlinux
 # debuginfo, kept warm (NVR-pinned) between nightly runs (ADR-0388). Emits the eval-safe
 # KDIVE_LIVE_VM_* wiring block on stdout; human progress goes to stderr.
 set -euo pipefail
@@ -565,6 +682,9 @@ here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "${here}/lib.sh"
 
 STORE="${KDIVE_WARM_STORE_DIR:-/var/lib/kdive/warm-store}"
+# Supplied pins (the operator/D compute the NVR from the base image; no live distro query here).
+TARGET="${KDIVE_WARM_STORE_TARGET_NVR:?set KDIVE_WARM_STORE_TARGET_NVR to the pinned kernel NVR}"
+IMAGE="${KDIVE_WARM_STORE_IMAGE:?set KDIVE_WARM_STORE_IMAGE to the catalog rootfs image}"
 mkdir -p -- "$STORE"
 
 # Serialize refreshes; the consuming boot (sub-issue D) takes a shared lock on the same file.
@@ -579,31 +699,23 @@ emit_wiring() {
   printf 'KDIVE_LIVE_VM_VMLINUX=%s/current/vmlinux.debug\n' "$STORE"
 }
 
-resolve_target_nvr() {
-  # Test seam / operator override; the real default resolves the kernel NVR from the distro base.
-  if [ -n "${KDIVE_WARM_STORE_TARGET_NVR:-}" ]; then
-    printf '%s\n' "$KDIVE_WARM_STORE_TARGET_NVR"
-  else
-    die "distro-base NVR resolution unimplemented in CI; set KDIVE_WARM_STORE_TARGET_NVR (host-only)"
-  fi
-}
-
 is_warm() {
-  local target="$1" cur="${STORE}/current"
+  local cur="${STORE}/current" m
+  m="$(manifest)"
   [ "${KDIVE_WARM_STORE_FORCE:-0}" = "1" ] && return 1
-  [ -e "${cur}/MANIFEST" ] || return 1
-  store_manifest_matches "$(manifest)" "$target" || return 1
-  verify_sha256 "${cur}/rootfs.qcow2" "$(manifest_field "$(manifest)" rootfs_sha256)" &&
-    verify_sha256 "${cur}/vmlinux" "$(manifest_field "$(manifest)" kernel_sha256)" &&
-    verify_sha256 "${cur}/vmlinux.debug" "$(manifest_field "$(manifest)" debuginfo_sha256)"
+  [ -e "$m" ] || return 1
+  store_manifest_matches "$m" "$TARGET" || return 1
+  # Non-fatal digest re-checks: a corrupt-but-present file makes this false -> rebuild, never die.
+  sha256_ok "${cur}/rootfs.qcow2" "$(manifest_field "$m" rootfs_sha256)" &&
+    sha256_ok "${cur}/vmlinux" "$(manifest_field "$m" kernel_sha256)" &&
+    sha256_ok "${cur}/vmlinux.debug" "$(manifest_field "$m" debuginfo_sha256)"
 }
 
 main() {
-  local target new dbg build_id
-  target="$(resolve_target_nvr)"
+  local new dbg build_id
   prune_other_sets "$STORE" # entry sweep: reclaim any crashed refresh's orphan set dirs.
 
-  if is_warm "$target"; then
+  if is_warm; then
     report_usage "warm-store" "$STORE"
     emit_wiring
     return 0
@@ -613,17 +725,15 @@ main() {
   # shellcheck disable=SC2064  # expand $new now so the trap cleans this exact dir on any pre-commit exit.
   trap "rm -rf -- '$new'" EXIT
 
-  # Capture build-fs's OWN eval-safe stdout so it never leaks into our wiring block.
-  build-fs "$new" >/dev/null
-  build_id="$(kernel_build_id "${new}/vmlinux")"
-
   export DEBUGINFOD_CACHE_PATH="${new}" # pin the ~1.2 GB download onto the store's filesystem.
+  build_id="$(produce_rootfs_and_kernel "$new" "$IMAGE")"
   dbg="$(debuginfod-find debuginfo "$build_id")" ||
     die "debuginfod-find failed for build-id ${build_id} (DEBUGINFOD_URLS set? kernel published?)"
   cp -- "$dbg" "${new}/vmlinux.debug"
-  build_ids_match "$build_id" "$(kernel_build_id "${new}/vmlinux")"
+  # REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
+  build_ids_match "$build_id" "$(elf_build_id "${new}/vmlinux.debug")"
 
-  write_manifest "${new}/MANIFEST" "$target" "$build_id" \
+  write_manifest "${new}/MANIFEST" "$TARGET" "$build_id" \
     "$(sha256_of "${new}/rootfs.qcow2")" "$(sha256_of "${new}/vmlinux")" \
     "$(sha256_of "${new}/vmlinux.debug")"
 
@@ -637,21 +747,21 @@ main() {
 main "$@"
 ```
 
-- [ ] **Step 4: Run to verify pass**
+- [ ] **Step 8: Run to verify pass**
 
-Run: `uv run python -m pytest tests/scripts/test_live_vm_stores.py -q -k warm`
+Run: `uv run python -m pytest tests/scripts/test_live_vm_stores.py -q -k "warm or produce"`
 Expected: PASS.
 
-- [ ] **Step 5: Lint**
+- [ ] **Step 9: Lint**
 
 Run: `just lint-shell`
 Expected: clean (the one `SC2064` disable carries a justification comment).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add scripts/live-vm/warm-store.sh tests/scripts/test_live_vm_stores.py
-git commit -m "feat(1292): warm-store.sh self-hosted warm store refresh"
+git add scripts/live-vm/lib.sh scripts/live-vm/warm-store.sh tests/scripts/test_live_vm_stores.py
+git commit -m "feat(1292): warm-store.sh + shared rootfs/kernel production helper"
 ```
 
 ---
@@ -663,8 +773,8 @@ git commit -m "feat(1292): warm-store.sh self-hosted warm store refresh"
 - Test: `tests/scripts/test_live_vm_stores.py`
 
 **Interfaces:**
-- Consumes: every `lib.sh` helper.
-- Produces: an executable script emitting the three-var wiring block. Env: `KDIVE_TCG_STAGE_DIR` (default `/mnt/kdive-tcg`), `KDIVE_TCG_BUDGET_BYTES` (default = documented ceiling). Pins `DEBUGINFOD_CACHE_PATH` under the stage dir. Three distinct fail-loud fetch outcomes.
+- Consumes: every `lib.sh` helper, including `produce_rootfs_and_kernel` (added in Task 4). Reuses the Task 4 test helpers `_produce_stubs` / `_stub` in the same test file.
+- Produces: an executable script emitting the three-var wiring block. Required env: `KDIVE_TCG_IMAGE` (ppc64le catalog rootfs image), `DEBUGINFOD_URLS`. Optional: `KDIVE_TCG_STAGE_DIR` (default `/mnt/kdive-tcg`), `KDIVE_TCG_BUDGET_BYTES` (default ~7 GB ceiling), `KDIVE_PYTHON`. Pins `DEBUGINFOD_CACHE_PATH` under the stage dir. Three distinct fail-loud fetch outcomes; asserts the fetched debuginfo's build-id matches the kernel.
 
 - [ ] **Step 1: Write the failing behavioral tests (append)**
 
@@ -679,7 +789,9 @@ def test_stage_tcg_syntax_valid() -> None:
 def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
     env = {
         "PATH": f"{bindir}:/usr/bin:/bin",
+        "KDIVE_PYTHON": "python3",
         "KDIVE_TCG_STAGE_DIR": str(stage),
+        "KDIVE_TCG_IMAGE": "rocky10-ppc64le-debug",
         "KDIVE_TCG_BUDGET_BYTES": "1000000000",  # 1 GB, generous for the stubbed tiny files
     }
     env.update(extra)
@@ -687,26 +799,28 @@ def _stage_env(bindir: Path, stage: Path, **extra: str) -> dict[str, str]:
 
 
 def _stage_stubs(bindir: Path) -> None:
-    # stage-ppc64le-set writes rootfs + a bare-ELF kernel into $1.
+    _produce_stubs(bindir, build_id="cafe02")  # python3/virt-ls/virt-copy-out/eu-readelf
+    _stub(bindir, "df", 'echo Avail; echo 900000000000')  # plenty free
+
+
+def _debuginfod_ok_stage(bindir: Path) -> None:
     _stub(
         bindir,
-        "stage-ppc64le-set",
-        'dst="$1"; : > "$dst/rootfs.qcow2"; printf "\\x7fELF" > "$dst/vmlinux"',
+        "debuginfod-find",
+        'd="$DEBUGINFOD_CACHE_PATH/$2"; mkdir -p "$d"; printf "\\x7fELF" > "$d/debuginfo"; echo "$d/debuginfo"',
     )
-    _stub(bindir, "eu-readelf", 'echo "    Build ID: cafe02"')
-    _stub(bindir, "df", 'echo Avail; echo 900000000000')  # plenty free
 
 
 def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    stage = tmp_path / "mnt"
-    stage.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()  # /mnt; the script creates the stage dir itself
     _stage_stubs(bindir)
-    _stub(bindir, "debuginfod-find", 'p="$DEBUGINFOD_CACHE_PATH/vmlinux.debug"; echo dbg > "$p"; echo "$p"')
+    _debuginfod_ok_stage(bindir)
     r = subprocess.run(
         [BASH, str(STAGE)], capture_output=True, text=True, check=False,
-        env=_stage_env(bindir, stage),
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert r.returncode == 0, r.stderr
     keys = sorted(ln.split("=", 1)[0] for ln in r.stdout.splitlines() if ln.strip())
@@ -716,18 +830,17 @@ def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
 def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    stage = tmp_path / "mnt"
-    stage.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
     _stage_stubs(bindir)
-    # Not-found (index lag): debuginfod-find exits 1 with an empty result.
-    _stub(bindir, "debuginfod-find", 'exit 1')
+    # Not-found (index lag): debuginfod-find exits 1.
+    _stub(bindir, "debuginfod-find", "exit 1")
     lag = subprocess.run(
         [BASH, str(STAGE)], capture_output=True, text=True, check=False,
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
     )
     assert lag.returncode != 0 and "not yet published" in lag.stderr
-    # Infra not configured: DEBUGINFOD_URLS unset.
-    (stage / "kdive-tcg").exists() and shutil.rmtree(stage / "kdive-tcg", ignore_errors=True)
+    # Infra not configured: DEBUGINFOD_URLS unset (fails before the build).
     infra = subprocess.run(
         [BASH, str(STAGE)], capture_output=True, text=True, check=False,
         env=_stage_env(bindir, stage),  # no DEBUGINFOD_URLS
@@ -738,10 +851,10 @@ def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
 def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    stage = tmp_path / "mnt"
-    stage.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
     _stage_stubs(bindir)
-    _stub(bindir, "df", 'echo Avail; echo 10')  # only 10 bytes free
+    _stub(bindir, "df", "echo Avail; echo 10")  # only 10 bytes free
     r = subprocess.run(
         [BASH, str(STAGE)], capture_output=True, text=True, check=False,
         env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
@@ -769,6 +882,7 @@ source "${here}/lib.sh"
 
 STAGE="${KDIVE_TCG_STAGE_DIR:-/mnt/kdive-tcg}"
 BUDGET="${KDIVE_TCG_BUDGET_BYTES:-7000000000}" # ~7 GB whole-budget ceiling (see spec disk budget).
+IMAGE="${KDIVE_TCG_IMAGE:?set KDIVE_TCG_IMAGE to the ppc64le catalog rootfs image}"
 mnt_root="$(dirname -- "$STAGE")"
 
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
@@ -779,13 +893,14 @@ export DEBUGINFOD_CACHE_PATH="$STAGE" # pin the ~1.2 GB download onto /mnt, not 
 # 1. Pre-stage best-effort free-space check for the WHOLE budget (staged set + cache copy + vmcore).
 require_free_space "$mnt_root" "$BUDGET" "hosted TCG image set"
 
-# 2. Stage the ppc64le rootfs + kernel; read the build-id from the actual staged artifact.
-stage-ppc64le-set "$STAGE"
-build_id="$(kernel_build_id "${STAGE}/vmlinux")"
-
-# 3. Fetch matching debuginfo by build-id, with three DISTINCT fail-loud outcomes.
+# 2. Require the fetch infra BEFORE the (minutes-long) build, so a misconfig fails fast.
 [ -n "${DEBUGINFOD_URLS:-}" ] ||
   die "debuginfod fetch infra not configured: set DEBUGINFOD_URLS to a server indexing ppc64le kernels"
+
+# 3. Build the ppc64le rootfs + extract its own kernel; read the build-id from the actual artifact.
+build_id="$(produce_rootfs_and_kernel "$STAGE" "$IMAGE")"
+
+# 4. Fetch matching debuginfo by build-id, with three DISTINCT fail-loud outcomes.
 if dbg="$(debuginfod-find debuginfo "$build_id" 2>/dev/null)"; then
   cp -- "$dbg" "${STAGE}/vmlinux.debug"
 else
@@ -796,9 +911,10 @@ else
   fi
   die "transient debuginfod error (rc=${rc}) fetching build-id ${build_id}; retry the run"
 fi
-build_ids_match "$build_id" "$(kernel_build_id "${STAGE}/vmlinux")"
+# REAL match: read the build-id from the FETCHED debuginfo (a bare ELF), not the kernel again.
+build_ids_match "$build_id" "$(elf_build_id "${STAGE}/vmlinux.debug")"
 
-# 4. Post-stage footprint cap on the staged set only.
+# 5. Post-stage footprint cap on the staged set only.
 enforce_budget "$STAGE" "$BUDGET" "hosted TCG image set"
 
 trap - EXIT # staged successfully; keep the set.
@@ -835,6 +951,8 @@ git commit -m "feat(1292): stage-tcg-images.sh hosted /mnt image set under budge
 **Interfaces:**
 - Consumes: sub-issue B's `live_vm_host` role, which loops over `live_vm_staging_dirs` to create+own each dir. Adding an entry makes the role create the warm-store dir persistently (runner-owned, world-traversable, AppArmor-dynamic — no static label).
 
+> **Verification honesty:** `just test-ansible` runs only the gdbstub-acl-prune and github-runner-preflight harnesses — it does **not** instantiate the `live_vm_host` role, so it does not exercise this loop entry. Coverage for this change is `just lint-ansible` (syntax) plus the operator live proof (an idempotent `runner.yml` re-run creates `warm_store_dir`). Do not claim `test-ansible` verifies it.
+
 - [ ] **Step 1: Add the `warm_store_dir` var and loop entry**
 
 Edit `deploy/ansible/inventory/group_vars/live_vm_runners.yml` — add `warm_store_dir` and append it to the `live_vm_staging_dirs` list:
@@ -864,10 +982,10 @@ live_vm_repo_version: main
 Run: `just lint-ansible`
 Expected: clean.
 
-- [ ] **Step 3: Run the Ansible regression suite**
+- [ ] **Step 3: Confirm the Ansible suite still passes (regression, not coverage of this entry)**
 
 Run: `just test-ansible`
-Expected: PASS (the existing `live_vm_host` verify/idempotence coverage exercises the loop; one additive entry does not change its shape).
+Expected: PASS — unchanged from before (this suite does not exercise `live_vm_host`; it only confirms the gdbstub/runner harnesses still pass). This entry's real verification is `lint-ansible` + the operator live proof, per the note above.
 
 - [ ] **Step 4: Commit**
 
@@ -891,9 +1009,10 @@ Append to `docs/operating/runbooks/self-hosted-kvm-runner.md` (before the `## Ma
 - Names the two stores and their scripts: `scripts/live-vm/warm-store.sh` (self-hosted, persistent, `KDIVE_WARM_STORE_DIR=/var/lib/kdive/warm-store`) and `scripts/live-vm/stage-tcg-images.sh` (hosted `/mnt`, ephemeral).
 - Copies the disk-budget derivation table from the spec (rootfs ~2 GB, kernel ~0.1 GB, debuginfo ~1.2 GB → staged ceiling ~3.5 GB; + transient cache ~1.2 GB + vmcore headroom ~2 GB → whole budget ~7 GB), and states the ~2 GB vmcore headroom assumes a ≤~2 GB-RAM guest.
 - States the enforced `/mnt` ceiling (`KDIVE_TCG_BUDGET_BYTES`, default ~7 GB) and that the warm store only reports usage.
-- Records the operator command to capture the first real measurement:
-  `KDIVE_WARM_STORE_DIR=/var/lib/kdive/warm-store scripts/live-vm/warm-store.sh` (stderr prints the measured `live-vm usage:` line), and the equivalent for the TCG stage.
-- Notes the prerequisites: `DEBUGINFOD_URLS` set to a distro debuginfod that indexes the kernel debuginfo; the refresh-vs-boot shared lock the consumer (sub-issue D) must take.
+- Records the operator command to capture the first real measurement, **with the required pins**:
+  `DEBUGINFOD_URLS=<distro-debuginfod> KDIVE_WARM_STORE_TARGET_NVR=<pinned-nvr> KDIVE_WARM_STORE_IMAGE=<catalog-image> scripts/live-vm/warm-store.sh` (stderr prints the measured `live-vm usage:` line), and the TCG equivalent `DEBUGINFOD_URLS=<…> KDIVE_TCG_IMAGE=<ppc64le-image> scripts/live-vm/stage-tcg-images.sh`.
+- States the supplied inputs each store requires (unset → the script dies with a clear message): warm store needs `KDIVE_WARM_STORE_TARGET_NVR` + `KDIVE_WARM_STORE_IMAGE`; the TCG set needs `KDIVE_TCG_IMAGE`; both need `DEBUGINFOD_URLS`. The NVR pin is operator/D-computed from the base image (no live distro query).
+- Notes the refresh-vs-boot shared lock the consumer (sub-issue D) must take on `<store>/.lock`.
 
 Use plain, factual prose (no "robust"/"comprehensive"/etc. — the doc-style guard). Operator commands invoke the scripts directly (not `just`), per the operator-doc convention.
 
@@ -927,8 +1046,9 @@ Expected: only `scripts/live-vm/*`, `tests/scripts/test_live_vm_stores.py`, `dep
 
 - Warm store (persistent, NVR-pinned, idempotent, integrity-verified, temp-then-swap) → Tasks 3–4 + 6.
 - Hosted TCG `/mnt` set (debuginfod by build-id, three fail-loud tiers, free-space + footprint gates, cache pinned onto `/mnt`) → Tasks 2, 5.
-- Build-id match by construction + digests + die-on-empty → Tasks 2–3, exercised in 4–5.
-- Three-var wiring contract + stdout purity (capture `build-fs`) → Tasks 4–5.
+- Build-id match by construction + digests + die-on-empty → Tasks 2–3; the REAL debuginfo-vs-kernel match is asserted in Tasks 4–5 (`build_ids_match "$build_id" "$(elf_build_id …vmlinux.debug)"`) and a differential test proves it (`test_warm_store_dies_on_debuginfo_kernel_mismatch`).
+- Rootfs via the real `python -m kdive build-fs`; kernel extracted from the rootfs's `/boot` (shared `produce_rootfs_and_kernel`) → Task 4, reused by Task 5.
+- Three-var wiring contract + stdout purity (`build-fs` stdout discarded inside the helper) → Tasks 4–5.
 - Measured disk budget documented → Task 7.
 - Refresh-vs-boot shared lock as a D boundary → `warm-store.sh` `flock` + Task 7 note.
 - No CI wiring, no System stand-up → enforced by the final scope-fence check.
