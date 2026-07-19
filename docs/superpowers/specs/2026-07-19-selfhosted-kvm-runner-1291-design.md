@@ -200,9 +200,10 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
 - **Short `XDG_RUNTIME_DIR`:** `loginctl enable-linger github_runner_user` so
   `/run/user/<uid>` exists with no login session. `enable-linger` alone does
   **not** put `XDG_RUNTIME_DIR` in a system service's process environment, so the
-  `github_runner` role also sets `Environment=XDG_RUNTIME_DIR=/run/user/<uid>` on
-  the runner service unit (below). The two together deliver the short QMP-socket
-  base (#1258) to the actual test process; `enable-linger` keeps the dir alive
+  `github_runner` role also writes `XDG_RUNTIME_DIR=/run/user/<uid>` into the
+  runner's `.env` file, which actions-runner loads into every job process
+  (below). The two together deliver the short QMP-socket base (#1258) to the
+  actual test process; `enable-linger` keeps the dir alive
   between jobs.
 - **Verification (the host-contract gate).** The role fails if any part fails.
   `scripts/check-local-libvirt.sh` alone is **not** sufficient — it checks
@@ -231,10 +232,10 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
        blocked by a `0700` ancestor;
      - `github_runner_user` is a member of `kvm` and `libvirt`;
      - `/run/user/<github_runner_uid>` exists (post-`enable-linger`) **and** the
-       installed runner service unit's `Environment=` carries
-       `XDG_RUNTIME_DIR=/run/user/<uid>` (assert on the unit file /
-       `systemctl show`). This checks what is verifiable at provisioning time; it
-       does **not** claim to observe the service process's live environment.
+       runner's `.env` (which actions-runner loads into every job process)
+       carries `XDG_RUNTIME_DIR=/run/user/<uid>` (`github_runner` asserts this
+       after writing `.env`). This checks what is verifiable at provisioning time;
+       it does **not** claim to observe the service process's live environment.
   The **definitive** proof that the *runner service* process (not the Ansible
   `become` session) boots a domain with a short QMP base is a smoke run through
   the registered runner — sub-issue D's job and the runbook. The in-play gate is
@@ -282,11 +283,14 @@ Rocky, so SELinux applies to both), all targeting `github_runner_user`:
   inside this branch, so an idempotent re-run of an already-registered host needs
   no token.
 - **Service, installed stopped (closes the B-before-D RCE window).** Install the
-  runner's `svc.sh` systemd service as `github_runner_user`, with `Environment=`
-  carrying `XDG_RUNTIME_DIR=/run/user/<uid>` (the short QMP-socket base, paired
-  with `live_vm_host`'s `enable-linger`) and `KDIVE_SECRETS_ROOT` (the pointer to
-  the file-based S3 credentials — B sets the pointer; C/D or the operator populate
-  the material). The service is installed **not started and not enabled** by
+  runner's `svc.sh` systemd service as `github_runner_user`, and writes the
+  runner's `.env` (loaded into every job process) with `XDG_RUNTIME_DIR=/run/user/<uid>`
+  (the short QMP-socket base, paired with `live_vm_host`'s `enable-linger`) and
+  `KDIVE_SECRETS_ROOT` (the pointer to the file-based S3 credentials — B sets the
+  pointer; C/D or the operator populate the material). The generated systemd unit
+  name (`actions.runner.<owner>-<repo>.<runner>.service`) is read from the
+  `.service` marker `svc.sh` writes, not derived from the URL. The service is
+  installed **not started and not enabled** by
   default: a bare `runner.yml` run registers the runner but leaves **no listener**
   picking up jobs. Only when `github_runner_service_enabled: true` is set — after
   the operator has applied the trusted-events posture — does the role start/enable
@@ -342,7 +346,7 @@ unchanged. This satisfies the epic's "nothing in the design blocks ppc64le."
 | Staging dir mis-pointed into `$HOME` / a `0700` ancestor | `live_vm_host`'s own gate asserts every parent of `live_vm_staging_dir` is `o+x`; a non-traversable ancestor fails the play (`check-local-libvirt.sh` cannot see the traversal problem). |
 | SELinux `virt_image_t` not applied (either staging dir) | `restorecon` after `sefcontext`, then `live_vm_host`'s own gate asserts the label on **both** the live-VM and install-staging dirs via `ls -Z`/`matchpathcon` — a missing label on either fails the play at provisioning, not silently at live-test time. |
 | Stock Rocky 10 ships `/boot/vmlinuz-*` `0600 root:root` → gate fails as non-root | `live_vm_host` makes the host kernels group-readable (`chmod 0644 /boot/vmlinu?-*`) so `check-local-libvirt.sh`'s `_host_kernels_readable` passes for the service account; runbook flags re-applying after a kernel upgrade. |
-| Runner service missing a short `XDG_RUNTIME_DIR` | `live_vm_host`'s gate asserts `/run/user/<uid>` exists **and** the service unit's `Environment=` carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
+| Runner service missing a short `XDG_RUNTIME_DIR` | The gate asserts `/run/user/<uid>` exists and `github_runner` asserts the runner `.env` (loaded into job processes) carries `XDG_RUNTIME_DIR` — the process-env proof is deferred to D's smoke run. |
 | Runner registered but starts listening before the trust posture is set | The service installs **stopped/disabled**; the role starts it only on explicit `github_runner_service_enabled: true`, so a bare `runner.yml` leaves no fork-PR-exploitable listener. |
 | Locally registered but removed server-side (offline past GitHub's ~14-day window, or admin-removed) | Enabling the service runs a liveness check; if the local `.runner` markers exist but GitHub no longer knows the runner, the role re-registers (fresh token) instead of starting a dead runner. Recovery (`config.sh remove` + re-run) and the offline-window warning are in the runbook. |
 

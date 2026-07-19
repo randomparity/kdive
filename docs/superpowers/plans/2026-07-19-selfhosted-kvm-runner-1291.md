@@ -690,12 +690,12 @@ test-ansible:
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
 ```
 
-- [ ] **Step 5: Run the harness and confirm it FAILS (role logic absent).**
+- [ ] **Step 5: Run the harness and confirm the fail cases go red (role logic absent).**
 ```bash
 chmod +x deploy/ansible/tests/run-github-runner-preflight.sh deploy/ansible/tests/fake-config-sh
 just test-ansible
 ```
-Expected: the github_runner cases fail (the placeholder role neither fails-closed nor skips), proving the harness is a real gate before Task 7.
+Expected: cases 1 (token fail-closed) and 2 (arch fail-loud) FAIL against the Task-2 placeholder — under `--tags github_runner_register` no tagged tasks exist yet, so neither expected-failure fires. Case 3 (already-registered skip) passes vacuously here (nothing runs, so `config.sh` is not called): it is a **regression guard** against future skip-logic breakage, not a red-first case; its failure-detecting power is demonstrated in Task 7 Step 3.
 
 - [ ] **Step 6: Verify shellcheck + commit.**
 ```bash
@@ -802,21 +802,15 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
       become_user: "{{ github_runner_user }}"
       no_log: true
 
-- name: Install the runner service (as the service account)
-  ansible.builtin.command:
-    cmd: "./svc.sh install {{ github_runner_user }}"
-    chdir: "{{ github_runner_install_dir }}"
-    creates: "/etc/systemd/system/actions.runner.{{ github_runner_repo_url | basename }}.service"
-  when: github_runner_marker.stat.exists or github_runner_registration_token | length > 0
-
-- name: Look up the service account uid for the runner env
-  # github_runner may run standalone; populate getent_passwd here rather than relying on
-  # live_vm_host's getent from earlier in the play.
+- name: Set XDG_RUNTIME_DIR + KDIVE_SECRETS_ROOT for the runner job process
+  # actions-runner loads <install_dir>/.env into every job process, so this is where the short
+  # QMP-socket base (#1258) + the S3 secrets pointer reach the test process. getent_passwd was
+  # populated by live_vm_host earlier in the play (and again here if github_runner runs alone).
   ansible.builtin.getent:
     database: passwd
     key: "{{ github_runner_user }}"
 
-- name: Set XDG_RUNTIME_DIR + KDIVE_SECRETS_ROOT on the runner service
+- name: Write the runner .env
   ansible.builtin.copy:
     dest: "{{ github_runner_install_dir }}/.env"
     content: |
@@ -826,9 +820,28 @@ git commit -m "test(1291): failing github_runner preflight regression harness"
     owner: "{{ github_runner_user }}"
     mode: "0640"
 
+- name: Assert the runner .env carries the short XDG_RUNTIME_DIR (#1258 provisioning check)
+  ansible.builtin.command: "grep -q '^XDG_RUNTIME_DIR=/run/user/' {{ github_runner_install_dir }}/.env"
+  changed_when: false
+
+- name: Install the runner service (as the service account)
+  # svc.sh writes the generated unit name into <install_dir>/.service; guard the install on
+  # that marker (the unit name is actions.runner.<owner>-<repo>.<runner>.service — NOT derivable
+  # from the URL basename, so do not hard-code it).
+  ansible.builtin.command:
+    cmd: "./svc.sh install {{ github_runner_user }}"
+    chdir: "{{ github_runner_install_dir }}"
+    creates: "{{ github_runner_install_dir }}/.service"
+  when: github_runner_marker.stat.exists or github_runner_registration_token | length > 0
+
+- name: Read the generated systemd unit name
+  ansible.builtin.slurp:
+    src: "{{ github_runner_install_dir }}/.service"
+  register: github_runner_unit_file
+
 - name: Enable + start the runner service only when the trust posture is confirmed
   ansible.builtin.systemd_service:
-    name: "actions.runner.{{ github_runner_repo_url | basename }}.service"
+    name: "{{ (github_runner_unit_file.content | b64decode).strip() }}"
     enabled: "{{ github_runner_service_enabled }}"
     state: "{{ 'started' if github_runner_service_enabled else 'stopped' }}"
   when: github_runner_service_enabled | bool
@@ -842,7 +855,10 @@ just test-ansible
 ```
 Expected: `ok case1 / ok case2 / ok case3`, exit 0.
 
-- [ ] **Step 3: Mutation-check the harness catches regressions.** Temporarily delete the `assert` "Fail closed when no registration token" task, run `just test-ansible`, confirm case1 now FAILS, then restore it and confirm green again. (Repo test philosophy: verify the test catches the failure.)
+- [ ] **Step 3: Mutation-check the harness catches regressions (both fail paths + the skip).**
+  - Delete the `assert` "Fail closed when no registration token" task → `just test-ansible` → confirm case1 FAILS → restore.
+  - Break the block guard `when: not github_runner_marker.stat.exists` (e.g. change to `when: true`) → `just test-ansible` → confirm **case3 FAILS** (the register block now runs for an already-registered runner and calls the fake `config.sh`, which case3 asserts must not happen) → restore.
+  This demonstrates case3's skip logic has real failure-detecting coverage, not just a vacuous pass. (Repo test philosophy: verify the test catches the failure.)
 
 - [ ] **Step 4: Verify lint + syntax.**
 ```bash
