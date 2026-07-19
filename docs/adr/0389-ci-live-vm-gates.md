@@ -59,12 +59,18 @@ trigger at all** makes fork-PR dispatch structurally impossible. Four decisions:
    wall-time/flake data justify it.
 
 2. **The self-hosted nightly stands up the provisioned-System family on the box.**
-   `scripts/live-stack/up.sh --skip-obs` brings up the compose backends + host
-   processes on the runner (which already has libvirt), a scripted allocate →
-   provision mints one System from the warm rootfs, and its id is exported as
-   `KDIVE_LIVE_VM_SYSTEM_ID`; the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` S3
-   credentials ride repo/org secrets. Self-contained: a pre-job reaper (not trap
-   cleanup) is what guarantees nothing external survives between nightly runs. It
+   `scripts/live-stack/up.sh --skip-obs` brings up the compose backends (the on-box
+   MinIO is the object store, authenticated with the `minioadmin` default
+   `env.sh` supplies — not a repo secret; external S3 is out of scope for the
+   nightly) + host processes on the runner (which already has libvirt), then a new
+   `scripts/live-vm/mint-system.sh` funds/onboards a project (the omitted-otherwise
+   prerequisite — `up.sh` cannot allocate against an unfunded project), mints a
+   token, allocates, provisions from the warm rootfs, polls to `ready`, and prints
+   the System id captured into `KDIVE_LIVE_VM_SYSTEM_ID`. Self-contained: a pre-job
+   reaper (not trap cleanup) is what guarantees nothing external survives between
+   nightly runs. Because each Actions `run:` is a fresh shell, the stand-up →
+   mint → preflight → suite steps run as **one `run:` block** so the sourced/minted
+   env survives to the suite (not lost between steps). It
    uses the **persistent `/opt/kdive` venv as the interpreter** (`KDIVE_PYTHON`)
    and overlays the tested sources via `PYTHONPATH=$GITHUB_WORKSPACE/src` — it does
    **not** mutate `/opt/kdive`'s checkout (no git update, no re-sync), because the
@@ -79,12 +85,15 @@ trigger at all** makes fork-PR dispatch structurally impossible. Four decisions:
 3. **A family-keyed fail-loud preflight, not per-test skips, gates job readiness.**
    `preflight-env.sh <family…>` asserts the *requested* families' env is present
    before pytest runs and **fails the job** (non-zero, names the missing var) when
-   it is not — including the specific S3 credentials the object-store client
-   authenticates with (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, both
-   non-empty) for the provisioned family, the concrete gap A's resolver leaves (A
-   checks only `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`, per its docstring). A
-   per-test `pytest.skip` is correct for an *unrequested* capability (A's gates);
-   the preflight is correct for a *declared* family a job intends to run, so a
+   it is not. For the provisioned family the teeth over A is **`KDIVE_LIVE_VM_SYSTEM_ID`
+   non-empty**: A's resolver returns `AVAILABLE` on `KDIVE_S3_ENDPOINT_URL` +
+   `KDIVE_S3_BUCKET` alone, so a family declared but with no System minted (a
+   `mint-system.sh` failure) skips green — the preflight fails loud. (The `AWS_*`
+   creds are the on-box `minioadmin` default on this path, so a credential-absence
+   check would be vacuous; it has teeth only on the `tcg` job, which exports the
+   presigned-upload creds explicitly and does not source `env.sh`.) A per-test
+   `pytest.skip` is correct for an *unrequested* capability (A's gates); the
+   preflight is correct for a *declared* family a job intends to run, so a
    mis-provisioned runner fails loud instead of skipping to green.
 
 4. **No fork-PR exposure — three layers.** (a) *Structural:* `live.yml` carries
@@ -129,6 +138,10 @@ Harder / new obligations:
 - D declares `docker` + the compose plugin as a `live_vm_host` Ansible dependency
   (the parity obligation for the on-box stack bring-up), so a reprovisioned cattle
   runner is stack-capable — an edit to B's role that ships with D.
+- The provisioned family needs a new `scripts/live-vm/mint-system.sh` (fund/onboard
+  → token → allocate → provision → poll-ready → print id); minting the System is a
+  real deliverable, not folded into "allocate → provision", and funding is a stated
+  prerequisite, not an assumption.
 - The hosted TCG job maps C's `KDIVE_LIVE_VM_ROOTFS` output onto the spine's
   `KDIVE_GUEST_IMAGE_PPC64LE` and supplies `KDIVE_KERNEL_SRC` from the
   fetch-kernel-tree fixture — an explicit job step, asserted by the preflight, so a
@@ -136,10 +149,11 @@ Harder / new obligations:
 - The timeout is a *measured* number that must be revisited if the emulator, the
   proof set, or the guest RAM changes; the ADR records the first measurement, the
   same operator-live-proof posture the sibling ADRs shipped.
-- `live.yml`'s concurrency uses `cancel-in-progress: false` (a running self-hosted
-  boot is never killed mid-flight), paired with a pre-job reaper that reclaims an
-  orphaned domain/System/stack a crash or timeout leaves — the cost of a
-  non-ephemeral runner.
+- `live.yml`'s two jobs use **distinct per-job** concurrency groups with
+  `cancel-in-progress: false` (a running self-hosted boot is never killed
+  mid-flight, and a long native run does not cross-block the hosted push-to-`main`
+  gate), paired with a pre-job reaper that reclaims an orphaned domain/System/stack
+  a crash or timeout leaves — the cost of a non-ephemeral runner.
 - Two live jobs mean things ordinary hosted PR CI cannot prove; the change's own
   guardrails are `actionlint`/`zizmor` (pins + posture), `shellcheck` on the
   preflight, the preflight behavioral test, and a workflow-shape guard that pins the

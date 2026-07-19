@@ -199,6 +199,15 @@ Step order (each fails loud):
 8. **Run** — `just test-live-tcg` (`-m live_vm_tcg --strict-markers`), under the
    job's `timeout-minutes` (measured; see Testing).
 
+Steps 5–8 (the `stage-tcg-images.sh` `eval`, the env mapping, the preflight, the
+run) execute as **one `run:` block** for the same reason Job 2 does: each Actions
+`run:` is a fresh shell, so the staged `KDIVE_LIVE_VM_*` exports and the mapped
+spine vars would be gone by the preflight if split across steps. `AWS_ACCESS_KEY_ID`
+/ `AWS_SECRET_ACCESS_KEY` are the compose MinIO's `minioadmin` and are exported
+explicitly by the block (the tcg job does not source `env.sh`); the `tcg` preflight
+requiring them catches a block that forgot to export the S3 creds the presigned
+upload needs — meaningful here, unlike the on-box `env.sh`-defaulted native path.
+
 The store's shared-lock consume contract (C) does not apply here — the hosted set
 is single-tenant and ephemeral (its own `KDIVE_TCG_STAGE_DIR`, no concurrent
 refresh), so no `flock` is taken; the concurrency group (below) prevents two TCG
@@ -237,27 +246,48 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    `KDIVE_LIVE_VM_ROOTFS` / `KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` from
    the committed `current/` set (the throwaway family's rootfs).
 5. **Stand up the provisioned-System family on the box** (ADR-0389, Decision 2) —
-   `scripts/live-stack/up.sh --skip-obs` brings up the compose backends + host
-   processes on the runner (the box has libvirt from `libvirt_stack`); then a
-   scripted allocate → provision (from the warm rootfs) mints one System whose id
-   is exported as `KDIVE_LIVE_VM_SYSTEM_ID`. `KDIVE_S3_ENDPOINT_URL` /
-   `KDIVE_S3_BUCKET` + the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` credential
-   env come from repo/org secrets. Self-contained: the reaper (step 3) is what
-   guarantees "nothing external must stay alive between nightly runs", since a
-   cancelled run cannot run its own teardown.
-   **Host-dep parity (finding — a real gap):** `up.sh` / `just stack-up` require
-   `docker` + the compose plugin, which **B's Ansible roles do not provision**.
-   Per the AGENTS.md provisioning-parity convention, D declares `docker` + the
-   compose plugin as a `live_vm_host` dependency **in the same change** (the role
-   edit ships with D), so a freshly-reprovisioned runner is stack-capable; the
-   runner is cattle, not a hand-installed box.
+   `scripts/live-stack/up.sh --skip-obs` brings up the compose backends (MinIO with
+   the well-known `minioadmin` root, docker-compose.yml) + host processes on the
+   runner (the box has libvirt from `libvirt_stack`). The on-box MinIO **is** the
+   object store, so `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are the
+   `minioadmin` default `scripts/live-stack/env.sh` supplies — not a repo secret;
+   an external-S3 deployment is out of scope for the nightly. Then a **new
+   `scripts/live-vm/mint-system.sh`** mints the System the family needs, in order:
+   (i) fund/onboard a project (reuse `scripts/live-stack/onboard.sh` — `up.sh`
+   itself prints "no project funded yet … just onboard", so funding is a required
+   prerequisite, not an assumption); (ii) mint an admin token from the mock issuer;
+   (iii) allocate → provision from the warm rootfs (`KDIVE_LIVE_VM_ROOTFS`); (iv)
+   poll to `ready`; (v) print the System id, captured into
+   `KDIVE_LIVE_VM_SYSTEM_ID`. It fails loud at each step (the `die`/`require_*`
+   idiom). Self-contained: the reaper (step 3) is what guarantees "nothing external
+   must stay alive between nightly runs", since a cancelled run cannot run its own
+   teardown.
+   **Host-dep parity (a real gap):** `up.sh` / `just stack-up` require `docker` +
+   the compose plugin, which **B's Ansible roles do not provision**. Per the
+   AGENTS.md provisioning-parity convention, D declares `docker` + the compose
+   plugin as a `live_vm_host` dependency **in the same change** (the role edit ships
+   with D), so a freshly-reprovisioned cattle runner is stack-capable.
 6. **Fail-loud preflight** — `scripts/live-vm/preflight-env.sh throwaway provisioned`
-   asserts **both** declared families' env, and — the gap A does not cover — that
-   the S3 credentials the object-store client uses (`AWS_ACCESS_KEY_ID` +
-   `AWS_SECRET_ACCESS_KEY`, non-empty) are present for the provisioned family
-   (A's resolver checks only `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`, per its
-   docstring). A missing System id or absent credential fails the job.
+   asserts **both** declared families' env. Its teeth over A's resolver is
+   **`KDIVE_LIVE_VM_SYSTEM_ID` non-empty** — A's resolver returns `AVAILABLE` on
+   `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` alone, so a family declared but with
+   no System minted (a `mint-system.sh` failure the workflow missed) would skip
+   green; the preflight fails loud instead. (It also checks endpoint + bucket set;
+   the `AWS_*` creds are the on-box `minioadmin` default and so are not a meaningful
+   absence check on this path — an *external*-S3 misconfiguration is caught at the
+   ADR-0089 worker secrets boundary, not here.)
 7. **Run** — `just test-live` (`-m "live_vm and not live_vm_tcg"`), both families.
+
+**Single-shell env continuity (GitHub Actions plumbing):** each `run:` step in
+Actions executes in a **fresh shell**, so a var `eval`'d/`export`ed in one step
+does **not** survive to the next. Steps 4–7 (warm-store `eval`, `up.sh` +
+`env.sh` source, `mint-system.sh` capture, preflight, `just test-live`) therefore
+run as **one `run:` block** — a single shell keeps `KDIVE_LIVE_VM_*`,
+`KDIVE_LIVE_VM_SYSTEM_ID`, and the sourced `env.sh` exports live through the
+preflight and the suite. (The alternative — forwarding each producer's exports to
+`$GITHUB_ENV` — is more boilerplate for the same effect; the plan states the
+single-`run:` shape so an implementer does not emit the natural-but-broken
+multi-step form where every staged var is gone by the preflight.)
 
 **Store consume lock (C's contract):** for the throwaway family, the boot holds a
 **shared** `flock` on the store lockfile for the domain's life so a concurrent
@@ -273,19 +303,20 @@ family names as args:
 
 - `throwaway` → require `KDIVE_LIVE_VM_ROOTFS` set **and the file exists**, and a
   resolvable libvirt URI.
-- `provisioned` → require `KDIVE_LIVE_VM_SYSTEM_ID` non-empty, `KDIVE_S3_ENDPOINT_URL`
-  + `KDIVE_S3_BUCKET` set, **and** the S3 credentials the object-store client
-  authenticates with — `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, both
-  non-empty (the concrete A-gap: A's resolver checks only the endpoint + bucket
-  env, so a runner with those but no credentials resolves `AVAILABLE` and fails
-  deep in the suite; the preflight names the specific credential vars, not a vague
-  "non-empty secrets dir", so the check is falsifiable). If a deployment instead
-  references file-based creds under `KDIVE_SECRETS_ROOT` (ADR-0089), the preflight
-  asserts the referenced file resolves under the root; the on-box compose path
-  this job uses authenticates with the `AWS_*` env, so those are the checked vars.
+- `provisioned` → require `KDIVE_LIVE_VM_SYSTEM_ID` non-empty (**the teeth over A**:
+  A's resolver returns `AVAILABLE` on `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`
+  alone, so a family declared but with no System minted skips green; this fails
+  loud), plus `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` set. The `AWS_*` creds are
+  **not** checked here: the on-box path authenticates to the compose MinIO with the
+  `minioadmin` default `env.sh` supplies, so credential *absence* is not a reachable
+  failure on this path (an external-S3 misconfiguration is caught at the ADR-0089
+  worker secrets boundary, not by a vacuous non-empty check the `minioadmin` default
+  would always satisfy).
 - `tcg` → require `KDIVE_STACK_BASE_URL`, `KDIVE_OIDC_ISSUER`, `KDIVE_DATABASE_URL`,
   `KDIVE_S3_ENDPOINT_URL`, `KDIVE_S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY`, `KDIVE_GUEST_IMAGE_PPC64LE` (file exists),
+  `AWS_SECRET_ACCESS_KEY` (here the check **has teeth** — the tcg job does not source
+  `env.sh`, so the run-block must export the presigned-upload creds explicitly; a
+  forgotten export fails loud), `KDIVE_GUEST_IMAGE_PPC64LE` (file exists),
   `KDIVE_KERNEL_SRC` (path exists), and `qemu-system-ppc64` on PATH.
   (`KDIVE_PPC64LE_BUNDLE` is **not** required — the opt-in fourth proof.)
 
@@ -301,13 +332,17 @@ runner fails the job instead of masquerading as green.
 
 - `permissions: contents: read` at the workflow level (least privilege; neither
   job writes the repo or packages).
-- `live.yml` carries its **own** `concurrency` group with **`cancel-in-progress:
-  false`** — deliberately *not* the `true` that `ci.yml` uses. On a non-ephemeral
-  self-hosted runner, cancelling a job mid-boot does not reliably run trap cleanup,
-  leaving an orphaned libvirt domain, provisioned System, compose stack, and a held
-  `flock`. `cancel-in-progress: false` lets a running nightly boot finish rather
-  than be killed by a later dispatch; the pre-job reaper (Job 2 step 3) is the
-  belt to that suspenders, reclaiming any orphan a crash/timeout still leaves.
+- **Per-job** `concurrency` groups with **`cancel-in-progress: false`** —
+  deliberately *not* the `true` that `ci.yml` uses. On a non-ephemeral self-hosted
+  runner, cancelling a job mid-boot does not reliably run trap cleanup, leaving an
+  orphaned libvirt domain, provisioned System, compose stack, and a held `flock`;
+  `cancel-in-progress: false` lets a running boot finish rather than be killed by a
+  later dispatch, and the pre-job reaper (Job 2 step 3) reclaims any orphan a
+  crash/timeout still leaves. The two jobs get **distinct** group keys
+  (`live-tcg-${{ github.ref }}` and `live-native-${{ github.ref }}`), so a long or
+  wedged self-hosted `native` run does not queue an unrelated `tcg` push-to-`main`
+  run behind it (and vice versa) — the `false` protects an in-flight self-hosted
+  boot without cross-blocking the independent hosted gate.
 - Each job carries its own `timeout-minutes` (the TCG job's is measured; see
   Testing) so a wedged emulator/boot fails the job instead of hanging the runner.
 - Actions pinned by SHA (the `zizmor` gate enforces this); no
@@ -383,8 +418,10 @@ split into what ordinary CI proves and what the operator/local proof proves:
 - **What lands:** a new `.github/workflows/live.yml` (the two gates), the inert
   `live-vm` job **removed** from `ci.yml` (replace, not deprecate), a
   `live_vm_host` Ansible role edit declaring `docker` + the compose plugin,
-  `scripts/live-vm/preflight-env.sh` + its test, the workflow-shape guard,
-  ADR-0389, this spec, the plan, and the operator CI notes. `ci.yml`'s existing
+  `scripts/live-vm/preflight-env.sh` + its test, **`scripts/live-vm/mint-system.sh`**
+  (fund/onboard → token → allocate → provision → poll-ready → print id) + its
+  shell lint/behavioral coverage, the workflow-shape guard, ADR-0389, this spec,
+  the plan, and the operator CI notes. `ci.yml`'s existing
   jobs are otherwise untouched, so **no existing job gains a nightly run** (the
   separate `on:` is why). Any new `KDIVE_*` the preflight introduces is added to
   `external_env.py` (env-docs guard); the vars it *reads* are already documented
