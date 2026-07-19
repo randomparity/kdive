@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Fake actions-runner config.sh: record invocation so the harness can assert whether the
-# register branch reached it. Never contacts GitHub.
-echo "config.sh $*" >>"${FAKE_CONFIG_LOG:?FAKE_CONFIG_LOG unset}"
-exit 0
