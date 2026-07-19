@@ -64,20 +64,32 @@ bounds the hosted store's disk use.
 
 ## Decisions (see ADR-0388)
 
-1. **Provenance: distro stock kernel + on-demand distro debuginfo.** The rootfs
-   is built on a stock distro base; the guest boots that distro's own pinned
-   kernel NVR; the matching `vmlinux` debuginfo is fetched from the distro
-   debuginfo repo for that exact NVR. "Fetched on demand" maps naturally to the
-   distro repo, and the NVR is recorded and asserted to match its debuginfo.
+1. **Provenance: distro stock kernel + on-demand distro debuginfo, matched by
+   build-id.** The rootfs is built on a stock distro base; the guest boots that
+   distro's own pinned kernel NVR; the matching `vmlinux` debuginfo is fetched
+   for that exact NVR. The NVR pins *which* build to fetch, but the **match
+   guarantee is the ELF build-id**, not the NVR string: the fetched debuginfo's
+   `.note.gnu.build-id` must equal the kernel image's build-id, or the refresh
+   fails loud. NVR-string equality is not a match proof (a distro can rebuild the
+   same NVR; a foreign-arch package can carry the same NVR), so the build-id is
+   the recorded, checked pin — the manifest stores both.
 2. **Two asymmetric stores.** The warm store is *sized for* its content
    (persistent, on the host's own disk, generous headroom) and only **reports**
    measured usage. The hosted `/mnt` set is *under a measured budget*
    (ephemeral, shared scratch) and its staging script **enforces** a ceiling —
    fail loud if exceeded.
-3. **NVR-pinned idempotent refresh.** A store manifest records the pinned kernel
-   NVR (plus rootfs digest). The refresh is warm when the manifest's NVR equals
-   the target and the files are present; otherwise it rebuilds. This is the
-   "kept warm between runs" mechanism and the unit-tested seam.
+3. **NVR-pinned idempotent refresh, integrity-verified.** A store manifest
+   records the pinned kernel NVR, the kernel/debuginfo build-id, and the rootfs
+   `sha256`. The refresh is warm only when the manifest NVR equals the target
+   **and** the staged rootfs re-hashes to the recorded digest **and** the staged
+   debuginfo's build-id still matches — presence alone is not warm, because a
+   truncated debuginfo or a corrupted rootfs is "present" but hands `drgn`/`crash`
+   a broken `vmlinux`, reproducing the exact silent-mismatch this feature exists
+   to prevent, persistently. Otherwise it rebuilds and **replaces** the prior
+   NVR's artifacts (the store holds one set). The refresh holds an exclusive
+   `flock` so a slow nightly and a concurrent operator run cannot interleave
+   large-artifact writes. The manifest predicate + build-id compare + budget gate
+   are the unit-tested seam.
 
 ## Architecture
 
@@ -96,42 +108,82 @@ mutation-proven shell-test pattern, e.g. `tests/scripts/test_setup_local_libvirt
 - `report_usage LABEL PATH` — print a stable, greppable measured-usage line.
 - `enforce_budget PATH CEILING_BYTES WHAT` — measure `PATH`; `die` with an
   actionable message naming `WHAT`, the measured size, and the ceiling if over;
-  otherwise print the measured usage. The `/mnt` gate with teeth. The boundary
+  otherwise print the measured usage. The post-stage footprint cap. The boundary
   (measured == ceiling passes; measured == ceiling + 1 fails) is asserted and
   mutation-checked.
+- `require_free_space PATH NEEDED_BYTES WHAT` — `df -B1` the filesystem holding
+  `PATH`; `die` if free space is below `NEEDED_BYTES` **before** any large write.
+  This is the actual eviction guard for the shared `/mnt` scratch: it prevents an
+  overrun rather than detecting one after the disk is already full.
+- `build_ids_match A B` — return 0 iff two build-id strings are equal; `die` with
+  both ids on mismatch. Extraction of each id (`eu-readelf -n` on the debuginfo
+  `vmlinux`; the distro `.build-id` farm / package metadata for the kernel image)
+  is host-only; the string compare is the testable seam.
 - `store_manifest_matches MANIFEST TARGET_NVR` — read the recorded kernel NVR
-  from `MANIFEST`; return 0 (warm) iff it equals `TARGET_NVR`, else 1
-  (stale/absent). Absent manifest is stale, not an error.
-- `write_manifest MANIFEST NVR ROOTFS_SHA256` — record the pinned inputs
-  (`kernel_nvr`, `rootfs_sha256`) atomically (write-temp-then-rename).
+  from `MANIFEST`; return 0 iff it equals `TARGET_NVR`, else 1 (stale/absent).
+  Absent manifest is stale, not an error. (Warmth also requires the integrity
+  re-checks below; NVR match is necessary, not sufficient.)
+- `manifest_field MANIFEST KEY` — read a recorded field (`kernel_nvr`,
+  `build_id`, `rootfs_sha256`) for the warm-path re-verification.
+- `write_manifest MANIFEST NVR BUILD_ID ROOTFS_SHA256` — record the pinned inputs
+  atomically (write-temp-then-rename).
 
 ### `scripts/live-vm/warm-store.sh` — self-hosted warm store refresh
 
-Idempotent. `KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir
-B's Ansible owns).
+Idempotent, holds an exclusive `flock` on the store for the whole refresh.
+`KDIVE_WARM_STORE_DIR` (default `/var/lib/kdive/warm-store`, the dir B's Ansible
+owns).
 
 1. Resolve the target kernel NVR from the distro base.
-2. If `store_manifest_matches` and the rootfs + kernel + debuginfo files are all
-   present → **warm**: `report_usage`, emit the `KDIVE_LIVE_VM_ROOTFS=…` wiring
-   line to stdout, exit 0.
-3. Else **refresh**: build the rootfs via `build-fs` (host-only, libguestfs),
-   record the kernel image + its NVR, fetch the matching `vmlinux` debuginfo for
-   that exact NVR from the distro debuginfo repo, `write_manifest`, then
-   `report_usage` and emit the wiring line.
+2. **Warm check** — declare warm only when `store_manifest_matches` **and** the
+   staged rootfs re-hashes to the manifest `rootfs_sha256` **and** the staged
+   debuginfo's build-id equals the manifest `build_id` and matches the staged
+   kernel image (`build_ids_match`). Any failure → treat as stale (rebuild), not
+   warm. On warm: `report_usage`, emit the full wiring block, exit 0.
+3. **Refresh** — build the rootfs via `build-fs` (host-only, libguestfs); record
+   the kernel image and its NVR; fetch the matching `vmlinux` debuginfo for that
+   exact NVR; `build_ids_match` the debuginfo against the kernel image (fail loud
+   on mismatch — never stage mismatched debuginfo); **remove the superseded NVR's
+   artifacts** so the store holds exactly one set; `write_manifest` (NVR,
+   build-id, rootfs sha256); `report_usage`; emit the wiring block.
 
-Stdout is the eval-safe wiring line only (like `build-fs`); the human summary
+**Wiring block** (both paths) — the store produces three matched artifacts, so it
+emits all three env vars the `live_vm` consumers read (`external_env.py`), not
+just the rootfs, as eval-safe stdout lines:
+
+- `KDIVE_LIVE_VM_ROOTFS=<rootfs.qcow2>`
+- `KDIVE_LIVE_VM_BZIMAGE=<kernel image>`
+- `KDIVE_LIVE_VM_VMLINUX=<vmlinux debuginfo>` (the same path also satisfies
+  `KDIVE_LIVE_VM_GDBMI_VMLINUX`, and pairs with a run-captured
+  `KDIVE_LIVE_VM_VMCORE`).
+
+Stdout is the eval-safe wiring block only (like `build-fs`); the human summary
 goes to stderr.
 
 ### `scripts/live-vm/stage-tcg-images.sh` — hosted TCG image set on `/mnt`
 
-`KDIVE_TCG_STAGE_DIR` (default `/mnt/kdive-tcg`), `KDIVE_TCG_BUDGET_BYTES`
-(default = the documented ceiling).
+Runs on the hosted `ubuntu-latest` (**x86_64**) runner but stages a **ppc64le**
+set, so debuginfo is fetched cross-arch. `KDIVE_TCG_STAGE_DIR` (default
+`/mnt/kdive-tcg`), `KDIVE_TCG_BUDGET_BYTES` (default = the documented ceiling). A
+cleanup `trap` removes a partially-staged dir on any failure, so a failed run
+never leaves a half-populated `/mnt` that the next run reads as complete.
 
-1. Stage the ppc64le rootfs + kernel into the stage dir.
-2. Fetch the matching ppc64le `vmlinux` debuginfo **on demand** (not pre-baked).
-3. `enforce_budget STAGE_DIR CEILING "hosted TCG image set"` — fail the job loud
-   if the staged set exceeds the ceiling.
-4. `report_usage`, emit the stage-dir wiring line to stdout.
+1. `require_free_space /mnt <ceiling + margin> "hosted TCG image set"` **before**
+   any fetch — the eviction guard: refuse to start if `/mnt` lacks room, rather
+   than filling it and evicting the compose backends mid-stage.
+2. Stage the ppc64le rootfs + kernel into the stage dir.
+3. Fetch the matching ppc64le `vmlinux` debuginfo **on demand** (not pre-baked),
+   **arch-targeted** at the ppc64le distro debuginfo repo (or `debuginfod` by
+   build-id, which is arch-neutral) — not the x86_64 host's native repo — then
+   `build_ids_match` it against the staged kernel. A fetch that returns *no
+   package for this exact NVR/build-id* is a **repo-lag failure** (fail loud,
+   distinct message: the distro has not published debuginfo for the pinned
+   kernel); a network/5xx error is **transient** (bounded retry, distinct
+   message). Neither stages mismatched or missing debuginfo.
+4. `enforce_budget STAGE_DIR CEILING "hosted TCG image set"` — post-stage
+   footprint cap; fail loud if the staged set exceeds the ceiling.
+5. `report_usage`, emit the same three-var wiring block (`KDIVE_LIVE_VM_ROOTFS`,
+   `KDIVE_LIVE_VM_BZIMAGE`, `KDIVE_LIVE_VM_VMLINUX`) to stdout.
 
 ### Ansible — the persistent warm-store dir (the B-role delta)
 
@@ -156,20 +208,32 @@ does not fail — it is the host's own disk). Derivation for the ceiling:
 
 These are *derived* sizes. The scripts print the **measured actual**; the runbook
 records the first real measurement from an operator run (the same
-CI-cannot-prove-it-live posture A and B shipped). The ceiling is a hard gate, so
-if real artifacts exceed the derivation the job fails loud with the measured
-number rather than silently evicting the backends.
+CI-cannot-prove-it-live posture A and B shipped).
+
+Two gates protect the shared `/mnt`, addressing distinct failure modes: a
+**pre-stage `require_free_space`** (free space on `/mnt` ≥ ceiling + margin
+*before* any fetch) prevents mid-run eviction of the compose backends, and the
+**post-stage `enforce_budget`** caps the staged set's own footprint. The former is
+the real "don't evict co-tenants" guarantee; the latter catches an artifact set
+that grew past the derivation. Both fail loud with the measured number.
 
 ## Testing
 
 - `tests/scripts/test_live_vm_stores.py` — subprocess-source `lib.sh`:
   - `enforce_budget`: passes under ceiling; fails loud (non-zero, message names
     the measured size + ceiling) over ceiling; boundary at exactly the ceiling.
+  - `require_free_space`: passes when free ≥ needed; fails loud when free <
+    needed (stubbed `df`, so the test is deterministic and host-independent).
+  - `build_ids_match`: returns 0 on equal ids; fails loud naming both on
+    mismatch — the concrete kernel↔debuginfo match assertion.
   - `report_usage`: stable, greppable format.
-  - `store_manifest_matches`: warm (NVR equal), stale (NVR differ), absent
-    manifest (stale, not error).
+  - `store_manifest_matches` / `manifest_field`: warm (NVR equal), stale (NVR
+    differ), absent manifest (stale, not error); field round-trip.
   - `write_manifest`: round-trips through `store_manifest_matches`; atomic
     (no partial manifest on interrupted write).
+  - **Warm-path integrity**: manifest NVR matches but the staged rootfs digest or
+    debuginfo build-id no longer matches → the warm predicate rejects (rebuild),
+    does not report warm — the corrupt-but-present regression.
 - The Ansible dir change is covered by `live_vm_host`'s existing verify gate and
   idempotence (`test-ansible`); no new role test needed for one loop entry.
 - The heavy operations (real `build-fs`, real debuginfo download, real boot) are

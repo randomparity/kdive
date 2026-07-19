@@ -41,29 +41,42 @@ Provide the two stores as three bash scripts under `scripts/live-vm/` (a shared
 a persistent warm-store directory owned by B's `live_vm_host` Ansible role and a
 documented disk budget. Four decisions:
 
-1. **Provenance — distro stock kernel + on-demand distro debuginfo.** The rootfs
-   is built on a stock distro base via the existing `build-fs` plane; the guest
-   boots that distro's own **pinned kernel NVR**; the matching `vmlinux`
-   debuginfo is fetched from the distro debuginfo repo for that exact NVR. The
-   NVR is recorded in a store manifest and asserted to match its debuginfo, so
-   "fetched on demand" maps to the distro repo and the match is checkable rather
-   than assumed.
+1. **Provenance — distro stock kernel + on-demand distro debuginfo, matched by
+   build-id.** The rootfs is built on a stock distro base via the existing
+   `build-fs` plane; the guest boots that distro's own **pinned kernel NVR**; the
+   matching `vmlinux` debuginfo is fetched for that exact NVR. The NVR pins which
+   build to fetch, but the **match guarantee is the ELF build-id** — the fetched
+   debuginfo's `.note.gnu.build-id` must equal the kernel image's, or the refresh
+   fails loud and stages nothing. NVR-string equality is not a match proof (a
+   distro can rebuild an NVR; a foreign-arch package can carry the same NVR), so
+   the build-id is the recorded, checked pin; the manifest stores NVR + build-id +
+   rootfs digest.
 
 2. **Two asymmetric stores, asymmetric enforcement.** The warm store is *sized
    for* its content — persistent, on the host's own disk, generous headroom for
    kdump/vmcore + debuginfo — and only **reports** measured usage. The hosted
    `/mnt` set is *under a measured budget* — ephemeral, shared scratch — and its
-   staging script **enforces a ceiling**, failing the job loud if the staged set
-   exceeds it. Enforcement lives where blowing the budget evicts other tenants of
-   the disk (the hosted scratch), not where it does not (the dedicated host).
+   staging script gates it two ways: a **pre-stage free-space check** (refuse to
+   start if `/mnt` free space is below the ceiling + margin) that *prevents*
+   evicting the compose backends, plus a **post-stage footprint cap** that fails
+   loud if the staged set grew past the derivation. Enforcement lives where
+   blowing the budget evicts other tenants of the disk (the hosted scratch), not
+   where it does not (the dedicated host).
 
-3. **NVR-pinned idempotent refresh keeps the store warm.** A manifest records the
-   pinned kernel NVR (plus rootfs digest). The refresh is a no-op ("warm") when
-   the manifest NVR equals the target and the rootfs/kernel/debuginfo files are
-   present; otherwise it rebuilds and rewrites the manifest atomically. This is
-   the "kept warm between runs" mechanism, and the manifest predicate + the
-   budget gate are the unit-tested seam (`lib.sh`, exercised by subprocess-source
-   behavioral tests, the repo's mutation-proven shell-test pattern).
+3. **NVR-pinned idempotent refresh keeps the store warm, integrity-verified.** A
+   manifest records the pinned kernel NVR, the build-id, and the rootfs digest.
+   The refresh is a no-op ("warm") only when the manifest NVR equals the target
+   **and** the staged rootfs re-hashes to the recorded digest **and** the staged
+   debuginfo build-id still matches — presence alone is not warm, because a
+   truncated debuginfo or corrupted rootfs is present but broken and would
+   persist that break every subsequent nightly. Otherwise it rebuilds, **replaces
+   the superseded NVR's artifacts** (so the store holds exactly one set, not an
+   accumulating pile of ~1.2 GB debuginfo per past kernel), and rewrites the
+   manifest atomically. The refresh holds an exclusive `flock` so a slow nightly
+   and a concurrent operator run cannot interleave large-artifact writes. The
+   manifest predicate, the build-id compare, and the budget gates are the
+   unit-tested seam (`lib.sh`, exercised by subprocess-source behavioral tests,
+   the repo's mutation-proven shell-test pattern).
 
 4. **Scope boundary — tooling only; CI wiring and System stand-up are D.** C
    ships the scripts, the persistent dir, the budget doc, and their tests. It
@@ -82,8 +95,10 @@ Easier:
   for a rebuild.
 - The hosted TCG set cannot silently overrun `/mnt` and evict the compose
   backends — the budget gate fails loud with the measured size.
-- Kernel/debuginfo agreement is a recorded, checkable pin (the manifest NVR),
-  not an assumption, so a mismatched introspection proof is caught.
+- Kernel/debuginfo agreement is a recorded, checkable pin (the manifest build-id,
+  verified on both the refresh and the warm path), not an assumption, so a
+  mismatched — or corrupt-but-present — introspection input is caught before it
+  reaches `drgn`/`crash`.
 - Reuses `build-fs` and the `scripts/live-stack/` idioms; no new build machinery
   and no new lint/test infrastructure.
 
@@ -93,8 +108,10 @@ Harder / new obligations:
   available in the distro debuginfo repo for that NVR; if the repo lags the
   kernel, the refresh fails loud rather than staging mismatched debuginfo.
 - The warm store is persistent state on the runner host that an operator must
-  provision (the dir) and occasionally garbage-collect if the pinned kernel
-  churns; the manifest bounds this to one live artifact set at a time.
+  provision (the dir); the refresh itself replaces the superseded NVR's
+  artifacts, so the store holds one live set and does not accumulate old
+  debuginfo across kernel bumps. The `flock` makes concurrent refreshes safe but
+  means a second run blocks on the first rather than racing.
 - The measured disk budget is a *derived* ceiling until an operator records the
   first real measurement (the scripts print it); like A/B, the live proof is an
   operator step, not a CI check.
