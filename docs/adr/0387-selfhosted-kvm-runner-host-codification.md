@@ -59,8 +59,9 @@ host is "green but not ready" one layer down.
   label, download verified against an operator-pinned SHA-256 (not a same-origin
   fetch), a `.runner`-marker idempotence guard so a re-run of an already-registered
   host is `0 changed` and needs no token, registration as the non-root
-  `github_runner_user` systemd service (with `Environment=XDG_RUNTIME_DIR` set,
-  since `enable-linger` alone does not export it) **installed stopped/disabled**
+  `github_runner_user` systemd service (with `XDG_RUNTIME_DIR` written into the
+  runner's `.env`, which actions-runner loads into every job process, since
+  `enable-linger` alone does not export it) **installed stopped/disabled**
   until `github_runner_service_enabled` is set so a bare run leaves no unguarded
   listener, a `no_log` registration token that **fails closed** when empty in the
   first-time branch, and `KDIVE_SECRETS_ROOT` wired as the pointer to the
