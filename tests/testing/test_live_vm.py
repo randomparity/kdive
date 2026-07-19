@@ -154,6 +154,31 @@ def test_boot_timeout_raises_and_tears_down(
     assert conn.closed  # teardown still ran
 
 
+def test_boot_refuses_to_clobber_a_pre_existing_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeConn()
+    rootfs = tmp_path / "rootfs.qcow2"
+    rootfs.write_bytes(b"qcow2")
+    # A real file already sits at the overlay path — the boot must refuse and NOT delete it.
+    collision = rootfs.with_name("k.qcow2")
+    collision.write_bytes(b"precious")
+    with (
+        pytest.raises(CategorizedError),
+        boot_throwaway_domain(
+            rootfs,
+            arch="x86_64",
+            name="k",
+            _connect=_fake_conn_factory(conn),
+            _overlay=_write_overlay,
+        ),
+    ):
+        pass
+    assert conn.define_calls == 0  # refused before defining
+    assert collision.read_bytes() == b"precious"  # the pre-existing file is untouched
+
+
 def test_boot_session_mode_restores_xdg_even_on_body_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -273,6 +298,19 @@ def test_wait_for_panic_false_at_deadline(tmp_path: Path) -> None:
     console = tmp_path / "c.log"
     console.write_text("no panic here\n")
     assert wait_for_panic(console, deadline_s=-1.0) is False  # already past deadline
+
+
+def test_wait_for_panic_waits_through_a_not_yet_created_console(tmp_path: Path) -> None:
+    console = tmp_path / "c.log"  # does not exist yet
+    calls = {"n": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            console.write_text("Kernel panic - not syncing\n")
+
+    # A missing file must be treated as "not yet panicked" (keep polling), not FileNotFoundError.
+    assert wait_for_panic(console, deadline_s=100.0, sleep=fake_sleep) is True
 
 
 def test_wait_for_ssh_true_when_probe_eventually_succeeds() -> None:

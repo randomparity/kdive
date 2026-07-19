@@ -51,6 +51,10 @@ def _module_markers(tree: ast.Module) -> set[str]:
 
 @cache
 def _functions_with_any(markers: tuple[str, ...]) -> dict[str, set[str]]:
+    # Effective markers = module-level ``pytestmark`` ∪ the function's own decorators. Class-scoped
+    # ``pytestmark`` and class-decorator markers are NOT walked (mirrors test_live_vm_tcg_tier.py):
+    # every kdive live_vm test is a module-level function, so a class-based test would be a new
+    # convention to handle here first. If one is ever added, extend this walk to ClassDef scope.
     found: dict[str, set[str]] = {}
     for path in _TESTS_ROOT.rglob("test_*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

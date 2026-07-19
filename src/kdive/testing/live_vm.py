@@ -173,16 +173,29 @@ def wait_for_active(
     return bool(domain.isActive())
 
 
+def _console_has_panic(console_log: Path) -> bool:
+    """True iff the console file exists and contains the panic marker.
+
+    A not-yet-created file (libvirt may materialize the serial ``<log>`` sink slightly after
+    ``create()``) is "not yet panicked", not an error — so the wait keeps polling to the deadline
+    rather than raising ``FileNotFoundError`` out of the boot.
+    """
+    try:
+        return _PANIC_MARKER in console_log.read_text(errors="replace")
+    except FileNotFoundError:
+        return False
+
+
 def wait_for_panic(
     console_log: Path, deadline_s: float, *, sleep: Callable[[float], None] = time.sleep
 ) -> bool:
     """Poll the serial console file for the panic marker until it appears or the deadline passes."""
     deadline = time.monotonic() + deadline_s
     while time.monotonic() < deadline:
-        if _PANIC_MARKER in console_log.read_text(errors="replace"):
+        if _console_has_panic(console_log):
             return True
         sleep(_POLL_INTERVAL_S)
-    return _PANIC_MARKER in console_log.read_text(errors="replace")
+    return _console_has_panic(console_log)
 
 
 def _ssh_banner_verdict(buffer: bytes) -> bool | None:
@@ -387,8 +400,18 @@ def boot_throwaway_domain(
     runtime = prepare_session_runtime(mode)
     conn: _ThrowawayConn | None = None
     domain: _ThrowawayDomain | None = None
+    created_overlay = False
     try:
+        if dest.exists():
+            # Refuse to clobber a pre-existing file beside the rootfs — ``qemu-img create`` would
+            # overwrite it and teardown would delete it. Callers give ``name`` a uuid, so a
+            # collision means an unexpected real file or a stale overlay, not this call's own.
+            raise CategorizedError(
+                f"overlay path {dest} already exists; refusing to clobber it — use a unique name",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
         _overlay(rootfs, dest)
+        created_overlay = True
         conn = _connect(mode)
         xml = throwaway_domain_xml(
             name=name,
@@ -437,7 +460,8 @@ def boot_throwaway_domain(
         if conn is not None:
             with contextlib.suppress(Exception):
                 conn.close()
-        with contextlib.suppress(OSError):
-            dest.unlink(missing_ok=True)
+        if created_overlay:  # only remove the overlay this call created — never a pre-existing file
+            with contextlib.suppress(OSError):
+                dest.unlink(missing_ok=True)
         if runtime is not None:
             runtime.restore()
