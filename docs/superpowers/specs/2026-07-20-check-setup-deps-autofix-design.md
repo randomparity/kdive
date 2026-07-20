@@ -120,23 +120,36 @@ as the runbook §4b / Ansible role). No sudo.
   dpkg path), falling back to the owning interpreter's `purelib` (Fedora) — the exact
   logic in runbook §4b. If zero `guestfs.py` matches → report "binding not found, is
   python3-guestfs installed?" and skip. If multiple `libguestfsmod*.so` match, link all.
+- **`${PY}` must be a real venv first.** `${PY}` resolves to the repo `.venv` python only
+  when it exists (else it falls back to **system** python3, and the `.venv` path variable
+  is unset). Symlinking into a system `${PY}` is the exact pollution this design rejects,
+  so before anything Fix 2 asserts `${PY}` is a venv:
+  `"${PY}" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'`.
+  If `${PY}` is not a venv (or does not exist), take the **skip** path — this subsumes
+  "venv absent" and handles `KDIVE_PYTHON` correctly (a host-services `KDIVE_PYTHON`
+  that points at a real venv passes and is the intended symlink target).
 - **Owning interpreter / ABI check:** the binding is built for the **system**
   interpreter (`/usr/bin/python3`, as the Ansible role pins). Compare its `X.Y` minor
   version against the venv `${PY}`'s; on mismatch, fail loud (report the two versions)
   and do **not** create a broken link.
 - **Idempotency:** link with `ln -sf` (or skip when the correct link already exists) so a
   re-run after a partial prior attempt does not abort on "File exists".
-- **Skipped** when the venv does not exist yet (e.g. first `just setup` before `uv sync`).
 
 ### After fixing
 
 Re-verification re-runs the affected tier's probes after `hash -r` (bash caches
 command lookups, so a just-installed binary is otherwise not found — a false "still
 missing"). Re-run all three probe kinds a tier uses: PATH command (`command_exists`),
-`pkg-config --exists`, and the venv import. After a fix, re-render the tier's status so
-an interactive operator sees the resolved state (a success confirmation, or the reduced
-remaining set) rather than the stale pre-fix "missing" report. Exit `0` if the Required
-tier is now satisfied (today it exits `1` on missing Required deps); otherwise exit `1`.
+`pkg-config --exists`, and the venv import. **Re-verification rebuilds the accumulator
+arrays** (`*_commands`, `*_packages`, `manual_hints`) from the post-fix probe results —
+not just a separate status flag — so the **entire** terminal summary renders from the
+current state: the per-tier report, the `manual_hints` "Tooling not provided by your
+distribution" block, the "Install the required dependencies … then rerun: just setup"
+trailer, and the "Setup dependencies are present." line. Otherwise a just-fixed host
+would print the stale "rerun: just setup" trailer immediately before `exit 0` —
+contradictory. Exit `0` if the Required tier is now satisfied (today it exits `1` on
+missing Required deps); otherwise exit `1`. A fully-fixed Required tier prints no
+"Install the required dependencies … rerun" trailer.
 
 ### Native arch visibility
 
@@ -185,6 +198,11 @@ Stub tests verify **command invocation and output wording**, not a real host boo
 - **guestfs link:** ordered after install in one `-y` run (install then link);
   ABI-mismatch → fail loud, no symlink; pre-existing link → no abort (idempotent);
   glob-miss → skip with message; venv absent → skip.
+- **venv identity:** when `${PY}` is a non-venv (system) interpreter, assert Fix 2 takes
+  the skip path and creates **no** symlink (never pollutes system site-packages).
+- **trailer consistency:** after a `-y` fix that satisfies Required, assert the output
+  contains **no** "Install the required dependencies … rerun: just setup" trailer and
+  exits `0` (accumulators rebuilt from post-fix state).
 - **native advisory:** exact host-first line ordering and per-arch wording for
   KVM-present, native-qemu-absent, and `/dev/kvm`-inaccessible (via `KDIVE_KVM_NODE`);
   existing foreign-line assertions unchanged.
