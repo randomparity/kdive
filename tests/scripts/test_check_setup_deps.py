@@ -96,6 +96,40 @@ def _bin(tmp_path: Path) -> Path:
     return b
 
 
+def _sys_site(tmp_path: Path, *, present: bool) -> Path:
+    """A fake system dist-packages dir; when present it carries the libguestfs binding files."""
+    d = tmp_path / "dist-packages"
+    d.mkdir()
+    if present:
+        (d / "guestfs.py").write_text("")
+        (d / "libguestfsmod.cpython-314.so").write_text("")
+    return d
+
+
+def _venv_python_stub(tmp_path: Path, *, site: Path, minor: str, is_venv: bool = True) -> Path:
+    """A ${PY} stub dispatching on its -c argument (four answers the script probes for).
+
+    ``import guestfs`` succeeds only once ``site/guestfs.py`` exists (models the venv importing the
+    binding after it is symlinked in), so probe_guestfs reads ``unlinked`` before a link and ``ok``
+    on the post-link re-probe.
+    """
+    ident = "exit 0" if is_venv else "exit 1"
+    body = (
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        f'  *"import guestfs"*) [ -e "{site}/guestfs.py" ] && exit 0 || exit 1 ;;\n'
+        f"  *base_prefix*) {ident} ;;\n"
+        f'  *purelib*) echo "{site}" ;;\n'
+        f'  *version_info*) echo "{minor}" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n"
+    )
+    p = tmp_path / "venv-python"
+    p.write_text(body)
+    p.chmod(0o755)
+    return p
+
+
 @pytest.mark.parametrize(
     ("distro_id", "manager", "libvirt_package"),
     [
@@ -353,6 +387,177 @@ def test_report_only_output_unchanged(tmp_path: Path) -> None:
     assert result.stderr.count("Required dependencies missing") == 1
 
 
+# ── Task 3: opt-in guestfs venv symlink (three-state) ────────────────────────
+
+
+def test_installed_but_unlinked_shows_symlink_not_install_hint(tmp_path: Path) -> None:
+    """Package present system-wide, venv can't import → symlink remedy, NOT an install hint."""
+    b = _bin(tmp_path)
+    venv_py = _stub_python(b, "venv-python", imports_ok=False)  # venv can't import guestfs
+    sys_site = _sys_site(tmp_path, present=True)  # but the package IS present system-wide
+    r = _run(
+        "debian",
+        str(b),
+        tmp_path,
+        extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
+    # guestfs must NOT appear in any package-install hint line (it is present, just unlinked)...
+    install_lines = [
+        ln for ln in r.stderr.splitlines() if "install" in ln and "python3-guestfs" in ln
+    ]
+    assert not install_lines, install_lines
+    # ...and the real remedy (the symlink) IS surfaced.
+    assert "symlink" in r.stderr
+    assert "python3-guestfs" in r.stderr
+
+
+def test_guestfs_skips_when_py_is_not_a_venv(tmp_path: Path) -> None:
+    """A system (non-venv) ${PY} must never be symlinked into."""
+    site = tmp_path / "sys-site"
+    site.mkdir()
+    sysython = _venv_python_stub(tmp_path, site=site, minor="3.14", is_venv=False)
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(sysython),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert not (site / "guestfs.py").exists()  # no symlink into the system interpreter
+    assert "not a venv" in r.stderr
+
+
+def test_yes_links_guestfs_when_package_present_and_venv_ok_abi(tmp_path: Path) -> None:
+    """-y with matching ABI creates the symlink into the venv site-packages."""
+    site = tmp_path / "venv-site"
+    site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",  # ln available
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert (site / "guestfs.py").is_symlink()
+    assert list(site.glob("libguestfsmod*.so"))
+
+
+def test_abi_mismatch_fails_loud_no_symlink(tmp_path: Path) -> None:
+    """System/venv Python minor differ → report both versions, create no (broken) link."""
+    site = tmp_path / "venv-site"
+    site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.12",  # mismatch
+        },
+    )
+    assert "3.12" in r.stderr and "3.14" in r.stderr
+    assert not (site / "guestfs.py").exists()  # no broken link
+
+
+def test_link_is_idempotent(tmp_path: Path) -> None:
+    """A pre-existing correct link does not abort the run under set -e."""
+    site = tmp_path / "venv-site"
+    site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=True)
+    (site / "guestfs.py").symlink_to(sys_site / "guestfs.py")  # pre-existing link
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert r.returncode == 0, r.stderr
+    assert (site / "guestfs.py").is_symlink()
+
+
+def test_fresh_host_installs_then_links_in_one_run(tmp_path: Path) -> None:
+    """Package absent at start; -y installs then links it in one run (re-probe closes the gap)."""
+    site = tmp_path / "venv-site"
+    site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=False)  # binding absent initially
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    # install stub materializes the binding into sys_site (`: >` is a builtin, no touch needed)
+    apt = (
+        "#!/bin/sh\n"
+        f': > "{sys_site}/guestfs.py"\n'
+        f': > "{sys_site}/libguestfsmod.cpython-314.so"\n'
+        "exit 0\n"
+    )
+    _stub(b, "apt-get", apt)
+    _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert (site / "guestfs.py").is_symlink()  # linked in the SAME run
+
+
+def test_symlink_only_fix_clears_the_hint(tmp_path: Path) -> None:
+    """Binding present+unlinked, all else present: -y link clears the 'symlink' hint on re-check."""
+    site = tmp_path / "venv-site"
+    site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path)
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run(
+        "debian",
+        f"{b}:{_coreutils_dir(tmp_path)}",
+        tmp_path,
+        args=["-y"],
+        extra_env={
+            "KDIVE_PYTHON": str(venv_py),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+            "KDIVE_SYSTEM_PY_MINOR": "3.14",
+        },
+    )
+    assert (site / "guestfs.py").is_symlink()
+    recheck = r.stderr.split("re-checking after fixes")[1]
+    assert "symlink" not in recheck
+
+
 def test_cross_arch_advisory_names_foreign_package_when_absent_on_x86(tmp_path: Path) -> None:
     """On x86_64 with no ppc64 emulator, the advisory names the exact ppc64 package (stdout)."""
     result = _run_with_uname("debian", "x86_64", (), tmp_path)
@@ -473,8 +678,14 @@ def test_pyimport_probes_venv_interpreter_not_system_python3(tmp_path: Path) -> 
     _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
     _stub_python(bindir, "python3", imports_ok=True)  # system python3 can import guestfs
     venv_py = _stub_python(bindir, "venv-python", imports_ok=False)  # the venv cannot
+    sys_site = _sys_site(tmp_path, present=True)  # installed system-wide → unlinked (not absent)
 
-    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+    result = _run(
+        "debian",
+        str(bindir),
+        tmp_path,
+        extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
 
     assert "python3-guestfs" in result.stderr, result.stderr
 
@@ -487,9 +698,16 @@ def test_pyimport_trusts_venv_over_system_python3_when_venv_has_binding(tmp_path
     _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
     _stub_python(bindir, "python3", imports_ok=False)  # system python3 cannot import guestfs
     venv_py = _stub_python(bindir, "venv-python", imports_ok=True)  # but the venv can
+    sys_site = _sys_site(tmp_path, present=True)  # package installed system-wide
 
-    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+    result = _run(
+        "debian",
+        str(bindir),
+        tmp_path,
+        extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
 
+    # package present + venv imports it → state 'ok' → no guestfs entry at all
     assert "python3-guestfs" not in result.stderr, result.stderr
 
 
@@ -503,8 +721,14 @@ def test_guestfs_hint_names_the_venv_symlink_remedy(tmp_path: Path) -> None:
     _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
     _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
     venv_py = _stub_python(bindir, "venv-python", imports_ok=False)
+    sys_site = _sys_site(tmp_path, present=True)  # present system-wide, venv can't import
 
-    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+    result = _run(
+        "debian",
+        str(bindir),
+        tmp_path,
+        extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site)},
+    )
 
     assert "symlink" in result.stderr, result.stderr
     assert "four-method-live-run.md" in result.stderr, result.stderr
@@ -530,13 +754,19 @@ def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None
     _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
     _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
     _stub_python(bindir, "python3", imports_ok=False)  # system python3 cannot -> emits the hint
+    sys_site = _sys_site(tmp_path, present=True)  # package present + venv imports → state 'ok'
     os_release = repo / "os-release"
     os_release.write_text("ID=debian\n")
 
     result = subprocess.run(
         [BASH, "scripts/check-setup-deps.sh"],  # relative path; KDIVE_PYTHON unset
         cwd=str(repo),
-        env={"PATH": str(bindir), "KDIVE_OS_RELEASE": str(os_release), "HOME": str(tmp_path)},
+        env={
+            "PATH": str(bindir),
+            "KDIVE_OS_RELEASE": str(os_release),
+            "HOME": str(tmp_path),
+            "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+        },
         capture_output=True,
         text=True,
         check=False,

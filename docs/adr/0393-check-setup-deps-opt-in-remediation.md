@@ -27,8 +27,9 @@ Replace the "never installs, never escalates" invariant with **opt-in remediatio
   today.** This non-interactive default preserves every existing caller (CI, tests).
 - An accepted package install runs a **non-interactive** install command with an index
   refresh on fresh hosts (`apt-get update && apt-get install -y` / `dnf install -y` /
-  `pacman -Sy --noconfirm` / `zypper --non-interactive install`) — not the human-facing
-  hint, which would itself prompt. Escalation is scoped to the mode: an **interactive**
+  `pacman -S --noconfirm` / `zypper --non-interactive install`) — not the human-facing
+  hint, which would itself prompt. Arch deliberately omits the `-Sy` refresh (see
+  Considered & rejected). Escalation is scoped to the mode: an **interactive**
   accept uses plain `sudo` (a password prompt is desired when a human just consented),
   while `-y`/non-TTY uses `sudo -n` and never blocks. A credential pre-flight (`sudo -v`
   interactive / `sudo -n true` non-interactive) runs first, so an escalation failure

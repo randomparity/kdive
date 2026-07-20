@@ -11,7 +11,8 @@ default:
 setup: check-deps sync install-hooks
     @echo "Development environment is ready."
 
-# Report missing host packages with distro-specific install hints (never installs).
+# Report missing host packages with distro-specific install hints. Report-only in CI / when piped;
+# at an interactive terminal it offers a [y/N] install per tier (pass -y to install unattended).
 check-deps:
     ./scripts/check-setup-deps.sh
 

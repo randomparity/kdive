@@ -312,6 +312,46 @@ distro="$(load_distro_id)"
 # Guard the substitution so an absent `uname` (restricted-PATH tests) does not trip `set -e`.
 host_arch="$(uname -m 2>/dev/null || true)"
 
+# The system dir holding the libguestfs binding: Debian's version-agnostic dist-packages, falling
+# back to the owning interpreter's purelib (Fedora) — the exact logic in runbook §4b. Overridable.
+guestfs_sys_site() {
+  local d="${KDIVE_GUESTFS_SYS_SITE:-/usr/lib/python3/dist-packages}"
+  [[ -e "${d}/guestfs.py" ]] ||
+    d="$(/usr/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))' 2>/dev/null || true)"
+  printf "%s" "${d}"
+}
+
+# guestfs is the one future-tier binding whose remedy is more than an apt install: it is a
+# distro-packaged binding (not pip-installable) the worker imports from the project venv, and a
+# uv-created .venv has no system-site-packages, so even with python3-guestfs installed the venv
+# cannot import it until guestfs.py + libguestfsmod*.so are symlinked in. So the entry is
+# three-state, keyed on BOTH package presence and venv import (importability alone conflates them):
+# absent -> install the package; unlinked (present but not importable) -> the symlink remedy, never
+# an install hint for an already-installed package; ok -> nothing.
+
+# Set GUESTFS_STATE only (no accumulator side effects) so it is safe to re-run for a state refresh.
+detect_guestfs_state() {
+  local site
+  site="$(guestfs_sys_site)"
+  if [[ ! -e "${site}/guestfs.py" ]]; then
+    GUESTFS_STATE=absent
+  elif command_exists "${PY}" && "${PY}" -c "import guestfs" 2>/dev/null; then
+    GUESTFS_STATE=ok
+  else
+    GUESTFS_STATE=unlinked
+  fi
+}
+
+# Detect + report; the reporting appends to accumulators, so this runs only inside probe_all.
+probe_guestfs() {
+  local distro="$1"
+  detect_guestfs_state
+  case "${GUESTFS_STATE}" in
+  absent) note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")" ;;
+  unlinked) manual_hints+=("python3-guestfs: present system-wide but not importable in the venv — symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b") ;;
+  esac
+}
+
 # Populate every tier accumulator from a fresh probe of the host. Called once at startup and again
 # after fixes (re-verification), so it resets the arrays first (bash caches command lookups, so the
 # caller runs `hash -r` before the second call). distro/host_arch are resolved once above (they do
@@ -376,16 +416,7 @@ probe_all() {
   # open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
   require_header future libdw-headers libdw "${distro}"
   require_header future libkdumpfile-headers libkdumpfile "${distro}"
-  # guestfs is the one future-tier binding whose remedy is more than an apt install: it is a
-  # distro-packaged binding (not pip-installable) that the worker imports from the project venv, and
-  # a uv-created .venv has no system-site-packages, so even with python3-guestfs installed the venv
-  # interpreter cannot import it until guestfs.py + libguestfsmod*.so are symlinked in. Probe the venv
-  # interpreter (${PY}); on failure name BOTH steps (mirrors check-local-libvirt.sh / the runbook) so
-  # the hint is not a dead end that sends the operator to an already-satisfied install.
-  if ! { command_exists "${PY}" && "${PY}" -c "import guestfs" 2>/dev/null; }; then
-    note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")"
-    manual_hints+=("python3-guestfs: after installing the package, symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b")
-  fi
+  probe_guestfs "${distro}"
 
   # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
   # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
@@ -479,11 +510,51 @@ report_and_fix_tier() {
   maybe_install_tier "${tier}" "${distro}"
 }
 
+# Offer the guestfs venv symlink (the `unlinked` state only). Keeps the venv isolated (symlink, not
+# --system-site-packages). No sudo. Sets FIX_ATTEMPTED on a successful link so the re-check clears
+# the hint. Skips when ${PY} is not a real venv (never symlink into the system interpreter) or the
+# system/venv Python minor versions differ (fail loud, never a broken link).
+maybe_link_guestfs() {
+  [[ "${GUESTFS_STATE}" == unlinked ]] || return 0
+  "${PY}" -c 'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)' 2>/dev/null || {
+    printf "  guestfs: %s is not a venv — skip (symlink only into an isolated venv)\n" "${PY}" >&2
+    return 0
+  }
+  offer_accepted "Symlink the libguestfs binding into the venv?" || return 0
+  local site sys_site vmin smin so
+  site="$("${PY}" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+  sys_site="$(guestfs_sys_site)"
+  vmin="$("${PY}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  # The binding is built for the system interpreter (the Ansible role / runbook pin /usr/bin/python3);
+  # its minor must match the venv's or the .so is ABI-incompatible. An empty smin means we cannot
+  # determine the system interpreter — report that distinctly rather than as a fake "mismatch".
+  smin="${KDIVE_SYSTEM_PY_MINOR:-$(/usr/bin/python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || true)}"
+  if [[ -z "${smin}" ]]; then
+    printf "  guestfs: cannot determine the system Python (for the ABI check) — skipping the symlink\n" >&2
+    return 0
+  fi
+  if [[ "${vmin}" != "${smin}" ]]; then
+    printf "  guestfs ABI mismatch: system python %s vs venv %s — not linking\n" "${smin}" "${vmin}" >&2
+    return 0
+  fi
+  # `ln -sf` is idempotent (a re-run does not abort on "File exists"). Surface a link failure
+  # (read-only venv, ENOSPC, permission) instead of swallowing it, so a consented fix is observable.
+  local linked=1
+  ln -sf "${sys_site}/guestfs.py" "${site}/" || linked=0
+  for so in "${sys_site}"/libguestfsmod*.so; do
+    [[ -e "${so}" ]] && { ln -sf "${so}" "${site}/" || linked=0; }
+  done
+  ((linked)) || printf "  guestfs: could not symlink the binding into %s (check permissions/space)\n" "${site}" >&2
+  FIX_ATTEMPTED=1
+}
+
 FIX_ATTEMPTED=0
 probe_all
 report_and_fix_tier "Required dependencies" required "${distro}"
 report_and_fix_tier "Recommended dependencies (full local CI)" recommended "${distro}"
 report_and_fix_tier "Future dependencies (live_vm / kernel build)" future "${distro}"
+detect_guestfs_state # refresh state so a just-installed python3-guestfs flips absent -> unlinked
+maybe_link_guestfs   # separate prompt; sets FIX_ATTEMPTED on a successful link
 
 if ((FIX_ATTEMPTED)); then
   hash -r   # drop bash's cached command lookups so just-installed binaries are found
