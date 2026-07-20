@@ -282,6 +282,21 @@ def _validate_chunks(
 ) -> tuple[ChunkEntry, ...] | ToolResponse:
     if not isinstance(raw_chunks, list) or not (1 <= len(raw_chunks) <= MAX_PARTS):
         return _config_error(object_id, data={"reason": "too_many_chunks"})
+    if len(raw_chunks) > 1 and declared_total <= SINGLE_PUT_MAX_BYTES:
+        # Chunking is a *size* mechanism for objects above the 5 GiB single-object cap, not a
+        # remedy for a short presign window: a single PUT always succeeds below the cap, so a
+        # multi-part declaration here is pure added failure surface (the parts upload but the
+        # manifest reassembly then fails) and almost always a client mistake. Reject it loudly
+        # with an actionable nudge to the single-PUT path rather than mint part URLs that dead-end.
+        return _config_error(
+            object_id,
+            detail=(
+                "chunked upload declared for an object that fits a single PUT: a single PUT "
+                "always succeeds below the 5 GiB single-object cap, so omit chunks and declare "
+                "a single-PUT upload instead of a multi-part upload"
+            ),
+            data={"reason": "chunking_not_needed"},
+        )
     chunks: list[ChunkEntry] = []
     total = 0
     last = len(raw_chunks) - 1

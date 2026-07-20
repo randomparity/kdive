@@ -1120,11 +1120,13 @@ def test_chunked_well_formed_accepted() -> None:
 
 
 def test_chunked_non_final_below_min_part_rejected() -> None:
+    # Object genuinely exceeds the single-PUT cap (so chunking is legitimate); the non-final
+    # part is below the 5 MiB minimum, which is the rejection under test.
     decl = {
         "name": "vmlinux",
         "sha256": "w",
-        "size_bytes": 1024 + 10,
-        "chunks": [{"sha256": "c0", "size_bytes": 1024}, {"sha256": "c1", "size_bytes": 10}],
+        "size_bytes": _5GIB + 1024,
+        "chunks": [{"sha256": "c0", "size_bytes": 1024}, {"sha256": "c1", "size_bytes": _5GIB}],
     }
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
     assert isinstance(out, ToolResponse)
@@ -1132,15 +1134,71 @@ def test_chunked_non_final_below_min_part_rejected() -> None:
 
 
 def test_chunked_sum_mismatch_rejected() -> None:
+    # Declared total exceeds the single-PUT cap (chunking legitimate) but disagrees with the
+    # summed chunk sizes, which is the rejection under test.
     decl = {
         "name": "vmlinux",
         "sha256": "w",
-        "size_bytes": 999,
+        "size_bytes": _5GIB + 999,
         "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
     }
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
     assert isinstance(out, ToolResponse)
     assert out.data["reason"] == "chunk_size_mismatch"
+
+
+def test_chunked_small_object_rejected_chunking_not_needed() -> None:
+    # A multi-part declaration for an object that fits a single PUT is a probable client
+    # mistake: reject it loudly (#1340, ADR-0397) rather than mint part URLs that dead-end.
+    decl = {
+        "name": "vmlinux",
+        "sha256": "w",
+        "size_bytes": 300,
+        "chunks": [{"sha256": "c0", "size_bytes": 200}, {"sha256": "c1", "size_bytes": 100}],
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "chunking_not_needed"
+    assert out.detail is not None and "single PUT" in out.detail
+
+
+def test_chunked_at_single_put_cap_rejected_chunking_not_needed() -> None:
+    # Boundary: an object exactly at the single-PUT cap still fits one PUT, so a multi-part
+    # declaration for it is rejected.
+    decl = {
+        "name": "vmlinux",
+        "sha256": "w",
+        "size_bytes": _5GIB,
+        "chunks": [
+            {"sha256": "c0", "size_bytes": _5GIB - 100},
+            {"sha256": "c1", "size_bytes": 100},
+        ],
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "chunking_not_needed"
+
+
+def test_small_object_single_put_accepted() -> None:
+    # A small object declared as a single PUT (no chunks) is the correct path and passes.
+    out = _validate_artifact_declarations(
+        "rid", [{"name": "vmlinux", "sha256": "a", "size_bytes": 300}], _ALLOWED, _CAP
+    )
+    assert isinstance(out, list)
+    assert out[0].chunks is None
+
+
+def test_large_object_chunked_accepted() -> None:
+    # A genuinely large object (over the single-PUT cap) declared chunked still passes.
+    decl = {
+        "name": "vmlinux",
+        "sha256": "whole",
+        "size_bytes": _5GIB + 100,
+        "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
+    assert isinstance(out, list)
+    assert out[0].chunks is not None and len(out[0].chunks) == 2
 
 
 def test_chunked_malformed_chunk_names_chunks_field() -> None:

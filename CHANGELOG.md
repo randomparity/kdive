@@ -69,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in package install (-y/interactive, sudo, per tier)
 - Replace_manifest returns a (server_time, deadline) stamp
 - State the full deadline contract on upload responses
+- Surface presigned-PUT footguns on the upload response
 - Nudge effective_config upload when complete_build lacks it
 
 ### Changed
@@ -267,6 +268,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Point guestfs hint at the venv-symlink remedy
 - Correct ADR pacman command, justfile comment, guestfs ABI edges
 - Fail loud on missing RETURNING row; document expires_at clock frame
+- Name a checksum-bypass upload distinctly from a mismatch
+- Reject chunked upload below the single-PUT cap
 
 ### Build
 
