@@ -92,6 +92,13 @@ jobs:
           # KDIVE_LIVE_VM_ROOTFS / _BZIMAGE / _VMLINUX. Capture-then-eval so a staging failure
           # (enforce_budget die, a fetch error) fails HERE with its own message — set -e does not
           # catch a non-zero exit inside `eval "$(cmd)"` directly.
+          # /mnt is the hosted runner's large ephemeral disk, but it is root-owned, so the runner
+          # user cannot mkdir there. Pre-create a runner-owned parent (hosted runners have
+          # passwordless sudo) and point the stager at a SUBDIR it fully controls — the script
+          # rm -rf's + recreates KDIVE_TCG_STAGE_DIR, which must not be the root-owned mount point.
+          sudo mkdir -p /mnt/kdive-tcg
+          sudo chown "$(id -u):$(id -g)" /mnt/kdive-tcg
+          export KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/set
           export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-fedora-ppc64le}"
           export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-https://debuginfod.fedoraproject.org/}"
           tcg_wiring="$(scripts/live-vm/stage-tcg-images.sh)"

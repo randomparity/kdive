@@ -64,6 +64,17 @@ def test_native_block_exports_warm_store_wiring() -> None:
         assert var in exported, f"{var} not exported in the native run block"
 
 
+def test_tcg_block_stages_into_a_runner_owned_dir() -> None:
+    # /mnt is root-owned on the ubuntu-latest hosted runner, so stage-tcg-images.sh's `mkdir` there
+    # fails (permission denied). The tcg block must sudo-create + chown a parent and stage into a
+    # SUBDIR — the script rm -rf's + recreates its stage dir, which must not be the mount point.
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
+    stage_subdir = "KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/"  # pragma: allowlist secret
+    assert "sudo chown" in run, "the tcg staging dir must be chowned to the runner user"
+    assert stage_subdir in run, "stage into a runner-owned subdir, not /mnt"
+
+
 def test_native_block_boots_provisioned_family_under_session() -> None:
     # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
     # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
