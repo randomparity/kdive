@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add live.yml gates; remove the inert ci.yml live-vm job
 - Reuse KDIVE_PROJECT in mint-system; update runner runbook
 - Add boot_preserved_gdbstub_domain harness (#1321)
+- Opt-in package install (-y/interactive, sudo, per tier)
 
 ### Changed
 
@@ -82,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extract fetch_debuginfo + emit_wiring shared helpers
 - Use require_tools for the tcg emulator check
 - Pass the staged rootfs to the mint heredoc via argv
+- Single source of truth for the tier list
 
 ### Documentation
 
@@ -182,6 +184,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct stale 'tcg does not source env.sh' comments
 - Record ADR-0392 harness boot for gdbstub debug tests
 - Add ADR-0391 for the TCG image fail-loud fix
+- Design for check-setup-deps.sh opt-in auto-fix + arch matrix
+- ADR-0393 check-setup-deps.sh opt-in remediation
+- Harden check-setup-deps autofix spec after adversarial review
+- Scope sudo by mode + fresh-host index refresh (spec review 2)
+- Safe Arch install (no auto -Sy partial upgrade) (spec review 3)
+- Venv-identity predicate + post-fix summary consistency (review 4)
+- Three-state guestfs keying + post-symlink re-probe (review 5)
+- Implementation plan for check-setup-deps autofix (#1330)
+- Harden autofix plan after plan review (5 findings)
+- Fix guestfs re-probe/FIX_ATTEMPTED wiring + stub fidelity (review 2)
+- Fix refresh short-circuit + per-commit build + root guard (review 3)
+- Fix did-not-abort assertion for empty host_arch (review 4)
+- Coreutils-free fix-effect tests + guarded loop ln (review 5)
+- Regenerate config reference for new script env vars
 
 ### Fixed
 
@@ -240,6 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Autodetect repo .venv in setup-local/remote-libvirt
 - Anchor venv path derivation to $PWD for relative invocation
 - Point guestfs hint at the venv-symlink remedy
+- Correct ADR pacman command, justfile comment, guestfs ABI edges
 
 ### Build
 
