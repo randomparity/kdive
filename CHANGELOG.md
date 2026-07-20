@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Warm-store.sh + shared rootfs/kernel production helper
 - Stage-tcg-images.sh hosted /mnt image set under budget
 - Add persistent warm-store dir to the live_vm runner host
+- Honor KDIVE_PYTHON in the live-stack scripts
+- Add the fail-loud live_vm family env preflight
+- Add mint-system.sh for the provisioned-System family
+- Provision docker+compose on the live_vm runner host
+- Add live.yml gates; remove the inert ci.yml live-vm job
+- Reuse KDIVE_PROJECT in mint-system; update runner runbook
 
 ### Changed
 
@@ -73,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Satisfy config-env + provider-boundary guards (#1290)
 - Simplify the wiring-test doubles and parametrize a pair
 - Extract fetch_debuginfo + emit_wiring shared helpers
+- Use require_tools for the tcg emulator check
+- Pass the staged rootfs to the mint heredoc via argv
 
 ### Documentation
 
@@ -160,6 +168,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document live-vm store env vars; accept ADR-0388
 - Record the Ubuntu 26.04 live proof + measured budget
 - State live-stack provisioning-parity convention
+- Spec + ADR-0389 for live-test CI wiring
+- Harden spec+ADR from adversarial review
+- Resolve iteration-2 spec review findings
+- Route the on-box worker through the libguestfs venv
+- Implementation plan for the live-vm CI gates
+- Resolve plan review findings
+- Fix three bugs in the plan review fixes
+- Reconcile spec — tcg job sources env.sh (DRY)
+- Defer the TCG wall-time measurement to the operator nightly
+- Reconcile spec/ADR/runbook with the review fixes
+- Correct stale 'tcg does not source env.sh' comments
 
 ### Fixed
 
@@ -202,6 +221,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden stores from branch review
 - Fail loud on missing host tools; declare the deps
 - Declare e2fsprogs host dep for build-fs repack
+- Run native pytest under KDIVE_PYTHON; harden the reaper
+- Supply warm-store pins + session URI to the native gate
+- Export the warm-store wiring vars in the native job
+- Make up.sh sudo-free on a pre-provisioned runner
+- Enter the LiveStackClient async context in mint-system
+- Stage warm rootfs into the provider root; read System state off env.status
+- Boot both live_vm families under qemu:///session
 
 ### Build
 
