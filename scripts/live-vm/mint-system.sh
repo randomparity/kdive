@@ -76,7 +76,10 @@ async def main() -> int:
                 "allocations.request",
                 project=project,
                 vcpus=2,
-                memory_gb=2,
+                # 4 GiB (not 2): a kdump System reserves crashkernel on the boot cmdline, and
+                # 2 GiB + crashkernel cannot reach the kdive-ready marker on the warm guest
+                # (proven live on runner-pdx, #1319).
+                memory_gb=4,
                 disk_gb=10,
                 resource={"mode": "kind", "kind": "local-libvirt"},
             )
@@ -89,14 +92,23 @@ async def main() -> int:
             "schema_version": 1,
             "arch": os.uname().machine,
             "vcpu": 2,
-            "memory_mb": 2048,
+            "memory_mb": 4096,
             "disk_gb": 10,
             "boot_method": "direct-kernel",
             # An opaque provenance label (any non-empty string); direct-kernel extracts the warm
             # rootfs's own kernel. Required by the schema for direct-kernel (local-libvirt's lane;
             # disk-image is remote-libvirt only).
             "kernel_source_ref": "warm-store-baseline",
-            "provider": {"local-libvirt": {"rootfs": {"kind": "local", "path": rootfs}}},
+            # crashkernel makes this a kdump System (capture_method=KDUMP) and arms crashkernel on
+            # the boot cmdline at provision (ADR-0390, #1319), so the provisioned-family kdump test
+            # captures a real vmcore with no manual pre-arming. The warm rootfs must be built
+            # kdump-capable (kdump.service enabled) — the operator's KDIVE_WARM_STORE_IMAGE choice.
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "local", "path": rootfs},
+                    "crashkernel": "256M",
+                }
+            },
         }
         prov = _scalar(
             await client.call_tool(
