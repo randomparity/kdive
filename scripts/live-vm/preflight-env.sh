@@ -47,8 +47,8 @@ check_tcg() {
   require_set AWS_SECRET_ACCESS_KEY
   require_path KDIVE_GUEST_IMAGE_PPC64LE
   require_path KDIVE_KERNEL_SRC
-  command -v qemu-system-ppc64 >/dev/null 2>&1 ||
-    die "qemu-system-ppc64 not on PATH: the ppc64le TCG guest cannot boot"
+  # Reuse lib.sh's require_tools (already sourced) rather than an inline command -v/die.
+  require_tools "qemu-system-ppc64:the ppc64le TCG guest emulator (install qemu-system-ppc)"
 }
 
 for family in "$@"; do
