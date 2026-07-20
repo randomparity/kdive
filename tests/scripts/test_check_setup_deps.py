@@ -268,3 +268,38 @@ def test_pyimport_trusts_venv_over_system_python3_when_venv_has_binding(tmp_path
     result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
 
     assert "python3-guestfs" not in result.stderr, result.stderr
+
+
+def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:
+    """With KDIVE_PYTHON unset, the guestfs probe autodetects the repo .venv even when the script
+    is invoked by a relative path (`bash scripts/check-setup-deps.sh` from the repo root, #1328).
+
+    The venv interpreter can import guestfs; system python3 cannot. A relative invocation must
+    still resolve the venv (anchored to $PWD), so the guestfs hint stays suppressed.
+    """
+    assert BASH is not None
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPT, scripts / "check-setup-deps.sh")
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _stub_python(venv_bin, "python", imports_ok=True)  # the repo venv can import guestfs
+    bindir = repo / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
+    _stub_python(bindir, "python3", imports_ok=False)  # system python3 cannot -> emits the hint
+    os_release = repo / "os-release"
+    os_release.write_text("ID=debian\n")
+
+    result = subprocess.run(
+        [BASH, "scripts/check-setup-deps.sh"],  # relative path; KDIVE_PYTHON unset
+        cwd=str(repo),
+        env={"PATH": str(bindir), "KDIVE_OS_RELEASE": str(os_release), "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert "python3-guestfs" not in result.stderr, result.stderr

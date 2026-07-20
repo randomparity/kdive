@@ -13,9 +13,14 @@ readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 # override (host-services deployment), and fall back to system python3 before the venv exists.
 #
 # Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
-# stubbed PATH with no coreutils. `${var%/*}` strips the trailing path component; two applications
-# on an absolute BASH_SOURCE[0] give the repo root, then append `.venv/bin/python`.
-_repo_venv_py="${BASH_SOURCE[0]%/*}"
+# stubbed PATH with no coreutils. BASH_SOURCE[0] is often relative (`bash scripts/check-setup-deps.sh`
+# from the repo root gives a single-slash path), so anchor it to $PWD first (a builtin, unlike
+# dirname) to stay CWD-independent; without this the two strips below yield `scripts/.venv/...`,
+# which misses the venv and silently falls back to system python3. `${var%/*}` strips one trailing
+# component; two applications (script filename, then the scripts/ dir) give the repo root.
+_repo_venv_py="${BASH_SOURCE[0]}"
+[[ "${_repo_venv_py}" == /* ]] || _repo_venv_py="${PWD}/${_repo_venv_py}"
+_repo_venv_py="${_repo_venv_py%/*}"
 _repo_venv_py="${_repo_venv_py%/*}/.venv/bin/python"
 if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
   readonly PY="${_repo_venv_py}"
