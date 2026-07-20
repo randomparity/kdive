@@ -7,6 +7,7 @@ cancellation, must fail here — the analogue of test_live_vm_tcg_tier.py pinnin
 from __future__ import annotations
 
 import pathlib
+import re
 
 import yaml
 
@@ -75,16 +76,51 @@ def test_tcg_block_stages_into_a_runner_owned_dir() -> None:
     assert stage_subdir in run, "stage into a runner-owned subdir, not /mnt"
 
 
-def test_tcg_default_image_is_a_real_catalog_entry() -> None:
-    # On schedule (no dispatch input) the tcg gate builds from the tcg_image default. A name absent
-    # from the rootfs catalog produces no rootfs and fails deep (virt-ls: No such file), not loud.
+def _catalog_names() -> set[str]:
     import tomllib
 
-    default = _triggers(_load(_LIVE))["workflow_dispatch"]["inputs"]["tcg_image"]["default"]
     catalog_path = _ROOT / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
     catalog = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
-    names = {img["name"] for img in catalog.get("image", [])}
-    assert default in names, f"tcg_image default {default!r} is not a rootfs_catalog.toml entry"
+    return {img["name"] for img in catalog.get("image", [])}
+
+
+def _tcg_image_input_default() -> str:
+    return _triggers(_load(_LIVE))["workflow_dispatch"]["inputs"]["tcg_image"]["default"]
+
+
+def _tcg_image_run_fallback() -> str:
+    # The tcg run block resolves the image on schedule/push as
+    #   export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-<fallback>}"
+    # because TCG_IMAGE_INPUT is empty off workflow_dispatch. Pull that bash default out.
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
+    match = re.search(r'KDIVE_TCG_IMAGE="\$\{TCG_IMAGE_INPUT:-([^}"]+)\}"', run)
+    assert match, "could not find the KDIVE_TCG_IMAGE fallback assignment in the tcg run block"
+    return match.group(1)
+
+
+def test_tcg_default_image_is_a_real_catalog_entry() -> None:
+    # On workflow_dispatch (no override) the tcg gate builds from the tcg_image input default. A
+    # name absent from the rootfs catalog produces no rootfs and fails deep (virt-ls: No such file).
+    default = _tcg_image_input_default()
+    assert default in _catalog_names(), (
+        f"tcg_image default {default!r} is not a rootfs_catalog.toml entry"
+    )
+
+
+def test_tcg_schedule_fallback_image_is_a_real_catalog_entry() -> None:
+    # On schedule/push TCG_IMAGE_INPUT is empty, so the run block's bash fallback is the built one.
+    # A bogus fallback (the old `fedora-ppc64le`) breaks every non-dispatch run; pin it to catalog.
+    fallback = _tcg_image_run_fallback()
+    assert fallback in _catalog_names(), (
+        f"tcg schedule/push fallback image {fallback!r} is not a rootfs_catalog.toml entry"
+    )
+
+
+def test_tcg_input_default_and_schedule_fallback_agree() -> None:
+    # Two independently-maintained defaults (the workflow_dispatch input and the bash fallback) must
+    # not drift: a dispatch and a scheduled run must build the same ppc64le guest.
+    assert _tcg_image_input_default() == _tcg_image_run_fallback()
 
 
 def test_native_block_boots_provisioned_family_under_session() -> None:

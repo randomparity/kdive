@@ -224,6 +224,22 @@ def test_produce_rootfs_and_kernel(tmp_path: Path) -> None:
     assert (dest / ".kver").read_text() == "6.1-test"  # rescue kernel skipped, real one chosen
     argv = (dest / "build-fs.argv").read_text()
     assert "--workspace" in argv and str(dest) in argv
+
+
+def test_produce_rootfs_and_kernel_dies_when_build_produces_no_rootfs(tmp_path: Path) -> None:
+    # A build that exits 0 without writing the qcow2 must fail HERE with a clear message, not deep
+    # at the virt-ls below as the misleading `rootfs.qcow2: No such file` (#1320).
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    dest = tmp_path / "set"
+    dest.mkdir()
+    _produce_stubs(bindir)
+    _stub(bindir, "python3", "exit 0")  # build-fs "succeeds" but writes no rootfs
+    env = {"PATH": f"{bindir}:/usr/bin:/bin", "KDIVE_PYTHON": "python3"}
+    r = _run('produce_rootfs_and_kernel "$1" "$2"', str(dest), "rocky10-debug", env=env)
+    assert r.returncode != 0
+    assert "produced no rootfs" in r.stderr
+    assert not (dest / "vmlinux").exists()  # failed before the kernel extract
     assert not (dest / ".build").exists()
 
 
