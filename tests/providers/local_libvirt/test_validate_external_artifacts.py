@@ -146,6 +146,8 @@ def test_missing_object_is_configuration_error() -> None:
 
 
 def test_checksum_mismatch_is_build_failure() -> None:
+    # #1338: a stored checksum that is present but DIFFERS keeps the generic "disagrees" message —
+    # this is a genuine wrong-bytes mismatch, distinct from the absent-checksum bypass case below.
     store = _FakeStore(
         {"k": _KERNEL_TAR},
         {"k": HeadResult(size_bytes=len(_KERNEL_TAR), checksum_sha256="OTHER", etag="e")},
@@ -158,6 +160,32 @@ def test_checksum_mismatch_is_build_failure() -> None:
             declared_build_id=None,
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
+    assert "disagrees with its manifest" in str(e.value)
+    assert "no stored SHA-256 checksum" not in str(e.value)
+
+
+def test_absent_stored_checksum_names_the_bypass_cause() -> None:
+    # #1338 / ADR-0395: a single-PUT object with no stored SHA-256 (checksum_sha256 is None) was
+    # not written through the presigned PUT — a direct put_object that skipped the signed
+    # x-amz-checksum-sha256 header. The rejection must name that cause, distinct from a genuine
+    # checksum mismatch, so the agent can tell "checksum absent (bypass)" from "checksum differs".
+    store = _FakeStore(
+        {"k": _KERNEL_TAR},
+        {"k": HeadResult(size_bytes=len(_KERNEL_TAR), checksum_sha256=None, etag="e")},
+    )
+    with pytest.raises(CategorizedError) as e:
+        validate_external_artifacts(
+            store,
+            manifest=[ManifestEntry("kernel", "csum", len(_KERNEL_TAR))],
+            keys={"kernel": "k"},
+            declared_build_id=None,
+        )
+    assert e.value.category is ErrorCategory.BUILD_FAILURE
+    message = str(e.value)
+    assert "no stored SHA-256 checksum" in message
+    assert "bypassed the presigned PUT" in message
+    assert "x-amz-checksum-sha256" in message
+    assert "disagrees with its manifest" not in message
 
 
 def _validate_kernel_blob(blob: bytes, *, arch: str = "x86_64") -> None:

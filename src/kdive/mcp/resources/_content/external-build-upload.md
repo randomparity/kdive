@@ -232,7 +232,10 @@ Replace the `x-amz-*` headers above with the exact set from `data.required_heade
 upload item — the names and values are per-artifact.
 
 A mismatch between a declared `sha256`/`size_bytes` and the stored object is rejected
-(`uploaded artifact disagrees with its manifest`), so checksum the bytes you actually PUT.
+(`uploaded artifact disagrees with its manifest`), so checksum the bytes you actually PUT. If
+you bypassed the presigned PUT with a direct `put_object` (no `x-amz-checksum-sha256`), the
+object has no stored checksum and finalize rejects it distinctly (`uploaded artifact has no
+stored SHA-256 checksum …`) — upload through the signed URL so the checksum is bound.
 
 ## Related
 

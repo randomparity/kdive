@@ -364,6 +364,52 @@ def test_create_system_upload_names_its_own_remint_tool(migrated_url: str) -> No
     _iso(responses.items[0].data["expires_at"])
 
 
+def _assert_upload_hint(hint: Any) -> None:
+    # #1338 / ADR-0395: the collection response carries a data.upload_hint that names both
+    # presigned-PUT footguns so a tool-schema-only agent sees them without the resource doc:
+    # (1) send only required_headers or the SigV4 signature breaks with a 403, and (2) do not
+    # bypass the signed PUT (it drops the signed checksum binding).
+    assert isinstance(hint, str)
+    assert "required_headers" in hint
+    assert "403 SignatureDoesNotMatch" in hint
+    assert "Content-Type" in hint  # the concrete extra-header trap
+    assert "curl -T" in hint  # the correct invocation
+    assert "x-amz-checksum-sha256" in hint  # the bypass caution
+
+
+def test_create_run_upload_response_carries_extra_header_footgun_hint(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+
+    responses = asyncio.run(_run())
+    _assert_upload_hint(responses.data["upload_hint"])
+
+
+def test_create_system_upload_response_carries_extra_header_footgun_hint(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            return await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+
+    responses = asyncio.run(_run())
+    _assert_upload_hint(responses.data["upload_hint"])
+
+
 def test_chunked_upload_one_expires_at_per_part_one_collection_deadline(migrated_url: str) -> None:
     _5gib = 5 * 1024 * 1024 * 1024
 
