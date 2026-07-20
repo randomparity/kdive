@@ -236,6 +236,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repair the TCG gate's schedule/push image fallback
 - Arm kdump on the provision baseline cmdline
 - Size the minted crashkernel per arch
+- Probe venv interpreter in check-setup-deps false-green
+- Autodetect repo .venv in setup-local/remote-libvirt
+- Anchor venv path derivation to $PWD for relative invocation
+- Point guestfs hint at the venv-symlink remedy
 
 ### Build
 
