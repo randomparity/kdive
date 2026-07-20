@@ -548,11 +548,19 @@ maybe_link_guestfs() {
   FIX_ATTEMPTED=1
 }
 
+# The three tiers, in report order, as `heading:tier` pairs (headings carry no colon). Single source
+# of truth for both the initial report+fix pass and the post-fix re-check.
+readonly TIER_SPECS=(
+  "Required dependencies:required"
+  "Recommended dependencies (full local CI):recommended"
+  "Future dependencies (live_vm / kernel build):future"
+)
+
 FIX_ATTEMPTED=0
 probe_all
-report_and_fix_tier "Required dependencies" required "${distro}"
-report_and_fix_tier "Recommended dependencies (full local CI)" recommended "${distro}"
-report_and_fix_tier "Future dependencies (live_vm / kernel build)" future "${distro}"
+for spec in "${TIER_SPECS[@]}"; do
+  report_and_fix_tier "${spec%:*}" "${spec##*:}" "${distro}"
+done
 detect_guestfs_state # refresh state so a just-installed python3-guestfs flips absent -> unlinked
 maybe_link_guestfs   # separate prompt; sets FIX_ATTEMPTED on a successful link
 
@@ -560,9 +568,9 @@ if ((FIX_ATTEMPTED)); then
   hash -r   # drop bash's cached command lookups so just-installed binaries are found
   probe_all # rebuild the accumulators from post-fix state
   printf "\n=== re-checking after fixes ===\n" >&2
-  report_tier "Required dependencies" required "${distro}"
-  report_tier "Recommended dependencies (full local CI)" recommended "${distro}"
-  report_tier "Future dependencies (live_vm / kernel build)" future "${distro}"
+  for spec in "${TIER_SPECS[@]}"; do
+    report_tier "${spec%:*}" "${spec##*:}" "${distro}"
+  done
 fi
 
 print_cross_arch_advisory "${host_arch}" "${distro}"
