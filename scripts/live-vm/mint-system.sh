@@ -66,6 +66,10 @@ async def main() -> int:
     token = os.environ["KDIVE_TOKEN"]
     project = os.environ.get("KDIVE_PROJECT", "demo")
     rootfs = sys.argv[1]  # the warm rootfs staged under the provider's allowed root (argv, not env)
+    arch = os.uname().machine
+    # Match arch_traits.default_crashkernel: ppc64le reserves more (POWER kdump-utils floor) so the
+    # crash kernel does not OOM before makedumpfile runs; 256M is the x86_64 default (#1319).
+    crashkernel = "512M" if arch == "ppc64le" else "256M"
 
     # LiveStackClient is an async context manager (dev_harness); it must be entered before any
     # call_tool, else fastmcp raises "Client is not connected".
@@ -90,7 +94,7 @@ async def main() -> int:
 
         profile = {
             "schema_version": 1,
-            "arch": os.uname().machine,
+            "arch": arch,
             "vcpu": 2,
             "memory_mb": 4096,
             "disk_gb": 10,
@@ -106,7 +110,7 @@ async def main() -> int:
             "provider": {
                 "local-libvirt": {
                     "rootfs": {"kind": "local", "path": rootfs},
-                    "crashkernel": "256M",
+                    "crashkernel": crashkernel,
                 }
             },
         }
