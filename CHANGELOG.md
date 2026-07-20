@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision docker+compose on the live_vm runner host
 - Add live.yml gates; remove the inert ci.yml live-vm job
 - Reuse KDIVE_PROJECT in mint-system; update runner runbook
+- Add boot_preserved_gdbstub_domain harness (#1321)
 
 ### Changed
 
@@ -179,6 +180,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer the TCG wall-time measurement to the operator nightly
 - Reconcile spec/ADR/runbook with the review fixes
 - Correct stale 'tcg does not source env.sh' comments
+- Record ADR-0392 harness boot for gdbstub debug tests
 - Add ADR-0391 for the TCG image fail-loud fix
 
 ### Fixed
