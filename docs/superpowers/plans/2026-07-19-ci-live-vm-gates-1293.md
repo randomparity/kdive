@@ -363,29 +363,38 @@ source "${here}/lib.sh"
 [ -e "${KDIVE_LIVE_VM_ROOTFS}" ] || die "KDIVE_LIVE_VM_ROOTFS=${KDIVE_LIVE_VM_ROOTFS} does not exist"
 [ -n "${KDIVE_STACK_BASE_URL:-}" ] || die "KDIVE_STACK_BASE_URL unset (bring up the stack first)"
 
-# 1. Fund the project + mint a token (reuse onboard.sh; it prints `export KDIVE_TOKEN=...`).
-eval "$("${here}/../live-stack/onboard.sh")"
+# 1. Fund the project + mint a token. onboard.sh prints banners + a token-contract heredoc to
+#    stdout alongside its one `export KDIVE_TOKEN=...` line, so eval ONLY that line (eval-ing the
+#    whole capture hits `(advisory)` unbalanced parens under set -e and aborts before the token).
+eval "$("${here}/../live-stack/onboard.sh" | grep '^export KDIVE_TOKEN=')"
 [ -n "${KDIVE_TOKEN:-}" ] || die "onboard.sh did not mint a token"
 
 # 2. Drive the lifecycle over MCP HTTP with `kdivectl tool call` (the generic passthrough,
 #    src/kdive/cli/__main__.py; mutating tools need --allow-mutating), parsing JSON with jq. Use the
-#    EXACT tool names the spine uses (tests/integration/live_stack/spine.py:218,243,
-#    scripts/live-debug.py:375-416):
+#    EXACT tool names + id sources the spine uses (tests/integration/live_stack/spine.py):
 #      investigations.open  {project, title}
-#      allocations.request  {project, ... }          # --allow-mutating
-#      allocations.list     {project}                # -> allocation_id (object_id of the new alloc)
+#      allocations.request  {project, ...}           # --allow-mutating; the ALLOCATION id is this
+#                                                     #   response's object_id (spine allocate_remote
+#                                                     #   returns env.object_id) — no allocations.list
+#                                                     #   needed
 #      systems.provision    {allocation_id, profile} # --allow-mutating; profile carries the warm
-#                                                     # rootfs KDIVE_LIVE_VM_ROOTFS + arch=<native>,
-#                                                     # shaped like spine.py _provision_profile()
-#      systems.get          {system_id}              # POLL until .status == "ready" (bounded loop + die on timeout)
+#                                                     #   rootfs KDIVE_LIVE_VM_ROOTFS + arch=<native>,
+#                                                     #   shaped like spine.py _provision_profile().
+#                                                     #   The SYSTEM id is data.system_id — NOT
+#                                                     #   object_id, which is the provisioning JOB id
+#                                                     #   (spine.py:243: `data_str(env,"system_id")`)
+#      systems.get          {system_id}              # POLL .data.status == "ready" (bounded loop + die on timeout)
 #    NOTE: do NOT reuse scripts/live-debug.py:_provision_boot_run wholesale — it goes PAST ready
 #    (upload/install/boot/run, returning a run_id); mint-system.sh stops at the ready System id.
-#    Run kdivectl via the KDIVE_PYTHON-honoring interpreter (`"${py[@]}"` when KDIVE_PYTHON is set,
-#    else `uv run python -m kdive.cli`); echo ONLY the id (all progress -> stderr).
+#    Run kdivectl via the KDIVE_PYTHON-honoring interpreter; echo ONLY the id (all progress -> stderr).
 py=("${KDIVE_PYTHON:+"$KDIVE_PYTHON" -m kdive.cli}")
 [[ ${#py[@]} -eq 0 ]] && py=(uv run python -m kdive.cli)
-# ... investigations.open / allocations.request / allocations.list / systems.provision as above ...
-system_id="..."   # object_id from systems.provision, then poll systems.get until status==ready
+# alloc_id=$( "${py[@]}" tool call allocations.request --allow-mutating --json '{...}' | jq -r '.object_id' )
+# system_id=$( "${py[@]}" tool call systems.provision --allow-mutating \
+#              --json "{\"allocation_id\":\"$alloc_id\",\"profile\":{...\"rootfs\":\"$KDIVE_LIVE_VM_ROOTFS\"...}}" \
+#              | jq -r '.data.system_id' )     # data.system_id, NOT object_id
+# then poll: "${py[@]}" tool call systems.get --json "{\"system_id\":\"$system_id\"}" | jq -r '.data.status'
+system_id="..."   # data.system_id from systems.provision, confirmed ready by the systems.get poll
 [ -n "$system_id" ] || die "provisioning did not yield a ready System id"
 printf '%s\n' "$system_id"
 ```
@@ -581,8 +590,11 @@ jobs:
       #   reaper (virsh destroy kdive-* ; docker compose down -v) -> eval warm-store.sh ->
       #   KDIVE_WORKER_AS_ROOT=0 up.sh --skip-obs ->
       #   source scripts/live-stack/env.sh   # REQUIRED: up.sh sources env.sh in its OWN process, so
-      #                                       # KDIVE_LIBVIRT_URI + KDIVE_S3_* are unset in this shell
-      #                                       # until sourced here — the preflight + suite need them
+      #                                       # KDIVE_S3_* are unset in this shell until sourced here
+      #   export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+      #                                       # env.sh does NOT set this (it lives un-exported in
+      #                                       # lib.sh:19); export it so the preflight AND the pytest
+      #                                       # subprocess (tests/live_vm/__init__.py reads it) see it
       #   -> KDIVE_LIVE_VM_SYSTEM_ID="$(mint-system.sh)"
       #   -> preflight-env.sh throwaway provisioned -> just test-live
 ```
@@ -664,9 +676,10 @@ Assemble and run the native job's `run:` block by hand on this host (it runs KVM
 ```bash
 KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
 source scripts/live-stack/env.sh
+export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"   # env.sh does not set this (lib.sh:19)
 eval "$(scripts/live-vm/warm-store.sh)"
 KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
-scripts/live-vm/preflight-env.sh throwaway provisioned   # must pass now that env.sh is sourced
+scripts/live-vm/preflight-env.sh throwaway provisioned   # must pass now that env + URI are exported
 just test-live
 ```
 
