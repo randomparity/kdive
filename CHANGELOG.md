@@ -205,6 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implementation plan for upload deadline contract (#1336)
 - Point Task 3 at the tool-description test registry (#1336)
 - State deadline scope and non-constraint in tool docstrings
+- Point agents at images.kernel_config as starting config
 
 ### Fixed
 
