@@ -128,8 +128,14 @@ or the existing schema test), `docs/guide/reference/artifacts.md` (regenerated).
 - Observe doc-style: no "critical/robust/comprehensive"; use plain prose.
 
 **Acceptance (AC6):**
-- A test asserts the wrapper docstring (or the FastMCP tool description) for both
-  tools contains the scope sentence and the "not for time pressure" clause.
+- A test asserts the FastMCP tool description for both tools contains the scope
+  sentence and the "not for time pressure" clause. Use the existing registry
+  pattern in `tests/mcp/core/test_tool_docs.py`: `TOOLS = _build_tools()` (built
+  from `build_app`), then `tools = {t.name: t for t in TOOLS}` and assert on
+  `tools["artifacts.create_run_upload"].description` /
+  `tools["artifacts.create_system_upload"].description`. Put the new test there
+  (the home of description-contract tests) rather than reintrospecting the app
+  in `test_create_upload_tool.py`.
 - Run `just docs`; `docs/guide/reference/artifacts.md` reflects the new prose;
   `just docs-check` passes.
 
