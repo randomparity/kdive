@@ -52,3 +52,13 @@ def test_both_jobs_disable_cancel_in_progress() -> None:
 
 def test_ci_yml_no_longer_defines_a_live_vm_job() -> None:
     assert "live-vm" not in _load(_CI)["jobs"]
+
+
+def test_native_block_exports_warm_store_wiring() -> None:
+    # emit_wiring prints bare (non-export) assignments, so the native run block must export the
+    # warm-store wiring vars or the child mint-system.sh / preflight / pytest never see the rootfs.
+    steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s)
+    exported = " ".join(ln for ln in run.splitlines() if ln.strip().startswith("export"))
+    for var in ("KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_VMLINUX"):
+        assert var in exported, f"{var} not exported in the native run block"

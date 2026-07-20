@@ -173,6 +173,9 @@ jobs:
           export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-${DEBUGINFOD_VAR}}"
           warm_wiring="$(KDIVE_LIBVIRT_URI=qemu:///session scripts/live-vm/warm-store.sh)"
           eval "$warm_wiring"
+          # emit_wiring prints BARE assignments (no `export`), so eval leaves them non-exported;
+          # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
+          export KDIVE_LIVE_VM_ROOTFS KDIVE_LIVE_VM_BZIMAGE KDIVE_LIVE_VM_VMLINUX
 
           # Provisioned family on the box: bring up the stack (worker non-root so sudo does not
           # strip the inherited KDIVE_PYTHON/PYTHONPATH), then mint one System.
