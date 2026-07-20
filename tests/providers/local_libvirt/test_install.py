@@ -49,6 +49,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.shared.runtime_paths import read_console_log
+from tests.live_vm import require_live_vm_provisioned
 from tests.providers.local_libvirt.fakes import FakeDomain, FakeLibvirtConn
 
 _SYS = UUID("11111111-1111-1111-1111-111111111111")
@@ -1113,20 +1114,20 @@ def test_install_unwritable_staging_root_is_config_error(tmp_path: Path) -> None
 
 
 @pytest.mark.live_vm
+@pytest.mark.live_vm_provisioned
 def test_live_vm_real_install_boot() -> None:  # pragma: no cover - live_vm
     import shutil
 
-    uri = os.environ.get("KDIVE_LIBVIRT_URI")
-    system_id = os.environ.get("KDIVE_LIVE_VM_SYSTEM_ID")
-    if not uri or not shutil.which("virsh") or not system_id:
-        pytest.skip("KDIVE_LIBVIRT_URI, virsh, or KDIVE_LIVE_VM_SYSTEM_ID unavailable")
+    contract = require_live_vm_provisioned()
+    if not shutil.which("virsh"):
+        pytest.skip("virsh not on PATH; local install-boot needs a local libvirt install")
     # The operator points KDIVE_LIVE_VM_SYSTEM_ID at a System already provisioned + installed
     # with a kdive-ready rootfs (epic #123 build/install harness). boot() power-cycles it and
     # drives the real _real_readiness console probe; a clean kdive-ready boot resolves without
     # raising. The vulnerable-vs-fixed A/B is exercised host-free by the committed crash/clean
     # fixtures (test_*_fixture_classifies_*) and end-to-end by the #123 integration harness.
     booter = LocalLibvirtInstall.from_env()
-    booter.boot(UUID(system_id))  # no raise == readiness resolved ok at the marker
+    booter.boot(UUID(contract.system_id))  # no raise == readiness resolved ok at the marker
 
 
 # --- classify_console: the pure readiness verdict core (ADR-0055) --------------------
