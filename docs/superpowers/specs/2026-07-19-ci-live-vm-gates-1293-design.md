@@ -438,15 +438,17 @@ split into what ordinary CI proves and what the operator/local proof proves:
     permanent, not a dangling inert copy).
 - **Local live proof (grounds the timeout, records the wall-time):** on this
   x86_64 host, ppc64le is foreign → TCG anyway, so the hosted-gate boot path is
-  reproducible locally. Bring up the stack, apt/dnf the ppc64le emulator, stage the
-  TCG set, and run `just test-live-tcg`; record the measured boot-to-panic
-  wall-time and set `timeout-minutes` = **⌈measured wall-time × 1.5⌉, floored at
-  30 min** (a concrete, falsifiable headroom rule, not "with headroom"). The
-  measured number and the resulting timeout are recorded in ADR-0389 (whose Status
-  stays **Proposed** until the number lands) and this spec, the same
-  CI-cannot-prove-it-live posture A/B/C shipped. The self-hosted job's
-  *process-context* proof (a real nightly on the enabled runner) is the operator
-  step, deferred to the runbook.
+  reproducible locally in principle. The `timeout-minutes` rule is **⌈measured
+  wall-time × 1.5⌉, floored at 30 min** (a concrete, falsifiable headroom rule).
+  A local measurement was attempted (the ppc64le fixture at
+  `/var/lib/kdive/rootfs/local/fedora-kdive-ready-44-ppc64le.qcow2` and a kernel
+  tree are present), but a clean full-stack bring-up could not be completed
+  in-session; the shipped `timeout-minutes` is therefore the **30-min floor**, and
+  grounding the measured number + flipping ADR-0389 Proposed → Accepted is
+  **deferred to the first operator nightly on the enabled runner** — the same
+  CI-cannot-always-prove-it-live posture A/B/C shipped. The self-hosted job's
+  *process-context* proof is likewise an operator step (the runner service is
+  disabled until the enabling order in the runbook).
 - Guardrails to run before commit: `just lint-workflows lint-shell test`
   (workflow + shell + the preflight/shape tests), and the full `just ci` before
   push (env-docs, docs guards, the whole PR gate).

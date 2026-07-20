@@ -108,10 +108,17 @@ trigger at all** makes fork-PR dispatch structurally impossible. Four decisions:
    window; merging D does not expose the runner — enabling the service does, and
    only after all three controls are in place.
 
-**Measured wall-time (grounds Decision 1's timeout):** _to be recorded from the
-local TCG proof, and the ADR flipped Proposed → Accepted, when the number lands —
-the CI-cannot-prove-it-live posture A/B/C shipped. `timeout-minutes` = ⌈measured ×
-1.5⌉ floored at 30 min._
+**Measured wall-time (grounds Decision 1's timeout):** not yet recorded. The
+shipped `timeout-minutes` is the **30-minute floor** of the `⌈measured × 1.5⌉,
+floor 30` rule. A local measurement was attempted on the x86_64 KVM dev host
+(the ppc64le fixture and a kernel tree are present), but a clean full-stack
+bring-up for the emulated boot could not be completed in-session without
+extensive stack orchestration tangential to this change; grounding the number is
+therefore **deferred to the first operator nightly on the enabled runner** (the
+same CI-cannot-always-prove-it-live posture A/B/C shipped, where the live proof is
+an operator step). The ADR stays **Proposed** until that first run records the
+number; the 30-minute floor is a safe default until then (the per-proof
+reachability deadline is 900 s, so three core proofs fit within it comfortably).
 
 ## Consequences
 
