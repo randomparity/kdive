@@ -32,8 +32,10 @@ SYSTEM_SSH_NETDEV_ID = "kdivessh"
 _PROFILE_POLICY = LocalLibvirtProfilePolicy()
 # The bare-fs rootfs roots on the lone virtio disk (`/dev/vda`); the serial `console=` (ttyS0 on
 # x86, hvc0 on pseries — see kdive.domain.platform) makes the readiness tail and SSH/drgn path
-# observable. kdump's `crashkernel` is the install/boot lane's job, sized against the
-# kernel-under-test — never added to the baseline boot (ADR-0272).
+# observable. A warm-own-kernel System that sets `crashkernel` arms kdump here, at provision, since
+# it never runs `runs.install` (the install lane sizes crashkernel against a kernel-under-test; the
+# warm rootfs carries its own modules) — ADR-0390 relaxes the ADR-0206/0272 "install-lane-only"
+# policy for that case. A profile with no `crashkernel` renders the bare baseline unchanged.
 _BASELINE_CMDLINE_TEMPLATE = "root=/dev/vda console={console} rw"
 
 
@@ -169,7 +171,11 @@ def _build_baseline_domain(
     # to the pre-ADR-0340 output; a TCG domain emits nothing and <os> follows <vcpu> directly.
     _append_guest_cpu(domain, is_kvm=is_kvm, kvm_cpu_mode=traits.kvm_cpu_mode, cpu_model=cpu_model)
     os_el = _append_os(domain, arch=profile.arch, machine=machine)
-    _append_direct_kernel(os_el, kernel_path, initrd_path, _baseline_cmdline(traits.console_device))
+    section = profile.provider.local_libvirt
+    cmdline = _baseline_cmdline(
+        traits.console_device, crashkernel=section.crashkernel, fadump=section.debug.fadump
+    )
+    _append_direct_kernel(os_el, kernel_path, initrd_path, cmdline)
     if traits.emit_acpi_features:
         _append_crash_capture_features(domain)
     devices = ET.SubElement(domain, "devices")
@@ -233,8 +239,24 @@ def _append_os(domain: ET.Element, *, arch: str, machine: str) -> ET.Element:
     return os_el
 
 
-def _baseline_cmdline(console_device: str) -> str:
-    return _BASELINE_CMDLINE_TEMPLATE.format(console=console_device)
+def _baseline_cmdline(
+    console_device: str, *, crashkernel: str | None = None, fadump: bool = False
+) -> str:
+    """Compose the direct-kernel baseline cmdline, arming kdump when ``crashkernel`` is set.
+
+    ``crashkernel`` (the profile's opaque reservation token) appends ``crashkernel=<size>`` so a
+    warm-own-kernel System reserves crash memory at provision (ADR-0390); ``fadump`` additionally
+    appends ``fadump=on`` after it (ppc64le firmware-assisted dump, ADR-0349), matching the install
+    lane's ``system_required_cmdline`` token order. ``None``/``False`` render the bare baseline —
+    the transient customization boot never arms.
+    """
+    cmdline = _BASELINE_CMDLINE_TEMPLATE.format(console=console_device)
+    if crashkernel is None:
+        return cmdline
+    cmdline = f"{cmdline} crashkernel={crashkernel}"
+    if fadump:
+        cmdline = f"{cmdline} fadump=on"
+    return cmdline
 
 
 def _append_crash_capture_features(domain: ET.Element) -> None:

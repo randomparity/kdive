@@ -154,7 +154,7 @@ _X86_KVM_GOLDEN = (
     '<memory unit="MiB">4096</memory><vcpu>4</vcpu><cpu mode="host-passthrough" />'
     '<os><type arch="x86_64" machine="pc-q35-9.0">hvm</type>'
     "<kernel>/var/lib/kdive/rootfs/11111111-1111-1111-1111-111111111111-baseline/kernel</kernel>"
-    "<cmdline>root=/dev/vda console=ttyS0 rw</cmdline></os>"
+    "<cmdline>root=/dev/vda console=ttyS0 rw crashkernel=256M</cmdline></os>"
     '<features><acpi /><vmcoreinfo state="on" /></features>'
     '<devices><disk type="file" device="disk"><driver name="qemu" type="qcow2" />'
     '<source file="/var/lib/kdive/rootfs/fedora-40.qcow2" />'
@@ -261,7 +261,11 @@ def test_render_domain_by_arch_and_accel(
     else:
         assert emu is not None and emu.text == emulator
     assert (root.find("features") is not None) is exp_features
-    assert root.findtext("os/cmdline") == f"root=/dev/vda console={_EXPECTED_CONSOLE[arch]} rw"
+    # _VALID sets crashkernel, so the armed baseline reserves crash memory per arch (ADR-0390).
+    assert (
+        root.findtext("os/cmdline")
+        == f"root=/dev/vda console={_EXPECTED_CONSOLE[arch]} rw crashkernel=256M"
+    )
 
 
 def test_render_machine_override_wins_for_ppc64le() -> None:
@@ -394,10 +398,38 @@ def test_render_uses_disk_path_override_when_given() -> None:
 
 
 def test_render_has_baseline_kernel_and_cmdline() -> None:
-    # Provision boots the rootfs's own baseline kernel via direct-kernel (#905, ADR-0272).
+    # Provision boots the rootfs's own baseline kernel via direct-kernel (#905, ADR-0272). The
+    # _VALID profile sets crashkernel, so the armed baseline reserves crash memory (ADR-0390).
     root = _safe_fromstring(_render())
     assert root.findtext("os/kernel") == str(_KERNEL)
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw crashkernel=256M"
+
+
+def test_render_arms_crashkernel_on_baseline_when_profile_sets_it() -> None:
+    # A warm-provisioned kdump System reserves crash memory at provision time (ADR-0390, #1319):
+    # a profile crashkernel is appended to the baseline boot cmdline, no runs.install required.
+    root = _safe_fromstring(_render(profile=_profile(crashkernel="512M")))
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw crashkernel=512M"
+
+
+def test_render_omits_crashkernel_when_profile_has_none() -> None:
+    # No crashkernel provisioned (a non-kdump System) → the bare baseline, unchanged (ADR-0390).
+    root = _safe_fromstring(_render(profile=_profile(crashkernel=None)))
     assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
+
+
+def test_render_fadump_appends_fadump_on_after_crashkernel() -> None:
+    # A ppc64le fadump System arms the firmware-assisted path: crashkernel reservation + fadump=on
+    # in the install lane's token order (ADR-0390, ADR-0349).
+    data = copy.deepcopy(_VALID)
+    data["arch"] = "ppc64le"
+    section = data["provider"]["local-libvirt"]
+    section.pop("domain_xml_params", None)
+    section["crashkernel"] = "512M"
+    section["debug"] = {"fadump": True}
+    profile = ProvisioningProfile.parse(data)
+    root = _safe_fromstring(_render(profile=profile))
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=hvc0 rw crashkernel=512M fadump=on"
 
 
 def _ppc64le_profile() -> ProvisioningProfile:
@@ -415,7 +447,8 @@ def test_render_ppc64le_uses_pseries_hvc0_and_unpinned_nic() -> None:
     os_type = root.find("os/type")
     assert os_type is not None
     assert os_type.get("machine") == "pseries"
-    assert root.findtext("os/cmdline") == "root=/dev/vda console=hvc0 rw"
+    # _VALID sets crashkernel, so the armed baseline reserves crash memory here too (ADR-0390).
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=hvc0 rw crashkernel=256M"
     args = [
         arg.get("value") for arg in root.findall(f"./{{{QEMU_NS}}}commandline/{{{QEMU_NS}}}arg")
     ]
@@ -978,7 +1011,7 @@ def test_provision_extracts_baseline_and_renders_kernel() -> None:
     root = _safe_fromstring(conn.recorded_xml[-1])
     assert root.findtext("os/kernel") == f"{storage_module.baseline_dir(_SYS)}/kernel"
     assert root.findtext("os/initrd") == f"{storage_module.baseline_dir(_SYS)}/initrd"
-    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw"
+    assert root.findtext("os/cmdline") == "root=/dev/vda console=ttyS0 rw crashkernel=256M"
 
 
 def test_provision_threads_baseline_kernel_hint_to_extractor() -> None:

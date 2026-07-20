@@ -327,6 +327,23 @@ def test_blank_crashkernel_rejected(value: str) -> None:
     _expect_configuration_error(data)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "256M init=/bin/sh",  # internal whitespace injects an extra kernel token
+        "256M\tfoo",  # tab is also internal whitespace
+        "crashkernel=256M",  # a doubled key
+        "256M\x00",  # a non-printable would break XML <cmdline> rendering
+    ],
+)
+def test_injection_unsafe_crashkernel_rejected(value: str) -> None:
+    # Since ADR-0390 the profile crashkernel is rendered verbatim into the boot <cmdline>, so a
+    # multi-token / prefixed / non-printable value is rejected at parse (mirrors the install lane).
+    data = _valid()
+    data["provider"]["local-libvirt"]["crashkernel"] = value
+    _expect_configuration_error(data)
+
+
 @pytest.mark.parametrize("value", ["", "   "])
 def test_blank_rootfs_path_rejected(value: str) -> None:
     # A local-kind rootfs with a blank file path is as malformed as a blank string field was.
