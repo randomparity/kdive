@@ -101,7 +101,11 @@ jobs:
           sudo mkdir -p /mnt/kdive-tcg
           sudo chown "$(id -u):$(id -g)" /mnt/kdive-tcg
           export KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/set
-          export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-fedora-ppc64le}"
+          # On schedule/push TCG_IMAGE_INPUT is empty, so this fallback must be a REAL catalog entry
+          # (kept identical to the workflow_dispatch tcg_image default above) — a bogus name like the
+          # old `fedora-ppc64le` made every non-dispatch run fail at build-fs. test_live_workflow_shape
+          # pins both this literal and the input default as catalog entries and pins them equal.
+          export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-fedora-kdive-ready-43-cloud-ppc64le}"
           export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-https://debuginfod.fedoraproject.org/}"
           tcg_wiring="$(scripts/live-vm/stage-tcg-images.sh)"
           eval "$tcg_wiring"
