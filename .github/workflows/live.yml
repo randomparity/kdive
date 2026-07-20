@@ -81,10 +81,13 @@ jobs:
           docker compose up -d --wait server worker reconciler
 
           # Stage the ppc64le TCG image set onto /mnt under the measured budget (#1292); it exports
-          # KDIVE_LIVE_VM_ROOTFS / _BZIMAGE / _VMLINUX.
+          # KDIVE_LIVE_VM_ROOTFS / _BZIMAGE / _VMLINUX. Capture-then-eval so a staging failure
+          # (enforce_budget die, a fetch error) fails HERE with its own message — set -e does not
+          # catch a non-zero exit inside `eval "$(cmd)"` directly.
           export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-fedora-ppc64le}"
           export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-https://debuginfod.fedoraproject.org/}"
-          eval "$(scripts/live-vm/stage-tcg-images.sh)"
+          tcg_wiring="$(scripts/live-vm/stage-tcg-images.sh)"
+          eval "$tcg_wiring"
 
           # The canonical host-side stack env (KDIVE_DATABASE_URL / _OIDC_ISSUER / _STACK_BASE_URL /
           # _S3_* / AWS_* minioadmin) lives in env.sh — source it rather than duplicate the values,
@@ -129,13 +132,23 @@ jobs:
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
           # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or
-          # timeout still leaves state) must not collide with this run's on-box stand-up.
-          virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^kdive-' \
-            | xargs -r -n1 virsh -c qemu:///system destroy 2>/dev/null || true
+          # timeout still leaves state) must not collide with this run's on-box stand-up. `virsh
+          # destroy` only powers off a RUNNING domain; a crash leaves shut-off domain definitions and
+          # multi-GB disks that `docker compose down -v` (which wipes the tracking DB) then orphans.
+          # So destroy-then-undefine WITH storage removal, tolerant of already-absent/shut-off state.
+          # Assumes a SINGLE runner per libvirt host: the `^kdive-` match is host-wide, so a second
+          # concurrent runner would reap a peer's in-flight domains (documented in the runbook).
+          for dom in $(virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^kdive-'); do
+            virsh -c qemu:///system destroy "$dom" 2>/dev/null || true
+            virsh -c qemu:///system undefine --nvram --remove-all-storage "$dom" 2>/dev/null || true
+          done
           docker compose down -v 2>/dev/null || true
+          df -h /var/lib/libvirt 2>/dev/null | tail -1 || true # disk-free observability (leak check)
 
-          # Throwaway family rootfs from the warm store.
-          eval "$(scripts/live-vm/warm-store.sh)"
+          # Throwaway family rootfs from the warm store. Capture-then-eval so a warm-store failure
+          # fails HERE with its own die message (set -e does not catch `eval "$(cmd)"` directly).
+          warm_wiring="$(scripts/live-vm/warm-store.sh)"
+          eval "$warm_wiring"
 
           # Provisioned family on the box: bring up the stack (worker non-root so sudo does not
           # strip the inherited KDIVE_PYTHON/PYTHONPATH), then mint one System.
@@ -150,4 +163,9 @@ jobs:
           export KDIVE_LIVE_VM_SYSTEM_ID
 
           scripts/live-vm/preflight-env.sh throwaway provisioned
-          just test-live
+          # Run pytest directly under the /opt/kdive interpreter — NOT `just test-live`, whose
+          # `uv run` would ignore KDIVE_PYTHON, sync a fresh workspace .venv (violating the
+          # never-uv-sync-in-workspace invariant), and omit the `live` group that carries drgn (a
+          # native live_vm test imports drgn in-process). /opt/kdive already has drgn + guestfs, so
+          # this also needs no `just` on the self-hosted runner.
+          "$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q
