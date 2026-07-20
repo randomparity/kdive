@@ -64,6 +64,29 @@ def test_native_block_exports_warm_store_wiring() -> None:
         assert var in exported, f"{var} not exported in the native run block"
 
 
+def test_tcg_block_stages_into_a_runner_owned_dir() -> None:
+    # /mnt is root-owned on the ubuntu-latest hosted runner, so stage-tcg-images.sh's `mkdir` there
+    # fails (permission denied). The tcg block must sudo-create + chown a parent and stage into a
+    # SUBDIR — the script rm -rf's + recreates its stage dir, which must not be the mount point.
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
+    stage_subdir = "KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/"  # pragma: allowlist secret
+    assert "sudo chown" in run, "the tcg staging dir must be chowned to the runner user"
+    assert stage_subdir in run, "stage into a runner-owned subdir, not /mnt"
+
+
+def test_tcg_default_image_is_a_real_catalog_entry() -> None:
+    # On schedule (no dispatch input) the tcg gate builds from the tcg_image default. A name absent
+    # from the rootfs catalog produces no rootfs and fails deep (virt-ls: No such file), not loud.
+    import tomllib
+
+    default = _triggers(_load(_LIVE))["workflow_dispatch"]["inputs"]["tcg_image"]["default"]
+    catalog_path = _ROOT / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
+    catalog = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
+    names = {img["name"] for img in catalog.get("image", [])}
+    assert default in names, f"tcg_image default {default!r} is not a rootfs_catalog.toml entry"
+
+
 def test_native_block_boots_provisioned_family_under_session() -> None:
     # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
     # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
