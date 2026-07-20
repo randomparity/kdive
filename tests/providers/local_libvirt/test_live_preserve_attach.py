@@ -1,19 +1,18 @@
 """Live proof for #747 (ADR-0233): real libvirt accepts kdive's gdbstub+preserve domain XML,
 and the gdbstub is reachable (kdive's own ``rsp_reachable``) on a preserved early-boot panic.
 
-`live_vm`-gated. The operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a kernel image that panics
-early in boot when it cannot mount its root (a bare bzImage with no usable rootfs), optionally
-overriding ``KDIVE_LIBVIRT_URI`` (default ``qemu:///session`` so it needs no root). The test
-renders the real provisioning XML, adds the direct-kernel ``<os>`` the install step adds in the
-full pipeline, starts the domain against a deliberately empty disk to force the panic, and
-asserts the stub answers ``rsp_reachable``. It tears down the transient domain and the scratch
-disk in a ``finally``.
+`live_vm`-gated (bzimage family, ADR-0392). The operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a
+kernel image that panics early in boot when it cannot mount its root (a bare bzImage with no
+usable rootfs), optionally overriding ``KDIVE_LIBVIRT_URI`` (default ``qemu:///session`` so it
+needs no root). The test renders the real provisioning XML (its SUT), adds the direct-kernel
+``<os>`` the install step adds in the full pipeline, and hands the finished XML to
+``boot_preserved_gdbstub_domain`` — which starts the domain against a deliberately empty disk to
+force the panic, waits for it, and tears the transient domain down. The test then asserts the stub
+answers ``rsp_reachable``.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import uuid4
@@ -23,7 +22,8 @@ import pytest
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
-from kdive.testing.live_vm import wait_for_panic
+from kdive.testing.live_vm import boot_preserved_gdbstub_domain
+from tests.live_vm import require_live_vm_bzimage
 
 _GDB_PORT = 51234
 # The SSH forward is rendered on every domain now (ADR-0281); this panic-boot test never reaches
@@ -34,15 +34,12 @@ _SSH_PORT = 51235
 @pytest.mark.live_vm
 @pytest.mark.live_vm_throwaway
 def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pragma: no cover
-    bzimage = os.environ.get("KDIVE_LIVE_VM_BZIMAGE")
-    if not bzimage or not Path(bzimage).is_file():
-        pytest.skip("KDIVE_LIVE_VM_BZIMAGE (an early-panicking kernel image) unavailable")
+    contract = require_live_vm_bzimage()
     try:
-        import libvirt  # noqa: PLC0415  # operator-provided
+        import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
     except ImportError:
         pytest.skip("libvirt-python unavailable")
 
-    uri = os.environ.get("KDIVE_LIBVIRT_URI", "qemu:///session")
     garbage_disk = tmp_path / "garbage.qcow2"
     console = tmp_path / "console.log"
     _make_empty_qcow2(garbage_disk)
@@ -55,25 +52,16 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
         disk_path=str(garbage_disk),
         gdb_port=_GDB_PORT,
         ssh_port=_SSH_PORT,
-        kernel_path=Path(bzimage),
+        kernel_path=contract.bzimage,
     )
-    final_xml = _with_direct_kernel(base_xml, bzimage=bzimage, console=console)
+    final_xml = _with_direct_kernel(base_xml, bzimage=str(contract.bzimage), console=console)
 
-    conn = libvirt.open(uri)
-    dom = None
-    try:
-        # createXML raising here would itself be a failure: it proves libvirt accepts the new
-        # pvpanic + <on_crash>preserve</on_crash> + -gdb passthrough XML.
-        dom = conn.createXML(final_xml, 0)
-        assert wait_for_panic(console, 30.0), "no early-boot kernel panic on console"
+    # The harness boot both proves libvirt accepts the new pvpanic + <on_crash>preserve</on_crash>
+    # + -gdb passthrough XML (createXML raising is a failure) and waits for the early-boot panic.
+    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
         # The crash signal is the console panic; the stub stays reachable on the halted vCPU
         # (domain may remain RUNNING with panic=0, so this does NOT assert VIR_DOMAIN_CRASHED).
         assert rsp_reachable("127.0.0.1", _GDB_PORT), "gdbstub not reachable on the halted panic"
-    finally:
-        if dom is not None:
-            with contextlib.suppress(libvirt.libvirtError):
-                dom.destroy()
-        conn.close()
 
 
 def _profile_data(disk: Path) -> dict[str, object]:

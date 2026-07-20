@@ -5,17 +5,15 @@ Kept in its own module (not ``test_debug_tools.py``) so the live marker does not
 behaviour-test-coverage gate treat the ``debug.*`` covering test as live-only. Reuses the DB seed
 helpers from ``test_debug_tools`` and the shared ``migrated_url`` Postgres fixture.
 
-`live_vm`-gated: the operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a kernel image that panics early
-in boot (no usable rootfs), optionally overriding ``KDIVE_LIBVIRT_URI`` (default ``qemu:///session``
-so it needs no root).
+`live_vm`-gated (bzimage family, ADR-0392): the operator points ``KDIVE_LIVE_VM_BZIMAGE`` at a
+kernel image that panics early in boot (no usable rootfs), optionally overriding
+``KDIVE_LIBVIRT_URI`` (default ``qemu:///session`` so it needs no root).
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import copy
-import os
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -30,7 +28,8 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.testing.live_vm import wait_for_panic
+from kdive.testing.live_vm import boot_preserved_gdbstub_domain
+from tests.live_vm import require_live_vm_bzimage
 from tests.mcp.debug.test_debug_tools import (
     _PROFILE,
     _PROFILE_POLICY,
@@ -52,16 +51,13 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
     (resolves the gdb port from the live domain XML, runs the real rsp_reachable probe) open a
     live gdbstub session against a real KVM domain that VFS-panics on an empty disk. Only the
     boot-step row is seeded directly (its recording is unit-tested separately)."""
-    bzimage = os.environ.get("KDIVE_LIVE_VM_BZIMAGE")
-    if not bzimage or not Path(bzimage).is_file():
-        pytest.skip("KDIVE_LIVE_VM_BZIMAGE (an early-panicking kernel image) unavailable")
+    contract = require_live_vm_bzimage()
     try:
-        import libvirt  # noqa: PLC0415  # operator-provided
+        import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
     except ImportError:
         pytest.skip("libvirt-python unavailable")
 
-    uri = os.environ.get("KDIVE_LIBVIRT_URI", "qemu:///session")
-    monkeypatch.setenv("KDIVE_LIBVIRT_URI", uri)
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", contract.libvirt_uri)
     disk = tmp_path / "garbage.qcow2"
     console = tmp_path / "console.log"
     console.write_text("")
@@ -69,7 +65,7 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
         ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
     )
 
-    final_xml = _render_panicking_domain(bzimage=bzimage, disk=disk, console=console)
+    final_xml = _render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
 
     async def _drive() -> Any:
         async with _pool(migrated_url) as pool:
@@ -92,18 +88,9 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
                 await handlers.end_session(pool, _ctx(), resp.object_id)
             return resp
 
-    conn = libvirt.open(uri)
-    dom = None
-    try:
-        dom = conn.createXML(final_xml, 0)
-        assert wait_for_panic(console, 30.0), "no early-boot panic"
+    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
         resp = asyncio.run(_drive())
         assert resp.status == "live", f"start_session did not attach: {resp.status} {resp.data}"
-    finally:
-        if dom is not None:
-            with contextlib.suppress(libvirt.libvirtError):
-                dom.destroy()
-        conn.close()
 
 
 def _render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
@@ -115,8 +102,16 @@ def _render_panicking_domain(*, bzimage: str, disk: Path, console: Path) -> str:
     section["debug"] = {"gdbstub": True, "preserve_on_crash": True}
     section.pop("crashkernel", None)
     profile = ProvisioningProfile.parse(data)
+    # ssh_port is required on every rendered domain (ADR-0281, #937) even though this panic-boot
+    # never reaches sshd; pinned distinct from the gdb port. Omitting it raised CONFIGURATION_ERROR
+    # before the boot (the #1255 live-proof gap).
     base = render_domain_xml(
-        uuid4(), profile, disk_path=str(disk), gdb_port=51299, kernel_path=Path(bzimage)
+        uuid4(),
+        profile,
+        disk_path=str(disk),
+        gdb_port=51299,
+        ssh_port=51298,
+        kernel_path=Path(bzimage),
     )
     root = ET.fromstring(base)  # noqa: S314 - kdive-rendered, trusted
     name_el = root.find("name")
