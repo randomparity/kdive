@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +45,7 @@ from kdive.providers.local_libvirt.retrieve_kdump import (
 )
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE, MAX_CORE_BYTES
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.live_vm import require_live_vm_provisioned
 
 _OVERLAY = "/var/lib/kdive/rootfs/sys-overlay.qcow2"
 _SYS = UUID("33333333-3333-3333-3333-333333333333")
@@ -273,14 +273,12 @@ def test_redact_dmesg_scrubs_a_registered_secret(tmp_path: Path) -> None:
 # Manual end-to-end runbook (including kdump service wire-up and drgn/libguestfs
 # venv prep): docs/operating/runbooks/four-method-live-run.md §4b.
 
-_SYS_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
-_URI_ENV = "KDIVE_LIBVIRT_URI"
-
 _FORCE_CRASH_WAIT_S = 60  # seconds to poll for the vmcore after the NMI
 _VMCORE_POLL_INTERVAL_S = 5
 
 
 @pytest.mark.live_vm
+@pytest.mark.live_vm_provisioned
 def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - live_vm
     """Force-crash a kdump System; verify vmcore.fetch harvests a real core host-side.
 
@@ -294,20 +292,13 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
       3. No staging artifact exists: the raw ref lives under ``systems/<uuid>/vmcore-kdump``
          (not a per-run staging path).
 
-    Skips when ``KDIVE_LIVE_VM_SYSTEM_ID``, ``KDIVE_LIBVIRT_URI``, or ``KDIVE_S3_*``
-    are absent (CI, dev hosts without the KVM prerequisites).
+    Gated by ``require_live_vm_provisioned`` (the provisioned-System family gate): skips when
+    ``KDIVE_LIVE_VM_SYSTEM_ID`` is absent, and fails loud when it is set but the ``KDIVE_S3_*``
+    backend is incomplete — a mis-provisioned runner must not masquerade as "no environment".
     """
     import shutil
 
-    system_id_str = os.environ.get(_SYS_ENV)
-    uri = os.environ.get(_URI_ENV)
-    s3_endpoint = os.environ.get("KDIVE_S3_ENDPOINT_URL")
-    s3_bucket = os.environ.get("KDIVE_S3_BUCKET")
-    if not system_id_str or not uri or not s3_endpoint or not s3_bucket:
-        pytest.skip(
-            f"{_SYS_ENV}, {_URI_ENV}, KDIVE_S3_ENDPOINT_URL, or KDIVE_S3_BUCKET not set; "
-            "local kdump acceptance needs an operator KVM host"
-        )
+    contract = require_live_vm_provisioned()
     if not shutil.which("virsh"):
         pytest.skip("virsh not on PATH; local kdump acceptance needs a local libvirt install")
 
@@ -317,7 +308,7 @@ def test_live_vm_kdump_capture_arc_no_staging() -> None:  # pragma: no cover - l
     from kdive.providers.shared.runtime_paths import domain_name_for
     from kdive.security.secrets.secret_registry import SecretRegistry
 
-    system_id = UUID(system_id_str)
+    system_id = UUID(contract.system_id)
     domain_name = domain_name_for(system_id)
 
     # Step 1: panic the guest via NMI over the real libvirt connection.

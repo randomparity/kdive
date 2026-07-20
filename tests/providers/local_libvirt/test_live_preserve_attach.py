@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from uuid import uuid4
@@ -24,6 +23,7 @@ import pytest
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.providers.shared.debug_common.rsp import rsp_reachable
+from kdive.testing.live_vm import wait_for_panic
 
 _GDB_PORT = 51234
 # The SSH forward is rendered on every domain now (ADR-0281); this panic-boot test never reaches
@@ -32,6 +32,7 @@ _SSH_PORT = 51235
 
 
 @pytest.mark.live_vm
+@pytest.mark.live_vm_throwaway
 def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pragma: no cover
     bzimage = os.environ.get("KDIVE_LIVE_VM_BZIMAGE")
     if not bzimage or not Path(bzimage).is_file():
@@ -64,7 +65,7 @@ def test_live_vm_preserve_crash_stub_is_reachable(tmp_path: Path) -> None:  # pr
         # createXML raising here would itself be a failure: it proves libvirt accepts the new
         # pvpanic + <on_crash>preserve</on_crash> + -gdb passthrough XML.
         dom = conn.createXML(final_xml, 0)
-        assert _await_panic(console, deadline_s=30.0), "no early-boot kernel panic on console"
+        assert wait_for_panic(console, 30.0), "no early-boot kernel panic on console"
         # The crash signal is the console panic; the stub stays reachable on the halted vCPU
         # (domain may remain RUNNING with panic=0, so this does NOT assert VIR_DOMAIN_CRASHED).
         assert rsp_reachable("127.0.0.1", _GDB_PORT), "gdbstub not reachable on the halted panic"
@@ -116,12 +117,3 @@ def _make_empty_qcow2(path: Path) -> None:
         check=True,
         capture_output=True,
     )
-
-
-def _await_panic(console: Path, *, deadline_s: float) -> bool:
-    deadline = time.monotonic() + deadline_s
-    while time.monotonic() < deadline:
-        if "Kernel panic" in console.read_text(errors="replace"):
-            return True
-        time.sleep(0.5)
-    return False
