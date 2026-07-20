@@ -9,6 +9,7 @@ needing stubs.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import subprocess
@@ -24,12 +25,17 @@ BASH = shutil.which("bash")
 # The script collects required-tool reports through a `local -n` nameref (bash >= 4.3).
 pytestmark = requires_bash(4, 3, "local -n namerefs")
 
+# run_privileged only escalates via sudo when EUID != 0; under a root pytest (some CI
+# containers) sudo is skipped and the sudo-log assertions have no file to read.
+skip_if_root = pytest.mark.skipif(os.geteuid() == 0, reason="sudo path only runs as non-root")
+
 
 def _run(
     os_release_id: str,
     path: str,
     tmp_path: Path,
     extra_env: dict[str, str] | None = None,
+    args: list[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the checker with a forced distro and a controlled PATH."""
     assert BASH is not None, "bash is required to run the checker"
@@ -42,12 +48,52 @@ def _run(
         **(extra_env or {}),
     }
     return subprocess.run(
-        [BASH, str(SCRIPT)],
+        [BASH, str(SCRIPT), *(args or [])],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _sudo_stub(bindir: Path, log: Path, *, preflight_ok: bool = True) -> None:
+    """A sudo stub that logs its argv, strips leading -n/-v, then dispatches.
+
+    Production calls `sudo -n <cmd>` / `sudo -n true` / `sudo -v`; a naive `exec "$@"` would run
+    `exec -n …` (invalid option), so the stub must strip the flag first.
+    """
+    fail = "exit 1\n" if not preflight_ok else ""
+    body = (
+        "#!/bin/sh\n"
+        f'echo "sudo $@" >> "{log}"\n'
+        f"{fail}"
+        'while [ "$1" = -n ] || [ "$1" = -v ]; do shift; done\n'
+        "[ $# -eq 0 ] && exit 0\n"  # `sudo -v` (now empty) = credential preflight OK
+        '[ "$1" = true ] && exit 0\n'  # `sudo -n true` preflight OK
+        'exec "$@"\n'
+    )
+    _stub(bindir, "sudo", body)
+
+
+def _coreutils_dir(tmp_path: Path) -> Path:
+    """Expose only ln/chmod/touch (via Python symlinks) for fix-effect tests, appended AFTER the
+    stub bindir so stubs still shadow and genuinely-absent deps (pkg-config) stay absent."""
+    d = tmp_path / "coreutils"
+    d.mkdir()
+    for name in ("ln", "chmod", "touch"):
+        target = shutil.which(name)
+        assert target is not None, f"{name} is required for the fix-effect tests"
+        os.symlink(target, d / name)
+    return d
+
+
+def _bin(tmp_path: Path) -> Path:
+    """A bindir with uv + pkg-config present so the Required tier is otherwise satisfiable."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    _stub(b, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(b, "pkg-config", "#!/bin/sh\nexit 0\n")
+    return b
 
 
 @pytest.mark.parametrize(
@@ -113,7 +159,11 @@ def test_ppc64le_future_hint_names_the_power_qemu_package(tmp_path: Path) -> Non
 
 
 def _run_with_uname(
-    distro_id: str, host_arch: str, present: tuple[str, ...], tmp_path: Path
+    distro_id: str,
+    host_arch: str,
+    present: tuple[str, ...],
+    tmp_path: Path,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the checker with a stubbed ``uname -m`` and a controlled set of present binaries.
 
@@ -127,7 +177,180 @@ def _run_with_uname(
     _stub(bindir, "uname", f"#!/bin/sh\necho {host_arch}\n")
     for tool in ("uv", "pkg-config", *present):
         _stub(bindir, tool, "#!/bin/sh\nexit 0\n")
-    return _run(distro_id, str(bindir), tmp_path)
+    return _run(distro_id, str(bindir), tmp_path, extra_env=extra_env)
+
+
+def test_advisory_shows_host_arch_first(tmp_path: Path) -> None:
+    """The advisory names the host arch first, then guest arches (native/host before foreign)."""
+    kvm = tmp_path / "kvm"
+    kvm.write_text("")
+    result = _run_with_uname(
+        "debian",
+        "x86_64",
+        ("qemu-system-x86_64", "qemu-system-ppc64"),
+        tmp_path,
+        extra_env={"KDIVE_KVM_NODE": str(kvm)},
+    )
+    out = result.stdout
+    assert "Host architecture: x86_64 (supported kdive provisioning arch)" in out
+    assert out.index("guest arch x86_64:") < out.index("guest arch ppc64le:")
+    native = "guest arch x86_64: available natively via qemu-system-x86_64 (/dev/kvm accessible"
+    assert native in out
+    assert "guest arch ppc64le: available via TCG only (qemu-system-ppc64)" in out
+
+
+def test_advisory_native_line_when_kvm_absent(tmp_path: Path) -> None:
+    """Native emulator present but /dev/kvm inaccessible → the TCG-fallback native line."""
+    result = _run_with_uname(
+        "debian",
+        "x86_64",
+        ("qemu-system-x86_64",),
+        tmp_path,
+        extra_env={"KDIVE_KVM_NODE": str(tmp_path / "nokvm")},
+    )
+    assert "guest arch x86_64: native emulator present, /dev/kvm not accessible" in result.stdout
+
+
+def test_advisory_native_line_when_qemu_absent(tmp_path: Path) -> None:
+    """No native emulator → name the package to install for native guests."""
+    result = _run_with_uname("debian", "x86_64", (), tmp_path)
+    want = "guest arch x86_64: not available; install qemu-system-x86 for native guests"
+    assert want in result.stdout
+
+
+# ── Task 2: opt-in package auto-install ──────────────────────────────────────
+
+
+def test_non_tty_without_yes_stays_report_only(tmp_path: Path) -> None:
+    """No -y and piped stdin => no install/sudo command ever runs (report-only contract)."""
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    _stub(b, "apt-get", f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0')
+    _stub(b, "sudo", f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0')
+    _run("debian", str(b), tmp_path)  # missing recommended/future deps, but no fix offered
+    assert not log.exists()
+
+
+@skip_if_root
+def test_yes_installs_with_refresh_and_noninteractive_flag_and_sudo_n(tmp_path: Path) -> None:
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    sudolog = tmp_path / "sudo.log"
+    _stub(b, "apt-get", f'#!/bin/sh\necho "apt-get $@" >> "{log}"\nexit 0')
+    _sudo_stub(b, sudolog)
+    _run("debian", str(b), tmp_path, args=["-y"])
+    logged = log.read_text()
+    assert "apt-get update" in logged
+    assert "apt-get install -y" in logged
+    assert "sudo -n" in sudolog.read_text()  # non-root path uses sudo -n under -y
+
+
+@skip_if_root
+def test_yes_sudo_preflight_failure_skips_with_message_no_hang(tmp_path: Path) -> None:
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    _stub(b, "apt-get", f'#!/bin/sh\necho installed >> "{log}"\nexit 0')
+    _sudo_stub(b, tmp_path / "sudo.log", preflight_ok=False)  # sudo -n true fails (no NOPASSWD)
+    r = _run("debian", str(b), tmp_path, args=["-y"])
+    assert "passwordless sudo" in r.stderr
+    assert not log.exists()  # install never attempted
+
+
+@skip_if_root
+def test_yes_install_failure_reported_not_fatal(tmp_path: Path) -> None:
+    b = _bin(tmp_path)
+    _stub(b, "apt-get", "#!/bin/sh\nexit 100")
+    _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run("debian", str(b), tmp_path, args=["-y"])
+    assert "failed to install" in r.stderr  # reported
+    # script did not abort mid-run: the advisory still printed. _bin stubs no `uname`, so
+    # host_arch is empty and the advisory takes its unsupported-host branch.
+    assert "not a supported kdive provisioning arch" in r.stdout
+
+
+@skip_if_root
+def test_manual_hint_tools_not_auto_installed_under_yes(tmp_path: Path) -> None:
+    b = _bin(tmp_path)
+    log = tmp_path / "curl.log"
+    _stub(b, "curl", f'#!/bin/sh\necho ran >> "{log}"\nexit 0')
+    _sudo_stub(b, tmp_path / "sudo.log")
+    _stub(b, "apt-get", "#!/bin/sh\nexit 0")
+    _run("debian", str(b), tmp_path, args=["-y"])
+    assert not log.exists()  # uv/rustup/just/prek curl|sh never executed
+
+
+@skip_if_root
+def test_reverify_after_install_exits_zero(tmp_path: Path) -> None:
+    """A required item missing at start, materialized by the install stub, is found on re-probe."""
+    b = tmp_path / "bin"
+    b.mkdir()
+    _stub(b, "uv", "#!/bin/sh\nexit 0\n")  # required manual-hint tool present
+    _sudo_stub(b, tmp_path / "sudo.log")
+    # pkg-config MISSING initially (so Required is unsatisfied); the install "creates" it,
+    # and the new pkg-config exits 0 so the header probes pass too.
+    apt = (
+        "#!/bin/sh\n"
+        f'printf "#!/bin/sh\\nexit 0\\n" > "{b}/pkg-config"\n'
+        f'chmod 0755 "{b}/pkg-config"\n'
+        "exit 0\n"
+    )
+    _stub(b, "apt-get", apt)
+    path = f"{b}:{_coreutils_dir(tmp_path)}"  # chmod available for the install stub
+    r = _run("debian", path, tmp_path, args=["-y"])
+    assert r.returncode == 0, r.stderr
+    assert "re-checking after fixes" in r.stderr
+    recheck = r.stderr.split("re-checking after fixes")[1]
+    assert "Required dependencies missing" not in recheck
+
+
+@skip_if_root
+def test_interactive_accept_uses_plain_sudo(tmp_path: Path) -> None:
+    """A TTY operator who answers 'y' gets plain sudo (password allowed), not sudo -n."""
+    import pty
+
+    b = _bin(tmp_path)
+    log = tmp_path / "cmd.log"
+    sudolog = tmp_path / "sudo.log"
+    _stub(b, "apt-get", f'#!/bin/sh\necho installed >> "{log}"\nexit 0')
+    _sudo_stub(b, sudolog)
+    # guestfs importable → no guestfs prompt, so the prompt count is deterministic
+    venv_py = _stub_python(b, "venv-python", imports_ok=True)
+    os_release = tmp_path / "os-release"
+    os_release.write_text("ID=debian\n")
+    env = {
+        "PATH": str(b),
+        "KDIVE_OS_RELEASE": str(os_release),
+        "HOME": str(tmp_path),
+        "KDIVE_PYTHON": str(venv_py),
+    }
+    assert BASH is not None
+    controller, worker = pty.openpty()
+    os.write(controller, b"y\n" * 6)  # generously more y's than prompts; extras are harmless
+    proc = subprocess.Popen(
+        [BASH, str(SCRIPT)],
+        stdin=worker,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+    )
+    os.close(worker)
+    proc.communicate(timeout=30)  # drains pipes concurrently (no deadlock)
+    os.close(controller)
+    logged = sudolog.read_text()
+    assert "sudo -v" in logged  # interactive credential preflight is plain sudo -v
+    assert "sudo -n" not in logged  # never the non-interactive flavor at a TTY
+    assert "installed" in log.read_text()
+
+
+def test_report_only_output_unchanged(tmp_path: Path) -> None:
+    """A non-TTY, no-arg run does not enter the fix path (no re-check, no double report)."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    result = _run("debian", str(empty), tmp_path)
+    assert "re-checking after fixes" not in result.stderr
+    # the 'missing' report appears exactly once per tier (no double render)
+    assert result.stderr.count("Required dependencies missing") == 1
 
 
 def test_cross_arch_advisory_names_foreign_package_when_absent_on_x86(tmp_path: Path) -> None:
