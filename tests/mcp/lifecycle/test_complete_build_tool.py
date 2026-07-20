@@ -495,6 +495,64 @@ def test_complete_build_success_does_not_carry_the_format_advisory(migrated_url:
     asyncio.run(_run())
 
 
+def test_complete_build_nudges_effective_config_upload_when_absent(migrated_url: str) -> None:
+    # No effective_config was uploaded, so the EXT4_FS/VIRTIO_BLK boot-config advisory could never
+    # fire; the success envelope carries a non-blocking nudge pointing at the upload tool (#1342).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+        assert resp.status == "succeeded"
+        advisory = resp.data["missing_effective_config"]
+        assert isinstance(advisory, dict)
+        assert advisory["reason"] == "no_effective_config_uploaded"
+        assert CREATE_RUN_UPLOAD_TOOL in resp.suggested_next_actions
+        assert "missing_boot_config" not in resp.data  # nudge and warning are mutually exclusive
+
+    asyncio.run(_run())
+
+
+def test_complete_build_omits_nudge_when_effective_config_present(migrated_url: str) -> None:
+    # A complete effective_config was uploaded (EXT4_FS + VIRTIO_BLK): neither the absent-config
+    # nudge nor the missing-symbol boot warning fires, and the upload tool is not suggested (#1342).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, _EXTERNAL_PROFILE)
+            config = b"CONFIG_EXT4_FS=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\n"
+            responses = await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=str(run_id),
+                artifacts=[
+                    {"name": "kernel", "sha256": "ck", "size_bytes": len(_KERNEL_TAR)},
+                    {"name": "effective_config", "sha256": "cc", "size_bytes": len(config)},
+                ],
+                store=_UploadStore(),
+            )
+            assert {response.status for response in responses.items} == {"upload_ready"}
+            kernel_key = f"local/runs/{run_id}/kernel"
+            config_key = f"local/runs/{run_id}/effective_config"
+            store = _ValidationStore(
+                {kernel_key: _KERNEL_TAR, config_key: config},
+                {
+                    kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k"),
+                    config_key: HeadResult(len(config), "cc", "e-c"),
+                },
+            )
+            resp = await CompleteBuildHandlers(
+                object_store_factory=lambda: store,
+            ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
+
+        assert resp.status == "succeeded", resp
+        assert "missing_effective_config" not in resp.data
+        assert CREATE_RUN_UPLOAD_TOOL not in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
 def test_complete_build_malformed_stored_profile_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
