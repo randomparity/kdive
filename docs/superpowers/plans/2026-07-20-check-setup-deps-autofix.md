@@ -192,8 +192,10 @@ def test_yes_install_failure_reported_not_fatal(tmp_path):
     _stub(b, "apt-get", 'exit 100'); _sudo_stub(b, tmp_path / "sudo.log")
     r = _run("debian", str(b), tmp_path, args=["-y"])
     assert "failed to install" in r.stderr  # reported
-    # script did not abort mid-run: the advisory (later output) still printed
-    assert "guest arch" in r.stdout
+    # script did not abort mid-run: the advisory still printed. _bin stubs no `uname`, so
+    # host_arch is empty and the advisory takes its unsupported-host branch — assert on that
+    # (a "guest arch" line is only emitted for a supported host arch).
+    assert "not a supported kdive provisioning arch" in r.stdout
 
 def test_manual_hint_tools_not_auto_installed_under_yes(tmp_path):
     b = _bin(tmp_path); log = tmp_path / "curl.log"
