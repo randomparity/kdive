@@ -43,7 +43,7 @@ check_tcg() {
   require_set KDIVE_DATABASE_URL
   require_set KDIVE_S3_ENDPOINT_URL
   require_set KDIVE_S3_BUCKET
-  require_set AWS_ACCESS_KEY_ID # teeth here: the tcg job exports these explicitly (no env.sh)
+  require_set AWS_ACCESS_KEY_ID # belt-and-suspenders: env.sh supplies the on-box MinIO minioadmin
   require_set AWS_SECRET_ACCESS_KEY
   require_path KDIVE_GUEST_IMAGE_PPC64LE
   require_path KDIVE_KERNEL_SRC

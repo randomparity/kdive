@@ -88,10 +88,11 @@ trigger at all** makes fork-PR dispatch structurally impossible. Four decisions:
    it is not. For the provisioned family the teeth over A is **`KDIVE_LIVE_VM_SYSTEM_ID`
    non-empty**: A's resolver returns `AVAILABLE` on `KDIVE_S3_ENDPOINT_URL` +
    `KDIVE_S3_BUCKET` alone, so a family declared but with no System minted (a
-   `mint-system.sh` failure) skips green — the preflight fails loud. (The `AWS_*`
-   creds are the on-box `minioadmin` default on this path, so a credential-absence
-   check would be vacuous; it has teeth only on the `tcg` job, which exports the
-   presigned-upload creds explicitly and does not source `env.sh`.) A per-test
+   `mint-system.sh` failure) skips green — the preflight fails loud. (Both jobs
+   source `env.sh`, which supplies the on-box `minioadmin` `AWS_*` default, so the
+   credential-absence check is belt-and-suspenders on both paths; the real teeth
+   are `KDIVE_LIVE_VM_SYSTEM_ID` for the provisioned family and the ppc64le
+   image/emulator checks for the tcg family.) A per-test
    `pytest.skip` is correct for an *unrequested* capability (A's gates); the
    preflight is correct for a *declared* family a job intends to run, so a
    mis-provisioned runner fails loud instead of skipping to green.
