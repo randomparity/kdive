@@ -123,6 +123,28 @@ def test_remint_updates_deadline(migrated_url: str) -> None:
     asyncio.run(_run_test())
 
 
+def test_replace_returns_stamp_matching_persisted_deadline(migrated_url: str) -> None:
+    """replace_manifest returns a (server_time, deadline) stamp read from the same
+    transaction, so deadline - server_time == ttl exactly and deadline equals the value
+    a later get_manifest reads (the reaper's contract). Both are timezone-aware (#1336)."""
+
+    async def _run_test() -> None:
+        owner_id = uuid4()
+        ttl = timedelta(hours=1)
+        async with await _connect(migrated_url) as conn:
+            stamp = await replace_manifest(
+                conn, _request(owner_id, [ManifestEntry("kernel", "Zm9v", 10)], ttl=ttl)
+            )
+            got = await get_manifest(conn, "runs", owner_id)
+        assert got is not None
+        assert stamp.server_time.tzinfo is not None
+        assert stamp.deadline.tzinfo is not None
+        assert stamp.deadline - stamp.server_time == ttl
+        assert stamp.deadline == got.deadline
+
+    asyncio.run(_run_test())
+
+
 def test_absent_returns_none(migrated_url: str) -> None:
     """get_manifest returns None when no manifest exists for the owner."""
 

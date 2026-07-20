@@ -34,6 +34,18 @@ class UploadManifest(NamedTuple):
     deadline: datetime
 
 
+class ManifestStamp(NamedTuple):
+    """The reference clock and reaper deadline for one manifest upsert (#1336).
+
+    Both are read from the same INSERT's ``now()`` (statement-stable), so
+    ``deadline - server_time == ttl`` exactly and ``server_time`` is the same clock
+    the reaper measures ``deadline`` against. Both are timezone-aware (``timestamptz``).
+    """
+
+    server_time: datetime
+    deadline: datetime
+
+
 @dataclass(frozen=True)
 class UploadManifestReplaceRequest:
     """A full replacement for one owner's upload manifest."""
@@ -59,7 +71,7 @@ def _entry_payload(entry: ManifestEntry) -> dict[str, object]:
 async def replace_manifest(
     conn: AsyncConnection,
     request: UploadManifestReplaceRequest,
-) -> None:
+) -> ManifestStamp:
     """Upsert the owner's manifest, stamping ``deadline = now() + ttl`` in Postgres.
 
     Full-set replace: a re-mint overwrites the prior manifest, prefix, and deadline.
@@ -67,15 +79,26 @@ async def replace_manifest(
     Args:
         conn: An async connection (autocommit or within a transaction).
         request: Owner, prefix, entries, and upload-window TTL for the replacement.
+
+    Returns:
+        The upsert's :class:`ManifestStamp` — ``now()`` (the reference clock) and the
+        stamped ``deadline``, both from the same statement so the agent-facing contract
+        (#1336) measures the deadline against the clock the reaper uses.
     """
     payload = [_entry_payload(e) for e in request.entries]
-    await conn.execute(
-        "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, deadline) "
-        "VALUES (%s, %s, %s, %s, now() + %s) "
-        "ON CONFLICT (owner_kind, owner_id) DO UPDATE SET "
-        "  prefix = EXCLUDED.prefix, manifest = EXCLUDED.manifest, deadline = EXCLUDED.deadline",
-        (request.owner_kind, request.owner_id, request.prefix, Jsonb(payload), request.ttl),
-    )
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, deadline) "
+            "VALUES (%s, %s, %s, %s, now() + %s) "
+            "ON CONFLICT (owner_kind, owner_id) DO UPDATE SET "
+            "  prefix = EXCLUDED.prefix, manifest = EXCLUDED.manifest, "
+            "  deadline = EXCLUDED.deadline "
+            "RETURNING now(), deadline",
+            (request.owner_kind, request.owner_id, request.prefix, Jsonb(payload), request.ttl),
+        )
+        row = await cur.fetchone()
+    assert row is not None  # a RETURNING upsert always yields exactly one row
+    return ManifestStamp(server_time=row[0], deadline=row[1])
 
 
 async def refresh_deadline(
