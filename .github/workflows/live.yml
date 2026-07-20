@@ -12,7 +12,9 @@ on:
       tcg_image:
         description: "ppc64le catalog rootfs image stage-tcg-images.sh builds from"
         required: false
-        default: "fedora-ppc64le"
+        # Must be a real fixtures/local-libvirt/rootfs_catalog.toml entry (test_live_workflow_shape
+        # pins this). The ppc64le TCG guest image; `fedora-ppc64le` was not a catalog name.
+        default: "fedora-kdive-ready-43-cloud-ppc64le"
       debuginfod_urls:
         description: "DEBUGINFOD_URLS: a server indexing the distro kernel debuginfo (both jobs)"
         required: false

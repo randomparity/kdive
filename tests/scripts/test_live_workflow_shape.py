@@ -75,6 +75,18 @@ def test_tcg_block_stages_into_a_runner_owned_dir() -> None:
     assert stage_subdir in run, "stage into a runner-owned subdir, not /mnt"
 
 
+def test_tcg_default_image_is_a_real_catalog_entry() -> None:
+    # On schedule (no dispatch input) the tcg gate builds from the tcg_image default. A name absent
+    # from the rootfs catalog produces no rootfs and fails deep (virt-ls: No such file), not loud.
+    import tomllib
+
+    default = _triggers(_load(_LIVE))["workflow_dispatch"]["inputs"]["tcg_image"]["default"]
+    catalog_path = _ROOT / "fixtures" / "local-libvirt" / "rootfs_catalog.toml"
+    catalog = tomllib.loads(catalog_path.read_text(encoding="utf-8"))
+    names = {img["name"] for img in catalog.get("image", [])}
+    assert default in names, f"tcg_image default {default!r} is not a rootfs_catalog.toml entry"
+
+
 def test_native_block_boots_provisioned_family_under_session() -> None:
     # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
     # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
