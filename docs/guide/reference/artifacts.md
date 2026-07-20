@@ -15,6 +15,15 @@ the PUT fails with `403 SignatureDoesNotMatch`. Each call replaces the Run uploa
 manifest, so corrections must redeclare every artifact that should remain part of the
 build.
 
+Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
+instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
+is the reference clock — compute remaining time as a deadline minus `server_time`, not
+from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
+earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
+upload if it is not finalized. If a window lapses, re-call this tool to reset the
+deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
+single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `artifacts` | array<object> | yes | Declared build artifacts: [{name, sha256 (base64), size_bytes}]. |
@@ -67,6 +76,15 @@ Examples for `artifacts`:
 
 Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
 System's project.
+
+Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
+instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
+is the reference clock — compute remaining time as a deadline minus `server_time`, not
+from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
+earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
+upload if it is not finalized. If a window lapses, re-call this tool to reset the
+deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
+single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
