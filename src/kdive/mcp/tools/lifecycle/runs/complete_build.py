@@ -11,7 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError
 from kdive.domain.external_provenance import external_source_provenance
-from kdive.kernel_config.gate import rootfs_mount_warning
+from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -129,19 +129,32 @@ class CompleteBuildHandlers:
     async def _success_envelope(
         self, conn: AsyncConnection, uid: UUID, result: BuildStepResult
     ) -> ToolResponse:
-        """Build the success envelope, attaching the pre-boot config warning when it fires."""
+        """Build the success envelope, attaching the boot-config warning or upload nudge.
+
+        The two advisories are mutually exclusive: the warning keys on a *present* config missing
+        boot symbols, the nudge on a config *absent* entirely (so the warning could never fire).
+        Compute the nudge only when the warning is silent to avoid a second config read.
+        """
         warning = await rootfs_mount_warning(conn, uid)
-        return _complete_envelope(uid, result, warning)
+        nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
+        return _complete_envelope(uid, result, warning=warning, nudge=nudge)
 
 
 def _complete_envelope(
-    run_id: UUID, result: BuildStepResult, warning: dict[str, JsonValue] | None = None
+    run_id: UUID,
+    result: BuildStepResult,
+    *,
+    warning: dict[str, JsonValue] | None = None,
+    nudge: dict[str, JsonValue] | None = None,
 ) -> ToolResponse:
     data: dict[str, JsonValue] = {}
     actions = ["runs.get"]
     if warning is not None:
         data["missing_boot_config"] = warning
         actions = [FEATURE_CONFIG_REQUIREMENTS_TOOL, "runs.get"]
+    elif nudge is not None:
+        data["missing_effective_config"] = nudge
+        actions = [CREATE_RUN_UPLOAD_TOOL, "runs.get"]
     return ToolResponse.success(
         str(run_id), "succeeded", suggested_next_actions=actions, refs=result.refs(), data=data
     )
