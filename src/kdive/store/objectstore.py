@@ -277,12 +277,16 @@ class ObjectStore:
         """Mint a presigned PUT that signs the checksum + object metadata into the URL.
 
         The agent must send the returned ``required_headers`` (the signed
-        ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata); S3 rejects a PUT whose
-        checksum disagrees with the signed value, and the metadata lands on the object so
-        the later install fetch (`get_artifact`) reads its sensitivity. This mints a single
-        PUT (the 5 GiB single-object ceiling on real S3); ``size_bytes`` is recorded by the
-        caller's manifest and capped to that ceiling before this is called. The `live_stack`
-        test asserts the **checksum** binding, not the upload length (ADR-0048 §2).
+        ``x-amz-checksum-sha256`` and ``x-amz-meta-*`` metadata) **and nothing else**: the URL
+        is SigV4-signed over exactly this header set, so any extra header the client adds — most
+        often an implicit ``Content-Type`` (e.g. ``curl --data-binary``) — changes the signed
+        request and S3 rejects the PUT with ``403 SignatureDoesNotMatch``. S3 also rejects a PUT
+        whose body checksum disagrees with the signed ``x-amz-checksum-sha256`` value, and the
+        metadata lands on the object so the later install fetch (`get_artifact`) reads its
+        sensitivity. This mints a single PUT (the 5 GiB single-object ceiling on real S3);
+        ``size_bytes`` is recorded by the caller's manifest and capped to that ceiling before
+        this is called. The `live_stack` test asserts the **checksum** binding, not the upload
+        length (ADR-0048 §2).
 
         Raises:
             CategorizedError: presigning fails

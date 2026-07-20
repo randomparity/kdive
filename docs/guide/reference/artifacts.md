@@ -11,9 +11,11 @@ Mint presigned PUTs for an external Run's build artifacts.
 Each upload item returns `refs.upload_url` plus `data.required_headers`; the client
 must send exactly those headers on the PUT and nothing else — an HTTP client that
 injects its own header (e.g. a default `Content-Type`) invalidates the signature and
-the PUT fails with `403 SignatureDoesNotMatch`. Each call replaces the Run upload
-manifest, so corrections must redeclare every artifact that should remain part of the
-build.
+the PUT fails with `403 SignatureDoesNotMatch`. Do not fall back to a direct
+`put_object`: it stores the object without the signed `x-amz-checksum-sha256`, which
+`runs.complete_build` then rejects for having no stored checksum. `data.upload_hint`
+restates both footguns. Each call replaces the Run upload manifest, so corrections must
+redeclare every artifact that should remain part of the build.
 
 Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
 instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
@@ -76,6 +78,14 @@ Examples for `artifacts`:
 
 Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
 System's project.
+
+The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
+send exactly those headers on the PUT and nothing else — an HTTP client that injects its
+own header (e.g. a default `Content-Type`) invalidates the signature and the PUT fails
+with `403 SignatureDoesNotMatch`. The presigned PUT also binds the object's
+`x-amz-checksum-sha256`; a direct `put_object` that skips it stores the bytes without
+that integrity check, so upload through the signed URL. `data.upload_hint` restates the
+header footgun.
 
 Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
 instant); a transfer already in flight is not interrupted at expiry. `data.server_time`

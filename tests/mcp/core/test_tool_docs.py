@@ -546,6 +546,20 @@ def test_upload_tools_state_deadline_scope_and_non_constraint() -> None:
         assert "beat the clock" in description  # chunks are size, not time
 
 
+def test_upload_tools_warn_extra_header_breaks_signature() -> None:
+    # #1338 / ADR-0395: an agent calling the upload tools reads only the wrapper docstring, so the
+    # extra-header footgun must be stated there — the PUT must send exactly required_headers, and
+    # any extra header (e.g. a default Content-Type) breaks the SigV4 signature with a 403. Points
+    # the agent at data.upload_hint, which restates it on the response itself.
+    tools = {t.name: t for t in TOOLS}
+    for name in ("artifacts.create_run_upload", "artifacts.create_system_upload"):
+        description = (tools[name].description or "").lower()
+        assert "required_headers" in description
+        assert "content-type" in description  # the concrete extra-header trap
+        assert "403 signaturedoesnotmatch" in description
+        assert "upload_hint" in description  # points at the on-response restatement
+
+
 def test_expected_boot_failure_documents_match_contract() -> None:
     # D7 (#763): the expected_boot_failure pattern is matched by
     # security.artifacts.artifact_search.search_text (a case-sensitive literal substring, applied

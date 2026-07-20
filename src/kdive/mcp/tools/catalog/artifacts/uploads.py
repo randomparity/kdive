@@ -60,6 +60,25 @@ CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
 CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
 _RETENTION_CLASS = "build"
 
+# Agent-visible PUT ergonomics, carried in the collection ``data`` so a tool-schema-only
+# client sees the two presigned-PUT footguns in the response itself, not only in a resource
+# doc (#1338, ADR-0395). Each presigned URL is signed (SigV4) over exactly the returned
+# ``required_headers``: (1) sending ANY extra header — most often an HTTP client's implicit
+# ``Content-Type`` (e.g. ``curl --data-binary``) — breaks the signature and the store answers
+# ``403 SignatureDoesNotMatch``; (2) bypassing the presigned PUT with a direct upload stores
+# the object without the signed ``x-amz-checksum-sha256`` integrity binding. The run
+# build-artifact finalize (``runs.complete_build``) rejects an object with no stored checksum,
+# so the caution is stated generically here and the run tool's docstring names that rejection.
+_UPLOAD_HINT = (
+    "PUT each object to its refs.upload_url sending ONLY the headers in data.required_headers "
+    "and nothing else: the URL is SigV4-signed over exactly that header set, so any extra "
+    "header (most often an HTTP client's implicit Content-Type, e.g. curl --data-binary) "
+    "breaks the signature and the store returns 403 SignatureDoesNotMatch. Prefer "
+    "`curl -T <file> -H 'Content-Type:'` plus the required_headers. Do not fall back to a "
+    "direct put_object: it stores the object without the signed x-amz-checksum-sha256 "
+    "integrity binding."
+)
+
 # Upper bound on an offending artifact-name string echoed back in an error's ``data.value``
 # (ADR-0166). The name is user-supplied; echoing a short string makes the rejection
 # self-correcting, but a longer or non-string value is never reflected so no large or
@@ -492,6 +511,7 @@ async def _create_upload(
             "replaces_prior_manifest": True,
             "server_time": _iso_utc(stamp.server_time),
             "manifest_deadline": _iso_utc(stamp.deadline),
+            "upload_hint": _UPLOAD_HINT,
             "on_expiry": {
                 "tool": _upload_tool_name(spec),
                 "effect": "re-mint replaces the manifest and resets the deadline",
