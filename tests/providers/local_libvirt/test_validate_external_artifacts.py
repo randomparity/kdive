@@ -619,24 +619,58 @@ def test_small_boot_only_tar_reports_plain_missing_modules(
         )
     assert e.value.category is ErrorCategory.BUILD_FAILURE
     assert "no lib/modules member within the scan bound" in str(e.value)
-    assert "exceeds the scan bound" not in str(e.value)
+    assert "before any lib/modules member" not in str(e.value)
 
 
 def test_oversized_boot_member_reports_cap_reached_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Boot member fully readable (boot_ok) but the scan cap lands at the lib/modules header, so
-    # modules is never seen: the message names the oversized-boot-member cause, not a bare
-    # "no lib/modules". The boot member occupies 512 (tar header) + 2048 (content) = 2560 bytes,
-    # so a 2560-byte cap reaches exactly its end and stops before the lib/modules header.
+    # modules is never seen: the message names the oversized-boot-member cause and the scan bound,
+    # not a bare "no lib/modules". The boot member occupies 512 (tar header) + 2048 (content) =
+    # 2560 bytes, so a 1 MiB cap reaches its end and stops before the lib/modules header.
     import kdive.build_artifacts.validation as validation_module
 
-    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 2560)
-    blob = _combined_kernel_tar(boot=_boot_elf(pad=2048 - 0x40), with_modules=True)
+    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 1 * 1024 * 1024)
+    blob = _combined_kernel_tar(boot=_boot_elf(pad=1024 * 1024), with_modules=True)
     with pytest.raises(CategorizedError) as e:
         _validate_kernel_blob(blob, arch="ppc64le")
     assert e.value.category is ErrorCategory.BUILD_FAILURE
-    assert "exceeds the scan bound" in str(e.value)
+    # The enriched message names the bound that was hit (#1339) so an agent can act on it.
+    assert "exceeds the 1 MiB scan bound before any lib/modules member" in str(e.value)
+
+
+def test_oversized_boot_member_ppc64le_message_carries_strip_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On ppc64le the enriched rejection appends the arch-specific remedy (strip vmlinux) with a doc
+    # pointer, so an agent hits the root cause instead of reordering members into a false pass.
+    import kdive.build_artifacts.validation as validation_module
+
+    monkeypatch.setattr(validation_module, "_KERNEL_TAR_SCAN_MAX_BYTES", 1 * 1024 * 1024)
+    blob = _combined_kernel_tar(boot=_boot_elf(pad=1024 * 1024), with_modules=True)
+    with pytest.raises(CategorizedError) as e:
+        _validate_kernel_blob(blob, arch="ppc64le")
+    msg = str(e.value)
+    assert "ppc64le: strip the build-tree vmlinux" in msg
+    assert "external-build-upload.md" in msg
+
+
+def test_oversized_boot_member_x86_64_message_omits_ppc64le_pointer() -> None:
+    # The ppc64le strip pointer is arch-gated: an x86_64 oversized-boot rejection states the bound
+    # and the generic remedy but not the ppc64le-only hint.
+    msg = validation._scan_bound_rejection_message("x86_64")
+    assert "128 MiB scan bound" in msg
+    assert "ppc64le" not in msg
+    assert "strip the boot image or list lib/modules earlier" in msg
+
+
+def test_scan_bound_rejection_message_names_full_bound_for_ppc64le() -> None:
+    # With the real (un-monkeypatched) bound the message states 128 MiB and the ppc64le pointer.
+    msg = validation._scan_bound_rejection_message("ppc64le")
+    assert "exceeds the 128 MiB scan bound" in msg
+    assert "ppc64le: strip the build-tree vmlinux before packaging" in msg
+    assert "external-build-upload.md" in msg
 
 
 def test_ppc64le_vmlinux_build_id_pairs() -> None:

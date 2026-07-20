@@ -305,7 +305,9 @@ def validate_external_artifacts(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"name": name},
             )
-        heads[name] = _validate_one_artifact(store, name, entry, key, boot_format)
+        heads[name] = _validate_one_artifact(
+            store, name, entry, key, boot_format=boot_format, arch=arch
+        )
 
     build_id = ""
     if "vmlinux" in by_name:
@@ -368,7 +370,13 @@ def _resolve_boot_format(arch: str) -> FormatContract:
 
 
 def _validate_one_artifact(
-    store: ValidatorStore, name: str, entry: ManifestEntry, key: str, boot_format: FormatContract
+    store: ValidatorStore,
+    name: str,
+    entry: ManifestEntry,
+    key: str,
+    *,
+    boot_format: FormatContract,
+    arch: str,
 ) -> HeadResult:
     head = store.head(key)
     if head is None:
@@ -395,22 +403,36 @@ def _validate_one_artifact(
         # whole-object SHA-256 is not comparable here; the per-chunk pins (verify_chunks)
         # already bound every byte. Only the total size is checked on the final object.
         raise _build_failure("reassembled artifact size disagrees with its manifest", name=name)
-    _check_artifact_content(store, name, key, head.size_bytes, boot_format)
+    _check_artifact_content(store, name, key, head.size_bytes, boot_format=boot_format, arch=arch)
     return head
 
 
 def _check_artifact_content(
-    store: ValidatorStore, name: str, key: str, size_bytes: int, boot_format: FormatContract
+    store: ValidatorStore,
+    name: str,
+    key: str,
+    size_bytes: int,
+    *,
+    boot_format: FormatContract,
+    arch: str,
 ) -> None:
     if name == "vmlinux":
         if store.get_range(key, start=0, length=4) != _ELF_MAGIC:
             raise _build_failure("vmlinux is not an ELF file", name=name)
     elif name == "kernel":
-        _check_kernel_combined_tar(store, key, name, size_bytes=size_bytes, boot_format=boot_format)
+        _check_kernel_combined_tar(
+            store, key, name, size_bytes=size_bytes, boot_format=boot_format, arch=arch
+        )
 
 
 def _check_kernel_combined_tar(
-    store: ValidatorStore, key: str, name: str, *, size_bytes: int, boot_format: FormatContract
+    store: ValidatorStore,
+    key: str,
+    name: str,
+    *,
+    size_bytes: int,
+    boot_format: FormatContract,
+    arch: str,
 ) -> None:
     """Validate the external `kernel` upload is a combined kernel+modules tar (ADR-0234 §2).
 
@@ -437,7 +459,7 @@ def _check_kernel_combined_tar(
             "combined tar is incomplete; re-upload the full archive",
             name=name,
         )
-    _verify_combined_tar_shape(data, name, boot_format, cap_reached=cap_reached)
+    _verify_combined_tar_shape(data, name, boot_format, cap_reached=cap_reached, arch=arch)
 
 
 def _decompress_bounded(
@@ -473,8 +495,34 @@ def _decompress_bounded(
     return bytes(out), len(out) >= max_out, decompressor.eof
 
 
+# Appended to the scan-bound rejection only for the arch whose unstripped kernel image is large
+# enough to overrun the scan window (#1339): powerpc has no bzImage, so its boot member is the ELF
+# `vmlinux`, and an unstripped vmlinux carries full DWARF (hundreds of MB) that pushes lib/modules
+# past the bound. x86_64's bzImage is already stripped/compressed, so the generic hint suffices.
+_PPC64LE_STRIP_HINT = (
+    " (ppc64le: strip the build-tree vmlinux before packaging - see "
+    "docs/operating/external-build-upload.md)"
+)
+
+
+def _scan_bound_rejection_message(arch: str) -> str:
+    """Build the oversized-boot-member rejection, naming the scan bound and an arch-gated remedy.
+
+    The scan stops at :data:`_KERNEL_TAR_SCAN_MAX_BYTES` (a gzip-bomb guard), so the boot member's
+    own decompressed size is never measured -- the message states the bound that was hit, not a
+    fabricated member size (#1339). The ppc64le strip pointer fires only for ``ppc64le``.
+    """
+    mib = _KERNEL_TAR_SCAN_MAX_BYTES // (1024 * 1024)
+    hint = _PPC64LE_STRIP_HINT if arch == "ppc64le" else ""
+    return (
+        f"kernel combined tar boot/vmlinuz exceeds the {mib} MiB scan bound before any lib/modules "
+        "member (the scan stops at the bound, so the boot member's full decompressed size is not "
+        "measured); strip the boot image or list lib/modules earlier" + hint
+    )
+
+
 def _verify_combined_tar_shape(
-    data: bytes, name: str, boot_format: FormatContract, *, cap_reached: bool
+    data: bytes, name: str, boot_format: FormatContract, *, cap_reached: bool, arch: str
 ) -> None:
     boot_seen = False
     boot_ok = False
@@ -513,11 +561,7 @@ def _verify_combined_tar_shape(
         )
     if not modules_ok:
         if cap_reached:
-            raise _build_failure(
-                "kernel combined tar boot/vmlinuz exceeds the scan bound before any lib/modules "
-                "member; strip the boot image or list lib/modules earlier",
-                name=name,
-            )
+            raise _build_failure(_scan_bound_rejection_message(arch), name=name)
         raise _build_failure(
             "kernel combined tar has no lib/modules member within the scan bound", name=name
         )
