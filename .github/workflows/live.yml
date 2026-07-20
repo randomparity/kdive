@@ -1,0 +1,153 @@
+name: live-vm gates
+
+# The two live_vm gates live here, NOT in ci.yml, because GitHub triggers are workflow-level: a
+# `schedule` on ci.yml's shared `on:` would fire every job nightly. Carrying no `pull_request`
+# trigger also makes fork-PR dispatch to the self-hosted runner structurally impossible (#1293,
+# ADR-0389).
+on:
+  schedule:
+    - cron: "0 7 * * *" # nightly ~07:00 UTC
+  workflow_dispatch:
+    inputs:
+      tcg_image:
+        description: "ppc64le catalog rootfs image stage-tcg-images.sh builds from"
+        required: false
+        default: "fedora-ppc64le"
+      debuginfod_urls:
+        description: "DEBUGINFOD_URLS: a server indexing the distro's ppc64le kernel debuginfo"
+        required: false
+        default: "https://debuginfod.fedoraproject.org/"
+      ppc64le_bundle:
+        description: "Optional: directory with the #1146 kernel bundle (opt-in fourth proof)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  tcg:
+    name: live_vm_tcg (hosted)
+    # No fork-PR risk (hosted, no /dev/kvm, secrets ride trusted events); belt-and-suspenders to
+    # the workflow having no pull_request trigger at all.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # timeout-minutes is set from the measured boot-to-panic wall-time (ceil(measured x 1.5), floor
+    # 30) by the local TCG proof (#1293 plan Task 7); 30 is the floor default until measured.
+    timeout-minutes: 30
+    concurrency:
+      group: live-tcg-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      # workflow_dispatch inputs are read via env (not interpolated into run:) to avoid script
+      # injection; on schedule/push they are empty, so fall back to the documented defaults below.
+      TCG_IMAGE_INPUT: ${{ github.event.inputs.tcg_image }}
+      DEBUGINFOD_INPUT: ${{ github.event.inputs.debuginfod_urls }}
+      BUNDLE_INPUT: ${{ github.event.inputs.ppc64le_bundle }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install host deps (ppc64le emulator, libguestfs, elfutils, debuginfod, libvirt-dev)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.18"
+          enable-cache: true
+
+      - name: Set up just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+
+      - name: Sync dependencies
+        run: uv sync --locked --group live
+
+      - name: Run the live_vm_tcg spine (stage -> map -> preflight -> test, one shell)
+        # ONE run: block — each Actions run: is a fresh shell, so the staged KDIVE_LIVE_VM_* exports
+        # and the mapped spine env must live in the same shell as the preflight and the suite.
+        run: |
+          set -euo pipefail
+          # Backends (postgres/minio/oidc + bucket + migrate) then the app tier (server/worker/
+          # reconciler) as compose services; the tcg tier drives them over HTTP.
+          just stack-up
+          docker compose up -d --wait server worker reconciler
+
+          # Stage the ppc64le TCG image set onto /mnt under the measured budget (#1292); it exports
+          # KDIVE_LIVE_VM_ROOTFS / _BZIMAGE / _VMLINUX.
+          export KDIVE_TCG_IMAGE="${TCG_IMAGE_INPUT:-fedora-ppc64le}"
+          export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-https://debuginfod.fedoraproject.org/}"
+          eval "$(scripts/live-vm/stage-tcg-images.sh)"
+
+          # The canonical host-side stack env (KDIVE_DATABASE_URL / _OIDC_ISSUER / _STACK_BASE_URL /
+          # _S3_* / AWS_* minioadmin) lives in env.sh — source it rather than duplicate the values,
+          # which would drift from the compose ports and re-declare the credential literals.
+          # shellcheck disable=SC1091
+          source scripts/live-stack/env.sh
+          # Map C's store output onto the spine env (the tcg proofs read KDIVE_GUEST_IMAGE_PPC64LE,
+          # not the throwaway KDIVE_LIVE_VM_ROOTFS) and supply the arch-opaque kernel tree.
+          export KDIVE_GUEST_IMAGE_PPC64LE="$KDIVE_LIVE_VM_ROOTFS"
+          export KDIVE_KERNEL_SRC
+          KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
+          # KDIVE_PPC64LE_BUNDLE is the opt-in fourth proof; unset -> the three core proofs run.
+          [ -n "${BUNDLE_INPUT:-}" ] && export KDIVE_PPC64LE_BUNDLE="$BUNDLE_INPUT"
+
+          scripts/live-vm/preflight-env.sh tcg
+          just test-live-tcg
+
+  native:
+    name: live_vm (self-hosted KVM)
+    # POSITIVE allowlist — NOT `!= 'pull_request'`, which would admit push and fire the
+    # RCE-sensitive, minutes-scale self-hosted boot on every commit to main.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, kvm, x64]
+    timeout-minutes: 90
+    concurrency:
+      # Distinct per-job group so a long native boot does not cross-block the hosted tcg gate.
+      group: live-native-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Run both native families (reaper -> stack -> mint -> preflight -> test, one shell)
+        # ONE run: block. Reuse /opt/kdive's libguestfs venv as the interpreter and overlay the
+        # tested sources via PYTHONPATH — never mutate /opt/kdive, never uv sync in the workspace.
+        env:
+          KDIVE_PYTHON: /opt/kdive/.venv/bin/python
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="${GITHUB_WORKSPACE}/src"
+
+          # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or
+          # timeout still leaves state) must not collide with this run's on-box stand-up.
+          virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^kdive-' \
+            | xargs -r -n1 virsh -c qemu:///system destroy 2>/dev/null || true
+          docker compose down -v 2>/dev/null || true
+
+          # Throwaway family rootfs from the warm store.
+          eval "$(scripts/live-vm/warm-store.sh)"
+
+          # Provisioned family on the box: bring up the stack (worker non-root so sudo does not
+          # strip the inherited KDIVE_PYTHON/PYTHONPATH), then mint one System.
+          KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
+          # up.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* and export
+          # KDIVE_LIBVIRT_URI (which lives un-exported in live-stack/lib.sh, not env.sh) so the
+          # preflight AND the pytest subprocess see it.
+          # shellcheck disable=SC1091
+          source scripts/live-stack/env.sh
+          export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+          KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
+          export KDIVE_LIVE_VM_SYSTEM_ID
+
+          scripts/live-vm/preflight-env.sh throwaway provisioned
+          just test-live
