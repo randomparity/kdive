@@ -113,15 +113,42 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
 
 **Interfaces:**
 - Consumes: existing per-tier accumulators (`required_commands`/`_packages`, etc.).
-- Produces: `ASSUME_YES` (0/1 from `-y`), `is_interactive` (`[ -t 0 ]`), `install_cmd_for
-  <distro>` (echoes refresh+install template), `run_tier_install <tier> <distro>`. Header
-  comment updated to state the new opt-in-remediation contract (drop "never installs, never
-  escalates"; cite ADR-0393). Reused by Task 3 for the post-fix re-probe/rebuild routine
-  `reverify_and_rebuild`.
+- Produces: `ASSUME_YES` (0/1 from `-y`), `offer_accepted <prompt>` (tty/`-y` gate),
+  `run_privileged <cmd…>` (mode-scoped sudo), `install_plan_for <distro> <pkgs…>` (refresh+install
+  template), `maybe_install_tier <tier> <distro>` (sets `FIX_ATTEMPTED`), and `probe_all`
+  (resets + repopulates the accumulators; called at startup and again in the post-fix re-check).
+  Header comment updated to the opt-in-remediation contract (drop "never installs, never
+  escalates"; cite ADR-0393). Task 3 adds `probe_guestfs` into `probe_all` and `maybe_link_guestfs`
+  into the control flow.
+
+- [ ] **Step 0: Harness prep (test-only, no production code yet).**
+  1. Extend `_run` to forward args: signature `_run(os_release_id, path, tmp_path,
+     extra_env=None, args=None)`, invoking `subprocess.run([BASH, str(SCRIPT), *(args or [])], …)`.
+  2. Add a **flag-stripping** sudo stub helper — the sudo flavor is `sudo -n <cmd>` (or `sudo
+     -n true` preflight) and `sudo -v` interactively, so a naive `exec "$@"` would run
+     `exec -n …` (invalid option, rc≠0). The stub must log the original args, then strip
+     leading `-n`/`-v` before dispatch, and treat a bare `-n true`/`-v` preflight as success:
+
+     ```python
+     def _sudo_stub(bindir, log, *, preflight_ok=True):
+         # logs the full sudo argv, strips -n/-v, then: preflight (true/-v) -> exit; else exec cmd
+         body = (
+             f'echo "sudo $@" >> "{log}"\n'
+             'while [ "$1" = -n ] || [ "$1" = -v ]; do shift; done\n'
+             f'{"" if preflight_ok else "exit 1\\n"}'
+             '[ $# -eq 0 ] && exit 0\n'      # `sudo -v` (now empty) = credential preflight OK
+             '[ "$1" = true ] && exit 0\n'   # `sudo -n true` preflight OK
+             'exec "$@"\n'
+         )
+         _stub(bindir, "sudo", "#!/bin/sh\n" + body)
+     ```
+     For the preflight-fails case, use `_sudo_stub(..., preflight_ok=False)` (whole stub exits 1).
 
 - [ ] **Step 1: Write failing tests** — the report-only contract, `-y` install with refresh +
   non-interactive flags + `sudo -n`, sudo-preflight-fail skip, install-failure handling,
-  re-verify exit 0, manual-hint safety, and interactive plain-sudo (pty).
+  re-verify exit 0, manual-hint safety, and interactive plain-sudo (pty). All non-root `-y`
+  tests use `_sudo_stub`; assert on the logged `sudo -n`/`sudo -v` line **and** the downstream
+  effect (install log), so the flag is verified directly, not only via the install side effect.
 
 ```python
 def _bin(tmp_path):  # helper: bindir with uv+pkg-config present so Required is otherwise satisfiable
@@ -137,26 +164,26 @@ def test_non_tty_without_yes_stays_report_only(tmp_path):
     assert not log.exists()
 
 def test_yes_installs_with_refresh_and_noninteractive_flag_and_sudo_n(tmp_path):
-    b = _bin(tmp_path); log = tmp_path / "cmd.log"
+    b = _bin(tmp_path); log = tmp_path / "cmd.log"; sudolog = tmp_path / "sudo.log"
     _stub(b, "apt-get", f'echo "apt-get $@" >> "{log}"\nexit 0')
-    _stub(b, "sudo", f'echo "sudo $@" >> "{log}"\nexec "$@"')  # sudo -n true preflight + passthrough
-    _run("debian", str(b), tmp_path, extra_env={}, args=["-y"])  # _run must accept args
+    _sudo_stub(b, sudolog)  # strips -n/-v, passes the real cmd through
+    _run("debian", str(b), tmp_path, args=["-y"])
     logged = log.read_text()
     assert "apt-get update" in logged
     assert "apt-get install -y" in logged
-    assert "sudo -n" in logged  # non-root path uses sudo -n under -y
+    assert "sudo -n" in sudolog.read_text()  # non-root path uses sudo -n under -y
 
 def test_yes_sudo_preflight_failure_skips_with_message_no_hang(tmp_path):
     b = _bin(tmp_path); log = tmp_path / "cmd.log"
     _stub(b, "apt-get", f'echo installed >> "{log}"\nexit 0')
-    _stub(b, "sudo", 'exit 1')  # sudo -n true fails (no NOPASSWD)
+    _sudo_stub(b, tmp_path / "sudo.log", preflight_ok=False)  # sudo -n true fails (no NOPASSWD)
     r = _run("debian", str(b), tmp_path, args=["-y"])
     assert "passwordless sudo" in r.stderr
     assert not log.exists()  # install never attempted
 
 def test_yes_install_failure_reported_not_fatal(tmp_path):
     b = _bin(tmp_path)
-    _stub(b, "apt-get", 'exit 100'); _stub(b, "sudo", 'exec "$@"')
+    _stub(b, "apt-get", 'exit 100'); _sudo_stub(b, tmp_path / "sudo.log")
     r = _run("debian", str(b), tmp_path, args=["-y"])
     assert "failed to install" in r.stderr  # reported
     # script did not abort mid-run: the advisory (later output) still printed
@@ -164,7 +191,7 @@ def test_yes_install_failure_reported_not_fatal(tmp_path):
 
 def test_manual_hint_tools_not_auto_installed_under_yes(tmp_path):
     b = _bin(tmp_path); log = tmp_path / "curl.log"
-    _stub(b, "curl", f'echo ran >> "{log}"\nexit 0'); _stub(b, "sudo", 'exec "$@"')
+    _stub(b, "curl", f'echo ran >> "{log}"\nexit 0'); _sudo_stub(b, tmp_path / "sudo.log")
     _stub(b, "apt-get", 'exit 0')
     _run("debian", str(b), tmp_path, args=["-y"])
     assert not log.exists()  # uv/rustup/just/prek curl|sh never executed
@@ -175,20 +202,30 @@ Interactive (pty) test:
 ```python
 import os, pty
 def test_interactive_accept_uses_plain_sudo(tmp_path):
-    """A TTY operator who answers 'y' gets plain sudo (password allowed), not sudo -n."""
-    b = _bin(tmp_path); log = tmp_path / "cmd.log"
+    """A TTY operator who answers 'y' gets plain sudo (password allowed), not sudo -n.
+
+    Env is pinned so the prompt count is deterministic: KDIVE_PYTHON at a stubbed venv that
+    imports guestfs (GUESTFS_STATE=ok → no guestfs prompt), so only Recommended + Future prompt.
+    """
+    b = _bin(tmp_path); log = tmp_path / "cmd.log"; sudolog = tmp_path / "sudo.log"
     _stub(b, "apt-get", f'echo installed >> "{log}"\nexit 0')
-    _stub(b, "sudo", f'echo "sudo $@" >> "{log}"\nexec "$@"')
+    _sudo_stub(b, sudolog)
+    venv_py = _stub_python(b, "venv-python", imports_ok=True)  # guestfs importable → no guestfs prompt
     os_release = tmp_path / "os-release"; os_release.write_text("ID=debian\n")
-    env = {"PATH": str(b), "KDIVE_OS_RELEASE": str(os_release), "HOME": str(tmp_path)}
+    env = {"PATH": str(b), "KDIVE_OS_RELEASE": str(os_release), "HOME": str(tmp_path),
+           "KDIVE_PYTHON": str(venv_py)}
     mo, so = pty.openpty()
+    # Feed generously more y's than prompts; extras are harmless, a shortfall would hang.
+    os.write(mo, b"y\n" * 6)
     proc = subprocess.Popen([BASH, str(SCRIPT)], stdin=so, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env, text=True)
-    os.write(mo, b"y\ny\ny\n")  # accept each tier prompt
-    proc.wait(timeout=30); os.close(mo); os.close(so)
-    logged = log.read_text()
-    assert "sudo -n" not in logged  # interactive => plain sudo
-    assert "installed" in logged
+    os.close(so)
+    out, err = proc.communicate(timeout=30)  # drains pipes concurrently (no deadlock)
+    os.close(mo)
+    logged = sudolog.read_text()
+    assert "sudo -v" in logged        # interactive credential preflight is plain sudo -v
+    assert "sudo -n" not in logged    # never the non-interactive flavor at a TTY
+    assert "installed" in log.read_text()
 ```
 
 - [ ] **Step 2: Run to verify FAIL** (`-k "yes or interactive or report_only or manual_hint"`).
@@ -253,7 +290,7 @@ run_privileged() { # cmd...
 Then, after each `report_tier`, run the install if accepted (guarded so `set -e` never aborts):
 
 ```bash
-maybe_install_tier() { # tier distro
+maybe_install_tier() { # tier distro  -> sets FIX_ATTEMPTED=1 when it runs anything
   local tier="$1" distro="$2"
   local -n pkgs="${tier}_packages"
   ((${#pkgs[@]})) || return 0
@@ -262,22 +299,61 @@ maybe_install_tier() { # tier distro
   plan="$(install_plan_for "${distro}" "${pkgs[@]}")"
   [[ -n "${plan}" ]] || { printf "  no auto-install for this distro; install manually: %s\n" "${pkgs[*]}" >&2; return 0; }
   refresh="${plan%% ;; *}"; install="${plan#* ;; }"
-  if ! run_privileged bash -c "${refresh}"; then return 0; fi   # refresh guarded, non-fatal
+  FIX_ATTEMPTED=1
+  # Skip the ':' no-op refresh so sudo is never escalated for a no-op (fedora/arch/opensuse).
+  if [[ "${refresh}" != ":" ]] && ! run_privileged bash -c "${refresh}"; then return 0; fi
   if ! run_privileged bash -c "${install}"; then
     printf "  package set failed to install: %s\n" "${pkgs[*]}" >&2
   fi
 }
 ```
 
-Wire calls right after the three `report_tier` lines (`maybe_install_tier required "${distro}"`
-etc.). Update the header comment to the ADR-0393 contract. Then add `reverify_and_rebuild`
-(see Task 3 interface) that re-runs the tier probes after `hash -r`, rebuilds the accumulators,
-and recomputes the exit condition; call it before the terminal summary block so the trailer /
-`manual_hints` / "present" line and exit code all reflect post-fix state.
+**`probe_all` (exact contents).** Move into `probe_all` the block that populates the
+accumulators — script lines ~262-330: the three `require_tool`/`require_command`/`require_header`
+passes (Required), the Recommended pass, the Future `future_cmds` loop + gcc/clang + the
+`require_header future …` calls, the `arch_needs_rust` rust/autotools branches, and (Task 3)
+`probe_guestfs`. **Leave OUT** the one-time resolution of `distro`/`host_arch` (they do not
+change) — resolve those before `probe_all` and pass/read them as globals. `probe_all` first
+**resets** every accumulator to empty, preserving the `set -u` empty-array guards the code
+relies on:
 
-> The re-probe reruns the same probe calls the top-of-script setup does. Factor the probe
-> sequence into a `probe_all` function (called once at startup and again by
-> `reverify_and_rebuild` after `hash -r`), resetting the accumulator arrays first.
+```bash
+probe_all() {
+  required_commands=() required_packages=() recommended_commands=() recommended_packages=()
+  future_commands=() future_packages=() manual_hints=()
+  # … the require_* passes exactly as today, then (Task 3) probe_guestfs …
+}
+```
+
+**Final control flow (bottom of script), shown explicitly so `report_tier` runs once per phase:**
+
+```bash
+FIX_ATTEMPTED=0
+probe_all
+report_tier "Required dependencies" required "${distro}";           maybe_install_tier required "${distro}"
+report_tier "Recommended dependencies (full local CI)" recommended "${distro}"; maybe_install_tier recommended "${distro}"
+report_tier "Future dependencies (live_vm / kernel build)" future "${distro}";   maybe_install_tier future "${distro}"
+maybe_link_guestfs "${distro}"        # Task 3, separate prompt, after the Future install
+if ((FIX_ATTEMPTED)); then
+  hash -r          # drop bash's cached command lookups so just-installed binaries are found
+  probe_all        # rebuild accumulators from post-fix state
+  printf "\n=== re-checking after fixes ===\n" >&2
+  report_tier "Required dependencies" required "${distro}"
+  report_tier "Recommended dependencies (full local CI)" recommended "${distro}"
+  report_tier "Future dependencies (live_vm / kernel build)" future "${distro}"
+fi
+print_cross_arch_advisory "${host_arch}" "${distro}"
+# terminal summary block (manual_hints / required trailer / "present" line) renders from the
+# now-current accumulators — unchanged code, but it now reflects post-fix state.
+```
+
+When no fix ran (report-only path: non-TTY + no `-y`), `FIX_ATTEMPTED` stays 0, the
+re-check block is skipped, and the output is **byte-identical to today** (single report, no
+double probe). Update the header comment to the ADR-0393 opt-in-remediation contract.
+
+- [ ] **Step 3b: Regression assertion** — a non-TTY, no-arg run produces the same stdout/stderr
+  as before this task (add `test_report_only_output_unchanged` capturing the existing all-missing
+  output and asserting no `re-checking` line and no double "missing" block appear).
 
 - [ ] **Step 4: Run to verify PASS** — the new tests pass; all pre-existing tests pass (the
   report-only path is unchanged because `offer_accepted` returns 1 for non-tty + no `-y`).
@@ -301,8 +377,8 @@ git commit -m "feat(scripts): opt-in package install (-y/interactive, sudo, per 
 - Test: `tests/scripts/test_check_setup_deps.py`.
 
 **Interfaces:**
-- Consumes: `${PY}` (venv interpreter, resolved in #1328), `offer_accepted`, `probe_all` /
-  `reverify_and_rebuild` (Task 2).
+- Consumes: `${PY}` (venv interpreter, resolved in #1328), `offer_accepted`, `probe_all`
+  (Task 2 — `probe_guestfs` is added into it so the post-fix re-check refreshes `GUESTFS_STATE`).
 - Produces: `guestfs_state` = `absent` | `unlinked` | `ok` keyed on package presence +
   venv import; `link_guestfs_into_venv` (idempotent `ln -sf`, ABI-checked).
 
