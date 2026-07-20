@@ -378,6 +378,16 @@ def _validate_one_artifact(
             details={"name": name},
         )
     if entry.chunks is None:
+        if head.checksum_sha256 is None:
+            # A single-PUT object with no stored SHA-256 was not written through the
+            # presigned PUT (which signs x-amz-checksum-sha256 onto the object). A direct
+            # put_object that skips that header stores the bytes but no checksum, so name that
+            # cause instead of the generic "disagrees" message (#1338).
+            raise _build_failure(
+                "uploaded artifact has no stored SHA-256 checksum (the upload bypassed the "
+                "presigned PUT; a direct put_object must send the x-amz-checksum-sha256 header)",
+                name=name,
+            )
         if head.size_bytes != entry.size_bytes or head.checksum_sha256 != entry.sha256:
             raise _build_failure("uploaded artifact disagrees with its manifest", name=name)
     elif head.size_bytes != entry.size_bytes:
