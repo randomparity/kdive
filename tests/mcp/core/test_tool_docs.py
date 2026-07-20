@@ -530,6 +530,22 @@ def test_jobs_wait_description_conveys_retry_contract() -> None:
     assert "short" in timeout_desc
 
 
+def test_upload_tools_state_deadline_scope_and_non_constraint() -> None:
+    # #1336 / ADR-0394: an agent calling the upload tools reads only the wrapper docstring, so
+    # the deadline contract must be stated there — the scope (begin the PUT before the per-URL
+    # expires_at; in-flight not interrupted), the reference clock, the re-mint recovery, and
+    # that chunks are a size mechanism, not a way to beat the clock.
+    tools = {t.name: t for t in TOOLS}
+    for name in ("artifacts.create_run_upload", "artifacts.create_system_upload"):
+        description = (tools[name].description or "").lower()
+        assert "expires_at" in description
+        assert "in flight" in description  # the not-interrupted scope clause
+        assert "server_time" in description  # the reference clock
+        assert "manifest_deadline" in description
+        assert "on_expiry" in description  # the named recovery action
+        assert "beat the clock" in description  # chunks are size, not time
+
+
 def test_expected_boot_failure_documents_match_contract() -> None:
     # D7 (#763): the expected_boot_failure pattern is matched by
     # security.artifacts.artifact_search.search_text (a case-sensitive literal substring, applied

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import NamedTuple, Protocol, cast
 from uuid import UUID
 
@@ -140,6 +140,16 @@ def _max_upload_bytes() -> int:
 
 def _presign_ttl_seconds() -> int:
     return min(3600, int(_upload_ttl().total_seconds()))
+
+
+def _iso_utc(when: datetime) -> str:
+    """Render a (tz-aware) instant as an ISO-8601 UTC string (#1336).
+
+    ``now()`` is a ``timestamptz`` psycopg renders in the DB session's timezone, which is
+    not guaranteed UTC, so normalize to UTC before formatting rather than trusting the
+    session offset. The upload deadline contract promises UTC.
+    """
+    return when.astimezone(UTC).isoformat()
 
 
 class _PresignStore(Protocol):
@@ -426,7 +436,7 @@ async def _create_upload(
                         owner_id=uid,
                         store=store,
                     )
-                    await upload_manifest.replace_manifest(
+                    stamp = await upload_manifest.replace_manifest(
                         conn,
                         upload_manifest.UploadManifestReplaceRequest(
                             owner_kind=spec.owner_kind,
@@ -456,7 +466,21 @@ async def _create_upload(
                 _log.warning("create_upload failed for %s %s: %s", spec.owner_kind, owner_id, exc)
                 return ToolResponse.failure_from_error(owner_id, exc)
 
-    items = [_upload_response(upload, next_action=spec.next_action) for upload in uploads]
+    # The presigned URL expiry (per item) is the "begin the PUT by" wall; it is
+    # server_time + presign_ttl, which clamps below the manifest deadline when
+    # UPLOAD_TTL_SECONDS > 3600. The manifest deadline (collection) is the reaper's
+    # reclaim window for the whole upload (#1336, ADR-0394).
+    #
+    # expires_at is rendered in the DB clock frame (server_time is the transaction's
+    # now(), which precedes the boto3 signing instant), while the object store enforces
+    # the URL on its own clock. Any DB-ahead-of-store skew or lock-wait between the two
+    # only understates expires_at, so the failure direction is a needless re-mint, never
+    # trusting a lapsed URL; manifest_deadline is the authoritative reaper-enforced wall.
+    url_expires_at = _iso_utc(stamp.server_time + timedelta(seconds=_presign_ttl_seconds()))
+    items = [
+        _upload_response(upload, next_action=spec.next_action, expires_at=url_expires_at)
+        for upload in uploads
+    ]
     return ToolResponse.collection(
         owner_id,
         "upload_ready",
@@ -466,11 +490,19 @@ async def _create_upload(
             "owner_kind": spec.owner_kind,
             "manifest_mode": "replace",
             "replaces_prior_manifest": True,
+            "server_time": _iso_utc(stamp.server_time),
+            "manifest_deadline": _iso_utc(stamp.deadline),
+            "on_expiry": {
+                "tool": _upload_tool_name(spec),
+                "effect": "re-mint replaces the manifest and resets the deadline",
+            },
         },
     )
 
 
-def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolResponse:
+def _upload_response(
+    upload: _MaterializedUpload, *, next_action: str, expires_at: str
+) -> ToolResponse:
     return ToolResponse.success(
         upload.key,
         "upload_ready",
@@ -480,6 +512,7 @@ def _upload_response(upload: _MaterializedUpload, *, next_action: str) -> ToolRe
             "name": upload.entry.name,
             "artifact_name": upload.entry.name,
             "expires_in": _presign_ttl_seconds(),
+            "expires_at": expires_at,
             **({"part_number": upload.part_number} if upload.part_number is not None else {}),
             "required_headers": dict(upload.presigned.required_headers),
             **upload.presigned.required_headers,
