@@ -45,11 +45,10 @@ ln -f -- "$KDIVE_LIVE_VM_ROOTFS" "$staged_rootfs" 2>/dev/null ||
 #    following the spine sequence (tests/integration/live_stack/spine.py): the System id is
 #    data["system_id"] on systems.provision (object_id there is the provisioning JOB id). All progress
 #    goes to stderr; stdout is the id alone.
-KDIVE_MINT_ROOTFS="$staged_rootfs" \
-  KDIVE_STACK_BASE_URL="$KDIVE_STACK_BASE_URL" \
+KDIVE_STACK_BASE_URL="$KDIVE_STACK_BASE_URL" \
   KDIVE_TOKEN="$KDIVE_TOKEN" \
   KDIVE_PROJECT="${KDIVE_PROJECT:-demo}" \
-  "${py[@]}" - <<'PY'
+  "${py[@]}" - "$staged_rootfs" <<'PY'
 import asyncio
 import os
 import sys
@@ -66,7 +65,7 @@ async def main() -> int:
     base = os.environ["KDIVE_STACK_BASE_URL"]
     token = os.environ["KDIVE_TOKEN"]
     project = os.environ.get("KDIVE_PROJECT", "demo")
-    rootfs = os.environ["KDIVE_MINT_ROOTFS"]  # staged under the provider's allowed root
+    rootfs = sys.argv[1]  # the warm rootfs staged under the provider's allowed root (argv, not env)
 
     # LiveStackClient is an async context manager (dev_harness); it must be entered before any
     # call_tool, else fastmcp raises "Client is not connected".
