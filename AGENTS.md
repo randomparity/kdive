@@ -129,6 +129,15 @@ and constraint an agent must know, and does not invite a pattern the behavior di
   object id, status, `suggested_next_actions` (literal next tool names), artifact `refs`,
   and an `error_category` **iff** the status is a failure (enforced at construction).
   References, never log dumps.
+- **State a limit's full contract** — For any limit you hand an agent, state all five:
+  unit, reference clock, scope (per-request vs per-flow), consequence of violation, and
+  recovery action. An agent has no wall clock and fills unspecified space with worst-case
+  assumptions, so a bare relative limit (`expires_in: 3600`) reads as a hard wall it must
+  route around — it will invent workarounds a fully-specified contract would have prevented.
+  Prefer absolute deadlines plus a `server_time` reference clock over relative durations,
+  surface the real (enforced) deadline rather than an incidental one, and name the recovery
+  tool in `suggested_next_actions`. Every workaround an agent improvises marks a missing
+  sentence in a contract (#1336).
 - **State transitions are guarded data** — `domain/capacity/state.py` is a nested adjacency table;
   the repository layer (`db/repositories.py`) calls `can_transition` before persisting any
   state change. An illegal edge raises `IllegalTransition` (a programming error, distinct
