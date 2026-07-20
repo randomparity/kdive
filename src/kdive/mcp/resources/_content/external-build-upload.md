@@ -24,6 +24,14 @@ provably lacks the symbols needed to mount the root filesystem and boot (`EXT4_F
 returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel that
 cannot boot is not silently accepted.
 
+**Start from the catalog image's own config, not a bare `defconfig`.** When you build against a
+catalog image, call `images.kernel_config(image_id)` (ADR-0317) and start from the `.config` it
+returns — `refs.download_uri` presigns a short-lived GET of that image's known-good
+`/boot/config-<ver>` (the version is in `data.default_kernel_version`). This is the recommended
+starting point: a stock `defconfig` commonly builds `VIRTIO_BLK` and `EXT4_FS` as modules rather
+than built-in, so the resulting kernel cannot mount the `/dev/vda` ext4 rootfs and never boots the
+direct-kernel guest. Begin from the image's config, then layer on the debug symbols below.
+
 A useful debug set to start from:
 
 ```

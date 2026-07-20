@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nudge effective_config upload on complete_build when it is absent
+
 - Surface data.liveness on runs.get for a wedged-after-ready guest
 - Cap artifacts.list, add latest_console ref, promote Observe step
 - Add system_id filter to jobs.list
@@ -207,6 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Point Task 3 at the tool-description test registry (#1336)
 - State deadline scope and non-constraint in tool docstrings
 - Presigned-PUT footgun guidance + ADR-0395 (#1338)
+- Point agents at images.kernel_config as starting config
 
 ### Fixed
 

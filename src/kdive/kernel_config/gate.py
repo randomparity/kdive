@@ -19,6 +19,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.artifacts.read_model import effective_config_key
 from kdive.kernel_config.fetch import load_effective_config
 from kdive.kernel_config.requirements import (
     CRASH_CAPTURE,
@@ -41,6 +42,13 @@ MISSING_BOOT_CONFIG_REASON = "kernel_missing_boot_config"
 _ROOTFS_REMEDIATION = (
     "rebuild the kernel with the missing CONFIG_* so the guest can mount its ext4 root filesystem "
     "and boot (see artifacts.feature_config_requirements)"
+)
+
+NO_EFFECTIVE_CONFIG_REASON = "no_effective_config_uploaded"
+_NO_EFFECTIVE_CONFIG_REMEDIATION = (
+    "upload the built kernel's effective_config alongside the build (artifacts.create_run_upload) "
+    "so runs.complete_build can check the boot-critical EXT4_FS/VIRTIO_BLK symbols the guest needs "
+    "to mount its root filesystem (see artifacts.feature_config_requirements)"
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
@@ -104,6 +112,28 @@ async def rootfs_mount_warning(conn: AsyncConnection, run_id: UUID) -> dict[str,
         "reason": MISSING_BOOT_CONFIG_REASON,
         "missing": missing,
         "remediation": _ROOTFS_REMEDIATION,
+    }
+
+
+async def missing_effective_config_nudge(
+    conn: AsyncConnection, run_id: UUID
+) -> dict[str, JsonValue] | None:
+    """Non-blocking ``no_effective_config_uploaded`` nudge for ``runs.complete_build`` (ADR-0398).
+
+    Returns ``{reason, remediation}`` when the Run has no ``effective_config`` artifact at all —
+    the case :func:`rootfs_mount_warning` fails open on, so the EXT4_FS/VIRTIO_BLK boot-config
+    advisory could never fire and the agent gets no signal it skipped the check. Returns ``None``
+    once a config is present (uploaded), whether or not it is readable or complete: the warning
+    path (present but missing symbols) and a plain success (present and complete) already cover
+    those. Keys on artifact *presence* — a present-but-unreadable config is treated as provided,
+    not absent. Advisory only: the completion always succeeds.
+    """
+    key = await effective_config_key(conn, run_id)
+    if key is not None:
+        return None
+    return {
+        "reason": NO_EFFECTIVE_CONFIG_REASON,
+        "remediation": _NO_EFFECTIVE_CONFIG_REMEDIATION,
     }
 
 
