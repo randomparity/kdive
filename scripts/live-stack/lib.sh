@@ -5,7 +5,9 @@
 
 # scripts/live-stack/ -> repo root is two levels up (matches the other scripts in this directory).
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-py="${repo_root}/.venv/bin/python"
+# KDIVE_PYTHON overrides the interpreter (the #1293 self-hosted CI job points it at /opt/kdive's
+# libguestfs venv); unset, it stays the workspace .venv so operator use is unchanged.
+py="${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 log_dir="${KDIVE_STACK_LOG_DIR:-${repo_root}/.live-stack-logs}"
 
 # Canonical backend compose services. NEVER the kdive:dev app tier (migrate/server/worker/

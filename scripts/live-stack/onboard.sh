@@ -28,6 +28,14 @@ repo_root="$(cd -- "${here}/../.." && pwd)"
 source "${here}/env.sh"
 cd "$repo_root"
 
+# KDIVE_PYTHON overrides the interpreter (the #1293 self-hosted CI job points it at /opt/kdive's
+# libguestfs venv); unset, fall back to `uv run python` (the operator dev-loop default).
+if [[ -n "${KDIVE_PYTHON:-}" ]]; then
+  py=("$KDIVE_PYTHON")
+else
+  py=(uv run python)
+fi
+
 PROJECT="${KDIVE_PROJECT:-demo}"
 ROLE="${KDIVE_ROLE:-admin}"
 TTL="${KDIVE_TOKEN_TTL}" # exported by env.sh (default 30d); see its comment
@@ -44,11 +52,11 @@ if ! "${repo_root}/scripts/check-local-libvirt.sh"; then
 fi
 
 banner "migrate (idempotent)"
-uv run python -m kdive migrate
+"${py[@]}" -m kdive migrate
 
 banner "seed (funding rows commit before resource discovery)"
 seed_rc=0
-if ! uv run python -m kdive seed-project \
+if ! "${py[@]}" -m kdive seed-project \
   --project "$PROJECT" \
   --limit-kcu "$LIMIT_KCU" \
   --max-concurrent-allocations "$MAX_ALLOC" \
@@ -57,7 +65,7 @@ if ! uv run python -m kdive seed-project \
 fi
 
 banner "verify (the hard funding gate)"
-uv run python -m kdive verify-project --project "$PROJECT"
+"${py[@]}" -m kdive verify-project --project "$PROJECT"
 
 if [[ "$seed_rc" -ne 0 ]]; then
   echo "WARN: seed-project exited non-zero but the funding rows verified — its resource-discovery" >&2
@@ -70,7 +78,7 @@ fi
 
 banner "token + contract"
 if token="$(
-  uv run python - "$PROJECT" "$TTL" "$ROLE" <<'PY'
+  "${py[@]}" - "$PROJECT" "$TTL" "$ROLE" <<'PY'
 import sys
 
 from kdive.cli.login import mint_local_token
