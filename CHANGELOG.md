@@ -179,6 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer the TCG wall-time measurement to the operator nightly
 - Reconcile spec/ADR/runbook with the review fixes
 - Correct stale 'tcg does not source env.sh' comments
+- Add ADR-0391 for the TCG image fail-loud fix
 
 ### Fixed
 
@@ -230,6 +231,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Boot both live_vm families under qemu:///session
 - Stage the hosted TCG image set into a runner-owned /mnt subdir
 - Correct the tcg_image default to a real catalog entry
+- Repair the TCG gate's schedule/push image fallback
 
 ### Build
 

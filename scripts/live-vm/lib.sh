@@ -170,6 +170,11 @@ produce_rootfs_and_kernel() {
   "$py" -m kdive build-fs --image "$image" --workspace "${dest}/.build" \
     --dest "${dest}/rootfs.qcow2" >/dev/null
   rm -rf -- "${dest}/.build"
+  # build-fs already dies loud (rc!=0, lists the valid names) on an unknown --image; this catches
+  # the OTHER miss — a build that exits 0 without producing the qcow2 — so it fails HERE with a
+  # clear message instead of deep at the virt-ls below (`rootfs.qcow2: No such file`).
+  [ -f "${dest}/rootfs.qcow2" ] ||
+    die "build-fs produced no rootfs at ${dest}/rootfs.qcow2 for image ${image}"
   # Choose the kernel deterministically: skip rescue kernels (which sort before the real one) and
   # take the highest version, so a /boot with more than one vmlinuz-* is not resolved by listing
   # order. `|| true` tolerates a no-match so the check below gives a clean message under set -e.
