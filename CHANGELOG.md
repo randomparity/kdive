@@ -198,6 +198,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix did-not-abort assertion for empty host_arch (review 4)
 - Coreutils-free fix-effect tests + guarded loop ln (review 5)
 - Regenerate config reference for new script env vars
+- Require five-part contract for agent-facing limits
 
 ### Fixed
 
