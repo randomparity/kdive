@@ -12,6 +12,7 @@ import pytest
 from kdive.domain.errors import CategorizedError
 from kdive.testing.live_vm import (
     LiveVmBootTimeout,
+    boot_preserved_gdbstub_domain,
     boot_throwaway_domain,
     prepare_session_runtime,
     throwaway_domain_xml,
@@ -202,6 +203,116 @@ def test_boot_session_mode_restores_xdg_even_on_body_error(
     ):
         raise RuntimeError("body boom")
     assert os.environ["XDG_CONFIG_HOME"] == "/original"
+
+
+class _FakeTransientDomain:
+    def __init__(self) -> None:
+        self.active = True  # createXML returns an already-running transient domain
+        self.destroyed = False
+
+    def isActive(self) -> bool:  # noqa: N802 - libvirt name
+        return self.active
+
+    def destroy(self) -> None:
+        self.destroyed = True
+        self.active = False
+
+
+class _FakeTransientConn:
+    def __init__(self) -> None:
+        self.domain = _FakeTransientDomain()
+        self.create_calls: list[str] = []
+        self.closed = False
+
+    def createXML(self, xml: str, _flags: int) -> _FakeTransientDomain:  # noqa: N802 - libvirt name
+        self.create_calls.append(xml)
+        return self.domain
+
+    def close(self) -> int:
+        self.closed = True
+        return 0
+
+
+_GDBSTUB_XML = "<domain type='kvm'><name>kdive-x</name></domain>"
+
+
+def test_preserved_boot_yields_and_tears_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeTransientConn()
+    console = tmp_path / "console.log"
+    console.write_text("Kernel panic - not syncing\n")  # already panicked → wait returns at once
+    with boot_preserved_gdbstub_domain(
+        _GDBSTUB_XML,
+        uri="qemu:///session",
+        console_log=console,
+        _connect=lambda _uri: conn,
+    ) as live:
+        assert live.name == "kdive-x"  # extracted from the caller's rendered XML
+        assert live.console_log == console
+        assert conn.create_calls == [_GDBSTUB_XML]  # booted the caller's XML verbatim
+    assert conn.domain.destroyed and conn.closed  # transient teardown ran
+
+
+def test_preserved_boot_timeout_raises_and_tears_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeTransientConn()
+    console = tmp_path / "console.log"
+    console.write_text("booting, no panic\n")
+    with (
+        pytest.raises(LiveVmBootTimeout),
+        boot_preserved_gdbstub_domain(
+            _GDBSTUB_XML,
+            uri="qemu:///session",
+            console_log=console,
+            wait_timeout_s=-1.0,  # already past the deadline → the panic-wait fails immediately
+            _connect=lambda _uri: conn,
+        ),
+    ):
+        pass
+    assert conn.domain.destroyed and conn.closed  # teardown still ran on the boot-timeout path
+
+
+def test_preserved_boot_session_mode_restores_xdg_even_on_body_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/original")
+    conn = _FakeTransientConn()
+    console = tmp_path / "console.log"
+    console.write_text("Kernel panic - not syncing\n")
+    with (
+        pytest.raises(RuntimeError),
+        boot_preserved_gdbstub_domain(
+            _GDBSTUB_XML,
+            uri="qemu:///session",
+            console_log=console,
+            _connect=lambda _uri: conn,
+        ),
+    ):
+        raise RuntimeError("body boom")
+    assert os.environ["XDG_CONFIG_HOME"] == "/original"  # #1323 redirect restored on teardown
+
+
+def test_preserved_boot_unnamed_xml_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "libvirt", _fake_libvirt_module())
+    conn = _FakeTransientConn()
+    console = tmp_path / "console.log"
+    console.write_text("Kernel panic - not syncing\n")
+    with boot_preserved_gdbstub_domain(
+        "<domain type='kvm'></domain>",  # no <name> → observability fallback, not a boot error
+        uri="qemu:///session",
+        console_log=console,
+        _connect=lambda _uri: conn,
+    ) as live:
+        assert live.name == "<unnamed>"
 
 
 def _root(xml: str) -> ET.Element:
