@@ -280,15 +280,21 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    **`qemu:///session`** (a per-invocation `KDIVE_LIVE_VM_*`-independent prefix) so
    the customize guest runs as the runner user, per the runbook's warm-store
    prerequisite (`qemu:///system` would hit the root-readback wall for the non-root
-   runner); the provisioned-family boot below keeps `qemu:///system`.
+   runner). The **provisioned-family boot below runs under the same
+   `qemu:///session`** for the identical reason: the non-root, no-sudo runner can
+   neither read `qemu:///system`'s root-owned console log (ADR-0223) nor launch a
+   root worker to sidestep it. Session mode is session-native for this provider
+   (SLIRP user-networking, no libvirt bridge) and is provisioned on the box (ansible
+   enables linger + `/run/user/<uid>`).
 5. **Stand up the provisioned-System family on the box** (ADR-0389, Decision 2) —
    `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs` brings up the compose
    backends (MinIO with the well-known `minioadmin` root, docker-compose.yml) + host
    processes on the runner (the box has libvirt from `libvirt_stack`).
    `KDIVE_WORKER_AS_ROOT=0` runs the worker **as the runner user** (already in the
-   `libvirt`/`kvm` groups from B's role), which both sidesteps `sudo`'s env-stripping
-   — so the inherited `KDIVE_PYTHON` + `PYTHONPATH` actually reach the worker — and
-   keeps the provisioning worker on the `qemu:///system` libvirt the family needs.
+   `libvirt`/`kvm` groups from B's role), which sidesteps `sudo`'s env-stripping —
+   so the inherited `KDIVE_PYTHON` + `PYTHONPATH` actually reach the worker — and,
+   with `KDIVE_LIBVIRT_URI=qemu:///session` exported before `up.sh`, keeps the
+   provisioned System's domain runner-owned so its console log is readable.
    The on-box MinIO **is** the
    object store, so `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are the
    `minioadmin` default `scripts/live-stack/env.sh` supplies — not a repo secret;

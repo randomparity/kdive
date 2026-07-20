@@ -148,16 +148,30 @@ jobs:
           set -euo pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
 
+          # Both live_vm families boot under qemu:///session (worker-owned QEMU), NOT qemu:///system.
+          # The runner service account is non-root AND has no sudo, so it can neither read
+          # qemu:///system's root-owned console log (ADR-0223 root-readback wall) nor launch a root
+          # worker to sidestep it — the same wall the warm-store build below already avoids. Session
+          # mode runs QEMU as the runner user (readable console) and is fully provisioned on the box
+          # (ansible enables linger + /run/user/<uid>); the provider's SLIRP user-networking needs no
+          # libvirt bridge, so it is session-native. Set before the reaper + up.sh so every actor —
+          # reaper, worker, mint, preflight, pytest — shares the one URI.
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+          export KDIVE_LIBVIRT_URI="qemu:///session"
+
           # Pre-job reaper: a run cancelled mid-boot (cancel-in-progress is false, but a crash or
           # timeout still leaves state) must not collide with this run's on-box stand-up. `virsh
           # destroy` only powers off a RUNNING domain; a crash leaves shut-off domain definitions and
           # multi-GB disks that `docker compose down -v` (which wipes the tracking DB) then orphans.
           # So destroy-then-undefine WITH storage removal, tolerant of already-absent/shut-off state.
-          # Assumes a SINGLE runner per libvirt host: the `^kdive-` match is host-wide, so a second
-          # concurrent runner would reap a peer's in-flight domains (documented in the runbook).
-          for dom in $(virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^kdive-'); do
-            virsh -c qemu:///system destroy "$dom" 2>/dev/null || true
-            virsh -c qemu:///system undefine --nvram --remove-all-storage "$dom" 2>/dev/null || true
+          # Sweep session (where this gate's domains live) AND system (legacy leftovers from before
+          # the session move). Assumes a SINGLE runner per libvirt host: the `^kdive-` match is
+          # host-wide, so a second concurrent runner would reap a peer's in-flight domains (runbook).
+          for uri in qemu:///session qemu:///system; do
+            for dom in $(virsh -c "$uri" list --all --name 2>/dev/null | grep -E '^kdive-'); do
+              virsh -c "$uri" destroy "$dom" 2>/dev/null || true
+              virsh -c "$uri" undefine --nvram --remove-all-storage "$dom" 2>/dev/null || true
+            done
           done
           docker compose down -v 2>/dev/null || true
           df -h /var/lib/libvirt 2>/dev/null | tail -1 || true # disk-free observability (leak check)
@@ -177,15 +191,16 @@ jobs:
           # export them here so the child mint-system.sh / preflight / pytest inherit the rootfs path.
           export KDIVE_LIVE_VM_ROOTFS KDIVE_LIVE_VM_BZIMAGE KDIVE_LIVE_VM_VMLINUX
 
-          # Provisioned family on the box: bring up the stack (worker non-root so sudo does not
-          # strip the inherited KDIVE_PYTHON/PYTHONPATH), then mint one System.
+          # Provisioned family on the box: bring up the stack, then mint one System. The worker runs
+          # non-root (KDIVE_WORKER_AS_ROOT=0, so up.sh takes no sudo path); it inherits the session
+          # URI exported above, so its provisioned domain and console log are runner-owned/readable.
           KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
-          # up.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* and export
-          # KDIVE_LIBVIRT_URI (which lives un-exported in live-stack/lib.sh, not env.sh) so the
-          # preflight AND the pytest subprocess see it.
+          # up.sh sources env.sh in its OWN process; source it here for KDIVE_S3_* + KDIVE_STACK_BASE_URL.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
-          export KDIVE_LIBVIRT_URI="${KDIVE_LIBVIRT_URI:-qemu:///system}"
+          # Re-assert the session URI: lib.sh defaults KDIVE_LIBVIRT_URI un-exported (to system), which
+          # sourcing env.sh does not carry into this shell for the mint/preflight/pytest that follow.
+          export KDIVE_LIBVIRT_URI="qemu:///session"
           KDIVE_LIVE_VM_SYSTEM_ID="$(scripts/live-vm/mint-system.sh)"
           export KDIVE_LIVE_VM_SYSTEM_ID
 

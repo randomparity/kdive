@@ -156,7 +156,14 @@ Harder / new obligations:
   D gives them a **backward-compatible `KDIVE_PYTHON` override** (default unchanged
   when unset) so the on-box stack runs under the libguestfs venv; the worker runs
   non-root (`KDIVE_WORKER_AS_ROOT=0`, the runner user in the `libvirt` group) to
-  keep `sudo` from stripping the inherited `KDIVE_PYTHON`/`PYTHONPATH`.
+  keep `sudo` from stripping the inherited `KDIVE_PYTHON`/`PYTHONPATH`. Both live_vm
+  families boot under **`qemu:///session`**, not `qemu:///system`: the non-root,
+  no-sudo runner can neither read `qemu:///system`'s root-owned console log
+  (ADR-0223) nor launch a root worker to sidestep it, so session mode — QEMU as the
+  runner user, session-native for the provider's SLIRP user-networking — is the only
+  readable path. Proven live on the self-hosted runner: `qemu:///system` fails a
+  console-reading provisioned test with a `configuration_error`, `qemu:///session`
+  passes it.
 - The hosted TCG job maps C's `KDIVE_LIVE_VM_ROOTFS` output onto the spine's
   `KDIVE_GUEST_IMAGE_PPC64LE` and supplies `KDIVE_KERNEL_SRC` from the
   fetch-kernel-tree fixture — an explicit job step, asserted by the preflight, so a

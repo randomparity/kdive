@@ -62,3 +62,19 @@ def test_native_block_exports_warm_store_wiring() -> None:
     exported = " ".join(ln for ln in run.splitlines() if ln.strip().startswith("export"))
     for var in ("KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_VMLINUX"):
         assert var in exported, f"{var} not exported in the native run block"
+
+
+def test_native_block_boots_provisioned_family_under_session() -> None:
+    # The non-root, no-sudo runner cannot read qemu:///system's root-owned console log (ADR-0223);
+    # the provisioned family must boot under qemu:///session (worker-owned QEMU) so console-reading
+    # tests pass. A regression to qemu:///system would silently re-break every such test.
+    steps = _load(_LIVE)["jobs"]["native"]["steps"]
+    run = next(s["run"] for s in steps if "run" in s)
+    # Scope to KDIVE_LIBVIRT_URI assignments: the reaper legitimately sweeps qemu:///system too
+    # (legacy leftovers), so a blanket qemu:///system search would false-positive on the reaper.
+    uri_assignments = [ln for ln in run.splitlines() if "KDIVE_LIBVIRT_URI=" in ln]
+    assert uri_assignments, "the native block must set KDIVE_LIBVIRT_URI"
+    assert all("qemu:///session" in ln for ln in uri_assignments), (
+        "the provisioned family must boot under qemu:///session, not qemu:///system "
+        "(the non-root, no-sudo runner cannot read a root-owned console log — ADR-0223)"
+    )

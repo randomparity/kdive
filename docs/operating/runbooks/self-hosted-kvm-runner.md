@@ -120,12 +120,21 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
 
 5. **One runner per libvirt host.** `live.yml`'s `native` job runs a pre-job
    reaper that destroys + `undefine --remove-all-storage`s **every** `kdive-*`
-   libvirt domain on the host (to reclaim orphans a crashed/timed-out run leaves,
-   since `docker compose down -v` wipes the DB that tracked them). That match is
-   host-wide, so **do not register a second self-hosted runner against the same
-   libvirt host** — a starting run would reap a peer run's in-flight domains. Scale
-   by giving each runner its own libvirt host (the ppc64le drop-in below is a
-   separate host).
+   libvirt domain on the host — across both `qemu:///session` (where this gate's
+   domains live) and `qemu:///system` (legacy leftovers) — to reclaim orphans a
+   crashed/timed-out run leaves, since `docker compose down -v` wipes the DB that
+   tracked them. That match is host-wide, so **do not register a second self-hosted
+   runner against the same libvirt host** — a starting run would reap a peer run's
+   in-flight domains. Scale by giving each runner its own libvirt host (the ppc64le
+   drop-in below is a separate host).
+
+6. **Both families boot under `qemu:///session`.** The `native` job exports
+   `KDIVE_LIBVIRT_URI=qemu:///session` (and `XDG_RUNTIME_DIR=/run/user/<uid>`) before
+   the reaper and the stack bring-up, so QEMU runs as the runner service account. The
+   runner is non-root and has no sudo, so it can neither read `qemu:///system`'s
+   root-owned console log (the root-readback wall, ADR-0223) nor launch a root worker
+   to sidestep it — session mode makes the console runner-readable. `runner.yml`
+   enables linger for the service account so `/run/user/<uid>` persists between jobs.
 
 ## ppc64le runner (drop-in)
 
