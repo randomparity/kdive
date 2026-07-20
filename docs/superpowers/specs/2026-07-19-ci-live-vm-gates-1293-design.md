@@ -202,11 +202,16 @@ Step order (each fails loud):
 Steps 5–8 (the `stage-tcg-images.sh` `eval`, the env mapping, the preflight, the
 run) execute as **one `run:` block** for the same reason Job 2 does: each Actions
 `run:` is a fresh shell, so the staged `KDIVE_LIVE_VM_*` exports and the mapped
-spine vars would be gone by the preflight if split across steps. `AWS_ACCESS_KEY_ID`
-/ `AWS_SECRET_ACCESS_KEY` are the compose MinIO's `minioadmin` and are exported
-explicitly by the block (the tcg job does not source `env.sh`); the `tcg` preflight
-requiring them catches a block that forgot to export the S3 creds the presigned
-upload needs — meaningful here, unlike the on-box `env.sh`-defaulted native path.
+spine vars would be gone by the preflight if split across steps. The canonical
+host-side stack env — `KDIVE_DATABASE_URL`, `KDIVE_OIDC_ISSUER`,
+`KDIVE_STACK_BASE_URL`, `KDIVE_S3_*`, and the `minioadmin` `AWS_*` — is obtained
+by **sourcing `scripts/live-stack/env.sh`** (DRY; duplicating the compose
+port/credential literals in the workflow would drift and re-declare secrets). The
+block then maps only the ppc64le-specific vars: `KDIVE_GUEST_IMAGE_PPC64LE` ←
+staged rootfs, `KDIVE_KERNEL_SRC` ← `fetch-kernel-tree.sh`. So the `tcg`
+preflight's real teeth are the ppc64le checks (`KDIVE_GUEST_IMAGE_PPC64LE` file +
+`qemu-system-ppc64` on PATH), not the `AWS_*` assertion (belt-and-suspenders,
+since `env.sh` defaults them).
 
 The store's shared-lock consume contract (C) does not apply here — the hosted set
 is single-tenant and ephemeral (its own `KDIVE_TCG_STAGE_DIR`, no concurrent
@@ -337,11 +342,14 @@ family names as args:
   would always satisfy).
 - `tcg` → require `KDIVE_STACK_BASE_URL`, `KDIVE_OIDC_ISSUER`, `KDIVE_DATABASE_URL`,
   `KDIVE_S3_ENDPOINT_URL`, `KDIVE_S3_BUCKET`, `AWS_ACCESS_KEY_ID`,
-  `AWS_SECRET_ACCESS_KEY` (here the check **has teeth** — the tcg job does not source
-  `env.sh`, so the run-block must export the presigned-upload creds explicitly; a
-  forgotten export fails loud), `KDIVE_GUEST_IMAGE_PPC64LE` (file exists),
-  `KDIVE_KERNEL_SRC` (path exists), and `qemu-system-ppc64` on PATH.
-  (`KDIVE_PPC64LE_BUNDLE` is **not** required — the opt-in fourth proof.)
+  `AWS_SECRET_ACCESS_KEY`, `KDIVE_GUEST_IMAGE_PPC64LE` (file exists),
+  `KDIVE_KERNEL_SRC` (path exists), and `qemu-system-ppc64` on PATH. The tcg job
+  sources `env.sh` (DRY, no drift), so the S3/`AWS_*` vars are its `minioadmin`
+  defaults — the preflight's real teeth for this family are the ppc64le-specific
+  `KDIVE_GUEST_IMAGE_PPC64LE` + `qemu-system-ppc64` checks (a missed image mapping
+  or absent emulator fails loud instead of a mid-suite skip); the stack/cred
+  asserts are belt-and-suspenders. (`KDIVE_PPC64LE_BUNDLE` is **not** required —
+  the opt-in fourth proof.)
 
 **Skip-vs-fail discipline** (mirrors A's contract): the preflight's job is to
 distinguish "the operator asked for family X but the runner is not set up for it"
