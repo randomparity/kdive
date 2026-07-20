@@ -57,56 +57,64 @@ async def main() -> int:
     token = os.environ["KDIVE_TOKEN"]
     project = os.environ.get("KDIVE_PROJECT", "demo")
     rootfs = os.environ["KDIVE_LIVE_VM_ROOTFS"]
-    client = LiveStackClient.over_http(base, token)
 
-    await _scalar(await client.call_tool("investigations.open", project=project, title="live-vm-mint"))
-    alloc = _scalar(
-        await client.call_tool(
-            "allocations.request",
-            project=project,
-            vcpus=2,
-            memory_gb=2,
-            disk_gb=10,
-            resource={"mode": "kind", "kind": "local-libvirt"},
+    # LiveStackClient is an async context manager (dev_harness); it must be entered before any
+    # call_tool, else fastmcp raises "Client is not connected".
+    async with LiveStackClient.over_http(base, token) as client:
+        await _scalar(
+            await client.call_tool("investigations.open", project=project, title="live-vm-mint")
         )
-    )
-    if alloc.status in {"error", "failed"}:
-        print(f"allocations.request {alloc.status}: {alloc.error_category}", file=sys.stderr)
-        return 1
-
-    profile = {
-        "schema_version": 1,
-        "arch": os.uname().machine,
-        "vcpu": 2,
-        "memory_mb": 2048,
-        "disk_gb": 10,
-        "boot_method": "direct-kernel",
-        "provider": {"local-libvirt": {"rootfs": {"kind": "local", "path": rootfs}}},
-    }
-    prov = _scalar(await client.call_tool("systems.provision", allocation_id=alloc.object_id, profile=profile))
-    if prov.status in {"error", "failed"}:
-        print(f"systems.provision {prov.status}: {prov.error_category}", file=sys.stderr)
-        return 1
-    system_id = prov.data.get("system_id")  # in data, NOT object_id (the provisioning job id)
-    if not system_id:
-        print("systems.provision returned no data.system_id", file=sys.stderr)
-        return 1
-
-    for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
-        env = _scalar(await client.call_tool("systems.get", system_id=system_id))
-        if env.status in {"error", "failed"}:
-            print(f"systems.get {env.status}: {env.error_category}", file=sys.stderr)
+        alloc = _scalar(
+            await client.call_tool(
+                "allocations.request",
+                project=project,
+                vcpus=2,
+                memory_gb=2,
+                disk_gb=10,
+                resource={"mode": "kind", "kind": "local-libvirt"},
+            )
+        )
+        if alloc.status in {"error", "failed"}:
+            print(f"allocations.request {alloc.status}: {alloc.error_category}", file=sys.stderr)
             return 1
-        state = env.data.get("status")
-        if state == "ready":
-            print(system_id)  # the sole stdout line
-            return 0
-        if state in {"failed", "error"}:
-            print(f"System {system_id} reached {state}", file=sys.stderr)
+
+        profile = {
+            "schema_version": 1,
+            "arch": os.uname().machine,
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 10,
+            "boot_method": "direct-kernel",
+            "provider": {"local-libvirt": {"rootfs": {"kind": "local", "path": rootfs}}},
+        }
+        prov = _scalar(
+            await client.call_tool(
+                "systems.provision", allocation_id=alloc.object_id, profile=profile
+            )
+        )
+        if prov.status in {"error", "failed"}:
+            print(f"systems.provision {prov.status}: {prov.error_category}", file=sys.stderr)
             return 1
-        await asyncio.sleep(5)
-    print(f"System {system_id} did not reach ready in time", file=sys.stderr)
-    return 1
+        system_id = prov.data.get("system_id")  # in data, NOT object_id (the provisioning job id)
+        if not system_id:
+            print("systems.provision returned no data.system_id", file=sys.stderr)
+            return 1
+
+        for _ in range(180):  # poll up to ~15 min (native KVM boot); the tcg deadline is generous
+            env = _scalar(await client.call_tool("systems.get", system_id=system_id))
+            if env.status in {"error", "failed"}:
+                print(f"systems.get {env.status}: {env.error_category}", file=sys.stderr)
+                return 1
+            state = env.data.get("status")
+            if state == "ready":
+                print(system_id)  # the sole stdout line
+                return 0
+            if state in {"failed", "error"}:
+                print(f"System {system_id} reached {state}", file=sys.stderr)
+                return 1
+            await asyncio.sleep(5)
+        print(f"System {system_id} did not reach ready in time", file=sys.stderr)
+        return 1
 
 
 raise SystemExit(asyncio.run(main()))
