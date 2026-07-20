@@ -1118,6 +1118,9 @@ def test_install_unwritable_staging_root_is_config_error(tmp_path: Path) -> None
 def test_live_vm_real_install_boot() -> None:  # pragma: no cover - live_vm
     import shutil
 
+    # The provisioned-family gate also requires KDIVE_S3_* (fails loud if incomplete). This
+    # boot/readiness test never touches the object store, but S3 is part of the provisioned-System
+    # family contract (#1133), so the widened precondition is intentional, not incidental.
     contract = require_live_vm_provisioned()
     if not shutil.which("virsh"):
         pytest.skip("virsh not on PATH; local install-boot needs a local libvirt install")
