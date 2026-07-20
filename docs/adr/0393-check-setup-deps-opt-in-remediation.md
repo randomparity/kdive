@@ -71,3 +71,8 @@ gate; this stays a setup-time convenience.
 - **`uv venv --system-site-packages` as the guestfs remedy.** Simpler but exposes the
   venv to every system package, weakening the pinned/reproducible dependency set;
   kept only as the documented alternative in the runbook.
+- **Arch `pacman -Sy <pkg>` (refresh db, install named only).** Rejected: on a
+  non-fresh host it leaves the "partial upgrade" state Arch declares unsupported (the
+  package may need newer libs than are on disk). `pacman -Syu` was also rejected — an
+  unattended dependency check must not upgrade the whole system. Arch therefore uses
+  plain `pacman -S` and, on a stale-db failure, tells the operator to run `pacman -Syu`.

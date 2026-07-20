@@ -55,14 +55,23 @@ omits the auto-confirm flag and would itself prompt on a piped stdin):
 |--------|---------------------------|-----------------|
 | debian | `apt-get update` | `apt-get install -y <pkgs>` (`apt-get`, not `apt`, for scripting) |
 | fedora | (dnf refreshes within cache validity) | `dnf install -y <pkgs>` |
-| arch | folded in via `-Sy` | `pacman -Sy --noconfirm <pkgs>` |
+| arch | none — see caveat | `pacman -S --noconfirm <pkgs>` |
 | opensuse | (zypper refreshes implicitly) | `zypper --non-interactive install <pkgs>` |
 | unknown | — | no auto-install — report the manual command and skip |
 
-The index refresh matters because the target is a **fresh host**: `apt-get install`
-fails with "Unable to locate package" against an empty `/var/lib/apt/lists`, and
-`pacman -S` (without `-y`) fails against an empty sync db. The refresh is guarded like
-the install (a refresh failure is reported, not fatal).
+The Debian index refresh matters because the target is a **fresh host**: `apt-get
+install` fails with "Unable to locate package" against an empty `/var/lib/apt/lists`.
+The refresh is guarded like the install (a refresh failure is reported, not fatal).
+
+**Arch does not auto-refresh** — deliberately. `pacman -Sy <pkg>` refreshes the sync db
+but installs only the named package without a full `-Su`, which can pull a package built
+against newer shared libraries than what is on disk — the "partial upgrade" state Arch
+declares unsupported, and this autofix must never break a working host. `pacman -Syu`
+(full upgrade) is the opposite surprise: an unattended dependency check should not upgrade
+the whole system. So Arch uses plain `pacman -S --noconfirm <pkgs>`; if it fails against
+a stale/empty db, the guarded handler reports "refresh and upgrade first: `pacman -Syu`"
+and skips, leaving the operator to run the system upgrade themselves. (See ADR-0393
+Considered & rejected.)
 
 **Escalation — scoped to the invocation mode.** When `EUID≠0` the install needs `sudo`,
 and the flavor depends on who is driving:
@@ -124,8 +133,10 @@ as the runbook §4b / Ansible role). No sudo.
 Re-verification re-runs the affected tier's probes after `hash -r` (bash caches
 command lookups, so a just-installed binary is otherwise not found — a false "still
 missing"). Re-run all three probe kinds a tier uses: PATH command (`command_exists`),
-`pkg-config --exists`, and the venv import. Exit `0` if the Required tier is now
-satisfied (today it exits `1` on missing Required deps); otherwise exit `1`.
+`pkg-config --exists`, and the venv import. After a fix, re-render the tier's status so
+an interactive operator sees the resolved state (a success confirmation, or the reduced
+remaining set) rather than the stale pre-fix "missing" report. Exit `0` if the Required
+tier is now satisfied (today it exits `1` on missing Required deps); otherwise exit `1`.
 
 ### Native arch visibility
 
