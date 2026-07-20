@@ -228,6 +228,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enter the LiveStackClient async context in mint-system
 - Stage warm rootfs into the provider root; read System state off env.status
 - Boot both live_vm families under qemu:///session
+- Stage the hosted TCG image set into a runner-owned /mnt subdir
+- Correct the tcg_image default to a real catalog entry
 
 ### Build
 
