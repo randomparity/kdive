@@ -8,8 +8,10 @@ import pytest
 
 from tests.live_vm import (
     LiveVmEnvState,
+    require_live_vm_bzimage,
     require_live_vm_provisioned,
     require_live_vm_throwaway,
+    resolve_bzimage_contract,
     resolve_provisioned_contract,
     resolve_throwaway_contract,
 )
@@ -69,6 +71,69 @@ def test_throwaway_available_honors_libvirt_uri_override(
     result = resolve_throwaway_contract("qemu:///system")
     assert result.contract is not None
     assert result.contract.libvirt_uri == "qemu:///session"
+
+
+def test_bzimage_absent_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_BZIMAGE", raising=False)
+    result = resolve_bzimage_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.ABSENT
+    assert "KDIVE_LIVE_VM_BZIMAGE" in result.reason
+
+
+def test_bzimage_misconfigured_when_not_a_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_BZIMAGE", "/nonexistent/bzImage")
+    result = resolve_bzimage_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+
+
+def test_bzimage_available_resolves_default_uri(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bzimage = tmp_path / "bzImage"
+    bzimage.write_bytes(b"kernel")
+    monkeypatch.setenv("KDIVE_LIVE_VM_BZIMAGE", str(bzimage))
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    result = resolve_bzimage_contract("qemu:///session")
+    assert result.state is LiveVmEnvState.AVAILABLE
+    assert result.contract is not None
+    assert result.contract.bzimage == bzimage
+    assert result.contract.libvirt_uri == "qemu:///session"
+
+
+def test_bzimage_available_honors_libvirt_uri_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bzimage = tmp_path / "bzImage"
+    bzimage.write_bytes(b"kernel")
+    monkeypatch.setenv("KDIVE_LIVE_VM_BZIMAGE", str(bzimage))
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", "qemu:///system")
+    result = resolve_bzimage_contract("qemu:///session")
+    assert result.contract is not None
+    assert result.contract.libvirt_uri == "qemu:///system"
+
+
+def test_bzimage_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_BZIMAGE", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        require_live_vm_bzimage()
+
+
+def test_bzimage_fails_loud_when_misconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_BZIMAGE", "/nonexistent/bzImage")
+    with pytest.raises(pytest.fail.Exception):
+        require_live_vm_bzimage()
+
+
+def test_bzimage_returns_contract_when_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bzimage = tmp_path / "bzImage"
+    bzimage.write_bytes(b"kernel")
+    monkeypatch.setenv("KDIVE_LIVE_VM_BZIMAGE", str(bzimage))
+    monkeypatch.delenv("KDIVE_LIBVIRT_URI", raising=False)
+    contract = require_live_vm_bzimage()
+    assert contract.libvirt_uri == "qemu:///session"
+    assert contract.bzimage == bzimage
 
 
 def test_provisioned_absent_when_system_id_unset(monkeypatch: pytest.MonkeyPatch) -> None:
