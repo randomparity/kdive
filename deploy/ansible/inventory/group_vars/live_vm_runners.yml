@@ -6,11 +6,16 @@ install_staging_dir: /var/lib/kdive/install
 # Persistent warm store for the native-KVM nightly's rootfs + kernel + matching debuginfo (#1292,
 # ADR-0388). Kept warm between runs; refreshed idempotently by scripts/live-vm/warm-store.sh.
 warm_store_dir: /var/lib/kdive/warm-store
+# Per-System qcow2 overlay dir the live-stack provisioner writes (KDIVE_ROOTFS_DIR default). The
+# self-hosted native gate's up.sh needs it; owned by the runner user so up.sh skips the sudo
+# elevation it would otherwise need (the runner service account may lack passwordless sudo, #1293).
+rootfs_overlay_dir: /var/lib/kdive/rootfs
 # The staging dirs live_vm_host creates, labels, and asserts — one source of truth for the loops.
 live_vm_staging_dirs:
   - "{{ live_vm_staging_dir }}"
   - "{{ install_staging_dir }}"
   - "{{ warm_store_dir }}"
+  - "{{ rootfs_overlay_dir }}"
 # Persistent repo checkout + venv the worker's guestfs/drgn import uses; D reuses via KDIVE_PYTHON.
 live_vm_venv: /opt/kdive
 live_vm_repo_url: https://github.com/randomparity/kdive.git
