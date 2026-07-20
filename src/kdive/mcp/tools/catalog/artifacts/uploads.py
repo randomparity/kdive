@@ -470,6 +470,12 @@ async def _create_upload(
     # server_time + presign_ttl, which clamps below the manifest deadline when
     # UPLOAD_TTL_SECONDS > 3600. The manifest deadline (collection) is the reaper's
     # reclaim window for the whole upload (#1336, ADR-0394).
+    #
+    # expires_at is rendered in the DB clock frame (server_time is the transaction's
+    # now(), which precedes the boto3 signing instant), while the object store enforces
+    # the URL on its own clock. Any DB-ahead-of-store skew or lock-wait between the two
+    # only understates expires_at, so the failure direction is a needless re-mint, never
+    # trusting a lapsed URL; manifest_deadline is the authoritative reaper-enforced wall.
     url_expires_at = _iso_utc(stamp.server_time + timedelta(seconds=_presign_ttl_seconds()))
     items = [
         _upload_response(upload, next_action=spec.next_action, expires_at=url_expires_at)

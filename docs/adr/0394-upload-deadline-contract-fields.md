@@ -69,6 +69,18 @@ are for objects over the 5 GiB size limit, not for time pressure.
 - A future deadline-bearing tool that wants the same clock will duplicate a few
   lines until the third case justifies promoting `server_time` to the envelope;
   that promotion is a later ADR, not this one.
+- **Precondition — per-URL `expires_at` spans two clocks.** `manifest_deadline`
+  is measured and enforced entirely on the Postgres clock (the reaper reads the
+  same `deadline`), so it is exact. `expires_at`, by contrast, is rendered on the
+  DB clock (`server_time + presign_ttl`) but enforced by the object store on
+  *its* clock — `PresignedUpload` carries no absolute expiry to report the real
+  signed window. This is sound only while the DB and object-store clocks are
+  roughly aligned (both NTP-synced), which kdive already assumes operationally.
+  The skew direction is safe: `server_time` is the transaction start, which
+  precedes the signing instant (and any same-owner advisory-lock wait), so
+  `expires_at` can only be *understated* — the worst case is a needless re-mint,
+  never a lapsed URL trusted as live. Treat `manifest_deadline`, not
+  `expires_at`, as the authoritative reaper-enforced wall.
 
 ## Considered & rejected
 

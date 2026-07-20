@@ -97,7 +97,10 @@ async def replace_manifest(
             (request.owner_kind, request.owner_id, request.prefix, Jsonb(payload), request.ttl),
         )
         row = await cur.fetchone()
-    assert row is not None  # a RETURNING upsert always yields exactly one row
+    if row is None:  # a RETURNING upsert always yields one row; fail loud if it ever does not
+        raise RuntimeError(
+            f"replace_manifest RETURNING yielded no row for {request.owner_kind} {request.owner_id}"
+        )
     return ManifestStamp(server_time=row[0], deadline=row[1])
 
 
