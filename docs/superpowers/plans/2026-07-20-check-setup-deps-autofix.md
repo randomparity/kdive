@@ -143,6 +143,12 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
          _stub(bindir, "sudo", "#!/bin/sh\n" + body)
      ```
      For the preflight-fails case, use `_sudo_stub(..., preflight_ok=False)` (whole stub exits 1).
+  3. `run_privileged` skips `sudo` entirely when `EUID==0`, so the sudo-log assertions cannot
+     hold under a root pytest (some CI containers). Guard those tests:
+     `skip_if_root = pytest.mark.skipif(os.geteuid() == 0, reason="sudo path only runs as non-root")`
+     and apply `@skip_if_root` to every test that asserts on the sudo log or the escalation
+     message (the `-y` install / preflight-fail / interactive tests). The install-effect and
+     report-only tests need no guard.
 
 - [ ] **Step 1: Write failing tests** — the report-only contract, `-y` install with refresh +
   non-interactive flags + `sudo -n`, sudo-preflight-fail skip, install-failure handling,
@@ -321,7 +327,11 @@ maybe_install_tier() { # tier distro  -> sets FIX_ATTEMPTED=1 when it runs anyth
   refresh="${plan%% ;; *}"; install="${plan#* ;; }"
   FIX_ATTEMPTED=1
   # Skip the ':' no-op refresh so sudo is never escalated for a no-op (fedora/arch/opensuse).
-  if [[ "${refresh}" != ":" ]] && ! run_privileged bash -c "${refresh}"; then return 0; fi
+  # A refresh failure is reported and NON-fatal — do not silently short-circuit (that would
+  # swallow the more informative install failure and leave the operator with no message).
+  if [[ "${refresh}" != ":" ]]; then
+    run_privileged bash -c "${refresh}" || printf "  package index refresh failed; attempting install anyway\n" >&2
+  fi
   if ! run_privileged bash -c "${install}"; then
     printf "  package set failed to install: %s\n" "${pkgs[*]}" >&2
   fi
@@ -345,7 +355,10 @@ probe_all() {
 }
 ```
 
-**Final control flow (bottom of script), shown explicitly so `report_tier` runs once per phase:**
+**Final control flow (bottom of script) — Task 2 version.** This commit keeps the existing
+#1328 guestfs report block inside `probe_all` (Task 3 replaces it with `probe_guestfs`), and
+does **not** yet call the Task-3 functions, so the Task-2 commit builds and passes on its own
+(the repo's per-commit bisectability guardrail):
 
 ```bash
 FIX_ATTEMPTED=0
@@ -353,8 +366,6 @@ probe_all
 report_tier "Required dependencies" required "${distro}";           maybe_install_tier required "${distro}"
 report_tier "Recommended dependencies (full local CI)" recommended "${distro}"; maybe_install_tier recommended "${distro}"
 report_tier "Future dependencies (live_vm / kernel build)" future "${distro}";   maybe_install_tier future "${distro}"
-probe_guestfs                         # re-probe so a just-installed python3-guestfs flips absent->unlinked
-maybe_link_guestfs "${distro}"        # Task 3, separate prompt; sets FIX_ATTEMPTED on a successful link
 if ((FIX_ATTEMPTED)); then
   hash -r          # drop bash's cached command lookups so just-installed binaries are found
   probe_all        # rebuild accumulators from post-fix state
@@ -366,6 +377,14 @@ fi
 print_cross_arch_advisory "${host_arch}" "${distro}"
 # terminal summary block (manual_hints / required trailer / "present" line) renders from the
 # now-current accumulators — unchanged code, but it now reflects post-fix state.
+```
+
+**Task 3 then inserts two lines** between the Future `maybe_install_tier` and the
+`if ((FIX_ATTEMPTED))` block:
+
+```bash
+  probe_guestfs                  # re-probe so a just-installed python3-guestfs flips absent->unlinked
+  maybe_link_guestfs "${distro}" # separate prompt; sets FIX_ATTEMPTED on a successful link
 ```
 
 When no fix ran (report-only path: non-TTY + no `-y`), `FIX_ATTEMPTED` stays 0, the
