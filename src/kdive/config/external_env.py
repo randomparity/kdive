@@ -295,7 +295,8 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "KDIVE_KVM_NODE",
         "script",
         "/dev/kvm",
-        "KVM device node `check-local-libvirt.sh` probes for hardware virtualization.",
+        "KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware "
+        "virtualization (the latter for its native-arch advisory line).",
     ),
     ExternalEnvVar(
         "KDIVE_BOOT_DIR",
@@ -334,6 +335,20 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "script",
         "/etc/os-release",
         "os-release file `check-setup-deps.sh` reads to detect the host distro.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_GUESTFS_SYS_SITE",
+        "script",
+        "/usr/lib/python3/dist-packages",
+        "System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when "
+        "deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_SYSTEM_PY_MINOR",
+        "script",
+        "$(python3 --version)",
+        "System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the "
+        "libguestfs ABI check before symlinking the binding (ADR-0393).",
     ),
     ExternalEnvVar(
         "KDIVE_KERNEL_REPO",
