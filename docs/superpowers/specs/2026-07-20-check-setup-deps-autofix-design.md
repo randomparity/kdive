@@ -109,12 +109,22 @@ required deps and decline live-only ones.
 
 ### Fix 2 — guestfs venv link (separate prompt, after Fix 1)
 
-The guestfs future-tier probe tests `"${PY}" -c "import guestfs"`. The symlink source
-files exist only once `python3-guestfs` is installed, so this fix is evaluated **after**
-the Future-tier package install (re-probe), and offered only when the binding is present
-system-wide but still not importable in the venv. On accept it does the ABI-checked
-symlink of `guestfs.py` + `libguestfsmod*.so` into the venv site-packages (same operation
-as the runbook §4b / Ansible role). No sudo.
+The guestfs entry is **three-state**, not two — venv-importability alone conflates two
+independent facts, so the report/rebuild must key on both the **package presence** (does
+`guestfs.py` exist under the system binding dir?) and the **venv import**:
+
+| package present system-wide | venv imports guestfs | remedy shown |
+|---|---|---|
+| no | — | install the distro package (`note_package`) |
+| yes | no | the **symlink** action / (on ABI mismatch) the fail-loud version message — **never** an install hint for an already-installed package |
+| yes | yes | none |
+
+Only the second row offers Fix 2. The symlink source files exist only once
+`python3-guestfs` is installed, so Fix 2 is evaluated **after** the Future-tier package
+install (re-probe). On accept it does the ABI-checked symlink of `guestfs.py` +
+`libguestfsmod*.so` into the venv site-packages (same operation as the runbook §4b /
+Ansible role). No sudo. A Future re-probe runs **after** the symlink too, so a successful
+link clears both the package entry and the symlink hint.
 
 - **Source discovery:** locate the binding at `/usr/lib/python3/dist-packages` (Debian
   dpkg path), falling back to the owning interpreter's `purelib` (Fedora) — the exact
@@ -139,10 +149,13 @@ as the runbook §4b / Ansible role). No sudo.
 
 Re-verification re-runs the affected tier's probes after `hash -r` (bash caches
 command lookups, so a just-installed binary is otherwise not found — a false "still
-missing"). Re-run all three probe kinds a tier uses: PATH command (`command_exists`),
-`pkg-config --exists`, and the venv import. **Re-verification rebuilds the accumulator
-arrays** (`*_commands`, `*_packages`, `manual_hints`) from the post-fix probe results —
-not just a separate status flag — so the **entire** terminal summary renders from the
+missing"). Re-run all the probe kinds a tier uses: PATH command (`command_exists`), `pkg-config
+--exists`, the venv import, and — for guestfs — the package-presence test (per the
+three-state table above, so an installed-but-unlinked or ABI-mismatched binding is
+rebuilt as the symlink/version remedy, never as a "missing package" install hint). The
+guestfs re-probe runs after the Fix 2 symlink, not only after Fix 1. **Re-verification
+rebuilds the accumulator arrays** (`*_commands`, `*_packages`, `manual_hints`) from the
+post-fix probe results — not just a separate status flag — so the **entire** terminal summary renders from the
 current state: the per-tier report, the `manual_hints` "Tooling not provided by your
 distribution" block, the "Install the required dependencies … then rerun: just setup"
 trailer, and the "Setup dependencies are present." line. Otherwise a just-fixed host
@@ -200,6 +213,9 @@ Stub tests verify **command invocation and output wording**, not a real host boo
   glob-miss → skip with message; venv absent → skip.
 - **venv identity:** when `${PY}` is a non-venv (system) interpreter, assert Fix 2 takes
   the skip path and creates **no** symlink (never pollutes system site-packages).
+- **installed-but-unlinked guestfs:** `-y`, package-install stub succeeds, symlink fails
+  (ABI mismatch) → assert the terminal summary contains **no** "install python3-libguestfs"
+  package hint and surfaces the symlink/ABI remedy instead (three-state keying).
 - **trailer consistency:** after a `-y` fix that satisfies Required, assert the output
   contains **no** "Install the required dependencies … rerun: just setup" trailer and
   exits `0` (accumulators rebuilt from post-fix state).
