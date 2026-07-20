@@ -2,6 +2,7 @@
 
 Date: 2026-07-20
 Status: approved (brainstorm), pending implementation
+ADR: [0393](../../adr/0393-check-setup-deps-opt-in-remediation.md)
 
 ## Problem
 
