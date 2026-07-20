@@ -38,7 +38,8 @@ from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.testing.live_vm import wait_for_panic
+from kdive.testing.live_vm import boot_preserved_gdbstub_domain
+from tests.live_vm import require_live_vm_bzimage
 from tests.mcp.debug.test_debug_live_attach import _render_panicking_domain
 from tests.mcp.debug.test_debug_tools import (
     _PROFILE_POLICY,
@@ -78,17 +79,16 @@ class _FixedDebugRuntimeResolver:
 def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    bzimage = _required_file("KDIVE_LIVE_VM_BZIMAGE", "early-panicking kernel image")
+    contract = require_live_vm_bzimage()
     vmlinux = _required_file("KDIVE_LIVE_VM_GDBMI_VMLINUX", "matching vmlinux")
     if shutil.which("gdb") is None:
         pytest.skip("gdb unavailable")
     try:
-        import libvirt  # noqa: PLC0415  # operator-provided
+        import libvirt  # noqa: F401, PLC0415  # operator-provided; presence gates the live boot
     except ImportError:
         pytest.skip("libvirt-python unavailable")
 
-    uri = os.environ.get("KDIVE_LIBVIRT_URI", "qemu:///session")
-    monkeypatch.setenv("KDIVE_LIBVIRT_URI", uri)
+    monkeypatch.setenv("KDIVE_LIBVIRT_URI", contract.libvirt_uri)
     disk = tmp_path / "garbage.qcow2"
     console = tmp_path / "console.log"
     console.write_text("")
@@ -96,7 +96,7 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
         ["qemu-img", "create", "-f", "qcow2", str(disk), "1G"], check=True, capture_output=True
     )
 
-    final_xml = _render_panicking_domain(bzimage=str(bzimage), disk=disk, console=console)
+    final_xml = _render_panicking_domain(bzimage=str(contract.bzimage), disk=disk, console=console)
     module_fixture = _optional_module_fixture()
     engine = GdbMiEngine(module_debuginfo_resolver=_module_resolver(module_fixture))
     runtime = DebugEngineRuntime(
@@ -106,17 +106,8 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
     )
     runtime_resolver = _FixedDebugRuntimeResolver(runtime)
 
-    conn = libvirt.open(uri)
-    dom = None
-    try:
-        dom = conn.createXML(final_xml, 0)
-        assert wait_for_panic(console, 30.0), "no early-boot panic"
+    with boot_preserved_gdbstub_domain(final_xml, uri=contract.libvirt_uri, console_log=console):
         asyncio.run(_drive_gdbmi_smoke(migrated_url, runtime_resolver, module_fixture, monkeypatch))
-    finally:
-        if dom is not None:
-            with contextlib.suppress(libvirt.libvirtError):
-                dom.destroy()
-        conn.close()
 
 
 async def _drive_gdbmi_smoke(

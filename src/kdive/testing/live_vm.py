@@ -161,6 +161,33 @@ class _ThrowawayConn(Protocol):
     def close(self) -> object: ...
 
 
+class _TransientDomain(_ActiveDomain, Protocol):
+    """The libvirt ``virDomain`` slice a transient (``createXML``) boot drives (no libvirt stubs).
+
+    A transient domain vanishes on ``destroy`` — there is no persistent definition to
+    ``undefineFlags``, so this is a narrower slice than ``_ThrowawayDomain``.
+    """
+
+    def destroy(self) -> object: ...
+
+
+class _TransientConn(Protocol):
+    """The ``virConnect`` slice ``boot_preserved_gdbstub_domain`` drives: transient boot + close."""
+
+    def createXML(  # noqa: N802 - libvirt binding name
+        self, xml: str, flags: int, /
+    ) -> _TransientDomain: ...
+    def close(self) -> object: ...
+
+
+class _LibvirtConn(_ThrowawayConn, _TransientConn, Protocol):
+    """The full ``virConnect`` slice: ``defineXML`` (throwaway) + ``createXML`` (transient) + close.
+
+    ``connect_libvirt`` returns this so its result satisfies both the ``boot_throwaway_domain``
+    (``_ThrowawayConn``) and the ``boot_preserved_gdbstub_domain`` (``_TransientConn``) seams.
+    """
+
+
 def _poll_until(
     predicate: Callable[[], bool], deadline_s: float, *, sleep: Callable[[float], None]
 ) -> bool:
@@ -308,10 +335,10 @@ def prepare_session_runtime(uri: str) -> _SessionRuntime | None:
     return _SessionRuntime(prior=prior, short_dir=short_dir)
 
 
-def connect_libvirt(uri: str) -> _ThrowawayConn:  # pragma: no cover - live_vm
+def connect_libvirt(uri: str) -> _LibvirtConn:  # pragma: no cover - live_vm
     """Open a libvirt connection. Call ``prepare_session_runtime`` first for a session URI.
 
-    ``virConnect`` structurally satisfies the narrow ``_ThrowawayConn`` protocol.
+    ``virConnect`` structurally satisfies the ``_LibvirtConn`` protocol (both boot seams).
     """
     import libvirt  # noqa: PLC0415  # operator-provided
 
@@ -470,5 +497,80 @@ def boot_throwaway_domain(
         if created_overlay:  # only remove the overlay this call created — never a pre-existing file
             with contextlib.suppress(OSError):
                 dest.unlink(missing_ok=True)
+        if runtime is not None:
+            runtime.restore()
+
+
+def _domain_name_from_xml(xml: str) -> str:
+    """The domain ``<name>`` text from rendered XML (for the yielded ``LiveDomain`` + error text).
+
+    The caller's ``render_domain_xml`` always emits ``<name>``; an absent/empty one falls back to
+    ``"<unnamed>"`` rather than raising — the name is observability, not a boot precondition.
+    """
+    root = ET.fromstring(xml)  # noqa: S314 - caller-rendered kdive domain XML, trusted
+    name_el = root.find("name")
+    if name_el is None or not name_el.text:
+        return "<unnamed>"
+    return name_el.text
+
+
+@contextmanager
+def boot_preserved_gdbstub_domain(
+    xml: str,
+    *,
+    uri: str,
+    console_log: Path,
+    wait_timeout_s: float = 30.0,
+    _connect: Callable[[str], _TransientConn] = connect_libvirt,
+) -> Iterator[LiveDomain]:
+    """Boot a transient gdbstub+preserve domain from caller-rendered production XML (ADR-0392).
+
+    The gdbstub/preserve-on-crash debug tests (#747, #1255) render kdive's own
+    ``render_domain_xml(..., gdb_port=, debug={gdbstub, preserve_on_crash})`` — pvpanic +
+    ``<on_crash>preserve</on_crash>`` + ``-gdb`` passthrough, **their** subject under test — and add
+    the direct-kernel ``<os>`` + serial-log sink the install step would add. This harness owns only
+    the environment boilerplate around that finished XML: it never renders or duplicates the debug
+    XML (no second builder), so the caller keeps proving the production rendering.
+
+    It boots the domain **transiently** (``createXML``): the caller bakes an empty scratch disk into
+    the XML to force an early VFS panic, so there is no overlay to stage (unlike
+    ``boot_throwaway_domain``) and a transient domain needs no ``undefineFlags`` on teardown. The
+    session-mode ``XDG_CONFIG_HOME`` redirect (``prepare_session_runtime``) is applied here so a raw
+    ``createXML`` boot no longer overflows the 108-byte QMP-socket limit under ``qemu:///session``
+    (#1323). Waits for the console panic marker, yields the live domain, and guarantees teardown.
+
+    ``console_log`` must be the same serial-log path baked into ``xml`` so the panic-wait reads the
+    right file. Raises ``LiveVmBootTimeout`` if the guest does not panic before the deadline.
+    """
+    name = _domain_name_from_xml(xml)
+    runtime = prepare_session_runtime(uri)
+    conn: _TransientConn | None = None
+    domain: _TransientDomain | None = None
+    try:
+        conn = _connect(uri)
+        domain = conn.createXML(xml, 0)
+        if not wait_for_panic(console_log, wait_timeout_s):
+            raise LiveVmBootTimeout(
+                f"transient gdbstub domain {name!r} (uri {uri}) did not panic on console in "
+                f"{wait_timeout_s}s"
+            )
+        yield LiveDomain(
+            name=name,
+            domain=domain,
+            conn=conn,
+            uri=uri,
+            ssh_port=None,
+            console_log=console_log,
+        )
+    finally:
+        if domain is not None:
+            import libvirt  # noqa: PLC0415  # operator-provided; only reached once a domain exists
+
+            with contextlib.suppress(libvirt.libvirtError):
+                if domain.isActive():
+                    domain.destroy()
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
         if runtime is not None:
             runtime.restore()
