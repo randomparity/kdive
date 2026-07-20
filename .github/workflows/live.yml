@@ -14,11 +14,19 @@ on:
         required: false
         default: "fedora-ppc64le"
       debuginfod_urls:
-        description: "DEBUGINFOD_URLS: a server indexing the distro's ppc64le kernel debuginfo"
+        description: "DEBUGINFOD_URLS: a server indexing the distro kernel debuginfo (both jobs)"
         required: false
         default: "https://debuginfod.fedoraproject.org/"
       ppc64le_bundle:
         description: "Optional: directory with the #1146 kernel bundle (opt-in fourth proof)"
+        required: false
+        default: ""
+      warm_nvr:
+        description: "native: KDIVE_WARM_STORE_TARGET_NVR — the pinned kernel NVR to warm"
+        required: false
+        default: ""
+      warm_image:
+        description: "native: KDIVE_WARM_STORE_IMAGE — the catalog rootfs image to build from"
         required: false
         default: ""
   push:
@@ -127,6 +135,15 @@ jobs:
         # tested sources via PYTHONPATH — never mutate /opt/kdive, never uv sync in the workspace.
         env:
           KDIVE_PYTHON: /opt/kdive/.venv/bin/python
+          # warm-store.sh's pins have no defaults (they are deployment-specific): a workflow_dispatch
+          # override, else the operator-set repo variables. Read via env (not interpolated into run:)
+          # to avoid injection. A scheduled run with the repo vars unset fails loud at warm-store.
+          WARM_NVR_INPUT: ${{ github.event.inputs.warm_nvr }}
+          WARM_IMAGE_INPUT: ${{ github.event.inputs.warm_image }}
+          DEBUGINFOD_INPUT: ${{ github.event.inputs.debuginfod_urls }}
+          WARM_NVR_VAR: ${{ vars.KDIVE_WARM_STORE_TARGET_NVR }}
+          WARM_IMAGE_VAR: ${{ vars.KDIVE_WARM_STORE_IMAGE }}
+          DEBUGINFOD_VAR: ${{ vars.KDIVE_DEBUGINFOD_URLS }}
         run: |
           set -euo pipefail
           export PYTHONPATH="${GITHUB_WORKSPACE}/src"
@@ -145,9 +162,16 @@ jobs:
           docker compose down -v 2>/dev/null || true
           df -h /var/lib/libvirt 2>/dev/null | tail -1 || true # disk-free observability (leak check)
 
-          # Throwaway family rootfs from the warm store. Capture-then-eval so a warm-store failure
-          # fails HERE with its own die message (set -e does not catch `eval "$(cmd)"` directly).
-          warm_wiring="$(scripts/live-vm/warm-store.sh)"
+          # Throwaway family rootfs from the warm store. Its pins come from a dispatch override
+          # else the operator-set repo vars; unset -> warm-store.sh dies loud (deployment-specific,
+          # no sane default). A rebuild boots build-fs under qemu:///session so the customize guest
+          # runs as the runner user (the runbook's warm-store prerequisite — qemu:///system would hit
+          # the root-readback wall for the non-root runner). Capture-then-eval so a failure fails
+          # HERE with its own die message (set -e does not catch `eval "$(cmd)"` directly).
+          export KDIVE_WARM_STORE_TARGET_NVR="${WARM_NVR_INPUT:-${WARM_NVR_VAR}}"
+          export KDIVE_WARM_STORE_IMAGE="${WARM_IMAGE_INPUT:-${WARM_IMAGE_VAR}}"
+          export DEBUGINFOD_URLS="${DEBUGINFOD_INPUT:-${DEBUGINFOD_VAR}}"
+          warm_wiring="$(KDIVE_LIBVIRT_URI=qemu:///session scripts/live-vm/warm-store.sh)"
           eval "$warm_wiring"
 
           # Provisioned family on the box: bring up the stack (worker non-root so sudo does not

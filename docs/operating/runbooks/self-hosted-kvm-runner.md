@@ -96,6 +96,18 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    minted, and the ADR-0089 worker secrets boundary catches an external-S3
    credential that does not resolve.
 
+   **Warm-store pins (required for the scheduled `native` gate).** `warm-store.sh`
+   has no defaults for the kernel/image pins (they are deployment-specific), so set
+   these as repository **variables** (Settings → Actions → Variables — not secrets;
+   they are not sensitive), which the scheduled `native` job reads:
+   - `KDIVE_WARM_STORE_TARGET_NVR` — the pinned guest-kernel NVR to keep warm,
+   - `KDIVE_WARM_STORE_IMAGE` — the catalog rootfs image to build from,
+   - `KDIVE_DEBUGINFOD_URLS` — a server indexing that kernel's debuginfo.
+
+   Unset, a scheduled run **fails loud** at the warm-store step (not a green skip).
+   A `workflow_dispatch` run may override them via the `warm_nvr` / `warm_image` /
+   `debuginfod_urls` inputs.
+
 4. **Enable the runner** once the posture is in place:
 
    ```sh

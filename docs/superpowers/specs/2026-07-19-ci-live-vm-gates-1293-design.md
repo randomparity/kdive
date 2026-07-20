@@ -270,9 +270,17 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    "nothing to clean". The `^kdive-` match is host-wide, so this assumes **one
    runner per libvirt host** (a second concurrent runner would reap a peer's
    in-flight domains — noted in the runbook).
-4. **Refresh the warm store** — `eval "$(scripts/live-vm/warm-store.sh)"`, exporting
+4. **Refresh the warm store** — `warm-store.sh` (capture-then-eval), exporting
    `KDIVE_LIVE_VM_ROOTFS` / `KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` from
-   the committed `current/` set (the throwaway family's rootfs).
+   the committed `current/` set (the throwaway family's rootfs). Its pins
+   (`KDIVE_WARM_STORE_TARGET_NVR`, `KDIVE_WARM_STORE_IMAGE`, `DEBUGINFOD_URLS`)
+   have **no defaults** (deployment-specific), so they come from a
+   `workflow_dispatch` override else operator-set **repo variables** — unset, the
+   step fails loud (never a green skip). A rebuild boots build-fs under
+   **`qemu:///session`** (a per-invocation `KDIVE_LIVE_VM_*`-independent prefix) so
+   the customize guest runs as the runner user, per the runbook's warm-store
+   prerequisite (`qemu:///system` would hit the root-readback wall for the non-root
+   runner); the provisioned-family boot below keeps `qemu:///system`.
 5. **Stand up the provisioned-System family on the box** (ADR-0389, Decision 2) —
    `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs` brings up the compose
    backends (MinIO with the well-known `minioadmin` root, docker-compose.yml) + host
