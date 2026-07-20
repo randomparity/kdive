@@ -182,6 +182,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Arm kdump at provision for a warm-own-kernel System (ADR-0390)
 - Scope git-cliff to SemVer tags, drop unused GitHub fetch
 - Point cost_class estimate hint at resources.describe
 - Remove stale runs.create git-source prose from agent surface
