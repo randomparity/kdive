@@ -13,7 +13,6 @@ import contextlib
 import os
 import shutil
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -39,6 +38,7 @@ from kdive.providers.ports.debug import GdbMiAttachment
 from kdive.providers.shared.debug_common.gdbmi.core.engine import GdbMiEngine
 from kdive.providers.shared.debug_common.gdbmi.policy.debuginfo import ModuleDebuginfo
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.testing.live_vm import wait_for_panic
 from tests.mcp.debug.test_debug_live_attach import _render_panicking_domain
 from tests.mcp.debug.test_debug_tools import (
     _PROFILE_POLICY,
@@ -74,6 +74,7 @@ class _FixedDebugRuntimeResolver:
 
 
 @pytest.mark.live_vm
+@pytest.mark.live_vm_throwaway
 def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -109,7 +110,7 @@ def test_live_vm_gdbmi_promoted_ops_smoke(  # pragma: no cover - live_vm
     dom = None
     try:
         dom = conn.createXML(final_xml, 0)
-        assert _await_panic(console, deadline_s=30.0), "no early-boot panic"
+        assert wait_for_panic(console, 30.0), "no early-boot panic"
         asyncio.run(_drive_gdbmi_smoke(migrated_url, runtime_resolver, module_fixture, monkeypatch))
     finally:
         if dom is not None:
@@ -303,12 +304,3 @@ def _required_file(name: str, description: str) -> Path:
     if not path.is_file():
         pytest.skip(f"{name} ({description}) is not a file")
     return path
-
-
-def _await_panic(console: Path, *, deadline_s: float) -> bool:
-    deadline = time.monotonic() + deadline_s
-    while time.monotonic() < deadline:
-        if "Kernel panic" in console.read_text(errors="replace"):
-            return True
-        time.sleep(0.5)
-    return False

@@ -17,7 +17,6 @@ import contextlib
 import copy
 import os
 import subprocess
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.connect import LocalLibvirtConnect
 from kdive.providers.local_libvirt.lifecycle.xml import render_domain_xml
 from kdive.security.secrets.secret_registry import SecretRegistry
+from kdive.testing.live_vm import wait_for_panic
 from tests.mcp.debug.test_debug_tools import (
     _PROFILE,
     _PROFILE_POLICY,
@@ -44,6 +44,7 @@ from tests.mcp.systems_support import provider_resolver
 
 
 @pytest.mark.live_vm
+@pytest.mark.live_vm_throwaway
 def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: no cover
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -95,12 +96,7 @@ def test_live_vm_start_session_attaches_to_halted_early_boot_crash(  # pragma: n
     dom = None
     try:
         dom = conn.createXML(final_xml, 0)
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if "Kernel panic" in console.read_text(errors="replace"):
-                break
-            time.sleep(0.5)
-        assert "Kernel panic" in console.read_text(errors="replace"), "no early-boot panic"
+        assert wait_for_panic(console, 30.0), "no early-boot panic"
         resp = asyncio.run(_drive())
         assert resp.status == "live", f"start_session did not attach: {resp.status} {resp.data}"
     finally:
