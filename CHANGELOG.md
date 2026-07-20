@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Nudge effective_config upload on complete_build when it is absent
-
 - Surface data.liveness on runs.get for a wedged-after-ready guest
 - Cap artifacts.list, add latest_console ref, promote Observe step
 - Add system_id filter to jobs.list
@@ -71,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in package install (-y/interactive, sudo, per tier)
 - Replace_manifest returns a (server_time, deadline) stamp
 - State the full deadline contract on upload responses
-- Surface presigned-PUT footguns on the upload response (#1338)
+- Nudge effective_config upload when complete_build lacks it
 
 ### Changed
 
@@ -208,12 +206,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implementation plan for upload deadline contract (#1336)
 - Point Task 3 at the tool-description test registry (#1336)
 - State deadline scope and non-constraint in tool docstrings
-- Presigned-PUT footgun guidance + ADR-0395 (#1338)
 - Point agents at images.kernel_config as starting config
 
 ### Fixed
 
-- Name a checksum-bypass upload distinctly from a mismatch (#1338)
 - Scope git-cliff to SemVer tags, drop unused GitHub fetch
 - Point cost_class estimate hint at resources.describe
 - Remove stale runs.create git-source prose from agent surface
