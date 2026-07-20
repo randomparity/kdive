@@ -6,7 +6,7 @@ import asyncio
 import copy
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -298,6 +298,106 @@ def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: 
             assert {e.name for e in manifest.entries} == {"kernel", "vmlinux"}
 
     asyncio.run(_run())
+
+
+def _iso(value: Any) -> datetime:
+    assert isinstance(value, str)
+    assert value.endswith("+00:00")  # F1: ISO-8601 UTC, not the DB session offset
+    return datetime.fromisoformat(value)
+
+
+def test_create_run_upload_states_full_deadline_contract(migrated_url: str) -> None:
+    # #1336 / ADR-0394: the success response carries the five-part deadline contract —
+    # a server_time reference clock, an absolute per-URL expires_at, the reaper-enforced
+    # manifest_deadline (not the presign TTL), and an on_expiry re-mint recovery hint.
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
+                store=_FakeStore(),
+            )
+
+    responses = asyncio.run(_run())
+    coll = responses.data
+    server_time = _iso(coll["server_time"])
+    manifest_deadline = _iso(coll["manifest_deadline"])
+    # The surfaced deadline is the reaper's manifest window (UPLOAD_TTL), not the presign TTL.
+    assert manifest_deadline - server_time == artifact_uploads._upload_ttl()
+    # Recovery hint names the re-mint tool and states re-mint resets the deadline.
+    assert coll["on_expiry"] == {
+        "tool": "artifacts.create_run_upload",
+        "effect": "re-mint replaces the manifest and resets the deadline",
+    }
+    # Per item: an absolute "begin the PUT by" wall = server_time + presign_ttl, which at
+    # the default UPLOAD_TTL (86400) is earlier than the manifest deadline (F2).
+    item = responses.items[0]
+    expires_at = _iso(item.data["expires_at"])
+    assert item.data["expires_in"] == artifact_uploads._presign_ttl_seconds()
+    assert expires_at - server_time == timedelta(seconds=artifact_uploads._presign_ttl_seconds())
+    assert expires_at < manifest_deadline
+
+
+def test_create_system_upload_names_its_own_remint_tool(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            return await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
+                resolver=provider_resolver(),
+                store=_FakeStore(),
+            )
+
+    responses = asyncio.run(_run())
+    assert responses.data["on_expiry"] == {
+        "tool": "artifacts.create_system_upload",
+        "effect": "re-mint replaces the manifest and resets the deadline",
+    }
+    _iso(responses.data["server_time"])
+    _iso(responses.data["manifest_deadline"])
+    _iso(responses.items[0].data["expires_at"])
+
+
+def test_chunked_upload_one_expires_at_per_part_one_collection_deadline(migrated_url: str) -> None:
+    _5gib = 5 * 1024 * 1024 * 1024
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            return await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[
+                    {
+                        "name": "vmlinux",
+                        "sha256": "whole",
+                        "size_bytes": _5gib + 100,
+                        "chunks": [
+                            {"sha256": "c0", "size_bytes": _5gib},
+                            {"sha256": "c1", "size_bytes": 100},
+                        ],
+                    },
+                ],
+                store=_FakeStore(),
+            )
+
+    responses = asyncio.run(_run())
+    # AC4: one expires_at per part item, one collection-level clock/deadline/recovery.
+    assert len(responses.items) == 2
+    part_expiries = [_iso(item.data["expires_at"]) for item in responses.items]
+    assert part_expiries[0] == part_expiries[1]  # all parts share the one presign window
+    assert "server_time" in responses.data
+    assert "manifest_deadline" in responses.data
+    on_expiry = responses.data["on_expiry"]
+    assert isinstance(on_expiry, dict)
+    assert on_expiry["tool"] == "artifacts.create_run_upload"
 
 
 def test_create_run_upload_writes_audit_row(migrated_url: str) -> None:
