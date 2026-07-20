@@ -68,6 +68,56 @@ def test_all_healthy_exits_zero(tmp_path: Path) -> None:
     assert "ready" in result.stderr.lower()
 
 
+def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:
+    """With KDIVE_PYTHON unset, the guestfs/drgn probe autodetects the repo .venv even under a
+    relative invocation (`bash scripts/check-local-libvirt.sh` from the repo root, #1328).
+
+    The planted repo venv can import guestfs+drgn; system python3 on PATH cannot. A relative
+    invocation must still resolve the venv ($PWD-anchored), so the probe reports OK, not fail.
+    """
+    assert BASH is not None
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPT, scripts / "check-local-libvirt.sh")
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _stub_python(venv_bin, "python", imports_ok=True)  # the repo venv can import guestfs, drgn
+    bindir = repo / "bin"
+    bindir.mkdir()
+    _stub(bindir, "virsh", 'case "$*" in *net-info*) echo "Active: yes";; esac\nexit 0')
+    _stub(bindir, "id", "echo kvm libvirt")
+    _stub(bindir, "qemu-system-x86_64", "exit 0")
+    _stub(bindir, "qemu-img", "exit 0")
+    _stub_python(bindir, "python3", imports_ok=False)  # system python3 lacks the bindings
+    kvm = repo / "kvm"
+    kvm.write_text("")
+    staging = repo / "install-staging"
+    staging.mkdir()
+    boot = repo / "boot"
+    boot.mkdir()
+    (boot / "vmlinuz-test").write_text("")
+
+    result = subprocess.run(
+        [BASH, "scripts/check-local-libvirt.sh"],  # relative path; KDIVE_PYTHON unset
+        cwd=str(repo),
+        env={
+            "PATH": str(bindir),
+            "HOME": str(tmp_path),
+            "KDIVE_KVM_NODE": str(kvm),
+            "KDIVE_INSTALL_STAGING": str(staging),
+            "KDIVE_BOOT_DIR": str(boot),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # The venv (not the failing system python3) satisfied the guestfs+drgn probe: OK, exit 0.
+    assert result.returncode == 0, result.stderr
+    assert "imports guestfs and drgn" in result.stderr
+
+
 def test_unwritable_install_staging_fails_with_hint(tmp_path: Path) -> None:
     """A missing/unwritable install-staging dir fails with an actionable fix (boot-blocking)."""
     bindir = tmp_path / "bin"

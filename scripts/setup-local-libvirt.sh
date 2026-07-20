@@ -19,9 +19,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "${SCRIPT_DIR}")"
 
-# kdive/fastmcp live in the project venv, not the system python3. Override with
-# KDIVE_PYTHON (e.g. /opt/kdive/.venv/bin/python) on a host-services deployment.
-readonly PY="${KDIVE_PYTHON:-python3}"
+# kdive/fastmcp live in the project venv, not the system python3. Prefer the repo's .venv when
+# present (in-repo dev loop needs no env var), honor a KDIVE_PYTHON override (host-services
+# deployment, e.g. /opt/kdive/.venv/bin/python), and fall back to system python3 (#1328).
+_repo_venv_py="${REPO_ROOT}/.venv/bin/python"
+if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
+  readonly PY="${_repo_venv_py}"
+else
+  readonly PY="${KDIVE_PYTHON:-python3}"
+fi
+unset _repo_venv_py
 readonly PROJECT="${KDIVE_PROJECT:-demo}"
 readonly LIMIT_KCU="${KDIVE_LIMIT_KCU:-1000000}"
 readonly MAX_ALLOC="${KDIVE_MAX_ALLOC:-4}"

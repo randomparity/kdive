@@ -47,6 +47,10 @@ def _healthy_remote(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "KDIVE_GUEST_HELPERS_DIR": str(helpers),
         "KDIVE_TOKEN": "T",
         "KDIVE_MCP_BASE": "http://127.0.0.1:8000/mcp",
+        # Pin KDIVE_PYTHON at the stub: the script now prefers the repo `.venv/bin/python`
+        # (present on dev checkouts and on CI once `uv sync` runs) over the PATH `python3`,
+        # and that real venv interpreter would run the onboarding helper for real (#1328).
+        "KDIVE_PYTHON": str(bindir / "python3"),
     }
     return env, calllog
 
@@ -79,6 +83,47 @@ def test_emits_argv_the_helper_accepts(tmp_path: Path) -> None:
     assert ns.limit_kcu == "1000000"
     assert ns.max_alloc == 4
     assert ns.max_sys == 4
+
+
+def test_autodetects_repo_venv_over_system_python3(tmp_path: Path) -> None:
+    """With KDIVE_PYTHON unset, onboarding runs under the repo .venv, not system python3 (#1328).
+
+    Runs a copy of the script from a temp repo carrying a fake .venv/bin/python sibling, with a
+    distinct system python3 on PATH. Only the venv interpreter must run the onboarding helper.
+    """
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPT, scripts / "setup-remote-libvirt.sh")
+    _stub(scripts, "check-remote-libvirt.sh", "exit 0")  # preflight passes; not under test here
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_log = tmp_path / "venv.log"
+    _stub(venv_bin, "python", f'echo "$@" >> "{venv_log}"\nexit 0')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    system_log = tmp_path / "system.log"
+    _stub(bindir, "python3", f'echo "$@" >> "{system_log}"\nexit 0')
+
+    assert BASH is not None
+    result = subprocess.run(
+        # HOST arg required; KDIVE_TOKEN set so demo-token.sh is skipped; KDIVE_PYTHON unset.
+        [BASH, str(scripts / "setup-remote-libvirt.sh"), "target.example", "root"],
+        env={
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "KDIVE_TOKEN": "T",
+            "KDIVE_MCP_BASE": "http://127.0.0.1:8000/mcp",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert venv_log.exists(), "onboarding did not run under the repo .venv interpreter"
+    assert "kdive_set_accounting" in venv_log.read_text()
+    assert not system_log.exists(), "onboarding fell back to system python3 despite a present .venv"
 
 
 def test_missing_host_arg_fails(tmp_path: Path) -> None:

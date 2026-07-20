@@ -130,6 +130,41 @@ def test_audited_path_requires_token(tmp_path: Path) -> None:
     assert not calllog.exists()
 
 
+def test_autodetects_repo_venv_over_system_python3(tmp_path: Path) -> None:
+    """With KDIVE_PYTHON unset, onboarding runs under the repo .venv, not system python3 (#1328).
+
+    Runs a copy of the script from a temp repo carrying a fake .venv/bin/python sibling, with a
+    distinct system python3 on PATH. Only the venv interpreter must run the onboarding.
+    """
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy(SCRIPT, scripts / "setup-local-libvirt.sh")
+    _stub(scripts, "check-local-libvirt.sh", "exit 0")  # preflight passes; not under test here
+    venv_bin = repo / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_log = tmp_path / "venv.log"
+    _stub(venv_bin, "python", f'echo "$@" >> "{venv_log}"\nexit 0')
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    system_log = tmp_path / "system.log"
+    _stub(bindir, "python3", f'echo "$@" >> "{system_log}"\nexit 0')
+
+    assert BASH is not None
+    result = subprocess.run(
+        [BASH, str(scripts / "setup-local-libvirt.sh")],  # KDIVE_PYTHON intentionally unset
+        env={"PATH": f"{bindir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert venv_log.exists(), "onboarding did not run under the repo .venv interpreter"
+    assert "-m kdive seed-project" in venv_log.read_text()
+    assert not system_log.exists(), "onboarding fell back to system python3 despite a present .venv"
+
+
 def test_preflight_failure_aborts(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()

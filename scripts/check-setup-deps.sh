@@ -6,6 +6,29 @@ set -euo pipefail
 
 readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 
+# The worker imports the libguestfs binding from the project venv, not system python3, so the
+# future-tier binding probe must ask the same interpreter the worker uses (else a binding present
+# system-wide but absent from the venv reports a false green, #1328). Mirror check-local-libvirt.sh:
+# prefer the .venv sibling of this script when present (in-repo dev loop), honor a KDIVE_PYTHON
+# override (host-services deployment), and fall back to system python3 before the venv exists.
+#
+# Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
+# stubbed PATH with no coreutils. BASH_SOURCE[0] is often relative (`bash scripts/check-setup-deps.sh`
+# from the repo root gives a single-slash path), so anchor it to $PWD first (a builtin, unlike
+# dirname) to stay CWD-independent; without this the two strips below yield `scripts/.venv/...`,
+# which misses the venv and silently falls back to system python3. `${var%/*}` strips one trailing
+# component; two applications (script filename, then the scripts/ dir) give the repo root.
+_repo_venv_py="${BASH_SOURCE[0]}"
+[[ "${_repo_venv_py}" == /* ]] || _repo_venv_py="${PWD}/${_repo_venv_py}"
+_repo_venv_py="${_repo_venv_py%/*}"
+_repo_venv_py="${_repo_venv_py%/*}/.venv/bin/python"
+if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
+  readonly PY="${_repo_venv_py}"
+else
+  readonly PY="${KDIVE_PYTHON:-python3}"
+fi
+unset _repo_venv_py
+
 # Per-tier accumulators: *_commands feed the human-readable summary line,
 # *_packages feed the distro install hint. manual_hints holds install commands
 # for tooling that distros do not package (uv, prek, just).
@@ -144,15 +167,6 @@ require_tool() {
 require_header() {
   local tier="$1" label="$2" module="$3" distro="$4"
   command_exists pkg-config && pkg-config --exists "${module}" 2>/dev/null && return
-  note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
-}
-
-# A distro-packaged Python binding is not pip-installable, so verify presence by asking the
-# system python3 to import it. Falls back to a note_package hint under the given tier if the
-# import fails (module missing OR python3 absent).
-require_pyimport() {
-  local tier="$1" label="$2" module="$3" distro="$4"
-  command_exists python3 && python3 -c "import ${module}" 2>/dev/null && return
   note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
 }
 
@@ -304,7 +318,16 @@ require_header future libelf-headers libelf "${distro}"
 # open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
 require_header future libdw-headers libdw "${distro}"
 require_header future libkdumpfile-headers libkdumpfile "${distro}"
-require_pyimport future python3-guestfs guestfs "${distro}"
+# guestfs is the one future-tier binding whose remedy is more than an apt install: it is a
+# distro-packaged binding (not pip-installable) that the worker imports from the project venv, and
+# a uv-created .venv has no system-site-packages, so even with python3-guestfs installed the venv
+# interpreter cannot import it until guestfs.py + libguestfsmod*.so are symlinked in. Probe the venv
+# interpreter (${PY}); on failure name BOTH steps (mirrors check-local-libvirt.sh / the runbook) so
+# the hint is not a dead end that sends the operator to an already-satisfied install.
+if ! { command_exists "${PY}" && "${PY}" -c "import guestfs" 2>/dev/null; }; then
+  note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")"
+  manual_hints+=("python3-guestfs: after installing the package, symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b")
+fi
 
 # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
 # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
