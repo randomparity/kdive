@@ -25,15 +25,22 @@ Replace the "never installs, never escalates" invariant with **opt-in remediatio
   (default No), or `-y`/`--yes` for scripted use. **When stdin is not a TTY and `-y`
   is absent, the script does not prompt and does not fix — behavior identical to
   today.** This non-interactive default preserves every existing caller (CI, tests).
-- An accepted package install runs a **non-interactive** install command (`apt-get
-  install -y` / `dnf install -y` / `pacman -S --noconfirm` / `zypper --non-interactive
-  install`) — not the human-facing hint, which would itself prompt. When `EUID≠0` it
-  prefixes `sudo -n` (never blocks on a password). If `sudo` is absent or `sudo -n`
-  fails (no NOPASSWD / `requiretty`), it emits an actionable message and skips rather
-  than hanging; so a `-y` provisioning caller is expected to run as root or with
-  passwordless sudo. Each install is guarded so a failure does not abort the run under
-  `set -euo pipefail`; the Required tier's exit code reflects the post-fix state.
-  Escalation is confined to this accepted-install path.
+- An accepted package install runs a **non-interactive** install command with an index
+  refresh on fresh hosts (`apt-get update && apt-get install -y` / `dnf install -y` /
+  `pacman -Sy --noconfirm` / `zypper --non-interactive install`) — not the human-facing
+  hint, which would itself prompt. Escalation is scoped to the mode: an **interactive**
+  accept uses plain `sudo` (a password prompt is desired when a human just consented),
+  while `-y`/non-TTY uses `sudo -n` and never blocks. A credential pre-flight (`sudo -v`
+  interactive / `sudo -n true` non-interactive) runs first, so an escalation failure
+  (skip with "run as root or passwordless sudo") is reported distinctly from a package
+  failure. A `-y` provisioning caller is expected to run as root or with passwordless
+  sudo. Each step is guarded so a failure does not abort the run under `set -euo
+  pipefail`; the Required tier's exit code reflects the post-fix state. Escalation is
+  confined to this accepted-install path.
+- Only distro-package tiers and the guestfs symlink are auto-fixable. Manual-hint
+  tooling (`uv`/rustup/`just`/`prek`, installed via `curl … | sh` or `uv tool install`)
+  is never auto-run, even under `-y` — an unprompted piped-shell installer is a
+  supply-chain surprise this opt-in design rejects; those remain report-only.
 - The guestfs venv symlink is offered as a **separate** prompt; it needs no sudo, is
   ABI-checked (system and venv Python minor versions must match — fail loud, never a
   broken link), and is skipped when the venv does not yet exist.

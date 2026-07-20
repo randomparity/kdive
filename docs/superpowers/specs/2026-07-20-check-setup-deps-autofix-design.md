@@ -51,26 +51,49 @@ Each tier already accumulates its install package list. On accept, run a
 **non-interactive** install command — **not** the human-facing hint verbatim (which
 omits the auto-confirm flag and would itself prompt on a piped stdin):
 
-| distro | install command |
-|--------|-----------------|
-| debian | `apt-get install -y <pkgs>` (`apt-get`, not `apt`, for scripting) |
-| fedora | `dnf install -y <pkgs>` |
-| arch | `pacman -S --noconfirm <pkgs>` |
-| opensuse | `zypper --non-interactive install <pkgs>` |
-| unknown | no auto-install — report the manual command and skip |
+| distro | index refresh (fresh host) | install command |
+|--------|---------------------------|-----------------|
+| debian | `apt-get update` | `apt-get install -y <pkgs>` (`apt-get`, not `apt`, for scripting) |
+| fedora | (dnf refreshes within cache validity) | `dnf install -y <pkgs>` |
+| arch | folded in via `-Sy` | `pacman -Sy --noconfirm <pkgs>` |
+| opensuse | (zypper refreshes implicitly) | `zypper --non-interactive install <pkgs>` |
+| unknown | — | no auto-install — report the manual command and skip |
 
-**Escalation:** when `EUID≠0`, prefix `sudo -n` (non-interactive — never block on a
-password prompt). If `sudo` is absent, or `sudo -n` fails (no cached creds / NOPASSWD /
-`requiretty`), do **not** hang: emit an actionable message ("re-run as root or with
-passwordless sudo to install: `<cmd>`") and skip that tier's fix. A `-y` provisioning
-caller is therefore expected to run as root or with NOPASSWD sudo — stated in the
-script header and the ADR.
+The index refresh matters because the target is a **fresh host**: `apt-get install`
+fails with "Unable to locate package" against an empty `/var/lib/apt/lists`, and
+`pacman -S` (without `-y`) fails against an empty sync db. The refresh is guarded like
+the install (a refresh failure is reported, not fatal).
 
-**Failure handling under `set -euo pipefail`:** guard every install (`if ! <cmd>;
-then report+continue; fi`) so a failed install (package absent on this distro/version,
+**Escalation — scoped to the invocation mode.** When `EUID≠0` the install needs `sudo`,
+and the flavor depends on who is driving:
+
+- **Interactive TTY accept** → **plain `sudo`** (a password prompt is the *desired*
+  behavior when a human just typed `y`). A `sudo -v` credential pre-flight runs first so
+  an auth failure is distinguishable from a package failure (see below).
+- **`-y` / non-TTY** → `sudo -n` (never block). A `sudo -n true` pre-flight decides
+  up front: on failure (no NOPASSWD / `requiretty`), emit "re-run as root or with
+  passwordless sudo to install: `<cmd>`" and skip — never hang. A `-y` provisioning
+  caller is thus expected to run as root or with passwordless sudo (stated in the header
+  and ADR). If `sudo` is absent entirely, same skip message.
+
+**Routable failure messages.** The credential pre-flight (`sudo -v` interactive /
+`sudo -n true` non-interactive) separates the two failure causes the spec must report
+distinctly: a pre-flight failure → the "escalation" message and skip; only on pre-flight
+success is the install run, and its non-zero exit → the "package set `<pkgs>` failed to
+install" message.
+
+**Failure handling under `set -euo pipefail`:** guard every refresh/install (`if !
+<cmd>; then report+continue; fi`) so a failure (package absent on this distro/version,
 network, disk) does not abort the whole script. Report which package set failed,
 continue to remaining tiers and the advisory, and preserve a non-zero exit when the
 Required tier is still unsatisfied at the end.
+
+**Only distro-package tiers and the guestfs symlink are auto-fixable.** Manual-hint
+tooling — `uv` (`curl … | sh`), `rustc/cargo` (rustup), `just`/`prek` (`uv tool
+install`) — is **never** auto-installed, even under `-y`: running a piped-shell
+installer unprompted is a supply-chain surprise the ADR's opt-in framing rejects. These
+stay report-only, so the Required tier's exit code may remain non-zero when such a tool
+(e.g. `uv`) is still missing.
 
 Separate accept per tier (Required / Recommended / Future) so an operator can install
 required deps and decline live-only ones.
@@ -133,9 +156,17 @@ Stub tests verify **command invocation and output wording**, not a real host boo
 - **non-TTY default:** with no `-y` and no TTY, assert **no** install/symlink/sudo ran —
   the report-only contract every existing test and CI run depends on.
 - **`-y` package install:** `apt-get`/`dnf`/`sudo`/python stubs → assert the executed
-  command carries the non-interactive flag (`-y`/`--noconfirm`/`--non-interactive`) and
-  `sudo -n` when non-root; a sudo-that-fails stub → assert the actionable skip message,
-  no hang.
+  command carries the index refresh (`apt-get update` / `pacman -Sy`) and the
+  non-interactive flag (`-y`/`--noconfirm`/`--non-interactive`), and `sudo -n` when
+  non-root; a `sudo -n true` pre-flight that fails → assert the actionable skip message,
+  no hang, and no install attempted.
+- **interactive install:** simulated TTY accept, non-root → assert **plain** `sudo`
+  (not `sudo -n`) is used, so a password-sudo developer is not refused.
+- **routable failures:** sudo pre-flight fail → escalation message; pre-flight ok but
+  install stub exits non-zero → "package set failed" message (distinct paths).
+- **manual-hint safety:** under `-y`, assert `uv`/rustup/`just`/`prek` piped-shell
+  installers are **not** executed (report-only), and Required stays non-zero when `uv`
+  is missing.
 - **install failure:** an install stub exiting non-zero → assert the script does not
   abort, reports the failed set, and exits non-zero when Required stays unsatisfied.
 - **re-verify:** a binary stub that appears only after the install stub runs → assert
