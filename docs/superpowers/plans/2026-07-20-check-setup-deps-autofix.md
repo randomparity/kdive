@@ -197,6 +197,26 @@ def test_manual_hint_tools_not_auto_installed_under_yes(tmp_path):
     assert not log.exists()  # uv/rustup/just/prek curl|sh never executed
 ```
 
+Re-verify test (materialize a missing binary so the post-install re-probe finds it):
+
+```python
+def test_reverify_after_install_exits_zero(tmp_path):
+    """A required item missing at start, created by the install stub, is found on re-probe → exit 0."""
+    b = tmp_path / "bin"; b.mkdir()
+    _stub(b, "uv", "#!/bin/sh\nexit 0\n")           # required manual-hint tool present
+    _sudo_stub(b, tmp_path / "sudo.log")
+    # pkg-config is MISSING initially (so Required is unsatisfied); the install "creates" it,
+    # and the new pkg-config exits 0 so the header probes pass too.
+    _stub(b, "apt-get",
+          f'printf "#!/bin/sh\\nexit 0\\n" > "{b}/pkg-config"; chmod 0755 "{b}/pkg-config"; exit 0')
+    r = _run("debian", str(b), tmp_path, args=["-y"])
+    assert r.returncode == 0, r.stderr            # Required satisfied after the fix + re-probe
+    assert "re-checking after fixes" in r.stderr
+    # the re-check section shows no Required 'missing' line
+    recheck = r.stderr.split("re-checking after fixes")[1]
+    assert "Required dependencies missing" not in recheck
+```
+
 Interactive (pty) test:
 
 ```python
@@ -333,7 +353,8 @@ probe_all
 report_tier "Required dependencies" required "${distro}";           maybe_install_tier required "${distro}"
 report_tier "Recommended dependencies (full local CI)" recommended "${distro}"; maybe_install_tier recommended "${distro}"
 report_tier "Future dependencies (live_vm / kernel build)" future "${distro}";   maybe_install_tier future "${distro}"
-maybe_link_guestfs "${distro}"        # Task 3, separate prompt, after the Future install
+probe_guestfs                         # re-probe so a just-installed python3-guestfs flips absent->unlinked
+maybe_link_guestfs "${distro}"        # Task 3, separate prompt; sets FIX_ATTEMPTED on a successful link
 if ((FIX_ATTEMPTED)); then
   hash -r          # drop bash's cached command lookups so just-installed binaries are found
   probe_all        # rebuild accumulators from post-fix state
@@ -442,12 +463,63 @@ def test_abi_mismatch_fails_loud_no_symlink(tmp_path):
 def test_link_is_idempotent(tmp_path):
     # pre-create a correct link, run -y again => no abort, still linked
     ...  # ln -sf / skip-if-correct; assert returncode 0 and link present
+
+def test_fresh_host_installs_then_links_in_one_run(tmp_path):
+    """Package ABSENT at start; -y installs it, then the same run links it (re-probe closes the gap)."""
+    site = tmp_path / "venv-site"; site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=False)   # binding absent initially
+    b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
+    # the install stub materializes guestfs.py + the .so into sys_site (as a real install would)
+    _stub(b, "apt-get",
+          f'touch "{sys_site}/guestfs.py" "{sys_site}/libguestfsmod.cpython-314.so"; exit 0')
+    r = _run("debian", str(b), tmp_path, args=["-y"],
+             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+                        "KDIVE_SYSTEM_PY_MINOR": "3.14"})
+    assert (site / "guestfs.py").is_symlink()       # linked in the SAME run
+
+def test_symlink_only_fix_clears_the_hint(tmp_path):
+    """Binding present+unlinked, all else present: a -y link clears the 'symlink' hint in the re-check."""
+    site = tmp_path / "venv-site"; site.mkdir()
+    venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
+    sys_site = _sys_site(tmp_path, present=True)
+    b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
+    r = _run("debian", str(b), tmp_path, args=["-y"],
+             extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
+                        "KDIVE_SYSTEM_PY_MINOR": "3.14"})
+    assert (site / "guestfs.py").is_symlink()
+    # after the link, the re-check must not still tell the operator to symlink (FIX_ATTEMPTED set)
+    recheck = r.stderr.split("re-checking after fixes")[1]
+    assert "symlink" not in recheck
 ```
 
-> `_venv_python_stub` writes a `#!/bin/sh` that answers the script's probes: the venv-identity
-> check (`sys.prefix != base_prefix` → exit 0), the site path (`sysconfig.get_path purelib` →
-> echo `${site}`), and the minor version (`echo 3.14`). Introduce `KDIVE_GUESTFS_SYS_SITE` and
-> `KDIVE_SYSTEM_PY_MINOR` test overrides mirroring `KDIVE_KVM_NODE` (documented as test seams).
+> `_venv_python_stub` writes a `#!/bin/sh` that **dispatches on its `-c` argument** and gives
+> **four** distinct answers (matching every probe the script makes on `${PY}`):
+> 1. `import guestfs` → **exit 0 iff `${site}/guestfs.py` exists, else exit 1** — this models
+>    reality: the venv can import guestfs only once the binding is linked in, so
+>    `probe_guestfs` reads `unlinked` before the link and flips to `ok` on the post-link re-probe
+>    (which is what clears the hint);
+> 2. `sys.prefix`/`base_prefix` venv-identity → **exit 0** (it IS a venv);
+> 3. `sysconfig`/`purelib` → **echo `${site}`** (the venv site-packages dir);
+> 4. `version_info` → **echo the minor** (e.g. `3.14`).
+>
+> ```python
+> def _venv_python_stub(tmp_path, *, site, minor, is_venv=True):
+>     ident = "exit 0" if is_venv else "exit 1"
+>     body = (
+>         'case "$*" in\n'
+>         f'  *"import guestfs"*) [ -e "{site}/guestfs.py" ] && exit 0 || exit 1 ;;\n'  # 1: linked?
+>         f'  *base_prefix*) {ident} ;;\n'                    # 2: venv identity
+>         f'  *purelib*) echo "{site}" ;;\n'                  # 3: site path
+>         f'  *version_info*) echo "{minor}" ;;\n'           # 4: minor version
+>         '  *) exit 0 ;;\nesac\n'
+>     )
+>     p = tmp_path / "venv-python"; p.write_text("#!/bin/sh\n" + body)
+>     p.chmod(0o755); return p
+> ```
+> Introduce `KDIVE_GUESTFS_SYS_SITE` and `KDIVE_SYSTEM_PY_MINOR` test overrides mirroring
+> `KDIVE_KVM_NODE` (documented as test seams in the script header). The `test_guestfs_skips_when_
+> py_is_not_a_venv` case uses `is_venv=False` (identity probe exits 1 → skip path).
 
 - [ ] **Step 2: Run to verify FAIL** (`-k guestfs or abi or link or unlinked`).
 
@@ -489,11 +561,16 @@ maybe_link_guestfs() { # distro
   fi
   ln -sf "${sys_site}/guestfs.py" "${site}/" 2>/dev/null || true
   local so; for so in "${sys_site}"/libguestfsmod*.so; do [[ -e "${so}" ]] && ln -sf "${so}" "${site}/"; done
+  FIX_ATTEMPTED=1   # so the re-check re-runs probe_all/probe_guestfs and clears the symlink hint
 }
 ```
 
-Call `probe_guestfs` inside `probe_all` (so the re-probe after the symlink refreshes
-`GUESTFS_STATE`), and `maybe_link_guestfs "${distro}"` after the Future-tier install.
+`probe_guestfs` is part of `probe_all` (so the startup probe and the post-fix re-check both
+set `GUESTFS_STATE`), **and** is called once more explicitly between the Future-tier install
+and `maybe_link_guestfs` in the control flow (so an install-then-link in one run sees the
+just-installed binding as `unlinked`, not stale `absent`). Because `maybe_link_guestfs` sets
+`FIX_ATTEMPTED`, a symlink-only fix (all other deps present) still triggers the re-check, so
+the "symlink the binding" hint clears from the terminal summary after a successful link.
 
 - [ ] **Step 4: Run to verify PASS** — new tests pass; full scripts test file green.
 
