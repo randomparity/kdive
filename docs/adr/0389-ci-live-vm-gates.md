@@ -166,8 +166,15 @@ Harder / new obligations:
 - `live.yml`'s two jobs use **distinct per-job** concurrency groups with
   `cancel-in-progress: false` (a running self-hosted boot is never killed
   mid-flight, and a long native run does not cross-block the hosted push-to-`main`
-  gate), paired with a pre-job reaper that reclaims an orphaned domain/System/stack
-  a crash or timeout leaves — the cost of a non-ephemeral runner.
+  gate), paired with a pre-job reaper that **destroy-then-`undefine
+  --remove-all-storage`s** orphaned `kdive-*` domains (so shut-off definitions and
+  their disks do not leak on the non-ephemeral runner) and tears down a stale
+  stack. The reaper's `^kdive-` match is host-wide, so the runner topology assumes
+  one runner per libvirt host (runbook-documented).
+- The self-hosted job runs pytest **directly under `KDIVE_PYTHON`** (not
+  `just test-live`), so the reused `/opt/kdive` interpreter — with `drgn` +
+  `guestfs` — is the one that runs the suite, and no `just` need be provisioned on
+  the runner.
 - Two live jobs mean things ordinary hosted PR CI cannot prove; the change's own
   guardrails are `actionlint`/`zizmor` (pins + posture), `shellcheck` on the
   preflight, the preflight behavioral test, and a workflow-shape guard that pins the

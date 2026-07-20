@@ -106,6 +106,15 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
 
    Confirm the runner shows **Idle/online** in the repo runner list.
 
+5. **One runner per libvirt host.** `live.yml`'s `native` job runs a pre-job
+   reaper that destroys + `undefine --remove-all-storage`s **every** `kdive-*`
+   libvirt domain on the host (to reclaim orphans a crashed/timed-out run leaves,
+   since `docker compose down -v` wipes the DB that tracked them). That match is
+   host-wide, so **do not register a second self-hosted runner against the same
+   libvirt host** — a starting run would reap a peer run's in-flight domains. Scale
+   by giving each runner its own libvirt host (the ppc64le drop-in below is a
+   separate host).
+
 ## ppc64le runner (drop-in)
 
 `actions/runner` ships no ppc64le release asset. Build one from

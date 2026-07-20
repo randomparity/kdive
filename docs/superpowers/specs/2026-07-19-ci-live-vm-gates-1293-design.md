@@ -261,10 +261,15 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    deliverables. The worker inherits `PYTHONPATH=$GITHUB_WORKSPACE/src` from the job
    shell (`setsid` inherits the environment), so it imports the tested sources under
    the libguestfs-bearing venv.
-3. **Pre-job reaper** — before any bring-up, `virsh destroy` any leftover
-   `kdive-*` domains and `docker compose down -v` a stale stack (idempotent), so a
-   prior run cancelled mid-boot (below) cannot collide with this run's on-box
-   stand-up. Fail-safe: the reaper tolerates "nothing to clean".
+3. **Pre-job reaper** — before any bring-up, **destroy-then-`undefine
+   --remove-all-storage`** any leftover `kdive-*` domains (not just `destroy`,
+   which only powers off a *running* domain — a crash leaves shut-off definitions
+   and multi-GB disks that `docker compose down -v`, wiping the tracking DB, would
+   then orphan), and `docker compose down -v` a stale stack (idempotent), plus a
+   `df` free-space line so a leak is visible. Fail-safe: the reaper tolerates
+   "nothing to clean". The `^kdive-` match is host-wide, so this assumes **one
+   runner per libvirt host** (a second concurrent runner would reap a peer's
+   in-flight domains — noted in the runbook).
 4. **Refresh the warm store** — `eval "$(scripts/live-vm/warm-store.sh)"`, exporting
    `KDIVE_LIVE_VM_ROOTFS` / `KDIVE_LIVE_VM_BZIMAGE` / `KDIVE_LIVE_VM_VMLINUX` from
    the committed `current/` set (the throwaway family's rootfs).
@@ -304,7 +309,13 @@ different-ref dispatches, and a re-`uv sync` dropping the hand-placed symlinks).
    the `AWS_*` creds are the on-box `minioadmin` default and so are not a meaningful
    absence check on this path — an *external*-S3 misconfiguration is caught at the
    ADR-0089 worker secrets boundary, not here.)
-7. **Run** — `just test-live` (`-m "live_vm and not live_vm_tcg"`), both families.
+7. **Run** — pytest **directly under the reused interpreter**,
+   `"$KDIVE_PYTHON" -m pytest -m "live_vm and not live_vm_tcg" -q`, **not**
+   `just test-live` (whose `uv run` ignores `KDIVE_PYTHON`, syncs a fresh workspace
+   `.venv` — violating the never-uv-sync-in-workspace invariant — and omits the
+   `live` dependency group carrying `drgn`, which a native `live_vm` test imports
+   in-process). `/opt/kdive`'s venv already has `drgn` + `guestfs`, so this also
+   needs no `just` on the self-hosted runner.
 
 **Single-shell env continuity (GitHub Actions plumbing):** each `run:` step in
 Actions executes in a **fresh shell**, so a var `eval`'d/`export`ed in one step
