@@ -185,7 +185,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Arm kdump at provision for a warm-own-kernel System (ADR-0390)
 - Scope git-cliff to SemVer tags, drop unused GitHub fetch
 - Point cost_class estimate hint at resources.describe
 - Remove stale runs.create git-source prose from agent surface
@@ -235,6 +234,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stage the hosted TCG image set into a runner-owned /mnt subdir
 - Correct the tcg_image default to a real catalog entry
 - Repair the TCG gate's schedule/push image fallback
+- Arm kdump on the provision baseline cmdline
+- Size the minted crashkernel per arch
 
 ### Build
 
@@ -248,6 +249,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Harden
 
 - Guard panic-wait + overlay collisions from branch review (#1290)
+- Validate the profile crashkernel token for cmdline safety
 
 ### Scripts
 
