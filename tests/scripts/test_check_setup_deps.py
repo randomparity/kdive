@@ -270,6 +270,23 @@ def test_pyimport_trusts_venv_over_system_python3_when_venv_has_binding(tmp_path
     assert "python3-guestfs" not in result.stderr, result.stderr
 
 
+def test_guestfs_hint_names_the_venv_symlink_remedy(tmp_path: Path) -> None:
+    """A venv that cannot import guestfs is hinted to symlink the binding into the venv, not just
+    to install the package — a uv venv has no system-site-packages, so an already-installed
+    package is a dead-end fix (#1328). The hint must point at the runbook, mirroring the check.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
+    venv_py = _stub_python(bindir, "venv-python", imports_ok=False)
+
+    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+
+    assert "symlink" in result.stderr, result.stderr
+    assert "four-method-live-run.md" in result.stderr, result.stderr
+
+
 def test_autodetects_repo_venv_under_relative_invocation(tmp_path: Path) -> None:
     """With KDIVE_PYTHON unset, the guestfs probe autodetects the repo .venv even when the script
     is invoked by a relative path (`bash scripts/check-setup-deps.sh` from the repo root, #1328).

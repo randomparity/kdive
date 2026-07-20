@@ -170,15 +170,6 @@ require_header() {
   note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
 }
 
-# A distro-packaged Python binding is not pip-installable, so verify presence by asking the
-# worker's venv interpreter (${PY}) to import it. Falls back to a note_package hint under the
-# given tier if the import fails (module missing OR interpreter absent).
-require_pyimport() {
-  local tier="$1" label="$2" module="$3" distro="$4"
-  command_exists "${PY}" && "${PY}" -c "import ${module}" 2>/dev/null && return
-  note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
-}
-
 join_by_comma() {
   local joined="" item
   for item in "$@"; do
@@ -327,7 +318,16 @@ require_header future libelf-headers libelf "${distro}"
 # open kdump-compressed vmcores (see four-method-live-run.md §4b and the POWER runbook §1).
 require_header future libdw-headers libdw "${distro}"
 require_header future libkdumpfile-headers libkdumpfile "${distro}"
-require_pyimport future python3-guestfs guestfs "${distro}"
+# guestfs is the one future-tier binding whose remedy is more than an apt install: it is a
+# distro-packaged binding (not pip-installable) that the worker imports from the project venv, and
+# a uv-created .venv has no system-site-packages, so even with python3-guestfs installed the venv
+# interpreter cannot import it until guestfs.py + libguestfsmod*.so are symlinked in. Probe the venv
+# interpreter (${PY}); on failure name BOTH steps (mirrors check-local-libvirt.sh / the runbook) so
+# the hint is not a dead end that sends the operator to an already-satisfied install.
+if ! { command_exists "${PY}" && "${PY}" -c "import guestfs" 2>/dev/null; }; then
+  note_package future python3-guestfs "$(package_for python3-guestfs "${distro}")"
+  manual_hints+=("python3-guestfs: after installing the package, symlink guestfs.py + libguestfsmod*.so into the venv site-packages (a uv venv has no system-site-packages) — see docs/operating/runbooks/four-method-live-run.md section 4b")
+fi
 
 # Wheel-less arches (ppc64le) build drgn from source — its vendored libdrgn uses autotools, so
 # `uv sync --group live` fails at `autoreconf` without autoconf/automake/libtool. libtool the
