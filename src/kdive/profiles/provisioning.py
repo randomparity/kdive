@@ -23,6 +23,7 @@ from enum import StrEnum
 from typing import Annotated, Literal, cast
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -46,6 +47,31 @@ from kdive.profiles.types import ProvisioningProfileInput
 
 type NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 """A string that is non-empty after whitespace stripping; blank values fail validation."""
+
+
+def _validate_crashkernel_token(value: str) -> str:
+    """Reject a crashkernel token that would inject extra kernel cmdline tokens.
+
+    The reservation token is rendered verbatim into the boot ``<cmdline>`` — the install lane
+    (ADR-0300) and, since ADR-0390, the provision baseline for a warm-own-kernel System. So
+    internal whitespace would inject an extra kernel token into the space-joined cmdline, a
+    non-printable character would fail XML rendering of the domain ``<cmdline>``, and a leading
+    ``crashkernel=`` prefix would double the key. Mirrors ``InstallPayload._safe_crashkernel``
+    and the ``runs.*`` tool-boundary check (the booted kernel remains the arbiter of the size
+    grammar itself). Blank is already rejected by :data:`NonEmptyStr`.
+    """
+    stripped = value.strip()
+    if stripped.split() != [stripped]:
+        raise ValueError("crashkernel must be a single token with no internal whitespace")
+    if not stripped.isprintable():
+        raise ValueError("crashkernel must be a single printable token")
+    if stripped.lower().startswith("crashkernel="):
+        raise ValueError("crashkernel must not include the 'crashkernel=' prefix")
+    return stripped
+
+
+type CrashkernelToken = Annotated[NonEmptyStr, AfterValidator(_validate_crashkernel_token)]
+"""A kdump ``crashkernel`` reservation token safe to render into a boot cmdline (ADR-0390)."""
 
 SUPPORTED_DOMAIN_XML_PARAMS = frozenset({"machine"})
 
@@ -155,7 +181,7 @@ class LibvirtProfile(_ProfileBase):
 
     domain_xml_params: dict[NonEmptyStr, NonEmptyStr] = Field(default_factory=dict)
     rootfs: RootfsSource
-    crashkernel: NonEmptyStr | None = None
+    crashkernel: CrashkernelToken | None = None
     baseline_kernel: NonEmptyStr | None = Field(
         default=None,
         # Provenance: ADR-0310, #1016.
@@ -205,7 +231,7 @@ class RemoteLibvirtProfile(_ProfileBase):
     """
 
     base_image_volume: NonEmptyStr
-    crashkernel: NonEmptyStr | None = None
+    crashkernel: CrashkernelToken | None = None
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
 
 

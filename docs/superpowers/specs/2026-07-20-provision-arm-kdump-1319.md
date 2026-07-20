@@ -45,6 +45,8 @@ the x86 warm guest — proven live on runner-pdx).
 - `src/kdive/providers/local_libvirt/lifecycle/xml.py` — append `crashkernel=`/`fadump=on`
   to the System baseline cmdline from the profile. The customization-boot renderer is
   unchanged (it passes no crashkernel).
+- `src/kdive/profiles/provisioning.py` — a `CrashkernelToken` type validates the profile
+  `crashkernel` field for cmdline-injection safety now that it lands on a boot `<cmdline>`.
 - `scripts/live-vm/mint-system.sh` — request kdump + 4 GiB in the minted profile.
 - Tests: `tests/providers/local_libvirt/test_provisioning.py`,
   `tests/providers/local_libvirt/lifecycle/test_xml.py`.

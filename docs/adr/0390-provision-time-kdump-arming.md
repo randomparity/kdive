@@ -66,6 +66,10 @@ guest, proven live on runner-pdx).
   avoiding a half-armed reservation.
 - The baseline provision cmdline is no longer byte-identical for a crashkernel-bearing
   profile; the provisioning golden tests are updated to the armed cmdline.
+- The profile `crashkernel` field — previously an inert KDUMP *signal*, now rendered
+  verbatim into a boot `<cmdline>` — is validated at parse for cmdline-injection safety
+  (no internal whitespace, printable, no `crashkernel=` prefix), the same `CrashkernelToken`
+  rules the install lane already applies to its per-install override.
 - No DB migration, no payload/schema change, no new tool or error category.
 
 ## Alternatives rejected
