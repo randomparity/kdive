@@ -143,7 +143,24 @@ git commit -m "feat(scripts): show host arch first + native acceleration in advi
          _stub(bindir, "sudo", "#!/bin/sh\n" + body)
      ```
      For the preflight-fails case, use `_sudo_stub(..., preflight_ok=False)` (whole stub exits 1).
-  3. `run_privileged` skips `sudo` entirely when `EUID==0`, so the sudo-log assertions cannot
+  3. **Coreutils under the stubbed PATH.** The tests run with `PATH` = the stub bindir only
+     (no `/usr/bin`), but the production fix path uses `ln` and some install stubs use
+     `touch`/`chmod` — coreutils, not shell builtins. Rather than expose all of `/usr/bin`
+     (which would make genuinely-absent deps like `pkg-config` appear present and defeat the
+     "missing" premise), add a helper that exposes ONLY the needed coreutils via Python
+     symlinks (no subprocess), appended AFTER the stub bindir so stubs still shadow:
+
+     ```python
+     def _coreutils_dir(tmp_path):  # exposes ln/chmod/touch only, for fix-effect tests
+         d = tmp_path / "coreutils"; d.mkdir()
+         for name in ("ln", "chmod", "touch"):
+             os.symlink(shutil.which(name), d / name)
+         return d
+     ```
+     Every test that asserts a real filesystem effect (the reverify test, the guestfs
+     link/fresh-host tests) uses `path=f"{bindir}:{_coreutils_dir(tmp_path)}"`. Report-only,
+     sudo-flavor, and hint-wording tests keep the bindir-only PATH.
+  4. `run_privileged` skips `sudo` entirely when `EUID==0`, so the sudo-log assertions cannot
      hold under a root pytest (some CI containers). Guard those tests:
      `skip_if_root = pytest.mark.skipif(os.geteuid() == 0, reason="sudo path only runs as non-root")`
      and apply `@skip_if_root` to every test that asserts on the sudo log or the escalation
@@ -217,7 +234,7 @@ def test_reverify_after_install_exits_zero(tmp_path):
     # and the new pkg-config exits 0 so the header probes pass too.
     _stub(b, "apt-get",
           f'printf "#!/bin/sh\\nexit 0\\n" > "{b}/pkg-config"; chmod 0755 "{b}/pkg-config"; exit 0')
-    r = _run("debian", str(b), tmp_path, args=["-y"])
+    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"])  # chmod available
     assert r.returncode == 0, r.stderr            # Required satisfied after the fix + re-probe
     assert "re-checking after fixes" in r.stderr
     # the re-check section shows no Required 'missing' line
@@ -465,7 +482,7 @@ def test_yes_links_guestfs_when_package_present_and_venv_ok_abi(tmp_path):
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14", is_venv=True)
     sys_site = _sys_site(tmp_path, present=True)
     b = _bin(tmp_path)
-    r = _run("debian", str(b), tmp_path, args=["-y"],
+    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],  # ln available
              extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
                         "KDIVE_SYSTEM_PY_MINOR": "3.14"})
     assert (site / "guestfs.py").is_symlink()
@@ -491,10 +508,11 @@ def test_fresh_host_installs_then_links_in_one_run(tmp_path):
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
     sys_site = _sys_site(tmp_path, present=False)   # binding absent initially
     b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
-    # the install stub materializes guestfs.py + the .so into sys_site (as a real install would)
+    # the install stub materializes guestfs.py + the .so into sys_site (as a real install would);
+    # `: >` file redirection is a builtin (no touch needed), production ln uses the coreutils dir.
     _stub(b, "apt-get",
-          f'touch "{sys_site}/guestfs.py" "{sys_site}/libguestfsmod.cpython-314.so"; exit 0')
-    r = _run("debian", str(b), tmp_path, args=["-y"],
+          f': > "{sys_site}/guestfs.py"; : > "{sys_site}/libguestfsmod.cpython-314.so"; exit 0')
+    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],
              extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
                         "KDIVE_SYSTEM_PY_MINOR": "3.14"})
     assert (site / "guestfs.py").is_symlink()       # linked in the SAME run
@@ -505,7 +523,7 @@ def test_symlink_only_fix_clears_the_hint(tmp_path):
     venv_py = _venv_python_stub(tmp_path, site=site, minor="3.14")
     sys_site = _sys_site(tmp_path, present=True)
     b = _bin(tmp_path); _sudo_stub(b, tmp_path / "sudo.log")
-    r = _run("debian", str(b), tmp_path, args=["-y"],
+    r = _run("debian", f"{b}:{_coreutils_dir(tmp_path)}", tmp_path, args=["-y"],  # ln available
              extra_env={"KDIVE_PYTHON": str(venv_py), "KDIVE_GUESTFS_SYS_SITE": str(sys_site),
                         "KDIVE_SYSTEM_PY_MINOR": "3.14"})
     assert (site / "guestfs.py").is_symlink()
@@ -581,7 +599,11 @@ maybe_link_guestfs() { # distro
     printf "  guestfs ABI mismatch: system python %s vs venv %s — not linking\n" "${smin}" "${vmin}" >&2; return 0
   fi
   ln -sf "${sys_site}/guestfs.py" "${site}/" 2>/dev/null || true
-  local so; for so in "${sys_site}"/libguestfsmod*.so; do [[ -e "${so}" ]] && ln -sf "${so}" "${site}/"; done
+  # guard the loop ln with `|| true` so a failure is non-fatal under set -e (the re-check block
+  # must always be reached) — a bare `[[ -e ]] && ln …` would abort the script on ln failure.
+  local so; for so in "${sys_site}"/libguestfsmod*.so; do
+    [[ -e "${so}" ]] && { ln -sf "${so}" "${site}/" 2>/dev/null || true; }
+  done
   FIX_ATTEMPTED=1   # so the re-check re-runs probe_all/probe_guestfs and clears the symlink hint
 }
 ```
