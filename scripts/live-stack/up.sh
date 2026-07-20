@@ -131,7 +131,13 @@ if [[ "$skip_libvirt" != "1" ]]; then
   # bit — needed so the domain can read staged kernels back at boot (ADR-0222/#694). `mkdir -p`
   # left prior runs root:root:0755, tripping the preflight's writable-by-worker check on a
   # non-root worker even though the actual runtime worked. `install -d` is idempotent.
-  sudo install -d -o "$(id -un)" -m 0755 "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"
+  # Skip the sudo elevation when the dir already exists writable by the invoking user: a
+  # pre-provisioned CI runner (ansible-created, owned by the runner user) has them, and that
+  # service account may lack passwordless sudo (#1293) — only a bare host needs the elevation.
+  for _pdir in "$KDIVE_ROOTFS_DIR" "${KDIVE_INSTALL_STAGING:-/var/lib/kdive/install}"; do
+    [[ -d "$_pdir" && -w "$_pdir" ]] && continue
+    sudo install -d -o "$(id -un)" -m 0755 "$_pdir"
+  done
   provision_prereqs_ok || {
     echo "libvirt reachable but provision prerequisites are missing (see MISSING lines)" >&2
     exit 1

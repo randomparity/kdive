@@ -80,15 +80,33 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    - the repository setting **Settings -> Actions -> General -> Fork pull request
      workflows -> "Require approval for all outside collaborators"** (or stricter)
      is applied, and
-   - sub-issue D's `live-vm` workflow exists with its `if:` guard restricting the
-     job to `schedule` / `workflow_dispatch` (never fork PRs).
+   - `.github/workflows/live.yml` is merged (#1293): it carries **no
+     `pull_request` trigger** and the self-hosted `native` job's `if:` is a
+     positive `schedule || workflow_dispatch` allowlist, so no PR — fork or
+     same-repo — dispatches to the runner. The gates run **nightly + on-demand
+     `workflow_dispatch`**; the hosted `tcg` gate additionally runs on `push` to
+     `main`. Merging D does not expose the runner — only enabling the service does.
 
-3. **Wire the object-store secrets.** Add `KDIVE_S3_*` as repo/organization
-   secrets (readable by `schedule` / `workflow_dispatch`, never by fork PRs). B
-   sets only the `KDIVE_SECRETS_ROOT` pointer in the runner `.env`; the S3
-   credential **material** under that root is placed by sub-issue C/D or the
-   operator (sub-issue A's resolver checks the S3 endpoint/bucket env, not the
-   credential files).
+3. **Wire the object-store secrets.** The `native` gate stands up the compose
+   MinIO on the box and authenticates with its `minioadmin` default (no repo
+   secret needed for the nightly's on-box object store). If you instead point the
+   worker at an external S3, add `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as
+   repo/organization secrets (readable by `schedule` / `workflow_dispatch`, never
+   by fork PRs) — `live.yml`'s `preflight-env.sh provisioned` asserts a System is
+   minted, and the ADR-0089 worker secrets boundary catches an external-S3
+   credential that does not resolve.
+
+   **Warm-store pins (required for the scheduled `native` gate).** `warm-store.sh`
+   has no defaults for the kernel/image pins (they are deployment-specific), so set
+   these as repository **variables** (Settings → Actions → Variables — not secrets;
+   they are not sensitive), which the scheduled `native` job reads:
+   - `KDIVE_WARM_STORE_TARGET_NVR` — the pinned guest-kernel NVR to keep warm,
+   - `KDIVE_WARM_STORE_IMAGE` — the catalog rootfs image to build from,
+   - `KDIVE_DEBUGINFOD_URLS` — a server indexing that kernel's debuginfo.
+
+   Unset, a scheduled run **fails loud** at the warm-store step (not a green skip).
+   A `workflow_dispatch` run may override them via the `warm_nvr` / `warm_image` /
+   `debuginfod_urls` inputs.
 
 4. **Enable the runner** once the posture is in place:
 
@@ -99,6 +117,24 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    ```
 
    Confirm the runner shows **Idle/online** in the repo runner list.
+
+5. **One runner per libvirt host.** `live.yml`'s `native` job runs a pre-job
+   reaper that destroys + `undefine --remove-all-storage`s **every** `kdive-*`
+   libvirt domain on the host — across both `qemu:///session` (where this gate's
+   domains live) and `qemu:///system` (legacy leftovers) — to reclaim orphans a
+   crashed/timed-out run leaves, since `docker compose down -v` wipes the DB that
+   tracked them. That match is host-wide, so **do not register a second self-hosted
+   runner against the same libvirt host** — a starting run would reap a peer run's
+   in-flight domains. Scale by giving each runner its own libvirt host (the ppc64le
+   drop-in below is a separate host).
+
+6. **Both families boot under `qemu:///session`.** The `native` job exports
+   `KDIVE_LIBVIRT_URI=qemu:///session` (and `XDG_RUNTIME_DIR=/run/user/<uid>`) before
+   the reaper and the stack bring-up, so QEMU runs as the runner service account. The
+   runner is non-root and has no sudo, so it can neither read `qemu:///system`'s
+   root-owned console log (the root-readback wall, ADR-0223) nor launch a root worker
+   to sidestep it — session mode makes the console runner-readable. `runner.yml`
+   enables linger for the service account so `/run/user/<uid>` persists between jobs.
 
 ## ppc64le runner (drop-in)
 

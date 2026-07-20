@@ -215,35 +215,6 @@ jobs:
         env:
           KDIVE_IMAGE: kdive:ci
 
-  live-vm:
-    name: live_vm (self-hosted KVM)
-    # Gated to manual dispatch: the live_vm suite needs a KVM/nested-virt host
-    # with libvirt and a kdump-enabled guest image, which GitHub-hosted runners
-    # do not provide. It never runs on pull_request, so PR CI stays green.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, kvm]
-    # Runner prerequisite: the self-hosted KVM host must provide the libvirt-dev
-    # headers (not just the libvirt runtime), since `uv sync` builds
-    # libvirt-python from source. This job does not apt-install them, because a
-    # self-hosted runner is operator-provisioned and may lack passwordless sudo.
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "0.11.18"
-          enable-cache: true
-
-      - name: Sync dependencies
-        run: uv sync --locked
-
-      - name: Test (live_vm)
-        run: uv run python -m pytest -m live_vm -q
-
   pre-commit:
     name: pre-commit hooks
     runs-on: ubuntu-latest

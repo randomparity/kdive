@@ -21,6 +21,12 @@ live_vm_host_packages:
   - libdw-dev          # drgn build
   - libkdumpfile-dev   # drgn kdump support
 
+# Container runtime for the #1293 self-hosted job's on-box compose stack (scripts/live-stack/up.sh).
+# docker-compose-v2 provides `docker compose` (the plugin) on Ubuntu 26.04.
+live_vm_host_docker_packages:
+  - docker.io
+  - docker-compose-v2
+
 # pip installs the uv console script to /usr/local/bin. Reference uv by absolute path in the
 # venv-build command so it is found under become regardless of sudo's PATH handling; override
 # if pip is configured to install console scripts elsewhere.
