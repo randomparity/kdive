@@ -80,15 +80,21 @@ throwaway per-job venv in `$GITHUB_WORKSPACE`, which would have `drgn` but not t
    - the repository setting **Settings -> Actions -> General -> Fork pull request
      workflows -> "Require approval for all outside collaborators"** (or stricter)
      is applied, and
-   - sub-issue D's `live-vm` workflow exists with its `if:` guard restricting the
-     job to `schedule` / `workflow_dispatch` (never fork PRs).
+   - `.github/workflows/live.yml` is merged (#1293): it carries **no
+     `pull_request` trigger** and the self-hosted `native` job's `if:` is a
+     positive `schedule || workflow_dispatch` allowlist, so no PR — fork or
+     same-repo — dispatches to the runner. The gates run **nightly + on-demand
+     `workflow_dispatch`**; the hosted `tcg` gate additionally runs on `push` to
+     `main`. Merging D does not expose the runner — only enabling the service does.
 
-3. **Wire the object-store secrets.** Add `KDIVE_S3_*` as repo/organization
-   secrets (readable by `schedule` / `workflow_dispatch`, never by fork PRs). B
-   sets only the `KDIVE_SECRETS_ROOT` pointer in the runner `.env`; the S3
-   credential **material** under that root is placed by sub-issue C/D or the
-   operator (sub-issue A's resolver checks the S3 endpoint/bucket env, not the
-   credential files).
+3. **Wire the object-store secrets.** The `native` gate stands up the compose
+   MinIO on the box and authenticates with its `minioadmin` default (no repo
+   secret needed for the nightly's on-box object store). If you instead point the
+   worker at an external S3, add `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` as
+   repo/organization secrets (readable by `schedule` / `workflow_dispatch`, never
+   by fork PRs) — `live.yml`'s `preflight-env.sh provisioned` asserts a System is
+   minted, and the ADR-0089 worker secrets boundary catches an external-S3
+   credential that does not resolve.
 
 4. **Enable the runner** once the posture is in place:
 

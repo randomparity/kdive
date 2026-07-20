@@ -38,7 +38,7 @@ eval "$("${here}/../live-stack/onboard.sh" | grep '^export KDIVE_TOKEN=')"
 KDIVE_LIVE_VM_ROOTFS="$KDIVE_LIVE_VM_ROOTFS" \
   KDIVE_STACK_BASE_URL="$KDIVE_STACK_BASE_URL" \
   KDIVE_TOKEN="$KDIVE_TOKEN" \
-  KDIVE_MINT_PROJECT="${KDIVE_PROJECT:-demo}" \
+  KDIVE_PROJECT="${KDIVE_PROJECT:-demo}" \
   "${py[@]}" - <<'PY'
 import asyncio
 import os
@@ -55,7 +55,7 @@ def _scalar(resp):
 async def main() -> int:
     base = os.environ["KDIVE_STACK_BASE_URL"]
     token = os.environ["KDIVE_TOKEN"]
-    project = os.environ["KDIVE_MINT_PROJECT"]
+    project = os.environ.get("KDIVE_PROJECT", "demo")
     rootfs = os.environ["KDIVE_LIVE_VM_ROOTFS"]
     client = LiveStackClient.over_http(base, token)
 
