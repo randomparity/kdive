@@ -25,7 +25,12 @@ BASH = shutil.which("bash")
 pytestmark = requires_bash(4, 3, "local -n namerefs")
 
 
-def _run(os_release_id: str, path: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run(
+    os_release_id: str,
+    path: str,
+    tmp_path: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run the checker with a forced distro and a controlled PATH."""
     assert BASH is not None, "bash is required to run the checker"
     os_release = tmp_path / "os-release"
@@ -34,6 +39,7 @@ def _run(os_release_id: str, path: str, tmp_path: Path) -> subprocess.CompletedP
         "PATH": path,
         "KDIVE_OS_RELEASE": str(os_release),
         "HOME": str(tmp_path),
+        **(extra_env or {}),
     }
     return subprocess.run(
         [BASH, str(SCRIPT)],
@@ -218,3 +224,47 @@ def test_required_present_exits_zero(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "Required dependencies missing" not in result.stderr
     assert "Required dependencies are present" in result.stdout
+
+
+def _stub_python(bindir: Path, name: str, *, imports_ok: bool) -> Path:
+    """Write a python-interpreter stub that succeeds (or fails) on ``-c "import ..."``.
+
+    Mirrors how the checker probes the worker venv: ``"$PY" -c "import guestfs"``.
+    """
+    body = "exit 0" if imports_ok else 'echo "ModuleNotFoundError" >&2\nexit 1'
+    py = bindir / name
+    py.write_text(f"#!/bin/sh\n{body}\n")
+    py.chmod(py.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return py
+
+
+def test_pyimport_probes_venv_interpreter_not_system_python3(tmp_path: Path) -> None:
+    """The libguestfs probe uses the venv interpreter (KDIVE_PYTHON), not system python3 (#1328).
+
+    System python3 can import guestfs, but the worker's venv cannot — the check must report
+    the missing binding rather than trust system python3 for a false green.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
+    _stub_python(bindir, "python3", imports_ok=True)  # system python3 can import guestfs
+    venv_py = _stub_python(bindir, "venv-python", imports_ok=False)  # the venv cannot
+
+    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+
+    assert "python3-guestfs" in result.stderr, result.stderr
+
+
+def test_pyimport_trusts_venv_over_system_python3_when_venv_has_binding(tmp_path: Path) -> None:
+    """A working venv binding suppresses the guestfs hint even when system python3 lacks it."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _stub(bindir, "uv", "#!/bin/sh\nexit 0\n")
+    _stub(bindir, "pkg-config", "#!/bin/sh\nexit 0\n")
+    _stub_python(bindir, "python3", imports_ok=False)  # system python3 cannot import guestfs
+    venv_py = _stub_python(bindir, "venv-python", imports_ok=True)  # but the venv can
+
+    result = _run("debian", str(bindir), tmp_path, extra_env={"KDIVE_PYTHON": str(venv_py)})
+
+    assert "python3-guestfs" not in result.stderr, result.stderr

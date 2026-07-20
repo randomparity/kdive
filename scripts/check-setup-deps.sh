@@ -6,6 +6,24 @@ set -euo pipefail
 
 readonly OS_RELEASE_FILE="${KDIVE_OS_RELEASE:-/etc/os-release}"
 
+# The worker imports the libguestfs binding from the project venv, not system python3, so the
+# future-tier binding probe must ask the same interpreter the worker uses (else a binding present
+# system-wide but absent from the venv reports a false green, #1328). Mirror check-local-libvirt.sh:
+# prefer the .venv sibling of this script when present (in-repo dev loop), honor a KDIVE_PYTHON
+# override (host-services deployment), and fall back to system python3 before the venv exists.
+#
+# Path derived via parameter expansion, not `dirname` — the script's own tests run it under a
+# stubbed PATH with no coreutils. `${var%/*}` strips the trailing path component; two applications
+# on an absolute BASH_SOURCE[0] give the repo root, then append `.venv/bin/python`.
+_repo_venv_py="${BASH_SOURCE[0]%/*}"
+_repo_venv_py="${_repo_venv_py%/*}/.venv/bin/python"
+if [[ -z "${KDIVE_PYTHON:-}" && -x "${_repo_venv_py}" ]]; then
+  readonly PY="${_repo_venv_py}"
+else
+  readonly PY="${KDIVE_PYTHON:-python3}"
+fi
+unset _repo_venv_py
+
 # Per-tier accumulators: *_commands feed the human-readable summary line,
 # *_packages feed the distro install hint. manual_hints holds install commands
 # for tooling that distros do not package (uv, prek, just).
@@ -148,11 +166,11 @@ require_header() {
 }
 
 # A distro-packaged Python binding is not pip-installable, so verify presence by asking the
-# system python3 to import it. Falls back to a note_package hint under the given tier if the
-# import fails (module missing OR python3 absent).
+# worker's venv interpreter (${PY}) to import it. Falls back to a note_package hint under the
+# given tier if the import fails (module missing OR interpreter absent).
 require_pyimport() {
   local tier="$1" label="$2" module="$3" distro="$4"
-  command_exists python3 && python3 -c "import ${module}" 2>/dev/null && return
+  command_exists "${PY}" && "${PY}" -c "import ${module}" 2>/dev/null && return
   note_package "${tier}" "${label}" "$(package_for "${label}" "${distro}")"
 }
 
