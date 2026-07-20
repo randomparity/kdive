@@ -236,10 +236,11 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_DEMO_NAMESPACE` | `kdive-demo` | Release namespace `demo-token.sh` targets when minting a bundled-demo bearer token. |
 | `KDIVE_EFFECTIVE_UID` | `$EUID` | Effective uid `check-local-libvirt.sh` uses for its non-root-worker readability advisory (ADR-0223); overrides `$EUID` so the gate is testable independent of the runner's uid. |
 | `KDIVE_GRAFANA_PORT` | `3000` | Host port the compose `grafana` service publishes (obs profile). |
+| `KDIVE_GUESTFS_SYS_SITE` | `/usr/lib/python3/dist-packages` | System dir `check-setup-deps.sh` looks in for the libguestfs binding (guestfs.py) when deciding its three-state guestfs remedy and performing the venv symlink (ADR-0393). |
 | `KDIVE_GUEST_HELPERS_DIR` | `deploy/remote-libvirt-guest-helpers` | Guest-helper source directory `check-remote-libvirt.sh` inspects. |
 | `KDIVE_KERNEL_REF` | `v6.9` | Kernel ref (tag/branch/sha) `fetch-kernel-tree.sh` checks out. |
 | `KDIVE_KERNEL_REPO` | `https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git` | Kernel git remote `fetch-kernel-tree.sh` clones. |
-| `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` probes for hardware virtualization. |
+| `KDIVE_KVM_NODE` | `/dev/kvm` | KVM device node `check-local-libvirt.sh` and `check-setup-deps.sh` probe for hardware virtualization (the latter for its native-arch advisory line). |
 | `KDIVE_LIMIT_KCU` | `1000000` | Budget ceiling (KCU) the setup-*-libvirt.sh scripts set for the project. |
 | `KDIVE_LIVE_SSH_PORT` | `22` | SSH port `check-ssh-reachable.sh` probes. |
 | `KDIVE_MAX_ALLOC` | `4` | max_concurrent_allocations quota the setup-*-libvirt.sh scripts set. |
@@ -261,6 +262,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SKIP_OBS` | `0` | When set to 1, `scripts/live-stack/up.sh` skips the prometheus/grafana observability tier; the essential backend services (postgres, minio, oidc) still start. |
 | `KDIVE_STACK_LOG_DIR` | `<repo>/.live-stack-logs` | Log directory written by `scripts/live-stack/lib.sh`; also consumed by `examples/local-libvirt/up.sh`, which overrides the default to an XDG state path via `examples/local-libvirt/env.sh`. |
 | `KDIVE_STACK_PID_FILE` | `~/.local/state/kdive/local-stack.pid` | PID file managed by `examples/local-libvirt/up.sh` (written) and `examples/local-libvirt/down.sh` (read); path is example-scoped, defaulting to `$XDG_STATE_HOME/kdive/local-stack.pid`. |
+| `KDIVE_SYSTEM_PY_MINOR` | `$(python3 --version)` | System Python `X.Y` minor `check-setup-deps.sh` compares against the venv's for the libguestfs ABI check before symlinking the binding (ADR-0393). |
 | `KDIVE_TCG_BUDGET_BYTES` | `7000000000` | Enforced `/mnt` disk-budget ceiling for the hosted TCG set (~7 GB): a pre-stage free-space check for the whole budget and a post-stage staged-set footprint cap, each failing loud. |
 | `KDIVE_TCG_IMAGE` | — | ppc64le catalog rootfs image `stage-tcg-images.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
 | `KDIVE_TCG_STAGE_DIR` | `/mnt/kdive-tcg` | Hosted-runner `/mnt` scratch directory `stage-tcg-images.sh` stages the ephemeral ppc64le TCG image set into. |
