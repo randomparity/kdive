@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse KDIVE_PROJECT in mint-system; update runner runbook
 - Add boot_preserved_gdbstub_domain harness (#1321)
 - Opt-in package install (-y/interactive, sudo, per tier)
+- Replace_manifest returns a (server_time, deadline) stamp
+- State the full deadline contract on upload responses
 
 ### Changed
 
@@ -199,6 +201,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coreutils-free fix-effect tests + guarded loop ln (review 5)
 - Regenerate config reference for new script env vars
 - Require five-part contract for agent-facing limits
+- Upload deadline contract spec + ADR-0394 (#1336)
+- Implementation plan for upload deadline contract (#1336)
+- Point Task 3 at the tool-description test registry (#1336)
+- State deadline scope and non-constraint in tool docstrings
 
 ### Fixed
 
@@ -258,6 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Anchor venv path derivation to $PWD for relative invocation
 - Point guestfs hint at the venv-symlink remedy
 - Correct ADR pacman command, justfile comment, guestfs ABI edges
+- Fail loud on missing RETURNING row; document expires_at clock frame
 
 ### Build
 
