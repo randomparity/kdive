@@ -48,9 +48,14 @@ inherits the new behavior. Each fixture, in order:
    started with a raised `max_connections` sized to workers × pool. The guaranteed
    invariant is **at most one container of each kind at any instant**, not a hard
    single start per run (see AC1).
-3. **Per-worker namespace.** Provision `kdive_test_<worker>` database (resp.
-   `kdive-test-<worker>` bucket) idempotently on the shared server; yield its
-   conninfo (resp. an `ObjectStore` bound to it). Drop it on per-worker teardown.
+3. **Per-run, per-worker namespace.** Provision `kdive_test_<run>_<worker>` database
+   (resp. `kdive-test-<run>-<worker>` bucket) idempotently on the shared server; yield
+   its conninfo (resp. an `ObjectStore` bound to it). Drop it on per-worker teardown.
+   The `<run>` token is the sanitized per-run temp-root leaf (e.g. `pytest-137` →
+   `pytest_137` for the pg identifier, `pytest-137` for the bucket) — stable across a
+   run's workers, distinct across runs — so two runs sharing one **override** backend
+   never collide on a name (the container path is already run-isolated by its fresh
+   container; the token is applied uniformly for one code path).
 
 Worker id: `PYTEST_XDIST_WORKER` env, or `master` when not under xdist.
 
@@ -70,10 +75,16 @@ allows, and the container-count criteria are verified by a live `just test` run.
   start and single stop, not N of each. The mechanism guarantees *at-most-one-
   concurrent*, not a hard "exactly one start" (a sparse/clustered DB schedule that
   drains all current holders before a later worker's first DB test may stop and
-  lazily restart one — correctness-neutral, costs a repeated start). *Verify:* a
+  lazily restart one — correctness-neutral, costs a repeated start). *Verify (unit):* a
   coordination test drives an acquire×K / release×K sequence **and** a
   finish-early-then-reacquire ordering against a fake container, asserting one live
   container while any holder is active and stop called exactly at `refcount == 0`.
+  *Verify (real, Docker-gated):* a test that exercises the helper with **real**
+  testcontainers from two concurrent acquirers sharing one temp root asserts exactly
+  one real container is started (queried by the recorded id) and is stopped/removed
+  after the last release — so the real start/stop/stop-by-id plumbing, not only the
+  fake, is falsifiable in CI (skips without Docker, hard-fails under
+  `KDIVE_REQUIRE_DOCKER=1` like the other backend tests).
 - **AC2 — per-worker isolation preserved.** Two xdist workers running DB tests
   concurrently do not observe each other's schema/rows; `pg_conn`'s `DROP SCHEMA
   public CASCADE` in worker A never affects worker B. *Verify:* the full existing db
@@ -101,11 +112,14 @@ allows, and the container-count criteria are verified by a live `just test` run.
   against a fake container object and asserts stop is called once, on the K-th
   release, and never before.
 - **AC6b — shared server sized for all workers.** The shared Postgres does not
-  exhaust connections under `-n auto` with real pool sizes: the container starts with
-  `max_connections` raised above `workers × create_pool max_size (10) + headroom`, and
-  the `just compose-up` Postgres (the override backend) is bumped to match. *Verify:*
-  a full `-n auto` db-suite run does not raise `FATAL: too many clients`; the started
-  container's `max_connections` is asserted ≥ the computed bound.
+  exhaust connections under `-n auto` with real pool sizes. Rather than a fragile
+  exact formula, the shared container starts with a fixed floor `max_connections=500`,
+  comfortably above the worst case (`PYTEST_XDIST_WORKER_COUNT` up to ~18 active
+  workers × `create_pool` default `max_size=10` × ~2 headroom ≈ 360; the worker count
+  is read from `PYTEST_XDIST_WORKER_COUNT`, treated as 1 when unset). The
+  `just compose-up` Postgres (the override backend) is bumped to the same floor.
+  *Verify:* a full `-n auto` db-suite run does not raise `FATAL: too many clients`; the
+  started container's `max_connections` is asserted `== 500`.
 - **AC7 — measured speedup.** A local `just test` run is meaningfully faster than
   before (target: the container start/stop tail visible in `--durations` collapses
   from ~20 `~3s setup` + a serial `stop` tail to a single start + single stop).
@@ -143,14 +157,36 @@ allows, and the container-count criteria are verified by a live `just test` run.
   independent containers, not a shared/refcount collision on a global lock. (Using
   `.parent` under non-xdist would have collided; AC-covered by the root-selection
   logic.)
+- **Two concurrent runs against one override backend.** The `<run>` token in the
+  per-worker namespace (design step 3) keeps a dev-plus-CI or two-shard pair pointed
+  at the same `KDIVE_TEST_PG_URL` from colliding: each run provisions its own
+  `kdive_test_<run>_<worker>` databases, so run A's `DROP DATABASE … (FORCE)` never
+  targets run B's in-use database. *Residual:* a crashed run leaves its run-token
+  databases/buckets on a *persistent* override backend (the container path has no
+  leftover — the container is gone). Bounded and self-describing (`kdive_test_*`
+  prefix); swept by `DROP DATABASE`-ing stale `kdive_test_*` or recreating the compose
+  volume. Documented in the fixture docstrings.
 - **Shared connection ceiling.** One server now holds every worker's pool. The shared
   container is started with a raised `max_connections`; the override backend must be
   sized likewise (documented; `just compose-up` bumped). Without this, `-n auto` can
   intermittently raise `FATAL: too many clients` on high-core hosts (a flake absent
   under container-per-worker).
 
+## Change set
+
+- `tests/db/conftest.py`, `tests/store/conftest.py` — the two fixtures.
+- `tests/support/xdist_backend.py` (new) — the flock/refcount/worker-id/run-token
+  coordination helper.
+- New coordination + real-container tests (AC1, AC6b, AC4, AC5).
+- `docker-compose.yml` / `justfile` — bump the compose Postgres `max_connections` to
+  the 500 floor so an override run does not exhaust it (a standalone, safe-to-leave
+  config change).
+- ADR-0400 and this spec — design records.
+
 ## Rollback
 
-Test-infra only; no schema, migration, or runtime code. Reverting the two conftest
-edits, the helper, and the ADR/spec restores container-per-worker with no data or API
-impact.
+Test-infra + one compose-config bump; no schema, migration, or runtime `src` code.
+Reverting the two conftest edits, the helper, and the new tests restores
+container-per-worker with no data or API impact. The `docker-compose.yml`
+`max_connections` bump is independent and safe to leave in place (it only widens a
+local dev backend's ceiling); revert it too for a full undo.

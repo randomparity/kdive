@@ -88,13 +88,17 @@ backend is required.
    sequential-restart window is reachable only under sparse/clustered DB scheduling or
    `worksteal` (#1332) and costs at most a repeated ~3s start, never correctness.
 
-3. **Isolation moves to database/bucket per worker.** Each worker provisions
-   `kdive_test_<worker>` (worker id from `PYTEST_XDIST_WORKER`, `master` when not
-   under xdist) with `DROP DATABASE IF EXISTS … (FORCE); CREATE DATABASE …` on the
-   shared server and yields that database's conninfo; `minio_store` provisions and
-   empties a `kdive-test-<worker>` bucket. Setup is idempotent so a database/bucket
-   left by a crashed prior run against a *persistent* (override) backend is
-   reclaimed, not a hard error. Per-worker teardown drops its own database/bucket.
+3. **Isolation moves to database/bucket per worker, scoped to the run.** Each worker
+   provisions `kdive_test_<run>_<worker>` (worker id from `PYTEST_XDIST_WORKER`,
+   `master` when not under xdist; `<run>` the sanitized per-run temp-root leaf) with
+   `DROP DATABASE IF EXISTS … (FORCE); CREATE DATABASE …` on the shared server and
+   yields that database's conninfo; `minio_store` provisions and empties a
+   `kdive-test-<run>-<worker>` bucket. The `<run>` token keeps two runs sharing one
+   *override* backend from colliding (each drops only its own run's databases); the
+   container path is already run-isolated by its fresh container. Setup is idempotent
+   so a database/bucket left by a crashed prior run against a *persistent* (override)
+   backend is reclaimed, not a hard error. Per-worker teardown drops its own
+   database/bucket.
    `pg_conn`'s per-test `DROP SCHEMA public` and `key_ns`'s per-test prefix are
    unchanged and now operate inside the per-worker namespace.
 
@@ -104,11 +108,12 @@ backend is required.
    defaults to `max_size = 10` (`src/kdive/db/pool.py`), so a worst case of ~18
    concurrent workers × 10 plus per-test autocommit connections can exceed 100 and
    raise `FATAL: too many clients` — a flake class that cannot occur under
-   container-per-worker. The shared container is therefore started with a raised
-   `max_connections` (`-c max_connections=<sized to workers × pool + headroom>`, e.g.
-   500). The env-override server is the operator's own backend; the same sizing
-   requirement is documented for it (the `just compose-up` Postgres is bumped to
-   match) rather than silently inherited.
+   container-per-worker. The shared container is therefore started with a fixed floor
+   `-c max_connections=500` — comfortably above the worst case
+   (`PYTEST_XDIST_WORKER_COUNT` ≈ 18 × pool `max_size` 10 × ~2 headroom ≈ 360), read as
+   a floor rather than a fragile exact formula. The env-override server is the
+   operator's own backend; the same floor is applied to the `just compose-up` Postgres
+   (bumped in `docker-compose.yml`) rather than silently inherited.
 
 5. **`KDIVE_REQUIRE_DOCKER=1` is preserved verbatim.** The import-guard and
    container-start failure paths still skip when unset and re-raise when set, on both
@@ -145,6 +150,11 @@ the algorithm rather than duplicating it.
   let its user create/drop databases and buckets. The `just compose-up` `kdive`
   superuser and `minioadmin` root satisfy this; a locked-down shared backend would
   fail loudly at `CREATE DATABASE`, which is the correct signal.
+- **Residual — leftover run-token namespaces on a persistent override backend.** A
+  crashed run leaves its `kdive_test_<run>_*` databases/buckets on a *persistent*
+  override backend (the container path has none — the container is gone). Bounded,
+  prefix-identifiable, and swept by dropping stale `kdive_test_*` or recreating the
+  compose volume. Documented in the fixture docstrings.
 - POSIX-only coordination (`fcntl.flock`). The suite already targets Linux/macOS
   developer and CI hosts; Windows is out of scope for the live/db suites.
 - Pairs with, but does not depend on, `--dist worksteal` (#1332) and truncate-based
