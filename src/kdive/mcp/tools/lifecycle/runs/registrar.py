@@ -125,9 +125,21 @@ def _register_runs_get(
         args (e.g. `dhash_entries=1`) with the `cmdline` field on
         `runs.complete_build`.
 
+        Boot failure: a boot that fails to reach readiness recycles its `data.steps.boot` back to
+        `pending` (it never reports a `failed` value), so do NOT poll `steps.boot=="succeeded"` to
+        detect a failed boot — it would wait forever. The failure signal is `data.boot_readiness`:
+        `{job_id, status:"failed", error_category}` on the surviving failed boot job. If you
+        declared an `expected_boot_failure` at `runs.create`, `data.boot_readiness` also carries
+        `expected_crash_matched:false` on this path — a matched crash instead succeeds the boot as
+        `expected_crash_observed`, so a failed `boot_readiness` means your declared crash was NOT
+        reproduced (look for an unrelated failure, not your declared signature).
+
         Console evidence: `refs.console` is the boot-window console snapshot and
         `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
-        `artifacts.find` for literal search) — both always present on a booted Run.
+        `artifacts.find` for literal search). Both are present on a booted Run — including a
+        readiness-failed boot: the console the boot captured stays reachable at `refs.console`
+        (backed by the same surviving artifact as `refs.latest_console`), so one field works whether
+        the boot succeeded or failed.
         `refs.latest_console` jumps straight to the **newest** console artifact correlated to this
         Run (the boot snapshot, or the newest rotating part on a chatty Run) — read it the same way
         as `refs.console`, and it equals `refs.console` when only the boot snapshot exists. Use it

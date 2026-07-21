@@ -751,6 +751,65 @@ def test_envelope_for_run_surfaces_console_access_hint() -> None:
     assert "artifacts.fetch_raw" not in console_access.values()
 
 
+def _failed_boot_readiness() -> run_steps.BootAttempt:
+    return run_steps.BootAttempt(job_id=uuid4(), error_category=ErrorCategory.READINESS_FAILURE)
+
+
+def test_envelope_for_run_boot_failure_falls_back_to_latest_console() -> None:
+    # #1384 (ADR-0413): the boot step's console_evidence_artifact_id is recycled on a readiness
+    # failure (ADR-0185), but the captured console survives; refs.console falls back to it so the
+    # same field works on success and failure.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=_failed_boot_readiness(),
+        latest_console_ref="console-artifact-9",
+    )
+    assert resp.refs["console"] == "console-artifact-9"
+    assert resp.refs["latest_console"] == "console-artifact-9"
+    assert resp.data["console_access"] == _CONSOLE_ACCESS_EXPECTED
+
+
+def test_envelope_for_run_no_console_fallback_without_boot_failure() -> None:
+    # The fallback is scoped to a failed boot; a pre-boot Run keeps no refs.console even when a
+    # correlated console (e.g. from a prior run on the System) exists.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=None,
+        latest_console_ref="console-artifact-9",
+    )
+    assert "console" not in resp.refs
+    assert resp.refs["latest_console"] == "console-artifact-9"
+    assert "console_access" not in resp.data
+
+
+def test_envelope_for_run_boot_failure_discloses_expected_crash_not_matched() -> None:
+    # #1384: a matched expected crash succeeds the boot step, so a surviving failed boot job with a
+    # declared expectation means the declared crash was NOT reproduced.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED, expected_boot_failure={"kind": "panic"}),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=_failed_boot_readiness(),
+    )
+    readiness = resp.data["boot_readiness"]
+    assert isinstance(readiness, dict)
+    assert readiness["status"] == "failed"
+    assert readiness["expected_crash_matched"] is False
+
+
+def test_envelope_for_run_boot_failure_no_crash_key_without_expectation() -> None:
+    # Without a declared expected_boot_failure, boot_readiness omits expected_crash_matched.
+    resp = runs_common.envelope_for_run(
+        _run_model(RunState.SUCCEEDED),
+        step_progress=StepProgress(install="succeeded", boot="pending", boot_outcome=None),
+        boot_readiness=_failed_boot_readiness(),
+    )
+    readiness = resp.data["boot_readiness"]
+    assert isinstance(readiness, dict)
+    assert "expected_crash_matched" not in readiness
+
+
 def test_envelope_for_run_surfaces_degraded_liveness() -> None:
     # A guest that livelocked after a ready boot reads state=degraded (#1237, ADR-0373).
     resp = runs_common.envelope_for_run(
@@ -1639,6 +1698,73 @@ def test_get_unbooted_run_has_no_console_ref(migrated_url: str) -> None:
             await _insert_step(pool, run_id, "install", "succeeded", {})
             resp = await get_run(pool, _ctx(), run_id)
         assert "console" not in resp.refs
+
+    asyncio.run(_run())
+
+
+def test_get_run_readiness_failure_surfaces_console_ref(migrated_url: str) -> None:
+    # #1384 (ADR-0413): after a readiness-failed boot (deleted boot step, surviving failed job),
+    # the captured console stays reachable at refs.console via the surviving artifact.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            await _seed_run_console_artifact(pool, run_id, f"console-{run_id}")
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["steps"]["boot"] == "pending"
+        assert resp.data["boot_readiness"]["status"] == "failed"
+        assert "console" in resp.refs
+        assert resp.refs["console"] == resp.refs["latest_console"]
+        assert resp.data["console_access"]["ref"] == "console"
+
+    asyncio.run(_run())
+
+
+def test_get_run_readiness_failure_no_console_ref_without_artifact(migrated_url: str) -> None:
+    # A readiness failure that captured no console keeps no refs.console (nothing to fall back to).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["boot_readiness"]["status"] == "failed"
+        assert "console" not in resp.refs
+
+    asyncio.run(_run())
+
+
+def test_get_run_readiness_failure_discloses_expected_crash_not_matched(migrated_url: str) -> None:
+    # #1384: with a declared expected_boot_failure, a failed boot discloses expected_crash_matched
+    # false so an agent knows the declared crash was not reproduced.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await _insert_step(pool, run_id, "install", "succeeded", {})
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE runs SET expected_boot_failure = %s WHERE id = %s",
+                    (Jsonb({"kind": "panic"}), UUID(run_id)),
+                )
+            await _seed_boot_job(
+                pool,
+                run_id,
+                state=JobState.FAILED,
+                error_category=ErrorCategory.READINESS_FAILURE,
+            )
+            resp = await get_run(pool, _ctx(), run_id)
+        assert resp.data["boot_readiness"]["expected_crash_matched"] is False
 
     asyncio.run(_run())
 
