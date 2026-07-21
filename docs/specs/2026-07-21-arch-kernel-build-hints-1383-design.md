@@ -104,16 +104,29 @@ A new pytest (`tests/mcp/resources/test_kernel_build_per_arch_doc.py`) over the 
 doc (`docs/guide/kernel-build-per-arch.md`; `resources-docs-check` guarantees the snapshot
 equals it):
 
-- **Set completeness:** parse the `##`-level section headers; assert the set of documented
-  arches equals `SUPPORTED_ARCHES`. A `_TRAITS` row added without a section fails here; a
-  section for an arch the platform does not support also fails.
+- **Set completeness:** collect only `##` headings whose text is *exactly* a supported-arch
+  token (membership in `SUPPORTED_ARCHES`), not "any `##` line"; assert that set equals
+  `SUPPORTED_ARCHES`. Scoping to exact-arch-token headings is what makes the negative guarantee
+  ("no unsupported arch heads a section") enforceable while incidental prose that names another
+  arch ("powerpc has no bzImage") does not false-trip. A `_TRAITS` row added without a section
+  fails here.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
   in that arch's section, so a renamed container is caught.
+- **Strip-required predicate (the load-bearing rule):** for any arch whose
+  `BOOT_MEMBER_FORMATS[arch].container` contains `"ELF"` (the no-bzImage arches — a
+  source-derived predicate, not a hardcoded arch list), assert that arch's section contains a
+  `strip` token. This binds the single most error-prone instruction (ppc64le: strip the
+  build-tree `vmlinux` first) to the contract instead of leaving it as unguarded prose. The
+  guard pins the rule's *presence*, not its wording.
 - **`crashkernel` values:** assert the doc contains the exact `default_crashkernel_summary()`
   output, so a changed default fails until resynced.
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the
   snapshot exists (the existing `test_doc_resources.py` may already cover generic
   registration; add only what is arch-specific).
+
+The guard is deliberately honest about reach: it binds set-completeness, the `crashkernel`
+string, the boot-container name, and the strip-required predicate; the *explanatory* prose
+(why DWARF overruns the scan bound, cross-compile triples) is review-only, not drift-guarded.
 
 ## Acceptance criteria
 
