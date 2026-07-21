@@ -88,16 +88,29 @@ Resume the worker's claim loop. Requires platform operator.
 
 `implemented`
 
-Run reconciler cleanup once.
+Run reconciler cleanup once (platform_operator).
 
-Returns `data.repair_counts`, keyed by every cataloged repair kind, plus the
-human-readable scalar summary fields and comma-joined `data.failures`.
+Repairs runtime drift — expired leases, orphaned allocations, and the like — without
+touching the inventory catalog; it never prunes rows or deletes objects. Returns
+`data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable
+scalar summary fields and comma-joined `data.failures`.
+
+This is the runtime-state pass. To reconcile `systems.toml` into the catalog (which
+**can prune** rows and free their object-store bytes), use `ops.reconcile_systems`.
 
 ## `ops.reconcile_systems`
 
 `implemented` · `destructive`
 
-Reconcile systems.toml into the catalog (can prune). Platform admin.
+Reconcile systems.toml into catalog; prunes dropped rows (platform_admin, irreversible).
+
+Applies the on-disk `systems.toml` to the inventory catalog (image catalog, cost
+classes, resources). Rows that left the file are **permanently pruned**, and each
+image-row delete frees that image's backing object-store bytes to the GC — no undo
+short of restoring the file and re-running. Cordoned/pruned identities are audited.
+
+This is the config-catalog pass. For runtime-drift cleanup that never prunes rows,
+use `ops.reconcile_now` instead.
 
 ## `ops.set_cost_class_coeff`
 

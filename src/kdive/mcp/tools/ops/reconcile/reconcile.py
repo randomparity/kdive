@@ -162,10 +162,15 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_now() -> ToolResponse:
-        """Run reconciler cleanup once.
+        """Run reconciler cleanup once (platform_operator).
 
-        Returns `data.repair_counts`, keyed by every cataloged repair kind, plus the
-        human-readable scalar summary fields and comma-joined `data.failures`.
+        Repairs runtime drift — expired leases, orphaned allocations, and the like — without
+        touching the inventory catalog; it never prunes rows or deletes objects. Returns
+        `data.repair_counts`, keyed by every cataloged repair kind, plus the human-readable
+        scalar summary fields and comma-joined `data.failures`.
+
+        This is the runtime-state pass. To reconcile `systems.toml` into the catalog (which
+        **can prune** rows and free their object-store bytes), use `ops.reconcile_systems`.
         """
         return await reconcile_now(
             pool,

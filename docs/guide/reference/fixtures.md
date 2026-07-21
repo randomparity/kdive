@@ -8,6 +8,11 @@
 
 List rootfs fixture catalog entries (provider, name, arch). Requires a valid token.
 
+Fixtures are the **public baseline subset of images** — the curated rootfs images
+every project may provision without registering its own. For the full image catalog
+(including private and project-scoped images) and per-image capabilities, use
+``images.list`` / ``images.describe``.
+
 Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
 ``request.cursor`` for the next page.
 

@@ -8,6 +8,13 @@
 
 Price a hypothetical selector over a window without writing anything. Requires viewer.
 
+Prices are denominated in **KCU** (kdive compute unit) — the platform's dimensionless
+cost unit, used everywhere accounting reports a `*_kcu`, `limit_kcu`, or `spent_kcu`
+value. Cost is size × time: `rate(kcu/hr) = coeff(cost_class) × (1.0 × vcpus +
+0.25 × memory_gb)` and `cost = rate × hours`, so one vCPU-hour is 1.0 KCU and one
+GB-hour is 0.25 KCU, scaled by the cost class (and an accelerator factor for kvm/tcg).
+The response returns `estimate_kcu`, the `rate_kcu_per_hr`, and the vcpu/memory breakdown.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `project` | string | yes | Project to price the estimate for. |
@@ -25,7 +32,11 @@ Price a hypothetical selector over a window without writing anything. Requires v
 
 `implemented` · `read-only`
 
-Return platform-wide accounting usage for all projects.
+Return an inline platform-wide spend rollup over all projects.
+
+The rollup is returned inline in ``data`` (KCU totals per ``group_by`` bucket);
+nothing is written to the object store. For a downloadable multi-section CSV/XLSX
+export behind presigned URLs, use ``reports.generate_all_projects`` instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -40,7 +51,11 @@ Return platform-wide accounting usage for all projects.
 
 `implemented` · `read-only`
 
-Return accounting usage for the caller's granted projects.
+Return an inline spend rollup over the caller's granted projects.
+
+The rollup is returned inline in ``data`` (one row per ``group_by`` bucket, KCU
+totals); nothing is written to the object store. For a downloadable multi-section
+CSV/XLSX export behind presigned URLs, use ``reports.generate_granted_set`` instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

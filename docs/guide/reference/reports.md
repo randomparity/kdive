@@ -6,7 +6,12 @@
 
 `implemented` · `read-only`
 
-Generate a platform-wide consolidated report over every project.
+Generate a downloadable platform-wide multi-section report over every project.
+
+Captures one ``as_of`` snapshot and returns the sections inline (within a byte
+budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
+download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
+inline KCU spend rollup with no spreadsheets, use ``accounting.report_all_projects``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -21,7 +26,12 @@ Generate a platform-wide consolidated report over every project.
 
 `implemented` · `read-only`
 
-Generate a consolidated report over the caller's granted projects.
+Generate a downloadable multi-section report over the caller's granted projects.
+
+Captures one ``as_of`` snapshot and returns the sections inline (within a byte
+budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
+download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
+inline KCU spend rollup with no spreadsheets, use ``accounting.report_granted_set``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

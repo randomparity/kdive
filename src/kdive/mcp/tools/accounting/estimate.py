@@ -183,7 +183,15 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ],
     ) -> ToolResponse:
-        """Price a hypothetical selector over a window without writing anything. Requires viewer."""
+        """Price a hypothetical selector over a window without writing anything. Requires viewer.
+
+        Prices are denominated in **KCU** (kdive compute unit) — the platform's dimensionless
+        cost unit, used everywhere accounting reports a `*_kcu`, `limit_kcu`, or `spent_kcu`
+        value. Cost is size × time: `rate(kcu/hr) = coeff(cost_class) × (1.0 × vcpus +
+        0.25 × memory_gb)` and `cost = rate × hours`, so one vCPU-hour is 1.0 KCU and one
+        GB-hour is 0.25 KCU, scaled by the cost class (and an accelerator factor for kvm/tcg).
+        The response returns `estimate_kcu`, the `rate_kcu_per_hr`, and the vcpu/memory breakdown.
+        """
         return await estimate(
             pool,
             current_context(),

@@ -34,7 +34,11 @@ Mark a host unschedulable; placement skips/rejects it. Requires platform operato
 
 `implemented` · `destructive`
 
-Deregister a runtime or config-owned remote-libvirt resource.
+Deregister a runtime or config-owned resource (platform_admin). Irreversible.
+
+Permanently removes the resource from the inventory; there is no undo (re-add it with
+the matching ``resources.register_*`` tool). Deregistering a resource with live
+allocations requires ``force=True`` (destructive-tier).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -113,7 +117,7 @@ the image can run on it.
 
 `implemented`
 
-Register a fault-inject runtime resource.
+Register a fault-inject runtime resource (platform_admin).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -129,7 +133,7 @@ Register a fault-inject runtime resource.
 
 `implemented`
 
-Register a local-libvirt runtime resource.
+Register a local-libvirt runtime resource (platform_admin).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -146,7 +150,7 @@ Register a local-libvirt runtime resource.
 
 `implemented`
 
-Register a remote-libvirt runtime resource.
+Register a remote-libvirt runtime resource (platform_admin).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -164,7 +168,7 @@ Register a remote-libvirt runtime resource.
 
 `implemented`
 
-Renew a runtime resource lease.
+Renew a runtime resource lease (platform_admin).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

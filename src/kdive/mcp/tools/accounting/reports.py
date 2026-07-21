@@ -357,7 +357,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Report filters: projects, group_by, and optional time window."),
         ] = None,
     ) -> ToolResponse:
-        """Return accounting usage for the caller's granted projects."""
+        """Return an inline spend rollup over the caller's granted projects.
+
+        The rollup is returned inline in ``data`` (one row per ``group_by`` bucket, KCU
+        totals); nothing is written to the object store. For a downloadable multi-section
+        CSV/XLSX export behind presigned URLs, use ``reports.generate_granted_set`` instead.
+        """
         return await report_granted_set(
             pool,
             current_context(),
@@ -375,7 +380,12 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Report filters: group_by and optional time window."),
         ] = None,
     ) -> ToolResponse:
-        """Return platform-wide accounting usage for all projects."""
+        """Return an inline platform-wide spend rollup over all projects.
+
+        The rollup is returned inline in ``data`` (KCU totals per ``group_by`` bucket);
+        nothing is written to the object store. For a downloadable multi-section CSV/XLSX
+        export behind presigned URLs, use ``reports.generate_all_projects`` instead.
+        """
         return await report_all_projects(
             pool,
             current_context(),
