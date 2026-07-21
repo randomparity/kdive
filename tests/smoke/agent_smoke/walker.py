@@ -104,12 +104,13 @@ def _stage_tools(section: str, tools: frozenset[str]) -> list[tuple[int, list[st
 def _advertised_links(doc: str) -> list[str]:
     """Return each distinct ``resource://kdive/...`` link the doc advertises, punctuation-stripped.
 
-    A link at the end of a sentence or inside a Markdown target carries trailing ``).,;:`` that
-    is not part of the URI; strip it so the link resolves against the served resource set.
+    A link at the end of a sentence, inside a Markdown target, or wrapped in backticks/angle
+    brackets carries trailing delimiters that are not part of the URI; strip them so the link
+    resolves against the served resource set.
     """
     seen: dict[str, None] = {}
     for raw in _LINK.findall(doc):
-        seen.setdefault(raw.rstrip(").,;:"), None)
+        seen.setdefault(raw.rstrip(").,;:`>"), None)
     return list(seen)
 
 
