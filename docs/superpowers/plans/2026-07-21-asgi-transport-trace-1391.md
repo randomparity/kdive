@@ -16,7 +16,7 @@ Spec: `docs/specs/2026-07-21-asgi-transport-trace-1391-design.md`. ADR: `docs/ad
 - Absolute imports only (`kdive....`), no relative imports. Google-style docstrings on public APIs.
 - Doc-style: plain, factual prose; never "critical/robust/comprehensive/elegant"; "Milestone" not "Sprint".
 - Guardrail suite: `just ci` = `lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check doc-constants-check chart-version-check test`. CI runs each recipe individually.
-- Adding a `KDIVE_*` registry `Setting` requires regenerating the config reference: `just config-docs` then commit `docs/reference/config.md` (guarded by `config-docs-check`).
+- Adding a `KDIVE_*` registry `Setting` requires regenerating the config reference: `just config-docs` then commit `docs/guide/reference/config.md` (guarded by `config-docs-check`).
 - Redaction invariant: `Authorization`/bearer logged as presence only, never the value.
 - Run a single test: `uv run python -m pytest <path>::<name> -q`.
 
@@ -28,7 +28,7 @@ Spec: `docs/specs/2026-07-21-asgi-transport-trace-1391-design.md`. ADR: `docs/ad
 - Modify: `src/kdive/config/core_settings.py` (add `MCP_TRACE` Setting next to `COMPACT_RESPONSES`, and to the `CORE_SETTINGS` list ~line 705-713)
 - Create: `src/kdive/mcp/middleware/transport_trace.py` (the `mcp_trace_enabled()` helper lives here, co-located with the middleware added in Task 2)
 - Test: `tests/config/test_core_settings.py` (or nearest existing settings test) and `tests/mcp/middleware/test_transport_trace.py`
-- Regenerate: `docs/reference/config.md` via `just config-docs`
+- Regenerate: `docs/guide/reference/config.md` via `just config-docs`
 
 **Interfaces:**
 - Produces: `kdive.config.core_settings.MCP_TRACE: Setting[str]` (name `KDIVE_MCP_TRACE`, `parse=_str`, no default, `group="logging"`, `processes=_SERVER`); `kdive.mcp.middleware.transport_trace.mcp_trace_enabled() -> bool`.
@@ -117,13 +117,13 @@ Expected: PASS (all parametrized cases).
 - [ ] **Step 6: Regenerate the config reference**
 
 Run: `just config-docs` then `just config-docs-check`
-Expected: `docs/reference/config.md` now lists `KDIVE_MCP_TRACE`; check passes.
+Expected: `docs/guide/reference/config.md` now lists `KDIVE_MCP_TRACE`; check passes.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/kdive/config/core_settings.py src/kdive/mcp/middleware/transport_trace.py \
-        tests/mcp/middleware/test_transport_trace.py docs/reference/config.md
+        tests/mcp/middleware/test_transport_trace.py docs/guide/reference/config.md
 git commit -m "feat(mcp): add KDIVE_MCP_TRACE setting and truthy resolver"
 ```
 
@@ -354,37 +354,50 @@ Expected: PASS.
 
 Append:
 
+Both tests below mutate the process-global root logger, so each snapshots **and fully
+restores** root level and handler list in a `finally` — otherwise they leak WARNING/stripped
+handlers into later tests and cause order-dependent (pass-in-isolation, fail-in-suite)
+failures. A small helper keeps the restore honest:
+
 ```python
-def test_level_independent_of_raised_root_floor(caplog) -> None:
-    # Mimic KDIVE_LOG_LEVEL=warning: raise the ROOT logger floor.
-    logging.getLogger().setLevel(logging.WARNING)
+import contextlib
+
+
+@contextlib.contextmanager
+def _preserve_root_logger():
+    """Snapshot and fully restore the root logger's level and handlers."""
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
     try:
+        yield root
+    finally:
+        root.setLevel(level)
+        root.handlers[:] = handlers
+
+
+def test_level_independent_of_raised_root_floor(caplog) -> None:
+    with _preserve_root_logger() as root:
+        root.setLevel(logging.WARNING)  # mimic KDIVE_LOG_LEVEL=warning
         caplog.set_level(logging.INFO, logger=TRACE_LOGGER)
         asyncio.run(TransportTraceMiddleware(_ok_app)(_scope([]), None, _noop_send))
         assert len(_records(caplog)) == 1
-    finally:
-        logging.getLogger().setLevel(logging.WARNING)  # leave as harness had it
 
 
 def test_otel_bridge_handler_stays_notset() -> None:
     # Regression guard for the documented level-independence invariant: the OTel
     # LoggingHandler that facade installs must remain at NOTSET so a propagated INFO
-    # record is not gated by a handler level.
+    # record is not gated by a handler level. _bridge_root_logger mutates root level and
+    # strips the stdlib floor, so restore fully.
     from opentelemetry.sdk._logs import LoggerProvider
 
     from kdive.observability.facade import _bridge_root_logger
 
-    root = logging.getLogger()
-    before = list(root.handlers)
-    try:
+    with _preserve_root_logger() as root:
+        before = list(root.handlers)
         _bridge_root_logger(LoggerProvider(), "warning")
         added = [h for h in root.handlers if h not in before]
         assert added, "expected the bridge handler to be installed"
         assert all(h.level == logging.NOTSET for h in added)
-    finally:
-        for h in list(root.handlers):
-            if h not in before:
-                root.removeHandler(h)
 
 
 def test_concurrent_requests_do_not_share_state(caplog) -> None:
@@ -521,7 +534,8 @@ async def run_server(
 
 - [ ] **Step 4: Thread the flag from `__main__`**
 
-In `src/kdive/__main__.py`, import and resolve in `_handle_server`:
+In `src/kdive/__main__.py`, add the import near the other `kdive....` imports and resolve the
+flag in `_handle_server`. The final form (no placeholder — write exactly this):
 
 ```python
 from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
@@ -532,21 +546,13 @@ def _handle_server(args, secret_registry, telemetry) -> None:
     host = config.require(HTTP_HOST)
     port = config.require(HTTP_PORT)
     asyncio.run(
-        _run_server(host, port, initialized, secret_registry=secret_registry)
-        if False else  # placeholder guard removed below
         _run_server(host, port, secret_registry, initialized, trace_enabled=mcp_trace_enabled())
     )
 ```
 
-Simplify to the single real call (do not keep the placeholder):
-
-```python
-    asyncio.run(
-        _run_server(host, port, secret_registry, initialized, trace_enabled=mcp_trace_enabled())
-    )
-```
-
-(`_run_server` is the aliased `run_server`; the keyword `trace_enabled` matches the new signature.)
+Only the `asyncio.run(...)` call and the new import change; the four lines above it are the
+existing body (verified against `__main__.py:106-109`). `_run_server` is the aliased
+`run_server`; the keyword-only `trace_enabled` matches the new signature from Step 3.
 
 - [ ] **Step 5: Run the seam tests + the whole trace module**
 
@@ -654,10 +660,30 @@ def test_trace_observes_transport_session_miss_404() -> None:
     assert any(r.status == 404 for r in records)
 ```
 
+**Tier note:** this lives in `tests/mcp/core/` (plain `just test`, no Docker), mirroring the
+existing `tests/mcp/core/test_bare_bearer_ordering.py`, which drives the same real `http_app`
+with an unopened pool. The spec allowed the integration tier as a hedge against the session
+layer touching the DB; the `open=False` in-process pattern is the cheaper always-on gate and
+is used **unless** Step 2 shows the session lookup actually touches the pool.
+
 - [ ] **Step 2: Run to verify the 404 assumption holds (and the tests fail only if wiring is wrong)**
 
 Run: `uv run python -m pytest tests/mcp/core/test_transport_trace_ordering.py -q`
-Expected initially: PASS if the wiring from Task 3 is correct. If `test_trace_observes_transport_session_miss_404` returns a status other than 404, inspect the real response (`resp.status_code`) and adjust the assertion to the transport's actual session-miss status **and** record the observed status in the test docstring — the point is that the trace records whatever status the transport returns for an unknown session. If FastMCP does not surface the session-miss as an observable `http.response.start` at all (no trace record), fall back to the ASGI stack-position assertion below.
+Expected initially: PASS if the wiring from Task 3 is correct. Three contingencies if not:
+
+1. **Different status.** If `test_trace_observes_transport_session_miss_404` returns a status
+   other than 404, inspect `resp.status_code`, adjust the assertion to the transport's actual
+   session-miss status, and record the observed status in the test docstring — the point is
+   that the trace records whatever status the transport returns for an unknown session.
+2. **No trace record at all** (FastMCP does not surface the session-miss as an observable
+   `http.response.start`): drop `test_trace_observes_transport_session_miss_404` and use the
+   Step 3 stack-position assertion as the PR gate instead.
+3. **Pool/connection error** (a `psycopg`/`PoolClosed`/connection exception — the unopened
+   pool WAS touched by the session layer): the in-process no-DB pattern does not hold for the
+   404 path. Re-tier this one test to the integration suite with a disposable open pool
+   (follow the `KDIVE_REQUIRE_DOCKER` integration fixtures the DB tests use), OR, if that is
+   heavier than warranted, fall back to the Step 3 stack-position assertion as the PR gate.
+   Either way the "outermost over FastMCP's transport" assumption stays checked by a PR gate.
 
 - [ ] **Step 3: (Fallback only, if Step 2 shows no trace record for the 404)** Add a stack-position assertion
 
