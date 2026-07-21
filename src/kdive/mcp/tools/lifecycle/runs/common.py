@@ -75,11 +75,13 @@ def _run_recovery(run: Run) -> dict[str, JsonValue]:
 
     Carries the optional client `label` (ADR-0264, #867) so every Run read path — success,
     failed, and `runs.list` — echoes it; it is the caller's own validated input, surfaced
-    verbatim like `investigations.title`.
+    verbatim like `investigations.title`. `outcome_note` (ADR-0415, #1386) is echoed the same
+    way — the post-hoc verdict set via `runs.set`, `None` until one is recorded.
     """
     return {
         "investigation_id": str(run.investigation_id),
         "label": run.label,
+        "outcome_note": run.outcome_note,
         # Every Run is the external-upload lane (the agent builds locally and uploads).
         "build_source": "external",
     }

@@ -120,6 +120,7 @@
 | [`runs.get`](runs.md#runsget) | `implemented` |
 | [`runs.install`](runs.md#runsinstall) | `implemented` |
 | [`runs.list`](runs.md#runslist) | `implemented` |
+| [`runs.set`](runs.md#runsset) | `implemented` |
 | [`secrets.list`](secrets.md#secretslist) | `implemented` |
 | [`session.whoami`](session.md#sessionwhoami) | `implemented` |
 | [`shapes.delete`](shapes.md#shapesdelete) | `implemented` |

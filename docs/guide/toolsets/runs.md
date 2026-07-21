@@ -25,3 +25,5 @@ tool's own description.
 - `runs.get` — read a run's status, build provenance, and console access.
 - `runs.list` — list runs with filters and pagination.
 - `runs.cancel` — cancel an in-flight run.
+- `runs.set` — record a post-hoc `outcome_note` (a free-form verdict) on a run, editable at any
+  time; readable back as `data.outcome_note`.

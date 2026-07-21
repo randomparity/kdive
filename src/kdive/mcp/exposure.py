@@ -209,6 +209,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "runs.create": _CONTRIBUTOR,
     "runs.bind": _CONTRIBUTOR,
     "runs.cancel": _CONTRIBUTOR,
+    "runs.set": _CONTRIBUTOR,
     "runs.complete_build": _CONTRIBUTOR,
     "runs.install": _CONTRIBUTOR,
     "runs.boot": _CONTRIBUTOR,
