@@ -38,12 +38,17 @@ class _CaptureHandler(logging.Handler):
         self.records.append(record)
 
 
-def _post(headers: dict[str, str], *, valid_auth: bool = False) -> tuple[httpx.Response, list[Any]]:
-    kp = make_keypair()
+def _traced_http_app(kp: Any) -> Any:
+    """The real FastMCP http_app with trace enabled, trusting ``kp``'s public key."""
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
-    http_app = app.http_app(middleware=server_http_middleware(trace_enabled=True))
+    return app.http_app(middleware=server_http_middleware(trace_enabled=True))
+
+
+def _post(headers: dict[str, str], *, valid_auth: bool = False) -> tuple[httpx.Response, list[Any]]:
+    kp = make_keypair()
+    http_app = _traced_http_app(kp)
     sent = dict(headers)
     if valid_auth:  # a token the verifier trusts, so auth passes and the session layer runs
         sent["Authorization"] = f"Bearer {mint(kp)}"
@@ -88,10 +93,6 @@ def test_trace_observes_transport_session_miss_404() -> None:
 
 
 def test_seam_places_trace_outermost_in_real_stack() -> None:
-    kp = make_keypair()
-    verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
-    pool = AsyncConnectionPool("postgresql://unused", open=False)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
-    http_app = app.http_app(middleware=server_http_middleware(trace_enabled=True))
+    http_app = _traced_http_app(make_keypair())
     user_mw = getattr(http_app, "user_middleware", [])
     assert any(getattr(m, "cls", None) is TransportTraceMiddleware for m in user_mw)
