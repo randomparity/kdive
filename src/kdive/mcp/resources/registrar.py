@@ -79,6 +79,21 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
     DocResource(
+        uri="resource://kdive/docs/guide/kernel-build-per-arch.md",
+        source="docs/guide/kernel-build-per-arch.md",
+        content_file="kernel-build-per-arch.md",
+        name="kernel-build-per-arch",
+        title="Per-architecture kernel build hints",
+        description=(
+            "The arch-varying rules for packaging a kernel upload, at a glance: what "
+            "boot/vmlinuz must be per target arch (the x86_64 bzImage vs the ppc64le stripped "
+            "ELF vmlinux, which has no bzImage), the strip step, the cross-compile triples, and "
+            "the crashkernel defaults, plus the build-host-vs-target check that catches an agent "
+            "building for the wrong arch. Cited by the BuildProfile arch field and the "
+            "agent-index build stage; the full upload recipe stays in external-build-upload."
+        ),
+    ),
+    DocResource(
         uri="resource://kdive/docs/guide/response-envelope.md",
         source="docs/guide/response-envelope.md",
         content_file="response-envelope.md",
