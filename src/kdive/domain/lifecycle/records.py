@@ -188,6 +188,11 @@ class Run(DomainModel, Attribution):
     #: Optional client-supplied human handle, set at create (ADR-0264, #867). Validated by
     #: `validate_label` before persistence; echoed in the runs read/create envelopes.
     label: str | None = None
+    #: Optional free-form post-hoc outcome note (ADR-0415, #1386), distinct from the write-once
+    #: `label`: set/updated via `runs.set` at any time after create — including on a terminal
+    #: Run — to record the Run's verdict. `None` until an agent records one; echoed in the runs
+    #: read envelopes.
+    outcome_note: str | None = None
 
     def require_system_id(self) -> UUID:
         """Return the bound System id, or fail closed for an unbound Run (ADR-0169).

@@ -48,6 +48,11 @@ from kdive.mcp.tools.lifecycle.runs.create import (
     create_run,
 )
 from kdive.mcp.tools.lifecycle.runs.create import _created_response as _created_response
+from kdive.mcp.tools.lifecycle.runs.metadata import (
+    OUTCOME_NOTE_MAX_LEN,
+    set_run,
+    validate_outcome_note,
+)
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run, install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
@@ -5979,5 +5984,153 @@ def test_get_succeeded_run_omits_build_provenance_key_when_absent(migrated_url: 
             )
             resp = await get_run(pool, _ctx(), run_id)
         assert "build_provenance" not in resp.data
+
+    asyncio.run(_run())
+
+
+# --- runs.set: post-hoc outcome note (ADR-0415, #1386) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("UBSAN reproduced, not a panic", "UBSAN reproduced, not a panic"),
+        ("  trimmed  ", "trimmed"),
+        ("line one\nline two", "line one\nline two"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_validate_outcome_note_normalizes(raw: str, expected: str | None) -> None:
+    assert validate_outcome_note(raw) == expected
+
+
+def test_validate_outcome_note_rejects_overlong() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_outcome_note("x" * (OUTCOME_NOTE_MAX_LEN + 1))
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "invalid_outcome_note"
+
+
+def test_validate_outcome_note_rejects_nul() -> None:
+    with pytest.raises(CategorizedError) as excinfo:
+        validate_outcome_note("bad\x00note")
+    assert excinfo.value.details["reason"] == "invalid_outcome_note"
+
+
+def test_envelope_for_run_surfaces_outcome_note() -> None:
+    run = _run_model(RunState.SUCCEEDED).model_copy(update={"outcome_note": "fix confirmed"})
+    assert runs_common.envelope_for_run(run).data["outcome_note"] == "fix confirmed"
+
+
+def test_envelope_for_run_outcome_note_null_when_unset() -> None:
+    assert runs_common.envelope_for_run(_run_model(RunState.RUNNING)).data["outcome_note"] is None
+
+
+def test_set_run_records_and_surfaces_outcome_note(migrated_url: str) -> None:
+    async def _run() -> tuple[ToolResponse, ToolResponse, str | None]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            set_resp = await set_run(pool, _ctx(), run_id, outcome_note="fix confirmed")
+            read = await get_run(pool, _ctx(), run_id)
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT outcome_note FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        return set_resp, read, (row["outcome_note"] if row else None)
+
+    set_resp, read, stored = asyncio.run(_run())
+    assert set_resp.status == "annotated"
+    assert set_resp.data["outcome_note"] == "fix confirmed"
+    assert read.data["outcome_note"] == "fix confirmed"
+    assert stored == "fix confirmed"
+
+
+def test_set_run_overwrites_existing_note(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await set_run(pool, _ctx(), run_id, outcome_note="first")
+            return await set_run(pool, _ctx(), run_id, outcome_note="second")
+
+    resp = asyncio.run(_run())
+    assert resp.data["outcome_note"] == "second"
+
+
+def test_set_run_blank_clears_note(migrated_url: str) -> None:
+    async def _run() -> tuple[ToolResponse, str | None]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            await set_run(pool, _ctx(), run_id, outcome_note="temporary")
+            cleared = await set_run(pool, _ctx(), run_id, outcome_note="")
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT outcome_note FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        return cleared, (row["outcome_note"] if row else "unset")
+
+    cleared, stored = asyncio.run(_run())
+    assert cleared.data["outcome_note"] is None
+    assert stored is None
+
+
+def test_set_run_editable_on_terminal_failed_run(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(
+                pool, state=RunState.FAILED, failure=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+            return await set_run(pool, _ctx(), run_id, outcome_note="wrong fix applied")
+
+    resp = asyncio.run(_run())
+    # A set on a terminal (failed) Run is still a successful mutation: an "annotated" ack,
+    # never an error envelope. The failed lifecycle state is carried in data.run_state.
+    assert resp.status == "annotated"
+    assert resp.data["run_state"] == "failed"
+    assert resp.data["outcome_note"] == "wrong fix applied"
+
+
+def test_set_run_rejects_overlong_note(migrated_url: str) -> None:
+    async def _run() -> tuple[ToolResponse, str | None]:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            resp = await set_run(
+                pool, _ctx(), run_id, outcome_note="x" * (OUTCOME_NOTE_MAX_LEN + 1)
+            )
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT outcome_note FROM runs WHERE id = %s", (run_id,))
+                row = await cur.fetchone()
+        return resp, (row["outcome_note"] if row else "unset")
+
+    resp, stored = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert stored is None
+
+
+def test_set_run_unknown_run_is_not_found(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            return await set_run(pool, _ctx(), str(uuid4()), outcome_note="note")
+
+    resp = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.NOT_FOUND.value
+
+
+def test_set_run_invalid_uuid_is_config_error(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            return await set_run(pool, _ctx(), "not-a-uuid", outcome_note="note")
+
+    resp = asyncio.run(_run())
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+
+
+def test_set_run_requires_contributor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
+            with pytest.raises(AuthorizationError):
+                await set_run(pool, _ctx(Role.VIEWER), run_id, outcome_note="note")
 
     asyncio.run(_run())

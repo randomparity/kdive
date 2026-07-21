@@ -34,6 +34,8 @@ from kdive.mcp.tools.lifecycle.runs.create import (
 from kdive.mcp.tools.lifecycle.runs.create import create_run as _create_run
 from kdive.mcp.tools.lifecycle.runs.list import RunsListRequest as _RunsListRequest
 from kdive.mcp.tools.lifecycle.runs.list import list_runs as _list_runs
+from kdive.mcp.tools.lifecycle.runs.metadata import OUTCOME_NOTE_MAX_LEN as _OUTCOME_NOTE_MAX_LEN
+from kdive.mcp.tools.lifecycle.runs.metadata import set_run as _set_run
 from kdive.mcp.tools.lifecycle.runs.steps import boot_run as _boot_run
 from kdive.mcp.tools.lifecycle.runs.steps import install_run as _install_run
 from kdive.mcp.tools.lifecycle.runs.view import get_run as _get_run
@@ -85,6 +87,7 @@ def register(
     _register_runs_create(app, pool, resolver)
     _register_runs_bind(app, pool)
     _register_runs_cancel(app, pool)
+    _register_runs_set(app, pool)
     _register_runs_complete_build(app, pool, resolver)
     _register_runs_install(app, pool, resolver)
     _register_runs_boot(app, pool)
@@ -367,6 +370,39 @@ def _register_runs_cancel(app: FastMCP, pool: AsyncConnectionPool) -> None:
     ) -> ToolResponse:
         """Cancel a non-terminal run, freeing its system without a teardown."""
         return await _cancel_run(pool, current_context(), run_id)
+
+
+def _register_runs_set(app: FastMCP, pool: AsyncConnectionPool) -> None:
+    @app.tool(
+        name="runs.set",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def runs_set(
+        run_id: Annotated[str, Field(description="The Run to annotate.")],
+        outcome_note: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional post-hoc outcome note for this Run — a free-form verdict recorded "
+                    "after the fact (e.g. 'UBSAN reproduced, not a panic', 'wrong fix applied', "
+                    "'fix confirmed'), echoed back as data.outcome_note in runs.get / runs.list. "
+                    "Unlike the write-once label (a create-time handle), this is editable at any "
+                    "time, including on a terminal (succeeded/failed/canceled) Run — call runs.set "
+                    "again to overwrite it. A blank value clears the note. "
+                    f"At most {_OUTCOME_NOTE_MAX_LEN} characters."
+                )
+            ),
+        ],
+    ) -> ToolResponse:
+        """Set or clear a Run's post-hoc outcome note, editable anytime after create.
+
+        The outcome_note is a free-form verdict recorded once the Run's outcome is known — a
+        separate field from the write-once label. It is editable at any time (including on a
+        terminal Run); passing a blank value clears it. Readable afterward as data.outcome_note
+        via runs.get and runs.list.
+        """
+        return await _set_run(pool, current_context(), run_id, outcome_note=outcome_note)
 
 
 def _register_runs_complete_build(

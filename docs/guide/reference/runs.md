@@ -212,3 +212,19 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 - `state` (``created`, `running`, `succeeded`, `failed`, `canceled` (nullable)`, optional) — Only Runs in this build-phase state.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
+
+## `runs.set`
+
+`implemented`
+
+Set or clear a Run's post-hoc outcome note, editable anytime after create.
+
+The outcome_note is a free-form verdict recorded once the Run's outcome is known — a
+separate field from the write-once label. It is editable at any time (including on a
+terminal Run); passing a blank value clears it. Readable afterward as data.outcome_note
+via runs.get and runs.list.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `outcome_note` | string | yes | Optional post-hoc outcome note for this Run — a free-form verdict recorded after the fact (e.g. 'UBSAN reproduced, not a panic', 'wrong fix applied', 'fix confirmed'), echoed back as data.outcome_note in runs.get / runs.list. Unlike the write-once label (a create-time handle), this is editable at any time, including on a terminal (succeeded/failed/canceled) Run — call runs.set again to overwrite it. A blank value clears the note. At most 4096 characters. |
+| `run_id` | string | yes | The Run to annotate. |
