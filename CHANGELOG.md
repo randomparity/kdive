@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stream the combined tar into extract_kernel_bundle (#1351)
 - Machine-checkable prompt step preconditions
 - Guard code-derived doc constants against source drift
+- Serve per-arch kernel build-hints resource + drift guard
 
 ### Changed
 
@@ -247,6 +248,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct QMP-socket XDG lever to XDG_CONFIG_HOME
 - P3 agent-surface polish batch (#1363)
 - Fix ADR-0202 cross-link filename in ADR-0409
+- Spec + ADR-0412 for per-arch kernel build hints
+- Tell agents to determine build-host vs target arch first
+- Harden ADR-0412 after adversarial review
+- Reconcile ADR-0412 with the already-inline arch Field text
+- Close remaining ADR-0412 completeness/honesty gaps
+- Correct strip-guard residual to declared-pin, not image bytes
+- Pin strip-guard to prefix-match, add red-step + exact tokens
+- Make completeness guard bidirectional; fix red-step recipe
+- Correct transposed crashkernel-summary ground-truth string
+- Guard the new Field citation; blank fenced blocks in parse
+- Scope fence-blanking to heading extraction only
+- Implementation plan for per-arch kernel build hints
+- Add missing AC3 red-steps and ADR-README prerequisite
+- Make rollback adr-status-check-safe; clarify red-step (e)
+- Use full ADR filename in rollback (docs-paths guard)
+- Green-at-each-commit order; defensive section lookup
+- Repoint only the arch-specific Field citation
 
 ### Fixed
 
