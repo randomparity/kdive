@@ -139,7 +139,34 @@ def test_finish_early_then_reacquire_restarts(tmp_path: Path) -> None:
     with _acquire(tmp_path):
         assert _FakeContainer.starts == 2  # a later holder lazily starts a fresh one
     assert _FakeContainer.stops == ["cid-1", "cid-2"]
+
+
+def test_corrupt_state_file_is_treated_as_absent(tmp_path: Path) -> None:
+    _FakeContainer.starts = 0
+    _FakeContainer.stops = []
+    (tmp_path / "kdive-pg.json").write_text("{ partial")  # SIGKILL-mid-write shape
+    with _acquire(tmp_path) as url:  # must not raise JSONDecodeError
+        assert url.endswith("/test")
+        assert _FakeContainer.starts == 1  # started fresh over the corrupt file
+
+
+def test_stop_failure_still_unlinks_state(tmp_path: Path) -> None:
+    def boom(_cid: str) -> None:
+        raise RuntimeError("already removed")
+
+    with xdist_backend.shared_container(
+        tmp_path, "pg", start=_FakeContainer.start, stop=boom
+    ):
+        pass  # sole holder; refcount hits 0 and stop() raises
+    # state file removed despite the stop() failure, so the next run starts clean
+    assert not (tmp_path / "kdive-pg.json").exists()
 ```
+
+Note: no stale-container detection is implemented — the coordination state file lives
+in the **per-run** temp root (a fresh `pytest-N` each run), so a prior run's state is
+in a different directory this run never reads (spec "Stale state file" edge case:
+*not reachable*). The two tests above cover the only real crash paths: corrupt JSON and
+a stop() that raises.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -256,8 +283,12 @@ def shared_container(
                 return
             state["refcount"] -= 1
             if state["refcount"] <= 0:
-                stop(state["container_id"])
-                state_path.unlink(missing_ok=True)
+                # Unlink the state file even if stop() fails (e.g. the container was
+                # already removed) so a stray container cannot wedge the next run.
+                try:
+                    stop(state["container_id"])
+                finally:
+                    state_path.unlink(missing_ok=True)
             else:
                 _write_state(state_path, state)
 
@@ -277,16 +308,24 @@ def _read_state(state_path: Path) -> dict | None:
         return json.loads(state_path.read_text())
     except FileNotFoundError:
         return None
+    except json.JSONDecodeError:
+        # A worker SIGKILLed mid-write could leave partial JSON; treat it as absent
+        # (start fresh) rather than wedging every later worker.
+        return None
 
 
 def _write_state(state_path: Path, state: dict) -> None:
-    state_path.write_text(json.dumps(state))
+    # Atomic: write to a temp file in the same dir, then os.replace (never a partial
+    # read by another worker under the flock).
+    tmp = state_path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, state_path)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run python -m pytest tests/support/test_xdist_backend.py -q`
-Expected: PASS (7 tests).
+Expected: PASS (9 tests).
 
 - [ ] **Step 5: Lint + type, then commit**
 
@@ -314,59 +353,75 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
+These test the module-level helpers directly (no `.__wrapped__`, no `_FakeFactory`) —
+the fixture is a thin wrapper over `_acquire_pg_server` + `_provision_worker_db`, both
+of which are plain callables the tests drive with the real `tmp_path_factory` fixture.
+The require-docker / override branches are covered without Docker by monkeypatching
+`_start_postgres`; the real provisioning roundtrip is Docker-gated.
+
 ```python
 # tests/db/test_postgres_url_fixture.py
 from __future__ import annotations
 
+import os
+
+import psycopg
 import pytest
 
 from tests.db import conftest as db_conftest
 
 
-def test_override_skips_container_and_names_per_worker(
-    monkeypatch: pytest.MonkeyPatch, pg_conn
-) -> None:
-    """With KDIVE_TEST_PG_URL set, no container is started and the conninfo points
-    at the override host with a kdive_test_<worker>_<token> database."""
-    # pg_conn gives a real (testcontainer or compose) server we can point the
-    # override at: reuse its server URL as the override target.
-    server = db_conftest._server_url_without_db(pg_conn.info.dsn)  # helper added below
-    monkeypatch.setenv("KDIVE_TEST_PG_URL", server)
-    started: list[str] = []
-    monkeypatch.setattr(db_conftest, "_start_postgres", lambda: started.append("x"))
-    gen = db_conftest.postgres_url.__wrapped__(tmp_path_factory=_FakeFactory())
-    url = next(gen)
-    try:
-        assert "/kdive_test_" in url
-        assert started == []  # override path never starts a container
-    finally:
-        gen.close()
-
-
-def test_require_docker_hard_fails_without_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
-    monkeypatch.setenv("KDIVE_REQUIRE_DOCKER", "1")
-    monkeypatch.setattr(
-        db_conftest, "_start_postgres",
-        lambda: (_ for _ in ()).throw(RuntimeError("docker down")),
+def test_server_url_without_db_strips_path() -> None:
+    assert db_conftest._server_url_without_db("postgresql://u:p@h:5432/test") == (
+        "postgresql://u:p@h:5432/postgres"
     )
-    gen = db_conftest.postgres_url.__wrapped__(tmp_path_factory=_FakeFactory())
-    with pytest.raises(RuntimeError):
-        next(gen)
-```
 
-Notes for the implementer: `postgres_url.__wrapped__` reaches the undecorated
-generator so the test can drive it directly; `_FakeFactory` returns a `tmp_path`
-via `getbasetemp()`. Because reaching into the fixture internals is awkward, prefer
-refactoring the container-start and server-selection into module-level helpers
-(`_start_postgres`, `_select_server`, `_server_url_without_db`) that the tests call
-directly, and keep the fixture a thin wrapper. Add a tiny `_FakeFactory` in the test
-returning `tmp_path`.
+
+def test_override_is_selected_without_starting_a_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.setenv("KDIVE_TEST_PG_URL", "postgresql://u:p@h:5432/somedb")
+
+    def _boom() -> tuple[str, str]:
+        raise AssertionError("override path must not start a container")
+
+    monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
+    with db_conftest._acquire_pg_server(tmp_path_factory, require_docker=False) as server:
+        assert server == "postgresql://u:p@h:5432/somedb"
+
+
+def test_require_docker_reraises_start_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
+
+    def _boom() -> tuple[str, str]:
+        raise RuntimeError("docker down")
+
+    monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
+    with pytest.raises(RuntimeError):
+        with db_conftest._acquire_pg_server(tmp_path_factory, require_docker=True):
+            pass
+
+
+def test_no_docker_skips_when_not_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
+
+    def _boom() -> tuple[str, str]:
+        raise RuntimeError("docker down")
+
+    monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
+    with pytest.raises(pytest.skip.Exception):
+        with db_conftest._acquire_pg_server(tmp_path_factory, require_docker=False):
+            pass
+```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/db/test_postgres_url_fixture.py -q`
-Expected: FAIL — missing `_start_postgres` / `_server_url_without_db`.
+Expected: FAIL — `AttributeError: module … has no attribute '_acquire_pg_server' / '_server_url_without_db'`.
 
 - [ ] **Step 3: Rewrite `tests/db/conftest.py`**
 
@@ -387,6 +442,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import psycopg
 import pytest
@@ -411,10 +467,13 @@ def _start_postgres() -> tuple[str, str]:
 
 
 def _stop_postgres(container_id: str) -> None:
+    import docker.errors
     from testcontainers.core.docker_client import DockerClient
 
-    DockerClient().client.containers.get(container_id).stop()
-    DockerClient().client.containers.get(container_id).remove(force=True)
+    try:
+        DockerClient().client.containers.get(container_id).remove(force=True)
+    except docker.errors.NotFound:  # already reaped — nothing to stop
+        pass
 
 
 def _server_url_without_db(url: str) -> str:
@@ -438,17 +497,18 @@ def _drop_worker_db(server_url: str, dbname: str) -> None:
         conn.execute(f'DROP DATABASE IF EXISTS "{dbname}" WITH (FORCE)')
 
 
-@pytest.fixture(scope="session")
-def postgres_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    override = os.environ.get("KDIVE_TEST_PG_URL")
-    require_docker = os.environ.get("KDIVE_REQUIRE_DOCKER") == "1"
+@contextmanager
+def _acquire_pg_server(
+    tmp_path_factory: pytest.TempPathFactory, *, require_docker: bool
+) -> Iterator[str]:
+    """Yield the shared server URL: the override if set, else a shared container.
 
+    Extracted from the fixture so the override / require-docker / skip decisions are
+    directly testable (the tests monkeypatch `_start_postgres`).
+    """
+    override = os.environ.get("KDIVE_TEST_PG_URL")
     if override:
-        worker_url, dbname = _provision_worker_db(override)
-        try:
-            yield worker_url
-        finally:
-            _drop_worker_db(override, dbname)
+        yield override
         return
 
     try:
@@ -463,15 +523,24 @@ def postgres_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         with xdist_backend.shared_container(
             root, "pg", start=_start_postgres, stop=_stop_postgres
         ) as server_url:
-            worker_url, dbname = _provision_worker_db(server_url)
-            try:
-                yield worker_url
-            finally:
-                _drop_worker_db(server_url, dbname)
+            yield server_url
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
+        # pytest.skip raises Skipped (a BaseException, not Exception), so a skip from
+        # a downstream test body is never swallowed here — only real start failures are.
         if require_docker:
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
+
+
+@pytest.fixture(scope="session")
+def postgres_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    require_docker = os.environ.get("KDIVE_REQUIRE_DOCKER") == "1"
+    with _acquire_pg_server(tmp_path_factory, require_docker=require_docker) as server:
+        worker_url, dbname = _provision_worker_db(server)
+        try:
+            yield worker_url
+        finally:
+            _drop_worker_db(server, dbname)
 
 
 @pytest.fixture
@@ -487,15 +556,52 @@ def migrated_url(pg_conn: psycopg.Connection, postgres_url: str) -> str:
     return postgres_url
 ```
 
-Notes: the `except Exception → skip` wraps only the container path (override skips
-it). If `_start_postgres` raising must hard-fail under `KDIVE_REQUIRE_DOCKER`, the
-re-raise inside the `except` preserves that. Keep the `migrated_url` docstring from
-the original if the reviewer wants it; behavior is unchanged.
+Notes: the `except Exception → skip` wraps only the container path (override yields
+before it). Under `KDIVE_REQUIRE_DOCKER`, a `_start_postgres` failure re-raises. Keep
+the original `migrated_url` docstring; behavior is unchanged.
+
+- [ ] **Step 3b: Add the Docker-gated provisioning roundtrip test**
+
+Append to `tests/db/test_postgres_url_fixture.py` a test that proves real
+provisioning against a credential-bearing server (do **not** derive the URL from
+`Connection.info.dsn` — psycopg3 redacts the password there; use the container's
+`get_connection_url()`, which includes it):
+
+```python
+def _docker_or_skip() -> None:
+    if os.environ.get("KDIVE_REQUIRE_DOCKER") == "1":
+        return
+    try:
+        from testcontainers.core.docker_client import DockerClient
+
+        DockerClient().client.ping()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Docker unavailable: {exc}")
+
+
+def test_provision_and_drop_roundtrip_against_real_server() -> None:
+    _docker_or_skip()
+    from testcontainers.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:17") as container:
+        server = container.get_connection_url(driver=None)  # includes the password
+        worker_url, dbname = db_conftest._provision_worker_db(server)
+        assert f"/{dbname}" in worker_url and dbname.startswith("kdive_test_")
+        with psycopg.connect(worker_url) as conn:  # database exists and is reachable
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+        # AC4: re-provisioning the SAME name reclaims (drop-if-exists), no error
+        again_url, _ = db_conftest._provision_worker_db(server)
+        assert again_url != worker_url  # fresh uuid each call
+        db_conftest._drop_worker_db(server, dbname)
+        with pytest.raises(psycopg.OperationalError):
+            psycopg.connect(worker_url, connect_timeout=3)
+```
 
 - [ ] **Step 4: Run the new tests + a slice of the db suite**
 
 Run: `uv run python -m pytest tests/db/test_postgres_url_fixture.py tests/db -q`
-Expected: PASS (skips cleanly if Docker absent and `KDIVE_REQUIRE_DOCKER` unset).
+Expected: PASS (the non-gated helper/override tests always run; the roundtrip skips
+cleanly if Docker absent and `KDIVE_REQUIRE_DOCKER` unset).
 
 - [ ] **Step 5: Lint + type, then commit**
 
@@ -541,12 +647,41 @@ def test_bucket_name_is_per_worker_unique() -> None:
     a = store_conftest._worker_bucket_name()
     b = store_conftest._worker_bucket_name()
     assert a != b and a.startswith("kdive-test-") and len(a) <= 63
+
+
+def test_override_selected_without_starting_a_container(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.setenv("KDIVE_TEST_S3_URL", "http://minio.example:9000")
+
+    def _boom() -> tuple[str, str]:
+        raise AssertionError("override path must not start a container")
+
+    monkeypatch.setattr(store_conftest, "_start_minio", _boom)
+    with store_conftest._acquire_minio_endpoint(
+        tmp_path_factory, require_docker=False
+    ) as (endpoint, _access, _secret):
+        assert endpoint == "http://minio.example:9000"
+
+
+def test_require_docker_reraises_start_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
+
+    def _boom() -> tuple[str, str]:
+        raise RuntimeError("docker down")
+
+    monkeypatch.setattr(store_conftest, "_start_minio", _boom)
+    with pytest.raises(RuntimeError):
+        with store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=True):
+            pass
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/store/test_minio_store_fixture.py -q`
-Expected: FAIL — missing `_select_s3_endpoint` / `_worker_bucket_name`.
+Expected: FAIL — missing `_select_s3_endpoint` / `_worker_bucket_name` / `_acquire_minio_endpoint`.
 
 - [ ] **Step 3: Rewrite `tests/store/conftest.py`**
 
@@ -595,10 +730,13 @@ def _start_minio() -> tuple[str, str]:
 
 
 def _stop_minio(container_id: str) -> None:
+    import docker.errors
     from testcontainers.core.docker_client import DockerClient
 
-    DockerClient().client.containers.get(container_id).stop()
-    DockerClient().client.containers.get(container_id).remove(force=True)
+    try:
+        DockerClient().client.containers.get(container_id).remove(force=True)
+    except docker.errors.NotFound:  # already reaped
+        pass
 
 
 def _s3_client(endpoint: str, access: str, secret: str):
@@ -613,10 +751,17 @@ def _s3_client(endpoint: str, access: str, secret: str):
 
 
 def _ensure_empty_bucket(client, bucket: str) -> None:
+    """Create the bucket if absent, then always empty it (handles a same-token retry
+    where the bucket already exists, and MinIO/us-east-1 returning 200 for an owned
+    bucket rather than raising)."""
     try:
         client.create_bucket(Bucket=bucket)
-    except client.exceptions.BucketAlreadyOwnedByYou:
-        _empty_bucket(client, bucket)
+    except (
+        client.exceptions.BucketAlreadyOwnedByYou,
+        client.exceptions.BucketAlreadyExists,
+    ):
+        pass
+    _empty_bucket(client, bucket)  # unconditional: no-op on a fresh bucket
 
 
 def _empty_bucket(client, bucket: str) -> None:
@@ -627,22 +772,15 @@ def _empty_bucket(client, bucket: str) -> None:
             client.delete_objects(Bucket=bucket, Delete={"Objects": objects})
 
 
-@pytest.fixture(scope="session")
-def minio_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ObjectStore]:
-    override = os.environ.get("KDIVE_TEST_S3_URL")
-    require_docker = os.environ.get("KDIVE_REQUIRE_DOCKER") == "1"
-    bucket = _worker_bucket_name()
-
-    if override:
-        _, access, secret = _select_s3_endpoint()
-        client = _s3_client(override, access, secret)
-        _await_ready(client)
-        _ensure_empty_bucket(client, bucket)
-        try:
-            yield ObjectStore(client, bucket)
-        finally:
-            _empty_bucket(client, bucket)
-            client.delete_bucket(Bucket=bucket)
+@contextmanager
+def _acquire_minio_endpoint(
+    tmp_path_factory: pytest.TempPathFactory, *, require_docker: bool
+) -> Iterator[tuple[str, str, str]]:
+    """Yield (endpoint, access_key, secret_key): the override if set, else a shared
+    container. Extracted so the override / require-docker / skip decisions are
+    directly testable (the tests monkeypatch `_start_minio`)."""
+    if os.environ.get("KDIVE_TEST_S3_URL"):
+        yield _select_s3_endpoint()
         return
 
     try:
@@ -657,22 +795,35 @@ def minio_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ObjectStor
         with xdist_backend.shared_container(
             root, "minio", start=_start_minio, stop=_stop_minio
         ) as endpoint:
-            client = _s3_client(endpoint, _ROOT_USER, _ROOT_PASSWORD)
-            _await_ready(client)
-            _ensure_empty_bucket(client, bucket)
-            try:
-                yield ObjectStore(client, bucket)
-            finally:
-                _empty_bucket(client, bucket)
-                client.delete_bucket(Bucket=bucket)
+            yield endpoint, _ROOT_USER, _ROOT_PASSWORD
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
         if require_docker:
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
+
+
+@pytest.fixture(scope="session")
+def minio_store(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ObjectStore]:
+    require_docker = os.environ.get("KDIVE_REQUIRE_DOCKER") == "1"
+    bucket = _worker_bucket_name()
+    with _acquire_minio_endpoint(tmp_path_factory, require_docker=require_docker) as (
+        endpoint,
+        access,
+        secret,
+    ):
+        client = _s3_client(endpoint, access, secret)
+        _await_ready(client)
+        _ensure_empty_bucket(client, bucket)
+        try:
+            yield ObjectStore(client, bucket)
+        finally:
+            _empty_bucket(client, bucket)
+            client.delete_bucket(Bucket=bucket)
 ```
 
-Add `from tests.support import xdist_backend` to the imports. Keep the existing
-`from kdive.store.objectstore import ObjectStore`, `boto3`, `Config` imports.
+Add `from tests.support import xdist_backend` and `from contextlib import
+contextmanager` to the imports. Keep the existing `from kdive.store.objectstore import
+ObjectStore`, `boto3`, `Config` imports.
 
 - [ ] **Step 4: Run the new tests + a slice of the store suite**
 
@@ -847,6 +998,6 @@ independent and safe to leave; revert it for a full undo.
 
 ## Self-Review
 
-- **Spec coverage:** AC1 → Task 1 (fake) + Task 5 (real); AC2 → Tasks 2/3 + existing db/store suites under Task 6; AC3 → Tasks 2/3 override tests; AC4 → Task 2/3 idempotency; AC5 → Tasks 2/3 require-docker tests; AC6 → Task 1 acquire/release + finish-early tests; AC6b → Task 5 `SHOW max_connections`; AC7 → Task 6; AC8 → Task 6 `just ci`.
+- **Spec coverage:** AC1 → Task 1 (fake) + Task 5 (real); AC2 → Tasks 2/3 + existing db/store suites under Task 6; AC3 → Task 2 `test_override_is_selected_without_starting_a_container` + Task 3 override test; AC4 → Task 2 `test_provision_and_drop_roundtrip` (distinct-token + same-name reclaim); AC5 → Tasks 2/3 `test_require_docker_reraises_start_failure` + `test_no_docker_skips_when_not_required` (the *container-start* branch — the meaningful one; the `import testcontainers` guard is `# pragma: no cover` defensive dead code for a dep that is always installed, deliberately not asserted); AC6 → Task 1 acquire/release + finish-early + crash-safety tests; AC6b → Task 5 `SHOW max_connections`; AC7 → Task 6; AC8 → Task 6 `just ci`.
 - **Type consistency:** helper names (`per_run_root`, `shared_container`, `with_database_name`, `worker_namespace_token`, `postgres_max_connections`) are used identically in Tasks 2/3/5.
 - **Placeholders:** none — every code step shows the code.
