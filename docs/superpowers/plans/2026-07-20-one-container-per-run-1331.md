@@ -481,9 +481,21 @@ def _server_url_without_db(url: str) -> str:
     return xdist_backend.with_database_name(url, "postgres")
 
 
-def _provision_worker_db(server_url: str) -> tuple[str, str]:
-    """Create this worker's database on `server_url`; return (worker_url, dbname)."""
-    dbname = f"kdive_test_{xdist_backend.xdist_worker_id()}_{xdist_backend.worker_namespace_token()}"
+def _worker_db_name() -> str:
+    """A fresh per-worker, run-unique database name."""
+    return (
+        f"kdive_test_{xdist_backend.xdist_worker_id()}_"
+        f"{xdist_backend.worker_namespace_token()}"
+    )
+
+
+def _provision_worker_db(server_url: str, dbname: str | None = None) -> tuple[str, str]:
+    """Create a database on `server_url`; return (worker_url, dbname).
+
+    `dbname` defaults to a fresh `_worker_db_name()`; a test may pass an explicit name
+    to exercise the same-name `DROP DATABASE IF EXISTS … FORCE` reclaim path.
+    """
+    dbname = dbname or _worker_db_name()
     admin = _server_url_without_db(server_url)
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{dbname}" WITH (FORCE)')
@@ -519,17 +531,22 @@ def _acquire_pg_server(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
+    manager = xdist_backend.shared_container(
+        root, "pg", start=_start_postgres, stop=_stop_postgres
+    )
     try:
-        with xdist_backend.shared_container(
-            root, "pg", start=_start_postgres, stop=_stop_postgres
-        ) as server_url:
-            yield server_url
+        server_url = manager.__enter__()  # only container start can fail here
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
-        # pytest.skip raises Skipped (a BaseException, not Exception), so a skip from
-        # a downstream test body is never swallowed here — only real start failures are.
         if require_docker:
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
+    # Yield OUTSIDE the skip-catch: a provisioning/readiness failure in the consumer
+    # (CREATE DATABASE rejected, server refusing connections) must surface as a real
+    # error, not a misleading "Docker unavailable" skip.
+    try:
+        yield server_url
+    finally:
+        manager.__exit__(None, None, None)  # refcount decrement / stop-by-id
 
 
 @pytest.fixture(scope="session")
@@ -585,16 +602,39 @@ def test_provision_and_drop_roundtrip_against_real_server() -> None:
 
     with PostgresContainer("postgres:17") as container:
         server = container.get_connection_url(driver=None)  # includes the password
-        worker_url, dbname = db_conftest._provision_worker_db(server)
-        assert f"/{dbname}" in worker_url and dbname.startswith("kdive_test_")
+        name = db_conftest._worker_db_name()
+        worker_url, dbname = db_conftest._provision_worker_db(server, dbname=name)
+        assert dbname == name and f"/{name}" in worker_url and name.startswith("kdive_test_")
         with psycopg.connect(worker_url) as conn:  # database exists and is reachable
-            assert conn.execute("SELECT 1").fetchone()[0] == 1
-        # AC4: re-provisioning the SAME name reclaims (drop-if-exists), no error
-        again_url, _ = db_conftest._provision_worker_db(server)
-        assert again_url != worker_url  # fresh uuid each call
-        db_conftest._drop_worker_db(server, dbname)
+            conn.execute("CREATE TABLE marker (id int)")  # leftover to detect reclaim
+        # AC4: re-provisioning the SAME name reclaims (DROP … FORCE then CREATE), no error
+        again_url, _ = db_conftest._provision_worker_db(server, dbname=name)
+        assert again_url == worker_url  # same name reused
+        with psycopg.connect(again_url) as conn:
+            got = conn.execute(
+                "SELECT to_regclass('public.marker')"
+            ).fetchone()[0]
+            assert got is None  # database was dropped and recreated clean
+        db_conftest._drop_worker_db(server, name)
         with pytest.raises(psycopg.OperationalError):
             psycopg.connect(worker_url, connect_timeout=3)
+```
+
+Also append the "body error is not masked as a skip" regression test (P1) — a real
+container is not needed; monkeypatch `_start_postgres`/`_stop_postgres`:
+
+```python
+def test_provisioning_error_propagates_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
+    monkeypatch.setattr(
+        db_conftest, "_start_postgres", lambda: ("postgresql://u:p@h:5432/test", "cid")
+    )
+    monkeypatch.setattr(db_conftest, "_stop_postgres", lambda cid: None)
+    with pytest.raises(ValueError):  # a body error must NOT become pytest.skip
+        with db_conftest._acquire_pg_server(tmp_path_factory, require_docker=False):
+            raise ValueError("provisioning blew up")
 ```
 
 - [ ] **Step 4: Run the new tests + a slice of the db suite**
@@ -676,6 +716,19 @@ def test_require_docker_reraises_start_failure(
     with pytest.raises(RuntimeError):
         with store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=True):
             pass
+
+
+def test_readiness_error_propagates_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
+    monkeypatch.setattr(
+        store_conftest, "_start_minio", lambda: ("http://h:9000", "cid")
+    )
+    monkeypatch.setattr(store_conftest, "_stop_minio", lambda cid: None)
+    with pytest.raises(ValueError):  # a body error must NOT become pytest.skip
+        with store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=False):
+            raise ValueError("minio never became ready")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -791,15 +844,21 @@ def _acquire_minio_endpoint(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
+    manager = xdist_backend.shared_container(
+        root, "minio", start=_start_minio, stop=_stop_minio
+    )
     try:
-        with xdist_backend.shared_container(
-            root, "minio", start=_start_minio, stop=_stop_minio
-        ) as endpoint:
-            yield endpoint, _ROOT_USER, _ROOT_PASSWORD
+        endpoint = manager.__enter__()  # only container start can fail here
     except Exception as exc:  # Docker daemon unreachable / image pull failure.
         if require_docker:
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
+    # Yield OUTSIDE the skip-catch: a readiness/bucket failure in the consumer must
+    # surface as a real error, not a misleading "Docker unavailable" skip.
+    try:
+        yield endpoint, _ROOT_USER, _ROOT_PASSWORD
+    finally:
+        manager.__exit__(None, None, None)
 
 
 @pytest.fixture(scope="session")
@@ -998,6 +1057,6 @@ independent and safe to leave; revert it for a full undo.
 
 ## Self-Review
 
-- **Spec coverage:** AC1 → Task 1 (fake) + Task 5 (real); AC2 → Tasks 2/3 + existing db/store suites under Task 6; AC3 → Task 2 `test_override_is_selected_without_starting_a_container` + Task 3 override test; AC4 → Task 2 `test_provision_and_drop_roundtrip` (distinct-token + same-name reclaim); AC5 → Tasks 2/3 `test_require_docker_reraises_start_failure` + `test_no_docker_skips_when_not_required` (the *container-start* branch — the meaningful one; the `import testcontainers` guard is `# pragma: no cover` defensive dead code for a dep that is always installed, deliberately not asserted); AC6 → Task 1 acquire/release + finish-early + crash-safety tests; AC6b → Task 5 `SHOW max_connections`; AC7 → Task 6; AC8 → Task 6 `just ci`.
+- **Spec coverage:** AC1 → Task 1 (fake) + Task 5 (real); AC2 → Tasks 2/3 + existing db/store suites under Task 6; AC3 → Task 2 `test_override_is_selected_without_starting_a_container` + Task 3 override test; AC4 → Task 2 `test_provision_and_drop_roundtrip` (same-name `DROP … FORCE` reclaim, proven via a leftover table that must vanish) + `test_provisioning_error_propagates_not_skipped` / minio `test_readiness_error_propagates_not_skipped` (a body failure surfaces as a real error, never a masked skip); AC5 → Tasks 2/3 `test_require_docker_reraises_start_failure` + `test_no_docker_skips_when_not_required` (the *container-start* branch — the meaningful one; the `import testcontainers` guard is `# pragma: no cover` defensive dead code for a dep that is always installed, deliberately not asserted); AC6 → Task 1 acquire/release + finish-early + crash-safety tests; AC6b → Task 5 `SHOW max_connections`; AC7 → Task 6; AC8 → Task 6 `just ci`.
 - **Type consistency:** helper names (`per_run_root`, `shared_container`, `with_database_name`, `worker_namespace_token`, `postgres_max_connections`) are used identically in Tasks 2/3/5.
 - **Placeholders:** none — every code step shows the code.
