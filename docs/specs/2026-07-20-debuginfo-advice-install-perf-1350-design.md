@@ -74,9 +74,13 @@ Rewrite the `debuginfo` `summary` in `FEATURE_REQUIREMENTS` to name the use case
 and the cost, e.g.:
 
 > Enable only for live drgn/gdb symbol resolution or offline vmcore analysis.
-> Embeds DWARF tables in every .ko — can grow the module tree 10–50× and
-> significantly slow upload and install. Omit for boot-time crash reproducers and
-> console-log investigations where no post-boot introspection is needed.
+> Embeds DWARF tables in every .ko - can grow the module tree 10-50x and slow
+> upload and install. Omit for boot-time crash reproducers and console-log
+> investigations where no post-boot introspection is needed.
+
+(ASCII in the code string literal to match the sibling `FEATURE_REQUIREMENTS`
+summaries and avoid terminal/encoding surprises; the prose form may stay
+typographic.)
 
 The summary flows verbatim through `feature_manifest()` into the
 `artifacts.feature_config_requirements` response `data`, which is the text the
@@ -161,8 +165,9 @@ regress.
    ppc64le members, incl. a `./`-prefixed member) and, given a `modules_dest`,
    repacks the `lib/modules/<ver>/` subtree; given `modules_dest=None` it extracts
    only the boot member and touches no modules tar.
-3. The combined tar is opened exactly once per install (asserted via a wrapped
-   `tarfile.open` counting opens, or an injected open seam).
+3. The combined tar is decompressed once: a `tarfile.open` counter that records
+   path+mode shows the combined-tar path opened exactly once in read mode for a
+   modules-needed run (the repacked modules tar's write-mode open is separate).
 4. All existing bounds hold on the merged function: member-count bomb →
    `CONFIGURATION_ERROR`; oversize boot member → `CONFIGURATION_ERROR`; oversize
    cumulative module tree → `CONFIGURATION_ERROR` with the `.part` temp cleaned;

@@ -68,7 +68,13 @@ def extract_kernel_bundle(
 - Single `for member in capped_tar_members(archive)` loop:
   - first `boot/vmlinuz` match (normalized via `_tar_member_path`): call
     `reject_oversize_member(member.size, dest=str(kernel_dest))`, read via
-    `archive.extractfile(member)`, hold the bytes.
+    `archive.extractfile(member)`, then **immediately** `write_staged_bytes(
+    kernel_dest, data)` and drop the reference. Do **not** hold the boot bytes
+    across the modules loop: a ppc64le unstripped `vmlinux` is bounded only by the
+    2 GB cap, and retaining it while repacking the module tree would regress the
+    exact peak-RAM profile this issue targets (today `extract_boot_vmlinuz` writes
+    and frees the boot member before repack runs). Set a `boot_written` flag so a
+    second `boot/vmlinuz` member is ignored (first-match-wins, as today).
   - else when an output tar is open and the normalized name starts with
     `_MODULES_MEMBER_PREFIX`: skip `..`-containing members; accumulate
     `member.size if member.isfile()`; `reject_oversize_member(total, ...)`;
@@ -77,9 +83,14 @@ def extract_kernel_bundle(
 - Consume each member fully before the loop advances (the pattern
   `repack_modules_subtree` already uses under `r:gz` — proven single forward pass,
   no backward seek).
-- After the loop: if boot bytes are None → raise `INFRASTRUCTURE_FAILURE`
-  ("no boot/vmlinuz member"); else `write_staged_bytes(kernel_dest, data)`. If
-  modules found → `modules_tmp.replace(modules_dest)`, else unlink the tmp.
+- After the loop: if no `boot/vmlinuz` member was seen → raise
+  `INFRASTRUCTURE_FAILURE` ("no boot/vmlinuz member"). If modules found →
+  `modules_tmp.replace(modules_dest)`, else unlink the tmp. **Partial-failure
+  note:** because `kernel_dest` is written mid-loop, a *later* modules-oversize
+  `CategorizedError` can leave `kernel_dest` already written (same as today, where
+  extract precedes repack). The install fails and a retry re-fetches and clobbers
+  the per-Run staging, so a stale `kernel_dest` on a failed install is immaterial;
+  the `.part` modules tmp is still cleaned on that error.
 - Error contract, unchanged categories: wrap `(OSError, tarfile.TarError)` →
   `INFRASTRUCTURE_FAILURE`; let `CategorizedError` (oversize/member-count) escape
   after cleaning the `.part` tmp. Keep helper functions small so the orchestrator
@@ -99,9 +110,13 @@ def extract_kernel_bundle(
 6. member-count bomb → `CONFIGURATION_ERROR` (monkeypatch `MAX_KERNEL_TAR_MEMBERS`).
 7. oversize boot member → `CONFIGURATION_ERROR`.
 8. oversize cumulative module tree → `CONFIGURATION_ERROR`, `.part` cleaned.
-9. **single-open assertion:** wrap/patch `tarfile.open` (or inject an open
-   counter) and assert the combined tar is opened exactly once for a
-   modules-needed install.
+9. **single-open assertion (performance-regression guard):** patch
+   `tarfile.open` with a counter that records the *path and mode* of each call,
+   and assert the **combined-tar path is opened exactly once in read mode** for a
+   modules-needed run. Do not assert a bare total open count — the merged function
+   also opens the repacked modules tar in write mode, so a global count is 2, not
+   1. Frame this as a guard that the combined tar is decompressed once, not a
+   general open-count test.
 
 **Acceptance:** new tests pass; `just test` green; `just type` green;
 `rg extract_boot_vmlinuz|repack_modules_subtree src tests` returns nothing.
