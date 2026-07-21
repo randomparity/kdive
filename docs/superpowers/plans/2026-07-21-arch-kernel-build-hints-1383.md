@@ -38,17 +38,19 @@ Assertions (each independently failing-informative):
    shape `^[a-z][a-z0-9_]*$`, and assert that set `==` `SUPPORTED_ARCHES`. A missing arch and a
    spurious/misnamed `## aarch64` both fail.
 2. **Boot-container verbatim.** For each arch, assert `BOOT_MEMBER_FORMATS[arch].container`
-   appears in that arch's **raw** (unblanked) section body. (Split the raw doc on the located
-   heading positions; do not scan the blanked copy — the container/strip content lives in prose
-   and fences.)
+   appears in that arch's **raw** (unblanked) section body. Look the section body up
+   **defensively** — `sections.get(arch, "")`, not `sections[arch]` — so an arch with no section
+   yields a clean assertion failure naming the arch, not a `KeyError`. (Split the raw doc on the
+   located heading positions; do not scan the blanked copy — the container/strip content lives in
+   prose and fences.)
 3. **Strip-required predicate.** Compute the ELF-kernel arch set structurally:
    `arch` is ELF-required iff any declared `MagicPin` has `offset == 0` and
    `pin.hex.startswith(_ELF_MAGIC.hex())` (prefix, **not** equality — ppc64le's pin is
    `7f454c460201`). Assert this set is **non-empty** (a mis-implemented predicate that empties
-   it is itself a failure). For each ELF-required arch, assert its raw section body contains a
-   `strip` invocation carrying a standalone `-s` flag (regex tolerant of the
-   `"${CROSS_COMPILE}strip" -s` form, e.g. `strip.*\s-s\b`; not the bare literal `strip -s`,
-   not the bare word `strip`).
+   it is itself a failure). For each ELF-required arch, assert its raw section body (looked up
+   defensively via `sections.get(arch, "")`) contains a `strip` invocation carrying a standalone
+   `-s` flag (regex tolerant of the `"${CROSS_COMPILE}strip" -s` form, e.g. `strip.*\s-s\b`; not
+   the bare literal `strip -s`, not the bare word `strip`).
 4. **crashkernel summary.** Assert the raw doc contains `default_crashkernel_summary()` verbatim.
 5. **Registration.** Assert `resource://kdive/docs/guide/kernel-build-per-arch.md` is in
    `DOC_RESOURCES` with `audience == "all"`, `required_kind is None`, and its `_content`
@@ -134,17 +136,25 @@ at plan time, not debug time).
 `pin_nic_slot`, `kvm_cpu_mode`, `emit_acpi_features`, `default_crashkernel`, not just a stub) so
 `SUPPORTED_ARCHES` grows, **and** a matching `BOOT_MEMBER_FORMATS` row (a `MagicPin` +
 `container`) so the import-time cross-table assert passes, with **no** doc section → the doc
-*completeness* test fails naming the missing arch. Note the expected signature: because a new
-`_TRAITS` row also changes `default_crashkernel_summary()`, the crashkernel-summary assertion (4)
-goes RED too — both REDs are expected and correct. This is the "a future arch cannot land without
-a hint" direction and must be demonstrated, not just reasoned about;
+*completeness* test fails naming the missing arch. Expected signature: assertions **1, 2, 3, and
+4 all go RED** — completeness (1) because the arch has no section; boot-container (2) and
+strip-required (3) because their per-arch lookup finds an empty section body (a clean assertion
+failure via `sections.get`, not a `KeyError`); crashkernel-summary (4) because the new `_TRAITS`
+row changes `default_crashkernel_summary()`. All four REDs are expected and correct. This is the
+"a future arch cannot land without a hint" direction and must be demonstrated, not just reasoned
+about;
 (f) change the ELF predicate from `startswith(_ELF_MAGIC.hex())` to `== _ELF_MAGIC.hex()` → the
 non-empty-strip-set assertion fails (the dead-guard bug is itself caught).
 Each must produce a clean RED (not an import error, except (e)'s import-assert gate which must be
 cleared first). Revert all perturbations; confirm green.
 
-**Commits.** One logical change per commit (test; registrar+snapshot; agent-index; Field
-repoint), imperative subject ≤72 chars, `Co-Authored-By` trailer. Stage explicit paths.
+**Commits.** Every committed commit must pass `just test` (the repo's bisectability standard —
+CLAUDE.md). RED-first is a **local, uncommitted** verification only: run the test, observe it
+RED (Task 1 acceptance), then land the enabling changes and commit the test **with or after**
+them — never a standalone RED test commit. A green-at-each-commit order: (1) registrar row +
+`_content` snapshot; (2) `arch` Field citation repoint; (3) agent-index cross-link + re-mirror;
+(4) the drift-guard test (now fully green). Or fold the test into commit (1)/(2). Imperative
+subject ≤72 chars, `Co-Authored-By` trailer. Stage explicit paths (never the scratch findings).
 
 ## Rollback
 
