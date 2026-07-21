@@ -94,6 +94,36 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "build-id test; unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_TEST_PG_URL",
+        "test",
+        None,
+        "Postgres server URL (with credentials) the db-test fixtures reuse instead of starting a "
+        "per-run container (ADR-0400); unset → one shared testcontainer is started per run. Each "
+        "worker creates its own kdive_test_<worker>_<token> database on it.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TEST_S3_URL",
+        "test",
+        None,
+        "MinIO/S3 endpoint the store-test fixtures reuse instead of starting a per-run container "
+        "(ADR-0400); unset → one shared testcontainer is started per run. Each worker creates its "
+        "own kdive-test-<worker>-<token> bucket on it.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TEST_S3_ACCESS_KEY",
+        "test",
+        "minioadmin",
+        "Access key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0400); defaults to the "
+        "just compose-up minioadmin root.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_TEST_S3_SECRET_KEY",
+        "test",
+        "minioadmin",  # pragma: allowlist secret - local dev default
+        "Secret key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0400); defaults to the "
+        "just compose-up minioadmin root.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_SSH_TARGET",
         "test",
         None,
