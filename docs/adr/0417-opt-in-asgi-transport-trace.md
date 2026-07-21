@@ -43,16 +43,23 @@ Add an opt-in ASGI request/response trace middleware, `TransportTraceMiddleware`
   (boolean, default off, `group="logging"`, `processes={server}`) gates it. When off, the
   middleware is **not added to the list** — not a per-request branch — so a normal
   deployment pays nothing.
-- **One structured line per request, level-independent.** Status and `duration_ms` are
-  captured when `http.response.start` is observed, but the single INFO record is emitted
-  exactly once, in a `finally`, via the dedicated `kdive.mcp.transport_trace` logger,
-  carrying: `method`, `path`, `mcp_session_id` (value) + `mcp_session_id_present`,
-  `mcp_protocol_version`, `status`, and `duration_ms`. The trace logger is given its **own
-  explicit `INFO` level** (`logger.setLevel(logging.INFO)`), so it emits independently of
-  the root floor `KDIVE_LOG_LEVEL` sets (`facade.py`): the `KDIVE_MCP_TRACE` flag — not the
-  global log level — is the gate. Without the explicit level, a deployment running
+- **One structured line per request, emitted at response headers.** The single INFO record
+  is emitted when `http.response.start` is observed — at the response headers, *not* at
+  stream close — via the dedicated `kdive.mcp.transport_trace` logger, carrying: `method`,
+  `path`, `mcp_session_id` (value) + `mcp_session_id_present`, `mcp_protocol_version`,
+  `status`, and `duration_ms`. An `emitted` flag guards exactly-once: a `finally` emits the
+  line **only** if `http.response.start` was never seen (the failure path below). Emitting
+  at response-start rather than in the `finally` is deliberate — for a long-lived SSE
+  response `await self.app(...)` returns only at stream close, so a finally-only emission
+  would withhold the line for the whole stream and defeat real-time lifecycle observation.
+- **Level-independent.** The trace logger is given its **own explicit `INFO` level**
+  (`logger.setLevel(logging.INFO)`), so it emits independently of the root floor
+  `KDIVE_LOG_LEVEL` sets (`facade.py`): the `KDIVE_MCP_TRACE` flag — not the global log
+  level — is the gate. Without the explicit level, a deployment running
   `KDIVE_LOG_LEVEL=warning` would silently drop every trace line even with the flag on,
-  because a child logger otherwise inherits the raised root floor.
+  because a child logger otherwise inherits the raised root floor. This depends on the OTel
+  bridge handler `facade.py` installs on the root logger staying at `NOTSET`; a regression
+  guard asserts that.
 - **Redaction-safe.** The `Authorization` header is logged as `authorization_present`
   (bool) only — never the value, honoring the mandatory-redaction invariant. The
   `Mcp-Session-Id` is a session handle (not an auth credential) and is logged as its
@@ -61,12 +68,15 @@ Add an opt-in ASGI request/response trace middleware, `TransportTraceMiddleware`
 - **Duration = time to response headers.** Measured from request receipt to the
   `http.response.start` emission (time-to-first-byte), so a long-lived SSE stream never
   delays or withholds the trace line.
-- **Logs on failure too, exactly once.** The single line is emitted in the `finally`
-  whether or not `http.response.start` was seen; if the downstream app raises before
-  sending it, the line carries `status=None` and the exception re-raises (never swallowed),
-  so a transport-layer fault is never silently unlogged. Because emission is only in the
-  `finally`, a request produces exactly one trace line — the success and failure paths do
-  not double-log.
+- **Logs on failure too, exactly once.** When the downstream app raises or is cancelled
+  before sending `http.response.start`, the `finally` emits the line (the `emitted` flag is
+  still false) with `status=None`, then the exception/cancellation re-raises (never
+  swallowed), so a transport-layer fault is never silently unlogged. `duration_ms` is
+  computed unconditionally in the `finally` (`monotonic()` minus request-receipt), *not* in
+  an `except` handler — so it is a real number even for `asyncio.CancelledError` (a
+  `BaseException`, the ordinary SSE client-disconnect path) that an `except Exception` would
+  miss. The `emitted` flag makes a request produce exactly one trace line whether it
+  succeeds or fails.
 
 Scope guard: transport-envelope logging only. No request/response *body* capture, no
 general protocol debugger.

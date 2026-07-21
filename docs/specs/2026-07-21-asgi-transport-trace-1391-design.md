@@ -29,18 +29,25 @@ See ADR-0417 for the decision and rejected alternatives. Summary:
 - **`TransportTraceMiddleware`** (`src/kdive/mcp/middleware/transport_trace.py`): a pure
   ASGI callable that wraps `send` to capture the response status, times the request with
   `time.monotonic()`, and logs exactly one INFO record per HTTP request via the dedicated
-  `kdive.mcp.transport_trace` logger. Status and `duration_ms` are captured when
-  `http.response.start` is observed; the single line is emitted once, in a `finally`, so a
-  request that raises before response-start still logs (with `status=None`) and no request
-  ever double-logs.
+  `kdive.mcp.transport_trace` logger. The line is emitted **when `http.response.start` is
+  observed** (at the response headers), setting an `emitted` flag; a `finally` emits the
+  line **only** when response-start was never seen (the failure path). Emitting at
+  response-start — not in the `finally` — is required for real-time observation: for a
+  long-lived SSE response `await self.app(...)` returns only at stream close, so a
+  finally-only emission would withhold the line for the whole stream. The `emitted` flag
+  makes the two paths mutually exclusive, so a request logs exactly once.
 - **Level independence:** the module gives its logger an explicit `setLevel(logging.INFO)`
   so trace lines emit whenever the flag is on, independent of the root floor
   `KDIVE_LOG_LEVEL` sets (`observability/facade.py`). Without this, `KDIVE_LOG_LEVEL=warning`
   would silently drop every trace line.
 - **Gate:** a new registry `Setting` `KDIVE_MCP_TRACE` (`config/core_settings.py`),
-  boolean, default off, `group="logging"`, `processes={server}`. When on,
-  `server_http_middleware()` prepends `TransportTraceMiddleware` to the list — outermost.
-  When off, the middleware is absent entirely.
+  `group="logging"`, `processes={server}`, declared the way the existing default-off gates
+  `OTEL_ENABLED`/`FAULT_INJECT` are — `parse=_str`, **no default** (resolves to `None` when
+  unset) — and read via `config.get` plus a truthy check, **never** `config.require` (which
+  raises `CONFIGURATION_ERROR` on an unset no-default setting and would break every normal
+  boot where the flag is off). When on, `server_http_middleware()` prepends
+  `TransportTraceMiddleware` to the list — outermost. When off, the middleware is absent
+  entirely.
 - **Logged fields** (structured `extra`): `method`, `path`, `mcp_session_id`,
   `mcp_session_id_present`, `mcp_protocol_version`, `status`, `duration_ms`.
 - **Redaction:** `Authorization` → `authorization_present` bool only, never the value.
@@ -48,23 +55,28 @@ See ADR-0417 for the decision and rejected alternatives. Summary:
   existing logging redaction floor (ADR-0090) as defense-in-depth.
 - **Timing / `duration_ms` semantics:** `duration_ms` is the interval from request receipt
   to the moment the response status is determined — to `http.response.start` when observed
-  (so a long-lived SSE stream does not inflate it or delay the line), else to the exception
-  on the failure path. It is therefore always a non-negative latency (never `None`): on a
-  normal request it is time-to-response-headers, on a failed request it is time-to-failure.
-- **Failure path:** if the downstream app raises before `http.response.start`, the line is
-  still emitted (`finally`) with `status=None` and a real `duration_ms` (time to the
-  exception), and the exception re-raises.
+  (so a long-lived SSE stream does not inflate it or delay the line), else computed in the
+  `finally`. It is always a non-negative number (never `None`): on a normal request it is
+  time-to-response-headers, on a failed request it is time-to-failure.
+- **Failure path (covers cancellation):** if the downstream app raises **or is cancelled**
+  before `http.response.start`, the `finally` emits the line with `status=None`, then the
+  exception/cancellation re-raises. `duration_ms` is computed unconditionally in the
+  `finally` (`monotonic()` minus receipt), **not** inside an `except` handler — so it is a
+  real number even for `asyncio.CancelledError`, a `BaseException` (the ordinary SSE
+  client-disconnect path) that an `except Exception` would miss.
 
 ### Threading the enable flag
 
 `processes/server.py::server_http_middleware()` currently takes no arguments and returns a
-fixed one-element list. It gains a `trace_enabled: bool` parameter and appends
-`TransportTraceMiddleware` first (outermost) when true. The flag is resolved **once** in
-`__main__._handle_server` via `config.require(MCP_TRACE)` — where `config.load()` has
-provably already run — and threaded through `run_server(..., trace_enabled=...)` into
-`serve_mcp`, exactly like `HTTP_HOST`/`HTTP_PORT` are read in `__main__` and passed as
-arguments. This keeps `server_http_middleware()` a pure function of its argument (no hidden
-global-config read, no load-order dependency, no global-state mutation in the seam test).
+fixed one-element list. It gains a `trace_enabled: bool` parameter and prepends
+`TransportTraceMiddleware` (outermost) when true. The flag is resolved **once** in
+`__main__._handle_server` via `config.get(MCP_TRACE)` + a truthy check — where
+`config.load()` has provably already run — and threaded through
+`run_server(..., trace_enabled=...)` into `serve_mcp`, exactly like `HTTP_HOST`/`HTTP_PORT`
+are read in `__main__` and passed as arguments (`trace_enabled` is keyword-only so
+`run_server` stays within the positional-parameter limit). This keeps
+`server_http_middleware()` a pure function of its argument (no hidden global-config read, no
+load-order dependency, no global-state mutation in the seam test).
 
 ### Level-independence invariant
 
@@ -107,9 +119,17 @@ driving `TransportTraceMiddleware(app)(scope, receive, send)` with hand-built AS
   absent from the record (assert the token substring is not in the formatted output).
 - downstream raises before `http.response.start` → exactly one record with `status=None`
   and a numeric `duration_ms >= 0`, and the exception propagates (not swallowed).
+- downstream cancelled (`asyncio.CancelledError`) before `http.response.start` → exactly one
+  record with `status=None` and a numeric `duration_ms >= 0`, and the `CancelledError`
+  propagates — proves duration is computed in the `finally`, not an `except Exception` that
+  a `BaseException` would skip.
 - level independence: with the root logger set to WARNING (mimicking
   `KDIVE_LOG_LEVEL=warning`), a request still emits one trace record — asserts the dedicated
   logger's own INFO level bypasses the raised root floor.
+- bridge-`NOTSET` regression guard: assert the OTel `LoggingHandler` that
+  `observability/facade.py` installs on the root logger is at level `NOTSET`, so the
+  documented level-independence invariant cannot silently regress (a handler-level would
+  gate emission in production while the caplog test stayed green).
 - exactly-one-line: a normal success path emits a single record (no double-log from a
   response-start path plus the `finally`).
 - non-`http` scope (`lifespan`/`websocket`) → passthrough, no record.
