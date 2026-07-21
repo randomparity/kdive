@@ -15,6 +15,7 @@ from kdive.mcp.prompts.registrar import (
     Step,
     ToolMaturity,
     _render_body,
+    _validate_preconditions,
     register,
 )
 
@@ -155,6 +156,87 @@ def test_render_numbers_steps_sequentially_from_one_on_their_own_lines() -> None
     assert "2. a.first" not in body
     # The steps are newline-separated, not joined into a single run.
     assert "1. a.first — p1\n2. a.second — p2\n3. a.third — p3" in body
+
+
+def test_every_canonical_step_precondition_is_satisfied_upstream() -> None:
+    # #1369: every step's `requires` capability must be provided by an earlier step in
+    # the same journey — the machine-checkable form of the prose preconditions.
+    for spec in CANONICAL_PROMPTS:
+        _validate_preconditions(spec)
+
+
+def test_build_boot_debug_introspect_requires_live_session_from_start_session() -> None:
+    # The P1-4 stall made structural: introspect.run's precondition is exactly the
+    # capability debug.start_session provides, and start_session is earlier in the journey.
+    spec = next(s for s in CANONICAL_PROMPTS if s.name == "build_boot_debug")
+    by_tool = {step.tool: step for step in spec.steps}
+    assert by_tool["introspect.run"].requires == ("drgn-live-session",)
+    assert "drgn-live-session" in by_tool["debug.start_session"].provides
+    tools = [step.tool for step in spec.steps]
+    assert tools.index("debug.start_session") < tools.index("introspect.run")
+
+
+def test_first_step_of_every_journey_has_no_requires() -> None:
+    # Cross-journey prerequisites stay in prose; a journey's opening step never carries a
+    # journey-local `requires` (it would be unsatisfiable and wrongly fail the guard).
+    for spec in CANONICAL_PROMPTS:
+        assert spec.steps[0].requires == (), spec.name
+
+
+def test_precondition_validator_catches_unsatisfied_requirement() -> None:
+    # The deliberately-broken journey: introspect.run demands a live session no earlier
+    # step provides. This is the violation the guard must reject (mirrors the P1-4 stall).
+    broken = PromptSpec(
+        name="broken_boot_debug",
+        title="Broken",
+        description="d",
+        summary="s",
+        steps=(
+            Step(tool="runs.boot", purpose="boot", provides=("booted-system",)),
+            Step(tool="introspect.run", purpose="introspect", requires=("drgn-live-session",)),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="drgn-live-session"):
+        _validate_preconditions(broken)
+
+
+def test_precondition_validator_rejects_requirement_provided_only_later() -> None:
+    # Order matters: a capability provided by a *later* step does not satisfy an earlier
+    # step's precondition, even though the tag appears somewhere in the journey.
+    out_of_order = PromptSpec(
+        name="out_of_order",
+        title="Out of order",
+        description="d",
+        summary="s",
+        steps=(
+            Step(tool="introspect.run", purpose="introspect", requires=("drgn-live-session",)),
+            Step(
+                tool="debug.start_session",
+                purpose="attach",
+                provides=("drgn-live-session",),
+            ),
+        ),
+    )
+    with pytest.raises(RuntimeError, match="drgn-live-session"):
+        _validate_preconditions(out_of_order)
+
+
+def test_register_fails_fast_when_a_journey_precondition_is_unmet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # register() validates preconditions before rendering, so a mis-ordered journey is
+    # rejected at registration, not only by the unit test above.
+    broken = PromptSpec(
+        name="broken",
+        title="Broken",
+        description="d",
+        summary="s",
+        steps=(Step(tool="introspect.run", purpose="p", requires=("drgn-live-session",)),),
+    )
+    monkeypatch.setattr("kdive.mcp.prompts.registrar.CANONICAL_PROMPTS", (broken,))
+    maturity = {"introspect.run": ToolMaturity(maturity="implemented", reason=None)}
+    with pytest.raises(RuntimeError, match="drgn-live-session"):
+        register(FastMCP("probe"), tool_maturity=maturity)
 
 
 def test_registered_prompts_carry_their_spec_title_and_description() -> None:
