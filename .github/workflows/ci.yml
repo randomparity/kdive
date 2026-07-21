@@ -142,6 +142,13 @@ jobs:
         # recipes individually, so adding it only to `just ci` would not gate PRs.
         run: just resources-docs-check
 
+      - name: Doc-constant drift guard
+        # Code-derived doc constants (the ~tool count in agent-index, the effective single-PUT
+        # upload ceiling in the artifacts docstrings) must equal their source of truth
+        # (ADR-0410). Listed here because CI invokes recipes individually, so adding it only to
+        # `just ci` would not gate PRs.
+        run: just doc-constants-check
+
       - name: Chart appVersion guard
         # Chart.yaml appVersion must equal the pyproject version (spec A3) so a cut
         # release publishes an image at exactly the chart's default tag. Listed here

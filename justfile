@@ -332,6 +332,14 @@ resources-docs:
 resources-docs-check:
     uv run python scripts/gen_doc_resources.py --check
 
+# Regenerate code-derived doc constants (tool count, upload ceiling) from source (ADR-0410).
+doc-constants:
+    uv run python -m scripts.gen_doc_constants
+
+# Verify code-derived doc constants match their source of truth (CI gate, ADR-0410).
+doc-constants-check:
+    uv run python -m scripts.gen_doc_constants --check
+
 # Regenerate the role->tool visibility matrix in docs/guide/safety-and-rbac.md (#347).
 rbac-matrix:
     uv run python scripts/gen_rbac_tool_matrix.py
@@ -379,4 +387,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check doc-constants-check chart-version-check test
