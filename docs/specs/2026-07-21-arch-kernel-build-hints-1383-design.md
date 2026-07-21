@@ -120,12 +120,18 @@ A new pytest (`tests/mcp/resources/test_kernel_build_per_arch_doc.py`) over the 
 doc (`docs/guide/kernel-build-per-arch.md`; `resources-docs-check` guarantees the snapshot
 equals it):
 
-- **Set completeness:** collect only `##` headings whose text is *exactly* a supported-arch
-  token (membership in `SUPPORTED_ARCHES`), not "any `##` line"; assert that set equals
-  `SUPPORTED_ARCHES`. Scoping to exact-arch-token headings is what makes the negative guarantee
-  ("no unsupported arch heads a section") enforceable while incidental prose that names another
-  arch ("powerpc has no bzImage") does not false-trip. A `_TRAITS` row added without a section
-  fails here.
+- **Set completeness (both directions):** collect every `##` heading whose text has the *shape*
+  of an arch token — a bare lowercase identifier `^[a-z][a-z0-9_]*$` (matches `x86_64`,
+  `ppc64le`, and any future `aarch64`/`s390x`) — then assert that collected set equals
+  `SUPPORTED_ARCHES`. Collecting by *shape* (not by membership in `SUPPORTED_ARCHES`) is what
+  makes the guard bidirectional: a *missing* supported arch fails the equality (completeness),
+  and a *spurious or misnamed* section — `## aarch64`, or a subtly wrong `## ppc64` a reader
+  would take as an arch — is also collected and fails it (the negative guarantee "no unsupported
+  arch heads a section"). The multi-word aux headings (`## Determine your architecture first`,
+  `## What differs by architecture`, `## Same for every architecture`) do not match the
+  bare-identifier shape, so they are excluded without an allowlist. Authoring constraint this
+  imposes: an aux `##` heading must not be a bare lowercase identifier (e.g. `## packaging`),
+  or it would be miscollected as an arch and fail; keep aux headings multi-word/Title-Case.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
   *verbatim* in that arch's section, so a renamed container is caught. The exact required
   substrings today are `bzImage` (x86_64) and `ppc64le ELF (vmlinux)` (ppc64le) — the doc author
@@ -176,10 +182,13 @@ it has one home to update rather than two.
    correct `boot/vmlinuz` format.
 2. `agent-index.md`'s build stage and the `runs.create` build-profile `arch` field both cite
    the new resource URI; `served-doc-links` passes (the citations resolve).
-3. The drift-guard pytest fails if a hypothetical arch is added to `_TRAITS` without a doc
-   section, if a `BOOT_MEMBER_FORMATS` container name changes without a doc edit, or if a
-   `crashkernel` default changes without a doc edit. (Verified by temporarily perturbing the
-   source in the red step, then reverting.)
+3. The drift-guard pytest fails when the code and doc disagree. Red-step-verified by temporarily
+   perturbing the source, then reverting: (a) adding a hypothetical arch to `_TRAITS`/
+   `SUPPORTED_ARCHES` **and** `BOOT_MEMBER_FORMATS` together (a bare `_TRAITS` add is caught
+   earlier by the import-time cross-table assert, not the doc test) without a doc section fails
+   the completeness test; a *spurious* `## aarch64` section with no matching table row also fails
+   it; (b) changing a `BOOT_MEMBER_FORMATS` container name without a doc edit fails; (c) changing
+   a `crashkernel` default without a doc edit fails.
    - **Strip-guard red-step (the highest-value case, so it is called out separately):** deleting
      or altering the ppc64le `strip -s` invocation (offset-0 ELF pin unchanged) must fail the
      suite. And the guard must positively assert the strip-required set is **non-empty** for the
@@ -191,14 +200,19 @@ it has one home to update rather than two.
 
 ## Edge cases and failure modes
 
-- **A future third arch.** Adding `_TRAITS`/`BOOT_MEMBER_FORMATS` rows without a doc section
-  fails the completeness test — the intended forcing function. The test message must name the
-  missing arch so the fix is obvious.
-- **Header-parse fragility.** The completeness test keys on `##` section headers; a
-  non-arch `##` header (e.g. a "Same for every arch" section) would be miscounted as an arch.
-  The test must scope to headers that are exactly an arch token (match against
-  `SUPPORTED_ARCHES` membership), not "any `##` line," so shared/aux sections do not pollute
-  the set. This is the main correctness risk in the guard and is called out for the plan.
+- **A future third arch.** A supported arch is added by editing `_TRAITS`/`SUPPORTED_ARCHES`
+  and `BOOT_MEMBER_FORMATS` *together* (a bare `_TRAITS` add fails the import-time
+  `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES` assert in `validation.py` first, before any
+  test runs — the import-time cross-table check is the first gate). Once both tables carry the
+  arch, the doc completeness test is the second gate: it fails until the arch gets a `##`
+  section. The test message must name the missing arch so the fix is obvious.
+- **Header-parse fragility.** The completeness test keys on `##` section headers; a non-arch
+  `##` header would be miscounted if the test matched "any `##` line." Collecting by
+  *bare-lowercase-identifier shape* (`^[a-z][a-z0-9_]*$`) excludes the multi-word aux headings
+  and is what lets the guard reject a spurious `## aarch64` section as well as a missing one
+  (see the set-completeness bullet). The residual authoring constraint — aux `##` headings must
+  not be bare lowercase identifiers — is documented there. This is the main correctness risk in
+  the guard and is called out for the plan.
 - **Snapshot vs canonical.** The guard reads canonical `docs/`; if it read `_content/` it could
   pass on a stale snapshot. Read canonical; let `resources-docs-check` bind the snapshot.
 - **`crashkernel` string coupling.** Embedding the exact `default_crashkernel_summary()` output

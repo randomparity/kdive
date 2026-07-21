@@ -64,11 +64,16 @@ guarantee here is a *set* invariant a `Binding` cannot express. The guard is hon
 reach — it binds three code-derived facts and does **not** attempt to police the explanatory
 prose:
 
-- **Set completeness** — every arch in `SUPPORTED_ARCHES` must have a section, and no arch
-  outside it may head a section. The test counts only `##` headings whose text is exactly a
-  supported-arch token, so incidental prose that names another arch ("powerpc has no bzImage")
-  does not pollute the set. Adding a `_TRAITS` row then fails the suite until the arch is
-  documented.
+- **Set completeness (both directions)** — every arch in `SUPPORTED_ARCHES` must have a section
+  and no arch outside it may head one. The test collects `##` headings by *arch-token shape* (a
+  bare lowercase identifier `^[a-z][a-z0-9_]*$`) and asserts that set equals `SUPPORTED_ARCHES`.
+  Collecting by shape rather than by membership is what makes both directions bite: a *missing*
+  supported arch fails the equality, and a *spurious/misnamed* section (`## aarch64`, `## ppc64`)
+  is also collected and fails it. Multi-word aux headings ("Same for every architecture") and
+  incidental prose ("powerpc has no bzImage") do not match the bare-identifier shape, so they do
+  not pollute the set — the one authoring constraint being that an aux heading must not itself be
+  a bare lowercase identifier. Adding a `_TRAITS`/`BOOT_MEMBER_FORMATS` arch then fails the suite
+  until the arch is documented.
 - **`crashkernel` value** — reuses the existing `arch_traits.default_crashkernel_summary()`
   renderer: the doc embeds that exact string and the test asserts equality, so a changed
   default fails until the doc is resynced.
