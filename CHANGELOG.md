@@ -312,6 +312,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reclaim staging kernel on a failed install (#1351)
 - Resolve P1 agent-surface release blockers
 - Rewrite transitive links between served docs to resource URIs
+- Disambiguate P2 agent-surface contracts
+- Correct images.delete object-reclamation wording
 
 ### Build
 
