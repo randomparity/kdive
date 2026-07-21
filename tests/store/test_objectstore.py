@@ -439,6 +439,163 @@ def test_get_artifact_none_etag_omits_if_match() -> None:
     assert fetched.data == b"bytes"
 
 
+class _StreamingBody:
+    """Fake boto ``StreamingBody``: ``read(size)`` returns up to ``size`` bytes (``b""`` at
+    true EOF) and ``close()`` records the close, mirroring the real body the reader wraps."""
+
+    def __init__(self, data: bytes, *, chunk: int | None = None) -> None:
+        self._buf = data
+        self._pos = 0
+        self._chunk = chunk
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = len(self._buf) - self._pos
+        want = remaining if size is None or size < 0 else min(size, remaining)
+        if self._chunk is not None:
+            want = min(want, self._chunk)
+        chunk = self._buf[self._pos : self._pos + want]
+        self._pos += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _StreamingClient:
+    """A stub S3 client whose ``get_object`` returns a fresh ``_StreamingBody`` + metadata."""
+
+    def __init__(
+        self, data: bytes, *, chunk: int | None = None, metadata: dict[str, str] | None = None
+    ) -> None:
+        self._data = data
+        self._chunk = chunk
+        self._metadata = (
+            metadata
+            if metadata is not None
+            else {"sensitivity": "redacted", "retention-class": "vmcore"}
+        )
+        self.last_kwargs: dict[str, object] | None = None
+        self.body: _StreamingBody | None = None
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        self.last_kwargs = kwargs
+        self.body = _StreamingBody(self._data, chunk=self._chunk)
+        return {"Metadata": self._metadata, "Body": self.body}
+
+
+class _StreamErrorBody:
+    """A body whose read raises a transport error, to drive the reader's mid-stream mapping."""
+
+    def read(self, _size: int = -1) -> bytes:
+        raise ReadTimeoutError(endpoint_url="http://unreachable")
+
+    def close(self) -> None:
+        pass
+
+
+class _StreamErrorClient:
+    def get_object(self, **_kwargs: object) -> dict[str, object]:
+        return {
+            "Metadata": {"sensitivity": "redacted", "retention-class": "vmcore"},
+            "Body": _StreamErrorBody(),
+        }
+
+
+def test_get_artifact_stream_yields_body_and_metadata() -> None:
+    store = ObjectStore(_StreamingClient(b"combined-tar-bytes"), "bucket")
+    with store.get_artifact_stream("t/runs/run-1/kernel", None) as streamed:
+        assert streamed.sensitivity is Sensitivity.REDACTED
+        assert streamed.retention_class == "vmcore"
+        assert streamed.reader.read() == b"combined-tar-bytes"
+
+
+def test_get_artifact_stream_short_reads_reassemble_without_truncation() -> None:
+    # The body hands back one byte per read; a correct readinto must not read a short chunk
+    # as EOF, or the streamed tar would silently truncate.
+    store = ObjectStore(_StreamingClient(b"one-byte-at-a-time", chunk=1), "bucket")
+    with store.get_artifact_stream("k", None) as streamed:
+        assert streamed.reader.read() == b"one-byte-at-a-time"
+
+
+def test_get_artifact_stream_closes_body_on_exit() -> None:
+    client = _StreamingClient(b"payload")
+    with ObjectStore(client, "bucket").get_artifact_stream("k", None) as streamed:
+        streamed.reader.read(1)
+    assert client.body is not None
+    assert client.body.closed
+
+
+@pytest.mark.parametrize("status", [404, 412])
+def test_get_artifact_stream_stale_statuses_raise_stale_handle(status: int) -> None:
+    store = ObjectStore(_StatusErrorClient(status), "bucket")
+    with (
+        pytest.raises(CategorizedError) as excinfo,
+        store.get_artifact_stream("t/vmcore/oid/core", "etag"),
+    ):
+        pass
+    assert excinfo.value.category is ErrorCategory.STALE_HANDLE
+    assert excinfo.value.details == {"key": "t/vmcore/oid/core", "http_status": status}
+
+
+def test_get_artifact_stream_non_stale_client_error_is_infrastructure_failure() -> None:
+    store = ObjectStore(_StatusErrorClient(500), "bucket")
+    with pytest.raises(CategorizedError) as excinfo, store.get_artifact_stream("k", None):
+        pass
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_get_artifact_stream_transport_error_is_infrastructure_failure() -> None:
+    store = ObjectStore(_UnreachableClient(), "bucket")
+    with (
+        pytest.raises(CategorizedError) as excinfo,
+        store.get_artifact_stream("t/vmcore/oid/core", None),
+    ):
+        pass
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_get_artifact_stream_invalid_metadata_is_infrastructure_failure() -> None:
+    store = ObjectStore(_StreamingClient(b"x", metadata={}), "bucket")
+    with (
+        pytest.raises(CategorizedError) as excinfo,
+        store.get_artifact_stream("t/vmcore/oid/core", None),
+    ):
+        pass
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details == {"key": "t/vmcore/oid/core"}
+
+
+def test_get_artifact_stream_mid_read_error_maps_to_infrastructure_failure() -> None:
+    store = ObjectStore(_StreamErrorClient(), "bucket")
+    with (
+        pytest.raises(CategorizedError) as excinfo,
+        store.get_artifact_stream("t/vmcore/oid/core", None) as streamed,
+    ):
+        streamed.reader.read()
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert excinfo.value.details["key"] == "t/vmcore/oid/core"
+    # The boto error class is carried as s3_error_code, so a read-timeout is observably distinct
+    # from a dropped connection without a new field (ADR-0400 residual observability).
+    assert excinfo.value.details["s3_error_code"] == "ReadTimeoutError"
+
+
+def test_get_artifact_stream_with_etag_sends_if_match() -> None:
+    client = _StreamingClient(b"x")
+    with ObjectStore(client, "bucket").get_artifact_stream("k", "abc123"):
+        pass
+    assert client.last_kwargs is not None
+    assert client.last_kwargs.get("IfMatch") == '"abc123"'
+
+
+def test_get_artifact_stream_none_etag_omits_if_match() -> None:
+    client = _StreamingClient(b"x")
+    with ObjectStore(client, "bucket").get_artifact_stream("k", None):
+        pass
+    assert client.last_kwargs is not None
+    assert "IfMatch" not in client.last_kwargs
+
+
 def test_register_artifact_row_maps_stored_and_owner() -> None:
     stored = StoredArtifact("t/vmcore/oid/core", "etag123", Sensitivity.REDACTED, "vmcore")
     owner_id = uuid4()
@@ -571,6 +728,28 @@ def test_get_artifact_unconditional_missing_key_raises_stale_handle(
     with pytest.raises(CategorizedError) as excinfo:
         minio_store.get_artifact(f"{key_ns}/runs/none/kernel", None)
     assert excinfo.value.category is ErrorCategory.STALE_HANDLE
+
+
+def test_get_artifact_stream_minio_round_trip(minio_store: ObjectStore, key_ns: str) -> None:
+    # AC1: the streamed bytes are byte-identical to the buffered get_artifact bytes, with the
+    # same sensitivity/retention_class read from the same object metadata.
+    stored = minio_store.put_artifact(
+        ArtifactWriteRequest(
+            tenant=key_ns,
+            owner_kind="runs",
+            owner_id="run-1",
+            name="kernel",
+            data=b"combined-tar-payload",
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="build",
+        ),
+    )
+    buffered = minio_store.get_artifact(stored.key, None)
+    with minio_store.get_artifact_stream(stored.key, None) as streamed:
+        streamed_bytes = streamed.reader.read()
+    assert streamed_bytes == buffered.data == b"combined-tar-payload"
+    assert streamed.sensitivity is buffered.sensitivity is Sensitivity.SENSITIVE
+    assert streamed.retention_class == buffered.retention_class == "build"
 
 
 def test_put_uses_the_key_scheme(minio_store: ObjectStore, key_ns: str) -> None:
