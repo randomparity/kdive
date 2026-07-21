@@ -77,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Machine-checkable prompt step preconditions
 - Guard code-derived doc constants against source drift
 - Serve per-arch kernel build-hints resource + drift guard
+- Steer completed teardown to allocations.release (#1385)
 
 ### Changed
 
