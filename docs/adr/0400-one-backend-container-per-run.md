@@ -61,18 +61,32 @@ backend is required.
    backend.
 
 2. **Otherwise, one lazily-started shared container, refcounted.** With no override,
-   the fixtures coordinate through the xdist-shared temp root
-   (`tmp_path_factory.getbasetemp().parent`, shared across workers) using a stdlib
-   `fcntl.flock` guard and a small JSON state file (`{url, container_id, refcount}`):
+   the fixtures coordinate through the **per-run** temp root using a stdlib
+   `fcntl.flock` guard and a small JSON state file (`{url, container_id, refcount}`).
+   The per-run root is `tmp_path_factory.getbasetemp().parent` **only under xdist**
+   (a worker's basetemp is `…/pytest-N/popen-gwK`, so `.parent` is the run-shared
+   `…/pytest-N`); under a non-xdist run `getbasetemp()` is already the per-run
+   `…/pytest-N` and `.parent` would be the *persistent* per-user root, so the
+   non-xdist path uses `getbasetemp()` itself. The coordination is therefore keyed to
+   one run in both modes, never the global root:
    - The first worker to request the fixture starts the container, records its
      connection URL and wrapped-container id, and sets `refcount = 1`; later workers
      read the URL and increment.
    - On teardown each worker decrements; the worker that brings `refcount` to `0`
      stops and removes the container **by id** (any worker can, via the recorded
      id) and deletes the state file.
-   - Ryuk is disabled for the run (`testcontainers` `ryuk_disabled`) because the
-     refcount now owns the container lifecycle; a container shared across processes
-     cannot be tied to any one creator's exit.
+   - Ryuk is disabled for the run (`testcontainers` `ryuk_disabled`, a process-global
+     switch) because the refcount now owns the container lifecycle; a container
+     shared across processes cannot be tied to any one creator's exit.
+   Because start is lazy and teardown stops the container at `refcount == 0`, the
+   guaranteed invariant is **at most one backend container of each kind at any
+   instant**, not a hard "exactly one start per run": a run whose DB tests are
+   scheduled so that every current holder finishes before a later worker's first DB
+   test would stop the container and then lazily start a fresh one. For the full
+   `just test` suite under the default `--dist load`, DB tests are spread across every
+   worker's whole session, so in practice this is a single start and single stop; the
+   sequential-restart window is reachable only under sparse/clustered DB scheduling or
+   `worksteal` (#1332) and costs at most a repeated ~3s start, never correctness.
 
 3. **Isolation moves to database/bucket per worker.** Each worker provisions
    `kdive_test_<worker>` (worker id from `PYTEST_XDIST_WORKER`, `master` when not
@@ -84,7 +98,19 @@ backend is required.
    `pg_conn`'s per-test `DROP SCHEMA public` and `key_ns`'s per-test prefix are
    unchanged and now operate inside the per-worker namespace.
 
-4. **`KDIVE_REQUIRE_DOCKER=1` is preserved verbatim.** The import-guard and
+4. **The shared server is sized for all workers' connections.** Collapsing ~18
+   private Postgres servers (default `max_connections = 100` *each*) into one shared
+   server puts every worker's pool on one 100-connection budget. `create_pool`
+   defaults to `max_size = 10` (`src/kdive/db/pool.py`), so a worst case of ~18
+   concurrent workers × 10 plus per-test autocommit connections can exceed 100 and
+   raise `FATAL: too many clients` — a flake class that cannot occur under
+   container-per-worker. The shared container is therefore started with a raised
+   `max_connections` (`-c max_connections=<sized to workers × pool + headroom>`, e.g.
+   500). The env-override server is the operator's own backend; the same sizing
+   requirement is documented for it (the `just compose-up` Postgres is bumped to
+   match) rather than silently inherited.
+
+5. **`KDIVE_REQUIRE_DOCKER=1` is preserved verbatim.** The import-guard and
    container-start failure paths still skip when unset and re-raise when set, on both
    the override-absent path (start) and unchanged otherwise.
 
@@ -94,19 +120,27 @@ the algorithm rather than duplicating it.
 
 ## Consequences
 
-- One Postgres and one MinIO container per `just test` run instead of ~18 each;
-  start cost paid once, no serial `container.stop()` tail. Recovers the ~15–25s
-  targeted by #1331.
+- At most one Postgres and one MinIO container alive at any instant, versus ~18 of
+  each concurrently today; for the full `just test` run under `--dist load` that is a
+  single start and a single stop, with no serial `container.stop()` tail. Recovers the
+  ~15–25s targeted by #1331.
 - The fixtures gain cross-process coordination code (flock + refcount + stop-by-id).
   This is the cost of a shared mutable resource across xdist processes; it is
   contained in one helper and exercised on every `-n auto` run.
-- **Residual — leaked container on hard worker crash.** With Ryuk disabled, a worker
-  killed (SIGKILL/OOM) before teardown never decrements, so `refcount` never reaches
-  `0` and the shared container survives the run. This is bounded (one container, not
-  18), self-healing on the next run against a container path (a fresh container is
-  started; the stale one is orphaned, not reused), and cleaned by
-  `docker container prune` or CI runner recycling. Documented in the fixture
-  docstrings.
+- **Residual — leaked container(s) on hard worker crash.** With Ryuk disabled, a
+  worker killed (SIGKILL/OOM) before teardown never decrements, so `refcount` never
+  reaches `0` and the shared container survives the run. A run exercising both suites
+  holds one Postgres *and* one MinIO container, so a hard crash can leak **up to two
+  backend containers**, not one — still bounded (two, not ~36), self-healing on the
+  next run against a container path (a fresh container is started; the stale one is
+  orphaned, not reused), and cleaned by `docker container prune` or CI runner
+  recycling. Documented in the fixture docstrings.
+- **Residual — Ryuk is disabled process-wide.** `ryuk_disabled` /
+  `TESTCONTAINERS_RYUK_DISABLED` is a process-global switch, not per-container. Today
+  the suite starts only these two backend container kinds (no other
+  `PostgresContainer`/`DockerContainer` `.start()` in `tests/`), so the blast radius
+  is exactly them. Any future throwaway testcontainer added to the suite must arrange
+  its **own** deterministic teardown rather than assuming the reaper will collect it.
 - **Residual — override backend requires `CREATEDB`.** The env-override server must
   let its user create/drop databases and buckets. The `just compose-up` `kdive`
   superuser and `minioadmin` root satisfy this; a locked-down shared backend would
@@ -126,6 +160,19 @@ the algorithm rather than duplicating it.
   mechanism: a bare `just test` and CI (which set no override) would keep starting
   one container per worker, so the headline speedup would not land by default. Kept
   as the *first* branch, layered over self-coordination.
+- **Provision one backend at the `just test` / CI orchestration layer, always take
+  the env-override path.** The recipe (and CI workflow) would start one Postgres and
+  one MinIO before `pytest`, export `KDIVE_TEST_PG_URL` / `KDIVE_TEST_S3_URL`, and
+  tear them down after — deleting the flock, refcount, stop-by-id, Ryuk-disable, and
+  stale-container machinery, keeping only branch 1. This is a real, simpler option and
+  was weighed explicitly (the operator chose between it and in-fixture
+  self-coordination). Rejected because the speedup would then bind to the *recipe*,
+  not to `pytest -n auto`: a direct `pytest -n auto tests/db` (a common inner-loop and
+  debugging invocation) run outside the recipe would fall back to container-per-worker,
+  and the backend's start/stop lifecycle would have to be duplicated in both the
+  `justfile` and the CI workflow. In-fixture coordination makes *any* `-n auto`
+  invocation get the single-container benefit and keeps backend lifecycle in one
+  place. The cost is the coordination code, accepted here.
 - **Eager start via xdist controller hooks** (`pytest_configure` +
   `pytest_configure_node` injecting the URL into `workerinput`,
   `pytest_sessionfinish` stopping it). Cleaner coordination — the controller

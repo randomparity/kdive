@@ -39,10 +39,15 @@ inherits the new behavior. Each fixture, in order:
    `KDIVE_TEST_S3_ACCESS_KEY` / `KDIVE_TEST_S3_SECRET_KEY`, defaulting to
    `minioadmin`) is set, treat it as the shared **server** and start no container.
 2. **Else, one shared container, lazily started, refcounted** across xdist workers
-   via a `fcntl.flock` guard + JSON state file in the xdist-shared temp root
-   (`tmp_path_factory.getbasetemp().parent`). First worker starts the container and
-   sets `refcount=1`; others increment; the worker that decrements to `0` stops and
-   removes it by recorded container id. Ryuk disabled for the run.
+   via a `fcntl.flock` guard + JSON state file in the **per-run** temp root — the
+   xdist-shared `tmp_path_factory.getbasetemp().parent` under `-n`, else
+   `getbasetemp()` itself (under non-xdist, `.parent` is the *persistent* per-user
+   root and must not be used). First worker starts the container and sets
+   `refcount=1`; others increment; the worker that decrements to `0` stops and removes
+   it by recorded container id. Ryuk disabled for the run. The shared Postgres is
+   started with a raised `max_connections` sized to workers × pool. The guaranteed
+   invariant is **at most one container of each kind at any instant**, not a hard
+   single start per run (see AC1).
 3. **Per-worker namespace.** Provision `kdive_test_<worker>` database (resp.
    `kdive-test-<worker>` bucket) idempotently on the shared server; yield its
    conninfo (resp. an `ObjectStore` bound to it). Drop it on per-worker teardown.
@@ -58,11 +63,17 @@ resource-specific start/provision callbacks stay in each conftest.
 Each is a checkable behavior; `/build-tdd` implements these as tests where the harness
 allows, and the container-count criteria are verified by a live `just test` run.
 
-- **AC1 — one container per run under xdist.** A `just test -n <N>` run (N>1) with no
-  env override starts exactly one Postgres and one MinIO container total, not N of
-  each. *Verify:* observe `docker ps` count during a run, or assert the refcount state
-  file records a single `container_id` while N workers hold it. A dedicated coordination
-  test (below) asserts the single-start invariant without a full suite run.
+- **AC1 — at most one container of each kind concurrently under xdist.** A
+  `just test -n <N>` run (N>1) with no env override has at most one Postgres and one
+  MinIO container alive at any instant — the state file records a single
+  `container_id` while N workers hold it — and for the full suite that is a single
+  start and single stop, not N of each. The mechanism guarantees *at-most-one-
+  concurrent*, not a hard "exactly one start" (a sparse/clustered DB schedule that
+  drains all current holders before a later worker's first DB test may stop and
+  lazily restart one — correctness-neutral, costs a repeated start). *Verify:* a
+  coordination test drives an acquire×K / release×K sequence **and** a
+  finish-early-then-reacquire ordering against a fake container, asserting one live
+  container while any holder is active and stop called exactly at `refcount == 0`.
 - **AC2 — per-worker isolation preserved.** Two xdist workers running DB tests
   concurrently do not observe each other's schema/rows; `pg_conn`'s `DROP SCHEMA
   public CASCADE` in worker A never affects worker B. *Verify:* the full existing db
@@ -89,6 +100,12 @@ allows, and the container-count criteria are verified by a live `just test` run.
   releases do not stop it. *Verify:* a coordination test drives acquire×K / release×K
   against a fake container object and asserts stop is called once, on the K-th
   release, and never before.
+- **AC6b — shared server sized for all workers.** The shared Postgres does not
+  exhaust connections under `-n auto` with real pool sizes: the container starts with
+  `max_connections` raised above `workers × create_pool max_size (10) + headroom`, and
+  the `just compose-up` Postgres (the override backend) is bumped to match. *Verify:*
+  a full `-n auto` db-suite run does not raise `FATAL: too many clients`; the started
+  container's `max_connections` is asserted ≥ the computed bound.
 - **AC7 — measured speedup.** A local `just test` run is meaningfully faster than
   before (target: the container start/stop tail visible in `--durations` collapses
   from ~20 `~3s setup` + a serial `stop` tail to a single start + single stop).
@@ -116,9 +133,21 @@ allows, and the container-count criteria are verified by a live `just test` run.
   bucket, so a prior run's leftovers are reclaimed.
 - **Override server lacks CREATEDB / bucket-create rights.** Fails loudly at
   provisioning — the correct signal, not a silent skip.
-- **Non-xdist run (`pytest` without `-n`).** Worker id `master`; the flock/refcount
-  path runs with a single holder (start → refcount 1 → teardown → stop). One
-  container, as today.
+- **Non-xdist run (`pytest` without `-n`).** Worker id `master`; the coordination
+  root is `getbasetemp()` (per-run), **not** `.parent` (which is the persistent
+  per-user root under non-xdist). The flock/refcount path runs with a single holder
+  (start → refcount 1 → teardown → stop). One container, as today.
+- **Two concurrent non-xdist runs.** Because the non-xdist root is per-run
+  (`getbasetemp()`), a developer running `pytest tests/db` in two terminals — or
+  pre-commit plus a manual run — gets two independent per-run roots and two
+  independent containers, not a shared/refcount collision on a global lock. (Using
+  `.parent` under non-xdist would have collided; AC-covered by the root-selection
+  logic.)
+- **Shared connection ceiling.** One server now holds every worker's pool. The shared
+  container is started with a raised `max_connections`; the override backend must be
+  sized likewise (documented; `just compose-up` bumped). Without this, `-n auto` can
+  intermittently raise `FATAL: too many clients` on high-core hosts (a flake absent
+  under container-per-worker).
 
 ## Rollback
 
