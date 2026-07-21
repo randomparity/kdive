@@ -61,7 +61,7 @@ format:
 type:
     uv run ty check
 
-# Run the test suite, excluding the gated live_vm and live_stack suites.
+# Run the test suite, excluding the gated live_vm, live_stack, and agent_smoke suites.
 # (oidc_issuer-marked tests stay selected; they skip cleanly without the issuer container.)
 #
 # `-n auto` runs the suite across all cores via pytest-xdist; each worker gets its own
@@ -72,7 +72,24 @@ type:
 # but is overridable: the weekly test-ordering workflow sets PYTHONHASHSEED=random to
 # surface any new ordering-dependent test the pinned seed would otherwise mask.
 test:
-    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack" -n auto -q
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" -n auto -q
+
+# Run the doc-driven agent-smoke tier (#1370, ADR-0411): a deterministic walker drives the
+# agent-index.md golden path over the served surface and fails on any stall. Non-PR-gate like
+# the live tiers and NOT in `ci` — the harness for the deferred nightly live-LLM agent. It is
+# infra-free (built app over a closed pool + dummy KDIVE_S3_* test env), so it needs no stack.
+# --strict-markers fails a mis-marked test; exit 5 ("no tests collected") is tolerated as a
+# clean skip, other codes propagate.
+test-agent-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    uv run python -m pytest -m agent_smoke --strict-markers -q || rc=$?
+    if [[ "$rc" -eq 5 ]]; then
+      echo "no agent_smoke tests collected — skipping cleanly (marked suite absent)"
+      exit 0
+    fi
+    exit "$rc"
 
 # The emulated foreign-arch tier is `just test-live-tcg`, excluded here so the native run stays fast.
 # Run the native live_vm suite (needs a KVM/libvirt host with a kdump-enabled guest).
