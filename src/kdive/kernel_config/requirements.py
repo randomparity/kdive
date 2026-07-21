@@ -80,7 +80,10 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     ),
     FeatureRequirement(
         "debuginfo",
-        "Resolve symbols for gdb/drgn debugging (build with DWARF or BTF).",
+        "Enable only for live drgn/gdb symbol resolution or offline vmcore analysis. Embeds "
+        "DWARF tables in every .ko - can grow the module tree 10-50x and slow upload and "
+        "install. Omit for boot-time crash reproducers and console-log investigations where no "
+        "post-boot introspection is needed.",
         (
             frozenset({"DEBUG_INFO"}),
             frozenset({"DEBUG_INFO_DWARF5", "DEBUG_INFO_DWARF4", "DEBUG_INFO_BTF"}),
