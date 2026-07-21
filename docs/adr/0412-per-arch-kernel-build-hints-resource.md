@@ -12,11 +12,19 @@ architecture-specific packaging rule. The reported failure: an agent builds a ke
 scratch. The concrete trap is the boot-image split: `x86_64` wants the compressed **bzImage**
 at `boot/vmlinuz`, while `ppc64le` has no bzImage and wants the **stripped ELF `vmlinux`**.
 
-The facts an agent needs to avoid this are already true in code and already reachable:
+The facts an agent needs to avoid this are already true in code and partly reachable:
 
-- `docs/operating/external-build-upload.md` carries a correct per-arch recipe — but inside a
-  257-line procedural narrative, so an agent scanning for "what differs for my arch" does not
-  hit it before building.
+- The bare boot-format split is **already inline in the tool schema**: the `runs.create`
+  `build_profile.arch` `Field` (and `BuildProfile.arch`, `src/kdive/profiles/build.py`) reads
+  "Selects the boot/vmlinuz payload format … (bzImage for x86_64, ELF vmlinux for ppc64le)."
+  So an agent authoring the profile is not blind to the one-liner. What it does *not* get there
+  is the actionable *why-and-how*: that the ppc64le member must be **stripped** first (the
+  unstripped DWARF `vmlinux` overruns the validator scan bound), the cross-compile triples, the
+  `crashkernel` default, and — the root of several reported cases — that the boot format follows
+  the **target** arch, not the build host an agent may have misidentified.
+- `docs/operating/external-build-upload.md` carries the full per-arch recipe including all of
+  that — but inside a 257-line procedural narrative, so an agent scanning for "what differs for
+  my arch" does not hit it in one read before building.
 - `artifacts.expected_uploads` returns the machine-readable
   `contracts.kernel.layout[boot/vmlinuz].formats_by_arch`, but that is a byte contract (magic
   offsets), not a build-and-package hint.
@@ -24,8 +32,10 @@ The facts an agent needs to avoid this are already true in code and already reac
   `domain/platform/arch_traits.py` (`_TRAITS`: machine, console, `default_crashkernel`) and
   `build_artifacts/validation.py` (`BOOT_MEMBER_FORMATS`, `SUPPORTED_ARCHES`).
 
-So the gap is a **discoverable, at-a-glance, per-arch reference** an agent hits *before* it
-builds — not missing facts. The supported set is exactly two arches today (`x86_64`,
+So the gap is not the bare boot-format fact (the `arch` Field has it) but a **discoverable,
+at-a-glance reference of the fuller per-arch build-and-package guidance** — strip rule and its
+rationale, cross-compile, crashkernel, and build-host-vs-target awareness — that an agent hits
+in one hop before it builds. The supported set is exactly two arches today (`x86_64`,
 `ppc64le`); "all supported CPU architectures" in the issue means both, and a future third arch
 must not be able to land without a corresponding hint.
 
@@ -63,14 +73,17 @@ prose:
   renderer: the doc embeds that exact string and the test asserts equality, so a changed
   default fails until the doc is resynced.
 - **Boot-member fact, bound to the contract** — for each arch the section must contain
-  `BOOT_MEMBER_FORMATS[arch].container` verbatim; and for any arch whose container names an
-  ELF (the no-bzImage arches — the predicate is `"ELF" in container`, derived from the
-  contract, not a hardcoded arch list), the section must also contain a `strip` instruction.
-  This ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage, so
-  strip the build-tree `vmlinux` first — to a source-derived predicate, rather than leaving it
-  as unguarded free prose. The *explanatory* text around it (why DWARF overruns the scan bound,
-  cross-compile triples) stays review-only; the guard pins the actionable rule's presence, not
-  its wording.
+  `BOOT_MEMBER_FORMATS[arch].container` verbatim; and for any arch whose boot format is an ELF
+  kernel, the section must also contain the `strip -s` command token. "Is an ELF kernel" is read
+  **structurally** from the contract — the format carries an ELF-magic `MagicPin` at offset 0
+  (`\x7fELF`), not from a substring of the human-readable `container` display string, so
+  renaming that display string cannot silently drop an arch from the strip-required set. This
+  ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage, so strip
+  the build-tree `vmlinux` first — to a structural source signal rather than leaving it as
+  unguarded free prose. Binding to `strip -s` (not the bare word `strip`, which appears
+  incidentally in "the bzImage is already stripped") pins the actionable command's presence;
+  the *explanatory* text around it (why DWARF overruns the scan bound, cross-compile triples)
+  stays review-only — the guard pins the rule's presence, not its full wording.
 
 `resources-docs-check` (snapshot mirror) and `served-doc-links` (a served doc must cite another
 served doc by its `resource://` URI, not a relative path) already gate the registration and the
@@ -92,13 +105,16 @@ test. No schema change, no migration.
   section (or the completeness test fails). These are separate gates cleared one failure at a
   time, not one atomic check; the net effect is that the doc cannot silently cover fewer arches
   than the platform supports.
-- There are now two agent-facing homes for the per-arch boot-image fact (this reference and
-  the procedural narrative). This duplication is deliberate and bounded — the reference is the
-  scannable "what differs" surface, the narrative the "how to run it" surface. The shared
-  code-derived facts (`crashkernel` string, boot-container name, and the strip-required
-  predicate) are guarded against divergence in *this* doc; the same facts in the narrative are
-  not bound by this test, and all explanatory prose in either doc remains a review
-  responsibility.
+- The per-arch boot-image fact now has **four agent-facing homes**: this reference, the
+  `external-build-upload.md` narrative, and two hardcoded inline `Field` descriptions
+  (`BuildProfile.arch` and the `runs.create` `build_profile` Field). This new doc's guard binds
+  only *this* reference (the `crashkernel` string, the boot-container name, and the structural
+  strip-required predicate); the narrative and the two `Field` strings are left as they are and
+  are **not** brought under a guard by this change. That is a bounded, acknowledged residual —
+  a third arch or a container rename can still silently rot those three copies — and its remedy
+  is the deferred inline-`Field` derivation recorded below, not this doc. The duplication with
+  the narrative is otherwise deliberate: the reference is the scannable "what differs" surface,
+  the narrative the "how to run it" surface.
 - The guard covers only the code-owned values it binds; a newly hand-copied per-arch constant
   is not auto-detected until added to the test, same asymmetry ADR-0410 accepted.
 
@@ -140,3 +156,15 @@ test. No schema change, no migration.
   A pytest expresses both the set invariant and the per-value checks in one place. Rejected for
   the completeness guard; the `crashkernel` value reuses the existing summary renderer rather
   than a new binding.
+- **Derive and/or guard the two hardcoded inline `Field` boot-format strings** in this same
+  change. The `arch` `Field` descriptions restate "bzImage for x86_64, ELF vmlinux for ppc64le"
+  as hardcoded literals (only the arch *list* is derived from `SUPPORTED_ARCHES`), so a third
+  arch rots them silently — the same drift class this ADR guards for the new doc. Deriving that
+  clause from `BOOT_MEMBER_FORMATS` (as `default_crashkernel_summary()` already derives the
+  crashkernel text) would remove the risk at low blast radius and reach the doc-skipping
+  population directly. It is **deferred, not dismissed**: it is a change to existing tool-schema
+  prose, which is the tool-surface scope this issue's chosen deliverable (a resource doc)
+  deliberately stayed out of. Recorded as the natural companion follow-up to the deterministic
+  build-time guard above. This change does repoint the `arch` `Field`'s existing doc citation at
+  the new focused reference (a one-line cross-link), but leaves the inline boot-format wording
+  as-is.

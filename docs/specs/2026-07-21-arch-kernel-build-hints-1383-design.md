@@ -18,8 +18,13 @@ scratch. The sharp edge is the boot-image split:
 | `x86_64` | the **bzImage** (`arch/x86/boot/bzImage`), renamed | the ELF `vmlinux` is *rejected* here |
 | `ppc64le` | the **stripped ELF `vmlinux`** | powerpc has no bzImage; the *unstripped* vmlinux (full DWARF, hundreds of MB) also overruns the validator scan bound |
 
-The facts already exist and are already correct in the codebase; the gap is that an agent does
-not reach them *before* building.
+The facts already exist and are correct in the codebase, and the bare boot-format one-liner is
+even inline in the `runs.create` `build_profile.arch` `Field` ("bzImage for x86_64, ELF vmlinux
+for ppc64le"). The gap is the *fuller* actionable guidance an agent needs in one read before
+building — the ppc64le strip requirement and why, cross-compile triples, the `crashkernel`
+default, and (the root of several reported cases) that the boot format follows the **target**
+arch, not the build host an agent may have misidentified. That guidance exists only inside the
+257-line procedural narrative today.
 
 ## Goal / non-goals
 
@@ -31,8 +36,10 @@ the discoverability side.
 **Non-goals.**
 - Not changing any validation behavior. The validator (`build_artifacts/validation.py`) is
   unchanged; this is agent-facing documentation only.
-- Not adding a new response field or tool. The only tool-surface change is one `Field`
-  description pointer.
+- Not adding a new response field or tool, and not rewording the inline boot-format prose in
+  the `arch` Field (deriving it from `BOOT_MEMBER_FORMATS` is a recorded follow-up). The only
+  tool-surface change is repointing the `arch` Field's existing doc citation at the new
+  reference — one line per Field.
 - Not restating the full procedural tar recipe. `docs/operating/external-build-upload.md`
   stays the how-to-run-it narrative; the new doc is the what-differs-by-arch reference.
 - Not an AI surface. This is documentation consumed *by* an external agent; it adds no LLM
@@ -94,9 +101,18 @@ equality.
   `resource://` URI beside the existing external-build-upload reference. (The agent-index
   snapshot is re-mirrored by `resources-docs`; the edit must not touch the `~NNN tools`
   doc-constant.)
-- Cite from the `runs.create` build-profile `arch` `Field` description: append a short "see
-  resource://kdive/docs/guide/kernel-build-per-arch.md for per-arch packaging" pointer, so the
-  agent reading the schema at build time has the link.
+- Cite from the `runs.create` build-profile `arch` `Field` description. That Field already
+  states the boot-format one-liner and already cites
+  `resource://kdive/docs/operating/external-build-upload.md`; **repoint** that existing citation
+  at the new focused reference (which itself links onward to external-build-upload for the full
+  recipe), rather than appending a second URL that would bloat the description. Do the same for
+  the `runs.create` `build_profile` Field if it carries its own citation. This is a one-line
+  cross-link per Field, not a rewrite of the boot-format wording — deriving that hardcoded
+  wording from `BOOT_MEMBER_FORMATS` is the deferred follow-up recorded in the ADR, out of
+  scope here.
+  - Guard note: check for an existing test that asserts the `arch` Field cites
+    external-build-upload before repointing; if one exists, update it to the new target (the
+    new doc chains onward, so no reachability is lost).
 
 ### Drift guard (the anti-rot mechanism)
 
@@ -112,12 +128,16 @@ equals it):
   fails here.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
   in that arch's section, so a renamed container is caught.
-- **Strip-required predicate (the load-bearing rule):** for any arch whose
-  `BOOT_MEMBER_FORMATS[arch].container` contains `"ELF"` (the no-bzImage arches — a
-  source-derived predicate, not a hardcoded arch list), assert that arch's section contains a
-  `strip` token. This binds the single most error-prone instruction (ppc64le: strip the
-  build-tree `vmlinux` first) to the contract instead of leaving it as unguarded prose. The
-  guard pins the rule's *presence*, not its wording.
+- **Strip-required predicate (the load-bearing rule):** for any arch whose boot format is an
+  ELF kernel, assert that arch's section contains the `strip -s` command token. "Is an ELF
+  kernel" is read **structurally** from the contract — the format carries an ELF-magic
+  `MagicPin` at offset 0 (`\x7fELF`) — not from a substring of the human-readable `container`
+  display string, so a display-string rename cannot silently drop an arch from the
+  strip-required set. Binding to `strip -s` (not the bare word `strip`, which appears
+  incidentally in "the bzImage is already stripped") avoids a trivially-satisfied common-word
+  match. This binds the single most error-prone instruction (ppc64le: strip the build-tree
+  `vmlinux` first) to a structural source signal instead of leaving it as unguarded prose; the
+  guard pins the command's *presence*, not its full wording.
 - **`crashkernel` values:** assert the doc contains the exact `default_crashkernel_summary()`
   output, so a changed default fails until resynced.
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the
