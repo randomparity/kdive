@@ -130,6 +130,9 @@ def test_register_includes_doc_when_required_kind_present(monkeypatch: pytest.Mo
 
 
 _RESOURCE_URI = re.compile(r"resource://kdive/docs/[^\s)\"'>]+")
+# A Markdown link whose target is a relative ``*.md`` path (optionally with a #fragment),
+# excluding scheme URIs.
+_RELATIVE_MD_LINK = re.compile(r"\]\((?!\w+://)([^)#]+\.md)(?:#[^)]*)?\)")
 
 
 def test_served_doc_resource_citations_are_all_allowlisted() -> None:
@@ -150,10 +153,35 @@ def test_served_doc_resource_citations_are_all_allowlisted() -> None:
     assert not offenders, "served docs cite unfetchable resource URIs:\n" + "\n".join(offenders)
 
 
-def test_citation_guard_is_not_vacuous() -> None:
-    # Canary: the matcher and allowlist check actually flag a bad citation, so a regex/read
-    # regression cannot make the guard above pass by scanning nothing.
+def test_served_docs_use_resource_uris_for_links_to_served_docs() -> None:
+    """A served doc must not link to another *served* doc with a relative Markdown path (#1361).
+
+    A relative ``*.md`` link is unfollowable over MCP (no path traversal), so when its target is
+    itself a served resource the reader is stranded on a dead link to reachable content — exactly
+    the F1 defect. The fix is to cite the target's ``resource://`` URI. Relative links to
+    *unserved* targets (ADRs, human-only design docs) are fine and ignored here.
+    """
+    source_to_uri = {entry.source: entry.uri for entry in DOC_RESOURCES}
+    offenders: list[str] = []
+    for entry in DOC_RESOURCES:
+        source = Path(entry.source)
+        text = (_ROOT / entry.source).read_text(encoding="utf-8")
+        for target in _RELATIVE_MD_LINK.findall(text):
+            resolved = str((source.parent / target).resolve().relative_to(_ROOT.resolve()))
+            if resolved in source_to_uri:
+                offenders.append(f"{entry.source}: [{target}] -> cite {source_to_uri[resolved]}")
+    assert not offenders, (
+        "served docs link to served docs by relative path (cite the resource:// URI instead):\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_citation_guards_are_not_vacuous() -> None:
+    # Canary: both matchers actually flag a bad citation/link, so a regex/read regression cannot
+    # make the guards above pass by scanning nothing.
     allow = {"resource://kdive/docs/guide/errors.md"}
     text = "see resource://kdive/docs/guide/nonexistent.md for details"
     hits = [m.rstrip(".,;") for m in _RESOURCE_URI.findall(text) if m.rstrip(".,;") not in allow]
     assert hits == ["resource://kdive/docs/guide/nonexistent.md"]
+    assert _RELATIVE_MD_LINK.findall("see [errors](errors.md#section) now") == ["errors.md"]
+    assert _RELATIVE_MD_LINK.findall("see resource://kdive/docs/guide/errors.md") == []

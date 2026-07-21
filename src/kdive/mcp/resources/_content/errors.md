@@ -1,6 +1,7 @@
 # Errors
 
-When a KDIVE tool reports a failure, the [`ToolResponse`](response-envelope.md)
+When a KDIVE tool reports a failure, the `ToolResponse`
+(resource://kdive/docs/guide/response-envelope.md)
 `error_category` field carries a value from a closed taxonomy defined in
 `src/kdive/domain/errors.py` and referenced in
 [ADR-0019](../adr/0019-tool-response-envelope.md). The rule is: pick the most
@@ -52,14 +53,15 @@ errors.
 - **`transport_failure`** — a console/debug transport or held long-poll stream failed; it is
   `retryable=true`. Retry the same call. A *raw* `socket connection was closed unexpectedly`
   (no envelope, so no `transport_failure` category) from a held `jobs.wait` is the same
-  transient class — see the transport-reset retry contract in
-  [async jobs](async-jobs.md#transport-resets-and-retries).
+  transient class — see the transport-reset retry contract in the async-jobs guide
+  (resource://kdive/docs/guide/async-jobs.md).
 - **`lease_expired`** — the allocation has expired; request a new allocation and
   provision a new System.
 - **`queue_timeout`** — the queued request never became placeable within the max-wait
   window; re-request once capacity frees, or relax the target (kind/PCIe) to widen the
   candidate hosts.
 - **`authorization_denied`** — the caller needs a higher role or the provisioning
-  profile needs an opt-in. See [safety and RBAC](safety-and-rbac.md).
+  profile needs an opt-in. See the safety-and-RBAC guide
+  (resource://kdive/docs/guide/safety-and-rbac.md).
 - **`infrastructure_failure`** or **`provisioning_failure`** — retry if the job has
   remaining attempts; otherwise triage via `jobs.list` and the audit log.

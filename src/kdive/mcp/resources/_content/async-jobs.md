@@ -9,7 +9,7 @@ worker restarts ([ADR-0008](../adr/0008-async-worker-tier-job-queue.md),
 ## The long-op pattern
 
 A tool that starts a long operation enqueues a job and returns immediately with a
-[`ToolResponse`](response-envelope.md) whose `status` is `running` (or `queued`)
+`ToolResponse` (resource://kdive/docs/guide/response-envelope.md) whose `status` is `running` (or `queued`)
 and whose `object_id` is the `job_id`. The `suggested_next_actions` field at this
 point contains `["jobs.wait", "jobs.cancel"]`.
 
@@ -28,7 +28,7 @@ The agent then polls:
 When `jobs.wait` or `jobs.get` returns `status: succeeded`, the `refs` field
 contains an object-store reference (e.g. `{"result": "<key>"}`) for any produced
 artifact. When it returns `status: failed`, the `error_category` field names the
-failure. See [errors](errors.md).
+failure. See the errors guide (resource://kdive/docs/guide/errors.md).
 
 ## Which operations are long-running
 
@@ -102,7 +102,7 @@ drop the **response to the enqueuing call itself** — `runs.install`, `vmcore.f
 `control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
 retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`
 ([ADR-0193](../adr/0193-uniform-mutation-idempotency.md), and see
-[the envelope guide](response-envelope.md#idempotent-retries)): a repeated key returns the
+the envelope guide, resource://kdive/docs/guide/response-envelope.md): a repeated key returns the
 **same job envelope** instead of enqueuing again.
 
 **Replay / GC window.** A recorded key replays only within the reconciler's retention window
