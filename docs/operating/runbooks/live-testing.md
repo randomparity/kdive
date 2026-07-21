@@ -50,7 +50,7 @@ marker.
 | Family (sub-marker) | Required env | Default libvirt mode | Served by |
 | --- | --- | --- | --- |
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
-| gdbstub-preserve debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | its own production XML (a `gdb_port` harness extension is pending) |
+| gdbstub-preserve debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | `boot_preserved_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
 | Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
@@ -167,8 +167,11 @@ its overlay) on exit. `mode` (session/system) is per-test. Two waits carry a
 required companion argument, enforced up front: `wait_for="panic"` needs
 `console_log` (the panic-wait reads the serial console) and `wait_for="ssh"`
 needs `ssh_hostfwd_port` — pass them or the call raises before any domain
-boots. The gdbstub-preserve debug tests still render their own production XML
-pending a harness `gdb_port` extension.
+boots. The gdbstub-preserve debug tests boot through a sibling harness in the
+same module, `boot_preserved_gdbstub_domain(xml, *, uri, console_log)`, which
+takes the caller's already-rendered production domain XML: the debug rendering
+(`render_domain_xml(..., gdb_port=…, debug=…)`) is their subject under test, so
+by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
 
 ## Hard-won quirks
 
