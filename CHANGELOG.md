@@ -93,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single source of truth for the tier list
 - Single-pass extract_kernel_bundle over the combined tar (#1350)
 - Dedup scratch-separate check, run-dir error, and .part cleanup (#1350)
+- Hoist acquire-or-skip and docker-skip into xdist_backend (#1331)
 - Generalize failed-install cleanup to kernel and initrd (#1351)
 
 ### Documentation
@@ -218,6 +219,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden #1350 plan after adversarial review (RAM, single-open test, ASCII)
 - Document DWARF cost + scratch tradeoff; link #1351 streaming follow-up (#1350)
 - Mark ADR-0399 Accepted; sync external-build-upload resource snapshot (#1350)
+- One backend container per test run, database-per-worker (#1331)
+- Harden ADR-0400 after adversarial review
+- Harden spec/ADR-0400 after spec review
+- Fix run-token uniqueness and connection scaling in spec/ADR-0400
+- State override-backend cleanup as a required operator task (ADR-0400)
+- Implementation plan for one-container-per-run (#1331)
+- Make TDD steps executable and crash-safe after plan review
+- Scope skip to acquisition, make same-name reclaim testable
+- Make shared_container teardown best-effort (never raise)
+- Register KDIVE_TEST_* override env vars (#1331)
 - Spec + ADR-0400 for streaming combined-tar fetch (#1351)
 - Weigh stream-to-file alternative and streaming residuals in ADR-0400
 - Pin the streaming reader contract and mid-stream fault test in spec
