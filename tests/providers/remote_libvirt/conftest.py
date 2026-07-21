@@ -6,9 +6,9 @@ import libvirt
 
 # Re-export the disposable-Postgres fixtures so console-wiring tests can register an
 # artifacts row against a migrated schema (ADR-0095 part-store assembly).
-from tests.db.conftest import migrated_url, pg_conn, postgres_url
+from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url
 
-__all__ = ["migrated_url", "pg_conn", "postgres_url"]
+__all__ = ["_migrated_db", "migrated_url", "pg_conn", "postgres_url"]
 
 
 def libvirt_error(code: int) -> libvirt.libvirtError:
