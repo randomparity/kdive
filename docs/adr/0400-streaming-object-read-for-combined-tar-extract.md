@@ -130,6 +130,15 @@ never fully materialized as `bytes` or written to disk before extraction.**
   botocore client timeouts are left at their configured defaults; if a slow-scratch
   repack proves to trip them in practice, the deliberate fix is raising the read
   timeout on the streamed GET, tracked separately rather than pre-built here.
+  **[Corrected by [ADR-0402](0402-explicit-read-timeout-streamed-object-get.md),
+  #1354]** — this bullet's trip mechanism is wrong: botocore's `read_timeout` is a
+  per-`recv()` socket timeout, armed only while a read is blocked waiting on the
+  *server*, so a scratch-write stall *between* `body.read()` calls does not count
+  toward it and does not trip it. A slow-but-progressing consumer therefore does
+  not raise `ReadTimeoutError` regardless of scratch speed, and raising the read
+  timeout does not address the case described here. The connection *is* still held
+  open across the repack (that part stands); it is simply not clipped by
+  `read_timeout` on a slow consumer. See ADR-0402 for the evidence.
 - **Residual — streaming trades fetch-then-extract atomicity for interleaving.** The
   buffered flow received the whole tar (temp-then-rename) before any extraction ran,
   so extraction implied a fully-received object. The streaming flow interleaves the
