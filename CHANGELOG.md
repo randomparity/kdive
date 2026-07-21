@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add get_artifact_stream sharing _open_get with get_artifact (#1351)
 - Stream the combined tar into extract_kernel_bundle (#1351)
 - Machine-checkable prompt step preconditions
+- Guard code-derived doc constants against source drift
 
 ### Changed
 
