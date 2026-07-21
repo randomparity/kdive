@@ -54,6 +54,17 @@ host-side DWARF introspection (offline `introspect.from_vmcore` and gdb), build 
 `CONFIG_DEBUG_INFO_DWARF5=y` and also upload `vmlinux`. A drgn-live session or introspect over a
 kernel with neither BTF nor an uploaded `vmlinux` returns a non-fatal `missing_debuginfo` warning.
 
+**DWARF has a cost — omit it when you do not need post-boot introspection.**
+`CONFIG_DEBUG_INFO_DWARF5=y` embeds DWARF tables in every `.ko`, which can grow the module tree
+10-50x (tens of MiB to a couple of GiB) and slows both upload and install proportionally — the
+worker decompresses and repacks the whole module tree. Enable it only for live drgn/gdb symbol
+resolution or offline vmcore analysis. For a boot-time crash reproducer or any investigation whose
+evidence is the serial-console log (an oops/panic before userspace), omit it. The
+`artifacts.feature_config_requirements` `debuginfo` entry states the same when/cost tradeoff.
+When you do build a DWARF-heavy kernel, an operator can point `KDIVE_INSTALL_SCRATCH` at a tmpfs
+mount to keep the large, short-lived install intermediates off the staging disk (mind the RAM
+tradeoff — see the config reference).
+
 `CONFIG_DEBUG_INFO_BTF=y` in the `.config` is necessary but not sufficient: BTF-only drgn-live
 introspection also depends on the guest image's drgn build being able to load that BTF at runtime
 (older in-guest drgn versions can fail to load a newer kernel's BTF). When the config advertises

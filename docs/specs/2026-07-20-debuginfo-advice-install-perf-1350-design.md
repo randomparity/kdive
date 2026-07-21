@@ -53,8 +53,8 @@ install path made that worse:
 - **Streaming fetch-and-extract (issue's 2b).** `store.get_artifact` returns the
   whole object as `bytes`; streaming the S3 body straight into the tar extractor
   would rework a shared store contract (sensitivity metadata, redaction, error
-  mapping) for a secondary time-to-first-byte win. Deferred to a follow-up issue
-  and recorded as a rejected alternative in ADR-0399. This spec's tmpfs-scratch
+  mapping) for a secondary time-to-first-byte win. Deferred to #1351 and
+  recorded as a rejected alternative in ADR-0399. This spec's tmpfs-scratch
   option is *complementary*, not a substitute — see the memory tradeoff below.
 - **Making `artifacts.feature_config_requirements` conditional on investigation
   type.** No clean investigation-type→introspection signal exists at

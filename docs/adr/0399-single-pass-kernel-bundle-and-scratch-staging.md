@@ -92,9 +92,9 @@ state this and guide sizing tmpfs against host RAM and worker concurrency.
   the tar extractor, avoiding both the 2 GB `bytes` materialisation and the
   on-disk copy. This is the genuine RAM-free win but reworks the shared
   `store.get_artifact` contract (sensitivity metadata, redaction, error mapping)
-  for a benefit secondary to the doubled-decompression fix. Deferred to a
-  follow-up issue with its own ADR; the tmpfs-scratch option here is complementary
-  (Decision 4), not a substitute.
+  for a benefit secondary to the doubled-decompression fix. Deferred to #1351
+  with its own ADR; the tmpfs-scratch option here is complementary (Decision 4),
+  not a substitute.
 - **Gate `artifacts.feature_config_requirements` on investigation type.** Suggest
   the debuginfo advice only when the Run's profile implies live introspection. No
   clean investigation-type→introspection signal exists at `runs.create`; inventing
