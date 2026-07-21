@@ -150,15 +150,17 @@ def test_corrupt_state_file_is_treated_as_absent(tmp_path: Path) -> None:
         assert _FakeContainer.starts == 1  # started fresh over the corrupt file
 
 
-def test_stop_failure_still_unlinks_state(tmp_path: Path) -> None:
+def test_stop_failure_warns_but_does_not_raise_and_unlinks(tmp_path: Path) -> None:
     def boom(_cid: str) -> None:
         raise RuntimeError("already removed")
 
-    with xdist_backend.shared_container(
-        tmp_path, "pg", start=_FakeContainer.start, stop=boom
-    ):
-        pass  # sole holder; refcount hits 0 and stop() raises
-    # state file removed despite the stop() failure, so the next run starts clean
+    # teardown must be best-effort: warn, not raise (so it can never mask a body error
+    # or wedge the run), and always unlink so the next run starts clean.
+    with pytest.warns(UserWarning, match="stop"):
+        with xdist_backend.shared_container(
+            tmp_path, "pg", start=_FakeContainer.start, stop=boom
+        ):
+            pass  # sole holder; refcount hits 0 and stop() raises internally
     assert not (tmp_path / "kdive-pg.json").exists()
 ```
 
@@ -196,6 +198,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -283,10 +286,18 @@ def shared_container(
                 return
             state["refcount"] -= 1
             if state["refcount"] <= 0:
-                # Unlink the state file even if stop() fails (e.g. the container was
-                # already removed) so a stray container cannot wedge the next run.
+                # Best-effort stop: teardown must never raise — a raise here would wedge
+                # the run and (via _acquire_*'s finally: manager.__exit__) could mask an
+                # in-flight body exception. Warn instead of swallowing silently; always
+                # unlink so the next run starts clean (a failed stop leaks one container,
+                # the bounded residual in ADR-0400).
                 try:
                     stop(state["container_id"])
+                except Exception as exc:  # noqa: BLE001
+                    warnings.warn(
+                        f"shared_container: stop({state['container_id']}) failed: {exc}",
+                        stacklevel=2,
+                    )
                 finally:
                     state_path.unlink(missing_ok=True)
             else:
