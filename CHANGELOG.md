@@ -243,6 +243,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the tier count self-consistent (three)
 - Fix the session-mode QMP-socket quirk to XDG_CONFIG_HOME
 - Correct QMP-socket XDG lever to XDG_CONFIG_HOME
+- P3 agent-surface polish batch (#1363)
 
 ### Fixed
 
