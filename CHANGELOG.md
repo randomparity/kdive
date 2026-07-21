@@ -235,6 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implementation plan for streaming combined-tar fetch (#1351)
 - Fix plan phase ordering, scratch reap, and MinIO coverage (#1351)
 - Reject #1354 read_timeout change as invalid-premise
+- Strike ADR-0400's superseded read-timeout residual text
 
 ### Fixed
 
