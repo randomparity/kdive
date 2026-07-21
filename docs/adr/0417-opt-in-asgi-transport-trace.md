@@ -65,18 +65,24 @@ Add an opt-in ASGI request/response trace middleware, `TransportTraceMiddleware`
   `Mcp-Session-Id` is a session handle (not an auth credential) and is logged as its
   value. As defense-in-depth the record still passes the existing logging redaction floor
   (ADR-0090), so a token that somehow reached a logged field is scrubbed.
-- **Duration = time to response headers.** Measured from request receipt to the
-  `http.response.start` emission (time-to-first-byte), so a long-lived SSE stream never
-  delays or withholds the trace line.
-- **Logs on failure too, exactly once.** When the downstream app raises or is cancelled
-  before sending `http.response.start`, the `finally` emits the line (the `emitted` flag is
-  still false) with `status=None`, then the exception/cancellation re-raises (never
-  swallowed), so a transport-layer fault is never silently unlogged. `duration_ms` is
-  computed unconditionally in the `finally` (`monotonic()` minus request-receipt), *not* in
-  an `except` handler — so it is a real number even for `asyncio.CancelledError` (a
-  `BaseException`, the ordinary SSE client-disconnect path) that an `except Exception` would
-  miss. The `emitted` flag makes a request produce exactly one trace line whether it
-  succeeds or fails.
+- **Duration = time to the emitted line.** `duration_ms` is `monotonic()` minus
+  request-receipt measured at the point the line is emitted: at `http.response.start` for
+  the normal line (time-to-response-headers, so a long-lived SSE stream never inflates it or
+  delays the line), or in the `finally` for the pre-header failure line. It is always a real
+  non-negative number.
+- **Logs a pre-header failure too, exactly once.** When the downstream app raises or is
+  cancelled **before** `http.response.start` (e.g. a request aborted during initial
+  dispatch), `emitted` is still false, so the `finally` emits the line with `status=None`,
+  then the exception/cancellation re-raises (never swallowed). `duration_ms` is computed in
+  that `finally` — *not* in an `except Exception` handler, which would miss
+  `asyncio.CancelledError` (a `BaseException`), leaving the field unset. The `emitted` flag
+  makes success and pre-header-failure paths mutually exclusive, so a request produces
+  exactly one line.
+- **Per-request state is call-local.** Starlette instantiates the middleware once and runs
+  `__call__` concurrently for every in-flight request, so `emitted`, the captured status,
+  and the receipt timestamp are locals of each `__call__` invocation (captured by the nested
+  `send` wrapper via `nonlocal`), never instance attributes — otherwise concurrent requests
+  would race and log each other's status/duration.
 
 Scope guard: transport-envelope logging only. No request/response *body* capture, no
 general protocol debugger.
@@ -88,6 +94,15 @@ general protocol debugger.
 - When enabled, one log line per HTTP request — potentially voluminous under load. This
   is why it is off by default and documented as a debug-only aid, not normal-operation
   telemetry.
+- **One line per request means one line per *request envelope*, not per stream event.**
+  Because the line is emitted at `http.response.start`, a streaming (SSE) response is
+  traced with its opening status (e.g. `200`) and its time-to-first-byte, but the stream's
+  *termination* — how long it ran, and whether the client disconnected mid-stream (a
+  post-header `asyncio.CancelledError`) — produces no additional line. This is a deliberate
+  scope choice: the motivating use case (reconstructing initialize → request → 404 →
+  re-initialize-or-not) turns on request/response envelopes and their statuses, all present
+  at response headers, not on stream-close accounting. An operator needing stream-lifetime
+  observability would use the two-line design in the rejected alternatives.
 - **Restart/observer effect.** The config registry snapshots `os.environ` at process start,
   and the gate is applied at server boot, so enabling `KDIVE_MCP_TRACE` takes effect only
   after a server restart. A restart drops every in-memory MCP session, so the trace captures
@@ -147,3 +162,11 @@ general protocol debugger.
   long-lived SSE stream would delay or withhold the trace line for the duration of the
   stream; time-to-response-headers plus status is what the lifecycle-reconstruction use
   case needs. Rejected.
+- **Two-line open+close model** — a line at `http.response.start` (real-time, TTFB) *and* a
+  second line in the `finally` on every request (tagged e.g. open/close) carrying the stream
+  termination and total duration, so a post-header SSE mid-stream disconnect is observable.
+  Rejected as out of scope: it doubles the line volume the "voluminous under load"
+  consequence already flags, and stream-close accounting is not needed to reconstruct the
+  request/response-envelope lifecycle this work targets. Chosen model emits exactly one line
+  (at response headers, or in the `finally` only for a pre-header failure); the omission of
+  the stream-close event is disclosed as a consequence above rather than left implicit.
