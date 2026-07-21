@@ -218,6 +218,11 @@ docs-links:
 docs-paths:
     ./scripts/check-doc-paths.sh
 
+# Fail when a served doc (DOC_RESOURCES) cites another served doc by a relative link instead
+# of its resource:// URI — a relative link is filesystem-valid but unfetchable over MCP.
+served-doc-links:
+    ./scripts/check-served-doc-links.sh
+
 # Guard the ADR status lifecycle: valid status, index in sync, no shipped-but-Proposed
 # drift (docs/adr/README.md ratification rule). Stdlib-only (plain python3, no uv sync).
 adr-status-check:
@@ -374,4 +379,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check chart-version-check test

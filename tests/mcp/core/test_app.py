@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import re
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -514,3 +517,164 @@ def test_build_app_silent_when_compact_disabled(
     with caplog.at_level("INFO", logger="kdive.mcp.assembly.app"):
         build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
     assert not any("compact_responses enabled" in r.getMessage() for r in caplog.records)
+
+
+# --- Tool-name reference resolution guard (#1365) ---------------------------------------
+#
+# A tool rename or a stale hand-authored reference used to drift silently: nothing
+# cross-checked the tool names embedded in `suggested_next_actions` literals, in
+# backtick-quoted tokens inside served docstrings/docs, or in prompt steps against the
+# live `list_tools()` registry. These guards make any orphaned reference fail CI.
+
+# A registered tool name is `namespace.verb` (both lowercase, snake segments).
+_TOOL_NAME_SHAPE = re.compile(r"^[a-z][a-z_]*\.[a-z][a-z_]*$")
+
+# Tokens that share the `namespace.verb` shape but are deliberately not tools: the operator
+# config filename and the `debug.gdbstub` live-debug boot preset. Listing them keeps the
+# backtick-reference guard generic (it checks every tool-shaped token whose namespace is
+# live) while acknowledging these known collisions. A genuine rename still fails the guard.
+_NON_TOOL_TOKENS = frozenset({"systems.toml", "debug.gdbstub"})
+
+_BACKTICK = re.compile(r"`([^`]+)`")
+
+
+def _live_tool_names() -> set[str]:
+    async def _run() -> set[str]:
+        return {t.name for t in await _built_app().list_tools()}
+
+    return asyncio.run(_run())
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Map module-level ``NAME = "literal"`` assignments to their string value.
+
+    Many call sites pass a module constant (``_GRANTED_TOOL``) rather than an inline
+    string to ``suggested_next_actions``; resolving them lets the guard bite when the
+    constant's tool name goes stale.
+    """
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                consts[target.id] = node.value.value
+    return consts
+
+
+def _suggested_actions_value(node: ast.AST) -> ast.AST | None:
+    """Return the value node assigned to ``suggested_next_actions``, if this node is one."""
+    if isinstance(node, ast.keyword) and node.arg == "suggested_next_actions":
+        return node.value
+    if isinstance(node, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "suggested_next_actions" for t in node.targets
+    ):
+        return node.value
+    return None
+
+
+def _string_literals(value: ast.AST, consts: dict[str, str]) -> list[str]:
+    """Collect string literals reachable from ``value``, resolving module constants.
+
+    Walks lists and conditional expressions; a ``Name`` bound to a module-level string
+    constant resolves to its value. Dynamic parts (f-strings, parameters, locals) yield
+    nothing and are intentionally not checked — they are not literals.
+    """
+    out: list[str] = []
+    for sub in ast.walk(value):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            out.append(sub.value)
+        elif isinstance(sub, ast.Name) and sub.id in consts:
+            out.append(consts[sub.id])
+    return out
+
+
+def _suggested_next_action_literals() -> dict[str, str]:
+    """Map every tool-shaped ``suggested_next_actions`` literal to a source file path."""
+    mcp_src = Path(__file__).resolve().parents[3] / "src" / "kdive" / "mcp"
+    assert mcp_src.is_dir(), "repo-root resolution is wrong"
+    found: dict[str, str] = {}
+    for py in mcp_src.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        if "suggested_next_actions" not in text:
+            continue
+        tree = ast.parse(text)
+        consts = _module_string_constants(tree)
+        for node in ast.walk(tree):
+            value = _suggested_actions_value(node)
+            if value is None:
+                continue
+            for literal in _string_literals(value, consts):
+                if _TOOL_NAME_SHAPE.match(literal):
+                    found.setdefault(literal, str(py))
+    return found
+
+
+def test_suggested_next_actions_resolve_to_live_tools() -> None:
+    """Every tool-shaped ``suggested_next_actions`` literal is a live tool name (#1365).
+
+    A rename that misses a hand-authored ``suggested_next_actions=["images.describe"]``
+    would silently steer an agent at a dead tool; this fails until it is fixed.
+    """
+    registered = _live_tool_names()
+    literals = _suggested_next_action_literals()
+    stale = sorted(f"{name!r} ({src})" for name, src in literals.items() if name not in registered)
+    assert not stale, "suggested_next_actions references not in live registry:\n" + "\n".join(stale)
+
+
+def _served_docs(app: FastMCP) -> list[tuple[str, str]]:
+    """Return (label, body) for every served docstring, the instructions, and each doc."""
+    from kdive.mcp.resources.registrar import DOC_RESOURCES
+
+    repo_root = Path(__file__).resolve().parents[3]
+    sources: list[tuple[str, str]] = []
+    for tool in asyncio.run(app.list_tools()):
+        if tool.description:
+            sources.append((f"tool:{tool.name} docstring", tool.description))
+    sources.append(("server instructions", app.instructions or ""))
+    for entry in DOC_RESOURCES:
+        sources.append((f"doc:{entry.source}", (repo_root / entry.source).read_text("utf-8")))
+    return sources
+
+
+def test_backtick_tool_refs_in_docs_resolve_to_live_tools() -> None:
+    """Every backtick tool-name in a served docstring/doc resolves to a live tool (#1365).
+
+    Restricted to backtick tokens of ``namespace.verb`` shape whose namespace is live, so a
+    stale ``debug.old_name`` reference fails while prose like ``maturity_detail`` is ignored.
+    Known tool-shaped non-tools (``systems.toml``) are allowlisted in ``_NON_TOOL_TOKENS``.
+    """
+    app = _built_app()
+    registered = {tool.name for tool in asyncio.run(app.list_tools())}
+    namespaces = {name.split(".")[0] for name in registered}
+    stale: set[str] = set()
+    for label, body in _served_docs(app):
+        for match in _BACKTICK.finditer(body):
+            token = match.group(1).strip()
+            if not (_TOOL_NAME_SHAPE.match(token) and token.split(".")[0] in namespaces):
+                continue
+            if token in _NON_TOOL_TOKENS or token in registered:
+                continue
+            stale.add(f"{token!r} ({label})")
+    assert not stale, "backtick tool references not in live registry:\n" + "\n".join(sorted(stale))
+
+
+def test_prompt_steps_resolve_to_live_tools() -> None:
+    """Every canonical-prompt ``Step`` tool is a live tool name (#1365).
+
+    ``build_app`` already fails fast on an unknown step (registrar ``_step_line``); this
+    pins the contract explicitly against the whole ``CANONICAL_PROMPTS`` set, not the curated
+    ``_EXPECTED_STEP_MATURITY`` subset.
+    """
+    from kdive.mcp.prompts.registrar import CANONICAL_PROMPTS
+
+    registered = _live_tool_names()
+    stale = sorted(
+        f"{step.tool!r} ({spec.name})"
+        for spec in CANONICAL_PROMPTS
+        for step in spec.steps
+        if step.tool not in registered
+    )
+    assert not stale, "prompt steps not in live registry:\n" + "\n".join(stale)

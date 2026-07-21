@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Opt-in KDIVE_INSTALL_SCRATCH root for transient intermediates (#1350)
 - Add get_artifact_stream sharing _open_get with get_artifact (#1351)
 - Stream the combined tar into extract_kernel_bundle (#1351)
+- Machine-checkable prompt step preconditions
 
 ### Changed
 
@@ -244,6 +245,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix the session-mode QMP-socket quirk to XDG_CONFIG_HOME
 - Correct QMP-socket XDG lever to XDG_CONFIG_HOME
 - P3 agent-surface polish batch (#1363)
+- Fix ADR-0202 cross-link filename in ADR-0409
 
 ### Fixed
 
@@ -315,6 +317,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewrite transitive links between served docs to resource URIs
 - Disambiguate P2 agent-surface contracts
 - Correct images.delete object-reclamation wording
+- Guard MCP-reachability of served-doc cross-references
 
 ### Build
 
