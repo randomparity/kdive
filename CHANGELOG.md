@@ -236,6 +236,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix plan phase ordering, scratch reap, and MinIO coverage (#1351)
 - Reject #1354 read_timeout change as invalid-premise
 - Strike ADR-0400's superseded read-timeout residual text
+- Add canonical live-testing tier guide (#1295)
+- Fix panic-wait harness snippet to a valid call
+- Correct live_vm sub-marker count to two
+- Name boot_preserved_gdbstub_domain as the debug harness
+- Make the tier count self-consistent (three)
+- Fix the session-mode QMP-socket quirk to XDG_CONFIG_HOME
 
 ### Fixed
 
