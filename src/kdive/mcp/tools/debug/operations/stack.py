@@ -99,7 +99,11 @@ def _register_debug_backtrace(
             ),
         ] = 64,
     ) -> ToolResponse:
-        """Walk the stopped kernel's stack on a live DebugSession. Requires contributor."""
+        """Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
+
+        The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
+        is no stack to unwind while the kernel runs.
+        """
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
@@ -126,7 +130,11 @@ def _register_debug_read_frame(
             Field(description="Stack frame index to inspect (0 is the innermost frame)."),
         ],
     ) -> ToolResponse:
-        """Inspect one selected stack frame on a live DebugSession. Requires contributor."""
+        """Inspect one selected stack frame on a live DebugSession. Requires contributor.
+
+        The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
+        selection is only valid at a halt.
+        """
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
@@ -163,6 +171,7 @@ def _register_debug_disassemble(
     ) -> ToolResponse:
         """Disassemble a bounded window around a symbol/address on a live DebugSession.
 
+        The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
         Requires contributor.
         """
         return await run_engine_op_with_resolver(

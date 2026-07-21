@@ -37,7 +37,8 @@ Two distinct statuses count as a failure, and they originate differently:
   built from a `Job` row (via `from_job`), surfaced through `jobs.get` / `jobs.wait`
   when a long-running operation fails. A direct tool call never returns `failed`.
 
-See [errors](errors.md) for the taxonomy and recovery guidance.
+See the errors guide (resource://kdive/docs/guide/errors.md) for the taxonomy and recovery
+guidance.
 
 ## References, not log dumps
 
@@ -49,8 +50,8 @@ dump in the envelope. Artifact bytes are fetched separately via `artifacts.get`
 after the agent inspects the reference.
 
 All guest output, gdb/SoL transcripts, and console logs pass through the redactor
-before persistence and before any response snippet. See [safety and RBAC](safety-and-rbac.md)
-for the redaction contract.
+before persistence and before any response snippet. See the safety-and-RBAC guide
+(resource://kdive/docs/guide/safety-and-rbac.md) for the redaction contract.
 
 ## Reading an open payload
 
@@ -99,9 +100,9 @@ accepts an optional `idempotency_key` ([ADR-0193](../adr/0193-uniform-mutation-i
   same key.
 - **One key per logical operation.** Reusing one key across two different tools fails closed
   with a `conflict` error — mint a fresh key per operation. A key is at most 200 characters.
-- **Window.** A key replays only within the retention window (see
-  [async jobs](async-jobs.md)); after it is garbage-collected, a repeat is treated as a fresh
-  request.
+- **Window.** A key replays only within the retention window (see the async-jobs guide,
+  resource://kdive/docs/guide/async-jobs.md); after it is garbage-collected, a repeat is
+  treated as a fresh request.
 
 ## List responses
 

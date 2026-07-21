@@ -72,7 +72,7 @@ async def kernel_config(
     return ToolResponse.success(
         image_id,
         "available",
-        suggested_next_actions=[_TOOL],
+        suggested_next_actions=["runs.create"],
         refs={"download_uri": url},
         data={
             "default_kernel_version": default_kernel_version(entry.provenance),

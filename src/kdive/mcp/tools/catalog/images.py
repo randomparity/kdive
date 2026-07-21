@@ -227,7 +227,7 @@ def _describe_envelope(entry: ImageCatalogEntry, basis: KernelVersion) -> ToolRe
             "expires_at": entry.expires_at.isoformat() if entry.expires_at else "",
             "managed_by": entry.managed_by.value,
         },
-        suggested_next_actions=[_LIST_TOOL],
+        suggested_next_actions=["systems.provision"],
     )
 
 

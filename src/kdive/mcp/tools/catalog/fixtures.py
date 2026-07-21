@@ -128,7 +128,7 @@ async def list_fixtures(
     return ToolResponse.success(
         _OBJECT_ID,
         "ok",
-        suggested_next_actions=[_LIST_TOOL],
+        suggested_next_actions=["images.list"],
         data={"fixtures": fixtures, "truncated": truncated, "next_cursor": next_cursor},
     )
 

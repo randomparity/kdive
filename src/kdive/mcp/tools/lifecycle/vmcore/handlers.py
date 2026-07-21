@@ -314,8 +314,13 @@ async def _postmortem_crash(
 ) -> ToolResponse:
     """Run the crash command batch over the viewer-authorized Run's captured core."""
     with bind_context(principal=ctx.principal):
-        if validate_crash_commands(commands) is not None:
-            return _config_error(run_id)
+        rejection = validate_crash_commands(commands)
+        if rejection is not None:
+            return _config_error(
+                run_id,
+                detail=f"crash command rejected: {rejection}",
+                data={"reason": rejection},
+            )
         async with pool.connection() as conn:
             try:
                 resolved = await resolve_run_vmcore_target(conn, ctx, run_id)

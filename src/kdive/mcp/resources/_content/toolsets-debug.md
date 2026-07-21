@@ -52,7 +52,7 @@ misconfiguration.
 
 - `debug.read_registers` — read the CPU registers at the halt.
 - `debug.read_memory` — read kernel memory at an address.
-- `debug.resolve_symbol` — resolve a symbol name to an address (or the reverse).
+- `debug.resolve_symbol` — resolve a symbol name to an address.
 - `debug.backtrace` — unwind the call stack at the halt.
 - `debug.read_frame` — select and read a single stack frame.
 - `debug.disassemble` — disassemble instructions around an address.

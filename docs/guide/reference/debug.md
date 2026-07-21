@@ -8,6 +8,9 @@
 
 Walk the stopped kernel's stack on a live DebugSession. Requires contributor.
 
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); there
+is no stack to unwind while the kernel runs.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `max_frames` | integer | no | Maximum frames to return (1-64); the backtrace is truncated past it. |
@@ -52,6 +55,7 @@ Resume a live DebugSession and wait for a stop event. Requires contributor.
 
 Disassemble a bounded window around a symbol/address on a live DebugSession.
 
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint).
 Requires contributor.
 
 | Parameter | Type | Required | Description |
@@ -76,8 +80,9 @@ Drive a live DebugSession to detached; close its transport. Requires contributor
 `implemented`
 
 Resume a live DebugSession until the current (innermost) frame returns, and wait for
-the stop. A frame that does not return within the wait interrupts back with
-timed_out=True. Requires contributor.
+the stop. The target must already be stopped (halt it with debug.interrupt or hit a
+breakpoint) to resume from. A frame that does not return within the wait interrupts back
+with timed_out=True. Requires contributor.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -174,7 +179,8 @@ Requires contributor.
 `implemented`
 
 Step one source line, over called functions, on a live DebugSession, and wait for the
-stop. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
+stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
+to step from. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
 current code has no debug symbols). Requires contributor.
 
 | Parameter | Type | Required | Description |
@@ -188,6 +194,9 @@ current code has no debug symbols). Requires contributor.
 
 Inspect one selected stack frame on a live DebugSession. Requires contributor.
 
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); frame
+selection is only valid at a halt.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `level` | integer | yes | Stack frame index to inspect (0 is the innermost frame). |
@@ -198,6 +207,9 @@ Inspect one selected stack frame on a live DebugSession. Requires contributor.
 `implemented` · `read-only`
 
 Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor.
+
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); a
+running kernel has no stable memory image to read.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -210,6 +222,9 @@ Read raw memory bytes from a live DebugSession (bounded by byte_count). Contribu
 `implemented` · `read-only`
 
 Read named registers from a live DebugSession. Requires contributor.
+
+The target must be stopped first (halt it with debug.interrupt or hit a breakpoint);
+registers are only meaningful at a halt.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -275,7 +290,8 @@ it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this 
 `implemented`
 
 Step one source line, into called functions, on a live DebugSession, and wait for the
-stop. In a region with no debug symbols this returns timed_out=True or a
+stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
+to step from. In a region with no debug symbols this returns timed_out=True or a
 debug_attach_failure ("Cannot find bounds of current function"); use
 debug.step_instruction there. Requires contributor.
 
@@ -288,8 +304,9 @@ debug.step_instruction there. Requires contributor.
 
 `implemented`
 
-Step one machine instruction on a live DebugSession, and wait for the stop. Works
-without debug symbols, so it is the fallback for stepping in symbol-poor regions.
+Step one machine instruction on a live DebugSession, and wait for the stop. The target
+must already be stopped (halt it with debug.interrupt or hit a breakpoint) to step from.
+Works without debug symbols, so it is the fallback for stepping in symbol-poor regions.
 Requires contributor.
 
 | Parameter | Type | Required | Description |

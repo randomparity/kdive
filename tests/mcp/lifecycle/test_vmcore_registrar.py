@@ -140,10 +140,13 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
     assert _property_descriptions(tools["vmcore.list"]) == {
         "run_id": "The Run whose redacted vmcore artifacts to list."
     }
-    assert _property_descriptions(tools["postmortem.crash"]) == {
-        "run_id": "The Run whose captured core to analyze.",
-        "commands": "Crash commands to run (allowlisted read-only verbs).",
-    }
+    crash_descriptions = _property_descriptions(tools["postmortem.crash"])
+    assert crash_descriptions["run_id"] == "The Run whose captured core to analyze."
+    # The commands Field enumerates the allowlisted verbs and names the rejection-detail
+    # contract instead of the old opaque "allowlisted read-only verbs" (#1361 F3).
+    commands_desc = crash_descriptions["commands"]
+    assert "bt" in commands_desc and "log" in commands_desc and "struct" in commands_desc
+    assert "detail names the offending command" in commands_desc
     assert _property_descriptions(tools["postmortem.triage"]) == {
         "run_id": "The Run whose captured core to triage."
     }

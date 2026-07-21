@@ -189,7 +189,8 @@ def _register_debug_step(
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Step one source line, into called functions, on a live DebugSession, and wait for the
-        stop. In a region with no debug symbols this returns timed_out=True or a
+        stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
+        to step from. In a region with no debug symbols this returns timed_out=True or a
         debug_attach_failure ("Cannot find bounds of current function"); use
         debug.step_instruction there. Requires contributor."""
         return await run_engine_op_with_resolver(
@@ -211,7 +212,8 @@ def _register_debug_next(
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Step one source line, over called functions, on a live DebugSession, and wait for the
-        stop. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
+        stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
+        to step from. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
         current code has no debug symbols). Requires contributor."""
         return await run_engine_op_with_resolver(
             pool,
@@ -233,8 +235,9 @@ def _register_debug_step_instruction(
         session_id: Annotated[str, _session_id_field("step one instruction on")],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
-        """Step one machine instruction on a live DebugSession, and wait for the stop. Works
-        without debug symbols, so it is the fallback for stepping in symbol-poor regions.
+        """Step one machine instruction on a live DebugSession, and wait for the stop. The target
+        must already be stopped (halt it with debug.interrupt or hit a breakpoint) to step from.
+        Works without debug symbols, so it is the fallback for stepping in symbol-poor regions.
         Requires contributor."""
         return await run_engine_op_with_resolver(
             pool,
@@ -255,8 +258,9 @@ def _register_debug_finish(
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
         """Resume a live DebugSession until the current (innermost) frame returns, and wait for
-        the stop. A frame that does not return within the wait interrupts back with
-        timed_out=True. Requires contributor."""
+        the stop. The target must already be stopped (halt it with debug.interrupt or hit a
+        breakpoint) to resume from. A frame that does not return within the wait interrupts back
+        with timed_out=True. Requires contributor."""
         return await run_engine_op_with_resolver(
             pool,
             current_context(),

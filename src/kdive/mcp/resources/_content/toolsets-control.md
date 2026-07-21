@@ -26,7 +26,7 @@ each tool's own description.
   before the deadline). Start the watch before you begin the loop; if your reproducer's SSH drops
   but the verdict is `not_fired`, the crash landed outside the watched window — read the full
   console with the `artifacts` tools. Contributor-level, non-destructive. See the
-  [race-debugging guide](../../operating/race-debugging.md).
+  race-debugging guide (resource://kdive/docs/operating/race-debugging.md).
 
 ## Capturing guest traffic
 
