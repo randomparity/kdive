@@ -37,6 +37,14 @@ run the same recipes locally rather than reinventing the underlying command:
 
 Run a single test: `uv run python -m pytest tests/mcp/test_allocations_tools.py::test_name -q`
 
+**Running the live tiers** — before re-deriving how to run a live test, read
+[`docs/operating/runbooks/live-testing.md`](docs/operating/runbooks/live-testing.md).
+It is the canonical map of the three live test tiers (`live_stack`, `live_vm`,
+`live_vm_tcg`) and the `live_vm` families: each tier's `just` recipe, its
+environment contract, and the hard-won quirks (`qemu:///session` vs system, a
+short session-mode socket path via `XDG_CONFIG_HOME`, modular daemons, per-mode
+confinement).
+
 `just type` is whole-tree on purpose: scoping `ty` to `src` once let a test-tree type
 error merge green, so `tests/` is type-checked only here. Don't narrow it back.
 

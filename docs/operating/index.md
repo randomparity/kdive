@@ -47,6 +47,7 @@ Step-by-step procedures for live runs and operational tasks.
 | [kdivectl](runbooks/kdivectl.md) | Operating the admin CLI |
 | [Doctor exit criterion](runbooks/doctor-exit-criterion.md) | The doctor readiness check |
 | [MCP coverage campaign rerun](runbooks/mcp-coverage-campaign-rerun.md) | Re-running the MCP tool coverage sweep |
+| [Live testing](runbooks/live-testing.md) | How to run each live test tier (`live_stack`, `live_vm`, `live_vm_tcg`) and its environment contract |
 
 ## Investigation
 
