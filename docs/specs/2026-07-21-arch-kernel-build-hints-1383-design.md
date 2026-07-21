@@ -111,18 +111,18 @@ equality.
   `resource://` URI beside the existing external-build-upload reference. (The agent-index
   snapshot is re-mirrored by `resources-docs`; the edit must not touch the `~NNN tools`
   doc-constant.)
-- Cite from the `runs.create` build-profile `arch` `Field` description. That Field already
-  states the boot-format one-liner and already cites
-  `resource://kdive/docs/operating/external-build-upload.md`; **repoint** that existing citation
-  at the new focused reference (which itself links onward to external-build-upload for the full
-  recipe), rather than appending a second URL that would bloat the description. Do the same for
-  the `runs.create` `build_profile` Field if it carries its own citation. This is a one-line
-  cross-link per Field, not a rewrite of the boot-format wording — deriving that hardcoded
-  wording from `BOOT_MEMBER_FORMATS` is the deferred follow-up recorded in the ADR, out of
-  scope here.
-  - Guard note: check for an existing test that asserts the `arch` Field cites
-    external-build-upload before repointing; if one exists, update it to the new target (the
-    new doc chains onward, so no reachability is lost).
+- Cite from the `BuildProfile.arch` `Field` description (serialized into the `build_profile`
+  param schema an agent reads at build time). That Field already states the boot-format
+  one-liner and cites `resource://kdive/docs/operating/external-build-upload.md`; **repoint**
+  that arch-specific citation at the new focused reference (which links onward to
+  external-build-upload for the full recipe), rather than appending a second URL that would
+  bloat the description. Leave the *outer* `runs.create` `build_profile` Field's citation as-is:
+  it reads "…for shaping an upload," which external-build-upload owns. This is a one-line
+  cross-link, not a rewrite of the boot-format wording — deriving that hardcoded wording from
+  `BOOT_MEMBER_FORMATS` is the deferred follow-up recorded in the ADR, out of scope here.
+  - Guard note: no existing test pins the `arch` Field to external-build-upload (the only
+    external-build-upload assertions in the suite are on validation error-message strings), so
+    the repoint breaks nothing; the new drift guard's Field-citation assertion then covers it.
 
 ### Drift guard (the anti-rot mechanism)
 
@@ -182,13 +182,18 @@ equals it):
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the
   snapshot exists (the existing `test_doc_resources.py` may already cover generic
   registration; add only what is arch-specific).
-- **Field-citation resolves (the one new tool-surface artifact):** assert the `BuildProfile.arch`
-  and `runs.create` `build_profile` `Field` descriptions each contain the new
+- **Field-citation resolves (the one new tool-surface artifact):** assert
+  `BuildProfile.model_fields["arch"].description` contains the new
   `resource://kdive/docs/guide/kernel-build-per-arch.md` URI **and** that URI is a member of
-  `DOC_RESOURCES`. Neither `served-doc-links` nor the existing citation pytest scans tool `Field`
-  descriptions, so without this assertion a typo in the repointed citation ships green as an
-  unfetchable dead end (the #1361/F1 class). This gives the Field citation the same
-  "resolves-to-the-allowlist" guarantee served-doc bodies already have.
+  `DOC_RESOURCES`. Only the *arch-specific* citation is repointed — `BuildProfile.arch`, read
+  trivially from the model field (no app build). The outer `runs.create` `build_profile` Field's
+  "see …external-build-upload.md **for shaping an upload**" citation is left unchanged: that one
+  is about the upload recipe/flow, for which external-build-upload is the correct target, so the
+  agent gets both surfaces (arch specifics via `arch`, upload flow via the outer Field). Neither
+  `served-doc-links` nor the existing citation pytest scans tool `Field` descriptions, so without
+  this assertion a typo in the repointed `arch` citation ships green as an unfetchable dead end
+  (the #1361/F1 class); this gives it the same "resolves-to-the-allowlist" guarantee served-doc
+  bodies already have.
 
 The guard is deliberately honest about reach: it binds set-completeness, the `crashkernel`
 string, the boot-container name, and the strip-required predicate; the *explanatory* prose
@@ -205,11 +210,11 @@ it has one home to update rather than two.
 1. `resource://kdive/docs/guide/kernel-build-per-arch.md` is listable and readable over MCP
    (audience `all`), and its content covers exactly `x86_64` and `ppc64le`, each naming the
    correct `boot/vmlinuz` format.
-2. `agent-index.md`'s build stage and the `runs.create` build-profile `arch` field both cite
-   the new resource URI, and both citations are guarded to resolve to an allowlisted resource:
-   the `agent-index` citation by the served-doc citation pytest (scans served-doc bodies), the
-   `Field` citation by this change's new Field-citation-resolves assertion (served-doc-links does
-   *not* validate either, and no existing guard scans `Field` descriptions).
+2. `agent-index.md`'s build stage and the `BuildProfile.arch` field both cite the new resource
+   URI, and both citations are guarded to resolve to an allowlisted resource: the `agent-index`
+   citation by the served-doc citation pytest (scans served-doc bodies), the `arch` Field
+   citation by this change's new Field-citation-resolves assertion (served-doc-links does *not*
+   validate either, and no existing guard scans `Field` descriptions).
 3. The drift-guard pytest fails when the code and doc disagree. Red-step-verified by temporarily
    perturbing the source, then reverting: (a) adding a hypothetical arch to `_TRAITS`/
    `SUPPORTED_ARCHES` **and** `BOOT_MEMBER_FORMATS` together (a bare `_TRAITS` add is caught

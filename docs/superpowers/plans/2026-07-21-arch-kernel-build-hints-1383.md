@@ -56,13 +56,13 @@ Assertions (each independently failing-informative):
    `DOC_RESOURCES` with `audience == "all"`, `required_kind is None`, and its `_content`
    snapshot file exists. (If `test_doc_resources.py` already covers generic registration
    invariants, keep this minimal — assert only the arch-doc-specific entry.)
-6. **Field-citation resolves.** Assert both build-profile `arch` Field descriptions
-   (`BuildProfile.arch` in `src/kdive/profiles/build.py`, and the `runs.create` `build_profile`
-   Field in `src/kdive/mcp/tools/lifecycle/runs/registrar.py`) contain the new
+6. **Field-citation resolves.** Assert `BuildProfile.model_fields["arch"].description`
+   (`src/kdive/profiles/build.py`) contains the new
    `resource://kdive/docs/guide/kernel-build-per-arch.md` URI, and that URI is a member of
-   `DOC_RESOURCES`. Read the description strings via the imported `BuildProfile` model field and
-   the registrar (or, if the registrar Field is not readily importable, assert against the
-   `list_tools()` schema for `runs.create`). Prefer the model/field object over re-reading source.
+   `DOC_RESOURCES`. Read it from the model field object (no app build). Only the arch-specific
+   citation is repointed; the outer `runs.create` `build_profile` Field keeps its
+   external-build-upload "for shaping an upload" citation (correct target), so it is not asserted
+   here.
 
 **Acceptance.** Run the test; it must be **RED** on the registration, snapshot, and
 Field-citation assertions (the doc content assertions may already pass, since the doc exists).
@@ -100,15 +100,16 @@ the edit minimal and **do not touch** the `~NNN tools` doc-constant line (guarde
 **Acceptance.** `just resources-docs-check`, `served-doc-links`, and `doc-constants-check` all
 pass; the agent-index snapshot reflects the new citation.
 
-## Task 4 — Repoint the arch Field citations to the new doc
+## Task 4 — Repoint the arch Field citation to the new doc
 
-**What / where.** In `src/kdive/profiles/build.py` (`BuildProfile.arch` Field) and
-`src/kdive/mcp/tools/lifecycle/runs/registrar.py` (the `runs.create` `build_profile` Field),
-repoint the existing `resource://kdive/docs/operating/external-build-upload.md` citation to
+**What / where.** In `src/kdive/profiles/build.py`, repoint the `BuildProfile.arch` Field's
+existing `resource://kdive/docs/operating/external-build-upload.md` citation to
 `resource://kdive/docs/guide/kernel-build-per-arch.md` (the new doc chains onward to
-external-build-upload, so no reachability is lost). Do **not** reword the inline boot-format
-clause ("bzImage for x86_64, ELF vmlinux for ppc64le") — deriving that from `BOOT_MEMBER_FORMATS`
-is the deferred follow-up recorded in ADR-0412.
+external-build-upload, so no reachability is lost). **Leave** the outer `runs.create`
+`build_profile` Field's citation (`registrar.py`) unchanged — it reads "…for shaping an upload,"
+which external-build-upload correctly owns; the per-arch doc has no upload flow. Do **not** reword
+the inline boot-format clause ("bzImage for x86_64, ELF vmlinux for ppc64le") — deriving that
+from `BOOT_MEMBER_FORMATS` is the deferred follow-up recorded in ADR-0412.
 
 **Guard note.** First check for an existing test that pins the `arch` Field to the
 external-build-upload citation; per the spec's ground-truth check, the only external-build-upload
@@ -164,5 +165,5 @@ one README index row per ADR file — removing the row while leaving the ADR fil
 fails CI): the doc, its `_content` snapshot, the registrar row, the agent-index citation, the
 test, the `docs/adr/0412-per-arch-kernel-build-hints-resource.md` ADR file, the spec, **and** the
 ADR-README index row; and revert
-the two `arch` Field citations to their prior external-build-upload target. No data or schema
-state is touched.
+the `BuildProfile.arch` Field citation to its prior external-build-upload target. No data or
+schema state is touched.
