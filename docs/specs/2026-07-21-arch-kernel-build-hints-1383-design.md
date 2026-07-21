@@ -56,7 +56,10 @@ the discoverability side.
   `set(BOOT_MEMBER_FORMATS) == SUPPORTED_ARCHES`.
 - **Per-arch `crashkernel` default** = `_TRAITS[arch].default_crashkernel` (`256M` x86_64,
   `512M` ppc64le), already rendered agent-facing by
-  `arch_traits.default_crashkernel_summary()` → `"256M on x86_64, 512M on ppc64le"`.
+  `arch_traits.default_crashkernel_summary()` → `"512M on ppc64le, 256M on x86_64"` (the
+  renderer is arch-sorted, so `ppc64le` sorts before `x86_64`; note this is the reverse of the
+  order in that function's own docstring example, a pre-existing cosmetic nit in ADR-0346 that
+  is out of scope here — the doc embeds the *actual* rendered string, verified by executing it).
 - **Doc-resource pipeline** (ADR-0151): canonical `docs/<path>` → `scripts/gen_doc_resources.py`
   snapshot into `src/kdive/mcp/resources/_content/<file>` → an entry in
   `registrar.DOC_RESOURCES`. `resources-docs-check` gates snapshot drift; `served-doc-links`
