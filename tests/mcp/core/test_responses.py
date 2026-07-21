@@ -102,6 +102,42 @@ def test_from_job_extra_next_actions_defaults_to_lifecycle_only() -> None:
     assert ToolResponse.from_job(_BUILD_JOB).suggested_next_actions == ["jobs.wait", "jobs.cancel"]
 
 
+def test_from_job_succeeded_teardown_steers_to_allocation_release() -> None:
+    # A completed teardown leaves the Allocation active; the terminal envelope points the agent
+    # at allocations.release after the generic lifecycle set, wherever the job is rendered (#1385).
+    job = _BUILD_JOB.model_copy(update={"kind": JobKind.TEARDOWN, "state": JobState.SUCCEEDED})
+    resp = ToolResponse.from_job(job)
+    assert resp.suggested_next_actions == ["jobs.get", "allocations.release"]
+
+
+def test_from_job_non_succeeded_teardown_omits_allocation_release() -> None:
+    # The steer is SUCCEEDED-only: a queued/running/failed/canceled teardown froze nothing to
+    # release, so the release hint must not appear.
+    for state in (JobState.QUEUED, JobState.RUNNING, JobState.FAILED, JobState.CANCELED):
+        update: dict[str, object] = {"kind": JobKind.TEARDOWN, "state": state}
+        if state is JobState.FAILED:
+            update["error_category"] = ErrorCategory.INFRASTRUCTURE_FAILURE
+        resp = ToolResponse.from_job(_BUILD_JOB.model_copy(update=update))
+        assert "allocations.release" not in resp.suggested_next_actions
+
+
+def test_from_job_succeeded_non_teardown_kind_is_unaffected() -> None:
+    # Only teardown carries the release steer; a succeeded build keeps the generic set.
+    resp = ToolResponse.from_job(_BUILD_JOB.model_copy(update={"state": JobState.SUCCEEDED}))
+    assert resp.suggested_next_actions == ["jobs.get"]
+
+
+def test_from_job_succeeded_teardown_precedes_extra_next_actions() -> None:
+    # The kind steer lands after the lifecycle set and before any caller-supplied extras.
+    job = _BUILD_JOB.model_copy(update={"kind": JobKind.TEARDOWN, "state": JobState.SUCCEEDED})
+    resp = ToolResponse.from_job(job, extra_next_actions=["investigations.close"])
+    assert resp.suggested_next_actions == [
+        "jobs.get",
+        "allocations.release",
+        "investigations.close",
+    ]
+
+
 def test_from_job_canceled_has_no_actions() -> None:
     resp = ToolResponse.from_job(_BUILD_JOB.model_copy(update={"state": JobState.CANCELED}))
     assert resp.status == "canceled"

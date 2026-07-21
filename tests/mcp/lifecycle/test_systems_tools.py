@@ -1382,6 +1382,9 @@ def test_teardown_tool_already_torn_down_no_job(migrated_url: str) -> None:
             sys_id = await _seed_teardown_system(pool, alloc_id, SystemState.TORN_DOWN)
             resp = await _teardown(pool, _ctx(Role.ADMIN), sys_id)
             assert resp.status == "torn_down"
+            # The idempotent replay steers to release the freed Allocation, not just re-read
+            # the System (#1385): allocations.release precedes systems.get.
+            assert resp.suggested_next_actions == ["allocations.release", "systems.get"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM jobs")
                 row = await cur.fetchone()

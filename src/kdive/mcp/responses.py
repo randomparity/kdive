@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
-from kdive.domain.operations.jobs import Job
+from kdive.domain.operations.jobs import Job, JobKind
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
 
 # Literal next tool names by the job's state.
@@ -26,6 +26,17 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
     JobState.SUCCEEDED: ["jobs.get"],
     JobState.FAILED: ["jobs.get"],
     JobState.CANCELED: [],
+}
+
+# Tool-specific next actions appended when a job of this kind reaches SUCCEEDED, so the hint
+# is a durable property of the completed job wherever it is rendered — every jobs.get /
+# jobs.wait / jobs.list read of the terminal job carries it, not just the enqueuing tool's
+# synchronous envelope (ADR-0414). A completed TEARDOWN drives the System to torn_down but
+# leaves its Allocation `active` until allocations.release; point the agent at that second
+# step so the two-step wind-down is not forgotten (#1385). Keyed on SUCCEEDED only: a failed
+# or canceled teardown did not free anything to release.
+_TERMINAL_KIND_ACTIONS: dict[JobKind, list[str]] = {
+    JobKind.TEARDOWN: ["allocations.release"],
 }
 
 # A response reports a failure under the job's `failed` lifecycle status or the
@@ -223,12 +234,22 @@ class ToolResponse(BaseModel):
         state's generic lifecycle set (order preserved, not deduplicated). The default
         ``None`` yields the lifecycle-only set every existing caller relies on; a caller
         that supplies actions is responsible for RBAC-filtering them first (ADR-0377).
+
+        A SUCCEEDED job additionally carries its kind's ``_TERMINAL_KIND_ACTIONS`` steer
+        (e.g. a completed teardown points at ``allocations.release``; ADR-0414). These are
+        not RBAC-filtered here — ``from_job`` has no request context, matching the existing
+        lifecycle set (``jobs.cancel`` is likewise advertised unfiltered) — because the
+        worker-plane envelope's next actions are advisory and the execution-time gate on
+        each named tool remains the boundary.
         """
         refs = {"result": job.result_ref} if job.result_ref else {}
         data: dict[str, JsonValue] = {"kind": job.kind.value}
         if job.state is JobState.FAILED:
             data.update(job.failure_context)
-        actions = list(_NEXT_ACTIONS[job.state]) + list(extra_next_actions or [])
+        terminal_kind = (
+            _TERMINAL_KIND_ACTIONS.get(job.kind, []) if job.state is JobState.SUCCEEDED else []
+        )
+        actions = list(_NEXT_ACTIONS[job.state]) + terminal_kind + list(extra_next_actions or [])
         return cls(
             object_id=str(job.id),
             status=job.state.value,
