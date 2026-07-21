@@ -160,6 +160,23 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     return ["debug.start_session"]
 
 
+def _boot_readiness_data(run: Run, boot_readiness: BootAttempt) -> dict[str, JsonValue]:
+    """The failed-boot disclosure surfaced as ``data.boot_readiness`` (#750/#1384, ADR-0230/0413).
+
+    The boot ``run_steps`` row is recycled on a terminal boot failure (ADR-0185), so ``steps.boot``
+    reads ``pending``; this carries the surviving failed boot job (``status="failed"`` with its
+    ``error_category``) as the failure signal an agent polls instead. When the Run declared an
+    ``expected_boot_failure``, a *failed* boot means the declared crash was not reproduced — a match
+    records ``expected_crash_observed`` and succeeds the boot step, so a surviving failed boot job
+    cannot coexist with a match. ``expected_crash_matched`` is therefore ``False`` here, telling the
+    agent to look for an unexpected failure rather than its declared signature (#1384).
+    """
+    data = dict(boot_readiness.as_data())
+    if run.expected_boot_failure is not None:
+        data["expected_crash_matched"] = False
+    return data
+
+
 def _run_step_data(
     run: Run, step_progress: StepProgress | None, boot_readiness: BootAttempt | None
 ) -> dict[str, JsonValue]:
@@ -170,7 +187,7 @@ def _run_step_data(
         # The boot step row was deleted on terminal failure (ADR-0185), so `steps.boot` reads
         # `pending`; surface the surviving failed boot job as evidence (#750, ADR-0230). Only the
         # SUCCEEDED read path passes a non-None value, so this stays scoped to `runs.get`.
-        data["boot_readiness"] = cast(JsonValue, boot_readiness.as_data())
+        data["boot_readiness"] = cast(JsonValue, _boot_readiness_data(run, boot_readiness))
     if (
         step_progress is not None
         and step_progress.boot_outcome == READY_BOOT_OUTCOME
@@ -324,6 +341,12 @@ def envelope_for_run(
     `data.boot_readiness` on the `SUCCEEDED` success path so a caller can distinguish a failed
     boot (whose `run_steps` row was deleted to `pending` by the ADR-0185 recycle) from a
     never-attempted one. The read path passes it only when the boot step is not yet succeeded.
+    When the Run declared an `expected_boot_failure`, `data.boot_readiness.expected_crash_matched`
+    is `False` on this path — a matched crash records `expected_crash_observed` and succeeds the
+    boot step, so a surviving failed boot job means the declared crash was not reproduced (#1384,
+    ADR-0413). When the boot step recycled its `console_evidence_artifact_id` but a correlated
+    console survives (`latest_console_ref`), `refs.console` and `data.console_access` fall back to
+    that surviving console so both work across success and failure rather than vanishing (#1384).
 
     `liveness` (#1237, ADR-0373) is the combined console-storm + SSH-reachability verdict,
     surfaced as `data.liveness` so an agent can tell a healthy guest from one that livelocked
@@ -347,6 +370,14 @@ def envelope_for_run(
         actions = ["runs.get"]
 
     console_ref = step_progress.console_evidence_artifact_id if step_progress is not None else None
+    if console_ref is None and boot_readiness is not None and latest_console_ref is not None:
+        # The boot step row (with its `console_evidence_artifact_id`) is recycled on a terminal boot
+        # failure (ADR-0185), but the captured boot console survives in the artifacts table. Fall
+        # back to that surviving correlated console so `refs.console` (and `data.console_access`)
+        # work across success and failure — the same field an agent reads on a booted Run — instead
+        # of vanishing on the failure path (#1384, ADR-0413). Scoped to a failed boot
+        # (`boot_readiness` present); a pre-boot Run keeps no `refs.console`.
+        console_ref = latest_console_ref
     data: dict[str, JsonValue] = {
         "project": run.project,
         "target_kind": run.target_kind.value,
