@@ -317,6 +317,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewrite transitive links between served docs to resource URIs
 - Disambiguate P2 agent-surface contracts
 - Correct images.delete object-reclamation wording
+- Document images.extend break-glass role and consequence
 - Guard MCP-reachability of served-doc cross-references
 
 ### Build
