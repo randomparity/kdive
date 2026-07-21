@@ -8,6 +8,11 @@
 
 ## Status of prerequisites (already done in the design commits)
 
+Already committed in the design phase on this branch: the spec, `ADR-0412`, and its
+`docs/adr/README.md` index row (so Task-nothing creates them — the rollback's "remove the
+ADR-README row / delete the ADR+spec" steps undo design-phase artifacts, listed here for
+traceability). Also authored:
+
 The canonical doc `docs/guide/kernel-build-per-arch.md` is **already authored** on this branch
 (design phase), with the arch sections, the exact `default_crashkernel_summary()` string
 (`512M on ppc64le, 256M on x86_64`), the verbatim container substrings (`bzImage`,
@@ -120,12 +125,20 @@ resources-docs-check, doc-constants-check, test, …). Fix any failure. Before t
 verification, confirm the guard's **green baseline** passes (catches the fence/strip interaction
 at plan time, not debug time).
 
-**Red-step verification (acceptance criterion 3 of the spec).** Temporarily, then revert:
+**Red-step verification (acceptance criterion 3 of the spec).** Temporarily, then revert each:
 (a) delete the ppc64le `strip -s` line → strip-required assertion fails; (b) rename a
 `BOOT_MEMBER_FORMATS` container without editing the doc → boot-container assertion fails;
 (c) change a `crashkernel` default without editing the doc → crashkernel assertion fails;
-(d) add a spurious `## aarch64` section → completeness assertion fails. Each must produce a clean
-RED (not an import error). Revert all perturbations; confirm green.
+(d) add a spurious `## aarch64` section → completeness assertion fails;
+(e) add a hypothetical arch to `_TRAITS`/`SUPPORTED_ARCHES` **and** `BOOT_MEMBER_FORMATS`
+together (a `MagicPin` + `container`, so the import-time cross-table assert passes) with **no**
+doc section → the doc *completeness* test (not the import assert) fails, naming the missing arch
+— this is the "a future arch cannot land without a hint" direction and must be demonstrated, not
+just reasoned about;
+(f) change the ELF predicate from `startswith(_ELF_MAGIC.hex())` to `== _ELF_MAGIC.hex()` → the
+non-empty-strip-set assertion fails (the dead-guard bug is itself caught).
+Each must produce a clean RED (not an import error, except (e)'s import-assert gate which must be
+cleared first). Revert all perturbations; confirm green.
 
 **Commits.** One logical change per commit (test; registrar+snapshot; agent-index; Field
 repoint), imperative subject ≤72 chars, `Co-Authored-By` trailer. Stage explicit paths.
