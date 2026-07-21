@@ -43,11 +43,16 @@ Add an opt-in ASGI request/response trace middleware, `TransportTraceMiddleware`
   (boolean, default off, `group="logging"`, `processes={server}`) gates it. When off, the
   middleware is **not added to the list** — not a per-request branch — so a normal
   deployment pays nothing.
-- **One structured line per request.** On response start it logs one INFO record via the
-  dedicated `kdive.mcp.transport_trace` logger carrying: `method`, `path`,
-  `mcp_session_id` (value) + `mcp_session_id_present`, `mcp_protocol_version`, `status`,
-  and `duration_ms`. INFO (not DEBUG) so the trace appears once the flag is on regardless
-  of `KDIVE_LOG_LEVEL`.
+- **One structured line per request, level-independent.** Status and `duration_ms` are
+  captured when `http.response.start` is observed, but the single INFO record is emitted
+  exactly once, in a `finally`, via the dedicated `kdive.mcp.transport_trace` logger,
+  carrying: `method`, `path`, `mcp_session_id` (value) + `mcp_session_id_present`,
+  `mcp_protocol_version`, `status`, and `duration_ms`. The trace logger is given its **own
+  explicit `INFO` level** (`logger.setLevel(logging.INFO)`), so it emits independently of
+  the root floor `KDIVE_LOG_LEVEL` sets (`facade.py`): the `KDIVE_MCP_TRACE` flag — not the
+  global log level — is the gate. Without the explicit level, a deployment running
+  `KDIVE_LOG_LEVEL=warning` would silently drop every trace line even with the flag on,
+  because a child logger otherwise inherits the raised root floor.
 - **Redaction-safe.** The `Authorization` header is logged as `authorization_present`
   (bool) only — never the value, honoring the mandatory-redaction invariant. The
   `Mcp-Session-Id` is a session handle (not an auth credential) and is logged as its
@@ -56,9 +61,12 @@ Add an opt-in ASGI request/response trace middleware, `TransportTraceMiddleware`
 - **Duration = time to response headers.** Measured from request receipt to the
   `http.response.start` emission (time-to-first-byte), so a long-lived SSE stream never
   delays or withholds the trace line.
-- **Logs on failure too.** If the downstream app raises before sending
-  `http.response.start`, the line is still emitted (in a `finally`) with `status=None`,
-  so a transport-layer fault is never silently unlogged.
+- **Logs on failure too, exactly once.** The single line is emitted in the `finally`
+  whether or not `http.response.start` was seen; if the downstream app raises before
+  sending it, the line carries `status=None` and the exception re-raises (never swallowed),
+  so a transport-layer fault is never silently unlogged. Because emission is only in the
+  `finally`, a request produces exactly one trace line — the success and failure paths do
+  not double-log.
 
 Scope guard: transport-envelope logging only. No request/response *body* capture, no
 general protocol debugger.
@@ -70,9 +78,22 @@ general protocol debugger.
 - When enabled, one log line per HTTP request — potentially voluminous under load. This
   is why it is off by default and documented as a debug-only aid, not normal-operation
   telemetry.
-- `Mcp-Session-Id` values land wherever the logs land (journal, CI log). It is a session
-  handle, not an auth secret, so this is acceptable and matches the issue's stated intent;
-  documented as a residual.
+- **Restart/observer effect.** The config registry snapshots `os.environ` at process start,
+  and the gate is applied at server boot, so enabling `KDIVE_MCP_TRACE` takes effect only
+  after a server restart. A restart drops every in-memory MCP session, so the trace captures
+  *newly-established* sessions, not the one currently wedged — and each existing client's
+  next request returns exactly the `404 Session not found` this work exists to study. The
+  restart requirement is inherent to the boot-time env snapshot, not to the build-time
+  add-vs-branch choice (a per-request branch would read the same boot snapshot); it is
+  disclosed here so an operator arms the flag *before* reproducing an incident rather than
+  expecting to attach to a live one.
+- `Mcp-Session-Id` values land wherever the logs land (journal, CI log). In the MCP
+  streamable-HTTP transport the session id identifies a session but is **not** an
+  authorization credential — authorization is the separate `Authorization: Bearer` token,
+  which is logged presence-only — so a logged session id is not a resumption/hijack
+  capability on its own. It remains a stable cross-user correlator in shared logs; that is
+  the accepted residual, and it matches the issue's explicit intent to log the value so a
+  server line can be correlated to a specific client session.
 - Middleware ordering is now load-bearing: the trace must stay outermost to keep full
   visibility. A future middleware that must run before it would require revisiting this.
 
@@ -93,6 +114,22 @@ general protocol debugger.
   middleware supersedes it. Adding an `access_log` toggle nobody has asked to flip (the
   uvicorn default is fine) is a speculative config knob. Rejected as redundant and
   speculative; the primary acceptance criteria are met without it.
+- **Log a salted hash of `Mcp-Session-Id` (or presence-only) instead of the raw value.** A
+  hash would give per-session correlation without disclosing the handle in shared logs. But
+  the issue's acceptance criteria require the *value* ("whether an `Mcp-Session-Id` was
+  present and its value"), because the operator reconstructs the lifecycle by correlating a
+  server trace line to the id the *client* logged; a server-only salted hash cannot be
+  matched against a client's raw id. Since the value is not an auth credential (above),
+  logging it meets the need. Rejected against the stated criteria; presence-only is kept as
+  a companion field, not a replacement.
+- **Emit the transport envelope as an OpenTelemetry span** via the existing tracer
+  (`facade.py`) with method/path/status/duration and the two MCP headers as attributes.
+  This would inherit sampling (bounding the "voluminous under load" consequence),
+  correlation, and the redaction floor. Rejected as the primary mechanism: it routes the
+  trace to the OTLP collector, which many debug deployments do not run, whereas the
+  motivating use case wants the lifecycle in the *plain server log/journal* an operator is
+  already reading; it also needs ASGI span plumbing and is a heavier opt-in than a single
+  log flag. The bespoke INFO logger keeps the operator path to "set flag, read journal."
 - **Full request-body capture / a general protocol debugger.** Exceeds the need and cuts
   against the no-speculative-features rule; a body may also carry secrets the envelope does
   not. Rejected by the scope guard.

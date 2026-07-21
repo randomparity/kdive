@@ -28,8 +28,15 @@ See ADR-0417 for the decision and rejected alternatives. Summary:
 
 - **`TransportTraceMiddleware`** (`src/kdive/mcp/middleware/transport_trace.py`): a pure
   ASGI callable that wraps `send` to capture the response status, times the request with
-  `time.monotonic()`, and logs one INFO record per HTTP request via the dedicated
-  `kdive.mcp.transport_trace` logger.
+  `time.monotonic()`, and logs exactly one INFO record per HTTP request via the dedicated
+  `kdive.mcp.transport_trace` logger. Status and `duration_ms` are captured when
+  `http.response.start` is observed; the single line is emitted once, in a `finally`, so a
+  request that raises before response-start still logs (with `status=None`) and no request
+  ever double-logs.
+- **Level independence:** the module gives its logger an explicit `setLevel(logging.INFO)`
+  so trace lines emit whenever the flag is on, independent of the root floor
+  `KDIVE_LOG_LEVEL` sets (`observability/facade.py`). Without this, `KDIVE_LOG_LEVEL=warning`
+  would silently drop every trace line.
 - **Gate:** a new registry `Setting` `KDIVE_MCP_TRACE` (`config/core_settings.py`),
   boolean, default off, `group="logging"`, `processes={server}`. `server.py`'s
   `server_http_middleware()` reads it (through the config registry) and prepends
@@ -81,8 +88,13 @@ driving `TransportTraceMiddleware(app)(scope, receive, send)` with hand-built AS
 - no session header → `mcp_session_id_present=False`, no `mcp_session_id` value.
 - `Authorization: Bearer <token>` present → `authorization_present=True`, token string
   absent from the record (assert the token substring is not in the formatted output).
-- downstream raises before `http.response.start` → one record with `status=None`, and the
-  exception propagates (not swallowed).
+- downstream raises before `http.response.start` → exactly one record with `status=None`,
+  and the exception propagates (not swallowed).
+- level independence: with the root logger set to WARNING (mimicking
+  `KDIVE_LOG_LEVEL=warning`), a request still emits one trace record — asserts the dedicated
+  logger's own INFO level bypasses the raised root floor.
+- exactly-one-line: a normal success path emits a single record (no double-log from a
+  response-start path plus the `finally`).
 - non-`http` scope (`lifespan`/`websocket`) → passthrough, no record.
 - `server_http_middleware()` with the flag on includes `TransportTraceMiddleware` as the
   first (outermost) entry; with it off, the list excludes it.
