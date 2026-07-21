@@ -151,16 +151,19 @@ copy-pasting the boot/teardown dance:
 from kdive.testing.live_vm import boot_throwaway_domain
 
 with boot_throwaway_domain(rootfs, arch=arch, name=unique, mode=uri,
-                           wait_for="panic") as domain:
+                           wait_for="panic", console_log=log_path) as domain:
     ...  # run one provider op against a live domain; teardown is guaranteed
 ```
 
 `boot_throwaway_domain` stages a qcow2 overlay beside the rootfs, resolves the
 arch-specific machine type / console / kernel format, waits for
 `active` / `panic` / `ssh`, yields the live domain, and tears it down (deleting
-its overlay) on exit. `mode` (session/system) is per-test. The
-gdbstub-preserve debug tests still render their own production XML pending a
-harness `gdb_port` extension.
+its overlay) on exit. `mode` (session/system) is per-test. Two waits carry a
+required companion argument, enforced up front: `wait_for="panic"` needs
+`console_log` (the panic-wait reads the serial console) and `wait_for="ssh"`
+needs `ssh_hostfwd_port` — pass them or the call raises before any domain
+boots. The gdbstub-preserve debug tests still render their own production XML
+pending a harness `gdb_port` extension.
 
 ## Hard-won quirks
 
