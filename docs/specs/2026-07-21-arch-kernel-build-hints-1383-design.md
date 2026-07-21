@@ -130,17 +130,19 @@ equals it):
   in that arch's section, so a renamed container is caught.
 - **Strip-required predicate (the load-bearing rule):** for any arch whose boot format is an
   ELF kernel, assert that arch's section contains the `strip -s` command token. "Is an ELF
-  kernel" is read **structurally** from the contract — the format carries an ELF-magic
-  `MagicPin` at offset 0 (`\x7fELF`) — not from a substring of the human-readable `container`
-  display string, so a display-string rename cannot silently drop an arch from the
-  strip-required set. Binding to `strip -s` (not the bare word `strip`, which appears
-  incidentally in "the bzImage is already stripped") avoids a trivially-satisfied common-word
-  match. This binds the single most error-prone instruction (ppc64le: strip the build-tree
-  `vmlinux` first) to a structural source signal instead of leaving it as unguarded prose; the
-  guard pins the command's *presence*, not its full wording. The ELF-magic signal is a proxy for
-  the real condition (ships an unstripped DWARF-heavy image that overruns the scan bound), exact
-  for both current arches; a future wrapped-image arch that needs stripping but does not lead
-  with `\x7fELF` would need the predicate widened, not just a new doc section.
+  kernel" is read from the contract's declared `magic` — a `MagicPin` at offset 0 carrying the
+  ELF magic (`\x7fELF`) — not from a substring of the human-readable `container` display string,
+  so a display-string rename cannot silently drop an arch from the strip-required set. Binding to
+  `strip -s` (not the bare word `strip`, which appears incidentally in "the bzImage is already
+  stripped") avoids a trivially-satisfied common-word match. Two limits, stated so a third-arch
+  author fixes the right lever: (1) the offset-0 ELF pin is a *proxy* for the real condition (an
+  unstripped DWARF-heavy image overruns the scan bound), exact for both current arches; (2) the
+  guard reads the *declared* pins, not image bytes — ppc64le declares both the offset-0
+  `\x7fELF` pin and the disambiguating EM_PPC64 pin at 0x12, so the offset-0 pin is an authoring
+  convention. A future strippable ELF arch that declared only a nonzero-offset discriminator and
+  omitted the offset-0 pin would lead with `\x7fELF` in bytes yet escape the check; the author's
+  obligation is to declare the offset-0 pin (or add an explicit `strip_required` flag — the
+  durable fix, deferred as a validation-data-model change).
 - **`crashkernel` values:** assert the doc contains the exact `default_crashkernel_summary()`
   output, so a changed default fails until resynced.
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the

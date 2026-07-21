@@ -75,20 +75,31 @@ prose:
 - **Boot-member fact, bound to the contract** — for each arch the section must contain
   `BOOT_MEMBER_FORMATS[arch].container` verbatim; and for any arch whose boot format is an ELF
   kernel, the section must also contain the `strip -s` command token. "Is an ELF kernel" is read
-  **structurally** from the contract — the format carries an ELF-magic `MagicPin` at offset 0
-  (`\x7fELF`), not from a substring of the human-readable `container` display string, so
-  renaming that display string cannot silently drop an arch from the strip-required set. This
-  ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage, so strip
-  the build-tree `vmlinux` first — to a structural source signal rather than leaving it as
+  from the contract's declared `magic` — specifically a `MagicPin` at offset 0 whose bytes are
+  the ELF magic (`\x7fELF`) — not from a substring of the human-readable `container` display
+  string, so renaming that display string cannot silently drop an arch from the strip-required
+  set. This ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage,
+  so strip the build-tree `vmlinux` first — to a source signal rather than leaving it as
   unguarded free prose. Binding to `strip -s` (not the bare word `strip`, which appears
   incidentally in "the bzImage is already stripped") pins the actionable command's presence;
   the *explanatory* text around it (why DWARF overruns the scan bound, cross-compile triples)
-  stays review-only — the guard pins the rule's presence, not its full wording. The ELF-magic
-  signal is a **proxy** for the real reason strip is required (an unstripped DWARF-heavy image
-  overruns the tar scan bound, `validation.py`); it is exact for both current arches. A future
-  arch that needs stripping but ships a boot member *not* leading with `\x7fELF` (a
-  self-decompressing or otherwise-wrapped image) would be classified not-strip-required, so a
-  third-arch author must revisit the predicate, not only add a doc section.
+  stays review-only — the guard pins the rule's presence, not its full wording.
+
+  Two limits of this signal, stated plainly so a third-arch author fixes the right thing. First,
+  the offset-0 `\x7fELF` pin is a **proxy** for the real reason strip is required (an unstripped
+  DWARF-heavy image overruns the tar scan bound, `validation.py`), exact for both current arches.
+  Second — and this is what the guard actually keys on — the predicate reads the *declared*
+  `MagicPins`, not the image's bytes. ppc64le declares both the offset-0 `\x7fELF\x02\x01` pin
+  and the EM_PPC64 discriminator at 0x12 (the 0x12 pin is what actually disambiguates it from
+  other ELF64-LE kernels), so the offset-0 pin is an authoring **convention**, not a structural
+  necessity. A future strippable ELF arch that declared only a nonzero-offset discriminator and
+  omitted the offset-0 pin would lead with `\x7fELF` in its bytes yet be classified
+  not-strip-required, and the completeness guard would pass with the strip hint absent from its
+  section. So the third-arch author's real obligation is to **declare the offset-0 `\x7fELF`
+  pin** (or add an explicit strip-required signal). The durable fix is an explicit
+  `strip_required`/ELF flag on the `FormatContract` rather than a pin-shape convention; that is
+  a code change to the validation data model, deferred with the inline-`Field` derivation below,
+  not taken in this doc-scoped change.
 
 `resources-docs-check` (snapshot mirror) and `served-doc-links` (a served doc must cite another
 served doc by its `resource://` URI, not a relative path) already gate the registration and the
@@ -190,4 +201,6 @@ test. No schema change, no migration.
   deliberately stayed out of. Recorded as the natural companion follow-up to the deterministic
   build-time guard above. This change does repoint the `arch` `Field`'s existing doc citation at
   the new focused reference (a one-line cross-link), but leaves the inline boot-format wording
-  as-is.
+  as-is. The same deferred contract-model work would add the explicit `strip_required`/ELF flag
+  on `FormatContract` that the strip-guard predicate above notes as its durable replacement for
+  the offset-0-pin convention.
