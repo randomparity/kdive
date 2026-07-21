@@ -144,7 +144,12 @@ equals it):
   or it would be miscollected as an arch and fail; keep aux headings multi-word/Title-Case. The
   test must **blank fenced code blocks before collecting headings** (the fence-toggle the
   sibling `check-served-doc-links.sh`/`check-doc-links.sh` scripts use), so a `##`-prefixed line
-  inside the doc's shell samples cannot be miscounted as a section.
+  inside the doc's shell samples cannot be miscounted as a section. **Scope note:** blanking is
+  for *heading extraction only* — use the blanked copy to locate `##` positions, but split and
+  scan the **raw** (unblanked) section body for the content checks below (the boot-container
+  verbatim and strip-required assertions), because the `strip -s` command those need lives
+  inside a fenced shell sample. Blanking once and reusing that copy for the content checks would
+  erase the `strip` command and make the strip-required assertion permanently un-passable.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
   *verbatim* in that arch's section, so a renamed container is caught. The exact required
   substrings today are `bzImage` (x86_64) and `ppc64le ELF (vmlinux)` (ppc64le) — the doc author
