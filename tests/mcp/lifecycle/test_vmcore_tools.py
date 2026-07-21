@@ -1013,6 +1013,10 @@ def test_postmortem_crash_bad_command_is_config_error(migrated_url: str) -> None
             )
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert crash.kwargs == {}  # the port was never called
+        # The rejection reason is surfaced, not swallowed (#1361 F3): the caller learns which
+        # command/metacharacter was refused instead of a bare config error.
+        assert resp.detail is not None and "|" in resp.detail
+        assert resp.data["reason"] == "disallowed metacharacter '|'"
 
     asyncio.run(_run())
 

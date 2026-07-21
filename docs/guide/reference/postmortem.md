@@ -6,18 +6,28 @@
 
 `implemented` · `read-only`
 
-Run crash postmortem commands for a captured vmcore.
+Run allowlisted crash(8) commands over a captured vmcore; returns a redacted report.
+
+Prerequisite: a captured core for the Run (see ``vmcore.fetch`` / ``vmcore.list``). For the
+default first-pass batch use ``postmortem.triage`` instead. Requires contributor: every
+command is validated against the crash allowlist before the core is opened, and the
+transcript is redacted before it is returned.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `commands` | array<string> | yes | Crash commands to run (allowlisted read-only verbs). |
+| `commands` | array<string> | yes | crash(8) commands to run over the captured core. Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (\| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command. |
 | `run_id` | string | yes | The Run whose captured core to analyze. |
 
 ## `postmortem.triage`
 
 `implemented` · `read-only`
 
-Run the default crash triage for a captured vmcore.
+Run the default first-pass crash(8) triage over a Run's captured vmcore (contributor).
+
+Runs the fixed triage batch (``log``, ``bt``) and returns a redacted report — the fast
+first look at a crash. Prerequisite: a captured core for the Run (see ``vmcore.fetch``, then
+``vmcore.list`` to confirm it). For arbitrary allowlisted crash commands use
+``postmortem.crash``; for programmable drgn introspection use ``introspect.from_vmcore``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

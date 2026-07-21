@@ -91,6 +91,54 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         ),
     ),
     DocResource(
+        uri="resource://kdive/docs/guide/errors.md",
+        source="docs/guide/errors.md",
+        content_file="errors.md",
+        name="errors",
+        title="Error categories and recovery",
+        description=(
+            "The ErrorCategory taxonomy and per-category recovery guidance: which failures are "
+            "retryable, which need a corrected input, and which are terminal. Cited by the "
+            "response-envelope guide's error_category section."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/safety-and-rbac.md",
+        source="docs/guide/safety-and-rbac.md",
+        content_file="safety-and-rbac.md",
+        name="safety-and-rbac",
+        title="Safety, RBAC, and redaction",
+        description=(
+            "The role model (viewer/contributor/operator), the destructive-ops gate, and the "
+            "redaction contract every transcript and console snippet passes through. Cited by the "
+            "response-envelope guide."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/guide/async-jobs.md",
+        source="docs/guide/async-jobs.md",
+        content_file="async-jobs.md",
+        name="async-jobs",
+        title="Async jobs and polling",
+        description=(
+            "How long-running tools return a job handle, the jobs.wait / jobs.get polling pattern, "
+            "the transport-reset retry contract, and the idempotency-key retention window. Cited "
+            "by the response-envelope guide."
+        ),
+    ),
+    DocResource(
+        uri="resource://kdive/docs/operating/race-debugging.md",
+        source="docs/operating/race-debugging.md",
+        content_file="race-debugging.md",
+        name="race-debugging",
+        title="Reproducing a race until it crashes",
+        description=(
+            "The repeat-until-crash workflow behind control.watch_for_crash: drive the reproducer "
+            "loop over SSH while the console is watched out-of-band for the crash signature. Cited "
+            "by the control toolset guide."
+        ),
+    ),
+    DocResource(
         uri="resource://kdive/docs/guide/agent-index.md",
         source="docs/guide/agent-index.md",
         content_file="agent-index.md",

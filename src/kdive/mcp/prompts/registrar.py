@@ -111,8 +111,12 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             Step("runs.complete_build", "finalize the externally built run"),
             Step("runs.install", "install the built kernel onto the system"),
             Step("runs.boot", "boot the system into the built kernel"),
-            Step("debug.start_session", "attach a live debug session"),
-            Step("introspect.run", "inspect kernel state in the live session"),
+            Step(
+                "debug.start_session",
+                'attach a live drgn-live session with transport="drgn-live" (introspect.run '
+                "needs a drgn-live session, not the default gdb transport)",
+            ),
+            Step("introspect.run", "inspect kernel state in the live drgn-live session"),
             Step("debug.end_session", "detach when done"),
         ),
     ),

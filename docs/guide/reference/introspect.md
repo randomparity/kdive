@@ -25,7 +25,7 @@ guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal war
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `helper` | string | yes | In-tree drgn helper to run with operator-provided drgn: tasks, modules, or sysinfo. |
-| `session_id` | string | yes | A live drgn-live DebugSession. |
+| `session_id` | string | yes | A live drgn-live DebugSession id, opened with debug.start_session(transport="drgn-live") (not the default gdb transport). |
 
 ## `introspect.script`
 
@@ -40,5 +40,5 @@ guest is missing debuginfo, `data.missing_debuginfo` is added as a non-fatal war
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `script` | string | yes | A drgn (Python) script run against the live guest kernel; `prog` is the live drgn.Program, already bound as a global in the script's namespace - do not `from drgn import prog` (it will fail; there is no such importable name). Example: `for t in prog.threads(): print(t.pid)`. Its stdout is returned (byte-capped). Each call is a fresh drgn process - put any multi-step work in one script. |
-| `session_id` | string | yes | A live drgn-live DebugSession. |
+| `session_id` | string | yes | A live drgn-live DebugSession id, opened with debug.start_session(transport="drgn-live") (not the default gdb transport). |
 | `timeout_sec` | number | no | In-guest execution bound (seconds); clamped to [1.0, operator ceiling]. Defaults to 30. A wedged script is recovered with debug.end_session. |

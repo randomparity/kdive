@@ -87,7 +87,11 @@ def _register_debug_read_memory(
             int, Field(description=f"Number of bytes to read (capped at {MAX_MEMORY_READ_BYTES}).")
         ],
     ) -> ToolResponse:
-        """Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor."""
+        """Read raw memory bytes from a live DebugSession (bounded by byte_count). Contributor.
+
+        The target must be stopped first (halt it with debug.interrupt or hit a breakpoint); a
+        running kernel has no stable memory image to read.
+        """
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
@@ -115,7 +119,11 @@ def _register_debug_read_registers(
             Field(description='Register names to read (e.g. ["rip", "rsp"]).'),
         ],
     ) -> ToolResponse:
-        """Read named registers from a live DebugSession. Requires contributor."""
+        """Read named registers from a live DebugSession. Requires contributor.
+
+        The target must be stopped first (halt it with debug.interrupt or hit a breakpoint);
+        registers are only meaningful at a halt.
+        """
         return await run_engine_op_with_resolver(
             pool,
             current_context(),

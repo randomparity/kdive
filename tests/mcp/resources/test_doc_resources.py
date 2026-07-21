@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
@@ -126,3 +127,33 @@ def test_register_includes_doc_when_required_kind_present(monkeypatch: pytest.Mo
     app = FastMCP("probe")
     count = register(app, resolver=_resolver({ResourceKind.REMOTE_LIBVIRT}))
     assert count == len(DOC_RESOURCES) + 1
+
+
+_RESOURCE_URI = re.compile(r"resource://kdive/docs/[^\s)\"'>]+")
+
+
+def test_served_doc_resource_citations_are_all_allowlisted() -> None:
+    """Every ``resource://kdive/docs/...`` a served doc cites must itself be served (#1361).
+
+    The flat allowlist has no path traversal, so a doc that points an agent at a
+    ``resource://`` URI absent from ``DOC_RESOURCES`` is an unfetchable dead end — the class of
+    bug F1 fixed. This guard fails if any served doc body cites a non-allowlisted resource URI.
+    """
+    allow = {entry.uri for entry in DOC_RESOURCES}
+    offenders: list[str] = []
+    for entry in DOC_RESOURCES:
+        text = (_ROOT / entry.source).read_text(encoding="utf-8")
+        for match in _RESOURCE_URI.findall(text):
+            uri = match.rstrip(".,;")
+            if uri not in allow:
+                offenders.append(f"{entry.source} :: {uri}")
+    assert not offenders, "served docs cite unfetchable resource URIs:\n" + "\n".join(offenders)
+
+
+def test_citation_guard_is_not_vacuous() -> None:
+    # Canary: the matcher and allowlist check actually flag a bad citation, so a regex/read
+    # regression cannot make the guard above pass by scanning nothing.
+    allow = {"resource://kdive/docs/guide/errors.md"}
+    text = "see resource://kdive/docs/guide/nonexistent.md for details"
+    hits = [m.rstrip(".,;") for m in _RESOURCE_URI.findall(text) if m.rstrip(".,;") not in allow]
+    assert hits == ["resource://kdive/docs/guide/nonexistent.md"]

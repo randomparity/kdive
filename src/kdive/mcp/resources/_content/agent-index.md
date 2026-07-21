@@ -31,8 +31,8 @@ the first tool to call.
 4. **Build** — `runs.create` on the external lane, then declare and upload the prebuilt
    kernel with `artifacts.expected_uploads` to see what is required, `artifacts.create_run_upload`
    per artifact to get a presigned PUT URL, and the presigned PUT itself; once every expected
-   artifact is uploaded, call `runs.complete_build`. See the runs guide and the
-   [build lane](../operating/external-build-upload.md).
+   artifact is uploaded, call `runs.complete_build`. See the runs guide and the build lane
+   (resource://kdive/docs/operating/external-build-upload.md).
 5. **Install and boot** — `runs.install` then `runs.boot`.
 6. **Reproduce in the guest** — `systems.authorize_ssh_key`, then `jobs.wait` until it
    succeeds, then drive the reproducer over SSH (compile in-guest or cross-compile and `scp`,

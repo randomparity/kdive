@@ -71,7 +71,15 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def introspect_run_tool(
-        session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],
+        session_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "A live drgn-live DebugSession id, opened with "
+                    'debug.start_session(transport="drgn-live") (not the default gdb transport).'
+                )
+            ),
+        ],
         helper: Annotated[
             str,
             Field(
@@ -103,7 +111,15 @@ def register(
         meta={"maturity": "implemented"},
     )
     async def introspect_script_tool(
-        session_id: Annotated[str, Field(description="A live drgn-live DebugSession.")],
+        session_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "A live drgn-live DebugSession id, opened with "
+                    'debug.start_session(transport="drgn-live") (not the default gdb transport).'
+                )
+            ),
+        ],
         script: Annotated[
             str,
             Field(
