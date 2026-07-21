@@ -435,7 +435,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: Secret
             Field(description="Granted-project report filters request; omit for defaults."),
         ] = None,
     ) -> ToolResponse:
-        """Generate a consolidated report over the caller's granted projects."""
+        """Generate a downloadable multi-section report over the caller's granted projects.
+
+        Captures one ``as_of`` snapshot and returns the sections inline (within a byte
+        budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
+        download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
+        inline KCU spend rollup with no spreadsheets, use ``accounting.report_granted_set``.
+        """
         payload = request or _GrantedReportPayload()
         return await generate_granted_set(
             pool,
@@ -457,7 +463,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: Secret
             Field(description="All-project report filters request; omit for defaults."),
         ] = None,
     ) -> ToolResponse:
-        """Generate a platform-wide consolidated report over every project."""
+        """Generate a downloadable platform-wide multi-section report over every project.
+
+        Captures one ``as_of`` snapshot and returns the sections inline (within a byte
+        budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
+        download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
+        inline KCU spend rollup with no spreadsheets, use ``accounting.report_all_projects``.
+        """
         payload = request or _AllProjectsReportPayload()
         return await generate_all_projects(
             pool,

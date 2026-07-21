@@ -18,7 +18,10 @@ Enqueue an image build job.
 
 `implemented` · `destructive`
 
-Delete an image catalog entry.
+Delete a private image catalog entry (project-scoped). Irreversible.
+
+Removes the catalog entry and its backing object permanently; there is no undo.
+A shared reference guard rejects deletion while the image is still referenced.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -114,7 +117,11 @@ true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
 
 `implemented` · `destructive`
 
-Prune expired image catalog entries.
+Permanently prune every expired image entry (platform-admin break-glass). Irreversible.
+
+A break-glass sweep gated on ``platform_admin``: it deletes all past-lifetime image
+entries and their backing objects in one pass, with no per-image confirmation and no
+undo. ``reason`` is audited. Use ``images.extend`` to save an entry before it expires.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

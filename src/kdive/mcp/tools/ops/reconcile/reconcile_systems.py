@@ -184,7 +184,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, image_store: ImageSweep
         meta={"maturity": "implemented"},
     )
     async def ops_reconcile_systems() -> ToolResponse:
-        """Reconcile systems.toml into the catalog (can prune). Platform admin."""
+        """Reconcile systems.toml into catalog; prunes dropped rows (platform_admin, irreversible).
+
+        Applies the on-disk `systems.toml` to the inventory catalog (image catalog, cost
+        classes, resources). Rows that left the file are **permanently pruned**, and each
+        image-row delete frees that image's backing object-store bytes to the GC — no undo
+        short of restoring the file and re-running. Cordoned/pruned identities are audited.
+
+        This is the config-catalog pass. For runtime-drift cleanup that never prunes rows,
+        use `ops.reconcile_now` instead.
+        """
         return await reconcile_systems(pool, current_context(), image_store=image_store)
 
 

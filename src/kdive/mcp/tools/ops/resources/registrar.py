@@ -99,7 +99,7 @@ def _register_resources_register_remote_libvirt(app: FastMCP, pool: AsyncConnect
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a remote-libvirt runtime resource."""
+        """Register a remote-libvirt runtime resource (platform_admin)."""
         return await register_remote_libvirt_resource(
             pool,
             current_context(),
@@ -170,7 +170,7 @@ def _register_resources_register_local_libvirt(app: FastMCP, pool: AsyncConnecti
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a local-libvirt runtime resource."""
+        """Register a local-libvirt runtime resource (platform_admin)."""
         return await register_local_libvirt_resource(
             pool,
             current_context(),
@@ -239,7 +239,7 @@ def _register_resources_register_fault_inject(app: FastMCP, pool: AsyncConnectio
             ),
         ] = None,
     ) -> ToolResponse:
-        """Register a fault-inject runtime resource."""
+        """Register a fault-inject runtime resource (platform_admin)."""
         return await register_fault_inject_resource(
             pool,
             current_context(),
@@ -281,7 +281,12 @@ def _register_resources_deregister(app: FastMCP, pool: AsyncConnectionPool) -> N
             ),
         ] = "",
     ) -> ToolResponse:
-        """Deregister a runtime or config-owned remote-libvirt resource."""
+        """Deregister a runtime or config-owned resource (platform_admin). Irreversible.
+
+        Permanently removes the resource from the inventory; there is no undo (re-add it with
+        the matching ``resources.register_*`` tool). Deregistering a resource with live
+        allocations requires ``force=True`` (destructive-tier).
+        """
         return await deregister_resource(
             pool, current_context(), resource_id=resource_id, force=force, reason=reason
         )
@@ -294,7 +299,7 @@ def _register_resources_renew(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="The runtime Resource UUID whose lease to renew.")
         ],
     ) -> ToolResponse:
-        """Renew a runtime resource lease."""
+        """Renew a runtime resource lease (platform_admin)."""
         return await renew_resource(pool, current_context(), resource_id=resource_id)
 
 

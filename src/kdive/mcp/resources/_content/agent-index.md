@@ -21,7 +21,11 @@ directly, so reach everything else through `tools.search` / `tools.invoke`.
 A reproduce-and-investigate session moves through these stages. Each names the toolset and
 the first tool to call.
 
-1. **Orient** — `investigations.open` to group the runs of one investigation.
+1. **Orient and discover** — start with `session.whoami` to see who you are and which
+   projects and roles you hold, then survey what you can provision: `resources.list` and
+   `resources.availability` for the registered hosts and their free capacity, `shapes.list`
+   for the named VM shapes, and `accounting.estimate` to price a shape × lease-window in KCU
+   before you spend. Then `investigations.open` to group the runs of one investigation.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
 3. **Define and provision a system** — `images.describe` to pick a base image and check its
    capabilities first. Then take one of two lanes: `systems.provision` directly (profile
@@ -47,7 +51,11 @@ the first tool to call.
    for non-halting drgn introspection against that session. See the debug and introspect guides.
 9. **Triage a crash** — induce one deliberately with `control.force_crash` if needed, then
    `vmcore.fetch` and `postmortem.triage`. See the control and postmortem guides.
-10. **Release** — `allocations.release` when done.
+10. **Wind down** — release everything you acquired, in order: `systems.teardown` to
+    destroy the provisioned guest (a completed teardown does not itself release the
+    allocation), then `allocations.release` to return the leased capacity, then
+    `investigations.close` to close out the investigation. Release the allocation and tear
+    down the system even if you leave the investigation open, so capacity is not held.
 
 Long steps (provision, build, install, boot, capture) return a job handle; poll it with
 `jobs.wait`.

@@ -3905,6 +3905,9 @@ def test_boot_without_install_step_is_config_error(migrated_url: str) -> None:
             njobs = await _count(pool, "SELECT count(*) AS n FROM jobs WHERE kind='boot'", ())
         assert resp.status == "error" and resp.error_category == "configuration_error"
         assert njobs == 0  # no boot job without a succeeded install step
+        # The rejection points the agent forward, mirroring the unbound-run path (#1362).
+        assert resp.data["reason"] == "install_first"
+        assert "runs.install" in resp.suggested_next_actions
 
     asyncio.run(_run())
 

@@ -232,7 +232,7 @@ async def boot_run(
             if run.system_id is None:
                 return _not_bound(run_id)
             if not await _has_succeeded_step(conn, uid, "install"):
-                return _config_error(run_id, data={"reason": "install_first"})
+                return _install_first(run_id)
             return await keyed_mutation(
                 conn,
                 idempotency_key=idempotency_key,
@@ -260,6 +260,21 @@ def _not_bound(run_id: str) -> ToolResponse:
         detail="run is not bound to a system",
         suggested_next_actions=["runs.bind"],
         data={"reason": "run_not_bound"},
+    )
+
+
+def _install_first(run_id: str) -> ToolResponse:
+    """Reject a boot before install succeeds, pointing the agent at runs.install (ADR-0404).
+
+    Mirrors :func:`_not_bound`: a boot needs a succeeded ``install`` step, so surface the
+    actionable next step rather than an opaque configuration error.
+    """
+    return ToolResponse.failure(
+        run_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        detail="run must be installed before boot",
+        suggested_next_actions=["runs.install"],
+        data={"reason": "install_first"},
     )
 
 
