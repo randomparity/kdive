@@ -398,6 +398,26 @@ INSTALL_STAGING = Setting(
     ),
 )
 
+INSTALL_SCRATCH = Setting(
+    name="KDIVE_INSTALL_SCRATCH",
+    parse=_str,
+    group="install",
+    processes=_WORKER,
+    help=(
+        "Worker scratch root for transient install intermediates (the fetched combined kernel "
+        "tar, the repacked modules tar, and a debuginfo run's fetched vmlinux). Unset defaults "
+        "to KDIVE_INSTALL_STAGING, so the intermediates share the staging dir (unchanged "
+        "behavior). Point this at a separate mount (e.g. tmpfs) to keep the large, short-lived "
+        "intermediates off the staging disk while the persistent kernel/initrd stay in staging. "
+        "tmpfs trades disk for RAM: the object store already materializes the whole tar in "
+        "memory, so a tmpfs scratch holds those bytes plus the repacked modules tar resident for "
+        "the extract+inject window (up to a few GB on a DWARF-heavy tar), multiplied by "
+        "concurrent installs. Size tmpfs against host RAM and worker concurrency, or leave it "
+        "unset; the RAM-free path is streaming fetch-and-extract (tracked as a follow-up to "
+        "ADR-0399)."
+    ),
+)
+
 FIXTURE_CATALOG_PATH = Setting(
     name="KDIVE_FIXTURE_CATALOG_PATH",
     parse=_str,
@@ -671,6 +691,7 @@ SETTINGS = [
     LOCAL_BUILD_REMOTE_ALLOWLIST,
     BUILD_USER,
     INSTALL_STAGING,
+    INSTALL_SCRATCH,
     FIXTURE_CATALOG_PATH,
     IMAGE_PUBLISH_GRACE,
     IMAGE_PRIVATE_LIFETIME_DEFAULT,

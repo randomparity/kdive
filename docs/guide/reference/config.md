@@ -84,6 +84,7 @@
 
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
+| `KDIVE_INSTALL_SCRATCH` | worker | — | no | Worker scratch root for transient install intermediates (the fetched combined kernel tar, the repacked modules tar, and a debuginfo run's fetched vmlinux). Unset defaults to KDIVE_INSTALL_STAGING, so the intermediates share the staging dir (unchanged behavior). Point this at a separate mount (e.g. tmpfs) to keep the large, short-lived intermediates off the staging disk while the persistent kernel/initrd stay in staging. tmpfs trades disk for RAM: the object store already materializes the whole tar in memory, so a tmpfs scratch holds those bytes plus the repacked modules tar resident for the extract+inject window (up to a few GB on a DWARF-heavy tar), multiplied by concurrent installs. Size tmpfs against host RAM and worker concurrency, or leave it unset; the RAM-free path is streaming fetch-and-extract (tracked as a follow-up to ADR-0399). |
 | `KDIVE_INSTALL_STAGING` | worker | `/var/lib/kdive/install` | no | Worker staging root for install artifacts. Must be writable by the run user; the default's parent (/var/lib/kdive) is root-owned, so on a source checkout pre-create it (or repoint this var) — on SELinux hosts with the virt_image_t label. An unwritable root fails install with a configuration_error (ADR-0204). |
 
 ## inventory
