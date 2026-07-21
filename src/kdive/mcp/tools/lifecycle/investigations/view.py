@@ -34,6 +34,7 @@ def investigation_envelope(
         "project": inv.project,
         "title": inv.title,
         "description": inv.description,
+        "summary": inv.summary,
         "external_refs": [r.model_dump() for r in inv.external_refs],
         "state": inv.state.value,
         "last_run_at": inv.last_run_at.isoformat() if inv.last_run_at else None,

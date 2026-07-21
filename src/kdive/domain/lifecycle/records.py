@@ -108,6 +108,10 @@ class Investigation(DomainModel, Attribution):
 
     title: str
     description: str | None = None
+    #: Terminal close-time account of the work, distinct from the anytime-editable `description`
+    #: (ADR-0416, #1349). Required at `investigations.close` and stamped on the close transition;
+    #: NULL while open/active and for closed rows that predate the field.
+    summary: str | None = None
     external_refs: list[ExternalRef] = Field(default_factory=list)
     state: InvestigationState
     last_run_at: datetime | None = None

@@ -22,6 +22,7 @@ from kdive.serialization import JsonValue
 TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 TITLE_MAX = 200
 DESCRIPTION_MAX = 4096
+SUMMARY_MAX = 4096
 
 
 class InvestigationErrorReason(StrEnum):
@@ -71,6 +72,38 @@ def invalid_text_error(object_id: str) -> InvestigationServiceError:
             f"title must be 1..{TITLE_MAX} chars and description at most {DESCRIPTION_MAX} chars"
         ),
     )
+
+
+def require_summary(object_id: str, summary: str) -> str:
+    """Return a validated close-time summary, or raise a fail-fast service error.
+
+    Closing an Investigation must record an account of the work, so a blank (empty or
+    whitespace-only) summary is rejected up front rather than persisting an empty field.
+
+    Args:
+        object_id: The Investigation id, echoed in the error envelope.
+        summary: The caller-supplied summary text.
+
+    Returns:
+        The summary unchanged when it is non-blank and within ``SUMMARY_MAX``.
+
+    Raises:
+        InvestigationServiceError: ``missing_required_field`` when the summary is blank,
+            ``invalid_text`` when it exceeds ``SUMMARY_MAX`` chars.
+    """
+    if not summary.strip():
+        raise InvestigationServiceError(
+            object_id=object_id,
+            reason=InvestigationErrorReason.MISSING_REQUIRED_FIELD,
+            detail="closing an investigation requires a non-empty summary of the work",
+        )
+    if len(summary) > SUMMARY_MAX:
+        raise InvestigationServiceError(
+            object_id=object_id,
+            reason=InvestigationErrorReason.INVALID_TEXT,
+            detail=f"summary must be at most {SUMMARY_MAX} chars",
+        )
+    return summary
 
 
 def natural_key(ref: ExternalRefKey) -> tuple[str, str] | None:

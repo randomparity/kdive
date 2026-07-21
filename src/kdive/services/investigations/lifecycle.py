@@ -23,6 +23,7 @@ from kdive.services.investigations.common import (
     InvestigationServiceError,
     invalid_text_error,
     parse_external_refs,
+    require_summary,
     resolve_contributor_investigation,
     validate_text,
 )
@@ -83,7 +84,7 @@ async def open_investigation_record(
 
 
 async def _close_locked(
-    conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, project: str
+    conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, summary: str, project: str
 ) -> Investigation:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await INVESTIGATIONS.get(conn, uid)
@@ -104,7 +105,8 @@ async def _close_locked(
         old = current.state
         updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
         await conn.execute(
-            "UPDATE investigations SET cleanup_pending_at = now() WHERE id = %s", (uid,)
+            "UPDATE investigations SET cleanup_pending_at = now(), summary = %s WHERE id = %s",
+            (summary, uid),
         )
         await audit.record(
             conn,
@@ -114,22 +116,23 @@ async def _close_locked(
                 object_kind="investigations",
                 object_id=uid,
                 transition=f"{old.value}->closed",
-                args={"investigation_id": str(uid)},
+                args={"investigation_id": str(uid), "summary_chars": len(summary)},
                 project=project,
             ),
         )
-    return updated
+    return updated.model_copy(update={"summary": summary})
 
 
 async def close_investigation_record(
-    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID, *, raw_id: str
+    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID, *, raw_id: str, summary: str
 ) -> Investigation:
-    """Drive an Investigation to `closed`."""
+    """Drive an Investigation to `closed`, recording a required summary of the work."""
+    require_summary(raw_id, summary)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             try:
-                return await _close_locked(conn, ctx, uid, project=inv.project)
+                return await _close_locked(conn, ctx, uid, summary=summary, project=inv.project)
             except IllegalTransition:
                 async with pool.connection() as conn2:
                     latest = await INVESTIGATIONS.get(conn2, uid)

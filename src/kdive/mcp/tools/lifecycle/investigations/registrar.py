@@ -136,9 +136,24 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
         investigation_id: Annotated[
             str, Field(description="The Investigation to drive to closed.")
         ],
+        summary: Annotated[
+            str,
+            Field(
+                description=(
+                    "Required account of the investigation's work, recorded on the row at close. "
+                    "Must be non-empty; summarize what was found and the outcome. Distinct from "
+                    "the anytime-editable description; a blank summary is rejected."
+                ),
+            ),
+        ],
     ) -> ToolResponse:
-        """Close an investigation."""
-        return await close_investigation(pool, current_context(), investigation_id)
+        """Close an investigation. Requires a summary of the work, persisted on close.
+
+        The summary is the terminal account of what the investigation found and concluded; it is
+        recorded on the Investigation and readable afterward via `investigations.get`. It is a
+        separate field from the description, and closing without a non-empty summary fails.
+        """
+        return await close_investigation(pool, current_context(), investigation_id, summary)
 
 
 def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> None:
