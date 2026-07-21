@@ -339,6 +339,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct images.delete object-reclamation wording
 - Document images.extend break-glass role and consequence
 - Guard MCP-reachability of served-doc cross-references
+- Restore boot readiness-failure read surfaces on runs.get
 
 ### Build
 
