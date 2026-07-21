@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
+from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
 
-__all__ = ["migrated_url", "pg_conn", "postgres_url"]
+__all__ = ["_migrated_db", "migrated_url", "pg_conn", "postgres_url"]

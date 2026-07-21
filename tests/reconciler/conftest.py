@@ -38,9 +38,9 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, DebugSession, Investigation, Run, System
 from kdive.providers.infra.reaping import OwnedDomain
-from tests.db.conftest import migrated_url, pg_conn, postgres_url
+from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url
 
-__all__ = ["migrated_url", "pg_conn", "postgres_url"]
+__all__ = ["_migrated_db", "migrated_url", "pg_conn", "postgres_url"]
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 
