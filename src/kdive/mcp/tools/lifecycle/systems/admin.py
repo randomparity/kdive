@@ -349,10 +349,15 @@ async def _teardown_locked(
             await _audit_destructive_denied(conn, ctx, system, _TEARDOWN, ["admin_role"])
             return _authz_denied(system_id, ["admin_role"])
         if system.state is SystemState.TORN_DOWN:
+            # The System is already terminal, but its Allocation may still be `active`; point the
+            # agent at the second wind-down step so the idempotent replay steers identically to a
+            # freshly-completed teardown job (#1385, ADR-0414). This branch is reached only after
+            # the ADMIN gate above, so the caller always holds the CONTRIBUTOR that
+            # allocations.release requires — no RBAC filtering needed.
             return ToolResponse.success(
                 system_id,
                 "torn_down",
-                suggested_next_actions=["systems.get"],
+                suggested_next_actions=["allocations.release", "systems.get"],
                 data={"project": system.project},
             )
         job = await queue.enqueue(
