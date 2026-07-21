@@ -83,13 +83,32 @@ def test_finish_early_then_reacquire_restarts(tmp_path: Path) -> None:
     assert _FakeContainer.stops == ["cid-1", "cid-2"]
 
 
-def test_corrupt_state_file_is_treated_as_absent(tmp_path: Path) -> None:
+def test_corrupt_state_file_warns_and_starts_fresh(tmp_path: Path) -> None:
     _FakeContainer.starts = 0
     _FakeContainer.stops = []
-    (tmp_path / "kdive-pg.json").write_text("{ partial")  # SIGKILL-mid-write shape
-    with _acquire(tmp_path) as url:  # must not raise JSONDecodeError
+    (tmp_path / "kdive-pg.json").write_text("{ partial")  # externally-corrupted file
+    # must not raise JSONDecodeError; warns (does not silently mask) then starts fresh
+    with pytest.warns(UserWarning, match="corrupt"), _acquire(tmp_path) as url:
         assert url.endswith("/test")
-        assert _FakeContainer.starts == 1  # started fresh over the corrupt file
+        assert _FakeContainer.starts == 1
+
+
+def test_start_then_write_failure_stops_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _FakeContainer.starts = 0
+    _FakeContainer.stops = []
+
+    def _boom_write(_path: Path, _state: dict) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(xdist_backend, "_write_state", _boom_write)
+    # start() succeeds but recording state fails: the started container must be stopped
+    # (not leaked) and the real write error must propagate (not be swallowed).
+    with pytest.raises(OSError, match="disk full"), _acquire(tmp_path):
+        pass
+    assert _FakeContainer.starts == 1
+    assert _FakeContainer.stops == ["cid-1"]  # stopped despite never being recorded
 
 
 def test_stop_failure_warns_but_does_not_raise_and_unlinks(tmp_path: Path) -> None:

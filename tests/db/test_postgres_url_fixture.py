@@ -61,8 +61,29 @@ def test_no_docker_skips_when_not_required(
         raise RuntimeError("docker down")
 
     monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
+    # simulate Docker genuinely down so start-failure becomes a skip (not a real error)
+    monkeypatch.setattr(db_conftest.xdist_backend, "docker_available", lambda: False)
     with (
         pytest.raises(pytest.skip.Exception),
+        db_conftest._acquire_pg_server(tmp_path_factory, require_docker=False),
+    ):
+        pass
+
+
+def test_real_error_propagates_even_when_not_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A start failure while Docker IS up is a real error, not a masked skip."""
+    monkeypatch.delenv("KDIVE_TEST_PG_URL", raising=False)
+    _isolate_root(monkeypatch, tmp_path)
+
+    def _boom() -> tuple[str, str]:
+        raise RuntimeError("disk full writing state")
+
+    monkeypatch.setattr(db_conftest, "_start_postgres", _boom)
+    monkeypatch.setattr(db_conftest.xdist_backend, "docker_available", lambda: True)
+    with (
+        pytest.raises(RuntimeError),
         db_conftest._acquire_pg_server(tmp_path_factory, require_docker=False),
     ):
         pass

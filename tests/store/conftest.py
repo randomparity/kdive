@@ -148,9 +148,11 @@ def _acquire_minio_endpoint(
     root = xdist_backend.per_run_root(tmp_path_factory)
     manager = xdist_backend.shared_container(root, "minio", start=_start_minio, stop=_stop_minio)
     try:
-        endpoint = manager.__enter__()  # only container start can fail here
-    except Exception as exc:  # Docker daemon unreachable / image pull failure.
-        if require_docker:
+        # __enter__ runs the whole flock+read+start+write body, so only skip when Docker
+        # is genuinely down — a real error (disk full, write failure) must propagate.
+        endpoint = manager.__enter__()
+    except Exception as exc:
+        if require_docker or xdist_backend.docker_available():
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
     # Yield OUTSIDE the skip-catch: a readiness/bucket failure in the consumer must

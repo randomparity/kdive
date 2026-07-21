@@ -62,6 +62,24 @@ def test_require_docker_reraises_start_failure(
         pass
 
 
+def test_no_docker_skips_when_not_required(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("KDIVE_TEST_S3_URL", raising=False)
+    _isolate_root(monkeypatch, tmp_path)
+
+    def _boom() -> tuple[str, str]:
+        raise RuntimeError("docker down")
+
+    monkeypatch.setattr(store_conftest, "_start_minio", _boom)
+    monkeypatch.setattr(store_conftest.xdist_backend, "docker_available", lambda: False)
+    with (
+        pytest.raises(pytest.skip.Exception),
+        store_conftest._acquire_minio_endpoint(tmp_path_factory, require_docker=False),
+    ):
+        pass
+
+
 def test_readiness_error_propagates_not_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:

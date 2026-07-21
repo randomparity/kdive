@@ -15,7 +15,7 @@ import os
 import uuid
 import warnings
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -65,6 +65,18 @@ def with_database_name(url: str, dbname: str) -> str:
     return urlunsplit(parts._replace(path=f"/{dbname}"))
 
 
+def docker_available() -> bool:
+    """True if the Docker daemon answers a ping. Used to decide whether a container
+    failure means 'Docker is down' (skip) or a real error (propagate)."""
+    try:
+        from testcontainers.core.docker_client import DockerClient
+
+        DockerClient().client.ping()
+    except Exception:  # noqa: BLE001 - any failure means "not usable"
+        return False
+    return True
+
+
 @contextmanager
 def shared_container(
     root: Path,
@@ -87,10 +99,19 @@ def shared_container(
         if state is None:
             server_url, cid = start()
             state = {"url": server_url, "container_id": cid, "refcount": 1}
+            try:
+                _write_state(state_path, state)
+            except Exception:
+                # The container is started but its id was never recorded, so no later
+                # release can reap it — stop it now rather than leak it, then re-raise
+                # the real (non-Docker) write failure so it is not masked as a skip.
+                with suppress(Exception):
+                    stop(cid)
+                raise
         else:
             state["refcount"] += 1
             server_url = str(state["url"])
-        _write_state(state_path, state)
+            _write_state(state_path, state)
 
     try:
         yield server_url
@@ -134,10 +155,17 @@ def _read_state(state_path: Path) -> dict | None:
     try:
         return json.loads(state_path.read_text())
     except FileNotFoundError:
-        return None
+        return None  # legitimately absent → start fresh
     except json.JSONDecodeError:
-        # A worker SIGKILLed mid-write could leave partial JSON; treat it as absent
-        # (start fresh) rather than wedging every later worker.
+        # Present but unparseable. Our own writes are atomic (os.replace), so this is
+        # never a mid-write of ours — it means external tampering/truncation. Warn
+        # (don't silently mask) but still treat as absent so a stray file cannot wedge
+        # the whole suite; a genuine live container coexisting with a corrupt file is
+        # not producible by this code under the per-run root.
+        warnings.warn(
+            f"shared_container: corrupt state file {state_path}, starting fresh",
+            stacklevel=2,
+        )
         return None
 
 

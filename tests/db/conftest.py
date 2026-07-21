@@ -105,9 +105,11 @@ def _acquire_pg_server(
     root = xdist_backend.per_run_root(tmp_path_factory)
     manager = xdist_backend.shared_container(root, "pg", start=_start_postgres, stop=_stop_postgres)
     try:
-        server_url = manager.__enter__()  # only container start can fail here
-    except Exception as exc:  # Docker daemon unreachable / image pull failure.
-        if require_docker:
+        # __enter__ runs the whole flock+read+start+write body, so only skip when Docker
+        # is genuinely down — a real error (disk full, write failure) must propagate.
+        server_url = manager.__enter__()
+    except Exception as exc:
+        if require_docker or xdist_backend.docker_available():
             raise
         pytest.skip(f"Docker unavailable for testcontainers: {exc}")
     # Yield OUTSIDE the skip-catch: a provisioning/readiness failure in the consumer
