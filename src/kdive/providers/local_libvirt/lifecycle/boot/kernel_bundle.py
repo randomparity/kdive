@@ -88,9 +88,12 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
     is read so its bytes are not held in RAM across the module repack.
 
     Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent or the tar is
-            unreadable; ``CONFIGURATION_ERROR`` for a member-count or uncompressed-size bomb (the
-            ``.part`` modules tar is cleaned before the error escapes).
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent, the tar is
+            unreadable, or repacking the modules tar fails (e.g. ``ENOSPC`` on a tmpfs scratch —
+            the details name the scratch modules path so an operator is pointed at
+            ``KDIVE_INSTALL_SCRATCH`` sizing, not the staging kernel); ``CONFIGURATION_ERROR`` for
+            a member-count or uncompressed-size bomb (the ``.part`` modules tar is cleaned before
+            the error escapes).
     """
     modules_tmp = modules_dest.with_name(modules_dest.name + ".part") if modules_dest else None
     try:
@@ -105,10 +108,20 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
         if modules_tmp is not None:
             with contextlib.suppress(OSError):
                 modules_tmp.unlink()
+        # The fault is either reading/decompressing the combined tar or writing the repacked
+        # modules tar (a full tmpfs scratch surfaces as ENOSPC here). Name both destinations and
+        # keep the message neutral so a full-scratch operator is not misdirected at the staging
+        # kernel path; modules_dest is present only on a modules-needed run.
+        details: dict[str, object] = {
+            "op": "extract_kernel_bundle",
+            "kernel_dest": str(kernel_dest),
+        }
+        if modules_dest is not None:
+            details["modules_dest"] = str(modules_dest)
         raise CategorizedError(
-            "failed to read the combined kernel tar",
+            "failed to read the combined kernel tar or write the repacked modules tar",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "extract_kernel_bundle", "dest": str(kernel_dest)},
+            details=details,
         ) from exc
 
 

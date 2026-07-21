@@ -402,6 +402,25 @@ def test_install_default_scratch_stages_intermediates_in_staging(tmp_path: Path)
     assert writer.modules_tar == tmp_path / str(_SYS) / str(_RUN) / "modules.tar.gz"
 
 
+def test_install_reclaims_scratch_intermediates_when_inject_fails(tmp_path: Path) -> None:
+    # A mid-install failure (inject fault) must still reclaim the scratch intermediates and reap the
+    # empty per-Run scratch dir — otherwise the multi-GB bytes stay pinned in a tmpfs scratch until
+    # a retry. The try/finally in _stage_install_artifacts runs cleanup on failure too (ADR-0399).
+    staging = tmp_path / "staging"
+    scratch = tmp_path / "scratch"
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events, fail=True)  # inject raises INFRASTRUCTURE_FAILURE
+    inst = _install(conn=conn, staging_root=staging, scratch_root=scratch, kernel_writer=writer)
+
+    with pytest.raises(CategorizedError):
+        inst.install(_request(method=CaptureMethod.KDUMP))
+
+    scratch_dir = scratch / str(_SYS) / str(_RUN)
+    # intermediates reclaimed and the empty scratch dir reaped despite the failure
+    assert not scratch_dir.exists()
+
+
 @pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0,
     reason="root bypasses the directory-mode write check, so mkdir would not raise",

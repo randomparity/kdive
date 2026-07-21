@@ -339,30 +339,37 @@ class LocalLibvirtInstaller:
         combined_tar = scratch_dir / "kernel.tar.gz"
         modules_tar = scratch_dir / "modules.tar.gz"
         vmlinux = scratch_dir / "vmlinux"
-        self._fetch_kernel(request.kernel_ref, combined_tar)
-        kernel_path = staging_dir / "kernel"
-        # kdump and debuginfo installs need the module tree in the guest; a plain boot does not.
-        # A modules-needed run repacks lib/modules/ in the same pass extract_kernel_bundle makes
-        # over boot/vmlinuz, so the combined tar is decompressed once, not twice (ADR-0399).
-        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
-        modules_found = extract_kernel_bundle(
-            combined_tar, kernel_path, modules_tar if needs_modules else None
-        )
-        initrd_path = self._stage_initrd(request, staging_dir)
-        modules_injected = False
-        if modules_found:
-            self._inject_built_modules(
-                request.system_id, modules_tar, kernel_path, request.debuginfo_ref, vmlinux
+        try:
+            self._fetch_kernel(request.kernel_ref, combined_tar)
+            kernel_path = staging_dir / "kernel"
+            # kdump and debuginfo installs need the module tree in the guest; a plain boot does not.
+            # A modules-needed run repacks lib/modules/ in the same pass extract_kernel_bundle makes
+            # over boot/vmlinuz, so the combined tar is decompressed once, not twice (ADR-0399).
+            needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
+            modules_found = extract_kernel_bundle(
+                combined_tar, kernel_path, modules_tar if needs_modules else None
             )
-            modules_injected = True
-        self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
-        if scratch_dir != staging_dir:
-            # A dedicated scratch dir holds nothing durable once the intermediates are reclaimed,
-            # so remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
-            # per install is unbounded inode growth. Best-effort: a racing/non-empty dir is left.
-            with contextlib.suppress(OSError):
-                scratch_dir.rmdir()
-        return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
+            initrd_path = self._stage_initrd(request, staging_dir)
+            modules_injected = False
+            if modules_found:
+                self._inject_built_modules(
+                    request.system_id, modules_tar, kernel_path, request.debuginfo_ref, vmlinux
+                )
+                modules_injected = True
+            return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
+        finally:
+            # Reclaim the intermediates on every exit, not just success: a mid-install failure
+            # (inject fault, bad debuginfo_ref) would otherwise leave the multi-GB combined/modules/
+            # vmlinux bytes resident — cheap on disk, but pinned RAM on a tmpfs scratch until retry
+            # overwrites them. Delete is best-effort/idempotent and re-fetch is temp-then-rename, so
+            # unconditional cleanup is retry-safe and bounds tmpfs use to one in-flight install.
+            self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
+            if scratch_dir != staging_dir:
+                # A dedicated scratch dir holds nothing durable once the intermediates are gone, so
+                # remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
+                # per install is unbounded inode growth. Best-effort: a racing/nonempty dir stays.
+                with contextlib.suppress(OSError):
+                    scratch_dir.rmdir()
 
     def _stage_initrd(self, request: InstallRequest, staging_dir: Path) -> Path | None:
         if request.initrd_ref is None:
