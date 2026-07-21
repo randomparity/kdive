@@ -74,11 +74,14 @@ prose:
   default fails until the doc is resynced.
 - **Boot-member fact, bound to the contract** — for each arch the section must contain
   `BOOT_MEMBER_FORMATS[arch].container` verbatim; and for any arch whose boot format is an ELF
-  kernel, the section must also contain the `strip -s` command token. "Is an ELF kernel" is read
-  from the contract's declared `magic` — specifically a `MagicPin` at offset 0 whose bytes are
-  the ELF magic (`\x7fELF`) — not from a substring of the human-readable `container` display
-  string, so renaming that display string cannot silently drop an arch from the strip-required
-  set. This ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage,
+  kernel, the section must also contain a `strip` invocation with the `-s` flag. "Is an ELF
+  kernel" is read from the contract's declared `magic` via a **prefix** match — a `MagicPin` at
+  offset 0 whose `hex` *starts with* `_ELF_MAGIC.hex()` (`7f454c46`), **not** an equality check:
+  ppc64le's real offset-0 pin is `_ELF64LE_PREFIX` = `\x7fELF\x02\x01` (hex `7f454c460201`), so
+  `pin.hex == _ELF_MAGIC.hex()` would never match and the strip-required set would be silently
+  empty — a dead guard. Reading the pin rather than a substring of the human-readable
+  `container` display string means renaming that display string cannot silently drop an arch
+  from the strip-required set. This ties the single most load-bearing, most-error-prone hint — ppc64le has no bzImage,
   so strip the build-tree `vmlinux` first — to a source signal rather than leaving it as
   unguarded free prose. Binding to `strip -s` (not the bare word `strip`, which appears
   incidentally in "the bzImage is already stripped") pins the actionable command's presence;

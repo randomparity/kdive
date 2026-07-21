@@ -127,14 +127,24 @@ equals it):
   arch ("powerpc has no bzImage") does not false-trip. A `_TRAITS` row added without a section
   fails here.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
-  in that arch's section, so a renamed container is caught.
+  *verbatim* in that arch's section, so a renamed container is caught. The exact required
+  substrings today are `bzImage` (x86_64) and `ppc64le ELF (vmlinux)` (ppc64le) — the doc author
+  must embed those literals deliberately (the doc already does), not a natural-language alias
+  like "the stripped ELF vmlinux", or the assertion fails at test time.
 - **Strip-required predicate (the load-bearing rule):** for any arch whose boot format is an
-  ELF kernel, assert that arch's section contains the `strip -s` command token. "Is an ELF
-  kernel" is read from the contract's declared `magic` — a `MagicPin` at offset 0 carrying the
-  ELF magic (`\x7fELF`) — not from a substring of the human-readable `container` display string,
-  so a display-string rename cannot silently drop an arch from the strip-required set. Binding to
-  `strip -s` (not the bare word `strip`, which appears incidentally in "the bzImage is already
-  stripped") avoids a trivially-satisfied common-word match. Two limits, stated so a third-arch
+  ELF kernel, assert that arch's section contains a `strip` invocation with the `-s` flag. "Is
+  an ELF kernel" is read from the contract's declared `magic` via a **prefix** match — a
+  `MagicPin` at offset 0 whose `hex` *starts with* `_ELF_MAGIC.hex()` (`7f454c46`), **not**
+  equality: ppc64le's actual offset-0 pin is `_ELF64LE_PREFIX` = `\x7fELF\x02\x01` (hex
+  `7f454c460201`), so an equality check `pin.hex == _ELF_MAGIC.hex()` would never match and the
+  strip-required set would be silently empty — a dead guard shipping green. Use
+  `pin.offset == 0 and pin.hex.startswith(_ELF_MAGIC.hex())`. Reading the *pin* rather than the
+  human-readable `container` display string means a display-string rename cannot drop an arch
+  from the set. The `-s`-flag match must tolerate the cross-compile prefix and quoting the doc
+  uses (`"${CROSS_COMPILE}strip" -s …`), so match a `strip`-token line that also carries a
+  standalone `-s` argument (e.g. regex `strip.*\s-s\b` within the section), **not** the bare
+  literal `"strip -s"` (which the quote in `strip" -s` would defeat) and **not** the bare word
+  `strip` (which appears incidentally in "the bzImage is already stripped"). Two limits, stated so a third-arch
   author fixes the right lever: (1) the offset-0 ELF pin is a *proxy* for the real condition (an
   unstripped DWARF-heavy image overruns the scan bound), exact for both current arches; (2) the
   guard reads the *declared* pins, not image bytes — ppc64le declares both the offset-0
@@ -170,6 +180,12 @@ it has one home to update rather than two.
    section, if a `BOOT_MEMBER_FORMATS` container name changes without a doc edit, or if a
    `crashkernel` default changes without a doc edit. (Verified by temporarily perturbing the
    source in the red step, then reverting.)
+   - **Strip-guard red-step (the highest-value case, so it is called out separately):** deleting
+     or altering the ppc64le `strip -s` invocation (offset-0 ELF pin unchanged) must fail the
+     suite. And the guard must positively assert the strip-required set is **non-empty** for the
+     current arch table — so a mis-implemented ELF predicate (e.g. the equality bug in the
+     Drift-guard section) that empties the set is itself a test failure, not a silent green pass.
+     Both are red-step-verified.
 4. `just ci` is green, including `resources-docs-check`, `doc-constants-check`,
    `served-doc-links`, `lint`, `type`, and `test`.
 
