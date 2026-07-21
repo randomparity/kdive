@@ -1122,3 +1122,42 @@ def test_list_jobs_system_scoped_job_excluded_from_investigation_filter(
         assert [r.data["kind"] for r in by_investigation.items] == ["install"]
 
     asyncio.run(_run())
+
+
+async def _enqueue_teardown(pool: AsyncConnectionPool, dedup: str) -> str:
+    async with pool.connection() as conn:
+        job = await queue.enqueue(
+            conn,
+            JobKind.TEARDOWN,
+            SystemPayload(system_id=str(uuid4())),
+            Authorizing(principal="p", project="proj"),
+            dedup,
+        )
+    return str(job.id)
+
+
+def test_get_succeeded_teardown_job_steers_to_allocation_release(migrated_url: str) -> None:
+    # End-to-end: an agent polling the completed teardown job through the generic jobs.get
+    # renderer is pointed at allocations.release, not just jobs.get (#1385, ADR-0414).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_teardown(pool, "teardown-done")
+            await _set_state(pool, job_id, JobState.SUCCEEDED)
+            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert resp.status == "succeeded"
+        assert resp.data == {"kind": "teardown"}
+        assert resp.suggested_next_actions == ["jobs.get", "allocations.release"]
+
+    asyncio.run(_run())
+
+
+def test_get_running_teardown_job_omits_allocation_release(migrated_url: str) -> None:
+    # A not-yet-terminal teardown froze nothing to release, so the release steer must be absent.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue_teardown(pool, "teardown-running")
+            await _set_state(pool, job_id, JobState.RUNNING)
+            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+        assert "allocations.release" not in resp.suggested_next_actions
+
+    asyncio.run(_run())

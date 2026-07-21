@@ -397,6 +397,11 @@ user}`` for ``ssh -J <jump_host> ...``, without a contract change.
 
 Enqueue teardown for a System. Requires admin on the System's project.
 
+Teardown drives the System to `torn_down` but leaves its Allocation `active`; once the
+teardown job succeeds, release the freed Allocation with `allocations.release` (the
+completed job and the already-`torn_down` replay both name it in
+`suggested_next_actions`).
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
