@@ -72,6 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface presigned-PUT footguns on the upload response
 - Nudge effective_config upload when complete_build lacks it
 - Opt-in KDIVE_INSTALL_SCRATCH root for transient intermediates (#1350)
+- Add get_artifact_stream sharing _open_get with get_artifact (#1351)
+- Stream the combined tar into extract_kernel_bundle (#1351)
 
 ### Changed
 
@@ -91,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single source of truth for the tier list
 - Single-pass extract_kernel_bundle over the combined tar (#1350)
 - Dedup scratch-separate check, run-dir error, and .part cleanup (#1350)
+- Generalize failed-install cleanup to kernel and initrd (#1351)
 
 ### Documentation
 
@@ -215,6 +218,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden #1350 plan after adversarial review (RAM, single-open test, ASCII)
 - Document DWARF cost + scratch tradeoff; link #1351 streaming follow-up (#1350)
 - Mark ADR-0399 Accepted; sync external-build-upload resource snapshot (#1350)
+- Spec + ADR-0400 for streaming combined-tar fetch (#1351)
+- Weigh stream-to-file alternative and streaming residuals in ADR-0400
+- Pin the streaming reader contract and mid-stream fault test in spec
+- Implementation plan for streaming combined-tar fetch (#1351)
+- Fix plan phase ordering, scratch reap, and MinIO coverage (#1351)
 
 ### Fixed
 
@@ -281,6 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name debuginfo use case and cost in feature advice (#1350)
 - Early-exit boot-only extract and reap empty scratch dirs (#1350)
 - Diagnosable repack failure and always-run scratch cleanup (#1350)
+- Reclaim staging kernel on a failed install (#1351)
 
 ### Build
 
