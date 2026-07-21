@@ -6,6 +6,7 @@ import contextlib
 import tarfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import IO
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.staged_write import write_staged_bytes
@@ -66,8 +67,8 @@ def _tar_member_path(name: str) -> str:
     return name.lstrip("/")
 
 
-def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: Path | None) -> bool:
-    """Extract ``boot/vmlinuz`` and, optionally, repack ``lib/modules/`` in one decompression pass.
+def extract_kernel_bundle(source: IO[bytes], kernel_dest: Path, modules_dest: Path | None) -> bool:
+    """Extract ``boot/vmlinuz`` and, optionally, repack ``lib/modules/`` in one streaming pass.
 
     The unified ``kernel`` artifact is a gzip tar of ``boot/vmlinuz`` + ``lib/modules/<ver>/``
     (ADR-0234). libvirt's direct-kernel ``<kernel>`` element needs a raw kernel-image path — a
@@ -76,28 +77,31 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
     extraction is arch-opaque by design: the arch was already validated at upload (ADR-0343), so
     this reads no magic and copies the member verbatim regardless of arch.
 
+    ``source`` is a forward-only binary reader (the S3 body reader from
+    ``ObjectStore.get_artifact_stream``, ADR-0400) opened in ``tarfile`` stream mode (``r|gz``): the
+    combined tar is neither fully materialized as ``bytes`` nor written to disk before extraction.
     When ``modules_dest`` is given (a kdump or debuginfo install that needs the module tree in the
     guest), the same forward walk repacks the ``lib/modules/`` subtree into ``modules_dest`` and
     returns whether a subtree was found; when it is ``None`` only the boot member is read (the walk
-    stops there) and the return is ``False``. The former two helpers opened the tar twice: the
-    repack pass had to decompress the boot member again just to skip past it into ``lib/modules/``.
-    This single pass decompresses the boot member once and reuses it for both the extract and the
-    skip-into-modules, so a modules-needed run saves one boot-member decompression (meaningful when
-    that member is a large ppc64le ELF), and a boot-only run early-exits at the boot member exactly
-    as the old next()-based extract did (ADR-0399, #1350). The boot member is written the instant it
-    is read so its bytes are not held in RAM across the module repack.
+    stops there) and the return is ``False``. The single pass decompresses the boot member once and
+    reuses it for both the extract and the skip-into-modules, so a modules-needed run saves one
+    boot-member decompression (meaningful when that member is a large ppc64le ELF), and a boot-only
+    run stops at the boot member so the caller can close the reader and abort the rest of the
+    download (ADR-0399/0400, #1350/#1351). The boot member is written the instant it is read so its
+    bytes are not held in RAM across the module repack.
 
     Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent, the tar is
-            unreadable, or repacking the modules tar fails (e.g. ``ENOSPC`` on a tmpfs scratch —
-            the details name the scratch modules path so an operator is pointed at
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent, the stream is
+            unreadable/undecompressable, or repacking the modules tar fails (e.g. ``ENOSPC`` on a
+            tmpfs scratch — the details name the scratch modules path so an operator is pointed at
             ``KDIVE_INSTALL_SCRATCH`` sizing, not the staging kernel); ``CONFIGURATION_ERROR`` for
             a member-count or uncompressed-size bomb (the ``.part`` modules tar is cleaned before
-            the error escapes).
+            the error escapes). A mid-stream store fault the reader has already mapped to a
+            ``CategorizedError`` propagates through unwrapped (ADR-0400).
     """
     modules_tmp = modules_dest.with_name(modules_dest.name + ".part") if modules_dest else None
     try:
-        return _scan_combined_tar(combined_tar, kernel_dest, modules_dest, modules_tmp)
+        return _scan_combined_tar(source, kernel_dest, modules_dest, modules_tmp)
     except (OSError, tarfile.TarError) as exc:
         # The fault is either reading/decompressing the combined tar or writing the repacked
         # modules tar (a full tmpfs scratch surfaces as ENOSPC here). Name both destinations and
@@ -125,14 +129,14 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
 
 
 def _scan_combined_tar(
-    combined_tar: Path, kernel_dest: Path, modules_dest: Path | None, modules_tmp: Path | None
+    source: IO[bytes], kernel_dest: Path, modules_dest: Path | None, modules_tmp: Path | None
 ) -> bool:
-    """Single forward pass: extract the boot member and repack modules into ``modules_tmp``."""
+    """Single forward streaming pass: extract the boot member, repack modules into the temp tar."""
     boot_written = False
     found = False
     total = 0
     with contextlib.ExitStack() as stack:
-        archive = stack.enter_context(tarfile.open(combined_tar, "r:gz"))
+        archive = stack.enter_context(tarfile.open(fileobj=source, mode="r|gz"))
         out = (
             stack.enter_context(tarfile.open(modules_tmp, "w:gz"))
             if modules_tmp is not None
@@ -144,9 +148,10 @@ def _scan_combined_tar(
                 boot_written = _extract_boot_member(archive, member, kernel_dest)
                 if boot_written and out is None:
                     # Boot-only run (no modules repack): stop at the boot member instead of walking
-                    # the rest of the tar. In "r:gz" mode advancing past a member decompresses it,
-                    # so iterating to the end would decompress the whole (DWARF-bloated) module tree
-                    # just to read boot/vmlinuz. This is the early exit the old next()-extract had.
+                    # the rest of the tar. In "r|gz" stream mode advancing past a member reads (and
+                    # discards) its bytes from the S3 stream, so iterating to the end would pull the
+                    # whole (DWARF-bloated) module tree off the network just to read boot/vmlinuz.
+                    # Stopping lets the caller close the reader and abort the rest of the download.
                     break
             elif out is not None and normalized.startswith(_MODULES_MEMBER_PREFIX):
                 if ".." in normalized.split("/"):
@@ -157,7 +162,7 @@ def _scan_combined_tar(
         raise CategorizedError(
             "combined kernel tar has no boot/vmlinuz member",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"member": _KERNEL_BUNDLE_BOOT_MEMBER, "tar": str(combined_tar)},
+            details={"member": _KERNEL_BUNDLE_BOOT_MEMBER},
         )
     if modules_dest is not None and modules_tmp is not None:
         if found:

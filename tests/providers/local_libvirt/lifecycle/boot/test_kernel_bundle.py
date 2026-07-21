@@ -1,4 +1,4 @@
-"""Arch-parameterized guards for the byte-agnostic kernel-bundle host-side path (#1146, #1350).
+"""Arch-parameterized guards for the byte-agnostic kernel-bundle host-side path (#1146/#1350/#1351).
 
 The install plane's ``extract_kernel_bundle`` / ``_read_release`` stage whatever ``boot/vmlinuz``
 bytes an already-validated upload carries (ADR-0343/0344) — a bzImage on x86_64, an ELF
@@ -6,10 +6,11 @@ bytes an already-validated upload carries (ADR-0343/0344) — a bzImage on x86_6
 byte-identically and a ``.ppc64le`` module version is handled, so the day someone re-adds a
 bzImage-only assumption to the host-side path, ppc64le fails CI here.
 
-``extract_kernel_bundle`` (ADR-0399) makes a *single* decompression pass over the combined tar,
-extracting ``boot/vmlinuz`` and — when a ``modules_dest`` is given — repacking the ``lib/modules/``
-subtree in the same pass; the two former helpers (``extract_boot_vmlinuz`` /
-``repack_modules_subtree``) are gone. A guard here asserts the combined tar is opened once.
+``extract_kernel_bundle`` (ADR-0399/0400) makes a *single* streaming decompression pass over the
+combined tar read from an ``IO[bytes]`` reader (``tarfile`` ``r|gz`` stream mode), extracting
+``boot/vmlinuz`` and — when a ``modules_dest`` is given — repacking the ``lib/modules/`` subtree in
+the same pass. A guard here asserts the combined tar is opened once in read/stream mode, and another
+asserts a mid-stream reader fault surfaces as a typed ``INFRASTRUCTURE_FAILURE`` (ADR-0400).
 
 Scope: the *host-side tar I/O* only. Cross-arch module indexing (``depmod``) is covered separately
 in ``test_module_indexing.py`` — as of #1148 it runs host-side, so it is no longer a libguestfs
@@ -21,6 +22,7 @@ from __future__ import annotations
 import io
 import tarfile
 from pathlib import Path
+from typing import IO, Any, cast
 
 import pytest
 
@@ -77,6 +79,30 @@ def _combined_tar(
     return buf.getvalue()
 
 
+class _FaultReader(io.RawIOBase):
+    """A reader that serves ``prefix`` then raises a store-mapped ``CategorizedError`` on the next
+    read, standing in for a mid-stream S3 transport fault the store's reader has already mapped."""
+
+    def __init__(self, prefix: bytes) -> None:
+        self._prefix = prefix
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any, /) -> int:
+        if self._pos >= len(self._prefix):
+            raise CategorizedError(
+                "object-store get_object for 'k' failed: ReadTimeoutError",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"key": "k", "s3_error_code": "ReadTimeoutError"},
+            )
+        count = min(len(buffer), len(self._prefix) - self._pos)
+        buffer[:count] = self._prefix[self._pos : self._pos + count]
+        self._pos += count
+        return count
+
+
 @pytest.mark.parametrize(
     ("arch", "boot_bytes"),
     [
@@ -92,8 +118,7 @@ def test_extract_kernel_bundle_round_trips_the_boot_member_byte_identically(
     With ``modules_dest=None`` (the common non-kdump/non-debuginfo run) only the boot member is
     read: no modules tar is written and the found flag is False.
     """
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(boot_bytes, version=f"1.0-{arch}"))
+    combined = io.BytesIO(_combined_tar(boot_bytes, version=f"1.0-{arch}"))
     dest = tmp_path / "kernel"
 
     found = extract_kernel_bundle(combined, dest, None)
@@ -105,8 +130,7 @@ def test_extract_kernel_bundle_round_trips_the_boot_member_byte_identically(
 def test_extract_kernel_bundle_handles_a_dot_slash_prefixed_ppc64le_member(tmp_path: Path) -> None:
     """A ``./boot/vmlinuz`` member (leading ./) still resolves — covers ppc64le tar layouts."""
     boot_bytes = _ppc64le_elf_boot_member()
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(boot_bytes, member_name="./boot/vmlinuz"))
+    combined = io.BytesIO(_combined_tar(boot_bytes, member_name="./boot/vmlinuz"))
     dest = tmp_path / "kernel"
 
     extract_kernel_bundle(combined, dest, None)
@@ -119,24 +143,43 @@ def test_extract_kernel_bundle_missing_boot_is_infrastructure_failure(tmp_path: 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _tar_add(tar, f"lib/modules/{_PPC64LE_VERSION}/modules.dep", b"")
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(buf.getvalue())
 
     with pytest.raises(CategorizedError) as excinfo:
-        extract_kernel_bundle(combined, tmp_path / "kernel", None)
+        extract_kernel_bundle(io.BytesIO(buf.getvalue()), tmp_path / "kernel", None)
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_extract_kernel_bundle_unreadable_tar_is_infrastructure_failure(tmp_path: Path) -> None:
     """A corrupt (non-gzip-tar) artifact is a clean INFRASTRUCTURE_FAILURE, not a raw TarError."""
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(b"not a gzip tar")
-
     with pytest.raises(CategorizedError) as excinfo:
-        extract_kernel_bundle(combined, tmp_path / "kernel", None)
+        extract_kernel_bundle(io.BytesIO(b"not a gzip tar"), tmp_path / "kernel", None)
 
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def test_extract_kernel_bundle_maps_mid_stream_reader_fault_to_infrastructure_failure(
+    tmp_path: Path,
+) -> None:
+    """A mid-stream reader fault (a store-mapped CategorizedError) survives the tarfile r|gz stack.
+
+    The store's reader maps a mid-download BotoCoreError to INFRASTRUCTURE_FAILURE with a
+    ``{key, s3_error_code}`` detail (ADR-0400). This drives that CategorizedError up from deep
+    inside ``tarfile``'s stream reader and asserts it escapes ``extract_kernel_bundle`` *unwrapped*
+    — i.e. it is NOT caught by the extractor's ``(OSError, tarfile.TarError)`` handler and
+    re-mapped to the generic ``{op, kernel_dest}`` detail (spec AC 2).
+    """
+    full = _combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION)
+    reader = cast(IO[bytes], _FaultReader(full[: len(full) // 2]))  # truncate mid-stream
+
+    with pytest.raises(CategorizedError) as excinfo:
+        extract_kernel_bundle(reader, tmp_path / "kernel", tmp_path / "modules.tar.gz")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert (
+        excinfo.value.details.get("key") == "k"
+    )  # the store's detail, not the extractor's generic
+    assert excinfo.value.details.get("s3_error_code") == "ReadTimeoutError"
 
 
 @pytest.mark.parametrize("version", [_X86_VERSION, _PPC64LE_VERSION])
@@ -147,8 +190,7 @@ def test_extract_kernel_bundle_repacks_the_modules_subtree(version: str, tmp_pat
     round-trip untouched — a naive suffix-strip would corrupt the injected /lib/modules/<ver> path.
     """
     boot_bytes = _ppc64le_elf_boot_member()
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(boot_bytes, version=version))
+    combined = io.BytesIO(_combined_tar(boot_bytes, version=version))
     kernel_dest = tmp_path / "kernel"
     modules_tar = tmp_path / "modules.tar.gz"
 
@@ -166,54 +208,53 @@ def test_extract_kernel_bundle_returns_false_when_no_modules_present(tmp_path: P
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _tar_add(tar, "boot/vmlinuz", _ppc64le_elf_boot_member())
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(buf.getvalue())
     modules_tar = tmp_path / "modules.tar.gz"
 
-    assert extract_kernel_bundle(combined, tmp_path / "kernel", modules_tar) is False
+    assert (
+        extract_kernel_bundle(io.BytesIO(buf.getvalue()), tmp_path / "kernel", modules_tar) is False
+    )
     assert not modules_tar.exists()
 
 
 def test_extract_kernel_bundle_opens_the_combined_tar_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Performance-regression guard (ADR-0399): the combined tar is decompressed once, not twice.
+    """Single-pass guard (ADR-0399/0400): the combined tar is opened exactly once in read/stream
+    mode, over a ``fileobj`` (not a path), with ``mode="r|gz"``.
 
-    Count reads of the *combined-tar path* specifically — the merged pass also opens the repacked
-    modules tar in write mode, so a bare total open count is 2, not 1.
+    The merged pass also opens the repacked modules tar in write mode (``w:gz``), so a bare total
+    open count is 2, not 1 — count only the read-mode opens.
     """
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION))
-    modules_tar = tmp_path / "modules.tar.gz"
-
+    combined = io.BytesIO(_combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION))
     real_open = tarfile.open
-    combined_read_opens = 0
+    read_opens: list[dict[str, object]] = []
 
     def _counting_open(name=None, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
-        nonlocal combined_read_opens
-        if Path(str(name)) == combined and mode.startswith("r"):
-            combined_read_opens += 1
+        effective_mode = kwargs.get("mode", mode)
+        if str(effective_mode).startswith("r"):
+            read_opens.append({"mode": effective_mode, "fileobj": kwargs.get("fileobj")})
         return real_open(name, mode, *args, **kwargs)
 
     monkeypatch.setattr(kernel_bundle.tarfile, "open", _counting_open)
 
-    extract_kernel_bundle(combined, tmp_path / "kernel", modules_tar)
+    extract_kernel_bundle(combined, tmp_path / "kernel", tmp_path / "modules.tar.gz")
 
-    assert combined_read_opens == 1
+    assert len(read_opens) == 1
+    assert read_opens[0]["mode"] == "r|gz"
+    assert read_opens[0]["fileobj"] is combined
 
 
 def test_extract_kernel_bundle_boot_only_stops_at_the_boot_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Boot-only (modules_dest=None) must not walk the whole tar (ADR-0399, #1350 regression guard).
+    """Boot-only (modules_dest=None) must not walk the whole tar (ADR-0399/0400, #1350 guard).
 
-    In ``r:gz`` mode advancing past a member decompresses it, so iterating to the end would
-    decompress the whole (DWARF-bloated) module tree just to read boot/vmlinuz. With boot/vmlinuz
-    first, extraction consumes exactly one member and stops — the early exit the former next()-based
-    extract had.
+    In ``r|gz`` stream mode advancing past a member reads (and discards) its bytes from the stream,
+    so iterating to the end would pull the whole (DWARF-bloated) module tree off S3 just to read
+    boot/vmlinuz. With boot/vmlinuz first, extraction consumes exactly one member and stops —
+    closing the reader after the break aborts the rest of the download.
     """
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION))
+    combined = io.BytesIO(_combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION))
 
     real_capped = kernel_bundle.capped_tar_members
     consumed = 0
@@ -253,8 +294,7 @@ def test_extract_kernel_bundle_rejects_an_oversize_boot_member(
 ) -> None:
     # A boot member declaring a huge size is a decompression bomb: reject before read() allocates.
     monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 4)
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member()))
+    combined = io.BytesIO(_combined_tar(_ppc64le_elf_boot_member()))
     with pytest.raises(CategorizedError) as exc:
         extract_kernel_bundle(combined, tmp_path / "kernel", None)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -267,14 +307,12 @@ def test_extract_kernel_bundle_rejects_an_oversize_module_tree(
     # The bound is set above the boot member but below the module tree so the boot extract succeeds
     # first and only the modules pass trips the cap.
     monkeypatch.setattr(kernel_bundle, "MAX_KERNEL_TAR_UNCOMPRESSED_BYTES", 100)
-    combined = tmp_path / "kernel.tar.gz"
     big_modules = io.BytesIO()
     with tarfile.open(fileobj=big_modules, mode="w:gz") as tar:
         _tar_add(tar, "boot/vmlinuz", _ppc64le_elf_boot_member())
         _tar_add(tar, f"lib/modules/{_PPC64LE_VERSION}/big.ko", b"x" * 200)
-    combined.write_bytes(big_modules.getvalue())
     dest = tmp_path / "modules.tar.gz"
     with pytest.raises(CategorizedError) as exc:
-        extract_kernel_bundle(combined, tmp_path / "kernel", dest)
+        extract_kernel_bundle(io.BytesIO(big_modules.getvalue()), tmp_path / "kernel", dest)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert not dest.with_name(dest.name + ".part").exists()
