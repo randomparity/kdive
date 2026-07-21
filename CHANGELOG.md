@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State the full deadline contract on upload responses
 - Surface presigned-PUT footguns on the upload response
 - Nudge effective_config upload when complete_build lacks it
+- Opt-in KDIVE_INSTALL_SCRATCH root for transient intermediates (#1350)
 
 ### Changed
 
@@ -88,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use require_tools for the tcg emulator check
 - Pass the staged rootfs to the mint heredoc via argv
 - Single source of truth for the tier list
+- Single-pass extract_kernel_bundle over the combined tar (#1350)
+- Dedup scratch-separate check, run-dir error, and .part cleanup (#1350)
 
 ### Documentation
 
@@ -208,6 +211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Point Task 3 at the tool-description test registry (#1336)
 - State deadline scope and non-constraint in tool docstrings
 - Point agents at images.kernel_config as starting config
+- Spec + ADR-0399 + plan for debuginfo advice and single-pass install (#1350)
+- Harden #1350 plan after adversarial review (RAM, single-open test, ASCII)
+- Document DWARF cost + scratch tradeoff; link #1351 streaming follow-up (#1350)
+- Mark ADR-0399 Accepted; sync external-build-upload resource snapshot (#1350)
 
 ### Fixed
 
@@ -271,6 +278,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name a checksum-bypass upload distinctly from a mismatch
 - Name the scan bound and ppc64le strip remedy on combined-tar rejection
 - Reject chunked upload below the single-PUT cap
+- Name debuginfo use case and cost in feature advice (#1350)
+- Early-exit boot-only extract and reap empty scratch dirs (#1350)
+- Diagnosable repack failure and always-run scratch cleanup (#1350)
 
 ### Build
 
