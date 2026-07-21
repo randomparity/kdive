@@ -175,7 +175,13 @@ def _register_images_extend(app: FastMCP, pool: AsyncConnectionPool) -> None:
             str, Field(description="Mandatory non-blank break-glass justification (audited).")
         ],
     ) -> ToolResponse:
-        """Extend an image catalog entry lease."""
+        """Re-arm a private image entry's expiry lease (platform-admin break-glass).
+
+        Gated on ``platform_admin``: records an audited break-glass row, then re-arms the
+        entry's ``expires_at`` to ``now + seconds``, clamped to the per-image lifetime
+        ceiling. Extending the lease keeps the backing object alive past its original
+        lifetime and defers the retention sweep; ``reason`` is audited.
+        """
         return await extend(
             pool, current_context(), image_id=image_id, seconds=seconds, reason=reason
         )
