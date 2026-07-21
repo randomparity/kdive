@@ -106,7 +106,9 @@ allows, and the container-count criteria are verified by a live `just test` run.
   `DROP DATABASE IF EXISTS … (FORCE)` / empty-bucket. *Verify:* one test provisions two
   distinct-token namespaces against the same server and asserts both succeed
   independently; a second asserts that re-provisioning the *same* `kdive_test_<worker>_<token>`
-  name drops-and-recreates without error.
+  name drops-and-recreates without error. (Because uuid names never recur in normal
+  operation, this `IF EXISTS … FORCE` guards only a same-token retry, not cross-run
+  crash recovery — that is the required operator sweep in the edge-case section.)
 - **AC5 — `KDIVE_REQUIRE_DOCKER` contract intact.** With Docker unavailable and no
   override: unset → the fixture skips; `KDIVE_REQUIRE_DOCKER=1` → it hard-fails
   (re-raises), on both the import-guard and container-start failure paths. *Verify:*
@@ -171,9 +173,15 @@ allows, and the container-count criteria are verified by a live `just test` run.
   targets run B's in-use database (the names differ globally). *Residual:* a crashed
   run leaves its uuid-named databases/buckets on a *persistent* override backend (the
   container path has no leftover — the container is gone), and because uuid names never
-  repeat they are not reclaimed by name-reuse. Bounded, self-describing (`kdive_test_*`
-  prefix); swept by `DROP DATABASE`-ing stale `kdive_test_*` or recreating the compose
-  volume. Documented in the fixture docstrings.
+  repeat they are not reclaimed by name-reuse. This is **bounded per crash
+  (~worker_count namespaces) but unbounded in aggregate without cleanup** — orphans
+  accumulate monotonically across crashed runs. No age-based auto-sweep is added
+  (dropping by age on a *shared* backend could drop a concurrent long-running run's
+  database — a worse footgun than the leak). Instead, periodic cleanup of the
+  self-describing `kdive_test_*` / `kdive-test-*` prefix on a persistent override
+  backend (a prefix `DROP DATABASE` sweep, or recreating the compose volume) is a
+  **required** operator task, documented in the fixture docstrings and the compose
+  runbook — not an optional remedy. The default container path needs none of this.
 - **Shared connection ceiling.** One server now holds every worker's pool. The shared
   container is started with a raised `max_connections`; the override backend must be
   sized likewise (documented; `just compose-up` bumped). Without this, `-n auto` can

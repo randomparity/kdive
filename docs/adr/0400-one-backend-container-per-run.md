@@ -154,9 +154,12 @@ the algorithm rather than duplicating it.
 - **Residual — leftover uuid namespaces on a persistent override backend.** A crashed
   run leaves its `kdive_test_<worker>_<token>` databases/buckets on a *persistent*
   override backend (the container path has none — the container is gone); because uuid
-  tokens never repeat, these are not reclaimed by name-reuse. Bounded,
-  prefix-identifiable, and swept by dropping stale `kdive_test_*` or recreating the
-  compose volume. Documented in the fixture docstrings.
+  tokens never repeat, these are not reclaimed by name-reuse — bounded per crash but
+  unbounded in aggregate without cleanup. No age-based auto-sweep is added (dropping by
+  age on a shared backend could drop a concurrent run's database). Periodic prefix
+  cleanup of `kdive_test_*` on a persistent override backend is therefore a **required**
+  operator task (documented in the fixture docstrings and the compose runbook), not an
+  optional remedy. The default container path needs none.
 - POSIX-only coordination (`fcntl.flock`). The suite already targets Linux/macOS
   developer and CI hosts; Windows is out of scope for the live/db suites.
 - Pairs with, but does not depend on, `--dist worksteal` (#1332) and truncate-based
