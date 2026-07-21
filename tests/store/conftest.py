@@ -146,21 +146,10 @@ def _acquire_minio_endpoint(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
-    manager = xdist_backend.shared_container(root, "minio", start=_start_minio, stop=_stop_minio)
-    try:
-        # __enter__ runs the whole flock+read+start+write body, so only skip when Docker
-        # is genuinely down — a real error (disk full, write failure) must propagate.
-        endpoint = manager.__enter__()
-    except Exception as exc:
-        if require_docker or xdist_backend.docker_available():
-            raise
-        pytest.skip(f"Docker unavailable for testcontainers: {exc}")
-    # Yield OUTSIDE the skip-catch: a readiness/bucket failure in the consumer must
-    # surface as a real error, not a misleading "Docker unavailable" skip.
-    try:
+    with xdist_backend.shared_container_or_skip(
+        root, "minio", start=_start_minio, stop=_stop_minio, require_docker=require_docker
+    ) as endpoint:
         yield endpoint, _ROOT_USER, _ROOT_PASSWORD
-    finally:
-        manager.__exit__(None, None, None)
 
 
 @pytest.fixture(scope="session")

@@ -103,22 +103,10 @@ def _acquire_pg_server(
         pytest.skip(f"testcontainers not installed: {exc}")
 
     root = xdist_backend.per_run_root(tmp_path_factory)
-    manager = xdist_backend.shared_container(root, "pg", start=_start_postgres, stop=_stop_postgres)
-    try:
-        # __enter__ runs the whole flock+read+start+write body, so only skip when Docker
-        # is genuinely down — a real error (disk full, write failure) must propagate.
-        server_url = manager.__enter__()
-    except Exception as exc:
-        if require_docker or xdist_backend.docker_available():
-            raise
-        pytest.skip(f"Docker unavailable for testcontainers: {exc}")
-    # Yield OUTSIDE the skip-catch: a provisioning/readiness failure in the consumer
-    # (CREATE DATABASE rejected, server refusing connections) must surface as a real
-    # error, not a misleading "Docker unavailable" skip.
-    try:
+    with xdist_backend.shared_container_or_skip(
+        root, "pg", start=_start_postgres, stop=_stop_postgres, require_docker=require_docker
+    ) as server_url:
         yield server_url
-    finally:
-        manager.__exit__(None, None, None)  # refcount decrement / stop-by-id
 
 
 @pytest.fixture(scope="session")

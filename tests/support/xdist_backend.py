@@ -77,6 +77,46 @@ def docker_available() -> bool:
     return True
 
 
+def skip_without_docker() -> None:
+    """Skip the calling test when Docker is unusable, unless ``KDIVE_REQUIRE_DOCKER=1``
+    (then the test runs and is allowed to fail loudly on a broken runner)."""
+    if os.environ.get("KDIVE_REQUIRE_DOCKER") == "1":
+        return
+    if not docker_available():
+        pytest.skip("Docker unavailable")
+
+
+@contextmanager
+def shared_container_or_skip(
+    root: Path,
+    name: str,
+    *,
+    start: Callable[[], tuple[str, str]],
+    stop: Callable[[str], None],
+    require_docker: bool,
+) -> Iterator[str]:
+    """Yield the shared server URL, turning a genuine Docker-down failure into a skip.
+
+    Drives :func:`shared_container` but scopes the skip to *acquisition*: only when
+    ``__enter__`` fails **and** Docker is actually down (and not ``require_docker``)
+    does this skip. A failure while Docker is up (disk full, write error) propagates,
+    and any failure in the consuming ``with`` body propagates too (the ``yield`` is
+    outside the skip-catch). This is the tricky usage contract of ``shared_container``,
+    kept here once rather than re-implemented by each fixture.
+    """
+    manager = shared_container(root, name, start=start, stop=stop)
+    try:
+        server_url = manager.__enter__()  # runs the whole flock+read+start+write body
+    except Exception as exc:
+        if require_docker or docker_available():
+            raise
+        pytest.skip(f"Docker unavailable for testcontainers: {exc}")
+    try:
+        yield server_url
+    finally:
+        manager.__exit__(None, None, None)  # refcount decrement / stop-by-id
+
+
 @contextmanager
 def shared_container(
     root: Path,

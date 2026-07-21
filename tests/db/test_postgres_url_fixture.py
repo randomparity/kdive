@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import psycopg
 import pytest
 
 from tests.db import conftest as db_conftest
+from tests.support import xdist_backend
 
 
 def _isolate_root(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
@@ -105,19 +105,8 @@ def test_provisioning_error_propagates_not_skipped(
         raise ValueError("provisioning blew up")
 
 
-def _docker_or_skip() -> None:
-    if os.environ.get("KDIVE_REQUIRE_DOCKER") == "1":
-        return
-    try:
-        from testcontainers.core.docker_client import DockerClient
-
-        DockerClient().client.ping()
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Docker unavailable: {exc}")
-
-
 def test_provision_and_drop_roundtrip_against_real_server() -> None:
-    _docker_or_skip()
+    xdist_backend.skip_without_docker()
     from testcontainers.postgres import PostgresContainer
 
     with PostgresContainer("postgres:17") as container:

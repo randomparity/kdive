@@ -3,7 +3,6 @@ by id (AC1 real, AC6b). Skips without Docker; hard-fails under KDIVE_REQUIRE_DOC
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import psycopg
@@ -13,19 +12,8 @@ from tests.db import conftest as db_conftest
 from tests.support import xdist_backend
 
 
-def _docker_or_skip() -> None:
-    if os.environ.get("KDIVE_REQUIRE_DOCKER") == "1":
-        return
-    try:
-        from testcontainers.core.docker_client import DockerClient
-
-        DockerClient().client.ping()
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Docker unavailable: {exc}")
-
-
 def test_one_real_container_for_two_holders(tmp_path: Path) -> None:
-    _docker_or_skip()
+    xdist_backend.skip_without_docker()
     starts: list[str] = []
 
     def counting_start() -> tuple[str, str]:
