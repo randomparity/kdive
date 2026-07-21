@@ -80,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Steer completed teardown to allocations.release (#1385)
 - Require a summary when closing an Investigation
 - Add post-hoc runs.set outcome_note on a Run
+- Add KDIVE_MCP_TRACE setting and truthy resolver
+- Implement TransportTraceMiddleware with unit suite
+- Wire transport trace through the middleware seam
 
 ### Changed
 
@@ -268,6 +271,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Use full ADR filename in rollback (docs-paths guard)
 - Green-at-each-commit order; defensive section lookup
 - Repoint only the arch-specific Field citation
+- Spec + ADR-0417 for opt-in ASGI transport trace
+- Harden ADR-0417 after adversarial review
+- Harden spec #1391 after adversarial review
+- Fix SSE emission timing + boot/cancel edges in #1391 design
+- Fix gate truthy idiom, concurrency, SSE-close scope in #1391
+- PR-gate the FastMCP-stack 404 proof + pin concurrency test
+- Implementation plan for #1391 transport trace
+- Fix plan config path, logger-test hygiene, __main__ edit
+- Include test_main.py call site in plan Task 3
+- Document KDIVE_MCP_TRACE transport tracing
 
 ### Fixed
 
