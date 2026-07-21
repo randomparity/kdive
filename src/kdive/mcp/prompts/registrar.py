@@ -45,10 +45,30 @@ class ToolMaturity:
 
 @dataclass(frozen=True, slots=True)
 class Step:
-    """One step of a journey: a real registered tool and its one-line purpose."""
+    """One step of a journey: a real registered tool and its one-line purpose.
+
+    Preconditions are machine-checkable capability tags, not prose (#1369). A step
+    ``requires`` zero or more capabilities that an earlier step in the same journey must
+    ``provides``; ``_validate_preconditions`` walks each journey and fails fast if a
+    ``requires`` tag is never provided upstream. This catches the ``build_boot_debug``
+    stall structurally — ``introspect.run`` requires ``drgn-live-session``, which only
+    ``debug.start_session`` provides — instead of relying on a prose note that an agent
+    can skip. Capabilities are journey-local: a step's *cross-journey* prerequisite (an
+    open investigation, a booted system from an earlier prompt) stays in ``summary`` prose
+    and is intentionally not modelled here, so a journey's first step carries no
+    ``requires``.
+
+    Attributes:
+        tool: The registered tool name this step invokes.
+        purpose: The one-line purpose shown in the rendered body.
+        requires: Capability tags an earlier step in the same journey must provide.
+        provides: Capability tags this step makes available to later steps.
+    """
 
     tool: str
     purpose: str
+    requires: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +106,30 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
         description="Orient and acquire capacity for a new kernel investigation.",
         summary="Open an investigation and acquire a target system to work on.",
         steps=(
-            Step("investigations.open", "open an investigation to group related runs"),
-            Step("resources.list", "see which resources you can allocate"),
-            Step("allocations.request", "request capacity on a resource"),
-            Step("allocations.wait", "wait until the allocation is granted"),
-            Step("systems.define", "define the target system to build/boot on"),
+            Step(
+                "investigations.open",
+                "open an investigation to group related runs",
+                provides=("investigation",),
+            ),
+            Step("resources.list", "see which resources you can allocate", provides=("resource",)),
+            Step(
+                "allocations.request",
+                "request capacity on a resource",
+                requires=("resource",),
+                provides=("allocation",),
+            ),
+            Step(
+                "allocations.wait",
+                "wait until the allocation is granted",
+                requires=("allocation",),
+                provides=("granted-allocation",),
+            ),
+            Step(
+                "systems.define",
+                "define the target system to build/boot on",
+                requires=("granted-allocation",),
+                provides=("system",),
+            ),
         ),
     ),
     PromptSpec(
@@ -105,19 +144,52 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             "(see start_investigation)."
         ),
         steps=(
-            Step("runs.create", "create a run with source='external' (the default upload lane)"),
-            Step("artifacts.expected_uploads", "learn the exact artifact bytes to produce"),
-            Step("artifacts.create_run_upload", "upload the prebuilt kernel artifact"),
-            Step("runs.complete_build", "finalize the externally built run"),
-            Step("runs.install", "install the built kernel onto the system"),
-            Step("runs.boot", "boot the system into the built kernel"),
+            Step(
+                "runs.create",
+                "create a run with source='external' (the default upload lane)",
+                provides=("run",),
+            ),
+            Step(
+                "artifacts.expected_uploads",
+                "learn the exact artifact bytes to produce",
+                requires=("run",),
+            ),
+            Step(
+                "artifacts.create_run_upload",
+                "upload the prebuilt kernel artifact",
+                requires=("run",),
+            ),
+            Step(
+                "runs.complete_build",
+                "finalize the externally built run",
+                requires=("run",),
+                provides=("built-run",),
+            ),
+            Step(
+                "runs.install",
+                "install the built kernel onto the system",
+                requires=("built-run",),
+                provides=("installed-kernel",),
+            ),
+            Step(
+                "runs.boot",
+                "boot the system into the built kernel",
+                requires=("installed-kernel",),
+                provides=("booted-system",),
+            ),
             Step(
                 "debug.start_session",
                 'attach a live drgn-live session with transport="drgn-live" (introspect.run '
                 "needs a drgn-live session, not the default gdb transport)",
+                requires=("booted-system",),
+                provides=("drgn-live-session",),
             ),
-            Step("introspect.run", "inspect kernel state in the live drgn-live session"),
-            Step("debug.end_session", "detach when done"),
+            Step(
+                "introspect.run",
+                "inspect kernel state in the live drgn-live session",
+                requires=("drgn-live-session",),
+            ),
+            Step("debug.end_session", "detach when done", requires=("drgn-live-session",)),
         ),
     ),
     PromptSpec(
@@ -129,11 +201,24 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
             "Prerequisite: a booted system on a kdump-capable run (see build_boot_debug)."
         ),
         steps=(
-            Step("control.force_crash", "induce a crash (or react to an observed panic)"),
-            Step("vmcore.fetch", "capture the vmcore from the crashed system"),
-            Step("vmcore.list", "confirm the captured vmcore reference"),
-            Step("postmortem.triage", "run the first-pass crash triage"),
-            Step("introspect.from_vmcore", "inspect kernel state from the captured vmcore"),
+            Step(
+                "control.force_crash",
+                "induce a crash (or react to an observed panic)",
+                provides=("crash",),
+            ),
+            Step(
+                "vmcore.fetch",
+                "capture the vmcore from the crashed system",
+                requires=("crash",),
+                provides=("vmcore",),
+            ),
+            Step("vmcore.list", "confirm the captured vmcore reference", requires=("vmcore",)),
+            Step("postmortem.triage", "run the first-pass crash triage", requires=("vmcore",)),
+            Step(
+                "introspect.from_vmcore",
+                "inspect kernel state from the captured vmcore",
+                requires=("vmcore",),
+            ),
         ),
     ),
 )
@@ -164,6 +249,30 @@ def _step_line(index: int, step: Step, maturity: Mapping[str, ToolMaturity]) -> 
     return line
 
 
+def _validate_preconditions(spec: PromptSpec) -> None:
+    """Assert every step's precondition is provided by an earlier step in the journey.
+
+    Walks ``spec.steps`` in order, accumulating the capabilities each step ``provides``,
+    and fails fast the first time a step ``requires`` a capability no earlier step has
+    provided. This is the structural guard for the ``build_boot_debug`` stall (#1369):
+    ``introspect.run`` requires ``drgn-live-session``, so reordering it before
+    ``debug.start_session`` — or dropping that step — raises here instead of silently
+    shipping a journey that stalls an agent.
+
+    Raises:
+        RuntimeError: If any step requires a capability that no earlier step provides.
+    """
+    provided: set[str] = set()
+    for step in spec.steps:
+        missing = tuple(cap for cap in step.requires if cap not in provided)
+        if missing:
+            raise RuntimeError(
+                f"prompt {spec.name!r} step {step.tool!r} requires {missing!r}, "
+                "but no earlier step in the journey provides it (ADR-0409)"
+            )
+        provided.update(step.provides)
+
+
 def _render_body(spec: PromptSpec, tool_maturity: Mapping[str, ToolMaturity]) -> str:
     """Render a prompt's markdown body from its spec and the live tool maturity."""
     lines = [_step_line(i, step, tool_maturity) for i, step in enumerate(spec.steps, start=1)]
@@ -189,8 +298,9 @@ def _body_prompt(spec: PromptSpec, body: str) -> Prompt:
 def register(app: FastMCP, *, tool_maturity: Mapping[str, ToolMaturity]) -> int:
     """Register every canonical lifecycle prompt on ``app``.
 
-    Renders each prompt's body against ``tool_maturity`` (failing fast on an unknown or
-    ``planned`` referenced tool) and registers it as a `FunctionPrompt`.
+    Validates each journey's step preconditions (#1369), then renders its body against
+    ``tool_maturity`` (failing fast on an unknown or ``planned`` referenced tool) and
+    registers it as a `FunctionPrompt`.
 
     Args:
         app: The FastMCP app to register prompts on.
@@ -201,9 +311,11 @@ def register(app: FastMCP, *, tool_maturity: Mapping[str, ToolMaturity]) -> int:
         The number of prompts registered.
 
     Raises:
-        RuntimeError: If any referenced tool is unknown or ``planned``.
+        RuntimeError: If any step's precondition is unmet, or any referenced tool is
+            unknown or ``planned``.
     """
     for spec in CANONICAL_PROMPTS:
+        _validate_preconditions(spec)
         body = _render_body(spec, tool_maturity)
         app.add_prompt(_body_prompt(spec, body))
     return len(CANONICAL_PROMPTS)
