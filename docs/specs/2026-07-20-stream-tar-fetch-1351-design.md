@@ -97,7 +97,27 @@ otherwise surface untyped out of the extractor. The reader is a thin
 from the wrapped body and re-raises `_infrastructure_error("get_object", key,
 err)` — the same category and detail shape `get_artifact` produces. The extractor
 never sees or couples to boto types; a `CategorizedError` propagates through
-`tarfile` and out unwrapped.
+`tarfile` and out unwrapped. Because `_infrastructure_error` records
+`type(err).__name__` as `s3_error_code` for a `BotoCoreError`, a read-timeout
+(`ReadTimeoutError`) is already distinguishable in the error details from a
+dropped connection (`ConnectionClosedError`) — the distinguishing signal the
+accepted read-timeout residual needs to be observed in production, with no new
+field.
+
+**`readinto` contract.** The reader wraps a botocore `StreamingBody`, whose
+`read(n)` returns up to `n` bytes and returns `b""` only at true end-of-stream.
+`readinto(buf)` therefore: (1) does one blocking `body.read(len(buf))`;
+(2) returns the number of bytes copied — which may be **fewer** than `len(buf)`
+(urllib3-backed bodies routinely short-read) and must **not** be treated as EOF;
+(3) returns `0` **only** when the wrapped read returned `b""` (true EOF), so a
+short read is never mistaken for a truncated archive; and (4) on a
+`(BotoCoreError, ClientError)` raises the mapped `CategorizedError`. That
+`CategorizedError` is a non-`OSError`, so it propagates cleanly out through
+`tarfile`'s `_Stream`/`io` buffering — none of `tarfile`'s `HeaderError` handlers
+nor `extract_kernel_bundle`'s `(OSError, tarfile.TarError)` handler catch it. This
+propagation is pinned by an acceptance test that drives a real `tarfile.open(mode=
+"r|gz")` over a fault-injecting reader (AC 2), not left to reasoning about CPython
+internals.
 
 "Bounded reader" means exactly this: the reader never buffers the whole object
 (it is a forward-only fixed-window read), and the *memory* bound on the
@@ -128,9 +148,13 @@ The extract-in-loop discipline (`extractfile(member)` fully consumed before the
 iterator advances) is already what the code does; it is the exact pattern stream
 mode requires (no backward seek). The boot-only early `break` still stops the walk
 at `boot/vmlinuz` — and now, because the source is the live S3 body, closing the
-reader after the break **aborts the rest of the download** rather than reading it
-to discard. For a plain-boot install of a DWARF-bloated tar this is the
-time-to-first-byte and bandwidth win, on top of never buffering the object.
+reader after the break closes the underlying HTTP stream. botocore's
+`StreamingBody.close()` closes the raw urllib3 stream and does not drain a
+partially-read body, so the rest of the download is dropped rather than read to
+discard. For a plain-boot install of a DWARF-bloated tar this is a
+time-to-first-byte and bandwidth benefit on top of never buffering the object;
+it is best-effort (a benefit, not a correctness property) since it depends on
+botocore's close behavior.
 
 The missing-boot / unreadable-tar error mapping (`(OSError, tarfile.TarError)` →
 `INFRASTRUCTURE_FAILURE`) and the `.part` modules cleanup are unchanged. The
@@ -207,14 +231,23 @@ and changes no agent-facing tool schema. No model-eval plan applies.
 1. `ObjectStore.get_artifact_stream(key, etag)` yields a `StreamedArtifact` whose
    `reader` streams the object body and whose `sensitivity`/`retention_class` match
    the object metadata (MinIO round-trip: streamed bytes are byte-identical to
-   `get_artifact(...).data`, same sensitivity).
+   `get_artifact(...).data`, same sensitivity). A second test feeds the reader a
+   body that returns deliberately **short** chunks (fewer bytes than requested) and
+   asserts byte-identical output — pinning that a short read is not mistaken for EOF
+   (`readinto` contract (2)/(3)).
 2. `get_artifact_stream` error mapping matches `get_artifact`: a missing key (404)
    and an etag mismatch (412) raise `STALE_HANDLE`; a non-stale `ClientError` and a
    `BotoCoreError` raise `INFRASTRUCTURE_FAILURE`; absent/invalid sensitivity
-   metadata raises `INFRASTRUCTURE_FAILURE`; a `BotoCoreError`/`ClientError` raised
-   **while the reader is read** raises `INFRASTRUCTURE_FAILURE` with the
-   `{"key", "s3_error_code"}` detail shape. `IfMatch` is sent iff `etag is not
-   None`.
+   metadata raises `INFRASTRUCTURE_FAILURE`; `IfMatch` is sent iff `etag is not
+   None`. **Mid-stream fault, end-to-end:** a test opens `tarfile.open(fileobj=
+   reader, mode="r|gz")` over a reader whose wrapped body raises a `BotoCoreError`
+   partway through the tar and asserts the `CategorizedError` escapes
+   `extract_kernel_bundle` with `category=INFRASTRUCTURE_FAILURE` **and** a
+   `details` carrying `{"key", "s3_error_code"}` (not the extractor's generic
+   `{"op", "kernel_dest"}` detail) — proving the reader's mapping survives the
+   `tarfile` stack. A companion assertion pins that `s3_error_code` reflects the
+   boto error class (`type(err).__name__`), so a `ReadTimeoutError` is observably
+   distinct from a dropped connection.
 3. `get_artifact` is unchanged for existing callers: its signature, return type,
    and error mapping are identical (verified by the existing `get_artifact` tests
    still passing against the refactor onto the shared `_open_get`).
