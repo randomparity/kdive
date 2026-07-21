@@ -204,9 +204,9 @@ class ObjectStore:
                 interpretable sensitivity metadata, or the get otherwise fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
-        _resp, sensitivity, retention_class = self._open_get(key, etag)
+        resp, sensitivity, retention_class = self._open_get(key, etag)
         try:
-            data = _resp["Body"].read()
+            data = resp["Body"].read()
         except (BotoCoreError, ClientError) as err:
             # The download streams here, after the headers; a mid-stream timeout or
             # dropped connection raises a BotoCoreError that must stay typed too.

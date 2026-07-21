@@ -380,21 +380,23 @@ def test_install_never_writes_a_combined_tar(tmp_path: Path) -> None:
     assert not (scratch / str(_SYS) / str(_RUN) / "kernel.tar.gz").exists()
 
 
-def test_install_failure_leaves_no_orphaned_staging_kernel(tmp_path: Path) -> None:
-    # Streaming interleaves download with extract, so a fault after boot/vmlinuz is written (here an
-    # inject failure) could leave a durable staging/kernel from an install that ultimately failed.
-    # The error path reclaims it so an abandoned, not-retried install leaves no orphaned boot image
-    # under KDIVE_INSTALL_STAGING (the domain is never redefined on a staging failure).
+def test_install_failure_leaves_no_orphaned_staging_artifacts(tmp_path: Path) -> None:
+    # Streaming interleaves download with extract, so a fault after boot/vmlinuz (and the initrd)
+    # are written (here an inject failure) could leave a durable staging/kernel and staging/initrd
+    # from an install that ultimately failed. The error path reclaims both persistent outputs so an
+    # abandoned, not-retried install leaves nothing under KDIVE_INSTALL_STAGING (the domain is never
+    # redefined on a staging failure).
     events: list[str] = []
     conn = _conn_with_existing(events=events)
-    writer = _FakeKernelWriter(events, fail=True)  # inject raises after boot/vmlinuz is staged
+    writer = _FakeKernelWriter(events, fail=True)  # inject raises after kernel + initrd are staged
     inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer)
 
     with pytest.raises(CategorizedError):
-        inst.install(_request(method=CaptureMethod.KDUMP))
+        inst.install(_request(method=CaptureMethod.KDUMP, initrd_ref=_INITRD_REF))
 
     staged_dir = tmp_path / str(_SYS) / str(_RUN)
-    assert not (staged_dir / "kernel").exists()  # no orphaned boot image on a failed install
+    assert not (staged_dir / "kernel").exists()  # no orphaned boot image
+    assert not (staged_dir / "initrd").exists()  # no orphaned initrd
 
 
 def test_install_kdump_reclaims_the_repacked_modules_tar(tmp_path: Path) -> None:

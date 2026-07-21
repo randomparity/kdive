@@ -365,15 +365,17 @@ class LocalLibvirtInstaller:
                 modules_injected = True
             return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
         except BaseException:
-            # A failed install must leave no orphaned boot image under the persistent staging root.
-            # The streaming extract may already have written staging/kernel (temp-then-rename) when
-            # a later fault fires — a mid-stream store fault after boot/vmlinuz, or an inject/initrd
-            # failure — yet the domain is only redefined *after* staging returns, so a staging
-            # failure never references this image. Reclaim it (only on the error path — on success
-            # it is the durable <kernel> for the System's lifetime) so an abandoned, not-retried
-            # install leaves nothing behind. Best-effort/idempotent; a retry re-writes it anyway.
-            with contextlib.suppress(OSError):
-                kernel_path.unlink(missing_ok=True)
+            # A failed install must leave no orphaned boot artifacts under the persistent staging
+            # root. The streaming extract / initrd fetch may already have written staging/kernel or
+            # staging/initrd (temp-then-rename) when a later fault fires — a mid-stream store fault
+            # after boot/vmlinuz, or an inject/initrd failure — yet the domain is only redefined
+            # *after* staging returns, so a staging failure never references either. Reclaim both
+            # (only on the error path — on success they are the durable <kernel>/<initrd> for the
+            # System's lifetime) so an abandoned, not-retried install leaves nothing behind.
+            # Best-effort/idempotent; a retry re-writes them anyway.
+            for orphan in (kernel_path, staging_dir / "initrd"):
+                with contextlib.suppress(OSError):
+                    orphan.unlink(missing_ok=True)
             raise
         finally:
             # Reclaim the intermediates on every exit, not just success: a mid-install failure
