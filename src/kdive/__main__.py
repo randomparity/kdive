@@ -28,6 +28,7 @@ from kdive.db.pool import create_pool
 from kdive.domain.errors import CategorizedError
 from kdive.images.rootfs.command import add_build_fs_parser, run_build_fs
 from kdive.images.rootfs.stage_volume import add_stage_volume_parser, run_stage_volume
+from kdive.mcp.middleware.transport_trace import mcp_trace_enabled
 from kdive.processes.reconciler import run_reconciler as _run_reconciler
 from kdive.processes.server import run_server as _run_server
 from kdive.processes.worker import run_worker as _run_worker
@@ -106,7 +107,9 @@ def _handle_server(
     initialized = _require_telemetry("server", telemetry)
     host = config.require(HTTP_HOST)
     port = config.require(HTTP_PORT)
-    asyncio.run(_run_server(host, port, secret_registry, initialized))
+    asyncio.run(
+        _run_server(host, port, secret_registry, initialized, trace_enabled=mcp_trace_enabled())
+    )
 
 
 def _handle_worker(

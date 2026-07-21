@@ -125,6 +125,7 @@
 | Variable | Processes | Default | Required | Value |
 |----------|-----------|---------|----------|-------|
 | `KDIVE_LOG_LEVEL` | migrate, reconciler, server, worker | `INFO` | no | Structured-logging level (overridable by --log-level). |
+| `KDIVE_MCP_TRACE` | server | — | no | Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off). |
 
 ## mcp
 

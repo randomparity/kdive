@@ -58,7 +58,7 @@ def test_server_uvicorn_config_sets_explicit_keepalive() -> None:
 
 def test_server_http_middleware_injects_bare_bearer_hint() -> None:
     """The server wires the bare-JWT hint middleware ahead of vendored auth (ADR-0380)."""
-    middleware = server_http_middleware()
+    middleware = server_http_middleware(trace_enabled=False)
     assert [m.cls for m in middleware] == [BareBearerHintMiddleware]
 
 

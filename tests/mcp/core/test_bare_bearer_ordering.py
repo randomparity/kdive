@@ -27,7 +27,7 @@ def _post(headers: dict[str, str]) -> httpx.Response:
     verifier = JWTVerifier(public_key=kp.public_key, issuer=ISSUER, audience=AUDIENCE)
     pool = AsyncConnectionPool("postgresql://unused", open=False)
     app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
-    http_app = app.http_app(middleware=server_http_middleware())
+    http_app = app.http_app(middleware=server_http_middleware(trace_enabled=False))
 
     async def _run() -> httpx.Response:
         transport = httpx.ASGITransport(app=http_app)

@@ -658,6 +658,14 @@ COMPACT_RESPONSES = Setting(
     ),
 )
 
+MCP_TRACE = Setting(
+    name="KDIVE_MCP_TRACE",
+    parse=_str,
+    group="logging",
+    processes=_SERVER,
+    help="Presence (1/true/yes) enables opt-in ASGI transport-trace logging (default off).",
+)
+
 SETTINGS = [
     DATABASE_URL,
     HTTP_HOST,
@@ -711,4 +719,5 @@ SETTINGS = [
     HEALTH_BIND_ADDR,
     MCP_TOOL_GATEWAY,
     COMPACT_RESPONSES,
+    MCP_TRACE,
 ]

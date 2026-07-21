@@ -9,6 +9,7 @@ from starlette.middleware import Middleware
 
 from kdive.db.pool import create_pool
 from kdive.mcp.middleware.bare_bearer_hint import BareBearerHintMiddleware
+from kdive.mcp.middleware.transport_trace import TransportTraceMiddleware
 from kdive.processes.runtime import HEARTBEAT_STALE_SECONDS, run_process_runtime
 
 if TYPE_CHECKING:
@@ -24,18 +25,31 @@ def server_uvicorn_config() -> dict[str, Any]:
     return {"timeout_keep_alive": HTTP_KEEPALIVE_S}
 
 
-def server_http_middleware() -> list[Middleware]:
-    """ASGI middleware injected ahead of FastMCP's vendored auth endpoint (ADR-0380).
+def server_http_middleware(trace_enabled: bool) -> list[Middleware]:
+    """ASGI middleware injected ahead of FastMCP's vendored endpoints (ADR-0380, ADR-0417).
 
     `BareBearerHintMiddleware` turns a bare-JWT `Authorization` header (no `Bearer `
     scheme prefix) into an accurate 401 before the vendored path emits its misleading
     "token invalid/expired" error.
+
+    When ``trace_enabled`` (`KDIVE_MCP_TRACE`), `TransportTraceMiddleware` is prepended so it
+    is the outermost wrapper and observes every HTTP request — including ones
+    `BareBearerHintMiddleware` 401s and ones the vendored transport 404s. It is absent
+    entirely when the flag is off, so a normal deployment pays nothing.
     """
-    return [Middleware(BareBearerHintMiddleware)]
+    middleware = [Middleware(BareBearerHintMiddleware)]
+    if trace_enabled:
+        middleware.insert(0, Middleware(TransportTraceMiddleware))
+    return middleware
 
 
 async def run_server(
-    host: str, port: int, secret_registry: SecretRegistry, telemetry: Telemetry
+    host: str,
+    port: int,
+    secret_registry: SecretRegistry,
+    telemetry: Telemetry,
+    *,
+    trace_enabled: bool,
 ) -> None:
     from kdive.health.probe import HealthProbe
     from kdive.health.processes.server import build_oidc_ping, build_postgres_ping
@@ -62,7 +76,7 @@ async def run_server(
             host=host,
             port=port,
             uvicorn_config=server_uvicorn_config(),
-            middleware=server_http_middleware(),
+            middleware=server_http_middleware(trace_enabled=trace_enabled),
         )
 
     await run_process_runtime(
