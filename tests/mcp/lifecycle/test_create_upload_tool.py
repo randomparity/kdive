@@ -286,7 +286,9 @@ def test_create_upload_mints_presigned_puts_and_persists_manifest(migrated_url: 
             assert items[0].data["required_headers"] == {
                 "x-amz-checksum-sha256": "aaa",
             }
-            assert items[0].data["x-amz-checksum-sha256"] == "aaa"
+            # The signed headers live under `required_headers` only; they are not also
+            # flattened onto the item's top-level `data` (#1363 de-dup).
+            assert "x-amz-checksum-sha256" not in items[0].data
             signed_keys = {c[0] for c in store.calls}
             assert signed_keys == {
                 f"local/runs/{run_id}/kernel",
@@ -375,6 +377,7 @@ def _assert_upload_hint(hint: Any) -> None:
     assert "Content-Type" in hint  # the concrete extra-header trap
     assert "curl -T" in hint  # the correct invocation
     assert "x-amz-checksum-sha256" in hint  # the bypass caution
+    assert "checksum mismatch" in hint  # #1363: manifest sha256/size-mismatch cause
 
 
 def test_create_run_upload_response_carries_extra_header_footgun_hint(migrated_url: str) -> None:

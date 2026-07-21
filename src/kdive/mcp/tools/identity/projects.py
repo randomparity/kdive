@@ -50,7 +50,7 @@ def whoami(ctx: RequestContext) -> ToolResponse:
         _OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=["accounting.report_granted_set"],
+        suggested_next_actions=["systems.list", "runs.list", "accounting.report_granted_set"],
         data={"principal": ctx.principal, "platform_roles": platform_roles},
     )
 

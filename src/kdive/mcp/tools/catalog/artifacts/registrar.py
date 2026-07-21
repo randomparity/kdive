@@ -235,6 +235,10 @@ def _register_artifacts_create_run_upload(
         upload if it is not finalized. If a window lapses, re-call this tool to reset the
         deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
         single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
+
+        Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
+        System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
+        read the Run with `runs.get`.
         """
         return await artifact_uploads.create_run_upload(
             pool,

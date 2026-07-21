@@ -214,6 +214,11 @@ class ToolResponse(BaseModel):
     def from_job(cls, job: Job, *, extra_next_actions: list[str] | None = None) -> ToolResponse:
         """Build a worker-plane job-handle envelope.
 
+        The job id is carried in the envelope's standard ``object_id`` field (``str(job.id)``),
+        not a separate ``job_id`` key — the ``{job_id, status: queued}`` shorthand in the tool
+        reference docs names that same value. Pass this ``object_id`` back as the ``job_id``
+        argument to ``jobs.wait`` / ``jobs.get`` / ``jobs.cancel``.
+
         ``extra_next_actions`` are tool-specific next actions appended *after* the job
         state's generic lifecycle set (order preserved, not deduplicated). The default
         ``None`` yields the lifecycle-only set every existing caller relies on; a caller

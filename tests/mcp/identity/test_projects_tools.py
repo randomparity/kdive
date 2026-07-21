@@ -48,7 +48,11 @@ def test_role_bearing_grant_names_project_role_and_platform_roles() -> None:
     assert data_str(resp, "principal") == "kdive-demo"
     assert list(data_sequence(resp, "platform_roles")) == ["platform_admin"]
     assert resp.data["count"] == 1
-    assert resp.suggested_next_actions == ["accounting.report_granted_set"]
+    assert resp.suggested_next_actions == [
+        "systems.list",
+        "runs.list",
+        "accounting.report_granted_set",
+    ]
 
 
 def test_role_less_membership_is_surfaced_with_empty_role() -> None:
