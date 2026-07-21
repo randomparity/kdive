@@ -210,3 +210,17 @@ def test_concurrent_requests_do_not_share_state(caplog) -> None:
     asyncio.run(run())
     by_session = {r.mcp_session_id: r.status for r in _records(caplog)}
     assert by_session == {"A": 201, "B": 202}
+
+
+def test_seam_includes_trace_outermost_when_enabled() -> None:
+    from kdive.processes.server import server_http_middleware
+
+    mws = server_http_middleware(trace_enabled=True)
+    assert mws[0].cls is TransportTraceMiddleware  # first entry == outermost wrapper
+
+
+def test_seam_excludes_trace_when_disabled() -> None:
+    from kdive.processes.server import server_http_middleware
+
+    mws = server_http_middleware(trace_enabled=False)
+    assert all(m.cls is not TransportTraceMiddleware for m in mws)
