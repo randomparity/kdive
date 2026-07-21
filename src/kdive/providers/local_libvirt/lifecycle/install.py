@@ -39,7 +39,7 @@ from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 import kdive.config as config
-from kdive.artifacts.storage import FetchedArtifact
+from kdive.artifacts.storage import FetchedArtifact, StreamedArtifact
 from kdive.config.core_settings import INSTALL_SCRATCH, INSTALL_STAGING
 from kdive.config.registry import Setting
 from kdive.domain.capture import KDUMP_FAMILY
@@ -96,6 +96,7 @@ class _LibvirtConn(Protocol):
 
 type Connect = Callable[[], _LibvirtConn]
 type Fetch = Callable[[str, Path], None]
+type StreamFetch = Callable[[str], contextlib.AbstractContextManager[StreamedArtifact]]
 type Readiness = Callable[[UUID], ReadinessResult]
 
 
@@ -239,7 +240,7 @@ class LocalLibvirtInstaller:
         self,
         *,
         connect: Connect,
-        fetch_kernel: Fetch,
+        stream_kernel: StreamFetch,
         fetch_initrd: Fetch,
         staging_root: Path,
         booter: LocalLibvirtBooter,
@@ -248,7 +249,7 @@ class LocalLibvirtInstaller:
         kernel_writer: GuestKernelWriter | None = None,
     ) -> None:
         self._connect = connect
-        self._fetch_kernel = fetch_kernel
+        self._stream_kernel = stream_kernel
         self._fetch_initrd = fetch_initrd
         self._staging_root = staging_root
         # Scratch holds the large, short-lived install intermediates; unset it tracks the staging
@@ -257,23 +258,26 @@ class LocalLibvirtInstaller:
         self._scratch_root = scratch_root if scratch_root is not None else staging_root
         self._scratch_separate = self._scratch_root != staging_root
         self._booter = booter
-        self._fetch_modules = fetch_modules or fetch_kernel
+        self._fetch_modules = fetch_modules or fetch_initrd
         self._kernel_writer = kernel_writer
 
     def install(self, request: InstallRequest) -> None:
         """Stage the kernel (and optionally initrd) and redefine the domain for direct-kernel boot.
 
         ``kernel_ref`` is the combined kernel+modules tar (the unified artifact, ADR-0234 §2):
-        install fetches it, extracts ``boot/vmlinuz`` host-side to ``staging/kernel`` for the
-        direct-kernel ``<kernel>`` element, and — when the boot is kdump or carries debuginfo —
-        repacks the tar's ``lib/modules/`` subtree and feeds it to the libguestfs injector. The
-        initrd fetch and ``<initrd>`` element are omitted when ``initrd_ref`` is ``None`` (e.g. an
-        embedded-initramfs kernel). The kdump preflight is gated on
-        the kdump family (``KDUMP``/``FADUMP``) — non-capture boots need no kdump prerequisites.
+        install **streams** it straight into the extractor (ADR-0400), extracting ``boot/vmlinuz``
+        host-side to ``staging/kernel`` for the direct-kernel ``<kernel>`` element, and — when the
+        boot is kdump or carries debuginfo — repacking the tar's ``lib/modules/`` subtree in the
+        same pass and feeding it to the libguestfs injector. The combined tar is never fully
+        materialized as bytes or written to disk. The initrd fetch and ``<initrd>`` element are
+        omitted when ``initrd_ref`` is ``None`` (e.g. an embedded-initramfs kernel). The kdump
+        preflight is gated on the kdump family (``KDUMP``/``FADUMP``) — non-capture boots need no
+        kdump prerequisites.
 
-        Intermediates (the combined tar, repacked modules tar, and a debuginfo run's vmlinux)
-        stage under ``KDIVE_INSTALL_SCRATCH`` when set, else under the staging root (ADR-0399);
-        the persistent ``kernel``/``initrd`` always stage under ``KDIVE_INSTALL_STAGING``.
+        The remaining on-disk intermediates (the repacked modules tar and a debuginfo run's
+        vmlinux) stage under ``KDIVE_INSTALL_SCRATCH`` when set, else under the staging root
+        (ADR-0399); the persistent ``kernel``/``initrd`` always stage under
+        ``KDIVE_INSTALL_STAGING``.
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the kdump capture path is absent
@@ -339,19 +343,19 @@ class LocalLibvirtInstaller:
     def _stage_install_artifacts(
         self, request: InstallRequest, staging_dir: Path, scratch_dir: Path
     ) -> _StagedInstallArtifacts:
-        combined_tar = scratch_dir / "kernel.tar.gz"
         modules_tar = scratch_dir / "modules.tar.gz"
         vmlinux = scratch_dir / "vmlinux"
         try:
-            self._fetch_kernel(request.kernel_ref, combined_tar)
             kernel_path = staging_dir / "kernel"
             # kdump and debuginfo installs need the module tree in the guest; a plain boot does not.
-            # A modules-needed run repacks lib/modules/ in the same pass extract_kernel_bundle makes
-            # over boot/vmlinuz, so the combined tar is decompressed once, not twice (ADR-0399).
+            # A modules-needed run repacks lib/modules/ in the same streaming pass
+            # extract_kernel_bundle makes over boot/vmlinuz, so the combined tar is decompressed
+            # once, not twice, and never lands on disk (ADR-0399/0400).
             needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
-            modules_found = extract_kernel_bundle(
-                combined_tar, kernel_path, modules_tar if needs_modules else None
-            )
+            with self._stream_kernel(request.kernel_ref) as streamed:
+                modules_found = extract_kernel_bundle(
+                    streamed.reader, kernel_path, modules_tar if needs_modules else None
+                )
             initrd_path = self._stage_initrd(request, staging_dir)
             modules_injected = False
             if modules_found:
@@ -362,11 +366,13 @@ class LocalLibvirtInstaller:
             return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
         finally:
             # Reclaim the intermediates on every exit, not just success: a mid-install failure
-            # (inject fault, bad debuginfo_ref) would otherwise leave the multi-GB combined/modules/
-            # vmlinux bytes resident — cheap on disk, but pinned RAM on a tmpfs scratch until retry
-            # overwrites them. Delete is best-effort/idempotent and re-fetch is temp-then-rename, so
-            # unconditional cleanup is retry-safe and bounds tmpfs use to one in-flight install.
-            self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
+            # (inject fault, bad debuginfo_ref) would otherwise leave the multi-GB modules/vmlinux
+            # bytes resident — cheap on disk, but pinned RAM on a tmpfs scratch until retry
+            # overwrites them. The combined tar is streamed (ADR-0400) and never lands on disk, so
+            # only the repacked modules tar and the debuginfo vmlinux are reclaimed here. Delete is
+            # best-effort/idempotent and re-fetch is temp-then-rename, so unconditional cleanup is
+            # retry-safe and bounds tmpfs use to one in-flight install.
+            self._delete_install_intermediates(modules_tar, vmlinux)
             if self._scratch_separate:
                 # A dedicated scratch dir holds nothing durable once the intermediates are gone, so
                 # remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
@@ -382,14 +388,14 @@ class LocalLibvirtInstaller:
         return initrd_path
 
     @staticmethod
-    def _delete_install_intermediates(combined_tar: Path, modules_tar: Path, vmlinux: Path) -> None:
-        # The combined tar, the repacked modules tar, and a debuginfo run's vmlinux are
-        # intermediates: boot/vmlinuz is already extracted for the <kernel> element and the modules
-        # tree and vmlinux are injected in-guest, so none is needed past this point. Reclaim them
-        # best-effort so the per-Run scratch dir does not retain a redundant copy of the kernel
-        # bytes for the System's lifetime — which on a tmpfs scratch is leaked RAM. A retried
-        # install re-fetches (temp-then-rename), so removal is retry-safe.
-        for intermediate in (combined_tar, modules_tar, vmlinux):
+    def _delete_install_intermediates(modules_tar: Path, vmlinux: Path) -> None:
+        # The repacked modules tar and a debuginfo run's vmlinux are intermediates: the modules
+        # tree and vmlinux are injected in-guest, so neither is needed past this point (the combined
+        # tar is streamed and never written, ADR-0400). Reclaim them best-effort so the per-Run
+        # scratch dir does not retain a redundant copy for the System's lifetime — which on a tmpfs
+        # scratch is leaked RAM. A retried install re-fetches (temp-then-rename), so removal is
+        # retry-safe.
+        for intermediate in (modules_tar, vmlinux):
             with contextlib.suppress(OSError):
                 intermediate.unlink(missing_ok=True)
 
@@ -522,7 +528,7 @@ class LocalLibvirtInstall:
         self,
         *,
         connect: Connect,
-        fetch_kernel: Fetch,
+        stream_kernel: StreamFetch,
         fetch_initrd: Fetch,
         readiness: Readiness,
         staging_root: Path,
@@ -538,7 +544,7 @@ class LocalLibvirtInstall:
         )
         self._installer = LocalLibvirtInstaller(
             connect=connect,
-            fetch_kernel=fetch_kernel,
+            stream_kernel=stream_kernel,
             fetch_initrd=fetch_initrd,
             staging_root=staging_root,
             booter=booter,
@@ -552,12 +558,15 @@ class LocalLibvirtInstall:
     def from_env(cls) -> LocalLibvirtInstall:
         """Build from the ``KDIVE_*`` environment; does not connect to libvirt or the store.
 
-        The fetch seam is the real object-store read (`_real_fetch` → `_stage_object`,
-        ADR-0054): it builds the store lazily from the ``KDIVE_S3_*`` env on the first call,
-        so the worker registers its handlers without S3 env present, and the network I/O runs
-        only when an install fetches. The real readiness preflight (`_real_readiness`) tails the
-        teed console under the `live_vm` gate (it needs a running host); the kdump prerequisite
-        is a host-observable initrd-presence check inside ``install`` (ADR-0055 §5), not a seam.
+        The kernel seam is the real object-store **stream** (`_real_stream` → `_stream_object`,
+        ADR-0400): the combined tar is fed straight into the extractor, never materialized as
+        bytes or staged to disk. The initrd and debuginfo-`vmlinux` seams stay the buffered read
+        (`_real_fetch` → `_stage_object`, ADR-0054). Both build the store lazily from the
+        ``KDIVE_S3_*`` env on the first call, so the worker registers its handlers without S3 env
+        present, and the network I/O runs only when an install reads. The real readiness preflight
+        (`_real_readiness`) tails the teed console under the `live_vm` gate (it needs a running
+        host); the kdump prerequisite is a host-observable initrd-presence check inside
+        ``install`` (ADR-0055 §5), not a seam.
         """
         host_uri = config.require(LIBVIRT_URI)
         staging_root = Path(config.require(INSTALL_STAGING))
@@ -565,7 +574,7 @@ class LocalLibvirtInstall:
         scratch_root = Path(scratch_raw) if scratch_raw else None
         return cls(
             connect=lambda: libvirt.open(host_uri),
-            fetch_kernel=_real_fetch,
+            stream_kernel=_real_stream,
             fetch_initrd=_real_fetch,
             readiness=_real_readiness,
             staging_root=staging_root,
@@ -589,11 +598,12 @@ class _ObjectReader(Protocol):
 def _stage_object(store: _ObjectReader, ref: str, dest: Path) -> None:
     """Read object ``ref`` from the store and write it to ``dest`` via temp-then-rename.
 
-    ``ref`` is a key the system itself produced (the Run's ``kernel_ref``/``initrd_ref``),
-    so the read is **unconditional** (``etag=None``, ADR-0054) — the install plane holds no
-    client handle to validate. The bytes are written to a sibling ``.part`` file and
+    ``ref`` is a key the system itself produced (the Run's ``initrd_ref`` or a debuginfo run's
+    ``vmlinux``), so the read is **unconditional** (``etag=None``, ADR-0054) — the install plane
+    holds no client handle to validate. The bytes are written to a sibling ``.part`` file and
     atomically renamed into ``dest``, so a failure partway leaves ``dest`` untouched and no
-    partial file the redefine could point at.
+    partial file the redefine could point at. The combined kernel tar takes the streaming path
+    (:func:`_stream_object`, ADR-0400) instead of this buffered read.
 
     Raises:
         CategorizedError: a store fault — ``STALE_HANDLE`` for a vanished key,
@@ -610,13 +620,41 @@ def _real_fetch(ref: str, dest: Path) -> None:  # pragma: no cover - live_vm
     _stage_object(object_store_from_env(), ref, dest)
 
 
+class _ObjectStreamReader(Protocol):
+    def get_artifact_stream(
+        self, key: str, etag: str | None
+    ) -> contextlib.AbstractContextManager[StreamedArtifact]: ...
+
+
+def _stream_object(
+    store: _ObjectStreamReader, ref: str
+) -> contextlib.AbstractContextManager[StreamedArtifact]:
+    """Open a streaming read of the system-produced key ``ref``.
+
+    Parallels :func:`_stage_object` for the combined kernel tar (ADR-0400): the read is
+    **unconditional** (``etag=None``, ADR-0054) — the install plane holds no client handle — and
+    the caller feeds the returned reader straight into ``extract_kernel_bundle`` under a ``with``,
+    so the tar is never materialized as bytes or written to disk. The ``etag=None`` intent lives
+    at this one call site so a host-free unit test pins it (guarding an empty-etag regression).
+    """
+    return store.get_artifact_stream(ref, None)
+
+
+def _real_stream(
+    ref: str,
+) -> contextlib.AbstractContextManager[StreamedArtifact]:  # pragma: no cover - live_vm
+    return _stream_object(object_store_from_env(), ref)
+
+
 __all__ = [
     "LocalLibvirtInstall",
     "ReadinessResult",
     "Fetch",
+    "StreamFetch",
     "GuestKernelWriter",
     "_RealGuestKernelWriter",
     "_real_readiness",
     "_stage_object",
+    "_stream_object",
     "extract_kernel_bundle",
 ]

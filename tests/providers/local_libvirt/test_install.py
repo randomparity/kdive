@@ -9,6 +9,7 @@ import sys
 import tarfile
 import xml.etree.ElementTree as ET  # noqa: S405 - parses only self-rendered, trusted test XML
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ import libvirt
 import pytest
 
 import kdive.config as config
-from kdive.artifacts.storage import FetchedArtifact
+from kdive.artifacts.storage import FetchedArtifact, StreamedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -45,6 +46,7 @@ from kdive.providers.local_libvirt.lifecycle.install import (
     LocalLibvirtInstall,
     _boot_window_polls,
     _stage_object,
+    _stream_object,
 )
 from kdive.providers.local_libvirt.settings import LIBVIRT_TCG_DEADLINE_MULTIPLIER
 from kdive.providers.ports.lifecycle import InstallRequest
@@ -130,6 +132,43 @@ class _Fetch:
         if self.fail:
             raise CategorizedError("synthetic fetch failure", category=ErrorCategory.STALE_HANDLE)
         tmp.rename(dest)
+
+
+@dataclass
+class _StreamKernel:
+    """Kernel `stream_kernel` seam: yields a StreamedArtifact over an in-memory combined tar.
+
+    Configured like ``_Fetch`` (with_modules / boot_bytes / version / fail) so a test that
+    already tunes the fetched kernel content keeps working after the kernel seam moved from a
+    fetch-to-disk to a streaming read (ADR-0400). ``fail=True`` raises on open (a vanished key),
+    the streaming analogue of a fetch failure.
+    """
+
+    with_modules: bool = True
+    boot_bytes: bytes = _X86_BOOT_MEMBER
+    version: str = _MODULES_VERSION
+    fail: bool = False
+    refs: list[str] = field(default_factory=list)
+
+    @contextmanager
+    def __call__(self, ref: str) -> Iterator[StreamedArtifact]:
+        self.refs.append(ref)
+        if self.fail:
+            raise CategorizedError("synthetic fetch failure", category=ErrorCategory.STALE_HANDLE)
+        data = _combined_kernel_tar_bytes(
+            with_modules=self.with_modules, version=self.version, boot_bytes=self.boot_bytes
+        )
+        yield StreamedArtifact(io.BytesIO(data), Sensitivity.SENSITIVE, "build")
+
+
+def _stream_from_fetch(fetch: _Fetch) -> _StreamKernel:
+    """Build a kernel stream seam mirroring a ``_Fetch``'s combined-tar configuration."""
+    return _StreamKernel(
+        with_modules=fetch.with_modules,
+        boot_bytes=fetch.boot_bytes,
+        version=fetch.version,
+        fail=fetch.fail,
+    )
 
 
 @dataclass
@@ -233,12 +272,17 @@ def _install(
     scratch_root: Path | None = None,
     kernel_writer: GuestKernelWriter | None = None,
     fetch_modules: Fetch | None = None,
+    stream: _StreamKernel | None = None,
 ) -> LocalLibvirtInstall:
     fetch = fetch or _Fetch()
     seam = seam or _Readiness()
+    # The kernel is streamed (ADR-0400); derive the stream content from the fetch config so
+    # existing tests that tune the combined tar via ``fetch`` keep working. The initrd and
+    # debuginfo-vmlinux fetches stay the buffered ``_Fetch`` seam.
+    stream = stream or _stream_from_fetch(fetch)
     return LocalLibvirtInstall(
         connect=lambda: conn,
-        fetch_kernel=fetch,
+        stream_kernel=stream,
         fetch_initrd=fetch,
         readiness=seam.readiness,
         staging_root=staging_root,
@@ -320,17 +364,20 @@ def test_install_stages_kernel_and_initrd_to_per_run_path(tmp_path: Path) -> Non
     assert list(staged_dir.glob("*.part")) == []
 
 
-def test_install_reclaims_the_redundant_combined_tar(tmp_path: Path) -> None:
-    # boot/vmlinuz is extracted to staging/kernel (the <kernel> element), so the fetched combined
-    # tar is dead weight afterward — install must not retain a redundant copy of the kernel bytes
-    # for the System's lifetime.
+def test_install_never_writes_a_combined_tar(tmp_path: Path) -> None:
+    # The combined tar is streamed straight into the extractor (ADR-0400): boot/vmlinuz lands in
+    # staging/kernel for the <kernel> element and the tar itself never touches disk — no redundant
+    # copy of the multi-GB kernel bytes to hold or reclaim.
+    scratch = tmp_path / "scratch"
     conn = _conn_with_existing()
-    inst = _install(conn=conn, staging_root=tmp_path)
+    inst = _install(conn=conn, staging_root=tmp_path / "staging", scratch_root=scratch)
     inst.install(_request(initrd_ref=_INITRD_REF))
 
-    staged_dir = tmp_path / str(_SYS) / str(_RUN)
+    staged_dir = tmp_path / "staging" / str(_SYS) / str(_RUN)
     assert (staged_dir / "kernel").exists()  # the <kernel> image persists
-    assert not (staged_dir / "kernel.tar.gz").exists()  # the combined tar is reclaimed
+    # No kernel.tar.gz is ever written under staging or scratch.
+    assert not (staged_dir / "kernel.tar.gz").exists()
+    assert not (scratch / str(_SYS) / str(_RUN) / "kernel.tar.gz").exists()
 
 
 def test_install_kdump_reclaims_the_repacked_modules_tar(tmp_path: Path) -> None:
@@ -450,16 +497,14 @@ def test_install_unwritable_scratch_root_is_config_error(tmp_path: Path) -> None
 def test_extract_kernel_bundle_skips_path_traversal_members(tmp_path: Path) -> None:
     # An externally-uploaded kernel tar whose lib/modules member escapes via ``..`` must not be
     # carried into the in-guest extract; the traversal member is dropped, the legit one kept.
-    combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _tar_add(tar, "boot/vmlinuz", b"bz")
         _tar_add(tar, "lib/modules/6.9.0/../../../etc/evil", b"pwn")
         _tar_add(tar, "lib/modules/6.9.0/kernel/ok.ko", b"mod")
-    combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
+    assert extract_kernel_bundle(io.BytesIO(buf.getvalue()), tmp_path / "kernel", out)
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
     assert "lib/modules/6.9.0/kernel/ok.ko" in names
@@ -469,16 +514,14 @@ def test_extract_kernel_bundle_skips_path_traversal_members(tmp_path: Path) -> N
 @pytest.mark.parametrize("prefix", ("./", "/"))
 def test_extract_kernel_bundle_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
     version = "7.0.0-dirty"
-    combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         _tar_add(tar, f"{prefix}boot/vmlinuz", b"bz")
         _tar_add(tar, f"{prefix}lib/modules/{version}/modules.dep", b"")
         _tar_add(tar, f"{prefix}lib/modules/{version}/kernel/ok.ko", b"mod")
-    combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
+    assert extract_kernel_bundle(io.BytesIO(buf.getvalue()), tmp_path / "kernel", out)
 
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
@@ -871,8 +914,7 @@ def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path)
     # recover ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A
     # regression here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
     version = "7.0.0-kdive"
-    combined = tmp_path / "kernel.tar.gz"
-    combined.write_bytes(_combined_kernel_tar_bytes(version=version))
+    combined = io.BytesIO(_combined_kernel_tar_bytes(version=version))
     modules_tar = tmp_path / "modules.tar.gz"
     assert extract_kernel_bundle(combined, tmp_path / "kernel", modules_tar)
 
@@ -1073,13 +1115,16 @@ def test_install_console_method_omits_initrd(tmp_path: Path) -> None:
     def _initrd_must_not_run(_ref: str, _dest: Path) -> None:
         raise AssertionError("initrd fetched when no initrd_ref given")
 
-    def _fetch_combined(_ref: str, dest: Path) -> None:
-        dest.write_bytes(_combined_kernel_tar_bytes())
+    @contextmanager
+    def _stream_combined(_ref: str) -> Iterator[StreamedArtifact]:
+        yield StreamedArtifact(
+            io.BytesIO(_combined_kernel_tar_bytes()), Sensitivity.SENSITIVE, "build"
+        )
 
     conn = _conn_with_existing()
     installer = LocalLibvirtInstall(
         connect=lambda: conn,
-        fetch_kernel=_fetch_combined,
+        stream_kernel=_stream_combined,
         fetch_initrd=_initrd_must_not_run,
         readiness=lambda _sid: ReadinessResult(answered=True, ok=True),
         staging_root=tmp_path,
@@ -1166,6 +1211,46 @@ def test_stage_object_categorizes_local_write_failure(tmp_path: Path) -> None:
     assert excinfo.value.details["op"] == "stage"
     assert excinfo.value.details["dest"] == str(dest)
     assert not dest.exists()
+
+
+# --- _stream_object: streaming object-store read for the combined tar (ADR-0400) -----
+
+
+@dataclass
+class _FakeStreamStore:
+    """Records the (ref, etag) of each get_artifact_stream; yields canned combined-tar bytes."""
+
+    data: bytes = b"combined-tar-bytes"
+    error: CategorizedError | None = None
+    calls: list[tuple[str, str | None]] = field(default_factory=list)
+
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        self.calls.append((key, etag))
+        if self.error is not None:
+            raise self.error
+        yield StreamedArtifact(io.BytesIO(self.data), Sensitivity.SENSITIVE, "build")
+
+
+def test_stream_object_reads_unconditionally_with_none_etag() -> None:
+    store = _FakeStreamStore()
+
+    with _stream_object(store, _KERNEL_REF) as streamed:
+        assert streamed.reader.read() == b"combined-tar-bytes"
+
+    # ADR-0054/0400 regression guard: the streaming seam reads with etag=None (an empty/non-None
+    # etag would 412 on a real store). This is the only place the etag argument is chosen.
+    assert store.calls == [(_KERNEL_REF, None)]
+
+
+def test_stream_object_propagates_store_error() -> None:
+    store = _FakeStreamStore(error=CategorizedError("gone", category=ErrorCategory.STALE_HANDLE))
+
+    with pytest.raises(CategorizedError) as excinfo, _stream_object(store, _KERNEL_REF):
+        pass
+
+    assert excinfo.value.category is ErrorCategory.STALE_HANDLE
+    assert store.calls == [(_KERNEL_REF, None)]
 
 
 def test_install_categorizes_staging_mkdir_failure(tmp_path: Path) -> None:
