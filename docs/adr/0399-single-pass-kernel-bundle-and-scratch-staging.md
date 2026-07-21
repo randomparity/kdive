@@ -1,6 +1,6 @@
 # 0399 — Single-pass kernel-bundle extraction, configurable scratch staging, and self-describing debuginfo advice
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
