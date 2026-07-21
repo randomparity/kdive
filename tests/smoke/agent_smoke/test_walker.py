@@ -9,7 +9,7 @@ stall fires. The gated ``agent_smoke`` test drives the *real* surface; this guar
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from tests.smoke.agent_smoke.walker import (
     AGENT_INDEX_URI,
@@ -165,6 +165,16 @@ def test_trailing_sentence_punctuation_is_stripped_from_links() -> None:
     assert _walk(_healthy()).ok
 
 
+def test_backtick_and_bracket_delimited_links_are_stripped() -> None:
+    # A future doc could wrap a link in backticks or angle brackets; those delimiters are not
+    # part of the URI and must be stripped, or the walk would false-stall on a served guide.
+    surface = _healthy()
+    surface.resources[AGENT_INDEX_URI] = surface.resources[AGENT_INDEX_URI].replace(
+        f"See {_GUIDE_URI}.", f"See `{_GUIDE_URI}` and <{_GUIDE_URI}>."
+    )
+    assert _walk(surface).ok
+
+
 def test_missing_prompt_stalls_at_prompts() -> None:
     surface = _healthy()
     del surface.prompts[NAMED_PROMPTS[0]]
@@ -188,7 +198,7 @@ def test_missing_typical_session_section_stalls() -> None:
 
 
 def test_stalls_are_independent_and_accumulate() -> None:
-    surface = replace(_healthy())
+    surface = _healthy()
     surface.tools.discard("tools.search")
     del surface.prompts[NAMED_PROMPTS[2]]
     result = _walk(surface)
