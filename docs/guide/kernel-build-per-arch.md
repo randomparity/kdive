@@ -16,6 +16,25 @@ boot image correctly the first time.
   `artifacts.expected_uploads` and read
   `contracts.kernel.layout[boot/vmlinuz].formats_by_arch`.
 
+## Determine your architecture first
+
+**Do not assume you are on x86_64.** Before building, establish two architectures — they can
+differ, and confusing them is the most common way a build comes out wrong:
+
+- The **target** architecture — the guest arch the kernel will boot on. This is what you
+  declare as `build_profile.arch`, and it alone decides the `boot/vmlinuz` format below. If a
+  System is already provisioned, read its arch from `systems.get` / `runs.get` rather than
+  guessing; do not infer it from the machine you happen to be on.
+- The **build-host** architecture — the machine you are compiling on. Check it explicitly with
+  `uname -m` (values include `x86_64`, `ppc64le`, `aarch64`). Agents have assumed an x86_64
+  build host and only discovered mid-build that they were on `ppc64le`, producing a kernel for
+  the wrong arch and having to start over. Confirm the host before you configure the build.
+
+When the build host and the target differ you are **cross-compiling**: set `ARCH` and
+`CROSS_COMPILE` for the target (the per-arch values are in each section below). When they
+match, a native build needs neither. Either way, the `boot/vmlinuz` format is decided by the
+**target** arch, not the build host.
+
 ## What differs by architecture
 
 | `arch` | `boot/vmlinuz` must be | kdump `crashkernel` default |

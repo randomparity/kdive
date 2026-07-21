@@ -64,11 +64,18 @@ Add `docs/guide/kernel-build-per-arch.md`, an agent-facing reference. Structure:
 1. A one-paragraph orientation naming the failure it prevents and pointing at
    `resource://kdive/docs/operating/external-build-upload.md` for the full recipe and
    `artifacts.expected_uploads` for the machine-readable byte contract.
-2. One `## <arch>` section per supported arch, each stating: what `boot/vmlinuz` must be for
+2. A "determine your architecture first" section: agents conflate the **build-host** arch (what
+   they compile on) with the **target** arch (what the kernel boots on), and assuming x86_64
+   when actually on `ppc64le` produces a kernel for the wrong arch. It tells the agent to check
+   the build host explicitly (`uname -m`), read the provisioned target from
+   `systems.get`/`runs.get` rather than inferring it, and states that the boot-image format
+   follows the target arch (which a cross-compile inverts from the host). This is the root of
+   the reported failure, one level up from the boot-image symptom.
+3. One `## <arch>` section per supported arch, each stating: what `boot/vmlinuz` must be for
    that arch and the one-line reason, any pre-package step (ppc64le: strip the build-tree
    `vmlinux`; DWARF goes in the optional `vmlinux` artifact, not the boot member), the
    cross-compile note, and the `crashkernel` default in context.
-3. A short shared "same for every arch" note (one combined gzip tar named `kernel`,
+4. A short shared "same for every arch" note (one combined gzip tar named `kernel`,
    `boot/vmlinuz` first, real `.ko` under `lib/modules/<release>/`, drop the `build`/`source`
    symlinks) — kept to a pointer-plus-summary, not a re-derivation of the recipe.
 
