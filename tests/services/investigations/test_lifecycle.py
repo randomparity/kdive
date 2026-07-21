@@ -17,9 +17,11 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.errors import ProjectMembershipDenied
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.services.investigations.common import (
+    SUMMARY_MAX,
     ExternalRefInput,
     InvestigationErrorReason,
     InvestigationServiceError,
+    require_summary,
 )
 from kdive.services.investigations.lifecycle import open_investigation_record
 
@@ -64,6 +66,25 @@ def test_open_rejects_out_of_bounds_title() -> None:
         _open(_ctx(), project="proj", title="x" * 201)
     assert err.value.reason is InvestigationErrorReason.INVALID_TEXT
     assert err.value.object_id == "proj"
+
+
+def test_require_summary_returns_valid_summary() -> None:
+    assert require_summary("inv-1", "found the bug") == "found the bug"
+    assert require_summary("inv-1", "x" * SUMMARY_MAX) == "x" * SUMMARY_MAX
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t "])
+def test_require_summary_rejects_blank(blank: str) -> None:
+    with pytest.raises(InvestigationServiceError) as err:
+        require_summary("inv-1", blank)
+    assert err.value.reason is InvestigationErrorReason.MISSING_REQUIRED_FIELD
+    assert err.value.object_id == "inv-1"
+
+
+def test_require_summary_rejects_oversized() -> None:
+    with pytest.raises(InvestigationServiceError) as err:
+        require_summary("inv-1", "x" * (SUMMARY_MAX + 1))
+    assert err.value.reason is InvestigationErrorReason.INVALID_TEXT
 
 
 def test_open_rejects_malformed_external_refs() -> None:
