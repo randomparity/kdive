@@ -152,6 +152,7 @@ Additive except the Field repoint. Simplest rollback is to revert the whole bran
 undoing piecemeal, delete **together** so `adr-status-check` stays green (its invariant: exactly
 one README index row per ADR file — removing the row while leaving the ADR file, or vice versa,
 fails CI): the doc, its `_content` snapshot, the registrar row, the agent-index citation, the
-test, the `docs/adr/0412-*.md` ADR file, the spec, **and** the ADR-README index row; and revert
+test, the `docs/adr/0412-per-arch-kernel-build-hints-resource.md` ADR file, the spec, **and** the
+ADR-README index row; and revert
 the two `arch` Field citations to their prior external-build-upload target. No data or schema
 state is touched.
