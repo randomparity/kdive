@@ -20,8 +20,9 @@ Enqueue an image build job.
 
 Delete a private image catalog entry (project-scoped). Irreversible.
 
-Removes the catalog entry and its backing object permanently; there is no undo.
-A shared reference guard rejects deletion while the image is still referenced.
+Removes the catalog row immediately; there is no undo. The backing object is
+reclaimed asynchronously by the leaked-object sweep, not at delete time. A shared
+reference guard rejects deletion while the image is still referenced by a live system.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
