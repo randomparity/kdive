@@ -130,11 +130,14 @@ at plan time, not debug time).
 `BOOT_MEMBER_FORMATS` container without editing the doc → boot-container assertion fails;
 (c) change a `crashkernel` default without editing the doc → crashkernel assertion fails;
 (d) add a spurious `## aarch64` section → completeness assertion fails;
-(e) add a hypothetical arch to `_TRAITS`/`SUPPORTED_ARCHES` **and** `BOOT_MEMBER_FORMATS`
-together (a `MagicPin` + `container`, so the import-time cross-table assert passes) with **no**
-doc section → the doc *completeness* test (not the import assert) fails, naming the missing arch
-— this is the "a future arch cannot land without a hint" direction and must be demonstrated, not
-just reasoned about;
+(e) add a hypothetical arch to `_TRAITS` (a **full** `ArchTraits` — `machine`, `console_device`,
+`pin_nic_slot`, `kvm_cpu_mode`, `emit_acpi_features`, `default_crashkernel`, not just a stub) so
+`SUPPORTED_ARCHES` grows, **and** a matching `BOOT_MEMBER_FORMATS` row (a `MagicPin` +
+`container`) so the import-time cross-table assert passes, with **no** doc section → the doc
+*completeness* test fails naming the missing arch. Note the expected signature: because a new
+`_TRAITS` row also changes `default_crashkernel_summary()`, the crashkernel-summary assertion (4)
+goes RED too — both REDs are expected and correct. This is the "a future arch cannot land without
+a hint" direction and must be demonstrated, not just reasoned about;
 (f) change the ELF predicate from `startswith(_ELF_MAGIC.hex())` to `== _ELF_MAGIC.hex()` → the
 non-empty-strip-set assertion fails (the dead-guard bug is itself caught).
 Each must produce a clean RED (not an import error, except (e)'s import-assert gate which must be
@@ -145,7 +148,10 @@ repoint), imperative subject ≤72 chars, `Co-Authored-By` trailer. Stage explic
 
 ## Rollback
 
-Additive except the Field repoint. To roll back: delete the doc, the `_content` snapshot, the
-registrar row, the agent-index citation, and the test; revert the two `arch` Field citations to
-their prior external-build-upload target; remove the ADR-README row. No data or schema state is
-touched.
+Additive except the Field repoint. Simplest rollback is to revert the whole branch/PR. If
+undoing piecemeal, delete **together** so `adr-status-check` stays green (its invariant: exactly
+one README index row per ADR file — removing the row while leaving the ADR file, or vice versa,
+fails CI): the doc, its `_content` snapshot, the registrar row, the agent-index citation, the
+test, the `docs/adr/0412-*.md` ADR file, the spec, **and** the ADR-README index row; and revert
+the two `arch` Field citations to their prior external-build-upload target. No data or schema
+state is touched.
