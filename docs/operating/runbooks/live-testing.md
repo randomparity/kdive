@@ -39,14 +39,19 @@ the stack. It needs no `/dev/kvm`, but it does need a full stack bring-up.
 `pytest -m live_vm` selects every family below. A run that exports only one
 family's env would silently skip the others and still report green — the "green
 run that is no coverage" failure this framework exists to kill. So each family
-carries an **additive sub-marker** (the test keeps the bare `live_vm` marker and
-adds one) and its own `require_live_vm_*` gate.
+has its own `require_live_vm_*` gate that fails loud on a mis-set env. Two
+additive sub-markers exist — `live_vm_throwaway` and `live_vm_provisioned` — and
+every test keeps the bare `live_vm` marker alongside its sub-marker. There is
+**no third sub-marker**: the gdbstub-preserve debug tests reuse
+`live_vm_throwaway`, so they are told apart from the ordinary throwaway tests by
+their env (`KDIVE_LIVE_VM_BZIMAGE`) and gate (`require_live_vm_bzimage`), not by
+marker.
 
-| Sub-marker | Required env | Default libvirt mode | Served by |
+| Family (sub-marker) | Required env | Default libvirt mode | Served by |
 | --- | --- | --- | --- |
-| `live_vm_throwaway` | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
-| *(gdbstub-preserve debug)* | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | its own production XML (a `gdb_port` harness extension is pending) |
-| `live_vm_provisioned` | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
+| Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
+| gdbstub-preserve debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | its own production XML (a `gdb_port` harness extension is pending) |
+| Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
 ADR-0087 config-env guard is not tripped by test-only vars). That module also
