@@ -382,8 +382,10 @@ def test_install_scratch_root_routes_intermediates_off_staging(tmp_path: Path) -
     assert writer.vmlinux is not None and writer.vmlinux.parent == scratch_dir
     # every intermediate is reclaimed from both roots after the install
     for name in ("kernel.tar.gz", "modules.tar.gz", "vmlinux"):
-        assert not (scratch_dir / name).exists()
         assert not (staging_dir / name).exists()
+    # the now-empty per-Run scratch dir is reaped (no empty-dir leak on a persistent scratch mount)
+    assert not scratch_dir.exists()
+    assert staging_dir.exists()  # staging persists — it holds the <kernel>/<initrd>
 
 
 def test_install_default_scratch_stages_intermediates_in_staging(tmp_path: Path) -> None:

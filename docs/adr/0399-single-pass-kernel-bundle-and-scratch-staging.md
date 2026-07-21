@@ -48,10 +48,17 @@ member to a kernel destination and — when a `modules_dest` is given — repack
 existing bound is preserved on the merged path: the member-count cap
 (`capped_tar_members`), `reject_oversize_member` on both the boot member's
 declared size and the cumulative module-tree size, the `..`-path skip, and
-temp-then-rename for both outputs. When no modules are needed (the common
-non-kdump/non-debuginfo run) only the boot member is read — still one pass. The
-two old functions are removed (replace, don't deprecate); callers, `__all__`, and
-the kernel-bundle tests move to `extract_kernel_bundle`.
+temp-then-rename for both outputs. The former helpers opened the tar twice: the
+repack pass re-decompressed the boot member just to skip past it into
+`lib/modules/`. The single pass decompresses the boot member once and reuses it
+for both the extract and the skip-into-modules, so a modules-needed run saves one
+boot-member decompression (meaningful for a large ppc64le ELF). When no modules
+are needed (the common non-kdump/non-debuginfo run) the walk **stops at the boot
+member** — the same early exit the old `next()`-based extract had; without that
+break, `r:gz` mode would decompress the whole tar to read one member, regressing
+exactly the DWARF+console-log case this ADR targets. The two old functions are
+removed (replace, don't deprecate); callers, `__all__`, and the kernel-bundle
+tests move to `extract_kernel_bundle`.
 
 **3. Configurable scratch staging (`KDIVE_INSTALL_SCRATCH`).** Add a worker
 Setting for a scratch root that defaults, when unset, to the

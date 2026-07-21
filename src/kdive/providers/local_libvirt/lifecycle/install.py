@@ -356,6 +356,12 @@ class LocalLibvirtInstaller:
             )
             modules_injected = True
         self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
+        if scratch_dir != staging_dir:
+            # A dedicated scratch dir holds nothing durable once the intermediates are reclaimed,
+            # so remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
+            # per install is unbounded inode growth. Best-effort: a racing/non-empty dir is left.
+            with contextlib.suppress(OSError):
+                scratch_dir.rmdir()
         return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
 
     def _stage_initrd(self, request: InstallRequest, staging_dir: Path) -> Path | None:

@@ -202,6 +202,37 @@ def test_extract_kernel_bundle_opens_the_combined_tar_once(
     assert combined_read_opens == 1
 
 
+def test_extract_kernel_bundle_boot_only_stops_at_the_boot_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Boot-only (modules_dest=None) must not walk the whole tar (ADR-0399, #1350 regression guard).
+
+    In ``r:gz`` mode advancing past a member decompresses it, so iterating to the end would
+    decompress the whole (DWARF-bloated) module tree just to read boot/vmlinuz. With boot/vmlinuz
+    first, extraction consumes exactly one member and stops — the early exit the former next()-based
+    extract had.
+    """
+    combined = tmp_path / "kernel.tar.gz"
+    combined.write_bytes(_combined_tar(_ppc64le_elf_boot_member(), version=_PPC64LE_VERSION))
+
+    real_capped = kernel_bundle.capped_tar_members
+    consumed = 0
+
+    def _counting_capped(archive: tarfile.TarFile):  # type: ignore[no-untyped-def]
+        nonlocal consumed
+        for member in real_capped(archive):
+            consumed += 1
+            yield member
+
+    monkeypatch.setattr(kernel_bundle, "capped_tar_members", _counting_capped)
+
+    extract_kernel_bundle(combined, tmp_path / "kernel", None)
+
+    # boot/vmlinuz is the first member; a boot-only run stops there rather than pulling the
+    # lib/modules members that follow it (the _combined_tar helper writes 2 module members).
+    assert consumed == 1
+
+
 def test_capped_tar_members_rejects_a_member_count_bomb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -78,10 +78,14 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
 
     When ``modules_dest`` is given (a kdump or debuginfo install that needs the module tree in the
     guest), the same forward walk repacks the ``lib/modules/`` subtree into ``modules_dest`` and
-    returns whether a subtree was found; when it is ``None`` only the boot member is read and the
-    return is ``False``. Opening the combined tar once — instead of once per former helper — halves
-    the decompression cost that a DWARF-bloated tar compounds (ADR-0399, #1350). The boot member is
-    written the instant it is read so its bytes are not held in RAM across the module repack.
+    returns whether a subtree was found; when it is ``None`` only the boot member is read (the walk
+    stops there) and the return is ``False``. The former two helpers opened the tar twice: the
+    repack pass had to decompress the boot member again just to skip past it into ``lib/modules/``.
+    This single pass decompresses the boot member once and reuses it for both the extract and the
+    skip-into-modules, so a modules-needed run saves one boot-member decompression (meaningful when
+    that member is a large ppc64le ELF), and a boot-only run early-exits at the boot member exactly
+    as the old next()-based extract did (ADR-0399, #1350). The boot member is written the instant it
+    is read so its bytes are not held in RAM across the module repack.
 
     Raises:
         CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent or the tar is
@@ -126,6 +130,12 @@ def _scan_combined_tar(
             normalized = _tar_member_path(member.name)
             if not boot_written and normalized == _KERNEL_BUNDLE_BOOT_MEMBER:
                 boot_written = _extract_boot_member(archive, member, kernel_dest)
+                if boot_written and out is None:
+                    # Boot-only run (no modules repack): stop at the boot member instead of walking
+                    # the rest of the tar. In "r:gz" mode advancing past a member decompresses it,
+                    # so iterating to the end would decompress the whole (DWARF-bloated) module tree
+                    # just to read boot/vmlinuz. This is the early exit the old next()-extract had.
+                    break
             elif out is not None and normalized.startswith(_MODULES_MEMBER_PREFIX):
                 if ".." in normalized.split("/"):
                     continue
