@@ -252,8 +252,10 @@ class LocalLibvirtInstaller:
         self._fetch_initrd = fetch_initrd
         self._staging_root = staging_root
         # Scratch holds the large, short-lived install intermediates; unset it tracks the staging
-        # root so behavior is unchanged and no second directory is created (ADR-0399).
+        # root so behavior is unchanged and no second directory is created (ADR-0399). The
+        # separate-scratch fact is derived once here so the create and reap sites cannot disagree.
         self._scratch_root = scratch_root if scratch_root is not None else staging_root
+        self._scratch_separate = self._scratch_root != staging_root
         self._booter = booter
         self._fetch_modules = fetch_modules or fetch_kernel
         self._kernel_writer = kernel_writer
@@ -283,10 +285,11 @@ class LocalLibvirtInstaller:
                 category from the seam.
         """
         staging_dir = self._make_run_dir(self._staging_root, request, INSTALL_STAGING)
-        if self._scratch_root == self._staging_root:
-            scratch_dir = staging_dir
-        else:
-            scratch_dir = self._make_run_dir(self._scratch_root, request, INSTALL_SCRATCH)
+        scratch_dir = (
+            self._make_run_dir(self._scratch_root, request, INSTALL_SCRATCH)
+            if self._scratch_separate
+            else staging_dir
+        )
         artifacts = self._stage_install_artifacts(request, staging_dir, scratch_dir)
         kdump_env_absent = request.method in KDUMP_FAMILY and not (
             artifacts.modules_injected or artifacts.initrd_path is not None
@@ -327,9 +330,9 @@ class LocalLibvirtInstaller:
             raise self._unwritable_run_dir_error(root, run_dir, setting) from exc
         except OSError as exc:
             raise CategorizedError(
-                "failed to create the per-Run staging directory",
+                f"failed to create the per-Run directory under {setting.name}",
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"op": "mkdir", "dest": str(run_dir)},
+                details={"op": "mkdir", "env_var": setting.name, "dest": str(run_dir)},
             ) from exc
         return run_dir
 
@@ -364,7 +367,7 @@ class LocalLibvirtInstaller:
             # overwrites them. Delete is best-effort/idempotent and re-fetch is temp-then-rename, so
             # unconditional cleanup is retry-safe and bounds tmpfs use to one in-flight install.
             self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
-            if scratch_dir != staging_dir:
+            if self._scratch_separate:
                 # A dedicated scratch dir holds nothing durable once the intermediates are gone, so
                 # remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
                 # per install is unbounded inode growth. Best-effort: a racing/nonempty dir stays.
@@ -433,8 +436,8 @@ class LocalLibvirtInstaller:
         self._booter.force_off_if_active(system_id)
         vmlinux_ref: Path | None = None
         if debuginfo_ref is not None:
+            self._fetch_modules(debuginfo_ref, vmlinux)
             vmlinux_ref = vmlinux
-            self._fetch_modules(debuginfo_ref, vmlinux_ref)
         self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux_ref)
 
     def _render_direct_kernel_xml(

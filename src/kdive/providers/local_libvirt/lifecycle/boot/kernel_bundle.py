@@ -98,20 +98,12 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
     modules_tmp = modules_dest.with_name(modules_dest.name + ".part") if modules_dest else None
     try:
         return _scan_combined_tar(combined_tar, kernel_dest, modules_dest, modules_tmp)
-    except CategorizedError:
-        # A missing-member or oversize/count rejection: clean the partial temp tar, keep category.
-        if modules_tmp is not None:
-            with contextlib.suppress(OSError):
-                modules_tmp.unlink()
-        raise
     except (OSError, tarfile.TarError) as exc:
-        if modules_tmp is not None:
-            with contextlib.suppress(OSError):
-                modules_tmp.unlink()
         # The fault is either reading/decompressing the combined tar or writing the repacked
         # modules tar (a full tmpfs scratch surfaces as ENOSPC here). Name both destinations and
         # keep the message neutral so a full-scratch operator is not misdirected at the staging
-        # kernel path; modules_dest is present only on a modules-needed run.
+        # kernel path; modules_dest is present only on a modules-needed run. (A member-count/
+        # oversize/missing-boot rejection is already a CategorizedError and propagates unwrapped.)
         details: dict[str, object] = {
             "op": "extract_kernel_bundle",
             "kernel_dest": str(kernel_dest),
@@ -123,6 +115,13 @@ def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: P
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details=details,
         ) from exc
+    finally:
+        # Clean the partial ``.part`` on every failure exit. On success ``_scan_combined_tar`` has
+        # already renamed or unlinked it, so this is a no-op (``missing_ok``); a single site instead
+        # of one per except arm.
+        if modules_tmp is not None:
+            with contextlib.suppress(OSError):
+                modules_tmp.unlink(missing_ok=True)
 
 
 def _scan_combined_tar(
