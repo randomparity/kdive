@@ -38,42 +38,59 @@ See ADR-0417 for the decision and rejected alternatives. Summary:
   `KDIVE_LOG_LEVEL` sets (`observability/facade.py`). Without this, `KDIVE_LOG_LEVEL=warning`
   would silently drop every trace line.
 - **Gate:** a new registry `Setting` `KDIVE_MCP_TRACE` (`config/core_settings.py`),
-  boolean, default off, `group="logging"`, `processes={server}`. `server.py`'s
-  `server_http_middleware()` reads it (through the config registry) and prepends
-  `TransportTraceMiddleware` to the list — outermost — only when the flag is on. When off,
-  the middleware is absent entirely.
+  boolean, default off, `group="logging"`, `processes={server}`. When on,
+  `server_http_middleware()` prepends `TransportTraceMiddleware` to the list — outermost.
+  When off, the middleware is absent entirely.
 - **Logged fields** (structured `extra`): `method`, `path`, `mcp_session_id`,
   `mcp_session_id_present`, `mcp_protocol_version`, `status`, `duration_ms`.
 - **Redaction:** `Authorization` → `authorization_present` bool only, never the value.
   `Mcp-Session-Id` is a session handle, logged as value. The record still passes the
   existing logging redaction floor (ADR-0090) as defense-in-depth.
-- **Timing point:** duration is measured to `http.response.start` (time-to-response
-  headers), not to stream completion, so a long-lived SSE response never delays the line.
+- **Timing / `duration_ms` semantics:** `duration_ms` is the interval from request receipt
+  to the moment the response status is determined — to `http.response.start` when observed
+  (so a long-lived SSE stream does not inflate it or delay the line), else to the exception
+  on the failure path. It is therefore always a non-negative latency (never `None`): on a
+  normal request it is time-to-response-headers, on a failed request it is time-to-failure.
 - **Failure path:** if the downstream app raises before `http.response.start`, the line is
-  still emitted (`finally`) with `status=None`.
+  still emitted (`finally`) with `status=None` and a real `duration_ms` (time to the
+  exception), and the exception re-raises.
 
-### Threading the config read
+### Threading the enable flag
 
 `processes/server.py::server_http_middleware()` currently takes no arguments and returns a
-fixed one-element list. It gains the trace entry conditionally. The flag is read via the
-config registry (`config.get(MCP_TRACE)`), consistent with how `HTTP_HOST`/`HTTP_PORT` are
-read in `__main__.py`. `server_http_middleware()` stays pure by reading the flag itself at
-call time (invoked once at server start), matching the existing no-argument signature.
+fixed one-element list. It gains a `trace_enabled: bool` parameter and appends
+`TransportTraceMiddleware` first (outermost) when true. The flag is resolved **once** in
+`__main__._handle_server` via `config.require(MCP_TRACE)` — where `config.load()` has
+provably already run — and threaded through `run_server(..., trace_enabled=...)` into
+`serve_mcp`, exactly like `HTTP_HOST`/`HTTP_PORT` are read in `__main__` and passed as
+arguments. This keeps `server_http_middleware()` a pure function of its argument (no hidden
+global-config read, no load-order dependency, no global-state mutation in the seam test).
+
+### Level-independence invariant
+
+The design relies on the OTel `LoggingHandler` bridge that `observability/facade.py`
+installs on the root logger staying at its default `NOTSET` level: a record the dedicated
+`kdive.mcp.transport_trace` logger (own level `INFO`) creates then propagates to that root
+handler, and a `NOTSET` handler processes it regardless of the root *logger* level
+`KDIVE_LOG_LEVEL` set. This invariant is documented here so a future change that gives the
+bridge handler a level does not silently drop trace lines.
 
 ## Acceptance criteria
 
 1. With `KDIVE_MCP_TRACE=1`, an HTTP request to the MCP server produces exactly one
    `kdive.mcp.transport_trace` INFO log record carrying `method`, `path`,
    `mcp_session_id_present` (and `mcp_session_id` value when present),
-   `mcp_protocol_version`, `status`, and `duration_ms`.
+   `mcp_protocol_version`, `status`, and a non-negative numeric `duration_ms`.
 2. With `KDIVE_MCP_TRACE` unset/off, `server_http_middleware()` returns the list *without*
    `TransportTraceMiddleware`, and no trace record is emitted.
 3. The `Authorization` header value never appears in any trace record; only a presence
    boolean is logged.
 4. A request short-circuited before dispatch (e.g. a bare-bearer 401, or a 404 session
-   miss) is still traced with its status — trace is outermost.
+   miss) is still traced with its status — trace is outermost. Proven through a real
+   Starlette middleware stack (not just a list-position assertion), so "first in the list =
+   outermost" is verified at runtime.
 5. A downstream error that sends no `http.response.start` still produces a trace line with
-   `status=None`.
+   `status=None` and a non-negative numeric `duration_ms`.
 6. `KDIVE_MCP_TRACE` appears in the generated config reference.
 7. `just ci` is green (lint, type, tests, doc guards).
 
@@ -88,16 +105,36 @@ driving `TransportTraceMiddleware(app)(scope, receive, send)` with hand-built AS
 - no session header → `mcp_session_id_present=False`, no `mcp_session_id` value.
 - `Authorization: Bearer <token>` present → `authorization_present=True`, token string
   absent from the record (assert the token substring is not in the formatted output).
-- downstream raises before `http.response.start` → exactly one record with `status=None`,
-  and the exception propagates (not swallowed).
+- downstream raises before `http.response.start` → exactly one record with `status=None`
+  and a numeric `duration_ms >= 0`, and the exception propagates (not swallowed).
 - level independence: with the root logger set to WARNING (mimicking
   `KDIVE_LOG_LEVEL=warning`), a request still emits one trace record — asserts the dedicated
   logger's own INFO level bypasses the raised root floor.
 - exactly-one-line: a normal success path emits a single record (no double-log from a
   response-start path plus the `finally`).
 - non-`http` scope (`lifespan`/`websocket`) → passthrough, no record.
-- `server_http_middleware()` with the flag on includes `TransportTraceMiddleware` as the
-  first (outermost) entry; with it off, the list excludes it.
+
+**Composition / ordering (closes AC4 at runtime).** A real `starlette.applications.Starlette`
+built with `middleware=server_http_middleware(trace_enabled=True)` around an inner ASGI app,
+driven by `starlette.testclient.TestClient` (in-process, no live server, no DB):
+
+- an inner app that returns a plain 404 → the trace record carries `status=404`, proving the
+  trace runs outermost over a short-circuited response and that Starlette applies list
+  position 0 as the outermost wrapper.
+- a request that trips `BareBearerHintMiddleware`'s 401 (bare-JWT `Authorization`) with the
+  trace middleware also present → the trace record carries `status=401`, proving the trace
+  observes a peer middleware's short-circuit.
+
+**Seam:** `server_http_middleware(trace_enabled=True)` includes `TransportTraceMiddleware`
+as the first entry and `trace_enabled=False` excludes it — a pure function of the argument,
+no config-global read.
+
+**Optional live assertion (not a PR gate).** A `live_stack` check that drives a request with
+a bogus `Mcp-Session-Id` against the running server and asserts the journal shows a
+`transport_trace` line with `status=404` — the only vehicle that proves FastMCP's vendored
+transport surfaces its session-miss 404 as an observable `http.response.start`. Documented as
+a follow-up verification, gated like the other `live_stack` tests; the PR gate stands on the
+Starlette-stack composition test above.
 
 ## Non-goals
 
