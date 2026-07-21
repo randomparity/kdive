@@ -35,7 +35,7 @@ sequence:
   gates.
 
 The environment knowledge that makes these tests pass — use `qemu:///session`
-to avoid the root-readback wall, keep `XDG_RUNTIME_DIR` short for the QMP
+to avoid the root-readback wall, keep `XDG_CONFIG_HOME` short for the QMP
 socket-path length limit, run the modular libvirt daemons, relabel staged
 images `virt_image_t` under SELinux — lives only in one test file and in
 maintainer memory. Each new live test re-derives it from scratch. This is the
@@ -199,7 +199,7 @@ different modes:
   guest arch for the throwaway family; `KDIVE_LIVE_VM_SYSTEM_ID` and the
   `KDIVE_S3_*` backend for the provisioned-System family — read in one place,
   not per module.
-- **`XDG_RUNTIME_DIR`:** kept short enough for the QMP socket path (session
+- **`XDG_CONFIG_HOME`:** kept short enough for the QMP socket path (session
   mode).
 - **libvirt daemons:** modular (`virtqemud` / `virtnetworkd`).
 - **Guest confinement (mechanism named per environment):** SELinux
