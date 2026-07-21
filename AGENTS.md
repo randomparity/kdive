@@ -42,7 +42,8 @@ Run a single test: `uv run python -m pytest tests/mcp/test_allocations_tools.py:
 It is the canonical map of the three live test tiers (`live_stack`, `live_vm`,
 `live_vm_tcg`) and the `live_vm` families: each tier's `just` recipe, its
 environment contract, and the hard-won quirks (`qemu:///session` vs system, a
-short `XDG_RUNTIME_DIR`, modular daemons, per-mode confinement).
+short session-mode socket path via `XDG_CONFIG_HOME`, modular daemons, per-mode
+confinement).
 
 `just type` is whole-tree on purpose: scoping `ty` to `src` once let a test-tree type
 error merge green, so `tests/` is type-checked only here. Don't narrow it back.

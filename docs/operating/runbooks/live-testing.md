@@ -4,9 +4,10 @@ The canonical answer to "how do I run each live test tier, and what does it
 need?" KDIVE has three live-test tiers — one per `just` recipe — at different
 maturity and hardware levels, and the native `live_vm` tier further spans three
 families (below). Their environment quirks — session vs system libvirt, a short
-`XDG_RUNTIME_DIR`, modular daemons, per-mode guest confinement — used to live
-only in one test file and in maintainer memory, so every new live test
-re-derived them. This page is the single place that records them.
+session-mode socket path (`XDG_CONFIG_HOME`), modular daemons, per-mode guest
+confinement — used to live only in one test file and in maintainer memory, so
+every new live test re-derived them. This page is the single place that records
+them.
 
 **Design of record:** the spec
 [`2026-07-18-live-test-framework.md`](../../design/2026-07-18-live-test-framework.md)
@@ -77,8 +78,14 @@ into `boot_throwaway_domain(mode=…)`.
   never per module. S3 *credentials* for the provisioned family are **not** env
   vars — they are file-based under `KDIVE_SECRETS_ROOT`; the resolver checks
   only that the endpoint + bucket env is present.
-- **`XDG_RUNTIME_DIR` must stay short** (e.g. `/run/user/<uid>`) under session
-  mode — the QMP socket path has a length limit that a long temp path overruns.
+- **The session-mode QMP socket path is length-limited (108 bytes), and the
+  lever is `XDG_CONFIG_HOME`.** Session-mode libvirt derives each domain's QMP
+  monitor socket under `$XDG_CONFIG_HOME`, so a deep pytest tmp path overflows
+  it. The harness redirects `XDG_CONFIG_HOME` to a short `/tmp/kdive-cl-<hex>`
+  path for the duration of a session-mode boot and restores it in teardown
+  (`prepare_session_runtime`) — a test that boots through the harness need not
+  manage it. (Separately, the self-hosted runner keeps `XDG_RUNTIME_DIR` short
+  for the session libvirt daemon's own socket; see its runbook.)
 - **libvirt runs as modular daemons** (`virtqemud` / `virtnetworkd`), not the
   monolithic `libvirtd`.
 - **Guest confinement is named per environment.** Under **system mode** on the
@@ -124,7 +131,7 @@ just test-live         # -m "live_vm and not live_vm_tcg"
 
 This needs a KVM/nested-virt host with libvirt, `drgn`, and a kdump-enabled
 guest image, plus the per-family env above. Standing up the host reproducibly —
-including `XDG_RUNTIME_DIR`, the warm image store, and both boot families under
+including the short session-runtime paths, the warm image store, and both boot families under
 `qemu:///session` — is the
 [self-hosted KVM runner runbook](self-hosted-kvm-runner.md); the ppc64le
 (POWER) north-star host is the [POWER host bring-up runbook](power-host-bringup.md).
@@ -180,8 +187,10 @@ by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
   domain writes a root-owned console log a non-root runner cannot read back;
   session mode runs qemu as the invoking user. This is why the self-hosted
   runner exports `KDIVE_LIBVIRT_URI=qemu:///session` for both boot families.
-- **A long `XDG_RUNTIME_DIR` breaks the QMP socket** under session mode — keep
-  it short.
+- **A long `XDG_CONFIG_HOME` breaks the session-mode QMP socket** (the per-domain
+  monitor socket lives under it and hits a 108-byte path limit) — `XDG_RUNTIME_DIR`
+  is *not* the lever. The harness redirects it to a short path automatically; the
+  quirk bites only code that boots a session-mode domain without the harness.
 - **Staged images need the right label under system mode** — `virt_image_t`
   (SELinux) or the `libvirt-qemu` AppArmor profile — and the rootfs's parent
   dir must be writable, because the boot stages an overlay beside it.
