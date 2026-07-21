@@ -48,14 +48,16 @@ inherits the new behavior. Each fixture, in order:
    started with a raised `max_connections` sized to workers × pool. The guaranteed
    invariant is **at most one container of each kind at any instant**, not a hard
    single start per run (see AC1).
-3. **Per-run, per-worker namespace.** Provision `kdive_test_<run>_<worker>` database
-   (resp. `kdive-test-<run>-<worker>` bucket) idempotently on the shared server; yield
+3. **Per-worker, run-unique namespace.** Provision `kdive_test_<worker>_<token>`
+   database (resp. `kdive-test-<worker>-<token>` bucket) on the shared server; yield
    its conninfo (resp. an `ObjectStore` bound to it). Drop it on per-worker teardown.
-   The `<run>` token is the sanitized per-run temp-root leaf (e.g. `pytest-137` →
-   `pytest_137` for the pg identifier, `pytest-137` for the bucket) — stable across a
-   run's workers, distinct across runs — so two runs sharing one **override** backend
-   never collide on a name (the container path is already run-isolated by its fresh
-   container; the token is applied uniformly for one code path).
+   `<token>` is a short `uuid4` hex minted by **each worker** at fixture setup. Because
+   the per-worker database name is consumed only by the worker that creates and drops
+   it (no cross-worker reference), the token need not be shared across a run's workers;
+   a per-worker uuid is globally unique, so two runs sharing one **override** backend —
+   even on different hosts — never collide on a name (the container path is already
+   run-isolated by its fresh container). The `<worker>` component stays for readability
+   so a leaked namespace names its owner.
 
 Worker id: `PYTEST_XDIST_WORKER` env, or `master` when not under xdist.
 
@@ -95,12 +97,16 @@ allows, and the container-count criteria are verified by a live `just test` run.
   connect to it, create per-worker databases/buckets, and start no testcontainer.
   *Verify:* a test invokes the fixture's server-selection with the env set and asserts
   the container-start path is not taken (monkeypatched/spy) and the returned conninfo
-  points at the override host with a `kdive_test_<worker>` path.
-- **AC4 — idempotent per-worker provisioning.** Against a persistent (override)
-  backend, a second run reclaims a pre-existing `kdive_test_<worker>` database and
-  `kdive-test-<worker>` bucket rather than failing on "already exists". *Verify:* a
-  test provisions twice in sequence against the same server and asserts the second
-  succeeds and yields a clean namespace.
+  points at the override host with a `kdive_test_<worker>_<token>` path (worker id
+  followed by the uuid token).
+- **AC4 — provisioning never fails on a prior run's leftovers.** Against a persistent
+  (override) backend, a new run never collides with a prior run's namespace (the uuid
+  token differs), so provisioning succeeds without an "already exists" error; and a
+  same-token re-provision (a simulated crash-leftover retry) reclaims cleanly via
+  `DROP DATABASE IF EXISTS … (FORCE)` / empty-bucket. *Verify:* one test provisions two
+  distinct-token namespaces against the same server and asserts both succeed
+  independently; a second asserts that re-provisioning the *same* `kdive_test_<worker>_<token>`
+  name drops-and-recreates without error.
 - **AC5 — `KDIVE_REQUIRE_DOCKER` contract intact.** With Docker unavailable and no
   override: unset → the fixture skips; `KDIVE_REQUIRE_DOCKER=1` → it hard-fails
   (re-raises), on both the import-guard and container-start failure paths. *Verify:*
@@ -111,15 +117,16 @@ allows, and the container-count criteria are verified by a live `just test` run.
   releases do not stop it. *Verify:* a coordination test drives acquire×K / release×K
   against a fake container object and asserts stop is called once, on the K-th
   release, and never before.
-- **AC6b — shared server sized for all workers.** The shared Postgres does not
-  exhaust connections under `-n auto` with real pool sizes. Rather than a fragile
-  exact formula, the shared container starts with a fixed floor `max_connections=500`,
-  comfortably above the worst case (`PYTEST_XDIST_WORKER_COUNT` up to ~18 active
-  workers × `create_pool` default `max_size=10` × ~2 headroom ≈ 360; the worker count
-  is read from `PYTEST_XDIST_WORKER_COUNT`, treated as 1 when unset). The
-  `just compose-up` Postgres (the override backend) is bumped to the same floor.
-  *Verify:* a full `-n auto` db-suite run does not raise `FATAL: too many clients`; the
-  started container's `max_connections` is asserted `== 500`.
+- **AC6b — shared server sized for the actual worker count.** The shared Postgres does
+  not exhaust connections under `-n auto`, which scales to core count (not a fixed ~18).
+  The container starts with `max_connections = max(500, worker_count × 20)`, where
+  `worker_count` is `PYTEST_XDIST_WORKER_COUNT` (treated as 1 when unset) and `20` is
+  `create_pool` default `max_size` (10) × 2 headroom — so a 64-core host (64 workers →
+  1280) is covered, while smaller hosts keep the 500 floor. The `just compose-up`
+  Postgres (the override backend) is bumped to the 500 floor (its ceiling is the
+  operator's to raise for very large `-n`). *Verify:* a full `-n auto` db-suite run does
+  not raise `FATAL: too many clients`; the started container's `max_connections` is
+  asserted `>=` the computed bound for the run's worker count.
 - **AC7 — measured speedup.** A local `just test` run is meaningfully faster than
   before (target: the container start/stop tail visible in `--durations` collapses
   from ~20 `~3s setup` + a serial `stop` tail to a single start + single stop).
@@ -157,13 +164,14 @@ allows, and the container-count criteria are verified by a live `just test` run.
   independent containers, not a shared/refcount collision on a global lock. (Using
   `.parent` under non-xdist would have collided; AC-covered by the root-selection
   logic.)
-- **Two concurrent runs against one override backend.** The `<run>` token in the
-  per-worker namespace (design step 3) keeps a dev-plus-CI or two-shard pair pointed
-  at the same `KDIVE_TEST_PG_URL` from colliding: each run provisions its own
-  `kdive_test_<run>_<worker>` databases, so run A's `DROP DATABASE … (FORCE)` never
-  targets run B's in-use database. *Residual:* a crashed run leaves its run-token
-  databases/buckets on a *persistent* override backend (the container path has no
-  leftover — the container is gone). Bounded and self-describing (`kdive_test_*`
+- **Two concurrent runs against one override backend.** The per-worker `uuid4` token
+  (design step 3) keeps any two runs pointed at the same `KDIVE_TEST_PG_URL` — same
+  host or different — from colliding: each worker provisions its own
+  `kdive_test_<worker>_<token>` database, so run A's `DROP DATABASE … (FORCE)` never
+  targets run B's in-use database (the names differ globally). *Residual:* a crashed
+  run leaves its uuid-named databases/buckets on a *persistent* override backend (the
+  container path has no leftover — the container is gone), and because uuid names never
+  repeat they are not reclaimed by name-reuse. Bounded, self-describing (`kdive_test_*`
   prefix); swept by `DROP DATABASE`-ing stale `kdive_test_*` or recreating the compose
   volume. Documented in the fixture docstrings.
 - **Shared connection ceiling.** One server now holds every worker's pool. The shared

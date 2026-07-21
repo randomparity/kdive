@@ -88,16 +88,17 @@ backend is required.
    sequential-restart window is reachable only under sparse/clustered DB scheduling or
    `worksteal` (#1332) and costs at most a repeated ~3s start, never correctness.
 
-3. **Isolation moves to database/bucket per worker, scoped to the run.** Each worker
-   provisions `kdive_test_<run>_<worker>` (worker id from `PYTEST_XDIST_WORKER`,
-   `master` when not under xdist; `<run>` the sanitized per-run temp-root leaf) with
-   `DROP DATABASE IF EXISTS … (FORCE); CREATE DATABASE …` on the shared server and
-   yields that database's conninfo; `minio_store` provisions and empties a
-   `kdive-test-<run>-<worker>` bucket. The `<run>` token keeps two runs sharing one
-   *override* backend from colliding (each drops only its own run's databases); the
-   container path is already run-isolated by its fresh container. Setup is idempotent
-   so a database/bucket left by a crashed prior run against a *persistent* (override)
-   backend is reclaimed, not a hard error. Per-worker teardown drops its own
+3. **Isolation moves to a per-worker, run-unique database/bucket.** Each worker
+   provisions `kdive_test_<worker>_<token>` (worker id from `PYTEST_XDIST_WORKER`,
+   `master` when not under xdist; `<token>` a short `uuid4` minted per worker at
+   setup) with `DROP DATABASE IF EXISTS … (FORCE); CREATE DATABASE …` on the shared
+   server and yields that database's conninfo; `minio_store` provisions and empties a
+   `kdive-test-<worker>-<token>` bucket. Because the per-worker name is consumed only
+   by its owner, a per-worker uuid is globally unique, so two runs sharing one
+   *override* backend — even on different hosts — never collide (each drops only its
+   own namespace); the container path is already run-isolated by its fresh container.
+   A same-token re-provision is idempotent (`IF EXISTS … FORCE`), so a crash-leftover
+   retry is reclaimed, not a hard error. Per-worker teardown drops its own
    database/bucket.
    `pg_conn`'s per-test `DROP SCHEMA public` and `key_ns`'s per-test prefix are
    unchanged and now operate inside the per-worker namespace.
@@ -108,12 +109,12 @@ backend is required.
    defaults to `max_size = 10` (`src/kdive/db/pool.py`), so a worst case of ~18
    concurrent workers × 10 plus per-test autocommit connections can exceed 100 and
    raise `FATAL: too many clients` — a flake class that cannot occur under
-   container-per-worker. The shared container is therefore started with a fixed floor
-   `-c max_connections=500` — comfortably above the worst case
-   (`PYTEST_XDIST_WORKER_COUNT` ≈ 18 × pool `max_size` 10 × ~2 headroom ≈ 360), read as
-   a floor rather than a fragile exact formula. The env-override server is the
-   operator's own backend; the same floor is applied to the `just compose-up` Postgres
-   (bumped in `docker-compose.yml`) rather than silently inherited.
+   container-per-worker. Because `-n auto` scales with core count, the shared container
+   is started with `-c max_connections=max(500, PYTEST_XDIST_WORKER_COUNT × 20)` (20 =
+   pool `max_size` 10 × 2 headroom), so a 64-core host (→ 1280) is covered while smaller
+   hosts keep the 500 floor. The env-override server is the operator's own backend; the
+   500 floor is applied to the `just compose-up` Postgres (bumped in
+   `docker-compose.yml`), with very large `-n` against an override left to the operator.
 
 5. **`KDIVE_REQUIRE_DOCKER=1` is preserved verbatim.** The import-guard and
    container-start failure paths still skip when unset and re-raise when set, on both
@@ -150,9 +151,10 @@ the algorithm rather than duplicating it.
   let its user create/drop databases and buckets. The `just compose-up` `kdive`
   superuser and `minioadmin` root satisfy this; a locked-down shared backend would
   fail loudly at `CREATE DATABASE`, which is the correct signal.
-- **Residual — leftover run-token namespaces on a persistent override backend.** A
-  crashed run leaves its `kdive_test_<run>_*` databases/buckets on a *persistent*
-  override backend (the container path has none — the container is gone). Bounded,
+- **Residual — leftover uuid namespaces on a persistent override backend.** A crashed
+  run leaves its `kdive_test_<worker>_<token>` databases/buckets on a *persistent*
+  override backend (the container path has none — the container is gone); because uuid
+  tokens never repeat, these are not reclaimed by name-reuse. Bounded,
   prefix-identifiable, and swept by dropping stale `kdive_test_*` or recreating the
   compose volume. Documented in the fixture docstrings.
 - POSIX-only coordination (`fcntl.flock`). The suite already targets Linux/macOS
