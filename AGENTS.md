@@ -39,8 +39,8 @@ Run a single test: `uv run python -m pytest tests/mcp/test_allocations_tools.py:
 
 **Running the live tiers** — before re-deriving how to run a live test, read
 [`docs/operating/runbooks/live-testing.md`](docs/operating/runbooks/live-testing.md).
-It is the canonical map of the four live surfaces (`live_stack`, `live_vm`
-throwaway + provisioned, `live_vm_tcg`): each one's `just` recipe, its
+It is the canonical map of the three live test tiers (`live_stack`, `live_vm`,
+`live_vm_tcg`) and the `live_vm` families: each tier's `just` recipe, its
 environment contract, and the hard-won quirks (`qemu:///session` vs system, a
 short `XDG_RUNTIME_DIR`, modular daemons, per-mode confinement).
 

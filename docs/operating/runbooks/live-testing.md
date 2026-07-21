@@ -1,8 +1,9 @@
 # Runbook: running the live test tiers
 
 The canonical answer to "how do I run each live test tier, and what does it
-need?" KDIVE has four live-test surfaces at different maturity and hardware
-levels. Their environment quirks — session vs system libvirt, a short
+need?" KDIVE has three live-test tiers — one per `just` recipe — at different
+maturity and hardware levels, and the native `live_vm` tier further spans three
+families (below). Their environment quirks — session vs system libvirt, a short
 `XDG_RUNTIME_DIR`, modular daemons, per-mode guest confinement — used to live
 only in one test file and in maintainer memory, so every new live test
 re-derived them. This page is the single place that records them.
@@ -13,7 +14,7 @@ and ADR-0386 (runner topology), ADR-0353 (the `live_vm_tcg` tier), and ADR-0387
 (self-hosted host codification). This runbook summarizes and points into that
 design; it does not restate it.
 
-## The four tiers at a glance
+## The three tiers at a glance
 
 The pytest markers are declared in `pyproject.toml`
 (`[tool.pytest.ini_options].markers`) and gate two distinct test *vehicles* — a
