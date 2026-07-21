@@ -47,10 +47,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
-    extract_boot_vmlinuz,
-    repack_modules_subtree,
-)
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     _POLL_INTERVAL_SECONDS,
     ReadinessResult,
@@ -319,12 +316,21 @@ class LocalLibvirtInstaller:
         combined_tar = staging_dir / "kernel.tar.gz"
         self._fetch_kernel(request.kernel_ref, combined_tar)
         kernel_path = staging_dir / "kernel"
-        extract_boot_vmlinuz(combined_tar, kernel_path)
-        initrd_path = self._stage_initrd(request, staging_dir)
         modules_tar = staging_dir / "modules.tar.gz"
-        modules_injected = self._inject_modules_if_needed(
-            request, staging_dir, combined_tar, modules_tar, kernel_path
+        # kdump and debuginfo installs need the module tree in the guest; a plain boot does not.
+        # A modules-needed run repacks lib/modules/ in the same pass extract_kernel_bundle makes
+        # over boot/vmlinuz, so the combined tar is decompressed once, not twice (ADR-0399).
+        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
+        modules_found = extract_kernel_bundle(
+            combined_tar, kernel_path, modules_tar if needs_modules else None
         )
+        initrd_path = self._stage_initrd(request, staging_dir)
+        modules_injected = False
+        if modules_found:
+            self._inject_built_modules(
+                request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
+            )
+            modules_injected = True
         self._delete_install_intermediates(combined_tar, modules_tar)
         return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
 
@@ -334,22 +340,6 @@ class LocalLibvirtInstaller:
         initrd_path = staging_dir / "initrd"
         self._fetch_initrd(request.initrd_ref, initrd_path)
         return initrd_path
-
-    def _inject_modules_if_needed(
-        self,
-        request: InstallRequest,
-        staging_dir: Path,
-        combined_tar: Path,
-        modules_tar: Path,
-        kernel_path: Path,
-    ) -> bool:
-        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
-        if not needs_modules or not repack_modules_subtree(combined_tar, modules_tar):
-            return False
-        self._inject_built_modules(
-            request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
-        )
-        return True
 
     @staticmethod
     def _delete_install_intermediates(combined_tar: Path, modules_tar: Path) -> None:
@@ -578,6 +568,5 @@ __all__ = [
     "_RealGuestKernelWriter",
     "_real_readiness",
     "_stage_object",
-    "extract_boot_vmlinuz",
-    "repack_modules_subtree",
+    "extract_kernel_bundle",
 ]

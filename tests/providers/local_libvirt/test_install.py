@@ -32,7 +32,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     _verify_vmlinux_size,
     _vmlinux_dest,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import repack_modules_subtree
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
     ReadinessResult,
@@ -109,7 +109,7 @@ class _Fetch:
     """Records (ref, dest); writes a combined kernel tar via temp-then-rename.
 
     The kernel fetch must produce the unified combined tar so install's host-side
-    ``extract_boot_vmlinuz``/``repack_modules_subtree`` succeed. ``with_modules=False`` writes a
+    ``extract_kernel_bundle`` succeeds. ``with_modules=False`` writes a
     tar with only ``boot/vmlinuz`` (no ``lib/modules/``) to exercise the modules-absent path.
     """
 
@@ -346,7 +346,7 @@ def test_install_kdump_reclaims_the_repacked_modules_tar(tmp_path: Path) -> None
     assert not (staged_dir / "kernel.tar.gz").exists()
 
 
-def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> None:
+def test_extract_kernel_bundle_skips_path_traversal_members(tmp_path: Path) -> None:
     # An externally-uploaded kernel tar whose lib/modules member escapes via ``..`` must not be
     # carried into the in-guest extract; the traversal member is dropped, the legit one kept.
     combined = tmp_path / "kernel.tar.gz"
@@ -358,7 +358,7 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, out)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
     assert "lib/modules/6.9.0/kernel/ok.ko" in names
@@ -366,7 +366,7 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("prefix", ("./", "/"))
-def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
+def test_extract_kernel_bundle_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
     version = "7.0.0-dirty"
     combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()
@@ -377,7 +377,7 @@ def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, pref
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, out)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
 
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
@@ -766,14 +766,14 @@ def test_kernel_writer_mount_close_failure_preserves_open_failure(
 
 
 def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:
-    # repack_modules_subtree writes members as ``lib/modules/<ver>/...``; _read_release must
+    # extract_kernel_bundle writes members as ``lib/modules/<ver>/...``; _read_release must
     # recover ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A
     # regression here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
     version = "7.0.0-kdive"
     combined = tmp_path / "kernel.tar.gz"
     combined.write_bytes(_combined_kernel_tar_bytes(version=version))
     modules_tar = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, modules_tar)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", modules_tar)
 
     assert _RealGuestKernelWriter._read_release(modules_tar, "ov") == version
 
