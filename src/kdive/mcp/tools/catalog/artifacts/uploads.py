@@ -74,7 +74,10 @@ _UPLOAD_HINT = (
     "and nothing else: the URL is SigV4-signed over exactly that header set, so any extra "
     "header (most often an HTTP client's implicit Content-Type, e.g. curl --data-binary) "
     "breaks the signature and the store returns 403 SignatureDoesNotMatch. Prefer "
-    "`curl -T <file> -H 'Content-Type:'` plus the required_headers. Do not fall back to a "
+    "`curl -T <file> -H 'Content-Type:'` plus the required_headers. The required_headers also "
+    "bind this object's declared sha256 (x-amz-checksum-sha256): the bytes you PUT must match "
+    "the sha256/size_bytes you declared, or the store rejects the PUT with a checksum mismatch "
+    "(re-declare with the correct digest, do not retry the same bytes). Do not fall back to a "
     "direct put_object: it stores the object without the signed x-amz-checksum-sha256 "
     "integrity binding."
 )
@@ -550,7 +553,6 @@ def _upload_response(
             "expires_at": expires_at,
             **({"part_number": upload.part_number} if upload.part_number is not None else {}),
             "required_headers": dict(upload.presigned.required_headers),
-            **upload.presigned.required_headers,
         },
     )
 

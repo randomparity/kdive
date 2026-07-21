@@ -14,6 +14,9 @@ _DEFAULT_COST_CLASS = "local"
 _WINDOW_DESCRIPTION = "Lease window length in hours, e.g. 24."
 _WINDOW_EXAMPLE = 24
 
+_VCPUS_DESCRIPTION = "Guest virtual CPU count (a positive integer), e.g. 4."
+_MEMORY_GB_DESCRIPTION = "Guest RAM in whole gigabytes (a positive integer), e.g. 8."
+
 # Stable local exception for the shape-XOR-custom violation. The binding middleware (ADR-0132)
 # keys on Pydantic's wrapped original exception to distinguish the XOR violation from a
 # field-level error and to surface the `both` flag as the envelope `detail`.
@@ -45,8 +48,8 @@ class SelectorPayload(ToolPayload):
     enforces the shape-XOR-custom rule.
     """
 
-    vcpus: int | None = None
-    memory_gb: int | None = None
+    vcpus: int | None = Field(default=None, description=_VCPUS_DESCRIPTION)
+    memory_gb: int | None = Field(default=None, description=_MEMORY_GB_DESCRIPTION)
     window: Decimal | None = Field(
         default=None, gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE]
     )
@@ -164,8 +167,8 @@ _ACCEL_DESCRIPTION = (
 
 
 class EstimateRequestPayload(SelectorPayload):
-    vcpus: int
-    memory_gb: int
+    vcpus: int = Field(description=_VCPUS_DESCRIPTION)
+    memory_gb: int = Field(description=_MEMORY_GB_DESCRIPTION)
     window: Decimal = Field(gt=0, description=_WINDOW_DESCRIPTION, examples=[_WINDOW_EXAMPLE])
     cost_class: str = Field(default=_DEFAULT_COST_CLASS, description=_COST_CLASS_DESCRIPTION)
     accel: str | None = Field(default=None, description=_ACCEL_DESCRIPTION)

@@ -15,6 +15,7 @@ from kdive.mcp.tools._runtime_resolution import with_runtime_for_run
 from kdive.mcp.tools.debug.introspection.common import _OFFLINE_VMCORE, _require_introspection
 from kdive.mcp.tools.debug.introspection.live import (
     _DEFAULT_SCRIPT_TIMEOUT,
+    _MAX_SCRIPT_BYTES,
     _TIMEOUT_FLOOR,
     introspect_run,
     introspect_script,
@@ -129,7 +130,8 @@ def register(
                     "`from drgn import prog` (it will fail; there is no such importable name). "
                     "Example: `for t in prog.threads(): print(t.pid)`. Its stdout is returned "
                     "(byte-capped). Each call is a fresh drgn process - put any multi-step work "
-                    "in one script."
+                    f"in one script. The script itself is capped at {_MAX_SCRIPT_BYTES // 1024} "
+                    "KiB (a larger script is a configuration_error, data.reason=script_too_large)."
                 )
             ),
         ],

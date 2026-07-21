@@ -73,7 +73,14 @@ the image can run on it.
 
 `implemented` · `destructive`
 
-Cordon a host, then report or force-release its allocations.
+Cordon a host, then report or force-release its allocations. Requires platform
+operator ('passive') or platform admin ('force_release').
+
+'passive' only cordons the host (no new placement) and reports the live allocations —
+running tenant work is left untouched. 'force_release' additionally break-glass releases
+every live allocation on the host: it evicts in-flight tenant sessions (their leases are
+forcibly released, ending any debug/run work booked on those allocations), so it is
+destructive and demands a non-blank audited `reason`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

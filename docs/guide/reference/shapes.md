@@ -16,7 +16,11 @@ Delete a system shape.
 
 `implemented` · `read-only`
 
-List system shapes.
+List the named VM size presets ("shapes").
+
+A shape is a reusable, operator-curated {vcpus, memory, disk (+ optional PCIe match)}
+sizing tuple identified by name. Pass its name as `shape` to `allocations.request`
+instead of spelling out a custom {vcpus, memory_gb, disk_gb} triple. Requires a token.
 
 ## `shapes.set`
 

@@ -22,8 +22,8 @@ The response returns `estimate_kcu`, the `rate_kcu_per_hr`, and the vcpu/memory 
 
 `request` fields:
 
-- `vcpus` (`integer`, required)
-- `memory_gb` (`integer`, required)
+- `vcpus` (`integer`, required) — Guest virtual CPU count (a positive integer), e.g. 4.
+- `memory_gb` (`integer`, required) — Guest RAM in whole gigabytes (a positive integer), e.g. 8.
 - `window` (`number \| string`, required) — Lease window length in hours, e.g. 24.
 - `cost_class` (`string`, optional) — Hypothetical cost class to price against (default 'local'); selects the per-class pricing coefficient. This is a what-if input, not the class you are billed under: actual usage is billed under the persisted cost_class of the resource the allocation books. To get an estimate that matches the bill, pass the cost_class of the resource you intend to allocate on (read it from `resources.describe`). An unknown class is a configuration_error.
 - `accel` (`string (nullable)`, optional) — Optional accelerator to price the estimate at: 'kvm' (native) or 'tcg' (foreign-arch emulation). Omit for the native baseline. A TCG guest is priced above a same-size KVM guest — price both to compare architectures before you allocate. This is a what-if input; the host resolves the real accelerator for your arch at provision. An unknown value is a configuration_error.

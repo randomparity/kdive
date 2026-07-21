@@ -122,7 +122,8 @@ def _register_debug_read_registers(
         """Read named registers from a live DebugSession. Requires contributor.
 
         The target must be stopped first (halt it with debug.interrupt or hit a breakpoint);
-        registers are only meaningful at a halt.
+        registers are only meaningful at a halt. Each requested register is returned in `data`
+        keyed by its name, with the value as a hexadecimal string (e.g. "0xffffffff81000000").
         """
         return await run_engine_op_with_resolver(
             pool,

@@ -102,8 +102,8 @@ Most real investigation time is spent here, not in the setup stages. After
    guest (nothing detects a livelock; it is worse than a crash). Reserve `probability` for
    stress/soak runs, not surgical single-site reproducers. The old caveat that `fail-nth`
    "trips on the first eligible call, not necessarily the one you're after" only holds when
-   you *cannot* scope — `cache-filter` scopes it. This is manual guest-side work today; #918
-   and #919 track a debugfs-driven fault-injection tool surface.
+   you *cannot* scope — `cache-filter` scopes it. This is manual guest-side work today; a
+   debugfs-driven fault-injection tool surface may land in a future release.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
 whatever you were watching over SSH is gone. The **serial-console is the durable record** — it

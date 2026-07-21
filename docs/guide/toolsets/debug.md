@@ -41,7 +41,7 @@ misconfiguration.
 
 ## Breakpoints and watchpoints
 
-- `debug.set_breakpoint` — set a breakpoint at a symbol or address.
+- `debug.set_breakpoint` — set a breakpoint at a symbol (a bare C function or variable name; not an address).
 - `debug.list_breakpoints` — list the current breakpoints.
 - `debug.clear_breakpoint` — remove a breakpoint.
 - `debug.set_watchpoint` — trap a write to a data address.
