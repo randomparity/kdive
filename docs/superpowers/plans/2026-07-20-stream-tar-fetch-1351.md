@@ -106,7 +106,21 @@ def test_get_artifact_stream_mid_read_error_maps_to_infrastructure_failure(...):
 
 def test_get_artifact_stream_with_etag_sends_if_match(...): ...   # asserts IfMatch='"e"'
 def test_get_artifact_stream_none_etag_omits_if_match(...): ...
+
+@pytest.mark.usefixtures(...)  # Docker-gated, same as the existing minio_store tests
+def test_get_artifact_stream_minio_round_trip(minio_store):
+    # AC1 byte-identity: put an object, then assert the streamed bytes equal the
+    # buffered get_artifact bytes and the sensitivity/retention_class match.
+    minio_store.put_artifact(ArtifactWriteRequest(key, payload, Sensitivity.INTERNAL, "standard"))
+    buffered = minio_store.get_artifact(key, None)
+    with minio_store.get_artifact_stream(key, None) as streamed:
+        streamed_bytes = streamed.reader.read()
+    assert streamed_bytes == buffered.data
+    assert streamed.sensitivity == buffered.sensitivity
+    assert streamed.retention_class == buffered.retention_class
 ```
+
+Follow the exact `minio_store` fixture usage and `ArtifactWriteRequest` construction of the neighboring `test_put_get_round_trip` / `test_sensitivity_persisted_as_object_metadata` tests (they are Docker-gated and skip cleanly without MinIO — the same gate this test rides).
 
 - [ ] **Step 2: Run to verify failure.** Run: `uv run python -m pytest tests/store/test_objectstore.py -k get_artifact_stream -q`. Expected: FAIL (`AttributeError: get_artifact_stream`).
 
@@ -215,17 +229,29 @@ git commit -m "feat(store): add get_artifact_stream sharing _open_get with get_a
 
 ---
 
-### Task 3: `extract_kernel_bundle` consumes a reader in `r|gz` stream mode
+### Task 3: `extract_kernel_bundle` streams a reader AND install streams the kernel (one atomic commit)
+
+> **Why merged:** `just type` is whole-tree (src+tests). Retyping `extract_kernel_bundle`'s first parameter from `Path` to `IO[bytes]` while its only caller (`install.py`) still passes a `Path` leaves the tree type- and runtime-broken. The signature change and its sole call site are inseparable for a green whole-tree gate, so they land in **one commit**.
 
 **Files:**
 - Modify: `src/kdive/providers/local_libvirt/lifecycle/boot/kernel_bundle.py`
+- Modify: `src/kdive/providers/local_libvirt/lifecycle/install.py`
 - Test: `tests/providers/local_libvirt/lifecycle/boot/test_kernel_bundle.py`
+- Test: `tests/providers/local_libvirt/test_install.py`
 
 **Interfaces:**
-- Consumes: nothing new (pure signature change).
-- Produces: `extract_kernel_bundle(source: IO[bytes], kernel_dest: Path, modules_dest: Path | None) -> bool` — opens `tarfile.open(fileobj=source, mode="r|gz")`; all bounds unchanged. Later tasks pass `StreamedArtifact.reader`.
+- Consumes: `get_artifact_stream` (Task 2), `StreamedArtifact` (Task 1).
+- Produces:
+  - `extract_kernel_bundle(source: IO[bytes], kernel_dest: Path, modules_dest: Path | None) -> bool` — opens `tarfile.open(fileobj=source, mode="r|gz")`; all bounds unchanged.
+  - `type StreamFetch = Callable[[str], AbstractContextManager[StreamedArtifact]]`
+  - `_ObjectStreamReader` protocol with `get_artifact_stream(key, etag) -> AbstractContextManager[StreamedArtifact]`
+  - `_stream_object(store, ref) -> AbstractContextManager[StreamedArtifact]` (reads `etag=None`)
+  - `_real_stream(ref)` (`# pragma: no cover - live_vm`)
+  - `LocalLibvirtInstaller` / `LocalLibvirtInstall`: `stream_kernel: StreamFetch` replaces `fetch_kernel: Fetch`; `fetch_modules` defaults to `fetch_initrd`.
 
-- [ ] **Step 1: Update the existing tests to pass a reader.** In `test_kernel_bundle.py`, the helpers currently build a tar file on disk and call `extract_kernel_bundle(tar_path, ...)`. Change each call to open the built tar in binary and pass the handle, e.g.:
+#### Part A — `extract_kernel_bundle` (kernel_bundle.py + test_kernel_bundle.py)
+
+- [ ] **Step 1: Update the existing kernel-bundle tests to pass a reader.** In `test_kernel_bundle.py`, the helpers currently build a tar file on disk and call `extract_kernel_bundle(tar_path, ...)`. Change each call to open the built tar in binary and pass the handle, e.g.:
 
 ```python
 with combined_tar.open("rb") as fh:
@@ -277,32 +303,11 @@ archive = stack.enter_context(tarfile.open(fileobj=source, mode="r|gz"))
 Update the missing-boot `CategorizedError` details to drop `"tar": str(combined_tar)` (there is no on-disk tar path); keep `{"member": _KERNEL_BUNDLE_BOOT_MEMBER}`. Update the early-break comment from `"r:gz"` to `"r|gz"` and note that closing the reader after the break aborts the download.
 
 - [ ] **Step 4: Run tests.** Run: `uv run python -m pytest "tests/providers/local_libvirt/lifecycle/boot/test_kernel_bundle.py" -q`. Expected: PASS (byte-identity for x86_64 + `./`-prefixed ppc64le members, member-count/oversize/missing-boot/`..`-skip bounds, boot-only early break, mid-stream fault).
-- [ ] **Step 5: Guardrails + commit.** Run: `just lint && just type`. Then:
+*(No commit yet — the tree's whole-tree `ty`/`test` gate stays red until Part B updates the `install.py` caller. Proceed straight to Part B.)*
 
-```bash
-git add src/kdive/providers/local_libvirt/lifecycle/boot/kernel_bundle.py \
-        tests/providers/local_libvirt/lifecycle/boot/test_kernel_bundle.py
-git commit -m "feat(install): extract_kernel_bundle streams a reader in r|gz mode (#1351)"
-```
+#### Part B — install streams the kernel (install.py + test_install.py)
 
----
-
-### Task 4: install path streams the kernel (no combined tar on disk)
-
-**Files:**
-- Modify: `src/kdive/providers/local_libvirt/lifecycle/install.py`
-- Test: `tests/providers/local_libvirt/test_install.py`
-
-**Interfaces:**
-- Consumes: `get_artifact_stream` (Task 2), `StreamedArtifact` (Task 1), `extract_kernel_bundle(source, ...)` (Task 3).
-- Produces:
-  - `type StreamFetch = Callable[[str], AbstractContextManager[StreamedArtifact]]`
-  - `_ObjectStreamReader` protocol with `get_artifact_stream(key, etag) -> AbstractContextManager[StreamedArtifact]`
-  - `_stream_object(store, ref) -> AbstractContextManager[StreamedArtifact]` (reads `etag=None`)
-  - `_real_stream(ref)` (`# pragma: no cover - live_vm`)
-  - `LocalLibvirtInstaller` / `LocalLibvirtInstall`: `stream_kernel: StreamFetch` replaces `fetch_kernel: Fetch`; `fetch_modules` defaults to `fetch_initrd`.
-
-- [ ] **Step 1: Write failing tests.** In `test_install.py`, add a streaming fake store paralleling `_FakeStore`:
+- [ ] **Step B1: Write failing install tests.** In `test_install.py`, add a streaming fake store paralleling `_FakeStore`:
 
 ```python
 class _FakeStreamStore:
@@ -322,9 +327,9 @@ Tests:
 - Update the extraction-via-install tests (`_skips_path_traversal_members`, `_normalizes_prefixed_members`) to feed the combined tar through the streaming fake.
 - Replace `test_install_reclaims_the_redundant_combined_tar` with `test_install_never_writes_a_combined_tar` (its premise — reclaiming an on-disk combined tar — is gone). Keep `test_install_kdump_reclaims_the_repacked_modules_tar` and the scratch-routing tests (modules tar + vmlinux still stage to scratch).
 
-- [ ] **Step 2: Run to verify failure.** Run: `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q`. Expected: FAIL.
+- [ ] **Step B2: Run to verify failure.** Run: `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q`. Expected: FAIL.
 
-- [ ] **Step 3: Implement.** Add imports: `import io` (tests), `from contextlib import contextmanager`, `AbstractContextManager` from `contextlib`, `StreamedArtifact` from `kdive.artifacts.storage`. Add near `_stage_object`:
+- [ ] **Step B3: Implement.** Add imports: `import io` (tests), `from contextlib import contextmanager`, `AbstractContextManager` from `contextlib`, `StreamedArtifact` from `kdive.artifacts.storage`. Add near `_stage_object`:
 
 ```python
 class _ObjectStreamReader(Protocol):
@@ -366,22 +371,32 @@ def _stage_install_artifacts(self, request, staging_dir, scratch_dir):
             modules_injected = True
         return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
     finally:
+        # Reclaim intermediates on every exit (unchanged rationale, #1350). combined_tar is
+        # gone — it never lands on disk now. Keep the per-Run empty-scratch reap verbatim.
         self._delete_install_intermediates(modules_tar, vmlinux)
+        if self._scratch_separate:
+            with contextlib.suppress(OSError):
+                scratch_dir.rmdir()
 ```
+
+**Do not drop the `scratch_dir.rmdir()` reap** — the current `finally` (install.py:363-375) has both the intermediate delete *and* the `if self._scratch_separate: scratch_dir.rmdir()` empty-scratch reap (#1350, prevents unbounded inode growth on a persistent scratch mount). Only the `_delete_install_intermediates` argument list changes; the reap block is preserved verbatim. Two kept tests assert it: `test_install_scratch_root_routes_intermediates_off_staging` (asserts `not scratch_dir.exists()`) and `test_install_reclaims_scratch_intermediates_when_inject_fails`.
 
 Change `_delete_install_intermediates(combined_tar, modules_tar, vmlinux)` → `(modules_tar, vmlinux)` and its loop/comment (the combined tar is no longer an on-disk intermediate). Update the `install` and `_stage_install_artifacts` docstrings/comments that describe fetching the combined tar to disk.
 
-- [ ] **Step 4: Run tests.** Run: `uv run python -m pytest tests/providers/local_libvirt/test_install.py -q`. Expected: PASS.
-- [ ] **Step 5: Guardrails + commit.** Run: `just lint && just type`. Then:
+- [ ] **Step B4: Run both changed test suites.** Run: `uv run python -m pytest tests/providers/local_libvirt/test_install.py "tests/providers/local_libvirt/lifecycle/boot/test_kernel_bundle.py" -q`. Expected: PASS (both — the whole-tree signature seam is now consistent).
+- [ ] **Step C: Guardrails + single atomic commit.** Run: `just lint && just type` (whole-tree `ty` is now green because the caller matches the new signature). Then commit both parts together:
 
 ```bash
-git add src/kdive/providers/local_libvirt/lifecycle/install.py tests/providers/local_libvirt/test_install.py
-git commit -m "feat(install): stream the combined tar via a stream_kernel seam (#1351)"
+git add src/kdive/providers/local_libvirt/lifecycle/boot/kernel_bundle.py \
+        tests/providers/local_libvirt/lifecycle/boot/test_kernel_bundle.py \
+        src/kdive/providers/local_libvirt/lifecycle/install.py \
+        tests/providers/local_libvirt/test_install.py
+git commit -m "feat(install): stream the combined tar into extract_kernel_bundle (#1351)"
 ```
 
 ---
 
-### Task 5: Full-suite guardrail sweep
+### Task 4: Full-suite guardrail sweep
 
 **Files:** none (verification only).
 
@@ -391,6 +406,6 @@ git commit -m "feat(install): stream the combined tar via a stream_kernel seam (
 
 ## Self-Review
 
-- **Spec coverage:** AC1 (round-trip + short-read) → Task 2; AC2 (error-mapping parity + end-to-end mid-stream fault + `s3_error_code` class) → Tasks 2 & 3; AC3 (`get_artifact` unchanged) → Task 2 step 4 (existing tests pass on the refactor); AC4 (byte-identity + repack in `r|gz`) → Task 3; AC5 (all bounds on streaming path) → Task 3; AC6 (install streams, no `kernel.tar.gz`, `etag=None`, mid-stream category propagates) → Task 4; AC7 (`just ci` green) → Task 5.
-- **Placeholder scan:** the `_FaultReader`/`_FakeStreamStore` bodies are sketched with `...`; the implementer fills the trivial buffering. Every load-bearing signature and the four production edits are shown in full.
-- **Type consistency:** `get_artifact_stream(key, etag)` and `StreamedArtifact(reader, sensitivity, retention_class)` are used identically in Tasks 2 and 4; `extract_kernel_bundle(source, kernel_dest, modules_dest)` is consistent across Tasks 3 and 4.
+- **Spec coverage:** AC1 (MinIO round-trip byte-identity + short-read) → Task 2; AC2 (error-mapping parity + end-to-end mid-stream fault + `s3_error_code` class) → Tasks 2 & 3; AC3 (`get_artifact` unchanged) → Task 2 Step 4 (existing tests pass on the refactor); AC4 (byte-identity + repack in `r|gz`) → Task 3 Part A; AC5 (all bounds on streaming path) → Task 3 Part A; AC6 (install streams, no `kernel.tar.gz`, `etag=None`, mid-stream category propagates, scratch reap unchanged) → Task 3 Part B; AC7 (`just ci` green) → Task 4.
+- **Placeholder scan:** the `_FaultReader`/`_FakeStreamStore` bodies are sketched with `...`; the implementer fills the trivial buffering. Every load-bearing signature and the production edits (including the preserved scratch reap) are shown in full.
+- **Type consistency:** `get_artifact_stream(key, etag)` and `StreamedArtifact(reader, sensitivity, retention_class)` are used identically in Tasks 2 and 3; `extract_kernel_bundle(source, kernel_dest, modules_dest)` is used consistently within Task 3 Parts A and B (one atomic commit, so no whole-tree gate ever sees a mismatched signature).
