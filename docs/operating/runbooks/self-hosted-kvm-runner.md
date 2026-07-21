@@ -210,7 +210,8 @@ the guest under libvirt. On the runner that requires, beyond the tools above:
   default `qemu:///system` writes a root-owned console log the non-root runner
   cannot read (the root-readback wall), and its qemu (uid `libvirt-qemu`) cannot
   traverse the runner-owned build workspace. Session mode sidesteps both; keep
-  `XDG_RUNTIME_DIR` short (e.g. `/run/user/<uid>`) for the QMP socket path.
+  `XDG_CONFIG_HOME` short for the QMP socket path (harness-managed via
+  `prepare_session_runtime`).
 
 ### Producing each store (operator)
 
