@@ -4,7 +4,7 @@ Status: Accepted
 
 - **Date:** 2026-07-21
 - **Issue:** #1369 (guard: machine-checkable prompt preconditions), parent epic #1360.
-- **Relates to:** [ADR-0202](0202-canonical-lifecycle-prompts.md) (the canonical lifecycle
+- **Relates to:** [ADR-0202](0202-mcp-lifecycle-prompts.md) (the canonical lifecycle
   prompts this guards) and [ADR-0404](0404-p2-agent-surface-contract-disambiguation.md)
   (the P2 batch that added the `runs.boot` `install_first` next-action hint).
 
