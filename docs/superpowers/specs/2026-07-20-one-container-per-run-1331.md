@@ -2,7 +2,7 @@
 
 - **Issue:** #1331 — "Speed up `just test`: one Postgres/MinIO container per run,
   not per xdist worker"
-- **ADR:** [0400](../../adr/0400-one-backend-container-per-run.md)
+- **ADR:** [0401](../../adr/0401-one-backend-container-per-run.md)
 - **Date:** 2026-07-20
 - **Status:** Draft
 
@@ -29,7 +29,7 @@ runtime dependency; no external backend required for the default `just test` or 
   one is a prerequisite for #1333.
 - Windows support for the db/store suites (POSIX-only, pre-existing).
 
-## Design summary (see ADR-0400 for the decision and rejected alternatives)
+## Design summary (see ADR-0401 for the decision and rejected alternatives)
 
 Two source fixtures change: `postgres_url` (`tests/db/conftest.py`) and `minio_store`
 (`tests/store/conftest.py`). Both are re-exported by ~19 conftests, so every consumer
@@ -199,7 +199,7 @@ allows, and the container-count criteria are verified by a live `just test` run.
 - `docker-compose.yml` / `justfile` — bump the compose Postgres `max_connections` to
   the 500 floor so an override run does not exhaust it (a standalone, safe-to-leave
   config change).
-- ADR-0400 and this spec — design records.
+- ADR-0401 and this spec — design records.
 
 ## Rollback
 

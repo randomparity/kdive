@@ -17,6 +17,8 @@ from __future__ import annotations
 import io
 import tarfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID
 
@@ -24,6 +26,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from kdive.artifacts.storage import StreamedArtifact
+from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.local_libvirt.lifecycle.install import LocalLibvirtInstall, ReadinessResult
@@ -146,10 +150,15 @@ def test_console_log_element_does_not_enable_append() -> None:
 # --- parsing libvirtd output: install must defend XMLDesc like discovery does --------
 
 
+@contextmanager
+def _stream_combined(_ref: str) -> Iterator[StreamedArtifact]:
+    yield StreamedArtifact(io.BytesIO(_combined_kernel_tar()), Sensitivity.SENSITIVE, "build")
+
+
 def _installer(conn: FakeLibvirtConn, staging_root: Path) -> LocalLibvirtInstall:
     return LocalLibvirtInstall(
         connect=lambda: conn,
-        fetch_kernel=lambda ref, dest: dest.write_bytes(_combined_kernel_tar()),
+        stream_kernel=_stream_combined,
         fetch_initrd=lambda ref, dest: dest.write_bytes(b"i"),
         readiness=lambda system_id: ReadinessResult(answered=True, ok=True),
         staging_root=staging_root,

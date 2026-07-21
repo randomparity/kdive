@@ -42,7 +42,7 @@ rejected with a 401 that names the missing prefix.
 ## Using this stack as a test override backend
 
 The test suite can reuse this Compose Postgres/MinIO instead of starting its own
-per-run containers, by pointing the fixtures at it (ADR-0400):
+per-run containers, by pointing the fixtures at it (ADR-0401):
 
 ```
 export KDIVE_TEST_PG_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret

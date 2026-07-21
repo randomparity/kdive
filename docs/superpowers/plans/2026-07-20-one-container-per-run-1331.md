@@ -4,14 +4,14 @@
 
 **Goal:** Collapse the per-xdist-worker Postgres/MinIO containers to one shared container per run, isolating workers by a per-worker uuid-scoped database/bucket, so `just test -n auto` starts one of each instead of ~18.
 
-**Architecture:** A resource-agnostic coordination helper (`tests/support/xdist_backend.py`) owns the cross-process single-container lifecycle (per-run temp-root `fcntl.flock` + refcounted JSON state file, stop-by-id, Ryuk disabled). The two session fixtures `postgres_url` (`tests/db/conftest.py`) and `minio_store` (`tests/store/conftest.py`) call it: each first honors an env override (`KDIVE_TEST_PG_URL` / `KDIVE_TEST_S3_URL`), else acquires the shared container, then provisions its own `kdive_test_<worker>_<token>` database / `kdive-test-<worker>-<token>` bucket. Governed by ADR-0400.
+**Architecture:** A resource-agnostic coordination helper (`tests/support/xdist_backend.py`) owns the cross-process single-container lifecycle (per-run temp-root `fcntl.flock` + refcounted JSON state file, stop-by-id, Ryuk disabled). The two session fixtures `postgres_url` (`tests/db/conftest.py`) and `minio_store` (`tests/store/conftest.py`) call it: each first honors an env override (`KDIVE_TEST_PG_URL` / `KDIVE_TEST_S3_URL`), else acquires the shared container, then provisions its own `kdive_test_<worker>_<token>` database / `kdive-test-<worker>-<token>` bucket. Governed by ADR-0401.
 
 **Tech Stack:** Python 3.14, `uv`, pytest + pytest-xdist, testcontainers, psycopg, boto3, stdlib `fcntl`/`uuid`/`json`.
 
 ## Global Constraints
 
 - Python 3.14; run everything via `uv run` / `just` recipes (the justfile is the source of truth).
-- No new runtime or dev dependency — coordination uses stdlib `fcntl.flock` (ADR-0400 rejects `filelock`).
+- No new runtime or dev dependency — coordination uses stdlib `fcntl.flock` (ADR-0401 rejects `filelock`).
 - Ruff line length 100, lint set `E,F,I,UP,B,SIM`; `ty` runs whole-tree (src + tests). Absolute imports only.
 - `KDIVE_REQUIRE_DOCKER=1` must still turn a no-Docker skip into a hard failure (ADR-0015/0017); `KDIVE_REQUIRE_DOCKER` unset must still skip cleanly.
 - Guardrail suite: `just lint`, `just type`, `just test`. Full gate: `just ci`. Single test: `uv run python -m pytest <path>::<name> -q`.
@@ -190,7 +190,7 @@ Under pytest-xdist each worker is a separate process, so a ``scope="session"``
 container fixture would start one container per worker. This helper lets all of a
 run's workers share a single container: the per-run temp root holds a
 ``fcntl.flock`` guard and a refcounted JSON state file, so the first worker starts
-the container and the last to leave stops it by id. See ADR-0400.
+the container and the last to leave stops it by id. See ADR-0401.
 """
 
 from __future__ import annotations
@@ -290,7 +290,7 @@ def shared_container(
                 # the run and (via _acquire_*'s finally: manager.__exit__) could mask an
                 # in-flight body exception. Warn instead of swallowing silently; always
                 # unlink so the next run starts clean (a failed stop leaks one container,
-                # the bounded residual in ADR-0400).
+                # the bounded residual in ADR-0401).
                 try:
                     stop(state["container_id"])
                 except Exception as exc:  # noqa: BLE001
@@ -437,7 +437,7 @@ Expected: FAIL — `AttributeError: module … has no attribute '_acquire_pg_ser
 - [ ] **Step 3: Rewrite `tests/db/conftest.py`**
 
 ```python
-"""Disposable-Postgres fixtures for the db tests (ADR-0015, ADR-0400).
+"""Disposable-Postgres fixtures for the db tests (ADR-0015, ADR-0401).
 
 `postgres_url` yields a per-worker database on a backend shared for the whole run.
 It first honors `KDIVE_TEST_PG_URL` (a running server, e.g. `just compose-up`); with
@@ -446,7 +446,7 @@ workers (`tests/support/xdist_backend`). Each worker owns a `kdive_test_<worker>
 database; `pg_conn` empties `public` per test. When Docker is unreachable the fixture
 skips, unless `KDIVE_REQUIRE_DOCKER=1`, which re-raises so a broken runner can't mask
 the suite. On a *persistent* override backend, crashed runs leave `kdive_test_*`
-databases that must be swept periodically (ADR-0400 residual).
+databases that must be swept periodically (ADR-0401 residual).
 """
 
 from __future__ import annotations
@@ -469,7 +469,7 @@ def _start_postgres() -> tuple[str, str]:
     from testcontainers.core.config import testcontainers_config
     from testcontainers.postgres import PostgresContainer
 
-    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0400)
+    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0401)
     container = PostgresContainer(_POSTGRES_IMAGE).with_command(
         f"postgres -c max_connections={xdist_backend.postgres_max_connections()}"
     )
@@ -939,7 +939,7 @@ Add a short subsection stating that when the compose Postgres/MinIO is used as a
 test **override** backend (`KDIVE_TEST_PG_URL` / `KDIVE_TEST_S3_URL`), the test
 fixtures create per-run `kdive_test_*` databases and `kdive-test-*` buckets, and a
 crashed run leaves them behind; periodically drop stale `kdive_test_*` databases (or
-recreate the compose volume) — required, not optional (ADR-0400).
+recreate the compose volume) — required, not optional (ADR-0401).
 
 - [ ] **Step 3: Validate compose + doc guards**
 

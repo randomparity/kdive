@@ -1,4 +1,4 @@
-# ADR 0400 — One Postgres/MinIO backend container per test run, database-per-worker
+# ADR 0401 — One Postgres/MinIO backend container per test run, database-per-worker
 
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-07-20

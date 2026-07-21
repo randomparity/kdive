@@ -4,7 +4,7 @@ Under pytest-xdist each worker is a separate process, so a ``scope="session"``
 container fixture would start one container per worker. This helper lets all of a
 run's workers share a single container: the per-run temp root holds a
 ``fcntl.flock`` guard and a refcounted JSON state file, so the first worker starts
-the container and the last to leave stops it by id. See ADR-0400.
+the container and the last to leave stops it by id. See ADR-0401.
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ def shared_container(
                     # wedge the run and (via a caller's finally: manager.__exit__)
                     # could mask an in-flight body exception. Warn instead of
                     # swallowing silently; always unlink so the next run starts clean
-                    # (a failed stop leaks one container, the ADR-0400 residual).
+                    # (a failed stop leaks one container, the ADR-0401 residual).
                     try:
                         stop(state["container_id"])
                     except Exception as exc:  # noqa: BLE001

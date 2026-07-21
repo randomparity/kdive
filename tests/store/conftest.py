@@ -1,4 +1,4 @@
-"""Disposable-MinIO fixtures for the object-store tests (ADR-0017, ADR-0400).
+"""Disposable-MinIO fixtures for the object-store tests (ADR-0017, ADR-0401).
 
 ``minio_store`` yields an :class:`ObjectStore` bound to a per-worker bucket on a
 MinIO shared for the whole run. It first honors ``KDIVE_TEST_S3_URL`` (a running
@@ -9,7 +9,7 @@ override it lazily starts one shared testcontainer coordinated across xdist work
 bucket; ``key_ns`` gives each test a unique key prefix within it. When Docker is
 unreachable the fixture skips, unless ``KDIVE_REQUIRE_DOCKER=1``, which re-raises so a
 broken runner cannot mask the suite. On a *persistent* override backend, crashed runs
-leave ``kdive-test-*`` buckets that must be swept periodically (ADR-0400 residual).
+leave ``kdive-test-*`` buckets that must be swept periodically (ADR-0401 residual).
 
 MinIO's official image is archived (final tag pinned below); if it stops resolving,
 swap in localstack or a Chainguard MinIO rebuild (ADR-0017).
@@ -76,7 +76,7 @@ def _start_minio() -> tuple[str, str]:
     from testcontainers.core.config import testcontainers_config
     from testcontainers.core.container import DockerContainer
 
-    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0400)
+    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0401)
     container = (
         DockerContainer(_MINIO_IMAGE)
         .with_command("server /data")

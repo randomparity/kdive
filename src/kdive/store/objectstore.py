@@ -10,8 +10,10 @@ returned sensitivity).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+import io
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from typing import IO, Any, cast
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -69,6 +71,34 @@ def _local_stream_error(key: str, path: str, err: OSError) -> CategorizedError:
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={"op": "put_stream", "key": key, "path": path},
     )
+
+
+class _StreamingBodyReader(io.RawIOBase):
+    """A blocking ``RawIOBase`` over a boto ``StreamingBody`` that maps transport faults to the
+    same typed infrastructure error the buffered read raises (ADR-0400).
+
+    ``readinto`` returns the number of bytes copied — a short read (fewer bytes than requested)
+    is *not* end-of-stream — and returns ``0`` only when the wrapped read returns ``b""`` (true
+    EOF), so a partial chunk is never mistaken for a truncated archive. A mid-stream
+    ``BotoCoreError``/``ClientError`` becomes a ``CategorizedError`` (a non-``OSError``) that
+    propagates cleanly out through ``tarfile``'s stream/io buffering to the caller.
+    """
+
+    def __init__(self, body: Any, key: str) -> None:
+        self._body = body
+        self._key = key
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any, /) -> int:
+        try:
+            chunk = self._body.read(len(buffer))
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("get_object", self._key, err) from err
+        count = len(chunk)
+        buffer[:count] = chunk
+        return count
 
 
 class ObjectStore:
@@ -174,6 +204,27 @@ class ObjectStore:
                 interpretable sensitivity metadata, or the get otherwise fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
+        resp, sensitivity, retention_class = self._open_get(key, etag)
+        try:
+            data = resp["Body"].read()
+        except (BotoCoreError, ClientError) as err:
+            # The download streams here, after the headers; a mid-stream timeout or
+            # dropped connection raises a BotoCoreError that must stay typed too.
+            raise _infrastructure_error("get_object", key, err) from err
+        return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
+
+    def _open_get(self, key: str, etag: str | None) -> tuple[Any, Sensitivity, str]:
+        """Issue the GET and parse the sensitivity metadata, shared by the buffered and
+        streaming reads so their error taxonomy cannot drift (ADR-0400, refining ADR-0054).
+
+        Returns the raw ``get_object`` response, the object's ``Sensitivity``, and its
+        retention class. The body is left unread so the caller chooses whether to buffer it
+        (:meth:`get_artifact`) or stream it (:meth:`get_artifact_stream`).
+
+        Raises:
+            CategorizedError: a 404/412 maps to ``STALE_HANDLE``; any other client/transport
+                error and absent/invalid sensitivity metadata map to ``INFRASTRUCTURE_FAILURE``.
+        """
         get_kwargs: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
         if etag is not None:
             get_kwargs["IfMatch"] = f'"{etag}"'
@@ -200,13 +251,34 @@ class ObjectStore:
                 category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"key": key},
             ) from err
+        return resp, sensitivity, retention_class
+
+    @contextmanager
+    def get_artifact_stream(
+        self, key: str, etag: str | None
+    ) -> Iterator[artifact_types.StreamedArtifact]:
+        """Yield a streaming reader over the object at ``key`` plus its sensitivity class.
+
+        Same GET/error/metadata contract as :meth:`get_artifact` (they share :meth:`_open_get`),
+        but the body is not materialized: the yielded ``reader`` streams it and maps a mid-stream
+        transport fault to ``INFRASTRUCTURE_FAILURE``. The body is closed on ``with``-exit,
+        aborting a partially-read download. Async callers offload the whole ``with`` block via
+        ``asyncio.to_thread`` (ADR-0400).
+
+        Raises:
+            CategorizedError: the object is missing or (with an ``etag``) no longer matches
+                (``STALE_HANDLE``); the object lacks interpretable sensitivity metadata, the get
+                otherwise fails, or the body read fails mid-stream (``INFRASTRUCTURE_FAILURE``).
+        """
+        resp, sensitivity, retention_class = self._open_get(key, etag)
+        body = resp["Body"]
         try:
-            data = resp["Body"].read()
-        except (BotoCoreError, ClientError) as err:
-            # The download streams here, after the headers; a mid-stream timeout or
-            # dropped connection raises a BotoCoreError that must stay typed too.
-            raise _infrastructure_error("get_object", key, err) from err
-        return artifact_types.FetchedArtifact(data, sensitivity, retention_class)
+            # RawIOBase provides the read interface tarfile uses but is not a nominal
+            # IO[bytes] in typeshed; cast at this one construction site.
+            reader = cast(IO[bytes], _StreamingBodyReader(body, key))
+            yield artifact_types.StreamedArtifact(reader, sensitivity, retention_class)
+        finally:
+            body.close()
 
     def ping(self) -> None:
         """Probe the bucket's reachability with a ``HEAD`` (ADR-0090 §5 readiness check).

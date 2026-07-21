@@ -1,4 +1,4 @@
-"""Disposable-Postgres fixtures for the db tests (ADR-0015, ADR-0400).
+"""Disposable-Postgres fixtures for the db tests (ADR-0015, ADR-0401).
 
 `postgres_url` yields a per-worker database on a backend shared for the whole run.
 It first honors `KDIVE_TEST_PG_URL` (a running server, e.g. `just compose-up`); with
@@ -8,7 +8,7 @@ workers (`tests/support/xdist_backend`). Each worker owns a
 Docker is unreachable the fixture skips, unless `KDIVE_REQUIRE_DOCKER=1`, which
 re-raises so a broken runner cannot mask the suite. On a *persistent* override
 backend, crashed runs leave `kdive_test_*` databases that must be swept periodically
-(ADR-0400 residual).
+(ADR-0401 residual).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _start_postgres() -> tuple[str, str]:
     from testcontainers.core.config import testcontainers_config
     from testcontainers.postgres import PostgresContainer
 
-    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0400)
+    testcontainers_config.ryuk_disabled = True  # refcount owns lifecycle (ADR-0401)
     container = PostgresContainer(_POSTGRES_IMAGE).with_command(
         f"postgres -c max_connections={xdist_backend.postgres_max_connections()}"
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import NamedTuple
+from typing import IO, NamedTuple
 
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -129,6 +129,19 @@ class FetchedArtifact(NamedTuple):
     """A fetched object's bytes and the class read back from its metadata."""
 
     data: bytes
+    sensitivity: Sensitivity
+    retention_class: str
+
+
+class StreamedArtifact(NamedTuple):
+    """A fetched object's streaming reader and the class read back from its metadata.
+
+    Parallels :class:`FetchedArtifact` but yields a forward-only reader instead of a
+    fully-materialized ``bytes`` body, for callers that stream the object into a consumer
+    (the install combined-tar extract, ADR-0400) rather than hold it in RAM.
+    """
+
+    reader: IO[bytes]
     sensitivity: Sensitivity
     retention_class: str
 
