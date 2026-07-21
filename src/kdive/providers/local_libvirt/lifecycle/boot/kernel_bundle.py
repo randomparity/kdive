@@ -66,78 +66,129 @@ def _tar_member_path(name: str) -> str:
     return name.lstrip("/")
 
 
-def extract_boot_vmlinuz(combined_tar: Path, dest: Path) -> None:
-    """Extract ``boot/vmlinuz`` from the combined kernel tar to ``dest``.
+def extract_kernel_bundle(combined_tar: Path, kernel_dest: Path, modules_dest: Path | None) -> bool:
+    """Extract ``boot/vmlinuz`` and, optionally, repack ``lib/modules/`` in one decompression pass.
 
     The unified ``kernel`` artifact is a gzip tar of ``boot/vmlinuz`` + ``lib/modules/<ver>/``
     (ADR-0234). libvirt's direct-kernel ``<kernel>`` element needs a raw kernel-image path — a
     bzImage on x86_64, an ELF ``vmlinux`` on ppc64le (powerpc has no bzImage; ADR-0343/0344) — so
-    whatever bytes the ``boot/vmlinuz`` member carries are extracted host-side via temp-then-rename.
-    The extraction is arch-opaque by design: the arch was already validated at upload (ADR-0343),
-    so this reads no magic and copies the member verbatim regardless of arch.
+    whatever bytes ``boot/vmlinuz`` carries are extracted host-side via temp-then-rename. The
+    extraction is arch-opaque by design: the arch was already validated at upload (ADR-0343), so
+    this reads no magic and copies the member verbatim regardless of arch.
+
+    When ``modules_dest`` is given (a kdump or debuginfo install that needs the module tree in the
+    guest), the same forward walk repacks the ``lib/modules/`` subtree into ``modules_dest`` and
+    returns whether a subtree was found; when it is ``None`` only the boot member is read (the walk
+    stops there) and the return is ``False``. The former two helpers opened the tar twice: the
+    repack pass had to decompress the boot member again just to skip past it into ``lib/modules/``.
+    This single pass decompresses the boot member once and reuses it for both the extract and the
+    skip-into-modules, so a modules-needed run saves one boot-member decompression (meaningful when
+    that member is a large ppc64le ELF), and a boot-only run early-exits at the boot member exactly
+    as the old next()-based extract did (ADR-0399, #1350). The boot member is written the instant it
+    is read so its bytes are not held in RAM across the module repack.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` if ``boot/vmlinuz`` is absent, the tar is
+            unreadable, or repacking the modules tar fails (e.g. ``ENOSPC`` on a tmpfs scratch —
+            the details name the scratch modules path so an operator is pointed at
+            ``KDIVE_INSTALL_SCRATCH`` sizing, not the staging kernel); ``CONFIGURATION_ERROR`` for
+            a member-count or uncompressed-size bomb (the ``.part`` modules tar is cleaned before
+            the error escapes).
     """
+    modules_tmp = modules_dest.with_name(modules_dest.name + ".part") if modules_dest else None
     try:
-        with tarfile.open(combined_tar, "r:gz") as archive:
-            member = next(
-                (
-                    item
-                    for item in capped_tar_members(archive)
-                    if _tar_member_path(item.name) == _KERNEL_BUNDLE_BOOT_MEMBER
-                ),
-                None,
-            )
-            if member is not None:
-                # Refuse a decompression-bomb boot member before read() allocates member.size bytes.
-                reject_oversize_member(member.size, dest=str(dest))
-            extracted = archive.extractfile(member) if member is not None else None
-            data = extracted.read() if extracted is not None else None
+        return _scan_combined_tar(combined_tar, kernel_dest, modules_dest, modules_tmp)
     except (OSError, tarfile.TarError) as exc:
+        # The fault is either reading/decompressing the combined tar or writing the repacked
+        # modules tar (a full tmpfs scratch surfaces as ENOSPC here). Name both destinations and
+        # keep the message neutral so a full-scratch operator is not misdirected at the staging
+        # kernel path; modules_dest is present only on a modules-needed run. (A member-count/
+        # oversize/missing-boot rejection is already a CategorizedError and propagates unwrapped.)
+        details: dict[str, object] = {
+            "op": "extract_kernel_bundle",
+            "kernel_dest": str(kernel_dest),
+        }
+        if modules_dest is not None:
+            details["modules_dest"] = str(modules_dest)
         raise CategorizedError(
-            "failed to read the combined kernel tar to extract boot/vmlinuz",
+            "failed to read the combined kernel tar or write the repacked modules tar",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "extract", "member": _KERNEL_BUNDLE_BOOT_MEMBER, "dest": str(dest)},
+            details=details,
         ) from exc
-    if data is None:
+    finally:
+        # Clean the partial ``.part`` on every failure exit. On success ``_scan_combined_tar`` has
+        # already renamed or unlinked it, so this is a no-op (``missing_ok``); a single site instead
+        # of one per except arm.
+        if modules_tmp is not None:
+            with contextlib.suppress(OSError):
+                modules_tmp.unlink(missing_ok=True)
+
+
+def _scan_combined_tar(
+    combined_tar: Path, kernel_dest: Path, modules_dest: Path | None, modules_tmp: Path | None
+) -> bool:
+    """Single forward pass: extract the boot member and repack modules into ``modules_tmp``."""
+    boot_written = False
+    found = False
+    total = 0
+    with contextlib.ExitStack() as stack:
+        archive = stack.enter_context(tarfile.open(combined_tar, "r:gz"))
+        out = (
+            stack.enter_context(tarfile.open(modules_tmp, "w:gz"))
+            if modules_tmp is not None
+            else None
+        )
+        for member in capped_tar_members(archive):
+            normalized = _tar_member_path(member.name)
+            if not boot_written and normalized == _KERNEL_BUNDLE_BOOT_MEMBER:
+                boot_written = _extract_boot_member(archive, member, kernel_dest)
+                if boot_written and out is None:
+                    # Boot-only run (no modules repack): stop at the boot member instead of walking
+                    # the rest of the tar. In "r:gz" mode advancing past a member decompresses it,
+                    # so iterating to the end would decompress the whole (DWARF-bloated) module tree
+                    # just to read boot/vmlinuz. This is the early exit the old next()-extract had.
+                    break
+            elif out is not None and normalized.startswith(_MODULES_MEMBER_PREFIX):
+                if ".." in normalized.split("/"):
+                    continue
+                total = _repack_module_member(archive, out, member, normalized, total, modules_dest)
+                found = True
+    if not boot_written:
         raise CategorizedError(
             "combined kernel tar has no boot/vmlinuz member",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"member": _KERNEL_BUNDLE_BOOT_MEMBER, "tar": str(combined_tar)},
         )
-    write_staged_bytes(dest, data)
-
-
-def repack_modules_subtree(combined_tar: Path, dest: Path) -> bool:
-    """Repack the combined kernel tar's ``lib/modules/`` subtree into a modules-only gzip tar."""
-    tmp = dest.with_name(dest.name + ".part")
-    found = False
-    total = 0
-    try:
-        with tarfile.open(combined_tar, "r:gz") as src, tarfile.open(tmp, "w:gz") as out:
-            for member in capped_tar_members(src):
-                normalized = _tar_member_path(member.name)
-                if ".." in normalized.split("/"):
-                    continue
-                if normalized.startswith(_MODULES_MEMBER_PREFIX):
-                    total += member.size if member.isfile() else 0
-                    reject_oversize_member(total, dest=str(dest))
-                    safe_member = member.replace(name=normalized)
-                    out.addfile(safe_member, src.extractfile(member) if member.isfile() else None)
-                    found = True
+    if modules_dest is not None and modules_tmp is not None:
         if found:
-            tmp.replace(dest)
+            modules_tmp.replace(modules_dest)
         else:
-            tmp.unlink(missing_ok=True)
-    except CategorizedError:
-        # An oversize-member rejection: clean up the partial temp tar, keep the category.
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
-    except (OSError, tarfile.TarError) as exc:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise CategorizedError(
-            "failed to repack the lib/modules subtree from the combined kernel tar",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"op": "repack", "dest": str(dest)},
-        ) from exc
+            modules_tmp.unlink(missing_ok=True)
     return found
+
+
+def _extract_boot_member(archive: tarfile.TarFile, member: tarfile.TarInfo, dest: Path) -> bool:
+    """Write the boot member to ``dest`` at once (not held in RAM); return whether it was a file."""
+    # Refuse a decompression-bomb boot member before read() allocates member.size bytes.
+    reject_oversize_member(member.size, dest=str(dest))
+    extracted = archive.extractfile(member)
+    if extracted is None:  # a directory/link named boot/vmlinuz — treat as no usable boot member
+        return False
+    write_staged_bytes(dest, extracted.read())
+    return True
+
+
+def _repack_module_member(
+    archive: tarfile.TarFile,
+    out: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    normalized: str,
+    total: int,
+    modules_dest: Path | None,
+) -> int:
+    """Add one ``lib/modules/`` member to the output tar, enforcing the cumulative-size bound."""
+    total += member.size if member.isfile() else 0
+    reject_oversize_member(total, dest=str(modules_dest))
+    safe_member = member.replace(name=normalized)
+    out.addfile(safe_member, archive.extractfile(member) if member.isfile() else None)
+    return total

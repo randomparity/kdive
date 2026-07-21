@@ -147,7 +147,7 @@ def index_modules_tar(
     """Extract a modules tar, index it host-side, and repack the indexed tree (ADR-0346).
 
     ``modules_tar`` is the ``lib/modules/<version>/`` subtree repacked from the combined kernel tar
-    (``repack_modules_subtree``). It is extracted under ``workdir`` (an existing dir the caller
+    (``extract_kernel_bundle``). It is extracted under ``workdir`` (an existing dir the caller
     owns — typically a ``TemporaryDirectory``), ``run_depmod`` indexes it in place, and the whole
     ``lib/modules/`` subtree — now carrying ``modules.dep`` and the ``.bin`` indices — is repacked
     to a gzip tar the caller ``tar_in``s into the guest overlay. No guest binary is executed.

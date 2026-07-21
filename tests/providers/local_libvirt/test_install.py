@@ -32,7 +32,7 @@ from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     _verify_vmlinux_size,
     _vmlinux_dest,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import repack_modules_subtree
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     ConsoleVerdict,
     ReadinessResult,
@@ -109,7 +109,7 @@ class _Fetch:
     """Records (ref, dest); writes a combined kernel tar via temp-then-rename.
 
     The kernel fetch must produce the unified combined tar so install's host-side
-    ``extract_boot_vmlinuz``/``repack_modules_subtree`` succeed. ``with_modules=False`` writes a
+    ``extract_kernel_bundle`` succeeds. ``with_modules=False`` writes a
     tar with only ``boot/vmlinuz`` (no ``lib/modules/``) to exercise the modules-absent path.
     """
 
@@ -230,6 +230,7 @@ def _install(
     fetch: _Fetch | None = None,
     seam: _Readiness | None = None,
     staging_root: Path,
+    scratch_root: Path | None = None,
     kernel_writer: GuestKernelWriter | None = None,
     fetch_modules: Fetch | None = None,
 ) -> LocalLibvirtInstall:
@@ -242,6 +243,7 @@ def _install(
         readiness=seam.readiness,
         staging_root=staging_root,
         boot_window_polls=3,
+        scratch_root=scratch_root,
         fetch_modules=fetch_modules or fetch,
         kernel_writer=kernel_writer,
     )
@@ -346,7 +348,106 @@ def test_install_kdump_reclaims_the_repacked_modules_tar(tmp_path: Path) -> None
     assert not (staged_dir / "kernel.tar.gz").exists()
 
 
-def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> None:
+# --- install: configurable scratch staging (KDIVE_INSTALL_SCRATCH, ADR-0399) ---------
+
+
+def test_install_scratch_root_routes_intermediates_off_staging(tmp_path: Path) -> None:
+    # With a distinct scratch root the large intermediates (combined tar, repacked modules tar,
+    # fetched vmlinux) stage under scratch while the persistent <kernel> stays in staging. A
+    # debuginfo run exercises all three intermediates.
+    staging = tmp_path / "staging"
+    scratch = tmp_path / "scratch"
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    fetch = _RecordingFetch(events)
+    inst = _install(
+        conn=conn,
+        staging_root=staging,
+        scratch_root=scratch,
+        kernel_writer=writer,
+        fetch_modules=fetch,
+    )
+
+    inst.install(_request(debuginfo_ref="dbg-ref"))
+
+    staging_dir = staging / str(_SYS) / str(_RUN)
+    scratch_dir = scratch / str(_SYS) / str(_RUN)
+    assert writer.injected
+    # persistent boot image is in staging, not scratch
+    assert (staging_dir / "kernel").exists()
+    assert not (scratch_dir / "kernel").exists()
+    # the repacked modules tar and the fetched vmlinux were handed to the injector from scratch
+    assert writer.modules_tar is not None and writer.modules_tar.parent == scratch_dir
+    assert writer.vmlinux is not None and writer.vmlinux.parent == scratch_dir
+    # every intermediate is reclaimed from both roots after the install
+    for name in ("kernel.tar.gz", "modules.tar.gz", "vmlinux"):
+        assert not (staging_dir / name).exists()
+    # the now-empty per-Run scratch dir is reaped (no empty-dir leak on a persistent scratch mount)
+    assert not scratch_dir.exists()
+    assert staging_dir.exists()  # staging persists — it holds the <kernel>/<initrd>
+
+
+def test_install_default_scratch_stages_intermediates_in_staging(tmp_path: Path) -> None:
+    # Unset scratch (scratch_root=None) tracks the staging root, so the modules tar the injector
+    # receives lives in the staging dir — behavior unchanged from before ADR-0399.
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events)
+    inst = _install(conn=conn, staging_root=tmp_path, kernel_writer=writer)
+
+    inst.install(_request(method=CaptureMethod.KDUMP))
+
+    assert writer.injected
+    assert writer.modules_tar == tmp_path / str(_SYS) / str(_RUN) / "modules.tar.gz"
+
+
+def test_install_reclaims_scratch_intermediates_when_inject_fails(tmp_path: Path) -> None:
+    # A mid-install failure (inject fault) must still reclaim the scratch intermediates and reap the
+    # empty per-Run scratch dir — otherwise the multi-GB bytes stay pinned in a tmpfs scratch until
+    # a retry. The try/finally in _stage_install_artifacts runs cleanup on failure too (ADR-0399).
+    staging = tmp_path / "staging"
+    scratch = tmp_path / "scratch"
+    events: list[str] = []
+    conn = _conn_with_existing(events=events)
+    writer = _FakeKernelWriter(events, fail=True)  # inject raises INFRASTRUCTURE_FAILURE
+    inst = _install(conn=conn, staging_root=staging, scratch_root=scratch, kernel_writer=writer)
+
+    with pytest.raises(CategorizedError):
+        inst.install(_request(method=CaptureMethod.KDUMP))
+
+    scratch_dir = scratch / str(_SYS) / str(_RUN)
+    # intermediates reclaimed and the empty scratch dir reaped despite the failure
+    assert not scratch_dir.exists()
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses the directory-mode write check, so mkdir would not raise",
+)
+def test_install_unwritable_scratch_root_is_config_error(tmp_path: Path) -> None:
+    # A writable staging root but an unwritable scratch root fails the per-Run scratch mkdir with a
+    # CONFIGURATION_ERROR naming KDIVE_INSTALL_SCRATCH (staging is created first and succeeds).
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    scratch.chmod(0o500)  # readable/executable but not writable by the run user
+    try:
+        inst = _install(conn=_conn_with_existing(), staging_root=staging, scratch_root=scratch)
+
+        with pytest.raises(CategorizedError) as excinfo:
+            inst.install(_request(initrd_ref=_INITRD_REF))
+    finally:
+        scratch.chmod(0o700)  # restore so tmp_path cleanup can recurse
+
+    err = excinfo.value
+    assert err.category is ErrorCategory.CONFIGURATION_ERROR
+    assert err.details["env_var"] == "KDIVE_INSTALL_SCRATCH"
+    assert str(scratch) in str(err.details["root"])
+
+
+def test_extract_kernel_bundle_skips_path_traversal_members(tmp_path: Path) -> None:
     # An externally-uploaded kernel tar whose lib/modules member escapes via ``..`` must not be
     # carried into the in-guest extract; the traversal member is dropped, the legit one kept.
     combined = tmp_path / "kernel.tar.gz"
@@ -358,7 +459,7 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, out)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
     assert "lib/modules/6.9.0/kernel/ok.ko" in names
@@ -366,7 +467,7 @@ def test_repack_modules_subtree_skips_path_traversal_members(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("prefix", ("./", "/"))
-def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
+def test_extract_kernel_bundle_normalizes_prefixed_members(tmp_path: Path, prefix: str) -> None:
     version = "7.0.0-dirty"
     combined = tmp_path / "kernel.tar.gz"
     buf = io.BytesIO()
@@ -377,7 +478,7 @@ def test_repack_modules_subtree_normalizes_prefixed_members(tmp_path: Path, pref
     combined.write_bytes(buf.getvalue())
 
     out = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, out)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", out)
 
     with tarfile.open(out, "r:gz") as repacked:
         names = set(repacked.getnames())
@@ -766,14 +867,14 @@ def test_kernel_writer_mount_close_failure_preserves_open_failure(
 
 
 def test_read_release_recovers_version_from_repacked_modules_tar(tmp_path: Path) -> None:
-    # repack_modules_subtree writes members as ``lib/modules/<ver>/...``; _read_release must
+    # extract_kernel_bundle writes members as ``lib/modules/<ver>/...``; _read_release must
     # recover ``<ver>`` from that exact layout (the build↔install bundle contract, #654). A
     # regression here is the double-nesting / depmod-"lib" bug the live path would otherwise hit.
     version = "7.0.0-kdive"
     combined = tmp_path / "kernel.tar.gz"
     combined.write_bytes(_combined_kernel_tar_bytes(version=version))
     modules_tar = tmp_path / "modules.tar.gz"
-    assert repack_modules_subtree(combined, modules_tar)
+    assert extract_kernel_bundle(combined, tmp_path / "kernel", modules_tar)
 
     assert _RealGuestKernelWriter._read_release(modules_tar, "ov") == version
 
@@ -1104,7 +1205,7 @@ def test_install_unwritable_staging_root_is_config_error(tmp_path: Path) -> None
     assert err.category is ErrorCategory.CONFIGURATION_ERROR
     assert err.details["env_var"] == "KDIVE_INSTALL_STAGING"
     # The remedy and the configured staging root are both surfaced for the operator.
-    assert str(staging_root) in str(err.details["staging_root"])
+    assert str(staging_root) in str(err.details["root"])
     remedy = str(err.details["remedy"])
     assert "writable" in remedy
     assert "virt_image_t" in remedy

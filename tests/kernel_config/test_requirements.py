@@ -42,6 +42,21 @@ def test_manifest_covers_every_feature_and_exposes_advertised_not_gate_required(
     assert "gate_required" not in entry  # internal, not advertised
 
 
+def test_debuginfo_summary_names_use_case_and_cost():
+    # #1350: the advice must steer an agent away from DWARF5 for a console-log-only
+    # investigation by naming *when* debuginfo is useful and *what* it costs. A bare
+    # "resolve symbols" summary gave no basis to omit it, so an agent enabled DWARF5 on a
+    # boot-time panic reproducer and inflated the module tree to ~2 GB.
+    summary = feature_requirement("debuginfo").summary.lower()
+    # use case: live introspection or offline vmcore analysis
+    assert "drgn" in summary or "vmcore" in summary
+    # cost: DWARF tables in every module, large module-tree growth
+    assert ".ko" in summary
+    assert "10-50x" in summary or "module tree" in summary
+    # explicit omit-guidance for the wasteful case
+    assert "omit" in summary
+
+
 def test_unknown_feature_raises():
     import pytest
 

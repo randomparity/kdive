@@ -1114,7 +1114,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
     Extends the #1144 baseline-boot proof through the **install plane**: a provisioned ppc64le
     System (``accel=tcg``) gets an uploaded combined kernel tar (ELF ``boot/vmlinuz`` +
     ``lib/modules/<ver>/``, validated as a ppc64le ELF at ``complete_build``, ADR-0343) plus an
-    ``initrd``; ``runs.install`` extracts the ELF via ``extract_boot_vmlinuz`` and redefines the
+    ``initrd``; ``runs.install`` extracts the ELF via ``extract_kernel_bundle`` and redefines the
     direct-kernel ``<os>``; ``runs.boot`` power-cycles into it under the TCG-scaled deadline
     (ADR-0341) and reaches readiness — proving the boot path (ADR-0344) is arch-opaque for the ELF
     payload, not bzImage-literal.
@@ -1157,7 +1157,7 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                     allocation_id = env.object_id
                 async with phase("ppc64le-bundle:provision"):
                     # No crashkernel → CaptureMethod.CONSOLE → a PLAIN boot (no module injection),
-                    # so this exercises extract_boot_vmlinuz + <os> render + SLOF boot only.
+                    # so this exercises extract_kernel_bundle + <os> render + SLOF boot only.
                     profile = _reachability_provision_profile(image, arch="ppc64le")
                     env = ok(
                         await scalar(

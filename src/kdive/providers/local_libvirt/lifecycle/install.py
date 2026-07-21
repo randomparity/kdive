@@ -40,17 +40,15 @@ from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact
-from kdive.config.core_settings import INSTALL_STAGING
+from kdive.config.core_settings import INSTALL_SCRATCH, INSTALL_STAGING
+from kdive.config.registry import Setting
 from kdive.domain.capture import KDUMP_FAMILY
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
     _RealGuestKernelWriter,
 )
-from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import (
-    extract_boot_vmlinuz,
-    repack_modules_subtree,
-)
+from kdive.providers.local_libvirt.lifecycle.boot.kernel_bundle import extract_kernel_bundle
 from kdive.providers.local_libvirt.lifecycle.boot.readiness import (
     _POLL_INTERVAL_SECONDS,
     ReadinessResult,
@@ -245,6 +243,7 @@ class LocalLibvirtInstaller:
         fetch_initrd: Fetch,
         staging_root: Path,
         booter: LocalLibvirtBooter,
+        scratch_root: Path | None = None,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
     ) -> None:
@@ -252,6 +251,11 @@ class LocalLibvirtInstaller:
         self._fetch_kernel = fetch_kernel
         self._fetch_initrd = fetch_initrd
         self._staging_root = staging_root
+        # Scratch holds the large, short-lived install intermediates; unset it tracks the staging
+        # root so behavior is unchanged and no second directory is created (ADR-0399). The
+        # separate-scratch fact is derived once here so the create and reap sites cannot disagree.
+        self._scratch_root = scratch_root if scratch_root is not None else staging_root
+        self._scratch_separate = self._scratch_root != staging_root
         self._booter = booter
         self._fetch_modules = fetch_modules or fetch_kernel
         self._kernel_writer = kernel_writer
@@ -267,26 +271,26 @@ class LocalLibvirtInstaller:
         embedded-initramfs kernel). The kdump preflight is gated on
         the kdump family (``KDUMP``/``FADUMP``) — non-capture boots need no kdump prerequisites.
 
+        Intermediates (the combined tar, repacked modules tar, and a debuginfo run's vmlinux)
+        stage under ``KDIVE_INSTALL_SCRATCH`` when set, else under the staging root (ADR-0399);
+        the persistent ``kernel``/``initrd`` always stage under ``KDIVE_INSTALL_STAGING``.
+
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` if the kdump capture path is absent
-                (method=kdump only, checked before any redefine) or the configured staging
-                root is not writable by the run user (a ``PermissionError`` on the per-Run
-                ``mkdir``, naming ``KDIVE_INSTALL_STAGING`` + the path + a remedy, ADR-0204);
-                ``INSTALL_FAILURE`` on a libvirt redefine error; ``INFRASTRUCTURE_FAILURE`` on
-                any other staging-dir creation fault; any fetch error category from the seam.
+                (method=kdump only, checked before any redefine) or the configured staging or
+                scratch root is not writable by the run user (a ``PermissionError`` on the per-Run
+                ``mkdir``, naming ``KDIVE_INSTALL_STAGING``/``KDIVE_INSTALL_SCRATCH`` + the path +
+                a remedy, ADR-0204); ``INSTALL_FAILURE`` on a libvirt redefine error;
+                ``INFRASTRUCTURE_FAILURE`` on any other run-dir creation fault; any fetch error
+                category from the seam.
         """
-        staging_dir = self._staging_root / str(request.system_id) / str(request.run_id)
-        try:
-            staging_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError as exc:
-            raise self._unwritable_staging_error(staging_dir) from exc
-        except OSError as exc:
-            raise CategorizedError(
-                "failed to create the per-Run staging directory",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"op": "mkdir", "dest": str(staging_dir)},
-            ) from exc
-        artifacts = self._stage_install_artifacts(request, staging_dir)
+        staging_dir = self._make_run_dir(self._staging_root, request, INSTALL_STAGING)
+        scratch_dir = (
+            self._make_run_dir(self._scratch_root, request, INSTALL_SCRATCH)
+            if self._scratch_separate
+            else staging_dir
+        )
+        artifacts = self._stage_install_artifacts(request, staging_dir, scratch_dir)
         kdump_env_absent = request.method in KDUMP_FAMILY and not (
             artifacts.modules_injected or artifacts.initrd_path is not None
         )
@@ -313,20 +317,62 @@ class LocalLibvirtInstaller:
         finally:
             _close(conn)
 
+    def _make_run_dir(self, root: Path, request: InstallRequest, setting: Setting[str]) -> Path:
+        """Create the per-Run directory under ``root``, mapping a mkdir fault to a clean error.
+
+        A ``PermissionError`` on an operator-misconfigured root is a ``CONFIGURATION_ERROR`` naming
+        ``setting`` (ADR-0204); any other ``OSError`` is an ``INFRASTRUCTURE_FAILURE``.
+        """
+        run_dir = root / str(request.system_id) / str(request.run_id)
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except PermissionError as exc:
+            raise self._unwritable_run_dir_error(root, run_dir, setting) from exc
+        except OSError as exc:
+            raise CategorizedError(
+                f"failed to create the per-Run directory under {setting.name}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"op": "mkdir", "env_var": setting.name, "dest": str(run_dir)},
+            ) from exc
+        return run_dir
+
     def _stage_install_artifacts(
-        self, request: InstallRequest, staging_dir: Path
+        self, request: InstallRequest, staging_dir: Path, scratch_dir: Path
     ) -> _StagedInstallArtifacts:
-        combined_tar = staging_dir / "kernel.tar.gz"
-        self._fetch_kernel(request.kernel_ref, combined_tar)
-        kernel_path = staging_dir / "kernel"
-        extract_boot_vmlinuz(combined_tar, kernel_path)
-        initrd_path = self._stage_initrd(request, staging_dir)
-        modules_tar = staging_dir / "modules.tar.gz"
-        modules_injected = self._inject_modules_if_needed(
-            request, staging_dir, combined_tar, modules_tar, kernel_path
-        )
-        self._delete_install_intermediates(combined_tar, modules_tar)
-        return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
+        combined_tar = scratch_dir / "kernel.tar.gz"
+        modules_tar = scratch_dir / "modules.tar.gz"
+        vmlinux = scratch_dir / "vmlinux"
+        try:
+            self._fetch_kernel(request.kernel_ref, combined_tar)
+            kernel_path = staging_dir / "kernel"
+            # kdump and debuginfo installs need the module tree in the guest; a plain boot does not.
+            # A modules-needed run repacks lib/modules/ in the same pass extract_kernel_bundle makes
+            # over boot/vmlinuz, so the combined tar is decompressed once, not twice (ADR-0399).
+            needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
+            modules_found = extract_kernel_bundle(
+                combined_tar, kernel_path, modules_tar if needs_modules else None
+            )
+            initrd_path = self._stage_initrd(request, staging_dir)
+            modules_injected = False
+            if modules_found:
+                self._inject_built_modules(
+                    request.system_id, modules_tar, kernel_path, request.debuginfo_ref, vmlinux
+                )
+                modules_injected = True
+            return _StagedInstallArtifacts(kernel_path, initrd_path, modules_injected)
+        finally:
+            # Reclaim the intermediates on every exit, not just success: a mid-install failure
+            # (inject fault, bad debuginfo_ref) would otherwise leave the multi-GB combined/modules/
+            # vmlinux bytes resident — cheap on disk, but pinned RAM on a tmpfs scratch until retry
+            # overwrites them. Delete is best-effort/idempotent and re-fetch is temp-then-rename, so
+            # unconditional cleanup is retry-safe and bounds tmpfs use to one in-flight install.
+            self._delete_install_intermediates(combined_tar, modules_tar, vmlinux)
+            if self._scratch_separate:
+                # A dedicated scratch dir holds nothing durable once the intermediates are gone, so
+                # remove the now-empty per-Run dir — on a persistent scratch mount an un-reaped dir
+                # per install is unbounded inode growth. Best-effort: a racing/nonempty dir stays.
+                with contextlib.suppress(OSError):
+                    scratch_dir.rmdir()
 
     def _stage_initrd(self, request: InstallRequest, staging_dir: Path) -> Path | None:
         if request.initrd_ref is None:
@@ -335,30 +381,15 @@ class LocalLibvirtInstaller:
         self._fetch_initrd(request.initrd_ref, initrd_path)
         return initrd_path
 
-    def _inject_modules_if_needed(
-        self,
-        request: InstallRequest,
-        staging_dir: Path,
-        combined_tar: Path,
-        modules_tar: Path,
-        kernel_path: Path,
-    ) -> bool:
-        needs_modules = request.method in KDUMP_FAMILY or request.debuginfo_ref is not None
-        if not needs_modules or not repack_modules_subtree(combined_tar, modules_tar):
-            return False
-        self._inject_built_modules(
-            request.system_id, modules_tar, kernel_path, request.debuginfo_ref, staging_dir
-        )
-        return True
-
     @staticmethod
-    def _delete_install_intermediates(combined_tar: Path, modules_tar: Path) -> None:
-        # The combined tar and the repacked modules tar are intermediates: boot/vmlinuz is already
-        # extracted for the <kernel> element and the modules tree is injected in-guest, so neither
-        # is needed past this point. Reclaim them best-effort so the per-Run staging dir does not
-        # retain a redundant copy of the kernel bytes for the System's lifetime; a retried install
-        # re-fetches the combined tar (temp-then-rename), so removal is retry-safe.
-        for intermediate in (combined_tar, modules_tar):
+    def _delete_install_intermediates(combined_tar: Path, modules_tar: Path, vmlinux: Path) -> None:
+        # The combined tar, the repacked modules tar, and a debuginfo run's vmlinux are
+        # intermediates: boot/vmlinuz is already extracted for the <kernel> element and the modules
+        # tree and vmlinux are injected in-guest, so none is needed past this point. Reclaim them
+        # best-effort so the per-Run scratch dir does not retain a redundant copy of the kernel
+        # bytes for the System's lifetime — which on a tmpfs scratch is leaked RAM. A retried
+        # install re-fetches (temp-then-rename), so removal is retry-safe.
+        for intermediate in (combined_tar, modules_tar, vmlinux):
             with contextlib.suppress(OSError):
                 intermediate.unlink(missing_ok=True)
 
@@ -368,7 +399,7 @@ class LocalLibvirtInstaller:
         modules_tar: Path,
         kernel_image: Path,
         debuginfo_ref: str | None,
-        staging_dir: Path,
+        vmlinux: Path,
     ) -> None:
         """Force-off the domain, then stage the built kernel into its overlay (ADR-0203/0207).
 
@@ -377,7 +408,8 @@ class LocalLibvirtInstaller:
         under direct-kernel boot the running kernel is supplied by libvirt and is otherwise absent
         from the guest ``/boot`` (ADR-0207). ``modules_tar`` is the ``lib/modules/`` subtree
         repacked host-side from the combined kernel tar; ``kernel_image`` is the ``boot/vmlinuz``
-        ``install`` already extracted to ``staging_dir/kernel`` for the ``<kernel>`` element.
+        ``install`` already extracted to ``staging_dir/kernel`` for the ``<kernel>`` element;
+        ``vmlinux`` is the scratch path a debuginfo run's DWARF image is fetched to before inject.
 
         When ``debuginfo_ref`` is set the run's DWARF ``vmlinux`` is fetched and staged in-guest
         at ``/usr/lib/debug/lib/modules/<ver>/vmlinux`` so the live ``kdive-drgn`` helper's
@@ -402,11 +434,11 @@ class LocalLibvirtInstaller:
                 details={"system_id": str(system_id)},
             )
         self._booter.force_off_if_active(system_id)
-        vmlinux: Path | None = None
+        vmlinux_ref: Path | None = None
         if debuginfo_ref is not None:
-            vmlinux = staging_dir / "vmlinux"
             self._fetch_modules(debuginfo_ref, vmlinux)
-        self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux)
+            vmlinux_ref = vmlinux
+        self._kernel_writer.inject(overlay_path(system_id), kernel_image, modules_tar, vmlinux_ref)
 
     def _render_direct_kernel_xml(
         self,
@@ -454,27 +486,30 @@ class LocalLibvirtInstaller:
         ET.SubElement(os_el, "cmdline").text = cmdline
         return ET.tostring(root, encoding="unicode")
 
-    def _unwritable_staging_error(self, staging_dir: Path) -> CategorizedError:
+    @staticmethod
+    def _unwritable_run_dir_error(
+        root: Path, run_dir: Path, setting: Setting[str]
+    ) -> CategorizedError:
         """A ``PermissionError`` on the per-Run mkdir is operator misconfiguration (ADR-0204).
 
-        The configured staging root is not writable by the run user (the default's parent
-        ``/var/lib/kdive`` is root-owned). That never becomes writable on retry, so it is a
-        ``CONFIGURATION_ERROR`` (not a retry-able infrastructure failure) whose details name
-        the env var, the configured root, the per-Run path tried, and an actionable remedy.
+        The configured ``root`` (staging or scratch) is not writable by the run user (the staging
+        default's parent ``/var/lib/kdive`` is root-owned). That never becomes writable on retry,
+        so it is a ``CONFIGURATION_ERROR`` (not a retry-able infrastructure failure) whose details
+        name the env var, the configured root, the per-Run path tried, and an actionable remedy.
         """
-        staging_root = str(self._staging_root)
+        root_str = str(root)
         remedy = (
-            f"pre-create {staging_root} (or repoint {INSTALL_STAGING.name}) so it is writable "
+            f"pre-create {root_str} (or repoint {setting.name}) so it is writable "
             "by the run user; on SELinux hosts give it the virt_image_t label"
         )
         return CategorizedError(
-            f"install staging root {staging_root} is not writable by the run user",
+            f"install {setting.name} root {root_str} is not writable by the run user",
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={
                 "op": "mkdir",
-                "env_var": INSTALL_STAGING.name,
-                "staging_root": staging_root,
-                "dest": str(staging_dir),
+                "env_var": setting.name,
+                "root": root_str,
+                "dest": str(run_dir),
                 "remedy": remedy,
             },
         )
@@ -492,6 +527,7 @@ class LocalLibvirtInstall:
         readiness: Readiness,
         staging_root: Path,
         boot_window_polls: int,
+        scratch_root: Path | None = None,
         fetch_modules: Fetch | None = None,
         kernel_writer: GuestKernelWriter | None = None,
     ) -> None:
@@ -506,6 +542,7 @@ class LocalLibvirtInstall:
             fetch_initrd=fetch_initrd,
             staging_root=staging_root,
             booter=booter,
+            scratch_root=scratch_root,
             fetch_modules=fetch_modules,
             kernel_writer=kernel_writer,
         )
@@ -524,6 +561,8 @@ class LocalLibvirtInstall:
         """
         host_uri = config.require(LIBVIRT_URI)
         staging_root = Path(config.require(INSTALL_STAGING))
+        scratch_raw = config.get(INSTALL_SCRATCH)
+        scratch_root = Path(scratch_raw) if scratch_raw else None
         return cls(
             connect=lambda: libvirt.open(host_uri),
             fetch_kernel=_real_fetch,
@@ -531,6 +570,7 @@ class LocalLibvirtInstall:
             readiness=_real_readiness,
             staging_root=staging_root,
             boot_window_polls=_boot_window_polls(),
+            scratch_root=scratch_root,
             fetch_modules=_real_fetch,
             kernel_writer=_RealGuestKernelWriter(),
         )
@@ -578,6 +618,5 @@ __all__ = [
     "_RealGuestKernelWriter",
     "_real_readiness",
     "_stage_object",
-    "extract_boot_vmlinuz",
-    "repack_modules_subtree",
+    "extract_kernel_bundle",
 ]
