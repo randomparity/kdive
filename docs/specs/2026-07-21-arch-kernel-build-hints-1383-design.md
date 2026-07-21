@@ -137,7 +137,10 @@ equals it):
   incidentally in "the bzImage is already stripped") avoids a trivially-satisfied common-word
   match. This binds the single most error-prone instruction (ppc64le: strip the build-tree
   `vmlinux` first) to a structural source signal instead of leaving it as unguarded prose; the
-  guard pins the command's *presence*, not its full wording.
+  guard pins the command's *presence*, not its full wording. The ELF-magic signal is a proxy for
+  the real condition (ships an unstripped DWARF-heavy image that overruns the scan bound), exact
+  for both current arches; a future wrapped-image arch that needs stripping but does not lead
+  with `\x7fELF` would need the predicate widened, not just a new doc section.
 - **`crashkernel` values:** assert the doc contains the exact `default_crashkernel_summary()`
   output, so a changed default fails until resynced.
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the
@@ -147,6 +150,12 @@ equals it):
 The guard is deliberately honest about reach: it binds set-completeness, the `crashkernel`
 string, the boot-container name, and the strip-required predicate; the *explanatory* prose
 (why DWARF overruns the scan bound, cross-compile triples) is review-only, not drift-guarded.
+
+Prose-ownership rule (to bound the accepted prose-vs-prose divergence residual): the reference
+carries only the scannable *key hints* (the strip-and-why one-liner, the crashkernel default,
+the target-vs-host rule) and points to `external-build-upload.md` for the exhaustive rationale
+and the full `tar` recipe. The narrative is the single owner of the deep detail, so an edit to
+it has one home to update rather than two.
 
 ## Acceptance criteria
 

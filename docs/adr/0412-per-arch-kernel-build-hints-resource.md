@@ -83,7 +83,12 @@ prose:
   unguarded free prose. Binding to `strip -s` (not the bare word `strip`, which appears
   incidentally in "the bzImage is already stripped") pins the actionable command's presence;
   the *explanatory* text around it (why DWARF overruns the scan bound, cross-compile triples)
-  stays review-only — the guard pins the rule's presence, not its full wording.
+  stays review-only — the guard pins the rule's presence, not its full wording. The ELF-magic
+  signal is a **proxy** for the real reason strip is required (an unstripped DWARF-heavy image
+  overruns the tar scan bound, `validation.py`); it is exact for both current arches. A future
+  arch that needs stripping but ships a boot member *not* leading with `\x7fELF` (a
+  self-decompressing or otherwise-wrapped image) would be classified not-strip-required, so a
+  third-arch author must revisit the predicate, not only add a doc section.
 
 `resources-docs-check` (snapshot mirror) and `served-doc-links` (a served doc must cite another
 served doc by its `resource://` URI, not a relative path) already gate the registration and the
@@ -115,6 +120,15 @@ test. No schema change, no migration.
   is the deferred inline-`Field` derivation recorded below, not this doc. The duplication with
   the narrative is otherwise deliberate: the reference is the scannable "what differs" surface,
   the narrative the "how to run it" surface.
+- The reference and `external-build-upload.md` now hold the same *explanatory* prose (the strip
+  rationale, the cross-compile triples) in two human-maintained docs, and `served-doc-links`
+  checks only that the cross-citation exists, not that the two agree. Prose-vs-prose divergence
+  is therefore an accepted residual distinct from the code-constant rot above — a higher-
+  frequency one, since it is exactly the unguarded text the guard does not bind. The mitigation
+  is an ownership split, not a guard: the narrative is the single owner of the exhaustive
+  rationale; the reference carries only the scannable key hints (the strip-and-why, the
+  crashkernel default, the target-vs-host rule) and points to the narrative for the rest, so an
+  edit to the deep detail has one home to update.
 - The guard covers only the code-owned values it binds; a newly hand-copied per-arch constant
   is not auto-detected until added to the test, same asymmetry ADR-0410 accepted.
 
@@ -133,6 +147,15 @@ test. No schema change, no migration.
   separate short resource gives. The two docs also serve different audiences (a `guide`
   reference vs an `operating` how-to). Rejected in favor of a separate short resource; the
   narrative keeps its recipe.
+- **Expand the `arch` `Field` description in place** to carry the missing why-and-how (strip
+  rule, cross-compile, crashkernel, target-vs-host), rather than stand up a new resource. This
+  is the lowest-surface option and it targets exactly where the agent authoring the profile
+  looks. It loses on cost, not concept: the `arch` Field description is serialized into every
+  `tools/list` response, so lengthening it from a one-line pointer into a multi-paragraph guide
+  taxes every catalog listing for every client on every session — and kdive deliberately keeps
+  the `arch` Field to a one-line pointer for that reason. A served resource is fetched only when
+  an agent asks for it. Rejected; the Field keeps its one-line pointer (repointed at the new
+  reference).
 - **Surface the arch hint in the tool response/schema instead of a doc** (e.g. an
   `expected_uploads` per-arch note, a `runs.create` echo, or an early upload-manifest rejection
   when the boot member contradicts the declared arch). This is the option that would
