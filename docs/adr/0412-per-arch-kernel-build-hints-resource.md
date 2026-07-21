@@ -109,10 +109,16 @@ prose:
   a code change to the validation data model, deferred with the inline-`Field` derivation below,
   not taken in this doc-scoped change.
 
+- **Field-citation resolves** — the pytest also asserts the repointed `arch` `Field` citation
+  names the new `resource://…kernel-build-per-arch.md` URI *and* that URI is in `DOC_RESOURCES`.
+  `served-doc-links` and the existing served-doc citation pytest scan doc bodies, not tool
+  `Field` descriptions, so without this a typo in the repointed URI would ship a dead link (the
+  #1361/F1 class); this closes that gap for the one new tool-surface citation.
+
 `resources-docs-check` (snapshot mirror) and `served-doc-links` (a served doc must cite another
-served doc by its `resource://` URI, not a relative path) already gate the registration and the
-cross-links; both run in CI. Docs, one registrar row, a `Field`-text pointer, and a guard
-test. No schema change, no migration.
+served doc by its `resource://` URI, not a relative path) already gate the snapshot and the
+doc↔doc cross-links; both run in CI. Docs, one registrar row, a repointed `Field` citation, and
+a guard test. No schema change, no migration.
 
 ## Consequences
 

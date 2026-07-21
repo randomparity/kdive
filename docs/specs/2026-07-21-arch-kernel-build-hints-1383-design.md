@@ -62,8 +62,15 @@ the discoverability side.
   is out of scope here — the doc embeds the *actual* rendered string, verified by executing it).
 - **Doc-resource pipeline** (ADR-0151): canonical `docs/<path>` → `scripts/gen_doc_resources.py`
   snapshot into `src/kdive/mcp/resources/_content/<file>` → an entry in
-  `registrar.DOC_RESOURCES`. `resources-docs-check` gates snapshot drift; `served-doc-links`
-  gates that every `resource://kdive/docs/...` citation in a served doc resolves.
+  `registrar.DOC_RESOURCES`. `resources-docs-check` gates snapshot drift. Two distinct citation
+  guards, easy to conflate: `served-doc-links` (`check-served-doc-links.sh`) fails a served doc
+  that links *another served doc by a relative path* instead of its `resource://` URI — it skips
+  `://` targets, so it does **not** validate that a `resource://` citation resolves. The
+  guarantee that every `resource://kdive/docs/...` citation resolves to an allowlisted resource
+  is the pytest `test_doc_resources.py::test_served_doc_resource_citations_are_all_allowlisted`,
+  and it scans only served-doc **bodies** (`DOC_RESOURCES[*].source`) — **not** tool `Field`
+  descriptions. So a `resource://` citation added to a tool `Field` is covered by neither guard
+  unless this change adds an assertion for it (see the drift guard below).
 
 ## Design
 
@@ -134,7 +141,10 @@ equals it):
   `## What differs by architecture`, `## Same for every architecture`) do not match the
   bare-identifier shape, so they are excluded without an allowlist. Authoring constraint this
   imposes: an aux `##` heading must not be a bare lowercase identifier (e.g. `## packaging`),
-  or it would be miscollected as an arch and fail; keep aux headings multi-word/Title-Case.
+  or it would be miscollected as an arch and fail; keep aux headings multi-word/Title-Case. The
+  test must **blank fenced code blocks before collecting headings** (the fence-toggle the
+  sibling `check-served-doc-links.sh`/`check-doc-links.sh` scripts use), so a `##`-prefixed line
+  inside the doc's shell samples cannot be miscounted as a section.
 - **Boot-container names:** assert each `BOOT_MEMBER_FORMATS[arch].container` string appears
   *verbatim* in that arch's section, so a renamed container is caught. The exact required
   substrings today are `bzImage` (x86_64) and `ppc64le ELF (vmlinux)` (ppc64le) — the doc author
@@ -167,6 +177,13 @@ equals it):
 - **Registration:** assert the new URI is in `DOC_RESOURCES` with `audience="all"` and the
   snapshot exists (the existing `test_doc_resources.py` may already cover generic
   registration; add only what is arch-specific).
+- **Field-citation resolves (the one new tool-surface artifact):** assert the `BuildProfile.arch`
+  and `runs.create` `build_profile` `Field` descriptions each contain the new
+  `resource://kdive/docs/guide/kernel-build-per-arch.md` URI **and** that URI is a member of
+  `DOC_RESOURCES`. Neither `served-doc-links` nor the existing citation pytest scans tool `Field`
+  descriptions, so without this assertion a typo in the repointed citation ships green as an
+  unfetchable dead end (the #1361/F1 class). This gives the Field citation the same
+  "resolves-to-the-allowlist" guarantee served-doc bodies already have.
 
 The guard is deliberately honest about reach: it binds set-completeness, the `crashkernel`
 string, the boot-container name, and the strip-required predicate; the *explanatory* prose
@@ -184,7 +201,10 @@ it has one home to update rather than two.
    (audience `all`), and its content covers exactly `x86_64` and `ppc64le`, each naming the
    correct `boot/vmlinuz` format.
 2. `agent-index.md`'s build stage and the `runs.create` build-profile `arch` field both cite
-   the new resource URI; `served-doc-links` passes (the citations resolve).
+   the new resource URI, and both citations are guarded to resolve to an allowlisted resource:
+   the `agent-index` citation by the served-doc citation pytest (scans served-doc bodies), the
+   `Field` citation by this change's new Field-citation-resolves assertion (served-doc-links does
+   *not* validate either, and no existing guard scans `Field` descriptions).
 3. The drift-guard pytest fails when the code and doc disagree. Red-step-verified by temporarily
    perturbing the source, then reverting: (a) adding a hypothetical arch to `_TRAITS`/
    `SUPPORTED_ARCHES` **and** `BOOT_MEMBER_FORMATS` together (a bare `_TRAITS` add is caught
@@ -222,10 +242,15 @@ it has one home to update rather than two.
   couples the doc prose to the renderer's format (`"<size> on <arch>"`, arch-sorted). That is
   intentional and is the same single-source reuse `runs.install` already relies on.
 - **Link direction.** The new doc links *out* to external-build-upload (already served) and is
-  linked *in* from agent-index; both directions must resolve under `served-doc-links`.
+  linked *in* from agent-index and the `arch` Field. `served-doc-links` only enforces that a
+  served doc cites another served doc by its `resource://` URI (not a relative path); the doc↔doc
+  citations resolving to the allowlist is the served-doc citation pytest, and the Field citation
+  resolving is this change's new Field-citation assertion (see the drift guard). All three use
+  `resource://` URIs, so none trips the relative-link rule.
 
 ## Rollback
 
-Pure additive docs + one registrar row + one `Field`-text line + one test. Rollback is deleting
-the doc, the snapshot, the registrar row, the `Field` pointer, the agent-index citation, the
-ADR-README row, and the test; no data or schema state is touched.
+Pure additive docs + one registrar row + a repointed `Field` citation + one test. Rollback is
+deleting the doc, the snapshot, the registrar row, the agent-index citation, and the test,
+reverting the `Field` citation to its prior external-build-upload target, and removing the
+ADR-README row; no data or schema state is touched.
