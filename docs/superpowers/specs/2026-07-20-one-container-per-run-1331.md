@@ -147,10 +147,12 @@ allows, and the container-count criteria are verified by a live `just test` run.
 - **Worker SIGKILLed before teardown.** Refcount never reaches 0; the single shared
   container leaks for the run. Bounded (one, not 18); documented; cleaned by
   `docker container prune`. Not silently retried into reuse.
-- **Stale state file from a crashed prior run (container path).** The recorded
-  `container_id` no longer exists. Setup must treat a missing/invalid container as
-  "start fresh": if the state file exists but its container is gone, discard it and
-  start a new container rather than handing out a dead URL.
+- **Stale state file from a crashed prior run (container path).** Not reachable: the
+  coordination state file lives in the **per-run** temp root (a fresh `pytest-N`
+  directory each run; pytest keeps only the last few and never reuses N for a live
+  run), so a crashed prior run's state file sits in a *different* root that this run
+  never reads. No stale-container detection or `is_alive` check is needed — the state
+  file a run sees is always its own.
 - **Pre-existing per-worker database/bucket (override path).** Setup drops-and-creates
   the database (`DROP DATABASE IF EXISTS … (FORCE)`) and empties-or-creates the
   bucket, so a prior run's leftovers are reclaimed.
