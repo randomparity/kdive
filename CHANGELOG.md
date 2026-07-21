@@ -310,6 +310,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Early-exit boot-only extract and reap empty scratch dirs (#1350)
 - Diagnosable repack failure and always-run scratch cleanup (#1350)
 - Reclaim staging kernel on a failed install (#1351)
+- Resolve P1 agent-surface release blockers
+- Rewrite transitive links between served docs to resource URIs
 
 ### Build
 
