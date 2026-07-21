@@ -186,6 +186,15 @@ Consequences for the install seam:
   member-count/oversize bomb as `CONFIGURATION_ERROR` (unchanged bounds), a missing
   boot member or corrupt gzip as `INFRASTRUCTURE_FAILURE`. Every category matches
   the buffered path; recovery is a new Run in all cases (ADR-0030 §2).
+- **Two accepted residuals of forward-only streaming** (ADR-0400 Consequences): the
+  S3 GET connection is held open across the whole extract+repack, so a scratch-write
+  stall can trip botocore's per-read timeout into a mid-stream
+  `INFRASTRUCTURE_FAILURE`; and streaming interleaves download with extraction, so a
+  later mid-stream fault can leave a durable staging `kernel` (always written from a
+  fully-read boot member) behind an install that then failed. Both are contained by
+  the run-step ledger + dead-letter + full re-fetch on retry — boot is a separate
+  step that never runs on a failed install. Whole-object checksum verification is
+  intentionally absent on both reads, unchanged here.
 
 ## AI-surface note
 

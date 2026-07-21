@@ -115,6 +115,34 @@ never fully materialized as `bytes` or written to disk before extraction.**
 - `extract_kernel_bundle`'s signature changes (Path → reader); its callers and
   tests move to passing a binary reader. No migration, no schema change, no
   config-doc regeneration (no new Setting).
+- **Residual — the S3 GET connection is held across extract+repack.** The buffered
+  read drained the body at network speed and then worked from RAM, so its
+  connection closed before extraction. The streaming read keeps the `GetObject`
+  HTTP connection open for as long as the extractor consumes the reader — on a
+  modules-needed run that spans the whole member-by-member repack, whose pace is
+  bounded by scratch-write throughput (ADR-0399 may route that scratch at a slow or
+  near-full tmpfs). botocore applies a per-read timeout to a streaming body, so a
+  scratch-write stall that delays the next read past that window trips a mid-stream
+  `BotoCoreError` that the reader maps to `INFRASTRUCTURE_FAILURE` — a spurious
+  install failure where the buffered path would have succeeded. This is an accepted
+  residual: recovery is a new Run (ADR-0030 §2), the same as any install-step
+  failure, and no bespoke timeout knob is added (it would be speculative). The
+  botocore client timeouts are left at their configured defaults; if a slow-scratch
+  repack proves to trip them in practice, the deliberate fix is raising the read
+  timeout on the streamed GET, tracked separately rather than pre-built here.
+- **Residual — streaming trades fetch-then-extract atomicity for interleaving.** The
+  buffered flow received the whole tar (temp-then-rename) before any extraction ran,
+  so extraction implied a fully-received object. The streaming flow interleaves the
+  download with extraction: the boot member is still written to the durable staging
+  `kernel` only after it is fully read (`_extract_boot_member` reads the whole member,
+  then temp-then-renames — so the staging `kernel` is never a partial boot image), but
+  a mid-stream fault *later* in a modules-needed run can leave that staging `kernel`
+  behind from an install that ultimately failed. This is contained: the modules
+  `.part` is cleaned in the `finally`, the install run-step is abandoned and the job
+  dead-lettered, boot is a separate step that will not run on a failed install, and a
+  retry re-fetches and clobbers (temp-then-rename). Whole-object checksum verification
+  is intentionally absent on *both* reads (unchanged by this ADR); integrity rests on
+  the run-step ledger + dead-letter + full re-fetch, not a per-object checksum.
 
 ## Considered & rejected
 
@@ -123,6 +151,23 @@ never fully materialized as `bytes` or written to disk before extraction.**
   eliminating them, and does nothing for time-to-first-byte. ADR-0399 itself named
   this the deferred, complementary win. Streaming is the RAM-free path; the tmpfs
   option remains valid for the still-staged modules tar.
+- **Stream the GET body to a constant-memory scratch file, then extract from `Path`
+  (unchanged extractor).** The tempting middle path: a `copyfileobj`-style chunked
+  copy of the body to `scratch/kernel.tar.gz` drops the ~2 GB Python-heap `bytes`
+  buffer with none of this ADR's surface — no `_open_get`/`get_artifact_stream`
+  split, no `StreamedArtifact`, no `RawIOBase` reader, no `Path`→`IO[bytes]` change,
+  and it *keeps* fetch-then-extract atomicity and closes the S3 connection before
+  extraction (avoiding both residuals above). Rejected because it does not meet the
+  primary goal under the configuration that motivates it: when the scratch is a
+  tmpfs (ADR-0399's whole point), the copied `kernel.tar.gz` is **resident in RAM as
+  a tmpfs file** — the exact whole-tar resident copy this issue exists to eliminate.
+  Stream-to-file only moves the buffer from the Python heap to the filesystem; on a
+  tmpfs scratch that is not a win at all, and on a disk scratch it still writes and
+  re-reads the whole 2 GB. Full streaming is the only option that holds no
+  whole-tar copy anywhere, and it alone earns the secondary wins (extraction begins
+  at first byte; the boot-only early break aborts the rest of the download). The
+  added surface is the honest price of the only design that satisfies the tmpfs
+  case ADR-0399 opened.
 - **A second, duplicate streaming method that re-implements the metadata parse and
   error mapping.** Rejected for the same reason ADR-0054 rejected `fetch_object`:
   two copies of the GET-setup + metadata + error-mapping block drift. The shared
