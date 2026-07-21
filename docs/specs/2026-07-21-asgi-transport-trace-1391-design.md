@@ -152,9 +152,13 @@ driving `TransportTraceMiddleware(app)(scope, receive, send)` with hand-built AS
   gate emission in production while the caplog test stayed green).
 - exactly-one-line: a normal success path emits a single record (no double-log from a
   response-start path plus the `finally`).
-- concurrency: two requests interleaved through **one** `TransportTraceMiddleware` instance
-  (distinct session ids/statuses) → each record carries its own status/session-id/duration
-  and exactly one line per request — proves per-request state is call-local, not on `self`.
+- concurrency: two requests interleaved through **one** `TransportTraceMiddleware` instance,
+  driven with `asyncio.gather` where request A's inner app awaits a test-controlled event
+  released only *after* request B has entered `__call__` and captured its own state — so the
+  test provably fails against a `self`-attribute implementation (a non-interleaving test
+  passes for both correct and buggy code, a false green). Assert each record's
+  status/session-id/duration matches the request that produced it, and exactly one line per
+  request.
 - non-`http` scope (`lifespan`/`websocket`) → passthrough, no record.
 
 **Gate resolution (closes the string→bool path AC2 alone misses).** Drive the
@@ -180,12 +184,26 @@ driven by `starlette.testclient.TestClient` (in-process, no live server, no DB):
 as the first entry and `trace_enabled=False` excludes it — a pure function of the argument,
 no config-global read.
 
-**Optional live assertion (not a PR gate).** A `live_stack` check that drives a request with
-a bogus `Mcp-Session-Id` against the running server and asserts the journal shows a
-`transport_trace` line with `status=404` — the only vehicle that proves FastMCP's vendored
-transport surfaces its session-miss 404 as an observable `http.response.start`. Documented as
-a follow-up verification, gated like the other `live_stack` tests; the PR gate stands on the
-Starlette-stack composition test above.
+**FastMCP-stack 404 (PR gate — proves the one job).** The raw-Starlette composition test
+above proves list-position ordering but *not* that the middleware list `app.run_async` /
+`app.http_app` receives sits outside FastMCP's vendored transport mount — the load-bearing
+assumption for observing a session-miss `404 Session not found`. A PR-gated test assembles
+the **real** app (`build_app(...).http_app(middleware=server_http_middleware(trace_enabled=True))`,
+matching `processes/server.py`'s wiring) and drives an in-process request bearing a bogus
+`Mcp-Session-Id` via `starlette.testclient.TestClient`, asserting a `transport_trace` record
+with `status=404`. This runs in the integration tier (a disposable pool; the session-miss is
+rejected by the transport before any DB access — the app pool can be constructed unopened),
+which CI hard-gates via `KDIVE_REQUIRE_DOCKER=1`. If FastMCP's session-miss cannot be
+reproduced in-process, the fallback PR gate asserts, against the assembled ASGI app, that
+`TransportTraceMiddleware` wraps FastMCP's transport mount (a position check on the *real*
+stack, not a raw-Starlette one) — so the "outermost over FastMCP's transport" assumption is
+always checked by something the PR must pass, never only by a de-gated live test.
+
+**Live assertion (`live_stack`, additional proof).** A `live_stack` check drives a
+bogus-`Mcp-Session-Id` request against the running server and asserts the journal shows a
+`transport_trace` line with `status=404` — end-to-end confirmation over the real uvicorn
+transport, gated like the other `live_stack` tests. Belt-and-suspenders on top of the
+in-process FastMCP-stack gate, not the sole proof.
 
 ## Non-goals
 
