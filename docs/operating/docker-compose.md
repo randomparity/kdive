@@ -38,3 +38,30 @@ your client's documentation for the exact `mcpServers` shape.
 The `Authorization` header value must include the `Bearer ` scheme prefix —
 `Authorization: Bearer <token>`, not a bare `<token>` (RFC 6750). A bare token is
 rejected with a 401 that names the missing prefix.
+
+## Using this stack as a test override backend
+
+The test suite can reuse this Compose Postgres/MinIO instead of starting its own
+per-run containers, by pointing the fixtures at it (ADR-0401):
+
+```
+export KDIVE_TEST_PG_URL=postgresql://kdive:kdive@localhost:5432/kdive  # pragma: allowlist secret
+export KDIVE_TEST_S3_URL=http://localhost:9000   # creds default to minioadmin/minioadmin
+```
+
+Each test run then creates per-run, per-worker `kdive_test_<worker>_<token>` databases
+and `kdive-test-<worker>-<token>` buckets on this shared backend. The Postgres service
+is started with `max_connections=500` so ~18 xdist workers do not exhaust it.
+
+**Required cleanup:** a run that crashes leaves its `kdive_test_*` databases and
+`kdive-test-*` buckets behind (the uuid names never recur, so they are not reclaimed by
+reuse). Periodically drop them, or recreate the Compose volume:
+
+```
+psql "$KDIVE_TEST_PG_URL" -tAc \
+  "SELECT datname FROM pg_database WHERE datname LIKE 'kdive_test_%'" \
+  | xargs -r -I{} psql "$KDIVE_TEST_PG_URL" -c 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)'
+```
+
+The default `just test` run (no override) starts one throwaway container per run and
+needs none of this.
