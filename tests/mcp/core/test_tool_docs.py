@@ -797,6 +797,181 @@ def test_backstop_actually_detects_the_known_gate_callers() -> None:
     assert _gate_reachers() == {"control.force_crash"}
 
 
+# --- #1367: docstring quality gates -------------------------------------------------------
+# Three content guards over the agent-facing tool descriptions, extending the ADR-0047 doc
+# guard. They key off the same `_docmeta` classification the destructive-hint guard uses,
+# plus a reviewed job-handle set. Each rule is paired with a canary that exercises its
+# predicate against synthetic input, so a regression that neuters the rule fails loudly here
+# rather than passing silently over a (now-clean) live tree. The `ADR-\d+` gate the issue
+# also lists is already enforced by tests/mcp/core/test_no_adr_leak.py (ADR-0270); it is not
+# duplicated here.
+
+# A destructive-hinted tool must not ship a bare summary: its description has to name a
+# concrete consequence (what it destroys / removes / crashes) or the privileged role/gate it
+# demands, so a black-box agent reads the stakes from the surface alone. Substring vocabulary,
+# lowercased; `admin` also covers `platform_admin`/`platform-admin`, `permanent` covers
+# `permanently`, `delete` covers `deletes`, and so on.
+_CONSEQUENCE_OR_ROLE_TERMS = frozenset(
+    {
+        # a named consequence
+        "irreversible",
+        "no undo",
+        "cannot be undone",
+        "permanent",
+        "delete",
+        "remove",
+        "teardown",
+        "tear down",
+        "prune",
+        "evict",
+        "destroy",
+        "destructive",
+        "break-glass",
+        "crash",
+        "reclaim",
+        # a required role / gate
+        "admin",
+        "platform operator",
+        "contributor",
+        "leaseholder",
+        "rbac",
+        "authoriz",
+        "gate",
+    }
+)
+
+
+def _names_consequence_or_role(description: str) -> bool:
+    lowered = description.lower()
+    return any(term in lowered for term in _CONSEQUENCE_OR_ROLE_TERMS)
+
+
+def test_destructive_tools_name_a_consequence_or_role() -> None:
+    # Every destructive-hinted tool (the reviewed _docmeta.DESTRUCTIVE_TOOLS set) must name a
+    # consequence or the role/gate it requires in its rendered description — a bare
+    # "Extend an image catalog entry lease."-style one-liner on a destructive tool is exactly
+    # the gap this closes. `tools.invoke` qualifies via its RBAC/authorization wording (its
+    # destructive hint is gateway-reach only).
+    by_name = {t.name: t for t in TOOLS}
+    offenders: list[str] = []
+    for name in sorted(_docmeta.DESTRUCTIVE_TOOLS):
+        tool = by_name.get(name)
+        if tool is None:
+            offenders.append(f"{name}: not registered")
+            continue
+        if not _names_consequence_or_role(tool.description or ""):
+            offenders.append(name)
+    assert not offenders, (
+        f"destructive tools whose description names no consequence/role: {offenders}"
+    )
+
+
+def test_destructive_consequence_guard_bites() -> None:
+    # Canary: the predicate must reject a bare summary and accept one that names a consequence
+    # or a role, so a regression that broadens the vocabulary to vacuity (or drops the check)
+    # fails here rather than passing over the clean tree.
+    assert not _names_consequence_or_role("Extend an image catalog entry lease.")
+    assert not _names_consequence_or_role("Open an investigation.")
+    assert _names_consequence_or_role("Permanently delete the catalog row; irreversible.")
+    assert _names_consequence_or_role("Enqueue teardown for a System. Requires admin.")
+
+
+# Tools whose response is an opaque durable-job handle whose result the caller obtains only by
+# polling — the out-of-band async contract (#941/jobs.wait): the description must name
+# `jobs.wait` as the poll tool, not merely "poll" or `jobs.get`. This is a reviewed set (like
+# DESTRUCTIVE_TOOLS): lifecycle tools that enqueue a job to advance a durable entity
+# (images.build, systems.provision/teardown, runs.boot) are tracked via that entity's read
+# tool, not jobs.wait, and are deliberately excluded.
+_JOB_HANDLE_TOOLS = frozenset(
+    {
+        "control.capture_traffic",
+        "control.diagnostic_sysrq",
+        "control.watch_for_crash",
+        "systems.authorize_ssh_key",
+        "systems.check_ssh_reachable",
+        "systems.snapshot",
+        "systems.restore",
+        "systems.delete_snapshot",
+        "vmcore.fetch",
+    }
+)
+
+
+def _references_jobs_wait(description: str) -> bool:
+    return "jobs.wait" in description
+
+
+def test_job_handle_tools_reference_jobs_wait() -> None:
+    # Every reviewed job-handle tool must point the caller at `jobs.wait` — its result is only
+    # reachable by polling, and jobs.wait carries the transport-reset retry contract
+    # (test_jobs_wait_description_conveys_retry_contract).
+    by_name = {t.name: t for t in TOOLS}
+    offenders: list[str] = []
+    for name in sorted(_JOB_HANDLE_TOOLS):
+        tool = by_name.get(name)
+        if tool is None:
+            offenders.append(f"{name}: not registered")
+            continue
+        if not _references_jobs_wait(tool.description or ""):
+            offenders.append(name)
+    assert not offenders, f"job-handle tools that do not name jobs.wait: {offenders}"
+
+
+def test_job_handle_set_is_exactly_the_jobs_wait_mentioners() -> None:
+    # Anti-vacuity pin (mirrors the gate-caller canary): the reviewed set must equal the
+    # registered tools — other than jobs.wait itself — whose description references jobs.wait.
+    # Dropping the mention from a reviewed tool, or a new tool claiming the poll contract
+    # without being reviewed into the set, breaks this equality and forces a deliberate update.
+    mentioners = {
+        t.name
+        for t in TOOLS
+        if t.name != "jobs.wait" and _references_jobs_wait(t.description or "")
+    }
+    assert mentioners == _JOB_HANDLE_TOOLS, (
+        f"jobs.wait mentioners {sorted(mentioners)} != reviewed job-handle set "
+        f"{sorted(_JOB_HANDLE_TOOLS)}"
+    )
+
+
+# A consequential tool — one that is destructive or returns a poll-only job handle — must
+# document more than a single bare sentence: a one-liner like "Capture and persist a vmcore."
+# hides the prerequisites, consequence, and poll contract a black-box agent needs. Simple
+# reads/mutations ("Open an investigation.") are exempt; the floor applies only where the
+# stakes warrant it.
+_CONTENT_FLOOR_TOOLS = _docmeta.DESTRUCTIVE_TOOLS | _JOB_HANDLE_TOOLS
+_CODE_SPAN = re.compile(r"`[^`]*`")
+
+
+def _sentence_count(description: str) -> int:
+    """Number of sentence-terminated clauses, ignoring dots inside `code spans`."""
+    prose = _CODE_SPAN.sub(" ", description)
+    return len(re.findall(r"[.!?]+(?=\s|$)", prose))
+
+
+def test_consequential_tools_clear_the_content_floor() -> None:
+    by_name = {t.name: t for t in TOOLS}
+    offenders: list[str] = []
+    for name in sorted(_CONTENT_FLOOR_TOOLS):
+        tool = by_name.get(name)
+        if tool is None:
+            offenders.append(f"{name}: not registered")
+            continue
+        if _sentence_count(tool.description or "") < 2:
+            offenders.append(name)
+    assert not offenders, (
+        f"destructive/job-handle tools whose description is a single bare sentence: {offenders}"
+    )
+
+
+def test_content_floor_guard_bites() -> None:
+    # Canary: a one-liner is one sentence (below the floor); a summary plus a specifics
+    # sentence clears it. A `. ` inside a code span must not inflate the count.
+    assert _sentence_count("Capture and persist a vmcore.") == 1
+    assert _sentence_count("Extend an image catalog entry lease.") == 1
+    assert _sentence_count("Enqueue teardown for a System. Requires admin.") == 2
+    assert _sentence_count("Do `a. b` now.") == 1
+
+
 def _collect_enums(schema: Any) -> list[list[Any]]:
     """Every ``enum`` value-list anywhere in ``schema`` (the rendered ``anyOf`` nests it)."""
     found: list[list[Any]] = []
