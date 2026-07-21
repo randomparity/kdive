@@ -16,8 +16,8 @@ SSH. See [ADR-0366](../adr/0366-race-debugging-out-of-band.md) for that decision
 ## Why not a gdbstub break
 
 The `debug` toolset attaches a GDB session to the guest's stub and can set breakpoints and
-hardware watchpoints — but hitting one **halts every CPU** (see the
-[debug toolset guide](../guide/toolsets/debug.md)). That is correct for a deterministic bug
+hardware watchpoints — but hitting one **halts every CPU** (see the debug toolset guide,
+resource://kdive/docs/guide/toolsets/debug.md). That is correct for a deterministic bug
 you can stop at and inspect. It is the wrong tool for a race: halting collapses the concurrent
 timing you are trying to observe, so the value you wanted to catch mid-flight never occurs
 under the debugger. Reach for the `debug` stub when you want to **stop and step**; reach for
@@ -27,7 +27,7 @@ the tools below when you need to **watch without stopping**.
 
 `drgn` reads a running kernel's memory and walks typed kernel structures **without stopping
 the CPU**, so it is the race-friendly way to inspect live state. It is the `introspect`
-toolset (see the [introspect guide](../guide/toolsets/introspect.md)):
+toolset (see the introspect guide, resource://kdive/docs/guide/toolsets/introspect.md):
 
 - `introspect.run` — run an in-tree helper (`tasks`, `modules`, `sysinfo`) against a live
   drgn-live session. Start here for common questions.
@@ -61,7 +61,7 @@ guests):
 - Use `trace-cmd` or `bpftrace` for anything beyond raw sysfs writes.
 - Fault injection (`failslab` / `fail_page_alloc` via debugfs, with a `CONFIG_FAULT_INJECTION`
   kernel) steers the kernel into the failure window — see the
-  [reproduce-and-capture loop](../guide/agent-index.md#the-reproduce-and-capture-loop) in the
+  reproduce-and-capture loop (resource://kdive/docs/guide/agent-index.md) in the
   agent index for the debugfs knobs (`ignore-gfp-wait`, `cache-filter`, `probability` vs
   `fail-nth`, `slab_nomerge`).
 
@@ -73,8 +73,8 @@ own. That is the point of the next section.
 Once a system is ready, authorize your public key with `systems.authorize_ssh_key` and poll
 `jobs.wait` until it succeeds; only then do you have **root SSH into the guest** — kdive never
 holds the private key. From there the guest is yours to shape (see
-[The guest is yours](../guide/agent-index.md#the-guest-is-yours--you-have-root) in the agent
-index and the [systems guide](../guide/toolsets/systems.md#reaching-the-guest-over-ssh)):
+The guest is yours (resource://kdive/docs/guide/agent-index.md) in the agent
+index and the systems guide, resource://kdive/docs/guide/toolsets/systems.md):
 
 - **The guest package manager is yours.** Install whatever the investigation needs at runtime
   — `apt install trace-cmd`, `bpftrace`, a compiler toolchain, `stress-ng`. Do not conclude a
@@ -92,14 +92,14 @@ On **local-libvirt** the guest has **no outbound egress by default**, so runtime
 install` fails to resolve any mirror until the **operator** enables egress
 (`guest_egress = true` on the `[[local_libvirt]]` block in the operator's systems inventory —
 not a per-request knob), or you use an image that already bakes the toolchain. See the
-[systems guide](../guide/toolsets/systems.md#reaching-the-guest-over-ssh).
+systems guide (resource://kdive/docs/guide/toolsets/systems.md).
 
 ## Route 3 — the reproducer loop stays root SSH
 
 Provoking a race usually means running the reproducer many times, or under stress, until the
 window hits. That loop is your own code, run over root SSH — compile it in-guest or
 cross-compile and `scp` the binary in, then run it, `stress-ng`, or a fuzzer over SSH. See the
-[reproduce-and-capture loop](../guide/agent-index.md#the-reproduce-and-capture-loop) in the
+reproduce-and-capture loop (resource://kdive/docs/guide/agent-index.md) in the
 agent index.
 
 **A panic drops your SSH channel.** When the kernel crashes, the SSH session dies with it, so
@@ -143,9 +143,13 @@ routes above); anything that must work when SSH is gone is where a tool is warra
 
 ## See also
 
-- [introspect toolset](../guide/toolsets/introspect.md) — drgn-live and offline introspection.
-- [debug toolset](../guide/toolsets/debug.md) — the halting gdbstub path (deterministic bugs).
-- [control toolset](../guide/toolsets/control.md) — `force_crash`, `diagnostic_sysrq`, `power`.
-- [Agent index](../guide/agent-index.md) — the guest-is-yours contract and reproduce-and-capture loop.
+- introspect toolset (resource://kdive/docs/guide/toolsets/introspect.md) — drgn-live and offline
+  introspection.
+- debug toolset (resource://kdive/docs/guide/toolsets/debug.md) — the halting gdbstub path
+  (deterministic bugs).
+- control toolset (resource://kdive/docs/guide/toolsets/control.md) — `force_crash`,
+  `diagnostic_sysrq`, `power`.
+- Agent index (resource://kdive/docs/guide/agent-index.md) — the guest-is-yours contract and
+  reproduce-and-capture loop.
 - [Four-method live run](runbooks/four-method-live-run.md) — capture methods end to end.
 - [ADR-0366](../adr/0366-race-debugging-out-of-band.md) — resolving #986 as docs, not a code mode.
