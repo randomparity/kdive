@@ -13,7 +13,11 @@ import re
 from pathlib import Path
 
 from kdive.build_artifacts.validation import _ELF_MAGIC, BOOT_MEMBER_FORMATS
-from kdive.domain.platform.arch_traits import SUPPORTED_ARCHES, default_crashkernel_summary
+from kdive.domain.platform.arch_traits import (
+    SUPPORTED_ARCHES,
+    arch_traits,
+    default_crashkernel_summary,
+)
 from kdive.mcp.resources import registrar
 from kdive.mcp.resources.registrar import DOC_RESOURCES
 from kdive.profiles.build import BuildProfile
@@ -108,6 +112,16 @@ def test_strip_required_arches_carry_a_strip_command() -> None:
 
 def test_crashkernel_summary_present_verbatim() -> None:
     assert default_crashkernel_summary() in _doc_text()
+
+
+def test_crashkernel_default_present_in_each_arch_section() -> None:
+    # The combined summary is bound above; this also binds the per-section restatement so a
+    # changed _TRAITS default cannot leave an arch's section bullet stale (branch review #1383).
+    sections = _h2_sections(_doc_text())
+    for arch in SUPPORTED_ARCHES:
+        body = sections.get(arch, "")
+        expected = arch_traits(arch).default_crashkernel
+        assert expected in body, f"{arch} section is missing its crashkernel default {expected!r}"
 
 
 def test_doc_registered_as_all_audience_resource() -> None:

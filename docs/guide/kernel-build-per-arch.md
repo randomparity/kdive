@@ -37,14 +37,15 @@ match, a native build needs neither. Either way, the `boot/vmlinuz` format is de
 
 ## What differs by architecture
 
-| `arch` | `boot/vmlinuz` must be | kdump `crashkernel` default |
-|---|---|---|
-| `x86_64` | the **bzImage** (`arch/x86/boot/bzImage`), renamed | `256M` |
-| `ppc64le` | the **stripped ELF `vmlinux`** (powerpc has no bzImage) | `512M` |
+| `arch` | `boot/vmlinuz` must be |
+|---|---|
+| `x86_64` | the **bzImage** (`arch/x86/boot/bzImage`), renamed |
+| `ppc64le` | the **stripped ELF `vmlinux`** (powerpc has no bzImage) |
 
-The per-install `crashkernel` defaults, when a System gives no override, are
-`512M on ppc64le, 256M on x86_64`. Everything else about the upload — one combined gzip tar,
-the module tree, member order — is the same across arches (see the last section).
+The per-install kdump `crashkernel` defaults, when a System gives no override, are
+`512M on ppc64le, 256M on x86_64` (each arch's value is also stated in its section below).
+Everything else about the upload — one combined gzip tar, the module tree, member order — is the
+same across arches (see the last section).
 
 ## x86_64
 
