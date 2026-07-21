@@ -95,7 +95,7 @@ runs.complete_build.
 `build_profile` fields:
 
 - `schema_version` (``=1``, required)
-- `arch` (`string`, optional) — Target CPU architecture the uploaded kernel is built for. One of ppc64le, x86_64; defaults to x86_64. Selects the boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md.
+- `arch` (`string`, optional) — Target CPU architecture the uploaded kernel is built for. One of ppc64le, x86_64; defaults to x86_64. Selects the boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF vmlinux for ppc64le) - see resource://kdive/docs/guide/kernel-build-per-arch.md.
 
 `reuse_requirement` fields:
 

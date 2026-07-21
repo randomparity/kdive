@@ -50,7 +50,7 @@ class BuildProfile(BaseModel):
             "Target CPU architecture the uploaded kernel is built for. One of "
             f"{', '.join(sorted(SUPPORTED_ARCHES))}; defaults to x86_64. Selects the "
             "boot/vmlinuz payload format the upload must carry (bzImage for x86_64, ELF "
-            "vmlinux for ppc64le) - see resource://kdive/docs/operating/external-build-upload.md."
+            "vmlinux for ppc64le) - see resource://kdive/docs/guide/kernel-build-per-arch.md."
         ),
     )
 
