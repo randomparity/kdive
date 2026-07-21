@@ -55,6 +55,9 @@ x-backends: &backends
 services:
   postgres:
     image: postgres:17
+    # max_connections sized for the test suite: when this backend is used as a test
+    # override (KDIVE_TEST_PG_URL), ~18 xdist workers share one server (ADR-0400).
+    command: ["postgres", "-c", "max_connections=500"]
     environment:
       POSTGRES_USER: kdive
       POSTGRES_PASSWORD: kdive # pragma: allowlist secret — local dev only
