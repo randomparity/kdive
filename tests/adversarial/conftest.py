@@ -29,7 +29,7 @@ from kdive.providers.fault_inject.capabilities import (
     MAX_LATENCY_S_KEY,
     SEED_KEY,
 )
-from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
+from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
 # A 1-vcpu/0-GB selector → rate 1.0 kcu/hr; small so a generous budget never denies.

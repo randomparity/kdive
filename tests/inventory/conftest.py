@@ -6,4 +6,4 @@ against a freshly-migrated schema, the same shapes the integration suite uses.
 
 from __future__ import annotations
 
-from tests.db.conftest import migrated_url, pg_conn, postgres_url  # noqa: F401
+from tests.db.conftest import _migrated_db, migrated_url, pg_conn, postgres_url  # noqa: F401
