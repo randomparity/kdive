@@ -559,21 +559,31 @@ existing body (verified against `__main__.py:106-109`). `_run_server` is the ali
 Run: `uv run python -m pytest tests/mcp/middleware/test_transport_trace.py -q`
 Expected: PASS.
 
-- [ ] **Step 6: Fix any other `server_http_middleware()` call sites**
+- [ ] **Step 6: Fix every other `server_http_middleware()` call site (all in one commit)**
 
 Run: `rg -n "server_http_middleware\(" src tests`
-Every call must now pass `trace_enabled=`. Update `tests/mcp/core/test_bare_bearer_ordering.py` (`server_http_middleware()` → `server_http_middleware(trace_enabled=False)`).
+**Hard rule: every path this prints must be updated and committed in this task** — the
+signature change and all call-site fixes land in one green, bisectable commit. The known
+no-arg call sites to change to `server_http_middleware(trace_enabled=False)`:
+- `tests/mcp/core/test_bare_bearer_ordering.py:30`
+- `tests/mcp/core/test_main.py:61` (`test_server_http_middleware_injects_bare_bearer_hint`; its
+  existing assertion `[m.cls for m in middleware] == [BareBearerHintMiddleware]` stays valid
+  with `trace_enabled=False`)
+
+(`src/kdive/processes/server.py:65` is the production call, already updated to
+`trace_enabled=trace_enabled` in Step 3.)
 
 - [ ] **Step 7: Run lint + type + the affected suites**
 
-Run: `just lint && just type && uv run python -m pytest tests/mcp/core/test_bare_bearer_ordering.py tests/mcp/middleware/test_transport_trace.py -q`
+Run: `just lint && just type && uv run python -m pytest tests/mcp/core/test_bare_bearer_ordering.py tests/mcp/core/test_main.py tests/mcp/middleware/test_transport_trace.py -q`
 Expected: clean + PASS.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add src/kdive/processes/server.py src/kdive/__main__.py \
-        tests/mcp/middleware/test_transport_trace.py tests/mcp/core/test_bare_bearer_ordering.py
+        tests/mcp/middleware/test_transport_trace.py \
+        tests/mcp/core/test_bare_bearer_ordering.py tests/mcp/core/test_main.py
 git commit -m "feat(mcp): wire transport trace through the middleware seam"
 ```
 
