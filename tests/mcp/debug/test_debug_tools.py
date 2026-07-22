@@ -59,6 +59,7 @@ from kdive.providers.ports.lifecycle import (
 )
 from kdive.providers.ports.retrieve import LiveScriptOutput
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.debug import lifecycle as debug_service_lifecycle
@@ -349,25 +350,38 @@ def test_start_session_attaches_and_row_is_live(migrated_url: str) -> None:
                 pool, _ctx(), run_id=run_id, transport="gdbstub", connector=conn_fake
             )
             assert resp.status == "live"
+            assert resp.data["project"] == "proj"
             assert conn_fake.opened == [("kdive-x", "gdbstub")]
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT state, transport_handle, worker_heartbeat_at "
+                    "SELECT state, transport_handle, worker_heartbeat_at, "
+                    "agent_session, principal, project "
                     "FROM debug_sessions WHERE id = %s",
                     (resp.object_id,),
                 )
                 row = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log "
-                    "WHERE object_kind = 'debug_sessions' AND transition IN "
-                    "('->attach', 'attach->live')"
+                    "SELECT tool, object_kind, transition, args_digest, project "
+                    "FROM audit_log WHERE object_id = %s",
+                    (resp.object_id,),
                 )
-                audit = await cur.fetchone()
+                audit_rows = await cur.fetchall()
         assert row is not None
         assert row["state"] == "live"
         assert row["transport_handle"] is not None
         assert row["worker_heartbeat_at"] is not None
-        assert audit is not None and audit["n"] == 2
+        # The persisted session carries the caller's identity and the run's project.
+        assert row["agent_session"] == "s"
+        assert row["principal"] == "user-1"
+        assert row["project"] == "proj"
+        # Both transitions are audited under the run's project with the run_id arg digest.
+        expected_digest = args_digest({"run_id": run_id})
+        assert {r["transition"] for r in audit_rows} == {"->attach", "attach->live"}
+        for audit_row in audit_rows:
+            assert audit_row["tool"] == "debug.start_session"
+            assert audit_row["object_kind"] == "debug_sessions"
+            assert audit_row["project"] == "proj"
+            assert audit_row["args_digest"] == expected_digest
 
     asyncio.run(_run())
 
@@ -499,9 +513,10 @@ def test_locked_recheck_closes_transport_when_system_crashed(migrated_url: str) 
                 resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.object_id == run_id  # the rejection is attributed to the run
         assert resp.data["current_status"] == "crashed"
         assert count == 0
-        assert conn_fake.closed  # the orphaned transport was closed
+        assert conn_fake.closed == [str(handle)]  # the orphaned transport handle was closed
 
     asyncio.run(_run())
 
@@ -532,8 +547,53 @@ def test_locked_recheck_closes_transport_when_conflict_appears(migrated_url: str
                 resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "transport_conflict"
+        assert resp.object_id == run_b  # the rejection is attributed to the losing run
         assert count == 1  # only the race winner's row
-        assert conn_fake.closed
+        assert conn_fake.closed == [str(handle)]  # the orphaned transport handle was closed
+
+    asyncio.run(_run())
+
+
+def test_locked_recheck_torn_down_system_reports_torn_down(migrated_url: str) -> None:
+    """The lost-race branch: the System row is gone by the time the lock is held."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            run_id = await _seed_run(pool, sys_id)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                # Hand the locked insert a System whose row does not exist: the authoritative
+                # re-read returns None, so admission reports the "torn_down" sentinel.
+                phantom = System(
+                    id=uuid4(),
+                    created_at=_DT,
+                    updated_at=_DT,
+                    principal="user-1",
+                    project="proj",
+                    allocation_id=UUID(alloc_id),
+                    state=SystemState.READY,
+                    provisioning_profile=copy.deepcopy(_PROFILE),
+                    domain_name="kdive-x",
+                )
+                conn_fake = _FakeConnector()
+                handle = conn_fake.open_transport(SystemHandle("kdive-x"), "gdbstub")
+                request = debug_service_lifecycle.AttachRequest(
+                    run=run,
+                    system=phantom,
+                    session_id=uuid4(),
+                    transport="gdbstub",
+                    connector=conn_fake,
+                )
+                resp = await debug_lifecycle._insert_session_locked(conn, _ctx(), request, handle)
+            count = await _session_count(pool)
+        assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.object_id == run_id
+        assert resp.data["current_status"] == "torn_down"
+        assert count == 0
+        assert conn_fake.closed == [str(handle)]
 
     asyncio.run(_run())
 
@@ -1615,18 +1675,26 @@ def test_end_session_detaches_live(migrated_url: str) -> None:
             conn_fake = _FakeConnector()
             resp = await _end_session(pool, _ctx(), session_id, connector=conn_fake)
             assert resp.status == "detached"
+            assert resp.object_id == session_id  # the detached session is echoed back
+            assert resp.data["project"] == "proj"
             assert conn_fake.closed  # transport closed on detach
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state FROM debug_sessions WHERE id = %s", (session_id,))
                 row = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log "
-                    "WHERE object_id = %s AND transition = 'live->detached'",
+                    "SELECT tool, object_kind, transition, args_digest, project "
+                    "FROM audit_log WHERE object_id = %s",
                     (session_id,),
                 )
-                audit = await cur.fetchone()
+                audit_rows = await cur.fetchall()
         assert row is not None and row["state"] == "detached"
-        assert audit is not None and audit["n"] == 1
+        assert len(audit_rows) == 1
+        audit_row = audit_rows[0]
+        assert audit_row["tool"] == "debug.end_session"
+        assert audit_row["object_kind"] == "debug_sessions"
+        assert audit_row["transition"] == "live->detached"
+        assert audit_row["project"] == "proj"
+        assert audit_row["args_digest"] == args_digest({"session_id": session_id})
 
     asyncio.run(_run())
 
@@ -1640,6 +1708,8 @@ def test_end_session_already_detached_is_idempotent(migrated_url: str) -> None:
             session_id = await _seed_session(pool, run_id, DebugSessionState.DETACHED)
             resp = await _end_session(pool, _ctx(), session_id, connector=_FakeConnector())
             assert resp.status == "detached"
+            assert resp.object_id == session_id  # idempotent replay echoes the session
+            assert resp.data["project"] == "proj"
             async with pool.connection() as c, c.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
                     "SELECT count(*) AS n FROM audit_log WHERE object_id = %s", (session_id,)
@@ -1680,7 +1750,10 @@ def test_end_session_close_failure_still_detaches(
             sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             run_id = await _seed_run(pool, sys_id)
             session_id = await _seed_session(pool, run_id, DebugSessionState.LIVE)
-            with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.debug.sessions"):
+            expected_handle = TransportHandleData(
+                kind="gdbstub", host="127.0.0.1", port=1234
+            ).encode()
+            with caplog.at_level(logging.WARNING, logger="kdive.services.debug.lifecycle"):
                 resp = await _end_session(
                     pool, _ctx(), session_id, connector=_RaisingCloseConnector()
                 )
@@ -1694,6 +1767,8 @@ def test_end_session_close_failure_still_detaches(
             for record in caplog.records
             if record.message == "debug transport close failed; continuing detach"
         ]
+        # The best-effort close logs the failing handle with the exception traceback attached.
+        assert record.__dict__["handle"] == expected_handle
         assert record.exc_info is not None
 
     asyncio.run(_run())
