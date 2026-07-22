@@ -29,6 +29,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import Booter, Connector
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
     search_text,
@@ -947,3 +948,431 @@ def test_ready_boot_stays_ready_without_expectation_even_with_post_marker_panic(
     )
     assert result["boot_outcome"] == "ready"
     assert len(audits) == 1
+
+
+# --- #1415 mutation sweep: pin collaborator wiring, result dicts, and probe arguments -----------
+
+
+class _RecordingConnector:
+    """Records the (handle, kind) open_transport was probed with; the stub is always reachable."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object]] = []
+
+    def open_transport(self, system: object, kind: object) -> object:
+        self.calls.append((system, kind))
+        return object()
+
+    def close_transport(self, _handle: object) -> None: ...
+
+
+def test_gdbstub_reachable_probes_derived_handle_and_kind() -> None:
+    conn = _RecordingConnector()
+    sid = uuid4()
+    assert boot_evidence.gdbstub_reachable(cast(Connector, conn), sid) is True
+    ((system, kind),) = conn.calls
+    # The handle is the id-derived domain name and the transport kind is exactly "gdbstub".
+    assert system == domain_name_for(sid)
+    assert kind == "gdbstub"
+
+
+class _KeyedPol:
+    """A ProfilePolicy whose predicates answer True only for the exact profile object handed in.
+
+    Passing ``None`` (a mutated arg) therefore flips every predicate to False, so a dropped
+    capture method in the output pins that the real profile was threaded through.
+    """
+
+    def __init__(
+        self,
+        profile: object,
+        *,
+        gdbstub: bool = False,
+        host_dump: bool = False,
+        method: CaptureMethod = CaptureMethod.CONSOLE,
+    ) -> None:
+        self._p = profile
+        self._gdbstub, self._host_dump, self._method = gdbstub, host_dump, method
+
+    def gdbstub_provisioned(self, profile: object) -> bool:
+        return self._gdbstub and profile is self._p
+
+    def host_dump_provisioned(self, profile: object) -> bool:
+        return self._host_dump and profile is self._p
+
+    def capture_method(self, profile: object) -> CaptureMethod:
+        return self._method if profile is self._p else CaptureMethod.CONSOLE
+
+
+def test_available_capture_threads_profile_to_host_dump_predicate() -> None:
+    profile = object()
+    pol = _KeyedPol(profile, gdbstub=True, host_dump=True)
+    out = boot_evidence.available_capture(
+        cast(ProfilePolicy, pol), cast(ProvisioningProfile, profile)
+    )
+    assert out == ["gdbstub", "console", "host_dump"]
+
+
+def test_inert_capture_threads_profile_to_every_predicate() -> None:
+    profile = object()
+    pol = _KeyedPol(profile, gdbstub=True, host_dump=True, method=CaptureMethod.KDUMP)
+    out = boot_evidence.inert_capture(cast(ProfilePolicy, pol), cast(ProvisioningProfile, profile))
+    assert out == ["gdbstub", "host_dump", "kdump"]
+
+
+class _RecordingSnap:
+    def __init__(self, mark: int) -> None:
+        self.mark = mark
+        self.seen: list[object] = []
+
+    async def mark_boot_window(self, system_id: object) -> int:
+        self.seen.append(system_id)
+        return self.mark
+
+    async def snapshot(self, conn: object, system_id: object, run_id: object, start_index: int = 0):
+        return None
+
+
+def test_mark_boot_window_passes_system_id_to_snapshotter() -> None:
+    snap = _RecordingSnap(7)
+    sid = uuid4()
+    assert asyncio.run(boot_evidence.mark_boot_window(sid, cast(ConsoleSnapshotter, snap))) == 7
+    assert snap.seen == [sid]
+
+
+def test_capture_run_console_local_threads_args_to_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def _rec(conn, system_id, run_id, secret_registry, artifact_store):
+        seen.update(
+            conn=conn,
+            system_id=system_id,
+            run_id=run_id,
+            sr=secret_registry,
+            store=artifact_store,
+        )
+        return boot_evidence.ConsoleArtifact(uuid4(), "k", b"x")
+
+    monkeypatch.setattr(boot_evidence, "_capture_console_artifact", _rec)
+    conn, sid, rid, sr, store = object(), uuid4(), uuid4(), object(), object()
+    out = asyncio.run(
+        boot_evidence.capture_run_console(
+            cast(AsyncConnection, conn),
+            sid,
+            rid,
+            secret_registry=cast(SecretRegistry, sr),
+            artifact_store=cast(ObjectStore, store),
+            snapshotter=None,
+            mark=0,
+        )
+    )
+    assert out is not None
+    assert seen == {"conn": conn, "system_id": sid, "run_id": rid, "sr": sr, "store": store}
+
+
+def _seed_system_and_run(conn: AsyncConnection, system_id: UUID, run_id: UUID):
+    async def _seed() -> None:
+        resource_id, allocation_id, investigation_id = uuid4(), uuid4(), uuid4()
+        await conn.execute(
+            "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) VALUES "
+            "(%s, 'local-libvirt', 'default', 'standard', 'available', 'qemu:///system')",
+            (resource_id,),
+        )
+        await conn.execute(
+            "INSERT INTO allocations (id, resource_id, state, principal, project) "
+            "VALUES (%s, %s, 'granted', 'p', 'proj')",
+            (allocation_id, resource_id),
+        )
+        await conn.execute(
+            "INSERT INTO systems (id, allocation_id, state, provisioning_profile, principal, "
+            "project) VALUES (%s, %s, 'ready', '{}'::jsonb, 'p', 'proj')",
+            (system_id, allocation_id),
+        )
+        await conn.execute(
+            "INSERT INTO investigations (id, principal, project, title, state) "
+            "VALUES (%s, 'p', 'proj', 't', 'open')",
+            (investigation_id,),
+        )
+        await conn.execute(
+            "INSERT INTO runs (id, investigation_id, system_id, target_kind, state, "
+            "build_profile, principal, project) "
+            "VALUES (%s, %s, %s, 'local-libvirt', 'created', '{}'::jsonb, 'p', 'proj')",
+            (run_id, investigation_id, system_id),
+        )
+
+    return _seed()
+
+
+def test_upsert_row_and_existing_row_carry_etag_key_and_data(migrated_url: str) -> None:
+    """The console row round-trips its etag/object_key/bytes and refreshes a changed etag."""
+    system_id, run_id = uuid4(), uuid4()
+    key = f"local/systems/{system_id}/console-{run_id}"
+
+    def _stored(etag: str) -> StoredArtifact:
+        return StoredArtifact(key, etag, Sensitivity.REDACTED, "console")
+
+    async def _run():
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                await _seed_system_and_run(conn, system_id, run_id)
+                a1 = await boot_evidence._upsert_console_artifact_row(
+                    conn, system_id, run_id, _stored("etag-1"), b"AAAA"
+                )
+                existing = await boot_evidence._existing_console_row(conn, system_id, key)
+                a2 = await boot_evidence._upsert_console_artifact_row(
+                    conn, system_id, run_id, _stored("etag-2"), b"BBBB"
+                )
+                row = await (
+                    await conn.execute("SELECT etag FROM artifacts WHERE id = %s", (a1.id,))
+                ).fetchone()
+            return a1, existing, a2, row
+
+    a1, existing, a2, row = asyncio.run(_run())
+    # Insert path returns the redacted bytes it stored, keyed by the stored object key.
+    assert a1.data == b"AAAA"
+    # _existing_console_row surfaces the exact persisted id + etag.
+    assert existing is not None
+    assert existing.id == a1.id
+    assert existing.etag == "etag-1"
+    # Same-Run refresh path keeps the row id + key and carries the new bytes.
+    assert a2.id == a1.id
+    assert a2.object_key == key
+    assert a2.data == b"BBBB"
+    # A changed etag is refreshed in place (the != guard fires, not its inverse).
+    assert row is not None and row[0] == "etag-2"
+
+
+def test_record_crash_halted_live_threads_args_and_pins_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, ctx = object(), object()
+    run = _FakeRun(None)
+    sid = uuid4()
+    connector, sr, store, snap = object(), object(), object(), object()
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", _PANIC_CONSOLE)
+    profile = object()
+    profiles_seen: list[object] = []
+    seen: dict[str, object] = {}
+
+    async def _get(c, s):
+        seen["get"] = (c, s)
+        return _FakeSystem(_PROFILE_DICT)
+
+    class _Pol2:
+        def gdbstub_provisioned(self, p):
+            profiles_seen.append(p)
+            return True
+
+        def host_dump_provisioned(self, p):
+            profiles_seen.append(p)
+            return True
+
+        def capture_method(self, p):
+            return CaptureMethod.CONSOLE
+
+    async def _cap(c, s, r, *, secret_registry, artifact_store, snapshotter, mark):
+        seen["cap"] = (c, s, r, secret_registry, artifact_store, snapshotter, mark)
+        return artifact
+
+    def _reach(connector_arg, system_id):
+        seen["reach"] = (connector_arg, system_id)
+        return True
+
+    async def _audit(c, x, r):
+        seen["audit"] = (c, x, r)
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(
+        boot_evidence.ProvisioningProfile, "parse", staticmethod(lambda _pd: profile)
+    )
+    monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
+    monkeypatch.setattr(boot_evidence, "gdbstub_reachable", _reach)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
+
+    result = asyncio.run(
+        boot_evidence.record_crash_halted_live(
+            cast(AsyncConnection, conn),
+            cast(RequestContext, ctx),
+            cast(Run, run),
+            system_id=sid,
+            connector=cast(Connector, connector),
+            profile_policy=cast(ProfilePolicy, _Pol2()),
+            secret_registry=cast(SecretRegistry, sr),
+            artifact_store=cast(ObjectStore, store),
+            snapshotter=cast(ConsoleSnapshotter, snap),
+            mark=5,
+        )
+    )
+    assert result == {
+        "system_id": str(sid),
+        "boot_outcome": "crashed_halted_live",
+        "evidence_kind": "console",
+        "evidence_artifact_id": str(artifact.id),
+        "available_capture": ["gdbstub", "console", "host_dump"],
+    }
+    assert seen["get"] == (conn, sid)
+    assert seen["cap"] == (conn, sid, run.id, sr, store, snap, 5)
+    assert seen["reach"] == (connector, sid)
+    assert seen["audit"] == (conn, ctx, run)
+    assert None not in profiles_seen  # the parsed profile threads into every predicate
+
+
+def test_record_crash_halted_live_returns_none_when_no_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _get(_c, _s):
+        return _FakeSystem(_PROFILE_DICT)
+
+    async def _cap(*_a, **_k):
+        return None  # no console artifact captured
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
+
+    result = asyncio.run(
+        boot_evidence.record_crash_halted_live(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, _FakeRun(None)),
+            system_id=uuid4(),
+            connector=cast(Connector, _Connector(raises=False)),
+            profile_policy=cast(ProfilePolicy, _Pol(gdbstub=True, host_dump=False)),
+            secret_registry=cast(SecretRegistry, object()),
+            artifact_store=cast(ObjectStore, object()),
+            snapshotter=None,
+            mark=0,
+        )
+    )
+    assert result is None  # a missing artifact short-circuits without dereferencing None.data
+
+
+def test_record_expected_crash_threads_args_and_pins_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, ctx = object(), object()
+    run = _FakeRun({"kind": "console_crash", "pattern": "panic"})
+    sid = uuid4()
+    pol = object()
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "k", _PANIC_CONSOLE)
+    seen: dict[str, object] = {}
+
+    async def _inert(c, s, p):
+        seen["inert"] = (c, s, p)
+        return ["gdbstub"]
+
+    async def _audit(c, x, r):
+        seen["audit"] = (c, x, r)
+
+    monkeypatch.setattr(boot_evidence, "_expected_crash_inert_capture", _inert)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
+
+    result = asyncio.run(
+        boot_evidence.record_expected_crash(
+            cast(AsyncConnection, conn),
+            cast(RequestContext, ctx),
+            cast(Run, run),
+            system_id=sid,
+            profile_policy=cast(ProfilePolicy, pol),
+            artifact=artifact,
+            matched_line="the panic line",
+        )
+    )
+    assert result == {
+        "system_id": str(sid),
+        "boot_outcome": "expected_crash_observed",
+        "expectation_matched": True,
+        "evidence_kind": "console",
+        "evidence_artifact_id": str(artifact.id),
+        "available_capture": ["console"],
+        "inert_capture": ["gdbstub"],
+        "matched_line": "the panic line",
+    }
+    assert seen["inert"] == (conn, sid, pol)
+    assert seen["audit"] == (conn, ctx, run)
+
+
+def test_expected_crash_inert_capture_threads_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn, sid, profile = object(), uuid4(), object()
+    profiles_seen: list[object] = []
+    seen: dict[str, object] = {}
+
+    async def _get(c, s):
+        seen["get"] = (c, s)
+        return _FakeSystem(_PROFILE_DICT)
+
+    class _Pol3:
+        def gdbstub_provisioned(self, p):
+            profiles_seen.append(p)
+            return True
+
+        def host_dump_provisioned(self, p):
+            profiles_seen.append(p)
+            return False
+
+        def capture_method(self, p):
+            return CaptureMethod.CONSOLE
+
+    monkeypatch.setattr(boot_evidence.SYSTEMS, "get", _get)
+    monkeypatch.setattr(
+        boot_evidence.ProvisioningProfile, "parse", staticmethod(lambda _pd: profile)
+    )
+    out = asyncio.run(
+        boot_evidence._expected_crash_inert_capture(
+            cast(AsyncConnection, conn), sid, cast(ProfilePolicy, _Pol3())
+        )
+    )
+    assert out == ["gdbstub"]
+    assert seen["get"] == (conn, sid)
+    assert None not in profiles_seen  # the parsed profile threads into inert_capture
+
+
+def test_evaluate_expected_failure_none_when_artifact_missing() -> None:
+    run = _FakeRun({"kind": "console_crash", "pattern": "panic"})  # expectation declared
+    out = asyncio.run(
+        boot_evidence.evaluate_expected_failure_after_ready(
+            cast(AsyncConnection, object()),
+            cast(RequestContext, object()),
+            cast(Run, run),
+            system_id=uuid4(),
+            profile_policy=cast(ProfilePolicy, object()),
+            artifact=None,
+        )
+    )
+    assert out is None  # a declared expectation with no artifact must not deref None.data
+
+
+def test_evaluate_expected_failure_threads_args_to_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn, ctx = object(), object()
+    run = _FakeRun({"kind": "console_crash", "pattern": "Kernel panic"})
+    sid, pol = uuid4(), object()
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "k", _PANIC_CONSOLE)
+    seen: dict[str, object] = {}
+
+    async def _record_exp(c, x, r, *, system_id, profile_policy, artifact, matched_line):
+        seen.update(c=c, x=x, r=r, sid=system_id, pol=profile_policy, art=artifact, ml=matched_line)
+        return {"ok": True}
+
+    monkeypatch.setattr(boot_evidence, "record_expected_crash", _record_exp)
+    out = asyncio.run(
+        boot_evidence.evaluate_expected_failure_after_ready(
+            cast(AsyncConnection, conn),
+            cast(RequestContext, ctx),
+            cast(Run, run),
+            system_id=sid,
+            profile_policy=cast(ProfilePolicy, pol),
+            artifact=artifact,
+        )
+    )
+    assert out == {"ok": True}
+    assert seen == {
+        "c": conn,
+        "x": ctx,
+        "r": run,
+        "sid": sid,
+        "pol": pol,
+        "art": artifact,
+        "ml": "[ 1.45] Kernel panic - not syncing: VFS: Unable to mount root fs",
+    }
