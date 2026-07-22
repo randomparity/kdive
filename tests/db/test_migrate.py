@@ -448,8 +448,13 @@ def test_bad_filename_rejected(tmp_path: Path) -> None:
 def test_duplicate_version_rejected(tmp_path: Path) -> None:
     (tmp_path / "0001_a.sql").write_text("SELECT 1;")
     (tmp_path / "0001_b.sql").write_text("SELECT 2;")
-    with pytest.raises(migrate.MigrationError, match="duplicate"):
+    with pytest.raises(migrate.MigrationError) as exc:
         migrate.discover_migrations(tmp_path)
+    # The error names both colliding files so an operator can find them; assert the
+    # first-seen filename is carried through, not just the "duplicate" phrase.
+    message = str(exc.value)
+    assert "0001_a.sql" in message
+    assert "0001_b.sql" in message
 
 
 def test_missing_schema_dir_raises(tmp_path: Path) -> None:
@@ -460,8 +465,13 @@ def test_missing_schema_dir_raises(tmp_path: Path) -> None:
 def test_apply_requires_idle_connection(postgres_url: str) -> None:
     with psycopg.connect(postgres_url) as conn:  # autocommit=False
         conn.execute("SELECT 1")  # opens a server-side transaction
-        with pytest.raises(migrate.MigrationError, match="open transaction"):
+        with pytest.raises(migrate.MigrationError) as exc:
             migrate.apply_migrations(conn)
+        # Anchor on the message head so a mutation that wraps/garbles the text (not
+        # just one that drops the "open transaction" substring) is still caught.
+        assert str(exc.value).startswith(
+            "apply_migrations requires a connection with no open transaction"
+        )
         conn.rollback()
 
 
