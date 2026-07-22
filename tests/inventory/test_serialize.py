@@ -15,11 +15,14 @@ from dataclasses import replace
 from decimal import Decimal
 
 import psycopg
+import pytest
 from psycopg.types.json import Jsonb
 
+from kdive.domain.catalog.images import Capability
 from kdive.inventory import serialize
 from kdive.inventory.model import InventoryDoc, StagedPathSource
 from kdive.inventory.overrides import InventorySourceKind
+from kdive.inventory.serialize import _cap_int, _opt_cap_int
 
 # ---- TOML emitter primitives ----------------------------------------------------------
 
@@ -379,3 +382,203 @@ async def _set_override(
         "VALUES (%s, %s, %s, %s, 'test', 'op-1')",
         (source_kind.value, resource_kind, name, disposition),
     )
+
+
+# ---- capability coercion (pure) -------------------------------------------------------
+
+
+def test_cap_int_rejects_bool_and_non_int_and_names_resource() -> None:
+    # bool is an int subclass but is not a valid capacity; the `or isinstance(bool)` clause
+    # rejects it, and a non-int (str) is rejected by the `not isinstance(int)` clause. A missing
+    # key resolves to None (also rejected). The resource name is threaded into every message.
+    assert _cap_int({"cap": 5}, "cap", name="host-x") == 5
+    with pytest.raises(ValueError, match="host-x"):
+        _cap_int({"cap": True}, "cap", name="host-x")
+    with pytest.raises(ValueError, match="host-x"):
+        _cap_int({"cap": "5"}, "cap", name="host-x")
+    with pytest.raises(ValueError, match="host-x"):
+        _cap_int({}, "cap", name="host-x")
+
+
+def test_opt_cap_int_allows_absent_but_rejects_bool_and_non_int() -> None:
+    assert _opt_cap_int({}, "seed") is None
+    assert _opt_cap_int({"seed": 7}, "seed") == 7
+    with pytest.raises(ValueError, match="seed"):
+        _opt_cap_int({"seed": True}, "seed")
+    with pytest.raises(ValueError, match="seed"):
+        _opt_cap_int({"seed": "7"}, "seed")
+
+
+# ---- read_inventory_snapshot field mapping (DB) ---------------------------------------
+
+
+async def _seed_config_image_full(
+    conn: psycopg.AsyncConnection,
+    *,
+    name: str,
+    capabilities: list[str],
+    object_key: str | None = None,
+    digest: str | None = None,
+    volume: str | None = None,
+    path: str | None = None,
+    provider: str = "remote-libvirt",
+    arch: str = "x86_64",
+    fmt: str = "qcow2",
+    root_device: str = "/dev/vda",
+    visibility: str = "public",
+    state: str = "registered",
+) -> None:
+    await conn.execute(
+        "INSERT INTO image_catalog "
+        "(provider, name, arch, format, root_device, visibility, capabilities, object_key, "
+        " digest, volume, path, state, managed_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'config')",
+        (
+            provider,
+            name,
+            arch,
+            fmt,
+            root_device,
+            visibility,
+            capabilities,
+            object_key,
+            digest,
+            volume,
+            path,
+            state,
+        ),
+    )
+
+
+async def _seed_config_resource(
+    conn: psycopg.AsyncConnection,
+    *,
+    kind: str,
+    name: str,
+    host_uri: str,
+    caps: dict[str, int],
+    cost_class: str,
+    pool: str,
+) -> None:
+    await conn.execute(
+        "INSERT INTO resources "
+        "(kind, name, capabilities, pool, cost_class, status, host_uri, managed_by) "
+        "VALUES (%s, %s, %s, %s, %s, 'available', %s, 'config')",
+        (kind, name, Jsonb(caps), pool, cost_class, host_uri),
+    )
+
+
+def test_read_snapshot_maps_every_image_field_and_source_shape(migrated_url: str) -> None:
+    # Each ImageRow field is read from its own column: an s3 image carries object_key + digest,
+    # a staged image carries volume, a staged-path image carries path — and the mutually
+    # exclusive source columns stay None on the others.
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await _seed_config_image_full(
+                conn,
+                name="img-s3",
+                provider="remote-libvirt",
+                arch="ppc64le",
+                fmt="qcow2",
+                root_device="/dev/sda",
+                visibility="public",
+                capabilities=["kdump", "ssh"],
+                object_key="images/remote-libvirt/img-s3/ppc64le.qcow2",
+                digest="sha256:abc123",
+            )
+            await _seed_config_image_full(
+                conn, name="img-vol", capabilities=[], volume="staged-vol.qcow2"
+            )
+            await _seed_config_image_full(
+                conn, name="img-path", capabilities=[], path="/staged/img-path.qcow2"
+            )
+            snap = await serialize.read_inventory_snapshot(conn)
+        by_name = {i.name: i for i in snap.images}
+        s3 = by_name["img-s3"]
+        assert s3.provider == "remote-libvirt"
+        assert s3.arch == "ppc64le"
+        assert s3.format == "qcow2"
+        assert s3.root_device == "/dev/sda"
+        assert s3.visibility == "public"
+        assert s3.capabilities == [Capability.KDUMP, Capability.SSH]
+        assert s3.object_key == "images/remote-libvirt/img-s3/ppc64le.qcow2"
+        assert s3.digest == "sha256:abc123"
+        assert s3.volume is None
+        assert s3.path is None
+        assert s3.state == "registered"
+        vol = by_name["img-vol"]
+        assert vol.volume == "staged-vol.qcow2"
+        assert vol.object_key is None
+        assert vol.digest is None
+        assert vol.path is None
+        pathed = by_name["img-path"]
+        assert pathed.path == "/staged/img-path.qcow2"
+        assert pathed.volume is None
+        assert pathed.object_key is None
+
+    asyncio.run(_run())
+
+
+def test_read_snapshot_maps_resource_fields_across_every_kind(migrated_url: str) -> None:
+    # local_libvirt and fault_inject rows flow through the same ledger-honoring read as
+    # remote_libvirt (so passing None for the overrides map would raise), and each scalar +
+    # capability field lands on the right ResourceRow attribute (seed included, fault-inject).
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await _seed_config_resource(
+                conn,
+                kind="local-libvirt",
+                name="loc-1",
+                host_uri="qemu:///system",
+                cost_class="cc-loc",
+                pool="pool-loc",
+                caps={"vcpus": 4, "memory_mb": 2048, "concurrent_allocation_cap": 3},
+            )
+            await _seed_config_resource(
+                conn,
+                kind="fault-inject",
+                name="fi-1",
+                host_uri="fault-inject://local",
+                cost_class="cc-fi",
+                pool="pool-fi",
+                caps={
+                    "vcpus": 1,
+                    "memory_mb": 512,
+                    "concurrent_allocation_cap": 1,
+                    "seed": 42,
+                },
+            )
+            snap = await serialize.read_inventory_snapshot(conn)
+        loc = next(r for r in snap.local_libvirt if r.name == "loc-1")
+        assert loc.cost_class == "cc-loc"
+        assert loc.pool == "pool-loc"
+        assert loc.host_uri == "qemu:///system"
+        assert loc.vcpus == 4
+        assert loc.memory_mb == 2048
+        assert loc.concurrent_allocation_cap == 3
+        assert loc.seed is None
+        fi = next(r for r in snap.fault_inject if r.name == "fi-1")
+        assert fi.seed == 42
+        assert fi.concurrent_allocation_cap == 1
+
+    asyncio.run(_run())
+
+
+def test_read_snapshot_missing_cap_raises_naming_the_resource(migrated_url: str) -> None:
+    # A config resource whose capabilities omit concurrent_allocation_cap fails the read with a
+    # ValueError that names the offending resource (the required-cap guard, name threaded in).
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            await _seed_config_resource(
+                conn,
+                kind="local-libvirt",
+                name="nocap-host",
+                host_uri="qemu:///system",
+                cost_class="cc",
+                pool="pool",
+                caps={"vcpus": 2, "memory_mb": 1024},
+            )
+            with pytest.raises(ValueError, match="nocap-host"):
+                await serialize.read_inventory_snapshot(conn)
+
+    asyncio.run(_run())
