@@ -122,6 +122,29 @@ async def _ledger_kinds(conn: psycopg.AsyncConnection, alloc_id: UUID) -> list[s
     return [r[0] for r in await cur.fetchall()]
 
 
+def test_multiple_expired_allocations_all_counted(migrated_url: str) -> None:
+    # Each expired allocation increments the reclaimed tally: the return is the number
+    # reclaimed, not a fixed 1.
+    async def _run() -> None:
+        started = datetime.now(UTC) - timedelta(hours=2)
+        ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(3):
+                ids.append(
+                    await _seed_expired_alloc(
+                        seed, state=AllocationState.ACTIVE, active_started_at=started
+                    )
+                )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, allocation_repairs.sweep_expired_allocations)
+        assert count == 3  # every expired allocation counted, not a fixed 1
+        async with await connect(migrated_url) as check:
+            for alloc_id in ids:
+                assert await _alloc_state(check, alloc_id) == "expired"
+
+    asyncio.run(_run())
+
+
 def test_idle_expired_allocation_swept_to_expired_with_credit(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:

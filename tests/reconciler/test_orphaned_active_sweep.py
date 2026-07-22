@@ -159,6 +159,24 @@ def test_leaked_active_with_torn_down_system_reclaimed(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
+def test_multiple_orphaned_active_allocations_all_counted(migrated_url: str) -> None:
+    # Each orphaned active allocation increments the reclaimed tally: the return is the number
+    # reclaimed, not a fixed 1.
+    async def _run() -> None:
+        ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(3):
+                ids.append(await _seed_active_alloc(seed, system_state=SystemState.TORN_DOWN))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, allocation_repairs.reap_orphaned_active_allocations)
+        assert count == 3  # every reclaimed allocation counted, not a fixed 1
+        async with await connect(migrated_url) as check:
+            for alloc_id in ids:
+                assert await _alloc_state(check, alloc_id) == "released"
+
+    asyncio.run(_run())
+
+
 def test_leaked_active_with_failed_system_reclaimed(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
