@@ -17,6 +17,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.errors import ProjectMembershipDenied
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.services.investigations.common import (
+    DESCRIPTION_MAX,
     SUMMARY_MAX,
     ExternalRefInput,
     InvestigationErrorReason,
@@ -42,11 +43,17 @@ def _open(
     *,
     project: str,
     title: str,
+    description: str | None = None,
     external_refs: list[ExternalRefInput] | None = None,
 ) -> object:
     return asyncio.run(
         open_investigation_record(
-            _CONN, ctx, project=project, title=title, external_refs=external_refs
+            _CONN,
+            ctx,
+            project=project,
+            title=title,
+            description=description,
+            external_refs=external_refs,
         )
     )
 
@@ -64,6 +71,15 @@ def test_open_requires_contributor_role() -> None:
 def test_open_rejects_out_of_bounds_title() -> None:
     with pytest.raises(InvestigationServiceError) as err:
         _open(_ctx(), project="proj", title="x" * 201)
+    assert err.value.reason is InvestigationErrorReason.INVALID_TEXT
+    assert err.value.object_id == "proj"
+
+
+def test_open_rejects_out_of_bounds_description() -> None:
+    # A valid title but an oversized description is still an invalid-text rejection: the
+    # description must be validated too, not dropped.
+    with pytest.raises(InvestigationServiceError) as err:
+        _open(_ctx(), project="proj", title="t", description="x" * (DESCRIPTION_MAX + 1))
     assert err.value.reason is InvestigationErrorReason.INVALID_TEXT
     assert err.value.object_id == "proj"
 
@@ -97,3 +113,4 @@ def test_open_rejects_malformed_external_refs() -> None:
         )
     assert err.value.reason is InvestigationErrorReason.INVALID_EXTERNAL_REF
     assert err.value.object_id == "proj"
+    assert err.value.detail == "each external_refs entry must carry a tracker, id, and url"

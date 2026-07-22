@@ -102,6 +102,8 @@ def test_close_wrapper_contract_states_summary_is_required() -> None:
 
 
 def test_open_mints_investigation_and_audits(migrated_url: str) -> None:
+    from kdive.security.audit import args_digest
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _open(pool, _ctx(), project="proj", title="kernel oops in xfs")
@@ -109,17 +111,32 @@ def test_open_mints_investigation_and_audits(migrated_url: str) -> None:
             inv_id = resp.object_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    "SELECT state, title FROM investigations WHERE id = %s", (inv_id,)
+                    "SELECT state, title, agent_session, principal, project "
+                    "FROM investigations WHERE id = %s",
+                    (inv_id,),
                 )
                 row = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = '->open' "
-                    "AND object_id = %s",
+                    "SELECT tool, object_kind, transition, args_digest, project "
+                    "FROM audit_log WHERE object_id = %s",
                     (inv_id,),
                 )
-                audit = await cur.fetchone()
+                audit_rows = await cur.fetchall()
         assert row is not None and row["state"] == "open" and row["title"] == "kernel oops in xfs"
-        assert audit is not None and audit["n"] == 1
+        # The minted row carries the caller identity and project.
+        assert row["agent_session"] == "s"
+        assert row["principal"] == "user-1"
+        assert row["project"] == "proj"
+        # Exactly one ->open audit row under the project with the project/title arg digest.
+        assert len(audit_rows) == 1
+        audit_row = audit_rows[0]
+        assert audit_row["tool"] == "investigations.open"
+        assert audit_row["object_kind"] == "investigations"
+        assert audit_row["transition"] == "->open"
+        assert audit_row["project"] == "proj"
+        assert audit_row["args_digest"] == args_digest(
+            {"project": "proj", "title": "kernel oops in xfs"}
+        )
 
     asyncio.run(_run())
 
@@ -275,6 +292,8 @@ async def _seed_investigation(pool: AsyncConnectionPool, state: InvestigationSta
 
 
 def test_close_open_investigation(migrated_url: str) -> None:
+    from kdive.security.audit import args_digest
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
@@ -284,13 +303,21 @@ def test_close_open_investigation(migrated_url: str) -> None:
                 await cur.execute("SELECT state FROM investigations WHERE id = %s", (inv_id,))
                 row = await cur.fetchone()
                 await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'open->closed' "
-                    "AND object_id = %s",
+                    "SELECT tool, object_kind, transition, args_digest, project "
+                    "FROM audit_log WHERE object_id = %s",
                     (inv_id,),
                 )
-                audit = await cur.fetchone()
+                audit_rows = await cur.fetchall()
         assert row is not None and row["state"] == "closed"
-        assert audit is not None and audit["n"] == 1
+        assert len(audit_rows) == 1
+        audit_row = audit_rows[0]
+        assert audit_row["tool"] == "investigations.close"
+        assert audit_row["object_kind"] == "investigations"
+        assert audit_row["transition"] == "open->closed"
+        assert audit_row["project"] == "proj"
+        assert audit_row["args_digest"] == args_digest(
+            {"investigation_id": inv_id, "summary_chars": len(_SUMMARY)}
+        )
 
     asyncio.run(_run())
 
@@ -438,7 +465,9 @@ def test_close_abandoned_is_config_error(migrated_url: str) -> None:
             inv_id = await _seed_investigation(pool, InvestigationState.ABANDONED)
             resp = await close_investigation(pool, _ctx(), inv_id, _SUMMARY)
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        assert resp.object_id == inv_id
         assert resp.data["current_status"] == "abandoned"
+        assert resp.detail == "cannot close an abandoned Investigation"
 
     asyncio.run(_run())
 
@@ -480,6 +509,9 @@ def test_close_backstop_maps_illegal_transition(
             monkeypatch.setattr(INVESTIGATIONS, "update_state", _boom)
             resp = await close_investigation(pool, _ctx(), inv_id, _SUMMARY)
         assert resp.status == "error" and resp.error_category == "configuration_error"
+        # The backstop re-reads the live row (still open) and reports it as not closable.
+        assert resp.data["current_status"] == "open"
+        assert resp.detail == "Investigation is open, not closable"
 
     asyncio.run(_run())
 
