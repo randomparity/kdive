@@ -80,6 +80,30 @@ def test_stale_heartbeat_probe_is_reaped(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_multiple_leaked_probes_all_counted(migrated_url: str) -> None:
+    # Two independent stale-heartbeat probes must each increment the reaped tally: the return is
+    # the number of probes reaped, not a fixed 1.
+    async def _run() -> None:
+        # One live probe per provider (unique constraint), so give each a distinct provider.
+        names = ["kdive-egress-probe-a", "kdive-egress-probe-b"]
+        providers = ["remote-libvirt", "local-libvirt"]
+        for name, provider in zip(names, providers, strict=True):
+            await _seed_probe(
+                migrated_url,
+                domain_name=name,
+                provider=provider,
+                heartbeat_ago=timedelta(minutes=30),
+                ttl_in=timedelta(minutes=30),
+            )
+        reaper = _FakeProbeReaper()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 2  # both probes reaped, not a fixed 1
+        assert sorted(reaper.destroyed) == sorted(names)
+
+    asyncio.run(_run())
+
+
 def test_live_run_probe_is_never_reaped(migrated_url: str) -> None:
     async def _run() -> None:
         await _seed_probe(
