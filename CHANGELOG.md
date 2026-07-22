@@ -284,6 +284,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document KDIVE_MCP_TRACE transport tracing
 - Worksteal exposes caplog closed-stderr-buffer leak
 - Record store/objectstore.py swept to 0 surviving
+- Record db/ bucket sweep + repositories.py blocker (#1401)
 
 ### Fixed
 
