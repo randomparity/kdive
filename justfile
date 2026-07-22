@@ -79,6 +79,54 @@ type:
 test:
     PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" -n auto --dist worksteal -q
 
+# Rerun the tests that failed on the previous run, failures first — the fast inner loop
+# (#1334, ADR-0420). Additive: `just test` stays the full pre-push gate and this never runs
+# in CI. Same marker exclusion and pinned PYTHONHASHSEED as `test:`, so a stale/empty --lf
+# cache (pytest then runs everything) still skips the gated live tiers and collects stably.
+test-lf:
+    PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "not live_vm and not live_stack and not agent_smoke" --lf -n auto -q
+
+# Run only the tests your working changes touch — the fast inner loop (#1334, ADR-0420).
+# scripts/select_changed_tests.py maps each changed src file to every tests/**/test_<stem>.py
+# and lists changed test files directly; it prints `__ALL__` when a change is unmappable (a
+# src file with no named test, a conftest, pyproject.toml, this justfile), which falls back
+# to the full suite here. The map is by name, not import graph, so a change to a widely
+# imported module runs only its own named test — `just test` stays the gate for the rest.
+test-changed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    marks="not live_vm and not live_stack and not agent_smoke"
+    run_full() {
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest -m "$marks" -n auto --dist worksteal -q
+    }
+    # Command substitution (not `< <(...)`) so a selector crash is caught, not read as "no
+    # changed tests" — a false green is the one failure this recipe must never produce.
+    if ! output="$(python3 scripts/select_changed_tests.py)"; then
+      echo "changed-test selector failed — running the full suite" >&2
+      run_full
+      exit
+    fi
+    if [[ "$output" == "__ALL__" ]]; then
+      echo "changed set is broad or unmappable — running the full suite"
+      run_full
+    elif [[ -z "$output" ]]; then
+      echo "no changed tests detected — nothing to run (use 'just test' for the full suite)"
+    else
+      mapfile -t targets <<< "$output"
+      printf 'running %d changed-test target(s):\n' "${#targets[@]}"
+      printf '  %s\n' "${targets[@]}"
+      # Exit 5 ("no tests collected") means every selected test was gated out by $marks
+      # (a changed live_vm/live_stack/agent_smoke test) — report it, don't abort as a
+      # false-red under set -e. Other non-zero codes are real failures and propagate.
+      rc=0
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --dist worksteal -q || rc=$?
+      if [[ "$rc" -eq 5 ]]; then
+        echo "all selected tests are gated (live_vm/live_stack/agent_smoke) — none ran; use 'just test' or a live recipe"
+        exit 0
+      fi
+      exit "$rc"
+    fi
+
 # Run the doc-driven agent-smoke tier (#1370, ADR-0411): a deterministic walker drives the
 # agent-index.md golden path over the served surface and fails on any stall. Non-PR-gate like
 # the live tiers and NOT in `ci` — the harness for the deferred nightly live-LLM agent. It is
