@@ -646,6 +646,56 @@ def test_leaked_domain_destroy_failure_does_not_strand_others(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_multiple_leaked_domains_all_counted(migrated_url: str) -> None:
+    # Two rowless leaked domains must each increment the reaped tally: the return is the count
+    # of domains reaped, not a fixed 1.
+    async def _run() -> None:
+        reaper = FakeReaper(
+            _FakeDomain(name="vm-leak-a", system_id=uuid4()),
+            _FakeDomain(name="vm-leak-b", system_id=uuid4()),
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 2  # both reaped, not a fixed 1
+        assert reaper.destroyed == ["vm-leak-a", "vm-leak-b"]
+
+    asyncio.run(_run())
+
+
+def test_foreign_domain_skip_does_not_halt_reaping(migrated_url: str) -> None:
+    # A foreign (non-kdive, untagged) domain is skipped, but the sweep must CONTINUE to the
+    # reapable domain that follows it — not break out of the loop on the first skip.
+    async def _run() -> None:
+        reaper = FakeReaper(
+            _FakeDomain(name="someone-elses-vm", system_id=None),  # skipped: unmanaged
+            _FakeDomain(name="vm-leak", system_id=uuid4()),  # rowless leak after the skip
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 1
+        assert reaper.destroyed == ["vm-leak"]  # reached despite the earlier foreign skip
+
+    asyncio.run(_run())
+
+
+def test_live_row_domain_skip_does_not_halt_reaping(migrated_url: str) -> None:
+    # A domain whose owning System still has a live row is skipped, but the sweep must CONTINUE
+    # to the reapable domain that follows it.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            live_id = await seed_system(seed, system_state=SystemState.READY)
+        reaper = FakeReaper(
+            _FakeDomain(name="vm-live", system_id=live_id),  # skipped: live row protects it
+            _FakeDomain(name="vm-leak", system_id=uuid4()),  # rowless leak after the skip
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(reaper))
+        assert count == 1
+        assert reaper.destroyed == ["vm-leak"]  # reached despite the earlier live-row skip
+
+    asyncio.run(_run())
+
+
 def test_mid_provision_domain_not_reaped(migrated_url: str) -> None:
     async def _run() -> None:
         # Headline acceptance: a provisioning row protects the domain (guard a),
