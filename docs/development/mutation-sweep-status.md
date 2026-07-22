@@ -164,6 +164,43 @@ are its sub-issues.
   covering assertions; that deeper sweep of the large `core.py` module is a #1398 follow-up
   (the "split a large module" path).
 
+- `services/runs/` bucket (#1399) — the run admission / bind / state-transition /
+  build-finalization modules, swept serially against their `migrated_url` covering tests
+  (`tests/services/runs/*`, plus `tests/adversarial/test_runs_bind_races.py`). Per module
+  (mutants, surviving before → after): `states.py` 0 (module-level constants, no mutable
+  surface); `liveness.py` 68, 11→0; `host_admission.py` 91, 2→0; `bind.py` 215, 35→13
+  equivalent; `steps.py` 76, 12→7 equivalent; `complete_build.py` 261, 65→9 equivalent;
+  `admission.py` 503, 48→18 equivalent. (Note the naming trap: the adversarial
+  `test_admission_*` files cover `services/allocation/admission`, not this bucket's
+  `services/runs/admission.py`; a fast direct cover — `tests/services/runs/test_create_flow.py`
+  — was added for the runs create flow.) Assertion gaps killed by pinning the storm-hit
+  threshold, argument passthrough in the liveness fakes, the full bind/create/complete_build
+  success snapshots + audit rows (tool/object_kind/transition/args-digest), reject-path error
+  object_id/category/details, the chunked-reassembly copy/final-key + cleanup, and the
+  cmdline_for branch matrix. The **surviving mutants are equivalent** and cluster into these
+  classes, none killable by a behavioral assertion:
+  1. **Postgres case-folded SQL** — keyword / unquoted-identifier case (as in `db/`).
+  2. **Advisory-lock key args** — mutating a `LockScope.*` lock key to `None` only changes
+     which key serializes; a serial (single-connection) test cannot observe it.
+  3. **Defense-in-depth re-checks** — a pre-lock reject (run-bindable, alloc-hostable,
+     cross-project) dropped in `_resolve_*`/`_bind_locked` is re-caught under the lock by
+     `check_host_preconditions` / the `IS NULL` compare-and-set, so the outcome is identical.
+  4. **Coupled-condition tautologies** — `precond is not None or ok is None` (and the
+     `chunked and store is not None`) are logically equal to the mutated `and`/`or` form
+     because the two operands are always coupled (`ok is None` ⟺ `precond is not None`;
+     `store` is set iff `chunked`).
+  5. **`typing.cast` / `model_dump(mode=…)` no-ops** — `cast(t, v)` returns `v` unchanged
+     regardless of `t`, and `model_dump`'s mode is unobservable for a payload with no
+     non-JSON-native fields.
+  6. **Naive-vs-UTC + DB-overwritten timestamp** — `datetime.now(None)` equals UTC on a UTC
+     host and the value is overwritten by the DB on insert (ADR-0016).
+  7. **Redundant / unreachable guards** — `_optional_provenance_map`'s cast, the `kind = None`
+     vs `""` in `_validate_unbound_target_kind` (both fail the membership check identically),
+     the FK-unreachable `else "missing"` allocation-missing literal, and the log-context-only
+     `bind_context(principal=…)`.
+  8. **Protocol-stub default args** — the `arch="x86_64"` default on the
+     `CompleteBuildValidation.__call__` Protocol (a `...` body never executed).
+
 **Not yet swept:** the remaining subsystem buckets (`jobs/handlers/`,
 `inventory/`, `reconciler/`) — filed as #1306 sub-issues.
 
