@@ -322,6 +322,23 @@ def test_reconcile_from_granted_never_active_is_full_credit(migrated_url: str) -
     asyncio.run(_run())
 
 
+def test_reconcile_started_but_never_ended_prices_zero_hours(migrated_url: str) -> None:
+    # An allocation whose active interval was started but never stamped closed cannot be priced:
+    # active_hours defensively resolves to 0 (a missing *either* bound), never a crash on a
+    # None-minus-datetime subtraction, so the reconcile is a full credit.
+    async def _run() -> None:
+        async with _conn(migrated_url) as conn:
+            await _seed_budget(conn)
+            res = await _seed_resource(conn)
+            alloc = await _seed_alloc(conn, res.id, active_started_at=_DT, active_ended_at=None)
+            await accounting.reserve(conn, alloc, Decimal("9.0000"))
+            delta = await accounting.reconcile(conn, alloc)
+            assert delta == Decimal("-9.0000")  # 0 active hours → 0 actual → full credit
+            assert await _spent(conn) == Decimal("0.0000")
+
+    asyncio.run(_run())
+
+
 def test_reconcile_credit_has_nullable_resource_id_for_unprovisioned(migrated_url: str) -> None:
     # An allocation released from granted never had a System; the reconciled credit's
     # resource_id is still the allocation's resource (it was chosen at request). The
@@ -361,25 +378,29 @@ def test_reconcile_zero_ledger_no_reservation_is_zero_delta(migrated_url: str) -
 
 
 def test_reconcile_missing_size_fails_closed(migrated_url: str) -> None:
-    # An active allocation with null requested size cannot price actual → configuration_error.
+    # An active allocation missing *either* requested size field cannot price actual and fails
+    # closed with a named CONFIGURATION_ERROR carrying the allocation id.
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
             await _seed_budget(conn)
             res = await _seed_resource(conn)
-            alloc = await _seed_alloc(
-                conn,
-                res.id,
-                vcpus=None,
-                memory_gb=None,
-                active_started_at=_DT,
-                active_ended_at=_DT + timedelta(hours=1),
-            )
-            await accounting.reserve(conn, alloc, Decimal("9.0000"))
-            try:
-                await accounting.reconcile(conn, alloc)
-                raise AssertionError("expected CategorizedError")
-            except CategorizedError as exc:
-                assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+            for vcpus, memory_gb in ((None, None), (2, None), (None, 4)):
+                alloc = await _seed_alloc(
+                    conn,
+                    res.id,
+                    vcpus=vcpus,
+                    memory_gb=memory_gb,
+                    active_started_at=_DT,
+                    active_ended_at=_DT + timedelta(hours=1),
+                )
+                await accounting.reserve(conn, alloc, Decimal("9.0000"))
+                try:
+                    await accounting.reconcile(conn, alloc)
+                    raise AssertionError("expected CategorizedError")
+                except CategorizedError as exc:
+                    assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+                    assert str(exc) == f"allocation {alloc.id} has no persisted size to reconcile"
+                    assert exc.details == {"allocation_id": str(alloc.id)}
 
     asyncio.run(_run())
 
