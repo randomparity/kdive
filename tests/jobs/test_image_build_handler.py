@@ -186,6 +186,36 @@ def test_handler_passes_kernel_config_to_publish(migrated_url: str, tmp_path: Pa
     asyncio.run(_run())
 
 
+def test_handler_threads_requested_packages_into_build_spec(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Payload-requested packages must reach the build spec verbatim (overriding the family
+    # default set); a dropped/None packages arg would silently fall back to the family default.
+    plane = _FakePlane(tmp_path)
+    store = _FakeStore()
+
+    async def _run() -> None:
+        async with await psycopg.AsyncConnection.connect(migrated_url, autocommit=True) as conn:
+            job = await queue.enqueue(
+                conn,
+                JobKind.IMAGE_BUILD,
+                _payload(packages=["kdive-extra-pkg"]),
+                _AUTHORIZING,
+                "dedup-packages",
+            )
+            await image_build_handler(
+                conn,
+                job,
+                resolver=_resolver_with_plane(plane),
+                store=store,
+                inspect=_all_present,
+            )
+            assert plane.spec is not None
+            assert plane.spec.packages == ("kdive-extra-pkg",)
+
+    asyncio.run(_run())
+
+
 def test_handler_resolves_build_plane_from_provider_runtime(
     migrated_url: str, tmp_path: Path
 ) -> None:
