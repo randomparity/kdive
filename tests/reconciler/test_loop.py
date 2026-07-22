@@ -985,6 +985,47 @@ def test_console_reap_with_empty_registry_is_noop(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_console_reap_counts_every_gone_collector(migrated_url: str) -> None:
+    from kdive.providers.infra.console_hosting import CollectorRegistry
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            gone_ids = [
+                await seed_system(seed, system_state=SystemState.TORN_DOWN) for _ in range(3)
+            ]
+        registry = CollectorRegistry()
+        for gid in gone_ids:
+            registry.add(_FakeConsoleCollector(gid))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: reap_console_collectors(c, registry))
+        assert count == 3  # every gone collector counted, not a fixed 1
+        for gid in gone_ids:
+            assert registry.has(gid) is False
+
+    asyncio.run(_run())
+
+
+def test_console_reap_live_skip_does_not_halt_gone_reap(migrated_url: str) -> None:
+    # A live System's collector is skipped, but the reap must CONTINUE to the gone collectors
+    # that follow it. The live collector is registered first so a `break` would drop the gone one.
+    from kdive.providers.infra.console_hosting import CollectorRegistry
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            live = await seed_system(seed, system_state=SystemState.READY)
+            gone = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+        registry = CollectorRegistry()
+        registry.add(_FakeConsoleCollector(live))  # skipped, registered first
+        registry.add(_FakeConsoleCollector(gone))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: reap_console_collectors(c, registry))
+        assert count == 1  # the gone collector was reaped despite the earlier live skip
+        assert registry.has(live) is True  # a live System keeps streaming (state not in gone)
+        assert registry.has(gone) is False
+
+    asyncio.run(_run())
+
+
 # --- host_dump orphaned-volume reap (ADR-0094, #301) ---------------------------------------
 
 
@@ -1115,6 +1156,70 @@ def test_reaps_when_capture_job_is_terminal(migrated_url: str) -> None:
                 lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
             )
         assert count == 1  # a finished capture no longer holds the volume
+
+    asyncio.run(_run())
+
+
+def test_reaps_multiple_orphan_volumes_all_counted(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            ids = [await seed_system(seed, system_state=SystemState.CRASHED) for _ in range(3)]
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(*(_vol(sid, age_s=3600, now_epoch=now_epoch) for sid in ids))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 3  # every orphan volume counted, not a fixed 1
+        assert len(reaper.deleted) == 3
+
+    asyncio.run(_run())
+
+
+def test_fresh_volume_skip_does_not_halt_older_reap(migrated_url: str) -> None:
+    # A within-grace (fresh) volume is skipped, but the sweep must CONTINUE to the older volume
+    # that follows it — the fresh one is listed first so a `break` would drop the older one.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            fresh_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            old_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(
+            _vol(fresh_sys, age_s=60, now_epoch=now_epoch),  # within grace → skipped, first
+            _vol(old_sys, age_s=3600, now_epoch=now_epoch),  # past grace → reaped
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{old_sys}.kdump"]  # reached after the skip
+
+    asyncio.run(_run())
+
+
+def test_active_capture_skip_does_not_halt_older_reap(migrated_url: str) -> None:
+    # A volume held by an active capture job is skipped, but the sweep must CONTINUE to the next
+    # reapable volume — the held one is listed first so a `break` would drop the reapable one.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            held_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            await _seed_capture_job(seed, held_sys, state="running")
+            free_sys = await seed_system(seed, system_state=SystemState.CRASHED)
+            now_epoch = await _seed_now_epoch(seed)
+        reaper = _FakeDumpVolumeReaper(
+            _vol(held_sys, age_s=3600, now_epoch=now_epoch),  # active capture → skipped, first
+            _vol(free_sys, age_s=3600, now_epoch=now_epoch),  # reapable
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(
+                pool,
+                lambda conn: reap_orphaned_dump_volumes(conn, reaper, timedelta(minutes=30)),
+            )
+        assert count == 1
+        assert reaper.deleted == [f"kdive-host-dump-{free_sys}.kdump"]  # reached after the skip
 
     asyncio.run(_run())
 

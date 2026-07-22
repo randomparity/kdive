@@ -41,6 +41,44 @@ async def _exists(conn: psycopg.AsyncConnection, artifact_id: UUID) -> bool:
     return await cur.fetchone() is not None
 
 
+def test_gc_counts_every_deleted_report_artifact(migrated_url: str) -> None:
+    # Each old report artifact increments the deleted tally: the return is the number deleted,
+    # not a fixed 1.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        ids: list[UUID] = []
+        try:
+            for i in range(3):
+                ids.append(
+                    await _insert_artifact(
+                        seed,
+                        owner_kind="reports",
+                        key=f"local/reports/old-{i}.csv",
+                        age=timedelta(days=8),
+                    )
+                )
+        finally:
+            await seed.close()
+
+        store = _RecordingStore()
+        repair_conn = await connect(migrated_url)
+        try:
+            deleted = await gc_report_artifacts(repair_conn, store, timedelta(days=7))
+        finally:
+            await repair_conn.close()
+
+        assert deleted == 3  # every old report artifact counted, not a fixed 1
+        assert len(store.deleted) == 3
+        check = await connect(migrated_url)
+        try:
+            for aid in ids:
+                assert not await _exists(check, aid)
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
 def test_gc_deletes_only_old_report_artifacts(migrated_url: str) -> None:
     async def _run() -> None:
         seed = await connect(migrated_url)
