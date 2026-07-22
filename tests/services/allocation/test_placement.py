@@ -221,6 +221,50 @@ def test_pcie_resolution_reports_busy_capacity_candidate(migrated_url: str) -> N
     assert capacity_id == busy_id
 
 
+def test_pcie_no_matching_device_reports_no_capacity_candidate(migrated_url: str) -> None:
+    # A host that lacks the requested device entirely is a NO_MATCH, not a busy CAPACITY
+    # candidate: it must never be reported as the capacity fallback (a `capacity_candidate is
+    # None` short-circuit would otherwise latch the first schedulable host regardless of match).
+    async def _run() -> tuple[list[UUID], UUID | None]:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, pcie=True)  # advertises only the 8086:1572 NIC
+            candidates = await resolve_placement_candidates(
+                conn,
+                PlacementRequest(
+                    resource_id=None,
+                    kind=ResourceKind.LOCAL_LIBVIRT,
+                    pcie_specs=("10de:1234",),  # a GPU no host advertises
+                ),
+            )
+        capacity_id = candidates.capacity_candidate.id if candidates.capacity_candidate else None
+        return [r.id for r in candidates.resources], capacity_id
+
+    matched, capacity_id = asyncio.run(_run())
+    assert matched == []
+    assert capacity_id is None
+
+
+def test_pool_request_applies_arch_filter(migrated_url: str) -> None:
+    # A by-pool request must still honour the arch predicate: an x86_64-only member of the pool
+    # is dropped for a ppc64le request, leaving only the ppc64le-capable member.
+    async def _run() -> tuple[list[UUID], UUID]:
+        async with _conn(migrated_url) as conn:
+            await _resource(conn, pool="big", guest_arches={"x86_64": _KVM})
+            power = await _resource(
+                conn,
+                created_offset=timedelta(seconds=1),
+                pool="big",
+                guest_arches={"ppc64le": _TCG},
+            )
+            candidates = await resolve_placement_candidates(
+                conn, PlacementRequest(resource_id=None, pool="big", arch="ppc64le")
+            )
+            return [r.id for r in candidates.resources], power.id
+
+    ids, power_id = asyncio.run(_run())
+    assert ids == [power_id]
+
+
 def test_any_available_skips_scoped_and_lands_on_global(migrated_url: str) -> None:
     """An any-available request skips a foreign-scoped host and selects the global one.
 
