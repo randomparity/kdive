@@ -87,6 +87,28 @@ def test_argv_is_fixed_and_excludes_the_key() -> None:
     assert argv[argv.index("-i") + 1] == "/tmp/kdive-bootkey-use-x/id"
 
 
+def test_argv_is_exactly_the_fixed_ssh_invocation() -> None:
+    # Pin the full argv: the hardening options (BatchMode/StrictHostKeyChecking/UserKnownHostsFile/
+    # ConnectTimeout), the -o/-p/-i flags, and their exact casing are all security-load-bearing.
+    assert build_authorize_argv("127.0.0.1", 22022, "/kp") == [
+        "ssh",
+        "-i",
+        "/kp",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "-p",
+        "22022",
+        "root@127.0.0.1",
+        ssh_authorize._REMOTE_SCRIPT,
+    ]
+
+
 def test_argv_targets_the_given_host_for_remote_endpoint() -> None:
     # ADR-0291: a remote System's recorded endpoint host is its ACL'd ssh_addr, not loopback.
     argv = build_authorize_argv("10.0.0.9", 47101, "/tmp/k")
@@ -111,7 +133,10 @@ def test_handler_unprovisioned_is_configuration_error() -> None:
     assert excinfo.value.details["reason"] == "ssh_not_provisioned"
     # Provider-capability wording, not a stale reprovision remedy (ADR-0281): the local forward is
     # always rendered now, so a None endpoint means the provider exposes no loopback SSH forward.
-    assert "local-libvirt" in str(excinfo.value)
+    assert str(excinfo.value) == (
+        "This System's provider exposes no loopback SSH forward; direct SSH to a "
+        "System is a local-libvirt capability"
+    )
     assert "reprovision" not in str(excinfo.value).lower()
 
 
@@ -132,9 +157,14 @@ def test_handler_unreachable_preflight_fails_fast_terminal(
 ) -> None:
     resolver = _resolver(("127.0.0.1", 22022))
     ssh_calls: list[int] = []
+    probe_calls: list[tuple[str, int]] = []
 
     def _ssh(_argv: list[str], _key: str) -> None:
         ssh_calls.append(1)
+
+    async def _probe(host: str, port: int) -> ReachResult:
+        probe_calls.append((host, port))
+        return result
 
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
@@ -144,7 +174,7 @@ def test_handler_unreachable_preflight_fails_fast_terminal(
                 resolver=resolver,
                 secret_registry=SecretRegistry(),
                 ssh_exec=_ssh,
-                probe=_probe_returning(result),
+                probe=_probe,
             )
         )
     exc = excinfo.value
@@ -152,6 +182,11 @@ def test_handler_unreachable_preflight_fails_fast_terminal(
     assert exc.category is ErrorCategory.TRANSPORT_FAILURE
     assert exc.details["reason"] == reason
     assert exc.details["detail"] == detail
+    assert (
+        str(exc) == "guest SSH endpoint is unreachable; not attempting the authorized-keys append"
+    )
+    # …the pre-flight probes the exact recorded endpoint (host, port)…
+    assert probe_calls == [("127.0.0.1", 22022)]
     # …terminal so the worker dead-letters instead of requeuing the doomed window (the ~230 s
     # overrun was max_attempts requeues, each burning the ~90 s append window)…
     assert exc.terminal is True
@@ -220,8 +255,13 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
                 resolver = _resolver(("127.0.0.1", 22022))
 
                 recorded: list[tuple[list[str], str]] = []
+                probe_calls: list[tuple[str, int]] = []
                 seen_key_path: Path | None = None
                 seen_key_existed: bool | None = None
+
+                async def _probe(host: str, port: int) -> ReachResult:
+                    probe_calls.append((host, port))
+                    return ReachResult.ok()
 
                 def _capture(argv: list[str], key: str) -> None:
                     nonlocal seen_key_path, seen_key_existed
@@ -235,9 +275,10 @@ def test_handler_authorizes_via_per_system_key_and_cleans_up_temp_key(
                     resolver=resolver,
                     secret_registry=SecretRegistry(),
                     ssh_exec=_capture,
-                    probe=_reachable,
+                    probe=_probe,
                 )
                 assert result is None
+                assert probe_calls == [("127.0.0.1", 22022)]
                 return recorded, seen_key_path, seen_key_existed
 
     recorded, key_path, key_existed = asyncio.run(_run())
@@ -272,6 +313,8 @@ def test_handler_resolves_endpoint_by_domain_name(migrated_url: str) -> None:
                     ssh_exec=lambda _argv, _key: None,
                     probe=_reachable,
                 )
+                # The binding is resolved with the handler's own (conn, system_id).
+                resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
                 handle = connector.recorded_ssh_endpoint.call_args.args[0]
                 return str(handle), system_id
 
@@ -328,6 +371,7 @@ def test_authorize_failure_classifies_reason(returncode: int, stderr: str, reaso
     with pytest.raises(CategorizedError) as excinfo:
         _raise_on_authorize_failure(_failed_proc(returncode, stderr))
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert str(excinfo.value) == "ssh authorize-key command failed in the guest"
     assert excinfo.value.details["reason"] == reason
     assert excinfo.value.details["exit_status"] == returncode
 
@@ -359,15 +403,22 @@ def _transport_error() -> CategorizedError:
 
 
 def test_attach_console_tail_enriches_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+    tail_calls: list[tuple[UUID, SecretRegistry]] = []
+
+    async def _tail(sid: UUID, reg: SecretRegistry) -> str:
+        tail_calls.append((sid, reg))
         return "systemd[1]: Started OpenSSH server daemon.\n"
 
     monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _tail)
     exc = _transport_error()
+    system_id = uuid4()
+    registry = SecretRegistry()
 
-    asyncio.run(_attach_console_tail(exc, uuid4(), SecretRegistry()))
+    asyncio.run(_attach_console_tail(exc, system_id, registry))
 
     assert exc.details["console_tail"] == "systemd[1]: Started OpenSSH server daemon.\n"
+    # The tail is read for THIS system with the passed-in registry (not None/some other id).
+    assert tail_calls == [(system_id, registry)]
 
 
 def test_attach_console_tail_skips_non_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -400,18 +451,23 @@ def test_unreachable_preflight_failure_context_carries_console_tail(
     # The acceptance shape: an unreachable authorize surfaces the guest console tail via the same
     # _failure_context path jobs.get/jobs.wait read — beside the #1008 reason — so an agent can
     # answer "did sshd start?" from the failed job alone, without a second session.
-    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+    tail_calls: list[tuple[UUID, SecretRegistry]] = []
+
+    async def _tail(sid: UUID, reg: SecretRegistry) -> str:
+        tail_calls.append((sid, reg))
         return "kdive-guest login:  (sshd never Started)\n"
 
     monkeypatch.setattr(ssh_authorize, "redacted_console_tail", _tail)
     resolver = _resolver(("127.0.0.1", 22022))
+    system_id = uuid4()
+    registry = SecretRegistry()
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(
             authorize_ssh_key_handler(
                 MagicMock(),
-                _job(),
+                _job_for(system_id),
                 resolver=resolver,
-                secret_registry=SecretRegistry(),
+                secret_registry=registry,
                 ssh_exec=lambda _argv, _key: None,
                 probe=_probe_returning(ReachResult.missing_banner()),
             )
@@ -419,6 +475,8 @@ def test_unreachable_preflight_failure_context_carries_console_tail(
     context = worker._failure_context(excinfo.value, SecretRegistry())
     assert context["failure_detail_reason"] == "banner_timeout"
     assert context["failure_detail_console_tail"] == "kdive-guest login:  (sshd never Started)\n"
+    # The handler enriches with THIS system's tail and its own registry (kills sid/registry drops).
+    assert tail_calls == [(system_id, registry)]
 
 
 def test_handler_no_bootstrap_key_is_configuration_error(migrated_url: str) -> None:
