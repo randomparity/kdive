@@ -44,9 +44,12 @@ injected inputs the way `schema_immutable_guard.find_violations` is):
 - **Changed set** = files differing between the branch's merge-base with the base branch
   and the working tree (`git diff --name-only <merge-base>`, which covers both committed
   branch work and uncommitted edits), plus untracked files
-  (`git ls-files --others --exclude-standard`). The base ref is `origin/<base>` when
-  present, else `<base>`, else the diff is taken against `HEAD` alone. No fetch — the
-  inner loop stays offline and fast.
+  (`git ls-files --others --exclude-standard`). The base ref is `origin/main` when
+  present, else `main`; when neither resolves (a default branch not named `main`, no
+  `origin`, a shallow clone) the base is unknown, so the recipe runs the full suite
+  rather than an uncommitted-only `HEAD` diff that would silently skip committed branch
+  work — the same never-under-run bias as an unmappable change. No fetch — the inner
+  loop stays offline and fast.
 - **A changed test file** (`tests/**/test_*.py` or `tests/**/*_test.py`) that still exists
   on disk is a direct target.
 - **A changed `src/kdive/**/*.py` file** maps to every `tests/**/test_<stem>.py` on disk

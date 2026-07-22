@@ -14,6 +14,7 @@ Contract of ``select_targets(changed, test_index)``:
 
 from __future__ import annotations
 
+import scripts.select_changed_tests as selector
 from scripts.select_changed_tests import build_test_index, select_targets
 
 # A small fake tree: stem -> the existing tests/**/test_<stem>.py paths on disk.
@@ -97,3 +98,11 @@ def test_build_test_index_keys_by_stem(tmp_path) -> None:
     assert index["errors"] == ["tests/domain/test_errors.py"]
     assert index["widget"] == ["tests/domain/widget_test.py"]
     assert "conftest" not in index
+
+
+def test_unresolvable_base_ref_runs_the_full_suite(monkeypatch, capsys) -> None:
+    # No base branch resolves -> the changed set is unknowable -> full suite, never an
+    # uncommitted-only HEAD diff that would skip committed branch work (ADR-0420 bias).
+    monkeypatch.setattr(selector, "_resolve_base_ref", lambda repo_root: None)
+    assert selector.main() == 0
+    assert capsys.readouterr().out.strip() == "__ALL__"

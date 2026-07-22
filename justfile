@@ -115,7 +115,16 @@ test-changed:
       mapfile -t targets <<< "$output"
       printf 'running %d changed-test target(s):\n' "${#targets[@]}"
       printf '  %s\n' "${targets[@]}"
-      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --dist worksteal -q
+      # Exit 5 ("no tests collected") means every selected test was gated out by $marks
+      # (a changed live_vm/live_stack/agent_smoke test) — report it, don't abort as a
+      # false-red under set -e. Other non-zero codes are real failures and propagate.
+      rc=0
+      PYTHONHASHSEED="${PYTHONHASHSEED:-0}" uv run python -m pytest "${targets[@]}" -m "$marks" -n auto --dist worksteal -q || rc=$?
+      if [[ "$rc" -eq 5 ]]; then
+        echo "all selected tests are gated (live_vm/live_stack/agent_smoke) — none ran; use 'just test' or a live recipe"
+        exit 0
+      fi
+      exit "$rc"
     fi
 
 # Run the doc-driven agent-smoke tier (#1370, ADR-0411): a deterministic walker drives the

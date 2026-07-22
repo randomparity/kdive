@@ -127,27 +127,28 @@ def _resolve_base_ref(repo_root: Path) -> str | None:
     return None
 
 
-def changed_files(repo_root: Path, base_ref: str | None) -> list[str]:
+def changed_files(repo_root: Path, base_ref: str) -> list[str]:
     """Files differing between the branch's merge-base with ``base_ref`` and the worktree.
 
     Covers committed branch work and uncommitted edits (``git diff --name-only`` against
     the merge-base tree) plus untracked files. No fetch — the inner loop stays offline.
-    Falls back to the uncommitted-only diff (against HEAD) when no base ref resolves.
     """
-    if base_ref is not None:
-        merge_base = _git(["merge-base", base_ref, "HEAD"], repo_root).strip()
-        diff_ref = merge_base or base_ref
-    else:
-        diff_ref = "HEAD"
-    paths = set(_git_lines(["diff", "--name-only", diff_ref], repo_root))
+    merge_base = _git(["merge-base", base_ref, "HEAD"], repo_root).strip()
+    paths = set(_git_lines(["diff", "--name-only", merge_base or base_ref], repo_root))
     paths.update(_git_lines(["ls-files", "--others", "--exclude-standard"], repo_root))
     return sorted(paths)
 
 
 def main() -> int:
     repo_root = Path(_git(["rev-parse", "--show-toplevel"], Path.cwd()).strip() or ".")
-    changed = changed_files(repo_root, _resolve_base_ref(repo_root))
-    targets = select_targets(changed, build_test_index(repo_root))
+    base_ref = _resolve_base_ref(repo_root)
+    if base_ref is None:
+        # No base branch resolves (default branch not 'main', no 'origin', shallow clone):
+        # the changed set is unknowable, so run the full suite rather than an
+        # uncommitted-only HEAD diff that would silently skip committed branch work.
+        print(_FULL_SUITE)
+        return 0
+    targets = select_targets(changed_files(repo_root, base_ref), build_test_index(repo_root))
     if targets is None:
         print(_FULL_SUITE)
     elif targets:
