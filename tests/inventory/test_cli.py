@@ -18,7 +18,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.inventory.cli import reconcile_systems
+from kdive.inventory.cli import _print_diff, reconcile_systems
+from kdive.inventory.reconcile.records import ReconcileDiff, ReconcileRecord
 
 # `migrated_url` is provided by tests/inventory/conftest.py (re-exported from tests.db.conftest),
 # resolved by pytest at call time — no import here (avoids the F811 fixture-shadow).
@@ -110,7 +111,10 @@ def test_reconcile_systems_malformed_file_exits_nonzero(
 
 
 def test_reconcile_systems_absent_default_is_quiet_no_op(
-    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    migrated_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # With no --path and an absent default file, the CLI is a quiet no-op (exit 0): it must
     # not prune every config row by feeding an empty inventory to reconcile_images.
@@ -119,8 +123,39 @@ def test_reconcile_systems_absent_default_is_quiet_no_op(
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
             code = await reconcile_systems(None, pool=pool, store=_FakeImageStore())
         assert code == 0
+        # The no-op emits its exact operator-facing line (not an empty/garbled message).
+        assert capsys.readouterr().out.strip() == "no systems.toml present; nothing to reconcile"
 
     asyncio.run(_run())
+
+
+def test_print_diff_prints_every_category_header_and_record_lines(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # _print_diff renders one "<label>: <count>" header per category and one indented line
+    # per record, appending an em-dash detail suffix only when the record carries a detail.
+    diff = ReconcileDiff(
+        created=[ReconcileRecord(name="a", entry="img-a")],
+        updated=[ReconcileRecord(name="b", entry="img-b", detail="bumped")],
+        pruned=[ReconcileRecord(name="c", entry="img-c")],
+        cordoned=[ReconcileRecord(name="d", entry="img-d", detail="orphaned")],
+        warned=[ReconcileRecord(name="e", entry="img-e", detail="missing size")],
+    )
+    _print_diff(diff)
+    lines = capsys.readouterr().out.splitlines()
+    # Exact header lines pin every label spelling + the "<label>: <count>" format.
+    assert "created: 1" in lines
+    assert "updated: 1" in lines
+    assert "pruned: 1" in lines
+    assert "cordoned: 1" in lines
+    assert "warned: 1" in lines
+    # A record with no detail renders exactly "  <entry>" (no suffix, no sentinel).
+    assert "  img-a" in lines
+    assert "  img-c" in lines
+    # A record with a detail appends " — <detail>".
+    assert "  img-b — bumped" in lines
+    assert "  img-d — orphaned" in lines
+    assert "  img-e — missing size" in lines
 
 
 def test_reconcile_systems_store_unreachable_propagates(migrated_url: str, tmp_path: Path) -> None:
