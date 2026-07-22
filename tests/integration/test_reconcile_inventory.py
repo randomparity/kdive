@@ -640,16 +640,21 @@ def test_s3_with_digest_and_present_object_registers(migrated_url: str, tmp_path
             )
         )
         store = _FakeImageStore(present={key})
-        async with (
-            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
-            pool.connection() as conn,
-        ):
-            await reconcile_images(conn, doc, store)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                created = await reconcile_images(conn, doc, store)
+            async with pool.connection() as conn:
+                # A second identical pass is a clean no-op: no spurious realized-field UPDATE.
+                idempotent = await reconcile_images(conn, doc, store)
         async with await _connect(migrated_url) as check:
             row = await _one(check, "i")
         assert row["state"] == "registered"
         assert row["object_key"] == key
         assert row["digest"] == "sha256:beef"
+        # The created record carries no detail (a bare identity line, empty suffix).
+        assert created.created[0].detail == ""
+        assert not idempotent.created
+        assert not idempotent.updated
 
     asyncio.run(_run())
 
@@ -683,6 +688,144 @@ def test_s3_store_unreachable_degrades_to_defined(migrated_url: str, tmp_path: P
             row = await _one(check, "i")
         assert row["state"] == "defined"  # degraded, not aborted
         assert any("i" in w.entry for w in diff.warned)
+
+    asyncio.run(_run())
+
+
+def _s3_image_body(*, key: str, digest: str) -> str:
+    return (
+        "schema_version = 2\n"
+        "[[image]]\n"
+        'provider = "local-libvirt"\n'
+        'name = "i"\n'
+        'arch = "x86_64"\n'
+        'format = "qcow2"\n'
+        'root_device = "/dev/vda"\n'
+        'visibility = "public"\n'
+        "[image.source]\n"
+        'kind = "s3"\n'
+        f'object_key = "{key}"\n'
+        f'digest = "{digest}"\n'
+    )
+
+
+def test_s3_with_digest_but_absent_object_stays_defined(migrated_url: str, tmp_path: Path) -> None:
+    # A digested s3 source whose object HEADs absent (404) stays defined + warns; it must not be
+    # registered on the strength of the file alone.
+    async def _run() -> None:
+        key = "images/local-libvirt/i/x86_64.qcow2"
+        doc = load_inventory(_write_toml(tmp_path, _s3_image_body(key=key, digest="sha256:beef")))
+        store = _FakeImageStore(present=set())  # object not present -> HEAD "absent"
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc, store)  # create -> defined + warn
+            async with pool.connection() as conn:
+                # A second pass takes the update path and re-HEADs through the store (which must
+                # be threaded through, not dropped) — still absent, so still defined + warns.
+                diff = await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "i")
+        assert row["state"] == "defined"
+        assert row["object_key"] is None
+        warning = next(w for w in diff.warned if w.name == "i")
+        assert "absent" in warning.detail
+
+    asyncio.run(_run())
+
+
+def test_s3_registered_row_preserves_original_key_on_file_change(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # An s3 row registered from (K1, D1) is runtime-owned: a later file edit to (K2, D2) must not
+    # rewrite the registered row's object_key/digest (invariant 1 — never downgrade/rewrite a
+    # build/upload-realized row from the file).
+    async def _run() -> None:
+        k1 = "images/local-libvirt/i/x86_64.qcow2"
+        k2 = "images/local-libvirt/i/x86_64-v2.qcow2"
+        doc1 = load_inventory(_write_toml(tmp_path, _s3_image_body(key=k1, digest="sha256:one")))
+        doc2 = load_inventory(_write_toml(tmp_path, _s3_image_body(key=k2, digest="sha256:two")))
+        store = _FakeImageStore(present={k1})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc1, store)  # registers from (K1, D1)
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc2, store)  # file now names (K2, D2)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "i")
+        assert row["state"] == "registered"
+        assert row["object_key"] == k1  # original preserved, not rewritten to K2
+        assert row["digest"] == "sha256:one"
+
+    asyncio.run(_run())
+
+
+def test_s3_no_digest_update_pass_warns_with_record_detail(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # An existing defined s3 row (no digest) reconciled again takes the update path and re-emits a
+    # warned record whose detail names the reason (pins the warned record's content, not just its
+    # presence).
+    async def _run() -> None:
+        body = (
+            "schema_version = 2\n"
+            "[[image]]\n"
+            'provider = "local-libvirt"\n'
+            'name = "i"\n'
+            'arch = "x86_64"\n'
+            'format = "qcow2"\n'
+            'root_device = "/dev/vda"\n'
+            'visibility = "public"\n'
+            "[image.source]\n"
+            'kind = "s3"\n'
+            'object_key = "images/local-libvirt/i/x86_64.qcow2"\n'
+        )
+        doc = load_inventory(_write_toml(tmp_path, body))
+        store = _FakeImageStore()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc, store)  # create -> defined + warn
+            async with pool.connection() as conn:
+                diff = await reconcile_images(conn, doc, store)  # update path re-warns
+        warning = next(w for w in diff.warned if w.name == "i")
+        assert warning.entry == "image[local-libvirt/i/x86_64]"
+        assert "no digest" in warning.detail
+
+    asyncio.run(_run())
+
+
+def test_fresh_build_source_stays_defined_and_warns_naming_image(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # A build source with no realized row yet is a defined placeholder and warns, with the warning
+    # naming the image (exercises the row-absent build path).
+    async def _run() -> None:
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                "schema_version = 2\n"
+                "[[image]]\n"
+                'provider = "local-libvirt"\n'
+                'name = "to-build"\n'
+                'arch = "x86_64"\n'
+                'format = "qcow2"\n'
+                'root_device = "/dev/vda"\n'
+                'visibility = "public"\n'
+                "[image.source]\n"
+                'kind = "build"\n'
+                'base = "fedora-43"\n',
+            )
+        )
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "to-build")
+        assert row["state"] == "defined"
+        warning = next(w for w in diff.warned if w.name == "to-build")
+        assert "to-build" in warning.detail
 
     asyncio.run(_run())
 
@@ -752,6 +895,9 @@ def test_prune_removes_only_config_rows_absent_from_config(
             assert await _exists(check, "runtime-img")  # runtime row untouched
             assert not await _exists(check, "stale-config")  # config row pruned (idle)
         assert "stale-config" in {p.name for p in diff.pruned}
+        # The pruned record's entry label is image[provider/name/arch], in that field order.
+        pruned = next(p for p in diff.pruned if p.name == "stale-config")
+        assert pruned.entry == "image[remote-libvirt/stale-config/x86_64]"
         assert store.deleted == []  # row-delete-only; GC reclaims any object
 
     asyncio.run(_run())
@@ -2602,6 +2748,8 @@ def test_staged_path_persists_sidecar_provenance(migrated_url: str, tmp_path: Pa
         async with await _connect(migrated_url) as check:
             row = await _one(check, "local-rootfs")
         assert row["provenance"] == provenance
+        # A staged-path sidecar is adopted as build-verified, not operator-attested.
+        assert row["provenance_attested"] is False
         entry = ImageCatalogEntry.model_validate(row)
         assert render_direct_kernel_signal(entry, _ANY_KERNEL)["status"] == "provisionable"
 
