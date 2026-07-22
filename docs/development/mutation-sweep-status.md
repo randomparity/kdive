@@ -157,12 +157,17 @@ are its sub-issues.
      and only feeds a relative lease window; the `resolve_replay` operation label only shapes
      an error string; and a denial `GateResult`'s `devices` list is never read (only the grant
      path reads it).
-  `admission/core.py` is partially swept: the grant snapshot/audit cluster and the
-  denial-enrichment boundaries are done, but ~8 killable survivors on the **queue-on-capacity
-  enqueue path** (`_enqueue`, `_deny_or_enqueue`, `_host_cap_check`/`admission_gate` queueable)
-  and a **PCIe-busy** `_resolve_pcie_claim` read need the `_enqueue` persistence + PCIe-busy
-  covering assertions; that deeper sweep of the large `core.py` module is a #1398 follow-up
-  (the "split a large module" path).
+  `admission/core.py` is now **fully swept** (#1410, the #1398 follow-up): the deferred
+  queue-on-capacity enqueue path was taken 36→17 (all 17 residual equivalent) by pinning the
+  `_enqueue` persistence snapshot (`requested_arch`/`shape`/`requested_pcie_specs`) and the full
+  enqueue audit row (tool/object_kind/transition/args_digest/project) in
+  `tests/services/test_allocation_enqueue.py`. The PCIe-busy `_resolve_pcie_claim` read was
+  already killed by the existing busy-device denial + enqueue tests; its lone survivor is the
+  `devices=[]`→`None` on a *denial* result (class 6, never read). The residual equivalents are
+  the same classes as the grant sweep: Postgres case-folded SQL (5), denial-`GateResult`
+  `devices=[]`→`None` (6), cosmetic `operation_label` (3), `datetime.now(UTC)`→`now(None)` on a
+  UTC host (1), and the removed `resource_id=None`/`lease_expiry=None`/`pcie_claim=[]` kwargs
+  that equal the `Allocation` field defaults (2).
 
 - `services/runs/` bucket (#1399) — the run admission / bind / state-transition /
   build-finalization modules, swept serially against their `migrated_url` covering tests
