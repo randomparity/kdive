@@ -294,9 +294,54 @@ are its sub-issues.
   system-id-dependent console-read fixture, and the `_real_probe` timing cluster needs a fake-clock
   socket harness.
 
-**Not yet swept:** the remaining subsystem buckets (`inventory/`, `reconciler/`) and the deferred
-`jobs/handlers/` remainder above (`capture_traffic` / `boot_evidence` / `systems`) — filed as
-#1306 sub-issues / a #1402 follow-up.
+- `inventory/` bucket (#1403) — the override-ledger / serializer / writeback / CLI / loader modules
+  and the `inventory/reconcile/` merge-reconcile passes, swept serially against their `migrated_url`
+  covering tests (`tests/inventory/*`, `tests/integration/test_reconcile_{inventory,coefficients}.py`).
+  Per module (mutants, surviving before → after): `path.py` 19, 0→0; `reconcile/pipeline.py` 36, 0→0;
+  `reconcile/{locks,records}.py` 0 mutants (import-time / dataclass-only, per #665); `loader.py` 27,
+  1→1 equivalent; `cli.py` 41, 14→0; `overrides.py` 103, 9→8 equivalent; `serialize.py` 381, 39→8
+  equivalent; `writeback.py` 263, 11→8 equivalent; `reconcile/coefficients.py` 66, 10→7 equivalent;
+  `reconcile/overrides.py` 114, 11→3 equivalent; `reconcile/images.py` 482, ~56→54 (equivalents plus a
+  deferred killable remainder, below); `reconcile/resources.py` 568, 70→53 (equivalents plus a deferred
+  killable remainder, below). Assertion gaps killed by pinning: the `reconcile-systems` CLI diff
+  headers + em-dash detail suffix + absent-default no-op line; the override-ledger `created_at`
+  round-trip; the serializer's DB read-path field mapping across every image source shape and resource
+  kind (incl. `_cap_int`/`_opt_cap_int` bool/non-int rejection); the writeback `api_base` trailing-slash
+  strip + client write-timeout; the coefficient created/updated record content; the override-GC cleared
+  **count** (settled/converged/retained/two-entry/empty); the image realize/prune/provenance paths
+  (registered-row preservation on a file edit, absent-object stays-defined, fresh-build defined
+  placeholder, staged-path sidecar build-verified-not-attested, prune record label, idempotent
+  no-spurious-UPDATE); and the resource deterministic name (+ empty-cleaned fallback), record labels,
+  local-libvirt overlay + idempotency, and fault-inject field-change update. The **surviving mutants
+  are equivalent**, in the same classes as the sibling buckets (Postgres case-folded SQL; `_log.*`
+  log-statement mutations; `cast` no-ops; `.lower()`-normalized `off` default; `fdopen`/`read_text`
+  encoding no-ops on a UTF-8 host; a sort key over a unique cost-class name; a no-op `+=` on a zero
+  accumulator; a convergent insert-conflict-reread; a `_S3Head` literal-case / registered-preserve
+  masked by a sibling check; build/s3 `volume` always-`None`; an ownerless-config-key `visibility`
+  arg) plus:
+  1. **mutmut-unattributable `RowTyper` callers** — `resources._{upsert,local,discovered}_row`
+     map columns through the frozen-slots `RowTyper` (`inventory/_row_typing`, the documented
+     can't-attribute case): mutmut's per-mutant covered-lines map finds no covering test for these
+     call sites even when a test that would kill them is the sole covering test, so they survive
+     unattributably (the row helpers are behaviorally pinned by the field assertions above).
+  2. **ConfigMap default-name literal (`writeback`)** — `resolve_writeback_target`'s
+     `or "kdive-systems"` default is behaviorally pinned by `test_factory_configmap_in_a_pod_...`
+     (asserts `_name == "kdive-systems"`), but mutmut cannot attribute that test to the literal
+     (same limitation class as (1)).
+
+  **`inventory/reconcile/` deferred killable remainder (needs a follow-up).** Two large passes carry a
+  killable remainder that needs new fixtures, not just assertions: (a) `reconcile/images.py` — a
+  staged-path UPDATE with a `.config` sibling to exercise the config-upload store passthrough
+  (`_update_entry` store arg), and the `_prune_departed` `continue`→`break` (needs a declared row
+  ordered before a departed one in the SQL result); (b) `reconcile/resources.py` — the
+  `_needs_config_adoption` and `_overlay_one_local`/`_update_config_resource` coupled-`or`→`and`
+  boundaries (need single-condition adoption/overlay fixtures: lease-only, owner-only, affinity-only,
+  name-null-only, name-only-change), the `_remote_libvirt_upsert` removed/detached-remote disposition
+  edges (need remote-libvirt override fixtures), the `_fault_inject_upsert` host-adopt edge, and the
+  `_prune_departed` `name→None` passthrough into `prune_or_cordon_*`.
+
+**Not yet swept:** the `reconciler/` bucket and the deferred `jobs/handlers/` remainder above
+(`capture_traffic` / `boot_evidence` / `systems`) — filed as #1306 sub-issues / a #1402 follow-up.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 
