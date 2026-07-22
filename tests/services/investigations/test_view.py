@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
 
+import pytest
 from psycopg import AsyncConnection
 
 from kdive.domain.capacity.state import InvestigationState
@@ -69,17 +71,34 @@ def test_valid_row_becomes_an_investigation() -> None:
     assert isinstance(item, Investigation)
 
 
-def test_invalid_row_degrades_to_row_error_carrying_its_id() -> None:
+def test_invalid_row_degrades_to_row_error_carrying_its_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # The :86 degrade edge folded in by #1304: a row that fails validation is not raised.
-    item = investigation_list_item({"id": "not-a-uuid"})
+    with caplog.at_level(logging.WARNING, logger="kdive.services.investigations.view"):
+        item = investigation_list_item({"id": "not-a-uuid"})
     assert isinstance(item, InvestigationRowError)
     assert item.object_id == "not-a-uuid"
+    [record] = [r for r in caplog.records if r.name == "kdive.services.investigations.view"]
+    # The degrade warning names the offending id and carries the validation traceback.
+    assert record.getMessage() == (
+        "investigation not-a-uuid violates the response invariant; degraded"
+    )
+    assert record.exc_info is not None
 
 
-def test_row_without_id_degrades_with_none_object_id() -> None:
-    item = investigation_list_item({})
+def test_row_without_id_degrades_with_none_object_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="kdive.services.investigations.view"):
+        item = investigation_list_item({})
     assert isinstance(item, InvestigationRowError)
     assert item.object_id is None
+    [record] = [r for r in caplog.records if r.name == "kdive.services.investigations.view"]
+    # A row with no id logs the "<missing>" sentinel, not a bare None.
+    assert record.getMessage() == (
+        "investigation <missing> violates the response invariant; degraded"
+    )
 
 
 def test_attached_runs_and_systems_dedupes_systems_preserving_order() -> None:
