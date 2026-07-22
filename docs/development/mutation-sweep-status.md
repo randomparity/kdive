@@ -94,8 +94,35 @@ are its sub-issues.
   (`tests/store/test_assembly.py`, #1405, #665 pattern) pinning both branches of
   `build_object_store_assembly` (provided `store_factory` used verbatim; default falls
   through to `object_store_from_env`). 3 mutants, 0 surviving.
+- `db/` bucket (#1401) — the container-backed repository / lock / idempotency / migration
+  modules, swept serially against their `pg_conn`/`migrated_url`/`postgres_url` covering
+  tests (plus `tests/adversarial/test_{idempotency_concurrency,lock_key_properties}.py`).
+  Per module: `db/pool.py` 19 mutants, 6 → 0; `db/idempotency.py` 145, 31 → 21 equivalent;
+  `db/locks.py` 76, 8 → 8 equivalent; `db/migrate.py` 75, 7 → 5 equivalent;
+  `db/probe_fence.py` 0 mutants generated (import-time-only, per #665). Assertion gaps
+  killed by pinning the created pool's `min_size`/`max_size`, the run-step error path
+  (`run_id`/`step` threaded into the non-JSON, unknown-state, and completion messages),
+  `complete_run_step`'s returned value, and both colliding filenames in the duplicate-migration
+  error. The **surviving mutants are equivalent** and cluster into six DB-specific classes,
+  none killable by a behavioral assertion:
+  1. **Postgres case-folded SQL** — mutating keyword/identifier case (`SELECT`→`select`,
+     `run_steps`→`RUN_STEPS`) is a no-op: keywords are case-insensitive and unquoted
+     identifiers fold to lowercase.
+  2. **Error-message `path`/`run_id`/`step` on DB-sourced values** — these arguments feed
+     only `ensure_json_value` / `parse_persisted_run_step_state` *error* messages, which never
+     fire for a value read back from `jsonb` (always valid JSON) or a CHECK-constrained column,
+     so setting them to `None` at those call sites is unobservable.
+  3. **`int.from_bytes(..., signed=True)` dropping `"big"`** — Python 3.11+ defaults the
+     byteorder to `"big"`, so the advisory-lock-key digest→int mapping is identical.
+  4. **Dead defensive `else` on `row is None`** — the `pg_try_advisory_lock` / `count(*)`
+     queries always return exactly one row, so flipping the unreachable `else False`→`else True`
+     is unobservable.
+  5. **`decode("utf-8")`→`decode("UTF-8")`** — the codec name is case-insensitive; same decoder.
+  6. **Behavior-preserving restructure** — `run_step`'s `inserted = None` skips the early
+     `RETURNING` return and falls through to an identical follow-up `SELECT` on the same
+     connection, yielding the same result. `db/repositories.py` remains tooling-blocked (below).
 
-**Not yet swept:** the remaining subsystem buckets (`services/`, `db/`, `jobs/handlers/`,
+**Not yet swept:** the remaining subsystem buckets (`services/`, `jobs/handlers/`,
 `inventory/`, `reconciler/`) — filed as #1306 sub-issues.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
@@ -148,10 +175,25 @@ in #1304 (each imports its module by dotted path; PG-independent "fast" targets)
 - **mutmut copy-scope / baseline (≈15):** the module's covering test reads files mutmut does
   not copy into `mutants/` (e.g. the top-level `docs/` tree), or a `tests/conftest.py`
   re-import fails in the copy. Examples: `mcp/resources/registrar.py`, `mcp/assembly/app.py`,
-  `db/repositories.py`, `config/external_env.py`, `security/secrets/secret_registry.py`,
+  `config/external_env.py`, `security/secrets/secret_registry.py`,
   `version.py`, and `mcp/middleware/binding_errors` (its import chain resolves a source path that
   404s as `mutants/<frozen importlib._bootstrap>` in the copy — covered by a direct test, but the
   baseline cannot run).
+- **mutmut import-time trampoline crash (`db/repositories.py`, re-investigated by #1401):**
+  `repositories.py` builds ~15 module-level repository singletons (`RESOURCES =
+  StatefulRepository(...)`, …) at import, invoking its own now-trampolined `Repository` /
+  `StatefulRepository` / `KeyedRepository` constructors during module import. mutmut's
+  `record_trampoline_hit` walks the caller stack under `max_stack_depth=8` and calls
+  `Path(co_filename).resolve(strict=True)` on each frame; at import time one frame is
+  `<frozen importlib._bootstrap>`, which resolves to a nonexistent
+  `mutants/<frozen importlib._bootstrap>` and raises `FileNotFoundError`, aborting the baseline
+  before any mutant runs (the `deploy`/other-module collection errors seen intermittently are a
+  downstream artifact of the coverage phase's module-unload, not the root cause). This is the
+  same trampoline/frozen-bootstrap class as `mcp/middleware/binding_errors`, and it is a mutmut
+  limitation with import-time-invoked mutated code — not a `repositories.py` defect. The module
+  stays behaviorally covered by `tests/db/test_repositories.py`; the fix belongs upstream (guard
+  the `<frozen …>` pseudo-filename before `resolve(strict=True)`) or would require moving the
+  singleton construction out of import time (a source change out of scope for a test sweep).
 - **mutmut cannot attribute a covering test (≈1):** `inventory/_row_typing` reaches 100% line
   coverage and mutmut generates mutants for its `@dataclass(frozen=True, slots=True)` `RowTyper`
   methods, but the per-mutant coverage map finds no covering test at any `max_stack_depth`, so it
