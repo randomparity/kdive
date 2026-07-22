@@ -55,6 +55,42 @@ def test_generate_report_runs_each_section_with_shared_as_of() -> None:
     asyncio.run(_run())
 
 
+class _RecordingSection:
+    key: str = "rec"
+    columns: tuple[str, ...] = ("a",)
+
+    def __init__(self) -> None:
+        self.received: tuple[object, Window, int] | None = None
+
+    async def gather(
+        self,
+        conn: AsyncConnection,
+        scope: ReportScope,
+        window: Window,
+        as_of: datetime,
+        *,
+        cap: int,
+    ) -> SectionRows:
+        self.received = (conn, window, cap)
+        return SectionRows(rows=(), truncated=False)
+
+
+def test_generate_report_forwards_conn_window_and_cap() -> None:
+    async def _run() -> None:
+        sentinel_conn = cast(AsyncConnection, object())
+        window: Window = (
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2026, 6, 22, tzinfo=UTC),
+        )
+        scope = ReportScope(projects=("proj",), all_projects=False)
+        section = _RecordingSection()
+        await generate_report(sentinel_conn, scope, window, _AS_OF, sections=(section,), cap=7)
+        # conn, window, and the explicit cap are forwarded verbatim to each section.
+        assert section.received == (sentinel_conn, window, 7)
+
+    asyncio.run(_run())
+
+
 def test_generate_report_preserves_registry_order() -> None:
     async def _run() -> None:
         class _A(_FakeSection):
