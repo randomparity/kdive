@@ -291,6 +291,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record jobs/handlers bucket result (#1402)
 - Record inventory/ bucket result (#1403)
 - Record reconciler/ bucket result (#1404)
+- Record loop.py fully swept (#1419)
 
 ### Fixed
 
