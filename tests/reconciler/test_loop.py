@@ -985,6 +985,36 @@ def test_console_reap_with_empty_registry_is_noop(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_reconcile_once_wires_console_registry_into_the_repair(migrated_url: str) -> None:
+    # reconcile_once must pass the configured registry AND the pooled connection into the
+    # console-collector repair. A mis-wired arg (None conn/registry, or a no-op lambda) makes
+    # the repair raise -> the pass records a failure and the count is wrong.
+    from kdive.providers.infra.console_hosting import CollectorRegistry
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            gone = await seed_system(seed, system_state=SystemState.TORN_DOWN)
+        registry = CollectorRegistry()
+        registry.add(_FakeConsoleCollector(gone))
+        config = make_reconcile_config(console_registry=registry)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(pool, NullReaper(), config=config)
+        assert report.failures == ()  # every repair, including the console reap, ran cleanly
+        assert report.console_collectors_reaped == 1  # the gone collector was reaped
+        assert registry.has(gone) is False
+
+    asyncio.run(_run())
+
+
+def test_image_publish_grace_reflects_configured_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The grace comes from KDIVE_IMAGE_PUBLISH_GRACE_SECONDS, not a hard-coded fallback: a
+    # non-default value must flow through unchanged.
+    monkeypatch.setenv("KDIVE_IMAGE_PUBLISH_GRACE_SECONDS", "7200")
+    assert loop._image_publish_grace() == timedelta(seconds=7200)
+
+
 def test_console_reap_counts_every_gone_collector(migrated_url: str) -> None:
     from kdive.providers.infra.console_hosting import CollectorRegistry
 
