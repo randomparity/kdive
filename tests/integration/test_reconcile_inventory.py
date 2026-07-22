@@ -1200,6 +1200,32 @@ def test_loop_inventory_pass_reconciles_a_present_file(
     asyncio.run(_run())
 
 
+def test_loop_inventory_pass_threads_image_store_into_head_gated_s3(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The `_reconcile_inventory_repair` factory forwards `config.image_store` to the inventory
+    # pass. A staged/volume image never HEADs the store, so only an s3 image with a digest — whose
+    # registration is gated on an object HEAD — dereferences it. With the store threaded through,
+    # the present object registers the row; a dropped-to-None store arg would raise on
+    # `head_present` and land `reconcile_inventory` in `failures` with a 0 count instead.
+    async def _run() -> None:
+        key = "images/local-libvirt/i/x86_64.qcow2"
+        path = _write_toml(tmp_path, _s3_image_body(key=key, digest="sha256:beef"))
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", str(path))
+        config = make_reconcile_config(image_store=_FakeImageStore(present={key}))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            report = await reconcile_once(pool, NullReaper(), config=config)
+        assert "reconcile_inventory" not in report.failures
+        assert report.reconciled_inventory == 1
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "i")
+        # registered (not degraded to `defined`) proves the real store HEAD-confirmed the object.
+        assert row["state"] == "registered"
+        assert row["object_key"] == key
+
+    asyncio.run(_run())
+
+
 def test_loop_inventory_pass_unreadable_file_is_fault_isolated(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
