@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -28,7 +28,9 @@ from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
+from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.mcp.auth import RequestContext
+from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import (
     AllocationRequest,
     admit,
@@ -171,6 +173,76 @@ def test_admit_under_cap_grants_and_audits(migrated_url: str) -> None:
             assert await _count_audit(conn) == 1
 
     asyncio.run(_run())
+
+
+_NIC = PCIeDescriptor(
+    bdf="0000:3b:00.0", vendor_id="8086", device_id="1572", class_code="020000", label="x710"
+)
+
+
+def test_admit_grant_persists_full_snapshot_and_audit(migrated_url: str) -> None:
+    # Pin every field the grant stamps onto the row and the audit event, plus the ~1h lease,
+    # so a dropped/blanked snapshot field, wrong audit label, or bad lease arithmetic is caught.
+    async def _run() -> tuple[Allocation, tuple[str, str, str, str, str] | None, datetime]:
+        async with _conn(migrated_url) as conn:
+            res = await RESOURCES.insert(
+                conn,
+                Resource(
+                    id=uuid4(),
+                    created_at=_DT,
+                    updated_at=_DT,
+                    kind=ResourceKind.LOCAL_LIBVIRT,
+                    capabilities={
+                        CONCURRENT_ALLOCATION_CAP_KEY: 2,
+                        "vcpus": 64,
+                        "memory_mb": 65536,
+                        "disk_gb": 500,
+                        PCIE_DEVICES_KEY: [dict(_NIC)],
+                    },
+                    pool="local-libvirt",
+                    cost_class="local",
+                    status=ResourceStatus.AVAILABLE,
+                    host_uri="qemu:///system",
+                ),
+            )
+            await _seed_budget_quota(conn)
+            before = datetime.now(UTC)
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX,
+                    resource=res,
+                    project="proj",
+                    selector=SEL,
+                    window=1,
+                    disk_gb=30,
+                    shape="gpu-small",
+                    pcie_specs=("8086:1572",),
+                ),
+            )
+            assert outcome.allocation is not None
+            cur = await conn.execute(
+                "SELECT tool, object_kind, transition, args_digest, project FROM audit_log "
+                "WHERE object_id = %s",
+                (outcome.allocation.id,),
+            )
+            audit = await cur.fetchone()
+        return outcome.allocation, audit, before
+
+    alloc, audit, before = asyncio.run(_run())
+    assert alloc.agent_session == "s"
+    assert alloc.requested_disk_gb == 30
+    assert alloc.shape == "gpu-small"
+    assert [c["vendor_id"] for c in alloc.pcie_claim] == ["8086"]
+    assert alloc.lease_expiry is not None
+    assert timedelta(minutes=59) <= (alloc.lease_expiry - before) <= timedelta(minutes=61)
+    assert audit == (
+        "allocations.request",
+        "allocations",
+        "->granted",
+        args_digest({"resource_id": str(alloc.resource_id), "project": "proj"}),
+        "proj",
+    )
 
 
 def test_admit_over_disk_ceiling_denies_configuration_error(migrated_url: str) -> None:
