@@ -242,15 +242,23 @@ are its sub-issues.
      profile the resource resolves `accel=None`/`resolved_cpu=None` and requests neither fadump
      nor a pinned CPU, so the fadump / cpu-pin / `resolved_cpu` binding mutants are unobservable.
 
-  **`systems/admission.py` deferred killable remainder (needs a follow-up).** Restricting the
+  **`systems/admission.py` deferred killable remainder — swept by #1413.** Restricting the
   covering set to `tests/services/systems/` (the root `test_admission_*` cover
-  `services/allocation`, not this module) leaves a killable remainder that needs new fixtures,
+  `services/allocation`, not this module) left a killable remainder that needed new fixtures,
   not just assertions: (a) the `accel`-resolution mutants in `_resolve_new_system_bindings` /
   `_insert_*` need a KVM/TCG caps-bearing resource whose `capability_view` resolves a non-`None`
   accel (the `FakeLibvirtConn` resource yields `accel=None`); (b) `_provision_create_response`'s
   `is FAILED` branch converges with the recycle branch unless a **failed provision job**
   (dedup-keyed) is seeded so `_failed_system_retry_failure` diverges; (c) the enqueue dedup-key
-  `allocation_id=None` mutant needs a job idempotency/dedup-key assertion.
+  `allocation_id=None` mutant needs a job idempotency/dedup-key assertion. #1413 added
+  `tests/services/systems/test_admission_host_bindings.py` (a `guest_arches`-bearing resource
+  seeded onto the bound Resource; a `failed` System plus a dedup-keyed failed provision job;
+  a `{allocation_id}:provision` dedup-key assertion), taking `systems/admission.py` from
+  **28 → 13 surviving** — all 15 killed mutants are the three deferred clusters (accel 13,
+  `is FAILED` 1, dedup-key 1). `systems/admission.py` is now **fully swept**: the 13 remaining
+  survivors are all equivalent — the local-profile fadump / cpu-pin / `resolved_cpu` binding
+  no-ops (item 5 above; the shared mint path never observes them for the local test profile),
+  the Postgres case-folded SQL, and the DB-overwritten naive-vs-UTC `now`.
 
 - `jobs/handlers/` bucket (#1402) — the durable worker job handlers (provision / build / install /
   boot / capture / control), swept serially against their `migrated_url` / `minio_store` covering
