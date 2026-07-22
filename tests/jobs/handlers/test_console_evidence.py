@@ -90,6 +90,40 @@ def test_tail_is_best_effort_and_never_raises(monkeypatch: pytest.MonkeyPatch) -
     assert asyncio.run(redacted_console_tail(uuid4(), SecretRegistry())) is None
 
 
+def test_read_locates_log_by_system_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The read must resolve the log from THIS system_id; a wrong/None id finds a different,
+    # absent path and returns None — so the returned bytes prove the id reached console_log_path.
+    system_id = uuid4()
+    monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    (tmp_path / f"{system_id}.log").write_bytes(b"real console\n")
+
+    assert asyncio.run(read_redacted_console(system_id, SecretRegistry())) == b"real console\n"
+
+
+def test_read_decodes_invalid_utf8_with_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A console with an invalid UTF-8 byte must decode via the "replace" error handler (U+FFFD),
+    # never "strict" (which raises) — the raw log is arbitrary bytes off a worker-local file.
+    system_id = uuid4()
+    log = tmp_path / f"{system_id}.log"
+    log.write_bytes(b"good\xffbad\n")
+    _point_at(monkeypatch, log)
+
+    redacted = asyncio.run(read_redacted_console(system_id, SecretRegistry()))
+
+    assert redacted is not None
+    assert "�" in redacted.decode("utf-8")
+
+
+def test_tail_locates_log_by_system_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    system_id = uuid4()
+    monkeypatch.setattr(console_evidence, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    (tmp_path / f"{system_id}.log").write_bytes(b"tail body\n")
+
+    assert asyncio.run(redacted_console_tail(system_id, SecretRegistry())) == "tail body\n"
+
+
 def test_tail_is_redacted_by_the_same_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     system_id = uuid4()
     log = tmp_path / f"{system_id}.log"
