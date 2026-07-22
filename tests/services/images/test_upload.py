@@ -31,7 +31,15 @@ from kdive.domain.catalog.images import ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.images.cataloging.validation import GUEST_CONTRACT_PATHS, InspectSeam
-from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
+from kdive.security.audit import args_digest
+from kdive.services.images.upload import (
+    PrivateUploadRequest,
+    _clamp_expiry,
+    _project_usage,
+    _quota_denial,
+    _reject_oversize_upload,
+    register_private_upload,
+)
 
 _REQUIRED = ("kdump", "drgn")
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -141,6 +149,92 @@ async def _denial_rows(conn: psycopg.AsyncConnection) -> int:
     return int(row[0])
 
 
+def test_clamp_expiry_caps_at_now_plus_lifetime_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_LIFETIME_MAX.name, "3600")
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    ceiling = now + timedelta(seconds=3600)
+    # A far-future request is clamped down to the ceiling (now + max), never a past instant.
+    assert _clamp_expiry(now + timedelta(days=365), now=now) == ceiling
+    # A within-ceiling request passes through unchanged.
+    earlier = now + timedelta(minutes=10)
+    assert _clamp_expiry(earlier, now=now) == earlier
+
+
+def test_quota_denial_admits_within_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "2")
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "100")
+    # One more row still fits the count cap and the bytes exactly reach (not exceed) the cap.
+    assert _quota_denial(project="proj", count=1, used_bytes=40, new_bytes=60) is None
+
+
+def test_quota_denial_count_cap_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "1")
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "1000000")
+    denial = _quota_denial(project="proj", count=1, used_bytes=0, new_bytes=0)
+    assert denial is not None
+    assert denial.category is ErrorCategory.QUOTA_EXCEEDED
+    assert str(denial) == "project 'proj' is at its private-image count cap"
+    assert denial.details == {"used": 1, "cap": 1}
+
+
+def test_quota_denial_bytes_cap_error_and_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "100")
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "10")
+    # Exactly at the cap is admitted (half-open: only strictly-over denies).
+    assert _quota_denial(project="proj", count=0, used_bytes=4, new_bytes=6) is None
+    denial = _quota_denial(project="proj", count=0, used_bytes=5, new_bytes=6)
+    assert denial is not None
+    assert denial.category is ErrorCategory.QUOTA_EXCEEDED
+    assert str(denial) == "project 'proj' would exceed its private-image bytes cap"
+    assert denial.details == {"used_bytes": 5, "new_bytes": 6, "cap_bytes": 10}
+
+
+def test_reject_oversize_upload_rejects_and_respects_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "10")
+
+    async def _run() -> None:
+        oversize = _FakeStore({"q/big": b"this-is-more-than-ten"})
+        with pytest.raises(CategorizedError) as err:
+            await _reject_oversize_upload(oversize, "q/big")
+        assert err.value.category is ErrorCategory.QUOTA_EXCEEDED
+        assert str(err.value) == "uploaded image exceeds the per-project private-image bytes cap"
+        assert err.value.details == {"size_bytes": 21, "cap_bytes": 10}
+        # An object exactly at the cap is admitted (strictly-over rejects).
+        at_cap = _FakeStore({"q/exact": b"0123456789"})
+        await _reject_oversize_upload(at_cap, "q/exact")
+        # A vanished quarantined object is a STALE_HANDLE, not a quota denial.
+        with pytest.raises(CategorizedError) as gone:
+            await _reject_oversize_upload(_FakeStore(), "q/missing")
+        assert gone.value.category is ErrorCategory.STALE_HANDLE
+
+    asyncio.run(_run())
+
+
+def test_project_usage_counts_rows_and_sums_object_bytes(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "10")
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_BYTES.name, "1000000")
+    payload_a = b"rootfs-aaaa"
+    payload_b = b"rootfs-bbbbbbbbbbbb"
+    store = _quarantine(payload_a, key="uploads/q/proj/a.qcow2")
+    store._objects["uploads/q/proj/b.qcow2"] = payload_b  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            await _register(conn, store, name="img-a", quarantine_key="uploads/q/proj/a.qcow2")
+            await _register(conn, store, name="img-b", quarantine_key="uploads/q/proj/b.qcow2")
+            count, total = await _project_usage(conn, "proj", store)
+        # Two live private rows, and the byte total is the sum of both objects (not a last-wins
+        # overwrite and not an off-by-one initial accumulator).
+        assert count == 2
+        assert total == len(payload_a) + len(payload_b)
+
+    asyncio.run(_run())
+
+
 def test_registers_private_image_resolving_only_within_owning_project(migrated_url: str) -> None:
     store = _quarantine(b"conforming-rootfs")
 
@@ -235,10 +329,24 @@ def test_over_count_cap_denied_fail_closed_and_audited(
             with pytest.raises(CategorizedError) as err:
                 await _register(conn, store, name="second", quarantine_key="uploads/q/proj/b.qcow2")
             assert err.value.category is ErrorCategory.QUOTA_EXCEEDED
+            assert str(err.value) == "project 'proj' is at its private-image count cap"
             # Fail-closed: the second image is not registered, and the denial is audited.
             registered = [r for r in await IMAGE_CATALOG.list_all(conn) if r.name == "second"]
             assert registered == []
             assert await _denial_rows(conn) == denied_before + 1
+            # The audit row carries the human-readable reason and the pinned args digest.
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT reason, args_digest FROM audit_log "
+                    "WHERE tool = %s AND transition = 'denied' ORDER BY ts DESC LIMIT 1",
+                    (_UPLOAD_TOOL,),
+                )
+                audit_row = await cur.fetchone()
+            assert audit_row is not None
+            assert audit_row[0] == "project 'proj' is at its private-image count cap"
+            assert audit_row[1] == args_digest(
+                {"provider": "local-libvirt", "name": "second", "visibility": "private"}
+            )
 
     asyncio.run(_run())
 
@@ -259,10 +367,28 @@ def test_over_bytes_cap_denied_fail_closed(
     asyncio.run(_run())
 
 
-def test_traversal_bearing_arch_is_rejected_before_staging(migrated_url: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "label"),
+    [("provider", "provider"), ("name", "name"), ("arch", "arch"), ("project", "owner")],
+)
+def test_traversal_bearing_identity_component_rejected_before_staging(
+    migrated_url: str, field: str, label: str
+) -> None:
     # A `/`-bearing identity component must be rejected up front (it would otherwise fold into the
-    # staged temp path / object key); the object is never read or written.
+    # staged temp path / object key); the object is never read or written, and the error names the
+    # offending component.
     store = _quarantine(b"rootfs")
+    fields: dict[str, object] = {
+        "project": "proj",
+        "principal": "alice",
+        "name": "myrootfs",
+        "provider": "local-libvirt",
+        "arch": "x86_64",
+        "quarantine_key": "uploads/q/proj/rootfs.qcow2",
+        "expires_at": _DT + timedelta(days=3),
+        "required": _REQUIRED,
+    }
+    fields[field] = "../../etc/evil"
 
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
@@ -270,19 +396,11 @@ def test_traversal_bearing_arch_is_rejected_before_staging(migrated_url: str) ->
                 await register_private_upload(
                     conn,
                     store,
-                    request=PrivateUploadRequest(
-                        project="proj",
-                        principal="alice",
-                        name="myrootfs",
-                        provider="local-libvirt",
-                        arch="../../etc/evil",
-                        quarantine_key="uploads/q/proj/rootfs.qcow2",
-                        expires_at=_DT + timedelta(days=3),
-                        required=_REQUIRED,
-                    ),
+                    request=PrivateUploadRequest(**fields),  # ty: ignore[invalid-argument-type]
                     inspect=_conforming(),
                 )
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+            assert f"{label!r}" in str(err.value)  # the rejection names the offending component
             assert store.puts == []
 
     asyncio.run(_run())
@@ -372,9 +490,16 @@ def test_records_principal_in_audit_owner_is_project(
         async with await _connect(migrated_url) as conn:
             entry = await _register(conn, store, principal="bob", project="proj")
             assert entry.owner == "proj"
+            # The recorded provenance pins the uploading principal and source object.
+            assert entry.provenance == {
+                "upload": {
+                    "principal": "bob",
+                    "quarantine_key": "uploads/q/proj/rootfs.qcow2",
+                }
+            }
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT principal, project FROM audit_log "
+                    "SELECT principal, project, args_digest FROM audit_log "
                     "WHERE transition = %s ORDER BY ts DESC LIMIT 1",
                     ("private-upload:registered",),
                 )
@@ -382,5 +507,8 @@ def test_records_principal_in_audit_owner_is_project(
             assert row is not None
             assert row[0] == "bob"
             assert row[1] == "proj"
+            assert row[2] == args_digest(
+                {"provider": entry.provider, "name": entry.name, "arch": entry.arch}
+            )
 
     asyncio.run(_run())
