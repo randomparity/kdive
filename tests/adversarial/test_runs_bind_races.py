@@ -25,8 +25,10 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.tools.lifecycle.runs.bind import RunBindRequest, bind_run
+from kdive.security.audit import args_digest
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from kdive.services.runs.admission import RunReuseRequirementInput
 from tests.db.conftest import migrated_url  # noqa: F401
 
 _DT = datetime(2026, 6, 18, tzinfo=None).replace(tzinfo=None)
@@ -38,7 +40,9 @@ def _ctx() -> RequestContext:
     )
 
 
-async def _seed_ready_system(pool: AsyncConnectionPool) -> str:
+async def _seed_ready_system(
+    pool: AsyncConnectionPool, *, provisioning_profile: dict | None = None
+) -> str:
     async with pool.connection() as conn:
         res = await RESOURCES.insert(
             conn,
@@ -75,7 +79,7 @@ async def _seed_ready_system(pool: AsyncConnectionPool) -> str:
                 project="proj",
                 allocation_id=alloc.id,
                 state=SystemState.READY,
-                provisioning_profile={},
+                provisioning_profile=provisioning_profile or {},
             ),
         )
     return str(system.id)
@@ -125,6 +129,119 @@ async def _count(pool: AsyncConnectionPool, query: LiteralString, params: tuple)
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _scalar(pool: AsyncConnectionPool, query: LiteralString, params: tuple):
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(query, params)
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def test_bind_success_sets_binding_result_and_audit(migrated_url: str) -> None:  # noqa: F811
+    """A successful bind returns the run/system/project and writes the runs.bind audit row.
+
+    Pins the RunBindResult fields carried into the envelope and every literal of the audit
+    event (tool/object_kind/transition and the digested {system_id, investigation_id} args,
+    the latter sourced from the resolved RunHostTargets).
+    """
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        await pool.open()
+        try:
+            run_id = await _seed_unbound_run(pool)
+            sys_id = await _seed_ready_system(pool)
+            inv_id = str(
+                await _scalar(pool, "SELECT investigation_id FROM runs WHERE id = %s", (run_id,))
+            )
+            result = await _bind(pool, run_id, sys_id)
+            audit = await _scalar(
+                pool,
+                "SELECT tool || '|' || object_kind || '|' || transition || '|' || args_digest "
+                "FROM audit_log WHERE object_id = %s",
+                (run_id,),
+            )
+        finally:
+            await pool.close()
+        assert result.status == "bound"
+        assert result.object_id == run_id
+        assert result.data["system_id"] == sys_id
+        assert result.data["project"] == "proj"
+        expected_digest = args_digest({"system_id": sys_id, "investigation_id": inv_id})
+        assert audit == f"runs.bind|runs|bind|{expected_digest}"
+
+    asyncio.run(_run())
+
+
+def test_bind_missing_run_is_configuration_error(migrated_url: str) -> None:  # noqa: F811
+    """Binding a nonexistent Run is a clean configuration error, not an attribute crash."""
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        await pool.open()
+        try:
+            sys_id = await _seed_ready_system(pool)
+            result = await _bind(pool, str(uuid4()), sys_id)
+        finally:
+            await pool.close()
+        assert result.status == "error"
+        assert result.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_bind_missing_system_is_configuration_error(migrated_url: str) -> None:  # noqa: F811
+    """Binding to a nonexistent System is a clean configuration error, not an attribute crash."""
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        await pool.open()
+        try:
+            run_id = await _seed_unbound_run(pool)
+            result = await _bind(pool, run_id, str(uuid4()))
+        finally:
+            await pool.close()
+        assert result.status == "error"
+        assert result.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_bind_unmet_reuse_requirement_is_rejected(migrated_url: str) -> None:  # noqa: F811
+    """An unmet reuse assertion rejects the bind and leaves the Run unbound.
+
+    Pins that the reuse assertion is actually evaluated against the resolved (system, alloc):
+    dropping it (or nulling either argument) either binds the Run or crashes.
+    """
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        await pool.open()
+        try:
+            run_id = await _seed_unbound_run(pool)
+            sys_id = await _seed_ready_system(
+                pool, provisioning_profile={"vcpu": 2, "memory_mb": 4096, "disk_gb": 20}
+            )
+            result = await bind_run(
+                pool,
+                _ctx(),
+                RunBindRequest(
+                    run_id=run_id,
+                    system_id=sys_id,
+                    reuse_requirement=RunReuseRequirementInput(vcpus=999),
+                ),
+            )
+            bound = await _count(
+                pool, "SELECT count(*) FROM runs WHERE id = %s AND system_id IS NOT NULL", (run_id,)
+            )
+        finally:
+            await pool.close()
+        assert result.status == "error"
+        assert bound == 0
+
+    asyncio.run(_run())
 
 
 def test_concurrent_bind_of_one_run_one_wins(migrated_url: str) -> None:  # noqa: F811
