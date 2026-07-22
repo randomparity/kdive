@@ -22,6 +22,8 @@ from kdive.jobs.handlers.connectivity.ssh_reachable import (
     check_ssh_reachable_handler,
     serialize_reach_verdict,
 )
+from kdive.providers.ports.handles import SystemHandle
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.clock import FrozenClock
 
@@ -223,7 +225,10 @@ def test_handler_serializes_reachable_verdict(
 ) -> None:
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
 
-    async def probe(_host: str, _port: int) -> ReachResult:
+    probe_calls: list[tuple[str, int]] = []
+
+    async def probe(host: str, port: int) -> ReachResult:
+        probe_calls.append((host, port))
         return ReachResult.ok()
 
     async def _run() -> str | None:
@@ -232,15 +237,27 @@ def test_handler_serializes_reachable_verdict(
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
-                return await check_ssh_reachable_handler(
+                resolver = _resolver(("127.0.0.1", 22001))
+                verdict = await check_ssh_reachable_handler(
                     conn,
                     job,
-                    resolver=_resolver(("127.0.0.1", 22001)),
+                    resolver=resolver,
                     secret_registry=SecretRegistry(),
                     probe=probe,
                 )
+                # The binding is resolved with the handler's own (conn, system_id), and the
+                # endpoint is looked up for the System's derived domain (no stored domain_name).
+                resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
+                connector = resolver.binding_for_system.return_value.runtime.connector
+                connector.recorded_ssh_endpoint.assert_called_once_with(
+                    SystemHandle(domain_name_for(system_id))
+                )
+                return verdict
 
-    assert asyncio.run(_run()) == (
+    verdict = asyncio.run(_run())
+    # The probe is driven with the exact recorded endpoint (host, port), in that order.
+    assert probe_calls == [("127.0.0.1", 22001)]
+    assert verdict == (
         '{"reachable":true,"checked_at":"2026-07-02T00:00:00+00:00",'
         '"endpoint":{"host":"127.0.0.1","port":22001},"detail":"reachable","layer":null,'
         '"checks":[{"layer":"tcp_connect","ok":true},{"layer":"ssh_banner","ok":true}]}'
@@ -281,7 +298,10 @@ def test_unreachable_verdict_carries_console_tail(
     # answerable from the verdict alone.
     monkeypatch.setattr(ssh_reachable, "datetime", FrozenClock(_FROZEN))
 
-    async def _tail(_sid: UUID, _reg: SecretRegistry) -> str:
+    tail_calls: list[tuple[UUID, SecretRegistry]] = []
+
+    async def _tail(sid: UUID, reg: SecretRegistry) -> str:
+        tail_calls.append((sid, reg))
         return "kdive-guest login:  (sshd never Started)\n"
 
     monkeypatch.setattr(ssh_reachable, "redacted_console_tail", _tail)
@@ -289,23 +309,28 @@ def test_unreachable_verdict_carries_console_tail(
     async def probe(_host: str, _port: int) -> ReachResult:
         return ReachResult.missing_banner()
 
-    async def _run() -> str | None:
+    registry = SecretRegistry()
+
+    async def _run() -> tuple[str | None, UUID]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
-                return await check_ssh_reachable_handler(
+                verdict = await check_ssh_reachable_handler(
                     conn,
                     job,
                     resolver=_resolver(("127.0.0.1", 22001)),
-                    secret_registry=SecretRegistry(),
+                    secret_registry=registry,
                     probe=probe,
                 )
+                return verdict, system_id
 
-    raw = asyncio.run(_run())
+    raw, system_id = asyncio.run(_run())
     assert raw is not None
     assert '"console_tail":"kdive-guest login:  (sshd never Started)\\n"' in raw
+    # The tail is fetched for THIS system with the handler's own secret registry (not None).
+    assert tail_calls == [(system_id, registry)]
 
 
 def test_reachable_verdict_omits_console_tail(
@@ -360,6 +385,9 @@ def test_handler_dead_letters_when_system_not_ready(migrated_url: str) -> None:
                     )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
                 assert excinfo.value.details["reason"] == "system_not_ready"
+                assert (
+                    str(excinfo.value) == "system is no longer ready; cannot probe SSH reachability"
+                )
 
     asyncio.run(_run())
 
@@ -374,15 +402,26 @@ def test_handler_dead_letters_when_no_forward(migrated_url: str) -> None:
             async with pool.connection() as conn:
                 system_id = await _seed_system(conn)
                 job = _job_for(system_id)
+                resolver = _resolver(None)
                 with pytest.raises(CategorizedError) as excinfo:
                     await check_ssh_reachable_handler(
                         conn,
                         job,
-                        resolver=_resolver(None),
+                        resolver=resolver,
                         secret_registry=SecretRegistry(),
                         probe=probe,
                     )
                 assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
                 assert excinfo.value.details["reason"] == "ssh_not_provisioned"
+                assert str(excinfo.value) == (
+                    "This System's provider exposes no loopback SSH forward; direct SSH to a "
+                    "System is a local-libvirt capability"
+                )
+                # The forward is looked up for the System's derived domain via its own binding.
+                resolver.binding_for_system.assert_awaited_once_with(conn, system_id)
+                connector = resolver.binding_for_system.return_value.runtime.connector
+                connector.recorded_ssh_endpoint.assert_called_once_with(
+                    SystemHandle(domain_name_for(system_id))
+                )
 
     asyncio.run(_run())
