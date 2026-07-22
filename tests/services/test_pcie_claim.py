@@ -165,7 +165,9 @@ def test_active_claims_unions_non_terminal(migrated_url: str) -> None:
                 [PCIeClaim(bdf="0000:3b:00.0", vendor_id="8086", device_id="1572")],
             )
             claims = await pcie_claim.active_claims(conn, host.id)
-            assert [c["bdf"] for c in claims] == ["0000:3b:00.0"]
+            # Assert the full claim identity, not just the bdf: the matcher subtracts by bdf,
+            # but vendor_id/device_id must round-trip intact from the persisted snapshot.
+            assert claims == [PCIeClaim(bdf="0000:3b:00.0", vendor_id="8086", device_id="1572")]
 
     asyncio.run(_run())
 
