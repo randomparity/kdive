@@ -69,12 +69,31 @@ was already corrupted, repoint `kdive.pth` at the real `src` and re-verify
 
 ## Deferred / blocked targets
 
-### Postgres-backed (112) — deferred by scope
+### Postgres/container-backed (112) — sweep in progress (#1306)
 
-Their only covering tests use the `migrated_url`/`pg_conn`/`postgres_url` fixtures. Sweeping
-these spins up testcontainers per run (slow, can leak/collide under parallelism); run them
-serially in a dedicated session. Subsystems: `services/`, `store/`, `db/`, most
-`jobs/handlers/`, and the Postgres-backed `inventory/`/`reconciler/` paths.
+Their only covering tests use container fixtures — the `migrated_url`/`pg_conn`/`postgres_url`
+Postgres fixtures, or the `minio_store` MinIO fixture. Sweeping these spins up testcontainers
+per run (slow, can leak/collide under parallelism); run them serially in a dedicated session.
+Subsystems: `services/`, `store/`, `db/`, most `jobs/handlers/`, and the Postgres-backed
+`inventory/`/`reconciler/` paths. #1306 is the tracking epic; the remaining subsystem buckets
+are its sub-issues.
+
+**Swept so far:**
+
+- `store/objectstore.py` — 569 mutants, 23 → 0 surviving. The survivors were assertion gaps
+  in the `_infrastructure_error` mapping (op label, key, and carried S3 error code went
+  unasserted), the `err.response.get("ResponseMetadata", {})` defensive default (never
+  exercised), and the `put_artifact` `content-encoding` metadata key (a case-mutation that a
+  live MinIO round-trip cannot distinguish, because S3 lowercases user-metadata keys — killed
+  with a fake-client exact-key assertion). Run with all four covering test files, including the
+  `minio_store`-gated round-trips: one read (`head`'s `content-encoding`) is attributable only
+  through the container round-trip, so the bucket's mutation run must keep the gated files in
+  scope to legitimately reach 0-surviving.
+
+**Not yet swept:** the remaining subsystem buckets (`services/`, `db/`, `jobs/handlers/`,
+`inventory/`, `reconciler/`) — filed as #1306 sub-issues. `store/assembly.py` is a separate
+no-direct-test module (imported only cross-file by conftest/`test_app`), not a container-backed
+target; it wants a direct mirror test on the #665 pattern, tracked with the store sub-issue.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 

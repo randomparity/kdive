@@ -187,6 +187,31 @@ def test_put_artifact_writes_metadata_and_returns_stored_artifact() -> None:
     assert stored.retention_class == "vmcore"
 
 
+def test_put_artifact_records_content_encoding_under_the_exact_metadata_key() -> None:
+    # S3/MinIO lowercases user-metadata keys, so a real round-trip cannot tell "content-encoding"
+    # from a miscased literal; assert the exact key sent to put_object to pin the mapping.
+    client = _RecordingPutClient()
+    stored = ObjectStore(client, "the-bucket").put_artifact(
+        ArtifactWriteRequest(
+            tenant="t",
+            owner_kind="systems",
+            owner_id="sys-1",
+            name="console-part-0",
+            data=b"x",
+            sensitivity=Sensitivity.REDACTED,
+            retention_class="evidence",
+            content_encoding="gzip",
+        )
+    )
+    assert client.last_kwargs is not None
+    assert client.last_kwargs["Metadata"] == {
+        "sensitivity": "redacted",
+        "retention-class": "evidence",
+        "content-encoding": "gzip",
+    }
+    assert stored.key == "t/systems/sys-1/console-part-0"
+
+
 def _sha256_b64(path: Path) -> str:
     return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode("ascii")
 
@@ -339,6 +364,25 @@ def test_get_artifact_non_stale_client_error_is_infrastructure_failure() -> None
     with pytest.raises(CategorizedError) as excinfo:
         store.get_artifact("k", "etag")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # A non-404/412 GET failure carries the op, key, and S3 error code verbatim so an operator
+    # can tell an access/quota fault from a stale handle.
+    assert str(excinfo.value) == "object-store get_object for 'k' failed: x"
+    assert excinfo.value.details == {"key": "k", "s3_error_code": "x"}
+
+
+def test_get_artifact_client_error_without_response_metadata_is_infrastructure_failure() -> None:
+    # A ClientError whose response omits ResponseMetadata (no HTTP status to read) is not a
+    # stale handle: it must still map to INFRASTRUCTURE_FAILURE rather than crash reading a
+    # status off a missing block.
+    class _NoMetadataClient:
+        def get_object(self, **_kwargs: object) -> dict[str, object]:
+            raise ClientError({"Error": {"Code": "boom"}}, "GetObject")
+
+    store = ObjectStore(_NoMetadataClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.get_artifact("k", "etag")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "object-store get_object for 'k' failed: boom"
 
 
 def test_get_artifact_invalid_metadata_is_infrastructure_failure() -> None:
@@ -362,6 +406,33 @@ def test_head_404_returns_none_other_status_raises() -> None:
         ObjectStore(_StatusErrorClient(500), "bucket").head("k")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(excinfo.value) == "object-store head_object for 'k' failed: x"
+
+
+def test_head_maps_transport_error_to_infrastructure_failure() -> None:
+    # A transport-level BotoCoreError on HEAD is not a 404: it maps to INFRASTRUCTURE_FAILURE
+    # with the op, key, and error class named, distinct from the "object absent" None return.
+    class _UnreachableHeadClient:
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            raise EndpointConnectionError(endpoint_url="http://unreachable")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(_UnreachableHeadClient(), "bucket").head("k")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "object-store head_object for 'k' failed: EndpointConnectionError"
+    assert excinfo.value.details == {"key": "k", "s3_error_code": "EndpointConnectionError"}
+
+
+def test_head_client_error_without_response_metadata_is_infrastructure_failure() -> None:
+    # A ClientError whose response omits ResponseMetadata has no HTTP status to read: HEAD must
+    # not mistake it for a 404 (returning None) nor crash reading a status off a missing block.
+    class _NoMetadataHeadClient:
+        def head_object(self, **_kwargs: object) -> dict[str, object]:
+            raise ClientError({"Error": {"Code": "boom"}}, "HeadObject")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        ObjectStore(_NoMetadataHeadClient(), "bucket").head("k")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == "object-store head_object for 'k' failed: boom"
 
 
 def test_head_invalid_sensitivity_metadata_returns_unknown_sensitivity() -> None:
@@ -394,6 +465,15 @@ def test_get_artifact_maps_body_read_failure_to_infrastructure_failure() -> None
     with pytest.raises(CategorizedError) as excinfo:
         store.get_artifact("t/vmcore/oid/core", "etag")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The op label, the key, and the boto error class all ride into the message/details, so a
+    # mid-stream body-read fault is attributable: pin the whole message and the carried code.
+    assert str(excinfo.value) == (
+        "object-store get_object for 't/vmcore/oid/core' failed: ReadTimeoutError"
+    )
+    assert excinfo.value.details == {
+        "key": "t/vmcore/oid/core",
+        "s3_error_code": "ReadTimeoutError",
+    }
 
 
 class _RecordingClient:
@@ -578,6 +658,11 @@ def test_get_artifact_stream_mid_read_error_maps_to_infrastructure_failure() -> 
     # The boto error class is carried as s3_error_code, so a read-timeout is observably distinct
     # from a dropped connection without a new field (ADR-0400 residual observability).
     assert excinfo.value.details["s3_error_code"] == "ReadTimeoutError"
+    # The reader labels its own op "get_object": the whole message stays attributable through
+    # tarfile's stream buffering back to the failed download.
+    assert str(excinfo.value) == (
+        "object-store get_object for 't/vmcore/oid/core' failed: ReadTimeoutError"
+    )
 
 
 def test_get_artifact_stream_with_etag_sends_if_match() -> None:
