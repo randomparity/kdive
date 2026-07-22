@@ -51,6 +51,10 @@ def test_render_xlsx_sheet_per_section_with_header() -> None:
     workbook = openpyxl.load_workbook(io.BytesIO(render_xlsx(_report())))
     assert workbook.sheetnames == ["inventory", "leases"]
     assert [cell.value for cell in workbook["inventory"][1]] == ["system_id", "vcpus"]
+    # Data rows carry each row's per-column values keyed by column (an empty cell reads
+    # back as None from the workbook); a wrong-key/None mutant would blank the real values.
+    assert [cell.value for cell in workbook["inventory"][2]] == ["s1", "4"]
+    assert [cell.value for cell in workbook["inventory"][3]] == ["s2", None]
 
 
 def test_render_xlsx_truncation_note_present() -> None:
@@ -76,3 +80,4 @@ def test_render_xlsx_missing_openpyxl_reports_runtime_dependency(
 
     assert exc.value.category is ErrorCategory.MISSING_DEPENDENCY
     assert exc.value.details == {"dependency": "openpyxl"}
+    assert str(exc.value) == "XLSX report rendering requires the openpyxl runtime dependency"
