@@ -127,6 +127,26 @@ def test_repair_no_ops_a_restore_that_committed_ready(migrated_url: str) -> None
     asyncio.run(_run())
 
 
+def test_recovers_multiple_restoring_systems_all_counted(migrated_url: str) -> None:
+    # Each stalled restoring System is recovered to failed and increments the tally.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        ids: list[UUID] = []
+        for _ in range(3):
+            sid = await seed_system(conn, system_state=SystemState.RESTORING)
+            await _seed_job(conn, "restore", {"system_id": str(sid)}, state=JobState.FAILED.value)
+            ids.append(sid)
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_restoring_systems)
+        assert recovered == 3  # every recovered System counted, not a fixed 1
+        for sid in ids:
+            assert await _system_state(conn, sid) == SystemState.FAILED.value
+        await conn.close()
+
+    asyncio.run(_run())
+
+
 def test_recovers_creating_snapshot_with_no_active_job(migrated_url: str) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
@@ -140,6 +160,29 @@ def test_recovers_creating_snapshot_with_no_active_job(migrated_url: str) -> Non
             recovered = await run_repair(pool, repair_stalled_creating_snapshots)
         assert recovered == 1
         assert await _snapshot_state(conn, snap_id) == SnapshotState.FAILED.value
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_recovers_multiple_creating_snapshots_all_counted(migrated_url: str) -> None:
+    # Each stalled creating snapshot is recovered to failed and increments the tally.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        snap_ids: list[UUID] = []
+        for i in range(3):
+            sid = await seed_system(conn, system_state=SystemState.READY)
+            snap_id = await _seed_snapshot(conn, sid, f"cp{i}", SnapshotState.CREATING)
+            await _seed_job(
+                conn, "snapshot", {"snapshot_id": str(snap_id)}, state=JobState.FAILED.value
+            )
+            snap_ids.append(snap_id)
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_creating_snapshots)
+        assert recovered == 3  # every recovered snapshot counted, not a fixed 1
+        for snap_id in snap_ids:
+            assert await _snapshot_state(conn, snap_id) == SnapshotState.FAILED.value
         await conn.close()
 
     asyncio.run(_run())

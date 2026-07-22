@@ -113,6 +113,34 @@ def test_orphaned_system_enqueues_gc_teardown(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_multiple_orphaned_systems_all_counted(migrated_url: str) -> None:
+    # Each orphaned System enqueues a teardown and increments the tally: the return is the
+    # number enqueued, not a fixed 1.
+    async def _run() -> None:
+        ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(3):
+                ids.append(
+                    await seed_system(
+                        seed,
+                        system_state=SystemState.READY,
+                        alloc_state=AllocationState.RELEASED,
+                    )
+                )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, repair_orphaned_systems)
+        assert count == 3  # every orphaned System counted, not a fixed 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT count(*) FROM jobs WHERE kind = 'teardown' AND dedup_key = ANY(%s)",
+                ([f"{sid}:teardown" for sid in ids],),
+            )
+            row = await cur.fetchone()
+            assert row is not None and row[0] == 3
+
+    asyncio.run(_run())
+
+
 def test_orphaned_system_second_pass_is_idempotent(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
