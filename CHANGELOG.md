@@ -281,6 +281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix plan config path, logger-test hygiene, __main__ edit
 - Include test_main.py call site in plan Task 3
 - Document KDIVE_MCP_TRACE transport tracing
+- Worksteal exposes caplog closed-stderr-buffer leak
 
 ### Fixed
 
