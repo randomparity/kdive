@@ -662,6 +662,7 @@ def test_record_key_duplicate_maps_to_configuration_error(migrated_url: str) -> 
 
         assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
         assert caught.value.details == {"principal": CTX.principal}
+        assert str(caught.value) == f"idempotency key ({CTX.principal}, dup) is already in use"
 
     asyncio.run(_run())
 
