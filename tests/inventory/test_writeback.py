@@ -735,6 +735,33 @@ def test_configmap_defaults_to_tls_verification() -> None:
     assert adapter._verify is True
 
 
+def test_configmap_api_base_strips_only_a_trailing_slash() -> None:
+    # rstrip("/") removes a trailing slash and nothing else; a hostname character that happens to
+    # sit in a broadened strip set must be preserved.
+    adapter = writeback.ConfigMapWriteback(
+        namespace="kdive",
+        name="kdive-systems",
+        key="systems.toml",
+        token="tok",  # noqa: S106
+        api_base="https://api-hostX/",
+    )
+    assert adapter._api_base == "https://api-hostX"
+
+
+def test_configmap_client_uses_the_write_timeout() -> None:
+    # The built client carries the module's write timeout, so a hung API patch fails fast rather
+    # than blocking the reconcile forever (dropping the timeout would fall back to httpx defaults).
+    async def _check() -> None:
+        adapter = _configmap_adapter(lambda _request: httpx.Response(200))
+        client = adapter._client()
+        try:
+            assert client.timeout == httpx.Timeout(writeback._WRITE_TIMEOUT_SECONDS)
+        finally:
+            await client.aclose()
+
+    _run(_check())
+
+
 def test_configmap_strips_trailing_slash_from_api_base() -> None:
     captured: dict[str, object] = {}
 
