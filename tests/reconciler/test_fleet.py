@@ -6,10 +6,12 @@ sync observable-gauge callbacks emit from the cached, frozen snapshot.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
+import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg_pool import AsyncConnectionPool
@@ -52,6 +54,18 @@ def _gauge_points(
     return points
 
 
+def _gauge_unit(reader: InMemoryMetricReader, name: str) -> str | None:
+    """Return the exported unit for gauge ``name`` (asserts the gauge exists)."""
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == name:
+                    return metric.unit
+    raise AssertionError(f"gauge {name!r} not found")
+
+
 def _telemetry() -> tuple[FleetTelemetry, InMemoryMetricReader]:
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
@@ -83,6 +97,16 @@ def test_gauges_emit_from_the_cached_snapshot() -> None:
     assert _gauge_points(reader, "kdive.systems")[(("state", "ready"),)] == 3
     assert _gauge_points(reader, "kdive.host.capacity.used")[(("provider", "local-libvirt"),)] == 2
     assert _gauge_points(reader, "kdive.host.capacity.total")[(("provider", "local-libvirt"),)] == 5
+
+    # Every gauge advertises the dimensionless unit "1" (ADR-0190); the exact string is the
+    # metric contract, so a dropped/garbled unit must be caught.
+    for gauge in (
+        "kdive.allocations",
+        "kdive.systems",
+        "kdive.host.capacity.used",
+        "kdive.host.capacity.total",
+    ):
+        assert _gauge_unit(reader, gauge) == "1"
 
 
 def test_refresh_swaps_the_cache_and_a_stale_read_keeps_the_last() -> None:
@@ -176,5 +200,48 @@ def test_read_fleet_snapshot_counts_and_caps(migrated_url: str) -> None:
         assert snapshot.capacity_used["local-libvirt"] == 2
         assert snapshot.capacity_total["local-libvirt"] == 5
         assert "remote-libvirt" not in snapshot.capacity_total  # no valid cap → skipped
+
+    asyncio.run(_run())
+
+
+def test_capacity_total_skips_capless_then_continues_to_later_resources(migrated_url: str) -> None:
+    # A cap-less resource is skipped but the sum must CONTINUE to the resources that follow it.
+    # The cap-less resource is seeded first so a `break` regression would drop the later caps.
+    import asyncio
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_resource(seed, kind=ResourceKind.REMOTE_LIBVIRT, cap=None)  # skipped, first
+            await _seed_resource(seed, kind=ResourceKind.LOCAL_LIBVIRT, cap=4)
+            await _seed_resource(seed, kind=ResourceKind.LOCAL_LIBVIRT, cap=6)
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            snapshot = await read_fleet_snapshot(conn)
+        # Both local caps summed despite the earlier cap-less skip; break would drop them.
+        assert snapshot.capacity_total["local-libvirt"] == 10
+
+    asyncio.run(_run())
+
+
+def test_no_capless_warning_when_all_resources_have_valid_caps(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # `skipped` starts at 0, so an all-valid fleet emits NO cap-less warning (a nonzero start
+    # would warn on a clean fleet every pass).
+    import asyncio
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_resource(seed, kind=ResourceKind.LOCAL_LIBVIRT, cap=2)
+            await _seed_resource(seed, kind=ResourceKind.LOCAL_LIBVIRT, cap=3)
+        caplog.set_level(logging.WARNING, logger="kdive.reconciler.fleet")
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await read_fleet_snapshot(conn)
+        assert not [r for r in caplog.records if "no valid allocation cap" in r.getMessage()]
 
     asyncio.run(_run())
