@@ -1743,11 +1743,13 @@ def test_local_libvirt_overlay_preserves_discovery_owned_hardware(
             "concurrent_allocation_cap = 4\n"
         )
         doc = load_inventory(_write_toml(tmp_path, body))
-        async with (
-            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
-            pool.connection() as conn,
-        ):
-            await reconcile_resources(conn, doc)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                diff = await reconcile_resources(conn, doc)
+            async with pool.connection() as conn:
+                # A second pass over the now-overlaid row is a clean no-op (change detection
+                # compares name/cost_class/caps/pool, so a dropped field would re-report drift).
+                diff2 = await reconcile_resources(conn, doc)
         async with await _connect(migrated_url) as check:
             row = await _resource_by_name(check, "lab-host")
         assert row["managed_by"] == "discovery"  # existence stays discovery-owned
@@ -1758,6 +1760,10 @@ def test_local_libvirt_overlay_preserves_discovery_owned_hardware(
         assert caps["memory_mb"] == 65536  # discovery-owned, NOT overwritten
         assert caps["pcie"] == ["0000:00:1f.0"]  # discovery-owned, NOT overwritten
         assert caps["concurrent_allocation_cap"] == 4  # overlaid from config
+        # The overlay's updated record identifies the local-libvirt instance.
+        updated = next(r for r in diff.updated if r.name == "lab-host")
+        assert updated.entry == "resource[local-libvirt/lab-host]"
+        assert not diff2.updated  # idempotent second pass
 
     asyncio.run(_run())
 
@@ -1770,6 +1776,8 @@ def test_discovered_local_with_no_config_gets_deterministic_name(
     async def _run() -> None:
         async with await _connect(migrated_url) as seed:
             rid = await _insert_discovered_local(seed, host_uri="qemu:///system")
+            # A host_uri with no alphanumerics collapses to the empty-cleaned fallback name.
+            symbolic = await _insert_discovered_local(seed, host_uri=":::")
         doc = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
         async with (
             AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
@@ -1779,9 +1787,14 @@ def test_discovered_local_with_no_config_gets_deterministic_name(
         async with await _connect(migrated_url) as check, check.cursor(row_factory=dict_row) as cur:
             await cur.execute("SELECT * FROM resources WHERE id = %s", (rid,))
             row = await cur.fetchone()
+            await cur.execute("SELECT name FROM resources WHERE id = %s", (symbolic,))
+            symbolic_row = await cur.fetchone()
         assert row is not None  # discovery-owned row never pruned
         assert row["managed_by"] == "discovery"
-        assert row["name"] is not None and row["name"] != ""  # deterministic name assigned
+        # Exact name: every non-alphanumeric run becomes a dash, prefixed with "discovered-".
+        assert row["name"] == "discovered-qemu----system"
+        assert symbolic_row is not None
+        assert symbolic_row["name"] == "discovered-host"  # empty-cleaned fallback
 
     asyncio.run(_run())
 
@@ -1838,6 +1851,31 @@ def test_prune_of_live_config_resource_cordons_not_deletes(
         assert row["cordoned"] is True
         assert "fi-busy" in {c.name for c in diff.cordoned}
         assert "fi-busy" not in {p.name for p in diff.pruned}
+        # The cordoned record's entry is resource[kind/name], in that field order.
+        cordoned = next(c for c in diff.cordoned if c.name == "fi-busy")
+        assert cordoned.entry == "resource[fault-inject/fi-busy]"
+
+    asyncio.run(_run())
+
+
+def test_fault_inject_field_change_updates_row_and_records_it(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # A changed config field on an existing config-owned fault-inject row takes the ordinary
+    # update path: the capabilities jsonb is rewritten and a resource[kind/name] record emitted.
+    async def _run() -> None:
+        doc1 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-x", cap=1)))
+        doc2 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-x", cap=5)))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc1)
+            async with pool.connection() as conn:
+                diff = await reconcile_resources(conn, doc2)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-x")
+        assert _row_caps(row)["concurrent_allocation_cap"] == 5  # jsonb rewritten, not nulled
+        updated = next(r for r in diff.updated if r.name == "fi-x")
+        assert updated.entry == "resource[fault-inject/fi-x]"
 
     asyncio.run(_run())
 
