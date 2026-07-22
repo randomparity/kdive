@@ -19,6 +19,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.profiles.types import ExpectedBootFailureInput
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.services.runs import host_admission as host_admission_mod
 from kdive.services.runs.admission import (
     _parse_expected_boot_failure,
     _validate_unbound_target_kind,
@@ -30,6 +31,7 @@ from kdive.services.runs.host_admission import (
     categorized_failure,
     config_failure,
     parse_uuid,
+    raise_config_error,
     stale_failure,
 )
 
@@ -55,6 +57,14 @@ def test_config_failure_fields() -> None:
     assert err.category is ErrorCategory.CONFIGURATION_ERROR
     assert str(err) == "bad thing"
     assert err.details == {"reason": "x"}
+
+
+def test_raise_config_error_preserves_custom_detail() -> None:
+    # raise_config_error must forward its non-default detail, not fall back to the default.
+    with pytest.raises(RunCreateError) as exc:
+        raise_config_error("obj", detail="a very specific reason")
+    assert str(exc.value) == "a very specific reason"
+    assert exc.value.object_id == "obj"
 
 
 def test_stale_failure_carries_current_status() -> None:
@@ -138,6 +148,21 @@ def test_allocation_block_error_active_unexpired_passes() -> None:
 
 def test_allocation_block_error_active_no_lease_passes() -> None:
     assert _allocation_block_error(_alloc(AllocationState.ACTIVE, None), uuid4()) is None
+
+
+def test_allocation_block_error_lease_expiry_exactly_now_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Boundary: a lease expiring at exactly `now` is not yet expired (strict `<`, not `<=`).
+    frozen = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+
+    class _FrozenClock:
+        @staticmethod
+        def now(tz: object = None) -> datetime:
+            return frozen
+
+    monkeypatch.setattr(host_admission_mod, "datetime", _FrozenClock)
+    assert _allocation_block_error(_alloc(AllocationState.ACTIVE, frozen), uuid4()) is None
 
 
 class _Resolver:
