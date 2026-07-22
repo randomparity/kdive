@@ -235,6 +235,20 @@ def test_pending_row_inside_deadline_protects_its_object(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_multiple_leaked_objects_all_counted(migrated_url: str) -> None:
+    # Two independent orphan objects past grace must each increment the deleted tally: the
+    # return is the number of objects deleted, not a fixed 1.
+    async def _run() -> None:
+        keys = [f"images/local-libvirt/orphan{i}/x86_64.qcow2" for i in range(3)]
+        store = _FakeImageStore({k: timedelta(hours=2) for k in keys})  # all past grace, no rows
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_leaked_images(c, store, _grace()))
+        assert count == 3  # every leaked object counted, not a fixed 1
+        assert sorted(store.deleted) == sorted(keys)
+
+    asyncio.run(_run())
+
+
 # --- dangling_images -----------------------------------------------------------------
 
 
@@ -313,6 +327,64 @@ def test_dangling_skips_row_whose_object_is_present(migrated_url: str) -> None:
         async with await connect(migrated_url) as check:
             cur = await check.execute("SELECT 1 FROM image_catalog WHERE id = %s", (row_id,))
             assert await cur.fetchone() is not None
+
+    asyncio.run(_run())
+
+
+def test_multiple_dangling_rows_all_removed_and_counted(migrated_url: str) -> None:
+    # Two dangling rows (objects missing past deadline) must each increment the removed tally.
+    async def _run() -> None:
+        row_ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for i in range(3):
+                row_ids.append(
+                    await _insert_image_row(
+                        seed,
+                        name=f"gone{i}",
+                        object_key=f"images/local-libvirt/gone{i}/x86_64.qcow2",
+                        pending_age=timedelta(hours=2),
+                    )
+                )
+        store = _FakeImageStore({})  # every object HEAD missing
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        assert count == 3  # every dangling row removed, not a fixed 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT count(*) FROM image_catalog WHERE id = ANY(%s)", (row_ids,)
+            )
+            row = await cur.fetchone()
+            assert row is not None and row[0] == 0
+
+    asyncio.run(_run())
+
+
+def test_dangling_present_row_does_not_halt_subsequent_removal(migrated_url: str) -> None:
+    # A row whose object is present is skipped, but the sweep must CONTINUE to the remaining
+    # candidates (not break). The present row is seeded first so a `break` regression would drop
+    # the dangling row that follows it.
+    async def _run() -> None:
+        present_key = "images/local-libvirt/healthy/x86_64.qcow2"
+        async with await connect(migrated_url) as seed:
+            present_id = await _insert_image_row(
+                seed, name="healthy", object_key=present_key, pending_age=timedelta(hours=2)
+            )
+            missing_id = await _insert_image_row(
+                seed,
+                name="gone",
+                object_key="images/local-libvirt/gone/x86_64.qcow2",
+                pending_age=timedelta(hours=2),
+            )
+        store = _FakeImageStore({present_key: timedelta(hours=2)})  # only the present row's object
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_dangling_images(c, store, _grace()))
+        assert count == 1  # the dangling row after the skip is still removed
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT id FROM image_catalog WHERE id = ANY(%s)", ([present_id, missing_id],)
+            )
+            surviving = {row[0] for row in await cur.fetchall()}
+        assert surviving == {present_id}  # present row kept, dangling row gone
 
     asyncio.run(_run())
 
