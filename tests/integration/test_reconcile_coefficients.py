@@ -37,6 +37,9 @@ def test_upserts_a_new_declared_coefficient(migrated_url: str) -> None:
                 diff = await reconcile_coefficients(conn, _doc(("premium", "2.5")))
             assert await _coeff(pool, "premium") == Decimal("2.5")
             assert [r.name for r in diff.created] == ["premium"]
+            created = diff.created[0]
+            assert created.entry == "cost_class[premium]"
+            assert created.detail == "priced at 2.5"
             assert diff.warned == []
 
     asyncio.run(_run())
@@ -56,6 +59,9 @@ def test_file_value_overrides_existing_row_and_flags_drift(migrated_url: str) ->
                 diff = await reconcile_coefficients(conn, _doc(("remote", "1.0")))
             assert await _coeff(pool, "remote") == Decimal("1.0")
             assert [r.name for r in diff.updated] == ["remote"]
+            # The updated record carries the same before/after detail as the warned record.
+            updated = diff.updated[0]
+            assert "was 9.0" in updated.detail and "now 1.0" in updated.detail
             drift = [r for r in diff.warned if r.name == "remote"]
             assert drift and "was 9.0" in drift[0].detail and "now 1.0" in drift[0].detail
 
