@@ -122,7 +122,49 @@ are its sub-issues.
      `RETURNING` return and falls through to an identical follow-up `SELECT` on the same
      connection, yielding the same result. `db/repositories.py` remains tooling-blocked (below).
 
-**Not yet swept:** the remaining subsystem buckets (`services/`, `jobs/handlers/`,
+- `services/allocation/` bucket (#1398) — the admission / lease / capacity-debit modules,
+  swept serially against their `migrated_url` covering tests (`tests/services/allocation/*`,
+  `tests/services/test_allocation_{admission,enqueue,sizing}.py`,
+  `tests/services/test_{admission_budget_quota,pcie_claim,pcie_claim_release}.py`, plus the
+  MCP-level renew tests). Per module (mutants, surviving before → after):
+  `error_details.py` 5, 0→0; `lease_bounds.py` 28, 0→0; `admission/affinity.py` 5, 0→0;
+  `admission/request.py` 164, 4→0; `admission/sizing.py` 56, 10→1; `admission/metrics.py`
+  93, 21→3; `admission/placement.py` 119, 3→1; `admission/pcie_claim.py` 30, 6→2;
+  `idempotency.py` 70, 6→5; `release.py` 98, 22→2; `renew.py` 253, 35→8; `promotion.py`
+  533, 121→39; `admission/core.py` 489, 51→20. Assertion gaps killed by pinning the full
+  grant/enqueue/release/renew snapshot + audit rows (tool/object_kind/transition/args/project),
+  lease-window arithmetic, error messages + details on every fail-closed path, and the
+  funding-gate + clamp boundaries. The **surviving mutants are equivalent** and cluster into
+  the same classes as the `db/` bucket plus a few allocation-specific ones:
+  1. **Postgres case-folded SQL** — keyword / unquoted-identifier case (as in `db/`).
+  2. **Advisory-lock key args** — mutating a `LockScope.*` lock key to `None` only changes
+     which key serializes; a serial (single-connection) test cannot observe it.
+  3. **Defense-in-depth placement filters** — `promotion._candidate_hosts` drops the
+     project/arch/pcie placement filter, but `admission_gate` re-checks affinity
+     (`project_may_place`), arch (`_reserve_accel`), and PCIe (`_resolve_pcie_claim`), so the
+     final grant/deny outcome is identical (placement is an optimization, the gate is
+     authoritative).
+  4. **`model_copy` update keys the ledger never reads** — mutating the `state`/`lease_expiry`/
+     `pcie_claim` keys of the in-memory copy passed to `accounting.reserve` is unobservable:
+     `reserve` reads only `id`/`project`/`resource_id`/`created_at`.
+  5. **`getattr` falsy default / discarded value** — `_enabled=False`→`None` (every use is a
+     truthiness guard) and `getattr(denial, "queueable", False)`→`None` are both falsy through
+     every branch; a `CategorizedError` message blanked at a call site whose only consumer is
+     `categorized_details` (which keeps details, not the message) never surfaces.
+  6. **OTel case-insensitive instrument names / naive-vs-UTC datetime / cosmetic
+     `operation_label` / `devices=[]` on denial `GateResult`s** — the metric name is
+     normalized to lowercase by OpenTelemetry; `datetime.now(None)` equals UTC on a UTC host
+     and only feeds a relative lease window; the `resolve_replay` operation label only shapes
+     an error string; and a denial `GateResult`'s `devices` list is never read (only the grant
+     path reads it).
+  `admission/core.py` is partially swept: the grant snapshot/audit cluster and the
+  denial-enrichment boundaries are done, but ~8 killable survivors on the **queue-on-capacity
+  enqueue path** (`_enqueue`, `_deny_or_enqueue`, `_host_cap_check`/`admission_gate` queueable)
+  and a **PCIe-busy** `_resolve_pcie_claim` read need the `_enqueue` persistence + PCIe-busy
+  covering assertions; that deeper sweep of the large `core.py` module is a #1398 follow-up
+  (the "split a large module" path).
+
+**Not yet swept:** the remaining subsystem buckets (`jobs/handlers/`,
 `inventory/`, `reconciler/`) — filed as #1306 sub-issues.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
