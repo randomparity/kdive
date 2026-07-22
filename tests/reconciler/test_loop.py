@@ -266,6 +266,29 @@ def test_zombie_with_malformed_run_payload_still_dead_letters_job(migrated_url: 
     asyncio.run(_run())
 
 
+def test_multiple_zombie_jobs_all_counted(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            job_ids = [
+                await seed_running_job(
+                    seed, f"dk-zombie-{i}", lease_seconds=-60, attempt=3, max_attempts=3
+                )
+                for i in range(3)
+            ]
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, repair_abandoned_jobs)
+        assert count == 3  # each zombie increments swept, not a fixed 1
+        async with await connect(migrated_url) as check:
+            cur = await check.execute(
+                "SELECT count(*) FROM jobs WHERE state = 'failed' AND id = ANY(%s)",
+                (job_ids,),
+            )
+            row = await cur.fetchone()
+            assert row is not None and row[0] == 3
+
+    asyncio.run(_run())
+
+
 def test_live_lease_and_attempts_remaining_not_swept(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
