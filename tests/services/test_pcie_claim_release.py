@@ -34,8 +34,9 @@ from kdive.mcp.auth import RequestContext
 from kdive.providers.infra.reaping import NullReaper
 from kdive.reconciler import loop
 from kdive.security import audit
+from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import AllocationRequest, admit
-from kdive.services.allocation.release import release_with_backstops
+from kdive.services.allocation.release import release_with_backstops, system_audit_writer
 from tests.reconcile_helpers import make_reconcile_config
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -116,6 +117,49 @@ async def _assert_free_and_reclaimable(conn: psycopg.AsyncConnection, res: Resou
         ),
     )
     assert again.granted is True  # the freed card is claimable by a new allocation
+
+
+def test_release_audits_both_transitions_and_stamps_active_ended(migrated_url: str) -> None:
+    # Drive a real DB-writing audit writer so every AuditEvent field (tool, object_kind,
+    # object_id, transition, args, project) is pinned, and confirm the active_ended stamp is
+    # set. The no-op writer other tests use cannot observe any of this.
+    async def _run() -> tuple[set[tuple[str, str, str, str, str]], datetime | None, UUID]:
+        async with (
+            _conn(migrated_url) as conn,
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
+        ):
+            res = await _seed(conn)
+            alloc_id = await _admit_claim(conn, res)
+            # Drive it ACTIVE with a start stamp so the release closes a real billing interval
+            # (a null active_started_at makes the active_ended stamp a documented no-op).
+            await conn.execute(
+                "UPDATE allocations SET state = 'active', active_started_at = %s WHERE id = %s",
+                (_DT, alloc_id),
+            )
+            outcome = await release_with_backstops(
+                pool, alloc_id, project="proj", audit_writer=system_audit_writer("system:test")
+            )
+            assert outcome.released is True
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT transition, tool, object_kind, args_digest, project FROM audit_log "
+                    "WHERE object_id = %s AND principal = 'system:test'",
+                    (alloc_id,),
+                )
+                rows = {tuple(row) for row in await cur.fetchall()}
+                await cur.execute(
+                    "SELECT active_ended_at FROM allocations WHERE id = %s", (alloc_id,)
+                )
+                ended_row = await cur.fetchone()
+        return rows, (ended_row[0] if ended_row else None), alloc_id
+
+    rows, active_ended, alloc_id = asyncio.run(_run())
+    digest = args_digest({"allocation_id": str(alloc_id)})
+    assert rows == {
+        ("active->releasing", "allocations.release", "allocations", digest, "proj"),
+        ("releasing->released", "allocations.release", "allocations", digest, "proj"),
+    }
+    assert active_ended is not None
 
 
 def test_release_frees_the_claim(migrated_url: str) -> None:
