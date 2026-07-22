@@ -27,6 +27,7 @@ non-autocommit pool connection so the real transaction framing is exercised.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -504,6 +505,38 @@ def test_staged_path_config_upload_failure_degrades_to_no_offer(
     asyncio.run(_run())
 
 
+def test_staged_path_config_upload_on_update_pass_threads_store(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    """The UPDATE path (not just create) threads the store into the config upload (ADR-0336).
+
+    A staged-path row first created with no ``.config`` sibling carries a NULL
+    ``kernel_config_key``. When the sibling later appears, the *update* pass must upload it
+    through the same threaded store — a store arg dropped to ``None`` on that call site would
+    raise on ``put_artifact`` instead of persisting the key.
+    """
+
+    async def _run() -> None:
+        qcow2 = tmp_path / "cfg-rootfs.qcow2"
+        doc = load_inventory(_write_toml(tmp_path, _staged_path_config_toml(qcow2)))
+        store = _FakeImageStore()
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc, store)  # create: no sibling -> key NULL
+            # The captured config sibling appears only after the row already exists, so the
+            # upload happens on the update pass through _update_entry, not on create.
+            (tmp_path / "cfg-rootfs.qcow2.config").write_bytes(b"CONFIG_DEBUG_INFO_BTF=y\n")
+            async with pool.connection() as conn:
+                await reconcile_images(conn, doc, store)  # update: uploads via the threaded store
+        key = _expected_config_key()
+        async with await _connect(migrated_url) as check:
+            row = await _one(check, "cfg-rootfs")
+        assert row["kernel_config_key"] == key
+        assert store.put[key] == b"CONFIG_DEBUG_INFO_BTF=y\n"
+
+    asyncio.run(_run())
+
+
 def test_reconcile_preserves_publish_owned_kernel_config_key(
     migrated_url: str, tmp_path: Path
 ) -> None:
@@ -899,6 +932,52 @@ def test_prune_removes_only_config_rows_absent_from_config(
         pruned = next(p for p in diff.pruned if p.name == "stale-config")
         assert pruned.entry == "image[remote-libvirt/stale-config/x86_64]"
         assert store.deleted == []  # row-delete-only; GC reclaims any object
+
+    asyncio.run(_run())
+
+
+def test_prune_continues_past_a_kept_row_to_a_later_departed_row(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The prune loop must `continue` (not `break`) past a still-declared row: a kept config row
+    # is scanned before a departed one, so a `break` at the kept row would leave the departed row
+    # un-pruned. Seeding the kept row first makes it scan first, isolating the short-circuit.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _insert_config_staged_row(
+                seed, name="kept", volume="kept.qcow2", provider="local-libvirt"
+            )
+            await _insert_config_staged_row(
+                seed, name="departed", volume="departed.qcow2", provider="local-libvirt"
+            )
+        # The file still declares `kept` but not `departed`.
+        doc = load_inventory(
+            _write_toml(
+                tmp_path,
+                "schema_version = 2\n"
+                "[[image]]\n"
+                'provider = "local-libvirt"\n'
+                'name = "kept"\n'
+                'arch = "x86_64"\n'
+                'format = "qcow2"\n'
+                'root_device = "/dev/vda"\n'
+                'visibility = "public"\n'
+                "[image.source]\n"
+                'kind = "staged"\n'
+                'volume = "kept.qcow2"\n',
+            )
+        )
+        store = _FakeImageStore()
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_images(conn, doc, store)
+        async with await _connect(migrated_url) as check:
+            assert await _exists(check, "kept")  # still declared -> retained
+            assert not await _exists(check, "departed")  # scanned after kept -> still pruned
+        assert "departed" in {p.name for p in diff.pruned}
+        assert "kept" not in {p.name for p in diff.pruned}
 
     asyncio.run(_run())
 
@@ -2215,6 +2294,409 @@ def test_reconcile_serializes_with_register_on_the_resource_name(
 async def _reconcile_on(pool: AsyncConnectionPool, doc: Any) -> ReconcileDiff:
     async with pool.connection() as conn:
         return await reconcile_resources(conn, doc)
+
+
+# --- Adoption boundary: each _needs_config_adoption trigger fires on its own -------------
+#
+# _needs_config_adoption ORs five independent conditions (managed_by mismatch, null name,
+# stale lease, owner_project, non-empty affinity). Each test below makes exactly ONE true so
+# that an `or`->`and` mutation of any single operand — which would demand two simultaneous
+# triggers — is observable: adoption must still fire (flip managed_by / clear the runtime
+# fields) on the lone condition.
+
+
+async def _insert_config_fault_inject(
+    conn: psycopg.AsyncConnection,
+    *,
+    name: str | None,
+    managed_by: str = "config",
+    owner_project: str | None = None,
+    affinity_allowlist: list[str] | None = None,
+    lease_expires_at: datetime | None = None,
+    cap: int = 1,
+) -> UUID:
+    """Insert a fault-inject row with precise single-condition adoption state."""
+    rid = uuid4()
+    await conn.execute(
+        "INSERT INTO resources (id, kind, name, capabilities, pool, cost_class, status, "
+        " host_uri, managed_by, owner_project, affinity_allowlist, lease_expires_at) "
+        "VALUES (%s, 'fault-inject', %s, %s, 'default', 'local', 'available', "
+        " 'fault-inject://local', %s, %s, %s, %s)",
+        (
+            rid,
+            name,
+            Jsonb({"vcpus": 8, "memory_mb": 16384, "concurrent_allocation_cap": cap}),
+            managed_by,
+            owner_project,
+            affinity_allowlist or [],
+            lease_expires_at,
+        ),
+    )
+    return rid
+
+
+def test_adopt_fires_on_managed_by_mismatch_alone(migrated_url: str, tmp_path: Path) -> None:
+    # Only managed_by differs (name set, no lease/owner, empty affinity): adoption must still
+    # flip it to config — an `or`->`and` on the managed_by operand would suppress that.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _insert_config_fault_inject(seed, name="fi-mb", managed_by="discovery")
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-mb")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-mb")
+        assert row["managed_by"] == "config"  # adopted on the lone managed_by trigger
+        assert "fi-mb" in {u.name for u in diff.updated}
+
+    asyncio.run(_run())
+
+
+def test_adopt_fires_on_stale_lease_alone(migrated_url: str, tmp_path: Path) -> None:
+    # A config-managed row that still carries a lease (only that condition true) is adopted so
+    # the stray lease is cleared — an `or`->`and` on the lease operand would leave it set.
+    from datetime import UTC, timedelta
+
+    async def _run() -> None:
+        lease = datetime.now(UTC) + timedelta(hours=1)
+        async with await _connect(migrated_url) as seed:
+            await _insert_config_fault_inject(seed, name="fi-lease", lease_expires_at=lease)
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-lease")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-lease")
+        assert row["lease_expires_at"] is None  # adoption cleared the stray lease
+
+    asyncio.run(_run())
+
+
+def test_adopt_fires_on_owner_project_alone(migrated_url: str, tmp_path: Path) -> None:
+    # A config-managed row scoped to a project (only that condition true) is adopted so it
+    # widens to global — an `or`->`and` on the owner operand would leave the scope in place.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _insert_config_fault_inject(seed, name="fi-owner", owner_project="proj-a")
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-owner")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "fi-owner")
+        assert row["owner_project"] is None  # adoption widened to global
+
+    asyncio.run(_run())
+
+
+def test_adopt_fires_on_null_name_alone_via_host_adopt(migrated_url: str, tmp_path: Path) -> None:
+    # A config-managed remote row whose name is NULL (only that condition true) is host-adopted
+    # and given the declared name — an `or`->`and` on the name operand would leave it nameless.
+    async def _run() -> None:
+        uri = "qemu+tls://h1/system"
+        async with await _connect(migrated_url) as seed:
+            await seed.execute(
+                "INSERT INTO resources (id, kind, name, capabilities, pool, cost_class, status, "
+                " host_uri, managed_by) "
+                "VALUES (%s, 'remote-libvirt', NULL, %s, 'default', 'remote', 'available', "
+                " %s, 'config')",
+                (uuid4(), Jsonb({"vcpus": 8, "memory_mb": 16384}), uri),
+            )
+        doc = load_inventory(_write_toml(tmp_path, _remote_libvirt_toml(name="r1")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "r1")  # name was assigned by adoption
+            assert row["managed_by"] == "config"
+            assert await _resource_count(check, kind="remote-libvirt", host_uri=uri) == 1
+
+    asyncio.run(_run())
+
+
+def test_fault_inject_does_not_host_adopt_a_stray_null_named_row(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # fault-inject must NOT host-adopt: every fault-inject instance shares the synthetic
+    # host_uri, so a differently-named instance must create its own row, never adopt a stray
+    # null-named row at that shared host_uri. Flipping adopt_by_host to True would collapse them.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            # A discovery-owned (prune ignores it) stray with a NULL name at the shared host_uri.
+            await _insert_config_fault_inject(seed, name=None, managed_by="discovery")
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-new")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            # Two rows: the stray discovery row plus a freshly-created config fi-new (not adopted).
+            assert (
+                await _resource_count(check, kind="fault-inject", host_uri="fault-inject://local")
+                == 2
+            )
+            async with check.cursor() as cur:
+                await cur.execute(
+                    "SELECT count(*) FROM resources "
+                    "WHERE kind = 'fault-inject' AND managed_by = 'discovery'"
+                )
+                stray = await cur.fetchone()
+        # The stray stayed discovery-owned; host-adoption would have flipped it to config.
+        assert stray is not None and int(stray[0]) == 1
+
+    asyncio.run(_run())
+
+
+# --- Remote-libvirt override disposition edges (ADR-0199) --------------------------------
+
+
+def test_removed_remote_libvirt_is_not_created(migrated_url: str, tmp_path: Path) -> None:
+    # A `removed` ledger entry for a still-declared remote-libvirt identity suppresses its
+    # creation — the disposition lookup must consult the real (kind, name), not be short-circuited.
+    async def _run() -> None:
+        uri = "qemu+tls://h1/system"
+        async with await _connect(migrated_url) as seed:
+            await _set_ledger(
+                seed,
+                source_kind="resource",
+                resource_kind="remote-libvirt",
+                name="r1",
+                disposition="removed",
+            )
+        doc = load_inventory(_write_toml(tmp_path, _remote_libvirt_toml(name="r1")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert await _resource_count(check, kind="remote-libvirt", host_uri=uri) == 0
+
+    asyncio.run(_run())
+
+
+def test_detached_remote_libvirt_preserves_runtime_cap_over_file(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # A `detached` ledger entry for a remote-libvirt identity: a file cap that differs from the
+    # live row must NOT overwrite the runtime value. This exercises the remote-libvirt DETACHED
+    # disposition arm; a dropped `detached` arg would let the file clobber the runtime cap.
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _remote_libvirt_toml(name="rd")))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)  # create at cap=1
+            async with await _connect(migrated_url) as seed:
+                await seed.execute(
+                    "UPDATE resources SET capabilities = "
+                    "jsonb_set(capabilities, '{concurrent_allocation_cap}', '5') "
+                    "WHERE name = 'rd'"
+                )
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="remote-libvirt",
+                    name="rd",
+                    disposition="detached",
+                )
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)  # file still says cap=1
+        async with await _connect(migrated_url) as check:
+            row = await _resource_by_name(check, "rd")
+        assert _row_caps(row)["concurrent_allocation_cap"] == 5  # runtime value preserved
+
+    asyncio.run(_run())
+
+
+# --- Local-libvirt overlay change-detection boundary (each field on its own) -------------
+
+
+def _local_libvirt_toml(
+    *,
+    name: str,
+    cost_class: str = "local",
+    cap: int = 4,
+    pool: str | None = None,
+    host_uri: str = "qemu:///system",
+) -> str:
+    pool_line = f'pool = "{pool}"\n' if pool is not None else ""
+    return (
+        "schema_version = 2\n"
+        "[[local_libvirt]]\n"
+        f'name = "{name}"\n'
+        f'host_uri = "{host_uri}"\n'
+        f'cost_class = "{cost_class}"\n'
+        f"concurrent_allocation_cap = {cap}\n"
+        f"{pool_line}"
+    )
+
+
+async def _overlay_then_change(
+    migrated_url: str, tmp_path: Path, first: str, second: str
+) -> tuple[dict[str, object], ReconcileDiff]:
+    """Seed a discovered local row, overlay ``first``, then reconcile ``second``; return the row."""
+    async with await _connect(migrated_url) as seed:
+        await _insert_discovered_local(seed, host_uri="qemu:///system")
+    async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+        async with pool.connection() as conn:
+            await reconcile_resources(conn, load_inventory(_write_toml(tmp_path, first)))
+        async with pool.connection() as conn:
+            diff = await reconcile_resources(conn, load_inventory(_write_toml(tmp_path, second)))
+    async with await _connect(migrated_url) as check, check.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT * FROM resources WHERE host_uri = 'qemu:///system'")
+        row = await cur.fetchone()
+    assert row is not None
+    return row, diff
+
+
+def test_overlay_updates_on_name_change_alone(migrated_url: str, tmp_path: Path) -> None:
+    # Only the config name changes: overlay must still UPDATE. An `or`->`and` on the name operand
+    # of the change-detector would treat a lone name change as no-op.
+    async def _run() -> None:
+        first = _local_libvirt_toml(name="h1")
+        second = _local_libvirt_toml(name="h2")  # same cost_class/cap/pool
+        row, diff = await _overlay_then_change(migrated_url, tmp_path, first, second)
+        assert row["name"] == "h2"
+        assert "h2" in {u.name for u in diff.updated}
+
+    asyncio.run(_run())
+
+
+def test_overlay_updates_on_cost_class_change_alone(migrated_url: str, tmp_path: Path) -> None:
+    # Only cost_class changes: overlay must still UPDATE the cost_class column.
+    async def _run() -> None:
+        first = _local_libvirt_toml(name="h1", cost_class="local")
+        second = _local_libvirt_toml(name="h1", cost_class="premium")
+        row, diff = await _overlay_then_change(migrated_url, tmp_path, first, second)
+        assert row["cost_class"] == "premium"
+        assert "h1" in {u.name for u in diff.updated}
+
+    asyncio.run(_run())
+
+
+def test_overlay_updates_on_pool_change_alone(migrated_url: str, tmp_path: Path) -> None:
+    # Only the pool changes: overlay must still UPDATE the pool column.
+    async def _run() -> None:
+        first = _local_libvirt_toml(name="h1")  # pool defaults to 'default'
+        second = _local_libvirt_toml(name="h1", pool="pool-x")
+        row, diff = await _overlay_then_change(migrated_url, tmp_path, first, second)
+        assert row["pool"] == "pool-x"
+        assert "h1" in {u.name for u in diff.updated}
+
+    asyncio.run(_run())
+
+
+# --- Prune ordering + identity-lock serialization ---------------------------------------
+
+
+def test_resource_prune_continues_past_a_kept_row_to_a_departed_one(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The prune loop must `continue` (not `break`) past a still-declared row: a kept config row
+    # scanned before a departed one must not stop the loop and spare the departed row. The kept
+    # row is seeded first so it is scanned first, isolating the order-dependent short-circuit.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _insert_config_fault_inject(seed, name="fi-kept")  # scanned first
+            await _insert_config_fault_inject(seed, name="fi-departed")
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-kept")))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            diff = await reconcile_resources(conn, doc)
+        async with await _connect(migrated_url) as check:
+            assert await _resource_by_name(check, "fi-kept")  # still declared -> retained
+            async with check.cursor() as cur:
+                await cur.execute("SELECT 1 FROM resources WHERE name = 'fi-departed'")
+                assert await cur.fetchone() is None  # scanned after kept -> still pruned
+        assert "fi-departed" in {p.name for p in diff.pruned}
+        assert "fi-kept" not in {p.name for p in diff.pruned}
+
+    asyncio.run(_run())
+
+
+def test_file_departure_prune_serializes_on_the_resource_name_lock(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The file-departure prune must acquire the (kind, name) identity lock keyed by the row's
+    # real name: while a holder holds that lock, the prune BLOCKS. A name dropped to None would
+    # key a different lock and not block, racing a concurrent register/adopt.
+    from kdive.db.locks import LockScope, advisory_xact_lock
+    from kdive.domain.catalog.resources import ResourceKind
+    from tests.db_waits import wait_until_any_backend_waiting
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-plock")))
+        empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+        lock_key = f"{ResourceKind.FAULT_INJECT.value}:fi-plock"
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=2, max_size=4) as pool,
+            pool.connection() as holder,
+        ):
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)  # create the config row
+            async with (
+                holder.transaction(),
+                advisory_xact_lock(holder, LockScope.RESOURCE, lock_key),
+            ):
+                task = asyncio.create_task(_reconcile_on(pool, empty))  # departure -> prune
+                await wait_until_any_backend_waiting(holder, locktype="advisory")
+                assert not task.done(), "prune did not block on the held resource-name lock"
+            diff = await task
+        assert "fi-plock" in {p.name for p in diff.pruned}  # pruned once the lock released
+
+    asyncio.run(_run())
+
+
+def test_removed_ledger_prune_serializes_on_the_resource_name_lock(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The `removed`-disposition prune path likewise acquires the (kind, name) identity lock keyed
+    # by the row's real name: while a holder holds it, the removed-prune BLOCKS.
+    from kdive.db.locks import LockScope, advisory_xact_lock
+    from kdive.domain.catalog.resources import ResourceKind
+    from tests.db_waits import wait_until_any_backend_waiting
+
+    async def _run() -> None:
+        doc = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-rlock")))
+        lock_key = f"{ResourceKind.FAULT_INJECT.value}:fi-rlock"
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=2, max_size=4) as pool,
+            pool.connection() as holder,
+        ):
+            async with pool.connection() as conn:
+                await reconcile_resources(conn, doc)  # create the config row
+            async with await _connect(migrated_url) as seed:
+                await _set_ledger(
+                    seed,
+                    source_kind="resource",
+                    resource_kind="fault-inject",
+                    name="fi-rlock",
+                    disposition="removed",
+                )
+            async with (
+                holder.transaction(),
+                advisory_xact_lock(holder, LockScope.RESOURCE, lock_key),
+            ):
+                # The file still declares fi-rlock, so the `removed` ledger drives the prune path.
+                task = asyncio.create_task(_reconcile_on(pool, doc))
+                await wait_until_any_backend_waiting(holder, locktype="advisory")
+                assert not task.done(), "removed-prune did not block on the resource-name lock"
+            diff = await task
+        assert "fi-rlock" in {p.name for p in diff.pruned}  # never-allocated -> deleted
+
+    asyncio.run(_run())
 
 
 # --- ADR-0115 Finding-1: coefficient pricing across BOTH reconcile orchestrators -----
