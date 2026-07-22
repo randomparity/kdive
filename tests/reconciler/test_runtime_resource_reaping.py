@@ -100,6 +100,20 @@ class _RaisingProbe:
         raise RuntimeError(f"probe failed for {host_uri}")
 
 
+class _RaiseForHosts:
+    """A ResourceProbe that raises for specific host_uris and reports the rest reachable."""
+
+    def __init__(self, raise_hosts: set[str]) -> None:
+        self._raise = raise_hosts
+        self.probed: list[str] = []
+
+    async def probe(self, host_uri: str) -> bool:
+        self.probed.append(host_uri)
+        if host_uri in self._raise:
+            raise RuntimeError(f"probe failed for {host_uri}")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Lease-expiry reaping (the primary contract + invariant 6)
 # ---------------------------------------------------------------------------
@@ -323,6 +337,82 @@ def test_reap_candidate_failure_logs_exception_context(
         assert len(warnings) == 1
         assert warnings[0].exc_info is not None
         assert isinstance(warnings[0].exc_info[1], RuntimeError)
+
+    asyncio.run(_run())
+
+
+def test_multiple_lapsed_idle_resources_all_reaped_and_counted(migrated_url: str) -> None:
+    # Each idle lapsed-lease resource increments the acted tally: the return is the number
+    # reaped, not a fixed 1.
+    async def _run() -> None:
+        ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for i in range(3):
+                ids.append(
+                    await _seed_resource(
+                        seed,
+                        managed_by="runtime",
+                        lease_seconds=-60,
+                        host_uri=f"qemu+tls://idle{i}.example/system",
+                    )
+                )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, reap_expired_runtime_resources)
+        assert count == 3  # every reaped row counted, not a fixed 1
+        async with await connect(migrated_url) as check:
+            for rid in ids:
+                assert not await _exists(check, rid)
+
+    asyncio.run(_run())
+
+
+def test_multiple_lapsed_live_resources_all_cordoned_and_counted(migrated_url: str) -> None:
+    # Each lapsed-lease resource still backing a live allocation increments the acted tally on
+    # the pass that cordons it: the cordon branch counts per row, not a fixed 1.
+    async def _run() -> None:
+        ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for i in range(3):
+                rid = await _seed_resource(
+                    seed,
+                    managed_by="runtime",
+                    lease_seconds=-60,
+                    host_uri=f"qemu+tls://live{i}.example/system",
+                )
+                await _seed_live_allocation(seed, rid)
+                ids.append(rid)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, reap_expired_runtime_resources)
+        assert count == 3  # every cordoned row counted, not a fixed 1
+        async with await connect(migrated_url) as check:
+            for rid in ids:
+                assert await _cordoned(check, rid)
+                assert await _exists(check, rid)  # cordoned, never destroyed
+
+    asyncio.run(_run())
+
+
+def test_failed_candidate_does_not_halt_remaining_reaps(migrated_url: str) -> None:
+    # A probe failure on one candidate is isolated and the pass CONTINUES to the rest — it must
+    # not break out of the loop. The failing candidate is seeded first so a `break` regression
+    # would drop the reapable candidate that follows it.
+    async def _run() -> None:
+        bad = "qemu+tls://bad.example/system"
+        good = "qemu+tls://good.example/system"
+        async with await connect(migrated_url) as seed:
+            bad_id = await _seed_resource(
+                seed, managed_by="runtime", lease_seconds=-60, host_uri=bad
+            )
+            good_id = await _seed_resource(
+                seed, managed_by="runtime", lease_seconds=-60, host_uri=good
+            )
+        probe = _RaiseForHosts({bad})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: reap_expired_runtime_resources(c, probe))
+        assert count == 1  # the good candidate was reaped despite the earlier probe failure
+        async with await connect(migrated_url) as check:
+            assert await _exists(check, bad_id)  # probe raised before its prune → left intact
+            assert not await _exists(check, good_id)  # reached and reaped after the skip
 
     asyncio.run(_run())
 
