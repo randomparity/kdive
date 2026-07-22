@@ -117,6 +117,25 @@ def test_recovers_crashing_with_no_job_row(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_recovers_multiple_crashing_systems_all_counted(migrated_url: str) -> None:
+    # Each stalled crashing System is recovered and increments the tally: the return is the
+    # number recovered, not a fixed 1.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        ids = [
+            await seed_system(conn, system_state=SystemState.CRASHING) for _ in range(3)
+        ]  # no force_crash jobs → all stalled
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_crashing_systems)
+        assert recovered == 3  # every recovered System counted, not a fixed 1
+        for sid in ids:
+            assert await _system_state(conn, sid) == SystemState.CRASHED.value
+        await conn.close()
+
+    asyncio.run(_run())
+
+
 def test_recovers_crashing_detaches_live_session(migrated_url: str) -> None:
     async def _run() -> None:
         conn = await connect(migrated_url)
