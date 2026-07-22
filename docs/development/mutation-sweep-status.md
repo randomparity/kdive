@@ -354,8 +354,8 @@ are its sub-issues.
   `inventory.py` 56, 21→16 (equivalents plus a chapter of chdir-tooling-blocked mutants, below);
   `cleanup/runtime_resources.py` 124, 39→36 equivalent; `fleet.py` 143, 38→30 equivalent;
   `repairs/systems.py` 275, 61→~56 equivalent; `cleanup/gc.py` 248, 94→87 equivalent;
-  `repairs/allocations.py` 208, 52→50 equivalent; `loop.py` 184, 36→29 (equivalents plus a deferred
-  killable remainder, below). Assertion gaps killed by pinning the **swept-count** of every repair with a
+  `repairs/allocations.py` 208, 52→50 equivalent; `loop.py` 184, 36→20 (all equivalent — the deferred
+  repair-factory arg-passthrough remainder was killed by #1419, below). Assertion gaps killed by pinning the **swept-count** of every repair with a
   multi-candidate seed (each `+= 1` counter proven to sum, not fix at 1), the **skip-does-not-halt**
   contract (a skipped/failed candidate seeded before a reapable one, killing the `continue`→`break`
   mutants in the console-rotation, provider-domain, dump-volume, image-dangling, runtime-resource, and
@@ -382,14 +382,23 @@ are its sub-issues.
      that can never equal `""`, so the initial/reset sentinel value is always overwritten before a
      hash-match can read it.
 
-  **`loop.py` deferred killable remainder (needs a follow-up).** Nine repair-factory arg-passthrough
-  mutants (`config.upload_store`/`config.image_store`/`conn`/`image_publish_grace` → `None` in the
+  **`loop.py` fully swept (#1419).** The nine repair-factory arg-passthrough mutants
+  (`config.upload_store`/`config.image_store`/`conn`/`image_publish_grace` → `None` in the
   `_leaked_images`/`_dangling_images`/`_expired_private_images`/`_abandoned_uploads`/`_report`/
-  `_investigation`/`_expired_build` gc / `_reconcile_inventory` factory lambdas) survive because the
-  store-consuming repairs short-circuit on an empty DB (the store arg is never dereferenced). Killing
-  them needs a `reconcile_once` integration fixture that seeds one candidate per store-consuming repair
-  (and a custom image_store yielding a leaked object) so each repair reaches its store, then asserts
-  `report.failures == ()` — a large covering-set expansion, filed as a #1404 follow-up.
+  `_investigation`/`_expired_build` gc / `_reconcile_inventory` factory lambdas) survived because the
+  store-consuming repairs short-circuit on an empty DB (the store arg was never dereferenced). #1419
+  killed them with a `reconcile_once` seed fixture (`tests/reconciler/test_reconcile_once_stores.py`)
+  that seeds one live candidate per store-consuming repair and hands the pass real recording stores,
+  asserting each repair's count is 1 and `report.failures == ()` (a `None`-threaded factory arg makes
+  the repair raise, landing it in `failures` with a 0 count). The `_reconcile_inventory` factory's
+  `config.image_store` passthrough — only dereferenced for an object-HEAD-gated s3 image — is killed by
+  `test_loop_inventory_pass_threads_image_store_into_head_gated_s3` in
+  `tests/integration/test_reconcile_inventory.py`. Run with those two files added to the
+  `tests/reconciler` + `tests/integration/test_reconcile_inventory.py` covering set: 184 mutants, 29→20
+  surviving, **0 in the arg-passthrough cluster**. The 20 residual are equivalent — the timing/log/
+  best-effort machinery in `_sleep_until_stop`, `_run_repair_plan`'s `_log.warning`, `_refresh_fleet_snapshot`
+  (best-effort snapshot read), `_pass_loop`'s lag/interval arithmetic, and `_tick_until_stop` — the same
+  classes as the sibling buckets.
 
 **Not yet swept:** the deferred `jobs/handlers/` remainder above
 (`capture_traffic` / `boot_evidence` / `systems`) — a #1402 follow-up.
