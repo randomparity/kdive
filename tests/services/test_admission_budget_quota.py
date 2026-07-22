@@ -13,20 +13,21 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from kdive.db.repositories import BUDGETS, QUOTAS, RESOURCES
+from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.accounting.cost import Selector
 from kdive.domain.accounting.records import Budget, Quota
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resource_capabilities import CONCURRENT_ALLOCATION_CAP_KEY
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.services.allocation import idempotency as allocation_idempotency
 from kdive.services.allocation.admission.core import (
@@ -321,6 +322,42 @@ def test_quota_only_unmet_lists_quota(migrated_url: str) -> None:
             assert unmet[0] == {"gate": "quota", "current": 0, "required": 1}
 
     asyncio.run(_run())
+
+
+async def _occupy_one(conn: psycopg.AsyncConnection, resource_id: UUID) -> None:
+    await ALLOCATIONS.insert(
+        conn,
+        Allocation(
+            id=uuid4(),
+            created_at=_DT,
+            updated_at=_DT,
+            principal="alice",
+            project="proj",
+            resource_id=resource_id,
+            state=AllocationState.GRANTED,
+        ),
+    )
+
+
+def test_quota_unmet_at_exact_limit_lists_limit_budget_met_at_exact_remaining(
+    migrated_url: str,
+) -> None:
+    # Boundary test: quota count == limit denies (>=, not >) and the entry names the finite
+    # limit; budget with remaining == estimate is still met (>=, not >), so the aggregate lists
+    # the quota gate ONLY.
+    async def _run() -> list[dict[str, object]]:
+        async with _conn(migrated_url) as conn:
+            res = await _seed_resource(conn, cap=10)
+            await _occupy_one(conn, res.id)  # one occupying allocation -> count == 1
+            await _seed_quota(conn, allocs=1)  # limit == count == 1
+            await _seed_budget(conn, limit="6")  # remaining 6 == estimate (rate 3 x window 2h)
+            outcome = await _admit(conn, resource=res)
+            assert outcome.granted is False
+            assert outcome.category is ErrorCategory.QUOTA_EXCEEDED
+            return outcome.details["unmet"]
+
+    unmet = asyncio.run(_run())
+    assert unmet == [{"gate": "quota", "current": 1, "required": 2, "limit": 1}]
 
 
 def test_host_cap_denial_has_no_unmet(migrated_url: str) -> None:
