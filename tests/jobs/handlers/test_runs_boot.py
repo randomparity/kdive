@@ -27,6 +27,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.console import ConsoleSnapshotter
 from kdive.providers.ports.lifecycle import Booter, Connector
 from kdive.security.artifacts.artifact_search import (
     ArtifactSearchInputError,
@@ -672,12 +673,19 @@ class _AccelRun:
 
 
 def test_resolve_system_accel_returns_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _get(_conn: object, _sid: object) -> _FakeSystemAccel:
+    get_calls: list[tuple[object, object]] = []
+
+    async def _get(conn: object, sid: object) -> _FakeSystemAccel:
+        get_calls.append((conn, sid))
         return _FakeSystemAccel("tcg")
 
     monkeypatch.setattr(runs_boot.SYSTEMS, "get", _get)
-    got = asyncio.run(runs_boot._resolve_system_accel(cast(AsyncConnection, object()), uuid4()))
+    conn = cast(AsyncConnection, object())
+    system_id = uuid4()
+    got = asyncio.run(runs_boot._resolve_system_accel(conn, system_id))
     assert got == "tcg"
+    # The System is read with the handler's own (conn, system_id), not None/some other id.
+    assert get_calls == [(conn, system_id)]
 
 
 def test_resolve_system_accel_none_when_system_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -719,6 +727,100 @@ def test_boot_and_capture_forwards_accel_to_booter(monkeypatch: pytest.MonkeyPat
     )
     assert spy.accel_seen == "tcg"
     assert result["boot_outcome"] == "ready"
+
+
+class _SpyBooterFull:
+    """Booter recording both the system_id and accel it was driven with."""
+
+    def __init__(self) -> None:
+        self.system_id_seen: object = "UNSET"
+        self.accel_seen: object = "UNSET"
+
+    def boot(self, system_id: UUID, *, accel: str | None = None) -> None:
+        self.system_id_seen = system_id
+        self.accel_seen = accel
+
+
+def test_ready_path_threads_collaborator_args_and_builds_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ready path drives booter.boot(system_id) and threads (conn, system_id, run.id, deps)
+    # verbatim into capture_run_console / evaluate_expected_failure_after_ready / record_boot_audit,
+    # then returns {system_id, boot_outcome, evidence_artifact_id} — pin every one so an arg swapped
+    # to None or a mistyped result key is caught.
+    system_id = uuid4()
+    run = _AccelRun(system_id)
+    conn = cast(AsyncConnection, object())
+    job_ctx = cast(RequestContext, object())
+    profile_policy = cast(ProfilePolicy, object())
+    secret_registry = cast(SecretRegistry, object())
+    artifact_store = cast(ObjectStore, object())
+    artifact = boot_evidence.ConsoleArtifact(uuid4(), "tenant/console", b"[ 1.0] kdive-ready\n")
+    booter = _SpyBooterFull()
+    # A non-None sentinel snapshotter so a snapshotter=None arg swap is observable.
+    snapshotter = cast(ConsoleSnapshotter, object())
+
+    cap_calls: list[tuple[object, ...]] = []
+    eval_calls: list[tuple[object, ...]] = []
+    audit_calls: list[tuple[object, ...]] = []
+
+    async def _cap(
+        c: object,
+        sid: object,
+        rid: object,
+        *,
+        secret_registry: object,
+        artifact_store: object,
+        snapshotter: object,
+        mark: object,
+    ) -> object:
+        cap_calls.append((c, sid, rid, secret_registry, artifact_store, snapshotter, mark))
+        return artifact
+
+    async def _eval(
+        c: object,
+        ctx: object,
+        r: object,
+        *,
+        system_id: object,
+        profile_policy: object,
+        artifact: object,
+    ) -> object:
+        eval_calls.append((c, ctx, r, system_id, profile_policy, artifact))
+        return None
+
+    async def _audit(c: object, ctx: object, r: object) -> None:
+        audit_calls.append((c, ctx, r))
+
+    monkeypatch.setattr(boot_evidence, "capture_run_console", _cap)
+    monkeypatch.setattr(boot_evidence, "evaluate_expected_failure_after_ready", _eval)
+    monkeypatch.setattr(boot_evidence, "record_boot_audit", _audit)
+
+    result = asyncio.run(
+        runs_boot._run_boot_and_capture_outcome(
+            conn,
+            job_ctx,
+            cast(Run, run),
+            cast(Booter, booter),
+            cast(Connector, object()),
+            profile_policy,
+            secret_registry,
+            artifact_store,
+            snapshotter,
+            0,
+            accel="kvm",
+        )
+    )
+
+    assert booter.system_id_seen == system_id
+    assert cap_calls == [(conn, system_id, run.id, secret_registry, artifact_store, snapshotter, 0)]
+    assert eval_calls == [(conn, job_ctx, run, system_id, profile_policy, artifact)]
+    assert audit_calls == [(conn, job_ctx, run)]
+    assert result == {
+        "system_id": str(system_id),
+        "boot_outcome": "ready",
+        "evidence_artifact_id": str(artifact.id),
+    }
 
 
 # --- expected_boot_failure evaluated on the ready path (ADR-0383, #1267) ---------------------
