@@ -453,6 +453,39 @@ def test_request_admission_by_kind_grant_threads_requested_kind(
     asyncio.run(_run())
 
 
+def test_request_admission_threads_arch_into_placement_and_admit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # arch must reach BOTH the placement filter (candidate selection) and the admission
+    # request (persisted requested_arch + accel/emulator sizing). Dropping it on either path
+    # silently misroutes or mis-sizes a cross-arch guest.
+    resource = _resource()
+    placement_requests: list[PlacementRequest] = []
+    admission_requests: list[AllocationRequest] = []
+
+    async def sizing(*_: object, **__: object) -> ResolvedSizing:
+        return _sizing()
+
+    async def placement(_conn: object, placement_request: object) -> PlacementCandidates:
+        placement_requests.append(cast(PlacementRequest, placement_request))
+        return PlacementCandidates(resources=[resource])
+
+    async def admit(_conn: object, admission_request: object) -> AdmissionOutcome:
+        admission_requests.append(cast(AllocationRequest, admission_request))
+        return AdmissionOutcome(granted=True, allocation=_allocation())
+
+    monkeypatch.setattr(request_service, "resolve_request_sizing", sizing)
+    monkeypatch.setattr(request_service, "resolve_placement_candidates", placement)
+    monkeypatch.setattr(request_service, "admit", admit)
+
+    async def _run() -> None:
+        await request_admission(_CONN, _ctx(), project="proj", spec=_spec(arch="ppc64le"))
+        assert placement_requests[0].arch == "ppc64le"
+        assert admission_requests[0].arch == "ppc64le"
+
+    asyncio.run(_run())
+
+
 def test_request_admission_by_pool_does_not_set_requested_kind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
