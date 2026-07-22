@@ -30,6 +30,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeClaim, PCIeDescriptor
 from kdive.mcp.auth import RequestContext
+from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import AllocationRequest, admit
 from tests.db_waits import wait_until_backend_waiting
 
@@ -150,13 +151,39 @@ async def _count_ledger(conn: psycopg.AsyncConnection) -> int:
     return await _scalar(conn, "SELECT count(*) FROM ledger")
 
 
+async def _audit_row(
+    conn: psycopg.AsyncConnection, object_id: UUID
+) -> tuple[str, str, str, str, str] | None:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT tool, object_kind, transition, args_digest, project FROM audit_log "
+            "WHERE object_id = %s",
+            (object_id,),
+        )
+        return await cur.fetchone()
+
+
 def test_host_cap_denial_with_queue_enqueues_a_requested_row(migrated_url: str) -> None:
     async def _run() -> None:
         async with _conn(migrated_url) as conn:
             res = await _seed_resource(conn, cap=1)
             await _seed_quota(conn)
             await _seed_granted(conn, res.id)  # fills the single host slot
-            outcome = await admit(conn, _queued_request(res))
+            outcome = await admit(
+                conn,
+                AllocationRequest(
+                    ctx=CTX,
+                    resource=res,
+                    project="proj",
+                    selector=SEL,
+                    window=1,
+                    on_capacity="queue",
+                    disk_gb=10,
+                    shape="gpu-small",  # a named preset label persisted, never re-resolved
+                    arch="x86_64",  # arch snapshot the promotion sweep re-admits with
+                    requested_kind=ResourceKind.LOCAL_LIBVIRT,
+                ),
+            )
             assert outcome.granted is True
             alloc = outcome.allocation
             assert alloc is not None
@@ -168,6 +195,16 @@ def test_host_cap_denial_with_queue_enqueues_a_requested_row(migrated_url: str) 
             assert alloc.requested_vcpus == 1
             assert alloc.requested_disk_gb == 10
             assert alloc.requested_kind is ResourceKind.LOCAL_LIBVIRT
+            assert alloc.shape == "gpu-small"  # the preset label is snapshotted
+            assert alloc.requested_arch == "x86_64"  # the arch snapshot is persisted
+            # The enqueue writes its own audit row (distinct tool/transition/args from a grant).
+            assert await _audit_row(conn, alloc.id) == (
+                "allocations.request",
+                "allocations",
+                "->requested",
+                args_digest({"project": "proj", "on_capacity": "queue"}),
+                "proj",
+            )
             # No reserve: the ledger holds nothing for a queued row (only the seeded grant
             # was inserted directly, never via accounting, so the ledger is empty).
             assert await _count_ledger(conn) == 0
@@ -249,7 +286,9 @@ def test_pcie_capacity_denial_with_queue_enqueues(migrated_url: str) -> None:
             assert alloc is not None
             assert alloc.state is AllocationState.REQUESTED
             assert alloc.resource_id is None
-            assert alloc.pcie_claim == []
+            assert alloc.pcie_claim == []  # nothing claimed at enqueue
+            # The requested device union is snapshotted so the promotion sweep re-resolves it.
+            assert alloc.requested_pcie_specs == ["8086:1572"]
             assert await _count_ledger(conn) == 0
 
     asyncio.run(_run())
