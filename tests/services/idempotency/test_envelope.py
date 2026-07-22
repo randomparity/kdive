@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -51,6 +52,8 @@ def test_validate_idempotency_key_bounds() -> None:
         with pytest.raises(CategorizedError) as exc:
             validate_idempotency_key(bad)
         assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert exc.value.details == {"reason": "idempotency_key_invalid"}
+        assert str(exc.value) == "idempotency_key must be 1-200 characters"
 
 
 def test_record_then_resolve_returns_identical_envelope(migrated_url: str) -> None:
@@ -150,5 +153,28 @@ def test_resolve_conflict_cross_tool_raises_conflict(migrated_url: str) -> None:
                     conn, principal="alice", key="shared", kind="systems.provision"
                 )
             assert exc.value.category is ErrorCategory.CONFLICT
+            assert exc.value.details == {"reason": "idempotency_key_in_use"}
+            assert str(exc.value) == (
+                "idempotency_key (alice, shared) is already in use by another operation"
+            )
+
+    asyncio.run(_run())
+
+
+def test_resolve_replay_returns_unwrapped_dict_when_no_envelope(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _open_pool(migrated_url) as pool, pool.connection() as conn:
+            # A row whose stored result is a plain JSON object with no "envelope" key
+            # (legacy / directly-written shape) must replay as the document itself.
+            bare = {"object_id": "22222222-2222-2222-2222-222222222222", "status": "ok"}
+            async with conn.transaction(), conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO idempotency_keys (key, principal, project, kind, result) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    ("bare", "alice", "proj", "runs.create", Jsonb(bare)),
+                )
+            got = await resolve_replay(conn, principal="alice", key="bare", kind="runs.create")
+            assert got is not None
+            assert got.document == bare
 
     asyncio.run(_run())
