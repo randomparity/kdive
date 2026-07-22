@@ -11,9 +11,11 @@ from uuid import uuid4
 import pytest
 from psycopg import AsyncConnection
 
+from kdive.domain.operations.jobs import JobKind
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.runs import liveness as liveness_mod
 from kdive.services.runs.liveness import (
+    _STORM_TAIL_CHARS,
     STATE_DEGRADED,
     STATE_HEALTHY,
     STATE_UNKNOWN,
@@ -58,6 +60,18 @@ def test_repeated_oom_retry_storm_flags_degraded() -> None:
 def test_matches_are_case_insensitive() -> None:
     tail = "\n".join(["SOFT LOCKUP - CPU#0 stuck", "Hung Task detected stall", "OUT OF MEMORY"])
     assert detect_console_storm(tail) is True
+
+
+def test_exactly_min_hits_flags_a_storm() -> None:
+    # Boundary: exactly _STORM_MIN_HITS (3) signatures must trip the storm (>= not >).
+    tail = "\n".join("soft lockup" for _ in range(3))
+    assert detect_console_storm(tail) is True
+
+
+def test_one_below_min_hits_is_not_a_storm() -> None:
+    # Boundary: one fewer than the threshold must stay below it.
+    tail = "\n".join("soft lockup" for _ in range(2))
+    assert detect_console_storm(tail) is False
 
 
 # --- state derivation ----------------------------------------------------------------------
@@ -119,26 +133,52 @@ def test_parse_verdict_without_checked_at() -> None:
 # --- data shape ----------------------------------------------------------------------------
 
 
-def _patch_signals(monkeypatch, *, console_tail: str | None, ssh_result_ref: str | None) -> None:
-    async def _fake_tail(_system_id, _registry, *, max_chars: int = 0) -> str | None:
+def _patch_signals(
+    monkeypatch,
+    *,
+    console_tail: str | None,
+    ssh_result_ref: str | None,
+    expected_conn: object,
+    expected_system_id,
+    expected_registry: SecretRegistry,
+) -> None:
+    # The fakes assert every argument the production calls forward: a mutant that drops or nulls
+    # conn / system_id / kind / registry / max_chars reaches an assertion and is killed.
+    async def _fake_tail(system_id, registry, *, max_chars: int = 0) -> str | None:
+        assert system_id == expected_system_id
+        assert registry is expected_registry
+        assert max_chars == _STORM_TAIL_CHARS
         return console_tail
 
-    async def _fake_job(_conn, _kind, _system_id):
+    async def _fake_job(conn, kind, system_id):
+        assert conn is expected_conn
+        assert kind is JobKind.CHECK_SSH_REACHABLE
+        assert system_id == expected_system_id
         return None if ssh_result_ref is None else SimpleNamespace(result_ref=ssh_result_ref)
 
     monkeypatch.setattr(liveness_mod, "redacted_console_tail", _fake_tail)
     monkeypatch.setattr(liveness_mod.queue, "latest_succeeded_job_for_system", _fake_job)
 
 
-def test_derive_liveness_degraded_on_console_storm(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A livelocked guest (printk storm) reads state=degraded even with no SSH probe (#1237).
+def _run_derive(monkeypatch, *, console_tail: str | None, ssh_result_ref: str | None) -> Liveness:
+    conn = object()
+    system_id = uuid4()
+    registry = SecretRegistry()
     _patch_signals(
         monkeypatch,
-        console_tail="foo\n214 callbacks suppressed\nbar",
-        ssh_result_ref=None,
+        console_tail=console_tail,
+        ssh_result_ref=ssh_result_ref,
+        expected_conn=conn,
+        expected_system_id=system_id,
+        expected_registry=registry,
     )
-    result = asyncio.run(
-        derive_liveness(cast(AsyncConnection, object()), uuid4(), SecretRegistry())
+    return asyncio.run(derive_liveness(cast(AsyncConnection, conn), system_id, registry))
+
+
+def test_derive_liveness_degraded_on_console_storm(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A livelocked guest (printk storm) reads state=degraded even with no SSH probe (#1237).
+    result = _run_derive(
+        monkeypatch, console_tail="foo\n214 callbacks suppressed\nbar", ssh_result_ref=None
     )
     assert result.state == STATE_DEGRADED
     assert result.console_storm is True
@@ -147,13 +187,10 @@ def test_derive_liveness_degraded_on_console_storm(monkeypatch: pytest.MonkeyPat
 
 
 def test_derive_liveness_degraded_on_unreachable_ssh(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_signals(
+    result = _run_derive(
         monkeypatch,
         console_tail="clean boot\nkdive-ready",
         ssh_result_ref=json.dumps({"reachable": False, "checked_at": "2026-07-16T00:00:00+00:00"}),
-    )
-    result = asyncio.run(
-        derive_liveness(cast(AsyncConnection, object()), uuid4(), SecretRegistry())
     )
     assert result.state == STATE_DEGRADED
     assert result.console_storm is False
@@ -162,23 +199,28 @@ def test_derive_liveness_degraded_on_unreachable_ssh(monkeypatch: pytest.MonkeyP
 
 
 def test_derive_liveness_healthy_when_clean_and_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_signals(
+    result = _run_derive(
         monkeypatch,
         console_tail="clean boot\nkdive-ready\nlogin:",
         ssh_result_ref=json.dumps({"reachable": True, "checked_at": "2026-07-16T00:00:00+00:00"}),
-    )
-    result = asyncio.run(
-        derive_liveness(cast(AsyncConnection, object()), uuid4(), SecretRegistry())
     )
     assert result.state == STATE_HEALTHY
     assert result.ssh_reachable is True
 
 
+def test_derive_liveness_healthy_when_console_empty_and_unprobed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An empty (readable) console is a positive signal: console_read is True, so an unprobed
+    # guest stays healthy not unknown. Pins console_read=(console_tail is not None), not a literal.
+    result = _run_derive(monkeypatch, console_tail="", ssh_result_ref=None)
+    assert result.state == STATE_HEALTHY
+    assert result.console_storm is False
+    assert result.ssh_reachable is None
+
+
 def test_derive_liveness_unknown_when_no_signal(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_signals(monkeypatch, console_tail=None, ssh_result_ref=None)
-    result = asyncio.run(
-        derive_liveness(cast(AsyncConnection, object()), uuid4(), SecretRegistry())
-    )
+    result = _run_derive(monkeypatch, console_tail=None, ssh_result_ref=None)
     assert result.state == STATE_UNKNOWN
     assert result.console_storm is False
     assert result.ssh_reachable is None
