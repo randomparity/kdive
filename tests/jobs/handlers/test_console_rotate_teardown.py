@@ -187,7 +187,7 @@ async def _part_rows(pool: AsyncConnectionPool, system_id: UUID) -> list[str]:
 def test_teardown_reclaims_console_parts_and_sidecar(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _run() -> tuple[list[str], list[str], bool]:
+    async def _run() -> tuple[list[str], list[str], list[str], bool]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
             await pool.open()
             system_id = await _seed_ready_system(pool)
@@ -201,12 +201,15 @@ def test_teardown_reclaims_console_parts_and_sidecar(
             assert sidecar_key in store.objects, "rotation must have written a sidecar"
             await _teardown(pool, store, system_id)
             after = await _part_rows(pool, system_id)
-            return before, after, sidecar_key in store.objects
+            objects_after = [k for k in store.objects if "console-part-" in k]
+            return before, after, objects_after, sidecar_key in store.objects
 
-    before, after, sidecar_present = asyncio.run(_run())
+    before, after, objects_after, sidecar_present = asyncio.run(_run())
 
     assert any("console-part-" in key for key in before), "rotation must seal at least one part row"
     assert [k for k in after if "console-part-" in k] == [], "console-part rows must be reclaimed"
+    # The part OBJECTS (not just their rows) are deleted by key — a wrong-key delete leaks them.
+    assert objects_after == [], "console-part objects must be deleted from the store"
     assert not sidecar_present, "sidecar object must be deleted at teardown"
 
 
