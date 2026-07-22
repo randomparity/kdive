@@ -201,6 +201,52 @@ are its sub-issues.
   8. **Protocol-stub default args** — the `arch="x86_64"` default on the
      `CompleteBuildValidation.__call__` Protocol (a `...` body never executed).
 
+- `services/` remaining container-backed bucket (#1400) — the reports / debug / investigations
+  / images / systems / accounting service modules, swept serially against their `migrated_url`
+  covering tests (`tests/services/{reports,debug,images,systems,accounting}/*`, plus
+  `tests/services/test_accounting*.py`, `tests/reconciler/test_image_sweeps.py`,
+  `tests/mcp/debug/test_debug_session_read.py`). Per module (mutants, surviving before → after):
+  `reports/sections.py` 215, 65→28 equivalent; `debug/detach.py` 26, 2→2 equivalent;
+  `debug/sessions.py` 19, 0 (already clean); `systems/validation.py` 59, 12→0;
+  `images/retention.py` 76, 19→18 equivalent (killed the `pruned += 1`→`= 1` count mutant);
+  `images/publish.py` 266, 37→18 equivalent; `images/upload.py` 295, 76→8 equivalent;
+  `accounting/ledger.py` 430, 34→24 equivalent; `systems/admission.py` 336, 70→28 (equivalents
+  **plus a deferred killable remainder**, below). The earlier commits on this branch swept the
+  idempotency / artifacts-listing / debug-lifecycle / investigations (`read`/`view`/`lifecycle`/
+  `metadata`/`common`) / reports (`render`/`artifacts`/`core`) modules to 0-or-equivalent. Gaps
+  killed by pinning: the section scope-isolation / cap-truncation / activity effective-window /
+  costs value+window paths; the fail-closed upload quota / oversize / clamp-expiry pure decisions
+  and their error+audit contracts; the publish digest-mismatch / HEAD-gate error contracts; the
+  reconcile missing-size + started-but-unended active-hours guard; the provision persisted-System
+  fields + audit + job + quota boundary + recycle failure. The **surviving mutants are
+  equivalent**, in the same classes as `#1399` (Postgres case-folded SQL; advisory-lock key
+  args; `cast`/`model_dump` no-ops; naive-vs-UTC DB-overwritten `now`) plus:
+  1. **`cap + 1` fetch sentinel** — the section pagers fetch `cap + 1` to detect truncation;
+     any value `≥ cap + 1` (including `None` = `LIMIT NULL` = no limit, or `cap + 2`) yields an
+     identical `_capped` result (`rows[:cap]`, `truncated = len > cap`) — only `< cap + 1`
+     (e.g. `cap - 1`) is observable, and that is killed.
+  2. **Empty-clause accumulator** — the first `clause += …` on an empty `clause` equals `=`.
+  3. **`_log.*` log-statement mutations** — argument/message mutations on `_log.info`/`_log.warning`
+     calls (the retention / publish best-effort legs); no behavioral effect, matching the
+     campaign's `do_not_mutate_patterns=logger.\w+` intent (missed here as the modules use `_log`).
+  4. **Unreachable fallbacks / no-op labels** — the costs `principal or ""` fallback (grouped
+     principals are always non-empty), the upload identity-component error label casing (the
+     security decision is pinned by the traversal guard), the cosmetic tempdir prefix, and the
+     `_validate_staged(None, …)` source under the stubbed inspect seam.
+  5. **Local-profile binding no-ops (`systems/admission.py`)** — for the local-libvirt test
+     profile the resource resolves `accel=None`/`resolved_cpu=None` and requests neither fadump
+     nor a pinned CPU, so the fadump / cpu-pin / `resolved_cpu` binding mutants are unobservable.
+
+  **`systems/admission.py` deferred killable remainder (needs a follow-up).** Restricting the
+  covering set to `tests/services/systems/` (the root `test_admission_*` cover
+  `services/allocation`, not this module) leaves a killable remainder that needs new fixtures,
+  not just assertions: (a) the `accel`-resolution mutants in `_resolve_new_system_bindings` /
+  `_insert_*` need a KVM/TCG caps-bearing resource whose `capability_view` resolves a non-`None`
+  accel (the `FakeLibvirtConn` resource yields `accel=None`); (b) `_provision_create_response`'s
+  `is FAILED` branch converges with the recycle branch unless a **failed provision job**
+  (dedup-keyed) is seeded so `_failed_system_retry_failure` diverges; (c) the enqueue dedup-key
+  `allocation_id=None` mutant needs a job idempotency/dedup-key assertion.
+
 **Not yet swept:** the remaining subsystem buckets (`jobs/handlers/`,
 `inventory/`, `reconciler/`) — filed as #1306 sub-issues.
 
