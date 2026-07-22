@@ -340,8 +340,54 @@ are its sub-issues.
   edges (need remote-libvirt override fixtures), the `_fault_inject_upsert` host-adopt edge, and the
   `_prune_departed` `name→None` passthrough into `prune_or_cordon_*`.
 
-**Not yet swept:** the `reconciler/` bucket and the deferred `jobs/handlers/` remainder above
-(`capture_traffic` / `boot_evidence` / `systems`) — filed as #1306 sub-issues / a #1402 follow-up.
+- `reconciler/` bucket (#1404) — the periodic drift-repair loop, swept serially against its
+  `migrated_url` covering tests (`tests/reconciler/*`, plus `tests/integration/test_reconcile_inventory.py`
+  for the inventory pass). Per module (mutants, surviving before → after): `repairs/jobs.py` 60, 14→13
+  equivalent; `repairs/debug_sessions.py` 107, 27→27 equivalent; `repairs/console_rotation.py` 67, 11→6
+  equivalent; `cleanup/uploads.py` 106, 20→19 equivalent; `loop_telemetry.py` 108, 25→25 equivalent;
+  `cleanup/images.py` 84, 22→19 equivalent; `cleanup/provider_reaping.py` 121, 39→35 equivalent;
+  `inventory.py` 56, 21→16 (equivalents plus a chapter of chdir-tooling-blocked mutants, below);
+  `cleanup/runtime_resources.py` 124, 39→36 equivalent; `fleet.py` 143, 38→30 equivalent;
+  `repairs/systems.py` 275, 61→~56 equivalent; `cleanup/gc.py` 248, 94→87 equivalent;
+  `repairs/allocations.py` 208, 52→50 equivalent; `loop.py` 184, 36→29 (equivalents plus a deferred
+  killable remainder, below). Assertion gaps killed by pinning the **swept-count** of every repair with a
+  multi-candidate seed (each `+= 1` counter proven to sum, not fix at 1), the **skip-does-not-halt**
+  contract (a skipped/failed candidate seeded before a reapable one, killing the `continue`→`break`
+  mutants in the console-rotation, provider-domain, dump-volume, image-dangling, runtime-resource, and
+  console-collector loops), the console-rotation `boot_id` stat identity, the reap-order state guard
+  (`state not in gone_states`), the fleet capacity-total continue + all-valid no-warning + gauge units,
+  the inventory pass's parsed-doc/real-path flow and drift-repair-every-pass cache, and the loop's
+  console-registry wiring + config-driven publish grace. The **surviving mutants are equivalent**, in the
+  same classes as the sibling buckets (Postgres case-folded SQL; `_log.*` log-statement mutations incl.
+  `exc_info`; advisory-lock key args; `row_factory=None`/`cast` no-ops on un-indexed results; OTel
+  case-normalized metric names + advisory bucket bounds; `bool`→`None` falsy assignments; unreachable
+  `else` fallbacks on always-one-row queries; defense-in-depth `or`→`and` re-check guards whose
+  delete-between-select-and-lock race is unreachable in a single-connection test; audit-event field
+  mutations; and the `mtime >= cutoff` naive boundary an exact-epoch match cannot reach) plus:
+  1. **inventory `_cwd_inventory_shadowed` — chdir-tooling-blocked (7).** The CWD-shadow detection is
+     inherently CWD-relative (`Path("systems.toml")`), so its tests use `monkeypatch.chdir`; mutmut's
+     trampoline resolves the mutated source file relative to the process CWD, so a `chdir` mid-test
+     aborts its baseline. Those tests live in `test_inventory_pass_cwd.py`, kept out of the sweep but
+     run in the suite, so the shadow-guard / warn-once / `_cwd_shadow_warned=True` mutants are behaviorally
+     covered though not mutmut-attributable. (The baseline also required a `loop`-free covering test —
+     `loop.py`'s module-level `_INVENTORY_PASS = InventoryReconcilePass()` singleton runs mutated code at
+     import time and trips the same trampoline — so `test_inventory_pass.py` imports only
+     `kdive.reconciler.inventory`.)
+  2. **`inventory.__init__`/`reset` `None`→`""` (equivalent).** The cache is keyed by a sha256 hex digest
+     that can never equal `""`, so the initial/reset sentinel value is always overwritten before a
+     hash-match can read it.
+
+  **`loop.py` deferred killable remainder (needs a follow-up).** Nine repair-factory arg-passthrough
+  mutants (`config.upload_store`/`config.image_store`/`conn`/`image_publish_grace` → `None` in the
+  `_leaked_images`/`_dangling_images`/`_expired_private_images`/`_abandoned_uploads`/`_report`/
+  `_investigation`/`_expired_build` gc / `_reconcile_inventory` factory lambdas) survive because the
+  store-consuming repairs short-circuit on an empty DB (the store arg is never dereferenced). Killing
+  them needs a `reconcile_once` integration fixture that seeds one candidate per store-consuming repair
+  (and a custom image_store yielding a leaked object) so each repair reaches its store, then asserts
+  `report.failures == ()` — a large covering-set expansion, filed as a #1404 follow-up.
+
+**Not yet swept:** the deferred `jobs/handlers/` remainder above
+(`capture_traffic` / `boot_evidence` / `systems`) — a #1402 follow-up.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 
