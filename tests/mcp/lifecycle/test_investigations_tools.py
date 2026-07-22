@@ -527,9 +527,28 @@ def _refs_of(pool: AsyncConnectionPool, inv_id: str):
     return _q
 
 
+def _resp_ref_keys(resp: ToolResponse) -> set[tuple[str, str]]:
+    refs = cast("list[dict[str, str]]", resp.data["external_refs"])
+    return {(r["tracker"], r["id"]) for r in refs}
+
+
+async def _audit_row(pool: AsyncConnectionPool, inv_id: str, transition: str) -> dict[str, object]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT tool, object_kind, args_digest, project FROM audit_log "
+            "WHERE object_id = %s AND transition = %s",
+            (inv_id, transition),
+        )
+        rows = await cur.fetchall()
+    assert len(rows) == 1
+    return rows[0]
+
+
 def test_link_then_unlink_round_trip(migrated_url: str) -> None:
+    from kdive.security.audit import args_digest
+
     # The issue's first acceptance criterion: open -> link -> unlink mutates external_refs.
-    async def _run() -> None:
+    async def _run() -> tuple[dict, dict, dict, dict]:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
             ref: ExternalRefInput = {
@@ -539,14 +558,62 @@ def test_link_then_unlink_round_trip(migrated_url: str) -> None:
             }
             await link_external_ref(pool, _ctx(), inv_id, ref)
             after_link = await _refs_of(pool, inv_id)()
+            link_audit = await _audit_row(pool, inv_id, "link")
             await unlink_external_ref(
                 pool, _ctx(), inv_id, {"tracker": ref["tracker"], "id": ref["id"]}
             )
             after_unlink = await _refs_of(pool, inv_id)()
-        assert after_link == {("bz", "7"): "https://bz/7"}
-        assert after_unlink == {}
+            unlink_audit = await _audit_row(pool, inv_id, "unlink")
+        return after_link, after_unlink, link_audit, unlink_audit
 
-    asyncio.run(_run())
+    after_link, after_unlink, link_audit, unlink_audit = asyncio.run(_run())
+    assert after_link == {("bz", "7"): "https://bz/7"}
+    assert after_unlink == {}
+    for transition, audit_row in (("link", link_audit), ("unlink", unlink_audit)):
+        assert audit_row["tool"] == f"investigations.{transition}"
+        assert audit_row["object_kind"] == "investigations"
+        assert audit_row["project"] == "proj"
+        assert audit_row["args_digest"] == args_digest({"tracker": "bz", "id": "7"})
+
+
+def test_link_preserves_other_refs(migrated_url: str) -> None:
+    """Linking a new ref keeps the Investigation's existing distinct refs (dedup is per key)."""
+
+    async def _run() -> dict[tuple[str, str], str]:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            await link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+            )
+            resp = await link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "jira", "id": "K-9", "url": "https://j/9"}
+            )
+            # The rendered response also reflects both refs (returned model, not just the row).
+            assert _resp_ref_keys(resp) == {("bz", "7"), ("jira", "K-9")}
+            return await _refs_of(pool, inv_id)()
+
+    refs = asyncio.run(_run())
+    assert refs == {("bz", "7"): "https://bz/7", ("jira", "K-9"): "https://j/9"}
+
+
+def test_link_unlink_set_cross_project_not_found_carries_raw_id(migrated_url: str) -> None:
+    """A non-visible Investigation degrades to not_found attributed to the requested id."""
+
+    async def _run() -> tuple[str, ToolResponse, ToolResponse, ToolResponse]:
+        async with _pool(migrated_url) as pool:
+            inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
+            foreign = _ctx(projects=("other",))
+            link = await link_external_ref(
+                pool, foreign, inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
+            )
+            unlink = await unlink_external_ref(pool, foreign, inv_id, {"tracker": "bz", "id": "7"})
+            edit = await set_investigation(pool, foreign, inv_id, title="new")
+            return inv_id, link, unlink, edit
+
+    inv_id, link, unlink, edit = asyncio.run(_run())
+    for resp in (link, unlink, edit):
+        assert resp.error_category == "not_found"
+        assert resp.object_id == inv_id
 
 
 def test_link_upserts_changed_url(migrated_url: str) -> None:
@@ -566,18 +633,23 @@ def test_link_upserts_changed_url(migrated_url: str) -> None:
 
 
 def test_unlink_by_natural_key_without_url(migrated_url: str) -> None:
-    async def _run() -> None:
+    async def _run() -> dict[tuple[str, str], str]:
         async with _pool(migrated_url) as pool:
             inv_id = (await _open(pool, _ctx(), project="proj", title="t")).object_id
             await link_external_ref(
                 pool, _ctx(), inv_id, {"tracker": "bz", "id": "7", "url": "https://bz/7"}
             )
+            await link_external_ref(
+                pool, _ctx(), inv_id, {"tracker": "jira", "id": "K-9", "url": "https://j/9"}
+            )
             # No url unlinks the (bz,7) entry (matching ignores url).
-            await unlink_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7"})
-            refs = await _refs_of(pool, inv_id)()
-        assert refs == {}
+            resp = await unlink_external_ref(pool, _ctx(), inv_id, {"tracker": "bz", "id": "7"})
+            # The returned model reflects the removal, not just the persisted row.
+            assert _resp_ref_keys(resp) == {("jira", "K-9")}
+            return await _refs_of(pool, inv_id)()
 
-    asyncio.run(_run())
+    refs = asyncio.run(_run())
+    assert refs == {("jira", "K-9"): "https://j/9"}
 
 
 def test_unlink_absent_is_idempotent_no_audit(migrated_url: str) -> None:
@@ -720,6 +792,8 @@ def test_open_overlong_title_is_config_error(migrated_url: str) -> None:
 
 
 def test_set_updates_title_and_description(migrated_url: str) -> None:
+    from kdive.security.audit import args_digest
+
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="old")
@@ -728,16 +802,26 @@ def test_set_updates_title_and_description(migrated_url: str) -> None:
             )
             assert resp.data["title"] == "new"
             assert resp.data["description"] == "note"
+            audit_row = await _audit_row(pool, opened.object_id, "set")
+        # A title+description edit audits "set" for the description with the new title.
+        assert audit_row["tool"] == "investigations.set"
+        assert audit_row["object_kind"] == "investigations"
+        assert audit_row["args_digest"] == args_digest({"title": "new", "description": "set"})
 
     asyncio.run(scenario())
 
 
 def test_set_clear_description_with_empty_string(migrated_url: str) -> None:
+    from kdive.security.audit import args_digest
+
     async def scenario() -> None:
         async with _pool(migrated_url) as pool:
             opened = await _open(pool, _ctx(), project="proj", title="t", description="x")
             resp = await set_investigation(pool, _ctx(), opened.object_id, description="")
             assert resp.data["description"] is None
+            audit_row = await _audit_row(pool, opened.object_id, "set")
+        # Clearing the description audits the "cleared" sentinel, not "set".
+        assert audit_row["args_digest"] == args_digest({"description": "cleared"})
 
     asyncio.run(scenario())
 
@@ -761,7 +845,22 @@ def test_set_requires_at_least_one_field(migrated_url: str) -> None:
             assert resp.error_category == "configuration_error"
             # ADR-0174: an empty set payload names the missing-field reason.
             assert resp.data["reason"] == "missing_required_field"
-            assert resp.detail is not None
+            assert resp.detail == "set requires at least one of title or description"
+
+    asyncio.run(scenario())
+
+
+def test_set_overlong_description_is_config_error(migrated_url: str) -> None:
+    # A valid title but an oversized description must still be rejected: set validates the
+    # description too, not just the title.
+    async def scenario() -> None:
+        async with _pool(migrated_url) as pool:
+            opened = await _open(pool, _ctx(), project="proj", title="t")
+            resp = await set_investigation(
+                pool, _ctx(), opened.object_id, title="ok", description="x" * 4097
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "invalid_text"
 
     asyncio.run(scenario())
 
