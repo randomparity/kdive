@@ -104,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dedup scratch-separate check, run-dir error, and .part cleanup (#1350)
 - Hoist acquire-or-skip and docker-skip into xdist_backend (#1331)
 - Generalize failed-install cleanup to kernel and initrd (#1351)
+- Inline single-use test-stem helper
 
 ### Documentation
 
@@ -356,6 +357,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document images.extend break-glass role and consequence
 - Guard MCP-reachability of served-doc cross-references
 - Restore boot readiness-failure read surfaces on runs.get
+- Never under-run when base ref or markers exclude all tests
 
 ### Build
 
