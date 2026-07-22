@@ -205,6 +205,9 @@ def test_report_empty_project_set_is_empty_report(migrated_url: str) -> None:
         async with _conn(migrated_url) as conn:
             report = await accounting.report(conn, projects=[], group_by=None, window=None)
         assert report.rows == ()
+        # The synthesized zero total is still labelled with the cross-project "*" marker.
+        assert report.total.project == "*"
+        assert report.total.principal is None
         assert report.total.reserved == Decimal("0.0000")
         assert report.total.reconciled == Decimal("0.0000")
         assert report.total.variance == Decimal("0.0000")
