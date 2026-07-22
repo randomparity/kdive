@@ -314,7 +314,11 @@ def test_require_fadump_supported_rejects_when_requested_but_unsupported() -> No
     with pytest.raises(CategorizedError) as exc:
         require_fadump_supported(requested=True, supported=False)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "10.2" in str(exc.value)
+    message = str(exc.value)
+    assert message.startswith("the bound host does not implement pseries fadump")
+    assert "QEMU >= 10.2" in message
+    # The structured details carry the machine-readable reason and QEMU floor for agents.
+    assert exc.value.details == {"reason": "pseries_fadump_unsupported", "qemu_floor": "10.2"}
 
 
 @pytest.mark.parametrize(
