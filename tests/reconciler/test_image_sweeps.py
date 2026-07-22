@@ -344,6 +344,37 @@ def test_expired_private_image_is_deleted(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_multiple_expired_private_images_are_all_counted(migrated_url: str) -> None:
+    async def _run() -> None:
+        key_a = "images/local-libvirt__proj/priv-a/x86_64.qcow2"
+        key_b = "images/local-libvirt__proj/priv-b/x86_64.qcow2"
+        async with await connect(migrated_url) as seed:
+            await _insert_image_row(
+                seed,
+                name="priv-a",
+                visibility="private",
+                owner="proj",
+                object_key=key_a,
+                expires_in=timedelta(seconds=-1),
+            )
+            await _insert_image_row(
+                seed,
+                name="priv-b",
+                visibility="private",
+                owner="proj",
+                object_key=key_b,
+                expires_in=timedelta(seconds=-1),
+            )
+        store = _FakeImageStore({key_a: timedelta(hours=2), key_b: timedelta(hours=2)})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, lambda c: _repair_expired_private_images(c, store))
+        # The pruned counter accumulates per row, so both expiries are reflected.
+        assert count == 2
+        assert sorted(store.deleted) == sorted([key_a, key_b])
+
+    asyncio.run(_run())
+
+
 def test_unexpired_private_image_is_kept(migrated_url: str) -> None:
     async def _run() -> None:
         key = "images/local-libvirt__proj/live/x86_64.qcow2"
