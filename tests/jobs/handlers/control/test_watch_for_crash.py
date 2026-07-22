@@ -29,11 +29,15 @@ from kdive.jobs.handlers.control.watch_for_crash import (
     CONTEXT_LINES,
     MATCHED_MAX_BYTES,
     WatchVerdict,
+    _cap_bytes,
+    _context_window,
     watch_console_for_crash,
     watch_for_crash_handler,
 )
+from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import provider_resolver
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
@@ -94,12 +98,40 @@ async def _run_core(
     )
 
 
+# --- pure helpers ---------------------------------------------------------------------
+
+
+def test_context_window_returns_matched_line_plus_symmetric_context() -> None:
+    text = "L0\nL1\nL2\nL3\nL4\nL5\n"
+    # An offset inside L2 must yield L1..L3 (one line of context each side), in order.
+    assert _context_window(text, text.index("L2"), 1) == "L1\nL2\nL3"
+
+
+def test_context_window_clamps_at_the_start_of_the_buffer() -> None:
+    text = "L0\nL1\nL2\nL3\n"
+    assert _context_window(text, text.index("L0"), 2) == "L0\nL1\nL2"
+
+
+def test_cap_bytes_keeps_a_value_within_the_limit() -> None:
+    assert _cap_bytes("a" * 10, 16) == "a" * 10
+
+
+def test_cap_bytes_drops_a_codepoint_split_by_the_cap_via_ignore() -> None:
+    # A 2-byte char straddling max_bytes must be dropped cleanly ("ignore"), never raise
+    # (strict / a bogus error-handler name) — the slice is arbitrary console text.
+    value = "a" * 9 + "é"  # 9 ASCII + 2-byte é = 11 bytes; cut at 10 splits the é
+    assert _cap_bytes(value, 10) == "a" * 9
+
+
 # --- pure core ------------------------------------------------------------------------
 
 
 def test_core_fires_on_first_signature_past_mark() -> None:
     states = [b"[1] booting\n[2] Kernel panic - not syncing: die\n[3] more\n"]
-    verdict = asyncio.run(_run_core(states, [0.0, 0.5]))
+    # A non-zero start clock so elapsed = clock() - start (not clock() + start). The trailing
+    # 20.0 lets a match-suppressing mutant reach the deadline and return not_fired (killed) rather
+    # than spin forever on an exhausted clock (a timeout, not a clean failure).
+    verdict = asyncio.run(_run_core(states, [5.0, 5.5, 20.0], deadline_s=10.0))
     assert verdict.outcome == "fired"
     assert verdict.fired is True
     assert verdict.signature == "Kernel panic"
@@ -122,10 +154,23 @@ def test_core_ignores_pre_mark_panic() -> None:
 
 
 def test_core_not_fired_at_deadline() -> None:
-    verdict = asyncio.run(_run_core([b"[1] still booting\n"], [0.0, 11.0]))
+    # Non-zero start clock: elapsed = 16 - 5 = 11 >= deadline 10. Pin elapsed_s and observed_at so
+    # a not_fired verdict that drops either (WatchVerdict(..., None, now()) / (..., elapsed, None))
+    # is caught.
+    verdict = asyncio.run(_run_core([b"[1] still booting\n"], [5.0, 16.0], deadline_s=10.0))
     assert verdict.outcome == "not_fired"
     assert verdict.fired is False
     assert verdict.signature is None and verdict.matched is None
+    assert verdict.elapsed_s == 11.0
+    assert verdict.observed_at == _NOW
+
+
+def test_core_not_fired_when_elapsed_exactly_reaches_deadline() -> None:
+    # The deadline is inclusive (elapsed >= deadline_s): at exactly the deadline the watch stops
+    # and returns that elapsed. A strict `>` would poll once more and report a later elapsed.
+    verdict = asyncio.run(_run_core([b"[1] booting\n"], [0.0, 10.0, 11.0], deadline_s=10.0))
+    assert verdict.outcome == "not_fired"
+    assert verdict.elapsed_s == 10.0
 
 
 def test_core_truncation_resets_mark_and_still_matches() -> None:
@@ -145,6 +190,17 @@ def test_core_non_halting_signature_fires() -> None:
     assert verdict.signature == "detected stall"
 
 
+def test_core_decodes_invalid_utf8_console_with_replacement() -> None:
+    # The console suffix is arbitrary bytes: an invalid UTF-8 byte must decode via "replace"
+    # (U+FFFD), never "strict" (raises) or a bogus error-handler name (LookupError), and the scan
+    # for a signature still fires.
+    states = [b"[1] \xff garbage \xfe\n[2] Kernel panic - not syncing: die\n"]
+    verdict = asyncio.run(_run_core(states, [0.0, 0.5]))
+    assert verdict.outcome == "fired"
+    assert verdict.signature == "Kernel panic"
+    assert verdict.matched is not None and "�" in verdict.matched
+
+
 def test_core_redacts_matched_slice() -> None:
     states = [b"[1] leak SECRET=abc\n[2] Kernel panic - not syncing\n"]
     verdict = asyncio.run(
@@ -160,8 +216,9 @@ def test_core_bounds_context_lines() -> None:
     lines[10] = "[10] Kernel panic - not syncing"
     body = ("\n".join(lines) + "\n").encode()
     verdict = asyncio.run(_run_core([body], [0.0, 0.5], context_lines=1))
-    assert verdict.matched is not None
-    assert verdict.matched.count("\n") <= 2  # matched line +/- 1 context line
+    # The window is anchored at the matched line's offset (not None/0), so it is exactly the panic
+    # line plus one context line on each side — a mis-anchored offset would return other lines.
+    assert verdict.matched == "[9] line 9\n[10] Kernel panic - not syncing\n[11] line 11"
 
 
 def test_core_caps_matched_bytes() -> None:
@@ -301,17 +358,41 @@ def test_handler_fired_returns_verdict_with_slice(
 
     monkeypatch.setattr(watch_for_crash, "read_console_log", _fake_read)
 
-    async def _go() -> str | None:
+    async def _go() -> tuple[str | None, object, list[tuple]]:
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_system(pool, SystemState.READY)
-            return await _run_handler(pool, _job(system_id, 5.0))
+            resolver = provider_resolver()
+            async with pool.connection() as conn:
+                ref = await watch_for_crash_handler(
+                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
+                )
+                provider_kind = take_provider_kind()
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT tool, object_kind, transition, args_digest FROM audit_log "
+                    "WHERE object_id = %s",
+                    (system_id,),
+                )
+                rows = await cur.fetchall()
+            return ref, provider_kind, [(*r, str(system_id)) for r in rows]
 
-    result_ref = asyncio.run(_go())
+    result_ref, provider_kind, rows = asyncio.run(_go())
     assert result_ref is not None
     doc = json.loads(result_ref)
     assert doc["outcome"] == "fired"
     assert doc["signature"] == "Kernel panic"
+    # The handler tags the provider kind for metrics (local-libvirt), not None.
+    assert provider_kind == "local-libvirt"
+    # Exactly one audit row with the exact tool/object/transition/args for the fired outcome.
+    assert len(rows) == 1
+    tool, object_kind, transition, digest, sid = rows[0]
+    assert (tool, object_kind, transition) == (
+        "control.watch_for_crash",
+        "systems",
+        "watch_for_crash:fired",
+    )
+    assert digest == args_digest({"system_id": sid, "outcome": "fired"})
 
 
 def test_handler_not_ready_raises_configuration_error(
@@ -331,6 +412,7 @@ def test_handler_not_ready_raises_configuration_error(
         asyncio.run(_go())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "system_not_ready"
+    assert str(excinfo.value) == "system is not ready; cannot watch for a crash signature"
 
 
 def test_handler_not_fired_at_deadline(
