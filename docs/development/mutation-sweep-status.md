@@ -315,8 +315,9 @@ are its sub-issues.
   1→1 equivalent; `cli.py` 41, 14→0; `overrides.py` 103, 9→8 equivalent; `serialize.py` 381, 39→8
   equivalent; `writeback.py` 263, 11→8 equivalent; `reconcile/coefficients.py` 66, 10→7 equivalent;
   `reconcile/overrides.py` 114, 11→3 equivalent; `reconcile/images.py` 482, ~56→54 (equivalents plus a
-  deferred killable remainder, below); `reconcile/resources.py` 568, 70→53 (equivalents plus a deferred
-  killable remainder, below). Assertion gaps killed by pinning: the `reconcile-systems` CLI diff
+  deferred killable remainder, since **fully swept by #1417**, below); `reconcile/resources.py` 568,
+  70→53 (equivalents plus a deferred killable remainder, since **fully swept by #1417**, below).
+  Assertion gaps killed by pinning: the `reconcile-systems` CLI diff
   headers + em-dash detail suffix + absent-default no-op line; the override-ledger `created_at`
   round-trip; the serializer's DB read-path field mapping across every image source shape and resource
   kind (incl. `_cap_int`/`_opt_cap_int` bool/non-int rejection); the writeback `api_base` trailing-slash
@@ -342,16 +343,29 @@ are its sub-issues.
      (asserts `_name == "kdive-systems"`), but mutmut cannot attribute that test to the literal
      (same limitation class as (1)).
 
-  **`inventory/reconcile/` deferred killable remainder (needs a follow-up).** Two large passes carry a
-  killable remainder that needs new fixtures, not just assertions: (a) `reconcile/images.py` — a
-  staged-path UPDATE with a `.config` sibling to exercise the config-upload store passthrough
-  (`_update_entry` store arg), and the `_prune_departed` `continue`→`break` (needs a declared row
-  ordered before a departed one in the SQL result); (b) `reconcile/resources.py` — the
-  `_needs_config_adoption` and `_overlay_one_local`/`_update_config_resource` coupled-`or`→`and`
-  boundaries (need single-condition adoption/overlay fixtures: lease-only, owner-only, affinity-only,
-  name-null-only, name-only-change), the `_remote_libvirt_upsert` removed/detached-remote disposition
-  edges (need remote-libvirt override fixtures), the `_fault_inject_upsert` host-adopt edge, and the
-  `_prune_departed` `name→None` passthrough into `prune_or_cordon_*`.
+  **`inventory/reconcile/` fully swept (#1417).** The deferred killable remainder was killed by new
+  fixtures in `tests/integration/test_reconcile_inventory.py` (no source change). `reconcile/images.py`
+  **54 → 52 surviving**: killed the `_update_entry` config-upload store passthrough (a staged-path row
+  whose `.config` sibling appears only *after* creation, so the upload runs on the update pass — a
+  store arg dropped to `None` there raises on `put_artifact`) and the `_prune_departed` `continue`→
+  `break` (a kept config row seeded before a departed one, so a `break` would spare the departed row).
+  `reconcile/resources.py` **55 → 31 surviving**: killed the four `_needs_config_adoption` `or`→`and`
+  boundaries (single-condition adoption fixtures — managed_by-only, stale-lease-only, owner-only, and
+  null-name-only via host-adopt, which also killed the previously RowTyper-unattributable `_upsert_row`
+  lease/owner/name reads), the three `_overlay_one_local` change-detector `or`→`and` boundaries
+  (single-field overlay changes — name-only, cost_class-only, pool-only, which also killed the
+  `_record` arg-drop), the `_fault_inject_upsert` host-adopt edge (a stray null-named row at the
+  shared synthetic host_uri must NOT be adopted), the `_remote_libvirt_upsert` removed/detached
+  disposition edges (remote-libvirt ledger fixtures), the `_prune_departed` `continue`→`break`, and
+  the `_prune_departed` `name`→`None` passthrough into `prune_or_cordon_*` (two concurrency fixtures
+  proving the file-departure and removed-ledger prune paths serialize on the `(kind, name)` identity
+  lock — otherwise a serial test cannot observe a lock-key-only mutation). The residual survivors in
+  both modules are all equivalent — the same classes above (Postgres case-folded SQL; `_log.*`
+  log-statement mutations; `cast`/RowTyper no-ops; the ownerless-config-key `visibility` arg; the
+  `_S3Head` registered-preserve masked by a sibling check; build/s3 `volume` always-`None`) plus the
+  falsy-default no-ops (`adopt_by_host=None`, `detached: bool = True` default never reached, the
+  diff-arg drop in the append-free `_name_unconfigured_discovered`) and the `_deterministic_name`
+  `.strip` string-literal quirk.
 
 - `reconciler/` bucket (#1404) — the periodic drift-repair loop, swept serially against its
   `migrated_url` covering tests (`tests/reconciler/*`, plus `tests/integration/test_reconcile_inventory.py`
