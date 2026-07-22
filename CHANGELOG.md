@@ -287,6 +287,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record db/ bucket sweep + repositories.py blocker (#1401)
 - Record services/allocation bucket sweep (#1398)
 - Record services/runs bucket swept (#1399)
+- Record services/ remaining container-backed bucket (#1400)
 
 ### Fixed
 
