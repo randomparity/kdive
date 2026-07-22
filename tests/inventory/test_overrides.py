@@ -7,6 +7,7 @@ covering each helper's happy path and its empty / absent / conflict edge.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import psycopg
 import pytest
@@ -52,6 +53,8 @@ def test_set_then_lookup_round_trips(migrated_url: str) -> None:
         assert found.source_kind is _RESOURCE
         assert found.resource_kind == "remote-libvirt"
         assert found.name == "h1"
+        # created_at is the DB-set insert time, carried through _override (not dropped).
+        assert isinstance(found.created_at, datetime)
 
     asyncio.run(_run())
 
