@@ -108,8 +108,11 @@ def test_non_json_result_is_rejected_before_storage(migrated_url: str) -> None:
             async def ok() -> JsonValue:
                 return [1, 2]
 
-            with pytest.raises(ValueError, match="non-JSON value tuple"):
+            with pytest.raises(ValueError) as exc:
                 await run_step(conn, run_id, "t", fn)
+            # The rejection message carries the run-step path (run_id + step), so a
+            # regression that drops either into the error is caught, not just the type.
+            assert f"run_steps[{run_id}].t.result contains non-JSON value tuple" in str(exc.value)
             assert await run_step(conn, run_id, "t", ok) == [1, 2]
             assert calls == 1
 
@@ -185,7 +188,10 @@ def test_claim_run_step_replays_succeeded(migrated_url: str) -> None:
             run_id = await _seed_run(conn)
             claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
             assert claim.claimed is True
-            await complete_run_step(conn, run_id, "s", {"v": 1})
+            completed = await complete_run_step(conn, run_id, "s", {"v": 1})
+            # complete_run_step returns the JSONB-round-tripped result it stored, not
+            # a bare acknowledgement, so a caller can use the value without re-reading.
+            assert completed == {"v": 1}
             replay = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
             assert replay.claimed is False
             assert replay.result == {"v": 1}
@@ -227,7 +233,25 @@ def test_claim_run_step_raises_on_unknown_state(migrated_url: str) -> None:
             # Without the guard, claim_run_step polls forever -> wait_for raises
             # TimeoutError (not RuntimeError), so pytest.raises fails: the red signal.
             # With the guard it raises RuntimeError before the timeout.
-            with pytest.raises(RuntimeError, match="unknown state"):
+            with pytest.raises(RuntimeError) as exc:
                 await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+            # The corrupt-row message identifies the offending (run_id, step) so an
+            # operator can locate it; assert both are threaded through, not just the phrase.
+            assert f"run_step ({run_id}, s) has unknown state 'bogus'" in str(exc.value)
+
+    asyncio.run(_run())
+
+
+def test_complete_run_step_rejects_non_json_result(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            run_id = await _seed_run(conn)
+            claim = await asyncio.wait_for(claim_run_step(conn, run_id, "s"), timeout=5)
+            assert claim.claimed is True
+            # A non-JSON result is rejected with the run-step path (run_id + step) before
+            # any UPDATE, so the claim stays RUNNING for a retry rather than storing junk.
+            with pytest.raises(ValueError) as exc:
+                await complete_run_step(conn, run_id, "s", (1, 2))  # ty: ignore[invalid-argument-type]
+            assert f"run_steps[{run_id}].s.result contains non-JSON value tuple" in str(exc.value)
 
     asyncio.run(_run())
