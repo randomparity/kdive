@@ -32,6 +32,7 @@ from kdive.domain.pcie import PCIE_DEVICES_KEY, PCIeDescriptor
 from kdive.mcp.auth import RequestContext
 from kdive.security.audit import args_digest
 from kdive.services.allocation.admission.core import (
+    AFFINITY_DENIAL_REASON,
     AllocationRequest,
     admit,
 )
@@ -416,6 +417,7 @@ def test_admit_denies_explicit_scoped_resource_for_foreign_project(migrated_url:
             assert outcome.granted is False
             assert outcome.allocation is None
             assert outcome.category is ErrorCategory.ALLOCATION_DENIED
+            assert outcome.reason == AFFINITY_DENIAL_REASON  # the non-queueable affinity denial
             assert await _count_allocs(conn) == 0  # no durable write
             assert await _count_audit(conn) == 0
 
