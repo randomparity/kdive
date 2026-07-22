@@ -1851,9 +1851,10 @@ def test_prune_of_live_config_resource_cordons_not_deletes(
         assert row["cordoned"] is True
         assert "fi-busy" in {c.name for c in diff.cordoned}
         assert "fi-busy" not in {p.name for p in diff.pruned}
-        # The cordoned record's entry is resource[kind/name], in that field order.
+        # The cordoned record's entry is resource[kind/name], in that field order, with no detail.
         cordoned = next(c for c in diff.cordoned if c.name == "fi-busy")
         assert cordoned.entry == "resource[fault-inject/fi-busy]"
+        assert cordoned.detail == ""
 
     asyncio.run(_run())
 
@@ -1876,6 +1877,7 @@ def test_fault_inject_field_change_updates_row_and_records_it(
         assert _row_caps(row)["concurrent_allocation_cap"] == 5  # jsonb rewritten, not nulled
         updated = next(r for r in diff.updated if r.name == "fi-x")
         assert updated.entry == "resource[fault-inject/fi-x]"
+        assert updated.detail == ""  # a reconcile record carries no free-text detail
 
     asyncio.run(_run())
 
