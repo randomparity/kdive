@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 from psycopg.rows import dict_row
@@ -138,6 +139,71 @@ def test_listing_keyset_paginates_capped_system_scope(migrated_url: str) -> None
     # The final page drains the remainder and reports no further pages.
     assert [item.id for item in last.items] == ids_newest_first[4:]
     assert last.truncated is False and last.next_key is None
+
+
+def test_listing_exact_limit_page_is_not_truncated(migrated_url: str) -> None:
+    """A page filled to exactly ``limit`` with no further row reports no truncation.
+
+    Pins ``truncated = len(rows) > limit`` (a ``>=`` mutant would over-report truncation and
+    hand back a dangling ``next_key`` for an empty next page).
+    """
+
+    async def _run() -> SystemArtifactPage:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            for i in range(2):
+                await _artifact(pool, system_id, f"a{i}", created_offset=timedelta(minutes=i + 1))
+            return await list_redacted_system_artifacts(pool, _ctx(), system_id=system_id, limit=2)
+
+    page = asyncio.run(_run())
+    assert len(page.items) == 2
+    assert page.truncated is False
+    assert page.next_key is None
+
+
+def test_listing_limit_one_keeps_single_row_and_reports_truncation(migrated_url: str) -> None:
+    """``limit=1`` keeps exactly one row and still detects a further page.
+
+    Pins the ``max(1, limit)`` slice and truncation caps: a ``max(2, limit)`` mutant would keep
+    two rows or under-report truncation when ``limit == 1``.
+    """
+
+    async def _run() -> SystemArtifactPage:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            for i in range(3):
+                await _artifact(pool, system_id, f"a{i}", created_offset=timedelta(minutes=i + 1))
+            return await list_redacted_system_artifacts(pool, _ctx(), system_id=system_id, limit=1)
+
+    page = asyncio.run(_run())
+    assert len(page.items) == 1
+    assert page.truncated is True
+    assert page.next_key is not None
+
+
+def test_listing_next_key_is_last_kept_rows_created_at_and_id(migrated_url: str) -> None:
+    """``next_key`` carries the *last kept* row's ``(created_at, id)`` — not any earlier row.
+
+    With three kept rows the last-row index (``-1``) is distinct from index ``+1``, so this pins
+    both ``next_key`` tuple components against a wrong-index mutant.
+    """
+
+    async def _run() -> tuple[SystemArtifactPage, list[str]]:
+        async with _pool(migrated_url) as pool:
+            system_id = await seed_crashed_system(pool)
+            ids_newest_first = [
+                await _artifact(pool, system_id, f"a{i}", created_offset=timedelta(minutes=4 - i))
+                for i in range(4)
+            ]
+            page = await list_redacted_system_artifacts(pool, _ctx(), system_id=system_id, limit=3)
+            return page, ids_newest_first
+
+    page, ids_newest_first = asyncio.run(_run())
+    assert [item.id for item in page.items] == ids_newest_first[:3]
+    assert page.truncated is True
+    assert page.next_key is not None
+    last_kept_offset = timedelta(minutes=4 - 2)  # third-newest of a0..a3
+    assert page.next_key == (_DT + last_kept_offset, UUID(ids_newest_first[2]))
 
 
 def test_latest_console_resolves_newest_correlated_console(migrated_url: str) -> None:
