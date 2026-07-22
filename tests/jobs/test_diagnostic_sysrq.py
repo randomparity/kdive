@@ -76,6 +76,32 @@ def test_seam_overlap_keeps_a_secret_straddling_the_mark_contiguous() -> None:
     assert result.raw == grown[len(before) - 8 :]
 
 
+def test_settle_requires_settle_polls_consecutive_no_growth_reads() -> None:
+    # A single no-growth read is not enough: a second growth spurt resets the settle counter, so
+    # the captured delta must include it. A `stable += 2` (settling after one read) would miss it.
+    frames = [b"", b"AA", b"AA", b"AABB", b"AABB", b"AABB"]
+    result, _ = asyncio.run(_capture(frames, settle_polls=2))
+    assert result.exit_reason == "stabilized"
+    assert result.raw == b"AABB"  # both growth spurts captured, not just the first
+
+
+def test_settle_fires_exactly_at_settle_polls_not_one_later() -> None:
+    # With settle_polls=2 and a tight max_polls=3, the settle must trigger on the second
+    # no-growth read (stable >= settle_polls). A strict `>` would need a 4th poll and hit the bound.
+    frames = [b"", b"AAA", b"AAA", b"AAA"]
+    result, _ = asyncio.run(_capture(frames, max_polls=3, settle_polls=2))
+    assert result.exit_reason == "stabilized"
+    assert result.raw == b"AAA"
+
+
+def test_zero_max_polls_reports_no_output_without_crashing() -> None:
+    # No poll iterations: the delta buffer defaults to the pre-injection read (not None), so the
+    # no-growth guard cleanly returns no_output rather than dereferencing a None body.
+    result, _ = asyncio.run(_capture([b"boot\n"], max_polls=0))
+    assert result.exit_reason == "no_output"
+    assert result.raw == b""
+
+
 def test_disabled_marker_in_growth_reports_disabled() -> None:
     disabled = b"sysrq: This sysrq operation is disabled.\n"
     frames = [b"boot\n", b"boot\n" + disabled, b"boot\n" + disabled, b"boot\n" + disabled]

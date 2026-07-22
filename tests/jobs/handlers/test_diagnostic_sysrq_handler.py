@@ -26,8 +26,11 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.handlers.control import diagnostic_sysrq
+from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.mcp.systems_support import provider_resolver
@@ -70,7 +73,9 @@ class _FakeControl:
                 handle.write(self._dump)
 
 
-async def _seed_ready_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
+async def _seed_ready_system(
+    pool: AsyncConnectionPool, state: SystemState, *, domain_name: str | None = "kdive-x"
+) -> UUID:
     disc = LocalLibvirtDiscovery(
         host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=2
     )
@@ -101,10 +106,20 @@ async def _seed_ready_system(pool: AsyncConnectionPool, state: SystemState) -> U
                 allocation_id=alloc.id,
                 state=state,
                 provisioning_profile={},
-                domain_name="kdive-x",
+                domain_name=domain_name,
             ),
         )
     return system.id
+
+
+async def _audit_rows(pool: AsyncConnectionPool, system_id: UUID) -> list[tuple]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT tool, object_kind, transition, args_digest, project FROM audit_log "
+            "WHERE object_id = %s",
+            (system_id,),
+        )
+        return list(await cur.fetchall())
 
 
 def _job(system_id: UUID, command: str) -> Job:
@@ -163,24 +178,80 @@ def test_captures_redacted_artifact_and_returns_its_id(
     monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
 
-    async def _go() -> tuple[str | None, list[tuple[str, str, str]], list[tuple[str, str]]]:
+    async def _go() -> dict[str, object]:
         async with _pool(migrated_url) as pool:
             await pool.open()
             system_id = await _seed_ready_system(pool, SystemState.READY)
             job = _job(system_id, "show_blocked_tasks")
-            result_ref = await _run(pool, _FakeStore(), control, job)
-            rows = await _artifact_rows(pool, system_id)
-            return result_ref, rows, control.calls
+            resolver = provider_resolver(controller=control)
+            async with pool.connection() as conn:
+                result_ref = await diagnostic_sysrq.diagnostic_sysrq_handler(
+                    conn,
+                    job,
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    artifact_store=cast(ObjectStore, _FakeStore()),
+                )
+                provider_kind = take_provider_kind()
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute("SELECT id FROM artifacts WHERE owner_id = %s", (system_id,))
+                art_ids = [str(r[0]) for r in await cur.fetchall()]
+            return {
+                "result_ref": result_ref,
+                "rows": await _artifact_rows(pool, system_id),
+                "calls": control.calls,
+                "provider_kind": provider_kind,
+                "audit": await _audit_rows(pool, system_id),
+                "art_ids": art_ids,
+                "system_id": system_id,
+            }
 
-    result_ref, rows, calls = asyncio.run(_go())
+    out = asyncio.run(_go())
+    system_id = out["system_id"]
 
-    assert calls == [("kdive-x", "w")]  # show_blocked_tasks -> trigger 'w'
+    assert out["calls"] == [("kdive-x", "w")]  # show_blocked_tasks -> trigger 'w'
+    assert out["provider_kind"] == "local-libvirt"
+    rows = cast(list[tuple[str, str, str]], out["rows"])
     assert len(rows) == 1
     object_key, sensitivity, retention = rows[0]
     assert "/sysrq-diagnostic-" in object_key  # object name carries the job id
     assert sensitivity == "redacted"
     assert retention == "console"
-    assert result_ref is not None
+    # The returned result_ref is exactly the stored artifact's id (not str(None)).
+    assert out["result_ref"] is not None
+    assert out["art_ids"] == [out["result_ref"]]
+    # Exactly one audit row with the exact tool/object/transition/args/project.
+    assert out["audit"] == [
+        (
+            "control.diagnostic_sysrq",
+            "systems",
+            "sysrq:show_blocked_tasks",
+            args_digest({"system_id": str(system_id), "command": "show_blocked_tasks"}),
+            "proj",
+        )
+    ]
+
+
+def test_handler_uses_derived_domain_when_system_unnamed(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A System with no stored domain_name resolves the domain via domain_name_for(system.id);
+    # that derived name (not None) is what the SysRq is injected against.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq : Show Memory\n dump\n")
+
+    async def _go() -> tuple[list[tuple[str, str]], UUID]:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY, domain_name=None)
+            await _run(pool, _FakeStore(), control, _job(system_id, "show_memory"))
+            return control.calls, system_id
+
+    calls, system_id = asyncio.run(_go())
+    assert calls == [(domain_name_for(system_id), "m")]
 
 
 def test_dump_secret_is_redacted_in_the_stored_object(
@@ -206,6 +277,30 @@ def test_dump_secret_is_redacted_in_the_stored_object(
     assert b"[REDACTED]" in stored
 
 
+def test_dump_with_invalid_utf8_is_decoded_with_replacement(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A SysRq dump carrying an invalid UTF-8 byte must decode via "replace" (U+FFFD), never
+    # "strict" (raises) or a bogus error-handler name (LookupError) — it is raw console output.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"SysRq dump \xff garbage \xfe end\n")
+    store = _FakeStore()
+
+    async def _go() -> str | None:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            return await _run(pool, store, control, _job(system_id, "show_memory"))
+
+    result_ref = asyncio.run(_go())
+    assert result_ref is not None
+    stored = b"".join(data for data, _s, _r in store.objects.values())
+    assert "�" in stored.decode("utf-8")
+
+
 def test_no_console_output_fails_configuration_error(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,9 +321,14 @@ def test_no_console_output_fails_configuration_error(
         asyncio.run(_go())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "no_console_output"
+    assert str(excinfo.value) == "no console output after SysRq injection"
     # ADR-0318: sysrq is System-addressed (no per-Run config gate), so its kernel-config
     # requirement is surfaced in the runtime no-output remediation instead.
-    assert "MAGIC_SYSRQ" in str(excinfo.value.details["remediation"])
+    assert excinfo.value.details["remediation"] == (
+        "build the guest kernel with CONFIG_MAGIC_SYSRQ=y (see "
+        "artifacts.feature_config_requirements) and a PS/2 keyboard driver "
+        "(i8042/atkbd), and enable kernel.sysrq in the guest for this command"
+    )
 
 
 def test_disabled_sysrq_fails_configuration_error_and_stores_nothing(
@@ -250,6 +350,13 @@ def test_disabled_sysrq_fails_configuration_error_and_stores_nothing(
                 await _run(pool, store, control, _job(system_id, "show_memory"))
             assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert excinfo.value.details["reason"] == "sysrq_disabled"
+            assert str(excinfo.value) == (
+                "the guest rejected the SysRq (kernel.sysrq restricts this operation)"
+            )
+            assert excinfo.value.details["remediation"] == (
+                "permit this SysRq in the guest's kernel.sysrq bitmask "
+                "(e.g. sysctl kernel.sysrq=1 or set the bit for this command)"
+            )
             return await _artifact_rows(pool, system_id)
 
     rows = asyncio.run(_go())
@@ -293,13 +400,17 @@ def test_system_not_ready_fails_system_changed_state(
     monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
     control = _FakeControl(log, b"dump\n")
 
+    seen: dict[str, UUID] = {}
+
     async def _go() -> None:
         async with _pool(migrated_url) as pool:
             await pool.open()
-            system_id = await _seed_ready_system(pool, SystemState.PROVISIONING)
-            await _run(pool, _FakeStore(), control, _job(system_id, "show_memory"))
+            seen["sid"] = await _seed_ready_system(pool, SystemState.PROVISIONING)
+            await _run(pool, _FakeStore(), control, _job(seen["sid"], "show_memory"))
 
     with pytest.raises(CategorizedError) as excinfo:
         asyncio.run(_go())
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert excinfo.value.details["reason"] == "system_changed_state"
+    assert str(excinfo.value) == "system left the ready local-libvirt state during SysRq capture"
+    assert excinfo.value.details["system_id"] == str(seen["sid"])
