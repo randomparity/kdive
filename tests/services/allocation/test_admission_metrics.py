@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader, Metric
 
 from kdive.domain.capacity.state import AllocationState
 from kdive.domain.errors import ErrorCategory
@@ -17,11 +19,14 @@ from kdive.services.allocation.admission.core import (
     AdmissionOutcome,
 )
 from kdive.services.allocation.admission.metrics import (
+    _WAIT_BUCKETS,
     AdmissionDecision,
     AdmissionMetrics,
     _AdmissionReason,
     classify,
 )
+
+_METRICS_LOGGER = "kdive.services.allocation.admission.metrics"
 
 
 def _alloc(state: AllocationState) -> Allocation:
@@ -93,6 +98,22 @@ def test_classify_unmatched_denial_is_unknown() -> None:
     )
 
 
+def test_unclassified_denial_warns_with_category_and_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The unknown branch must log the offending category AND reason so a new denial shape
+    # is diagnosable, not just visible. A non-None reason distinguishes a dropped-arg mutant.
+    outcome = _denial(ErrorCategory.NOT_FOUND, "weird-reason")
+    with caplog.at_level(logging.WARNING, logger=_METRICS_LOGGER):
+        assert classify(outcome) == (AdmissionDecision.REJECTED, _AdmissionReason.UNKNOWN)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == (
+        f"admission metrics: unclassified denial category={ErrorCategory.NOT_FOUND!s} "
+        f"reason={'weird-reason'}"
+    )
+
+
 def _points(reader: InMemoryMetricReader, name: str) -> dict[tuple[tuple[str, str], ...], float]:
     data = reader.get_metrics_data()
     assert data is not None
@@ -142,6 +163,34 @@ def _metric_names(reader: InMemoryMetricReader) -> set[str]:
         for sm in rm.scope_metrics
         for metric in sm.metrics
     }
+
+
+def _metric(reader: InMemoryMetricReader, name: str) -> Metric:
+    data = reader.get_metrics_data()
+    assert data is not None
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for metric in sm.metrics:
+                if metric.name == name:
+                    return metric
+    raise AssertionError(f"metric {name!r} not exported")
+
+
+def test_instrument_metadata_is_the_published_contract() -> None:
+    # Unit, description, and the wait histogram's bucket layout are part of the metric
+    # contract dashboards/alerts read; a silent drift must fail here, not just be tolerated.
+    metrics, reader = _metrics()
+    metrics.record_decision(_denial(ErrorCategory.QUOTA_EXCEEDED))
+    metrics.record_promotion(1.0)
+    counter = _metric(reader, "kdive.allocation.admission")
+    assert counter.unit == "1"
+    assert counter.description == "Allocation admission decisions, by outcome and reason."
+    wait = _metric(reader, "kdive.allocation.wait")
+    assert wait.unit == "s"
+    assert wait.description == "Request→grant wait for a promoted allocation."
+    assert isinstance(wait.data, Histogram)
+    bounds = {tuple(point.explicit_bounds) for point in wait.data.data_points}
+    assert bounds == {_WAIT_BUCKETS}
 
 
 def test_record_decision_increments_counter() -> None:
