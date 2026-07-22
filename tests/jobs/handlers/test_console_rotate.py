@@ -267,6 +267,37 @@ def test_boot_id_change_starts_new_part_generation(
     assert any("console-part-1-" in key for key in rows), "boot-id change seals generation 1"
 
 
+def test_rotate_decodes_invalid_utf8_and_locates_log_by_system_id(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two invariants in one round-trip:
+    #  1. The console log is resolved from THIS system_id — a None/other id finds an absent log
+    #     and the handler seals nothing (so a non-empty part set proves the id reached the path).
+    #  2. A raw console carrying an invalid UTF-8 byte decodes via the "replace" handler (U+FFFD),
+    #     never "strict" (raises) or a bogus error-handler name (LookupError) — the log is
+    #     arbitrary worker-local bytes.
+    system_id = uuid4()
+    monkeypatch.setattr(console_rotate, "console_log_path", lambda sid: tmp_path / f"{sid}.log")
+    bad = b"console-line payload \xff bytes\n" * 6000  # invalid UTF-8, > 64 KiB -> seals parts
+    (tmp_path / f"{system_id}.log").write_bytes(bad)
+
+    async def _run() -> tuple[str | None, _FakeStore]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            await _seed_system(pool, system_id, "ready")
+            store = _FakeStore()
+            result = await _run_handler(pool, store, _job(system_id, "boot-A"))
+            return result, store
+
+    result, store = asyncio.run(_run())
+
+    part_keys = store.part_puts()
+    assert result == str(system_id)
+    assert part_keys, "invalid-utf8 console must still seal parts (log located by system_id)"
+    decoded = gzip.decompress(store.objects[part_keys[0]][0]).decode("utf-8")
+    assert "�" in decoded, "the invalid byte must decode to the U+FFFD replacement char"
+
+
 def test_terminal_system_seals_no_parts_after_teardown(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
