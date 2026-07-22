@@ -247,8 +247,56 @@ are its sub-issues.
   (dedup-keyed) is seeded so `_failed_system_retry_failure` diverges; (c) the enqueue dedup-key
   `allocation_id=None` mutant needs a job idempotency/dedup-key assertion.
 
-**Not yet swept:** the remaining subsystem buckets (`jobs/handlers/`,
-`inventory/`, `reconciler/`) — filed as #1306 sub-issues.
+- `jobs/handlers/` bucket (#1402) — the durable worker job handlers (provision / build / install /
+  boot / capture / control), swept serially against their `migrated_url` / `minio_store` covering
+  tests (`tests/jobs/handlers/**`, `tests/jobs/test_{image_build_handler,capture_telemetry,
+  diagnostic_sysrq}.py`, `tests/adversarial/test_vmcore_capture_idempotency.py`). Per module
+  (mutants, surviving before → after): `runs/registrar.py` 26, 0→0; `diagnostics.py` 28, 0→0;
+  `runs/{common,install,ports}.py` and the async-frame `runs_*` modules 0 mutants (import-time /
+  deeper than `max_stack_depth`, per #665; `ports.py` mirror-tested by #1304);
+  `console/capture_telemetry.py` 57, 3→3 equivalent; `console/console_evidence.py` 50, 22→17
+  equivalent; `console/console_rotate.py` 207, 29→25 equivalent; `runs/boot.py` 59, 32→0;
+  `image_build.py` 14, 2→0; `artifacts/vmcore.py` 170, 35→3 equivalent;
+  `connectivity/ssh_authorize.py` 143, 41→0; `connectivity/ssh_reachable.py` 152, 31→11;
+  `control/control.py` 113, 18→2 equivalent; `control/watch_for_crash.py` 232, 54→20;
+  `control/diagnostic_sysrq.py` 324, 57→14. Assertion gaps killed by pinning: collaborator-arg
+  passthrough into the `boot_evidence` / `redacted_console_tail` / retriever / probe seams; the
+  full audit rows (tool / object_kind / transition / args_digest / project); the boot/capture
+  result dicts + returned ids; provider-kind tags (`take_provider_kind`); the SSH argv hardening
+  options + fail-closed error messages + remediation strings; the console decode-error handler on
+  raw guest bytes (invalid-UTF-8 round-trips); and the watch/sysrq settle-poll and byte-cap
+  boundaries. The **surviving mutants are equivalent**, in the same classes as `#1399`/`#1400`
+  (Postgres case-folded SQL; advisory-lock key args; codec-name case; naive-vs-UTC `now`;
+  log-statement `_log.*` mutations; defense-in-depth re-checks masked by a sibling guard) plus:
+  1. **Codec error-handler on already-valid UTF-8** — `redacted_console_tail` decodes the bytes
+     `read_redacted_console` already re-encoded to valid UTF-8, so its `"replace"` handler never
+     fires; the mutant is unobservable (the *source* read, over raw disk bytes, is killed).
+  2. **Value only in a fail-closed error detail** — `ensure_method_match`'s `run_id` and similar
+     feed only a not-taken error path (method-mismatch), killable only with a cross-method fixture.
+  3. **`_real_probe` deadline/backoff/read-timeout arithmetic + socket params** — the SSH-reachable
+     banner probe's timing (`<0` vs `<=0`, `suppress(None)`, `open_connection(None)`→loopback) is
+     either an unobservable boundary or killable only via a fake-clock socket harness.
+  4. **Poll-loop mutants caught as a timeout** — `watch_console_for_crash`'s `match = None` makes
+     the loop never fire, so every fired-path test fails or times out (detected, not a clean kill).
+
+  **Tooling note (fixtures sandbox).** `image_build.py` resolves its rootfs catalog by a
+  `__file__`-relative path into the repo-root `fixtures/` tree, which mutmut's `source_paths=
+  src/kdive` sandbox does not copy, so its baseline aborts. Sweep it with a
+  `mutants/fixtures -> ../fixtures` symlink (mutmut reuses the copy, so the symlink survives across
+  runs); no source change is needed. This joins the ADR-0229 env shims as a `just mutate`
+  workaround for `__file__`-relative resource loads outside the package.
+
+  **Deferred killable remainder (needs a follow-up).** Three large handlers were not swept in this
+  session and carry killable survivors in the same audit / message / arg-passthrough / core-logic
+  clusters handled above (not equivalents): `control/capture_traffic.py` (356 mutants, 99
+  surviving), `runs/boot_evidence.py` (290, 105), and `systems.py` (766, 143). A couple of smaller
+  deferrals also remain: `console_log_path(None)` in `watch_for_crash` / `diagnostic_sysrq` needs a
+  system-id-dependent console-read fixture, and the `_real_probe` timing cluster needs a fake-clock
+  socket harness.
+
+**Not yet swept:** the remaining subsystem buckets (`inventory/`, `reconciler/`) and the deferred
+`jobs/handlers/` remainder above (`capture_traffic` / `boot_evidence` / `systems`) — filed as
+#1306 sub-issues / a #1402 follow-up.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 
