@@ -1,6 +1,26 @@
 from kdive.domain.lifecycle.run_steps import parse_boot_outcome
 from kdive.images.families._fedora_customize import READINESS_MARKER
-from kdive.services.runs.steps import BuildStepResult, _optional_str_list, ready_boot_outcome
+from kdive.services.runs.steps import (
+    BuildStepResult,
+    _optional_str,
+    _optional_str_list,
+    ready_boot_outcome,
+)
+
+
+def test_optional_str_passes_through_non_empty_string() -> None:
+    assert _optional_str("kernel-ref") == "kernel-ref"
+
+
+def test_optional_str_empty_string_is_none() -> None:
+    # Empty string is falsy: coerced to None, not carried forward as "" (kills `and`->`or`).
+    assert _optional_str("") is None
+
+
+def test_optional_str_non_string_is_none() -> None:
+    # A truthy non-string (e.g. an int) must not pass the isinstance-and-truthy gate.
+    assert _optional_str(5) is None
+    assert _optional_str(["not", "a", "str"]) is None
 
 
 def test_ready_boot_outcome_descriptor_shape() -> None:
