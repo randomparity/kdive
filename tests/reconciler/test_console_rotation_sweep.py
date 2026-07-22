@@ -94,7 +94,67 @@ def test_two_live_local_systems_enqueue_two_jobs(migrated_url: str) -> None:
             payloads = await _rotation_payloads(check)
         assert {p["system_id"] for p in payloads} == {str(sid_a), str(sid_b)}
         for payload in payloads:
-            assert "boot_id" in payload  # per-boot identity stamped (empty when not co-located)
+            # Not co-located with the console file here, so the per-boot identity degrades to the
+            # empty reset-forcing string (never a placeholder / absent key).
+            assert payload["boot_id"] == ""
+
+    asyncio.run(_run())
+
+
+def test_boot_id_stamps_real_console_stat_when_colocated(
+    migrated_url: str, tmp_path: Any, monkeypatch: Any
+) -> None:
+    # When the console file is reachable, the payload carries the file's real dev:ino:mtime
+    # identity keyed on THIS system's path — not an empty string, and not some other file's.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            sid = await seed_system(seed, system_state=SystemState.READY)
+
+        def _path_for(system_id: UUID) -> Any:
+            return tmp_path / f"{system_id}.log"
+
+        monkeypatch.setattr(console_rotation_repairs, "console_log_path", _path_for)
+        console_file = _path_for(sid)
+        console_file.write_bytes(b"console output")
+        st = console_file.stat()
+        expected = f"{st.st_dev}:{st.st_ino}:{int(st.st_mtime)}"
+
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _SWEEP)
+        assert count == 1
+        async with await connect(migrated_url) as check:
+            payloads = await _rotation_payloads(check)
+        assert [p["boot_id"] for p in payloads] == [expected]
+        assert expected != ""  # a real stat produced a non-empty identity
+
+    asyncio.run(_run())
+
+
+def test_skipped_in_flight_system_does_not_halt_remaining(migrated_url: str) -> None:
+    # A System with an in-flight rotation is skipped, but the sweep must CONTINUE to the other
+    # live Systems (not break out of the loop). The skipped System is seeded first so a `break`
+    # regression would drop the two free Systems that follow it.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            skipped = await seed_system(seed, system_state=SystemState.READY)
+            await seed_running_job(
+                seed,
+                f"console_rotate:{skipped}:preexisting",
+                kind="console_rotate",
+                payload={"system_id": str(skipped)},
+                lease_seconds=300,
+                attempt=0,
+                max_attempts=3,
+            )
+            free_a = await seed_system(seed, system_state=SystemState.READY)
+            free_b = await seed_system(seed, system_state=SystemState.READY)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _SWEEP)
+        assert count == 2  # both free Systems enqueued despite the earlier skip
+        async with await connect(migrated_url) as check:
+            payloads = await _rotation_payloads(check)
+        enqueued = {p["system_id"] for p in payloads if p.get("boot_id") is not None}
+        assert {str(free_a), str(free_b)} <= enqueued
 
     asyncio.run(_run())
 
