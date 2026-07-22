@@ -89,11 +89,14 @@ are its sub-issues.
   `minio_store`-gated round-trips: one read (`head`'s `content-encoding`) is attributable only
   through the container round-trip, so the bucket's mutation run must keep the gated files in
   scope to legitimately reach 0-surviving.
+- `store/assembly.py` — a no-direct-test module (previously imported only cross-file by
+  conftest/`test_app`), not itself container-backed; gained a direct mirror unit test
+  (`tests/store/test_assembly.py`, #1405, #665 pattern) pinning both branches of
+  `build_object_store_assembly` (provided `store_factory` used verbatim; default falls
+  through to `object_store_from_env`). 3 mutants, 0 surviving.
 
 **Not yet swept:** the remaining subsystem buckets (`services/`, `db/`, `jobs/handlers/`,
-`inventory/`, `reconciler/`) — filed as #1306 sub-issues. `store/assembly.py` is a separate
-no-direct-test module (imported only cross-file by conftest/`test_app`), not a container-backed
-target; it wants a direct mirror test on the #665 pattern, tracked with the store sub-issue.
+`inventory/`, `reconciler/`) — filed as #1306 sub-issues.
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 
