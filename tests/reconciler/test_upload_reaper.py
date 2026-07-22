@@ -137,6 +137,32 @@ def test_reaps_uncommitted_objects_past_deadline_for_created_run(migrated_url: s
     asyncio.run(_run())
 
 
+def test_reaps_multiple_abandoned_owners_counted(migrated_url: str) -> None:
+    # Two independent past-deadline Run manifests must each increment the reaped tally: the
+    # return is the number of owners reaped, not a fixed 1.
+    async def _run() -> None:
+        prefixes: list[str] = []
+        run_ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(2):
+                system_id = await seed_system(seed)
+                run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+                prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+                await upload_manifest.replace_manifest(seed, request)
+                prefixes.append(prefix)
+                run_ids.append(run_id)
+        store = _FakeStore({p: [f"{p}kernel"] for p in prefixes})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 2  # both owners reaped, not a fixed 1
+        assert sorted(store.deleted) == sorted(f"{p}kernel" for p in prefixes)
+        async with await connect(migrated_url) as check:
+            for run_id in run_ids:
+                assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
 def test_reaps_uncommitted_objects_past_deadline_for_defined_system(migrated_url: str) -> None:
     async def _run() -> None:
         system_id = await _defined_system_via_define(migrated_url)
