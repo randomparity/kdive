@@ -225,12 +225,38 @@ def test_cmdline_for_override_replaces_build_extra(monkeypatch: pytest.MonkeyPat
 
 
 def test_cmdline_for_no_override_appends_build_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The no-override path reads the ledger with the exact (conn, run.id) it was given, and appends
+    # the recorded build extra.
+    conn_sentinel = cast("steps_mod.AsyncConnection", object())
+    run = _fake_run()
+
     async def _build_result(conn: object, run_id: object) -> BuildStepResult | None:
+        assert conn is conn_sentinel
+        assert run_id == run.id
         return BuildStepResult(
             kernel_ref=None, debuginfo_ref=None, build_id=None, cmdline="dhash_entries=9"
         )
 
     monkeypatch.setattr(steps_mod, "existing_build_result", _build_result)
+
+    async def _run() -> str:
+        return await cmdline_for(
+            conn_sentinel,
+            run,
+            CaptureMethod.HOST_DUMP,
+            root_cmdline=_LOCAL_ROOT,
+            arch=_X86,
+        )
+
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda dhash_entries=9"
+
+
+def test_cmdline_for_no_build_result_returns_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No recorded build step: the composed cmdline is exactly the platform-required tokens.
+    async def _no_result(conn: object, run_id: object) -> BuildStepResult | None:
+        return None
+
+    monkeypatch.setattr(steps_mod, "existing_build_result", _no_result)
 
     async def _run() -> str:
         return await cmdline_for(
@@ -241,4 +267,25 @@ def test_cmdline_for_no_override_appends_build_extra(monkeypatch: pytest.MonkeyP
             arch=_X86,
         )
 
-    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda dhash_entries=9"
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda"
+
+
+def test_cmdline_for_build_result_without_cmdline_returns_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A recorded build step with no cmdline appends nothing: only the required tokens remain.
+    async def _result_no_cmdline(conn: object, run_id: object) -> BuildStepResult | None:
+        return BuildStepResult(kernel_ref="k", debuginfo_ref="d", build_id="b", cmdline=None)
+
+    monkeypatch.setattr(steps_mod, "existing_build_result", _result_no_cmdline)
+
+    async def _run() -> str:
+        return await cmdline_for(
+            cast("steps_mod.AsyncConnection", None),
+            _fake_run(),
+            CaptureMethod.HOST_DUMP,
+            root_cmdline=_LOCAL_ROOT,
+            arch=_X86,
+        )
+
+    assert asyncio.run(_run()) == "console=ttyS0 root=/dev/vda"
