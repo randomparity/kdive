@@ -31,6 +31,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.images.cataloging.catalog import resolve_rootfs
 from kdive.services.images.publish import (
     PublishRequest,
+    _write_config_best_effort,
+    image_object_key,
     kernel_config_object_key,
     publish_image,
 )
@@ -301,6 +303,10 @@ def test_publish_fails_when_object_does_not_head(migrated_url: str, tmp_path: Pa
             with pytest.raises(CategorizedError) as err:
                 await publish_image(conn, store, request=_PUBLIC_REQUEST, source=source)
             assert err.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+            message = str(err.value)
+            assert message.startswith("published image object is not present after write")
+            assert "HEAD gate failed" in message
+            assert err.value.details == {"object_key": image_object_key(_PUBLIC_REQUEST)}
             row = (await IMAGE_CATALOG.list_all(conn))[0]
             assert row.state is ImageState.PENDING
 
@@ -324,6 +330,10 @@ def test_publish_rejects_source_digest_mismatch(migrated_url: str, tmp_path: Pat
                     source=source,
                 )
             assert err.value.category is ErrorCategory.CONFIGURATION_ERROR
+            message = str(err.value)
+            assert message.startswith("published image bytes do not match the declared content")
+            # The structured details name the declared vs actually-computed digest for the agent.
+            assert err.value.details == {"declared": wrong_digest, "actual": _DIGEST}
             rows = await IMAGE_CATALOG.list_all(conn)
             assert len(rows) == 1
             assert rows[0].state is ImageState.PENDING
@@ -456,6 +466,24 @@ def test_publish_writes_config_object_and_sets_key(migrated_url: str, tmp_path: 
             ckey = kernel_config_object_key(request)
             assert entry.kernel_config_key == ckey
             assert store._objects[ckey] == _CONFIG
+
+    asyncio.run(_run())
+
+
+def test_write_config_best_effort_skips_without_key_or_config() -> None:
+    async def _run() -> None:
+        # A None config_key means no config was captured: nothing is written, presence is False.
+        no_key_store = _FakeStore()
+        with_config = replace(_PUBLIC_REQUEST, kernel_config=_CONFIG)
+        assert await _write_config_best_effort(no_key_store, with_config, None) is False
+        assert no_key_store.puts == []
+        # A request carrying no kernel_config likewise writes nothing and reports False.
+        no_config_store = _FakeStore()
+        assert (
+            await _write_config_best_effort(no_config_store, _PUBLIC_REQUEST, "some/key.config")
+            is False
+        )
+        assert no_config_store.puts == []
 
     asyncio.run(_run())
 
