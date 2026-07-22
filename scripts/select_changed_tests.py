@@ -91,18 +91,14 @@ def select_targets(
                 targets.add(path)
             continue
         if is_src_file(path):
-            matches = test_index.get(_test_stem_of_source(path))
+            # A source file's tests are named after its basename (foo.py -> test_foo).
+            matches = test_index.get(Path(path).stem)
             if not matches:
                 return None  # unmapped source change -> full suite (the safe default)
             targets.update(matches)
             continue
         return None  # conftest, non-Python, config, docs, justfile -> full suite
     return sorted(targets)
-
-
-def _test_stem_of_source(path: str) -> str:
-    """The basename (without ``.py``) a source file's tests are named after."""
-    return Path(path).stem
 
 
 def _git(args: list[str], repo_root: Path) -> str:
