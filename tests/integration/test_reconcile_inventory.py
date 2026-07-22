@@ -2153,17 +2153,20 @@ async def _ledger_exists(
         return await cur.fetchone() is not None
 
 
-async def reconcile_all_for_test(conn: psycopg.AsyncConnection, doc: InventoryDoc) -> None:
+async def reconcile_all_for_test(conn: psycopg.AsyncConnection, doc: InventoryDoc) -> int:
     """Run the resource pass then the override GC (the GC's input is the doc).
 
     The full ``reconcile_all`` also runs the image/coefficient passes, which need a store; these
     ledger tests touch neither, so this helper drives only the resource path plus the GC step the
     GC tests assert.
+
+    Returns:
+        The number of ledger entries the GC step cleared this pass.
     """
     from kdive.inventory.reconcile.overrides import reconcile_overrides_gc
 
     await reconcile_resources(conn, doc)
-    await reconcile_overrides_gc(conn, doc)
+    return await reconcile_overrides_gc(conn, doc)
 
 
 def test_removed_ledger_skips_recreate_across_passes(migrated_url: str, tmp_path: Path) -> None:
@@ -2374,7 +2377,8 @@ def test_removed_ledger_gced_when_identity_leaves_file(migrated_url: str, tmp_pa
                 )
             empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
             async with pool.connection() as conn:
-                await reconcile_all_for_test(conn, empty)
+                cleared = await reconcile_all_for_test(conn, empty)
+            assert cleared == 1  # exactly the one settled entry was GC'd
         async with await _connect(migrated_url) as check:
             assert not await _ledger_exists(
                 check, source_kind="resource", resource_kind="fault-inject", name="fi-settled"
@@ -2401,7 +2405,8 @@ def test_detached_ledger_gced_when_file_matches_live(migrated_url: str, tmp_path
                 )
             # File values already equal the live row (cap=3), so the override is a no-op -> GC'd.
             async with pool.connection() as conn:
-                await reconcile_all_for_test(conn, doc)
+                cleared = await reconcile_all_for_test(conn, doc)
+            assert cleared == 1  # the converged entry was the only one cleared
         async with await _connect(migrated_url) as check:
             assert not await _ledger_exists(
                 check, source_kind="resource", resource_kind="fault-inject", name="fi-conv"
@@ -2434,11 +2439,57 @@ def test_detached_ledger_retained_when_file_still_diverges(
             # File still declares cap=1, live row is 9 -> divergent -> entry retained.
             doc2 = load_inventory(_write_toml(tmp_path, _fault_inject_toml(name="fi-div", cap=1)))
             async with pool.connection() as conn:
-                await reconcile_all_for_test(conn, doc2)
+                cleared = await reconcile_all_for_test(conn, doc2)
+            assert cleared == 0  # divergent entry retained, nothing cleared
         async with await _connect(migrated_url) as check:
             assert await _ledger_exists(
                 check, source_kind="resource", resource_kind="fault-inject", name="fi-div"
             )
+
+    asyncio.run(_run())
+
+
+def test_override_gc_clears_two_settled_entries_reports_count(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Two `removed` entries whose identities are no longer declared are both GC'd, and the pass
+    # reports the exact count (pins the per-entry increment, not a fixed 1).
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool:
+            async with await _connect(migrated_url) as seed:
+                for name in ("fi-a", "fi-b"):
+                    await _set_ledger(
+                        seed,
+                        source_kind="resource",
+                        resource_kind="fault-inject",
+                        name=name,
+                        disposition="removed",
+                    )
+            empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+            async with pool.connection() as conn:
+                cleared = await reconcile_all_for_test(conn, empty)
+            assert cleared == 2
+        async with await _connect(migrated_url) as check:
+            for name in ("fi-a", "fi-b"):
+                assert not await _ledger_exists(
+                    check, source_kind="resource", resource_kind="fault-inject", name=name
+                )
+
+    asyncio.run(_run())
+
+
+def test_override_gc_with_empty_ledger_clears_nothing(migrated_url: str, tmp_path: Path) -> None:
+    # With no ledger entries the GC short-circuits and reports zero cleared.
+    async def _run() -> None:
+        from kdive.inventory.reconcile.overrides import reconcile_overrides_gc
+
+        empty = load_inventory(_write_toml(tmp_path, "schema_version = 2\n"))
+        async with (
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=2) as pool,
+            pool.connection() as conn,
+        ):
+            cleared = await reconcile_overrides_gc(conn, empty)
+        assert cleared == 0
 
     asyncio.run(_run())
 
