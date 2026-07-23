@@ -319,9 +319,15 @@ are its sub-issues.
   capped `>0`), `max_polls`' dead `max(1, …)` floor (a positive-int duration is always ≥ the poll
   interval), the codec error-handler on already-valid UTF-8, `_unlink_quietly`'s `missing_ok`
   masked by `suppress(OSError)`, the `operation=` arg that feeds only a failure-path log line, and
-  defense-in-depth re-checks masked by a sibling guard. Two smaller deferrals remain unchanged:
-  `console_log_path(None)` in `watch_for_crash` / `diagnostic_sysrq` needs a system-id-dependent
-  console-read fixture, and the `_real_probe` timing cluster needs a fake-clock socket harness.
+  defense-in-depth re-checks masked by a sibling guard. The two smaller fixture-dependent deferrals
+  were also **SWEPT by #1415**: `control/watch_for_crash.py` and `control/diagnostic_sysrq.py` gained
+  a recording `console_log_path` fixture so the handler is pinned to read *its own* System's console
+  (killing the `console_log_path(None)` mutant in each — watch_for_crash 20→19, diagnostic_sysrq
+  14→13, residuals the same poll-loop / byte-cap / log equivalents), and `connectivity/
+  ssh_reachable.py` gained a fake-clock socket harness (a manually-driven coroutine over a patched
+  asyncio clock / connect / read / sleep) that pins every `_real_probe` connect/backoff/read timeout,
+  the exact deadline boundary, the derived host/port, the `suppress(OSError)` on close, and the
+  handler's `datetime.now(UTC)` stamp — **11→0 surviving**.
 
 - `inventory/` bucket (#1403) — the override-ledger / serializer / writeback / CLI / loader modules
   and the `inventory/reconcile/` merge-reconcile passes, swept serially against their `migrated_url`
@@ -438,11 +444,10 @@ are its sub-issues.
   (best-effort snapshot read), `_pass_loop`'s lag/interval arithmetic, and `_tick_until_stop` — the same
   classes as the sibling buckets.
 
-**Not yet swept:** two smaller fixture-dependent deferrals — `console_log_path(None)` in
-`watch_for_crash` / `diagnostic_sysrq` (needs a system-id-dependent console-read fixture) and the
-`ssh_reachable` `_real_probe` timing cluster (needs a fake-clock socket harness). The three large
-`jobs/handlers/` modules (`capture_traffic` / `boot_evidence` / `systems`) were swept to 0 killable
-by #1415 (see above).
+**Not yet swept:** nothing in the `jobs/handlers/` bucket. #1415 swept the three large modules
+(`capture_traffic` / `boot_evidence` / `systems`) and both smaller fixture-dependent deferrals
+(`console_log_path(None)` in `watch_for_crash` / `diagnostic_sysrq`, and the `ssh_reachable`
+`_real_probe` timing cluster) to 0 killable surviving (see above).
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 

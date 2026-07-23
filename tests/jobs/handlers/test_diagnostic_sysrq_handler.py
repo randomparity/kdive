@@ -414,3 +414,41 @@ def test_system_not_ready_fails_system_changed_state(
     assert excinfo.value.details["reason"] == "system_changed_state"
     assert str(excinfo.value) == "system left the ready local-libvirt state during SysRq capture"
     assert excinfo.value.details["system_id"] == str(seen["sid"])
+
+
+def test_handler_reads_console_for_its_own_system(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The console delta must be captured from THIS System's console log; a hardcoded/None id would
+    # read the wrong (or no) guest's console. Record the id console_log_path is resolved for.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot log\n")
+    seen: list[UUID] = []
+
+    def _console_path(sid: UUID) -> Path:
+        seen.append(sid)
+        return log
+
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", _console_path)
+    control = _FakeControl(log, b"SysRq : Show Blocked State\n task list...\n")
+
+    async def _go() -> UUID:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            job = _job(system_id, "show_blocked_tasks")
+            resolver = provider_resolver(controller=control)
+            async with pool.connection() as conn:
+                await diagnostic_sysrq.diagnostic_sysrq_handler(
+                    conn,
+                    job,
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    artifact_store=cast(ObjectStore, _FakeStore()),
+                )
+            return system_id
+
+    system_id = asyncio.run(_go())
+    assert seen  # the console path is resolved at least once
+    assert set(seen) == {system_id}  # always this System's id, never None
