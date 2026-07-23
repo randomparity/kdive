@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add column-agnostic render_envelope for generated verbs
+- Generate committed kdivectl verb descriptors from tool schemas
 
 ### Changed
 
 - Consolidate mutations _flatten onto flatten_envelope
+- Make verb-classification branch explicit in gen_cli_verbs
 
 ### Documentation
 
