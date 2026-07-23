@@ -13,9 +13,10 @@ status field honest:
    missing file), and each row's status keyword matches the ADR file's — so the index can
    never claim Proposed while the file says Accepted, or vice versa.
 3. **No shipped-but-Proposed drift.** No ADR whose status keyword is ``Proposed`` is cited
-   in production source (``src/``). A citation there means the decision is implemented, so
-   the ADR should have been advanced to Accepted (or superseded). This is the drift the
-   backfill cleaned up; the guard stops it returning.
+   in production source (``src/``) or in the test suite (``tests/``). A citation there means
+   the decision is implemented — including guard-type ADRs whose enforcement ships purely as
+   tests, never as ``src/`` code — so the ADR should have been advanced to Accepted (or
+   superseded). This is the drift the backfill cleaned up; the guard stops it returning.
 
 Stdlib only (plain ``python3``, no ``uv sync``), so CI runs it without a synced env.
 Exit 0 clean, 1 on any violation.
@@ -31,6 +32,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _ADR_DIR = _ROOT / "docs" / "adr"
 _INDEX = _ADR_DIR / "README.md"
 _SRC = _ROOT / "src"
+_TESTS = _ROOT / "tests"
 
 _VALID = ("Proposed", "Accepted", "Rejected", "Superseded")
 _ADR_FILE = re.compile(r"^(\d{4})-.+\.md$")
@@ -84,10 +86,14 @@ def _is_scannable_source(path: Path) -> bool:
     return "__pycache__" not in path.parts and path.suffix != ".pyc"
 
 
-def _cited_in_src(read_errors: list[str] | None = None) -> set[str]:
-    """ADR numbers cited anywhere under src/ (production code)."""
+def _cited_in_src_or_tests(read_errors: list[str] | None = None) -> set[str]:
+    """ADR numbers cited anywhere under src/ (production code) or tests/ (guard enforcement).
+
+    Some ADRs — notably CI-guard decisions — ship entirely as tests and are never cited by
+    src/, so both trees count as "implemented" evidence.
+    """
     cited: set[str] = set()
-    for path in _SRC.rglob("*"):
+    for path in (*_SRC.rglob("*"), *_TESTS.rglob("*")):
         if not path.is_file() or not _is_scannable_source(path):
             continue
         try:
@@ -136,12 +142,12 @@ def main() -> int:
                 f"index says {index_status[num]!r}. Flip both in the same PR."
             )
 
-    cited = _cited_in_src(read_errors)
+    cited = _cited_in_src_or_tests(read_errors)
     for num in sorted(file_status):
         if file_status[num] == "Proposed" and num in cited:
             errors.append(
-                f"ADR {num}: status is Proposed but it is cited in src/ — the decision "
-                f"appears implemented. Advance it to Accepted (or supersede it)."
+                f"ADR {num}: status is Proposed but it is cited in src/ or tests/ — the "
+                f"decision appears implemented. Advance it to Accepted (or supersede it)."
             )
 
     if errors:
