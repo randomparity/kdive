@@ -15,6 +15,7 @@ def _point_guard_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     monkeypatch.setattr(guard, "_ADR_DIR", adr_dir)
     monkeypatch.setattr(guard, "_INDEX", adr_dir / "README.md")
     monkeypatch.setattr(guard, "_SRC", root / "src")
+    monkeypatch.setattr(guard, "_TESTS", root / "tests")
 
 
 def _write_repo(
@@ -24,6 +25,7 @@ def _write_repo(
     index_status: str = "Accepted",
     include_index_row: bool = True,
     source: str = "",
+    test_source: str = "",
 ) -> None:
     adr_dir = root / "docs" / "adr"
     adr_dir.mkdir(parents=True)
@@ -38,6 +40,9 @@ def _write_repo(
         encoding="utf-8",
     )
     (root / "src" / "kdive" / "module.py").write_text(source, encoding="utf-8")
+    if test_source:
+        (root / "tests").mkdir(parents=True, exist_ok=True)
+        (root / "tests" / "test_module.py").write_text(test_source, encoding="utf-8")
 
 
 def test_clean_adr_status_index_and_uncited_proposed_pass(
@@ -93,6 +98,21 @@ def test_proposed_adr_cited_in_source_fails(
 
     assert guard.main() == 1
     assert "status is Proposed but it is cited in src/" in capsys.readouterr().out
+
+
+def test_proposed_adr_cited_only_in_tests_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _point_guard_at(monkeypatch, tmp_path)
+    _write_repo(
+        tmp_path,
+        file_status="Proposed",
+        index_status="Proposed",
+        test_source='"""Guards ADR-0001 (enforced only by this test, no src/ citation)."""\n',
+    )
+
+    assert guard.main() == 1
+    assert "status is Proposed but it is cited in src/ or tests/" in capsys.readouterr().out
 
 
 def test_unreadable_source_file_fails_with_path_and_exception(
