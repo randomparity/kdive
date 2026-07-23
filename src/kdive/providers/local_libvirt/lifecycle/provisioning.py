@@ -496,9 +496,10 @@ class LocalLibvirtProvisioning:
         window, so materializing it here — with no real ``system_id`` — would issue a bogus HEAD.
         A ``local`` reference is validated by materializing it within the provider roots.
         """
-        if isinstance(rootfs, CatalogComponentRef | _UploadRootfs):
-            if isinstance(rootfs, CatalogComponentRef):
-                validate_rootfs_reference(rootfs)
+        if isinstance(rootfs, _UploadRootfs):
+            return
+        if isinstance(rootfs, CatalogComponentRef):
+            validate_rootfs_reference(rootfs)
             return
         self._materialize_rootfs_base(rootfs, UUID(int=0))
 

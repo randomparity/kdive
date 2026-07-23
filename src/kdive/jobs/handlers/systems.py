@@ -154,7 +154,7 @@ async def _commit_uploaded_rootfs(
     """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
     if not rootfs_upload_window_allowed(profile_policy, profile):
         return
-    key = artifact_key("local", "systems", str(system.id), "rootfs")
+    key = _uploaded_rootfs_key(system.id)
     head = await asyncio.to_thread(artifact_store.head, key)
     if head is None:
         raise CategorizedError(
@@ -710,9 +710,7 @@ def _uploaded_rootfs_key(system_id: UUID) -> str:
     return artifact_key("local", "systems", str(system_id), "rootfs")
 
 
-async def _delete_uploaded_rootfs_object(
-    conn: AsyncConnection, store: ObjectStore, system_id: UUID
-) -> None:
+async def _delete_uploaded_rootfs_object(store: ObjectStore, system_id: UUID) -> None:
     """Delete the System's uploaded rootfs object (best-effort) — ADR-0434 §4.
 
     ``owner_kind='systems'`` objects are exempt from the #768 expiry reaper, so a torn-down
@@ -720,10 +718,8 @@ async def _delete_uploaded_rootfs_object(
     store fault must not block teardown, like the console/sysrq reclaim); the ``artifacts`` row —
     the download handle — is deleted fail-loud in :func:`_delete_uploaded_rootfs_row`, so a store
     fault leaves at most an unreferenced orphan, never a live download handle. A non-upload System
-    has no such object; the delete is a no-op. ``conn`` is unused (parity with the reclaim
-    helpers' signature).
+    has no such object; the delete is a no-op.
     """
-    del conn
     await asyncio.to_thread(store.delete, _uploaded_rootfs_key(system_id))
 
 
@@ -823,7 +819,7 @@ async def teardown_handler(
     # Isolated from the console/sysrq reclaim above: a fault there must not skip reclaiming the
     # SENSITIVE uploaded-rootfs object, which no #768 reaper would ever collect (ADR-0434 §4).
     try:
-        await _delete_uploaded_rootfs_object(conn, artifact_store, system_id)
+        await _delete_uploaded_rootfs_object(artifact_store, system_id)
     except Exception:  # noqa: BLE001 - object reclaim is best-effort; the row was already revoked
         _log.warning(
             "best-effort uploaded-rootfs object reclaim for system %s failed",
