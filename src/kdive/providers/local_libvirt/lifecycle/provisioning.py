@@ -54,14 +54,19 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     MaterializableRootfsRef,
     RootfsMaterializationContext,
     RootfsUploadContext,
+    UploadFetch,
     materialize_rootfs_base,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.overlay_customize import OverlayCustomizer
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_catalog_fetch import (
     rootfs_catalog_fetch_from_env,
 )
+from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    rootfs_upload_fetch_from_env,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import (
     ROOTFS_DIR,
+    UPLOADS_DIR,
     ProvisioningFiles,
     baseline_dir,
     overlay_path,
@@ -85,7 +90,6 @@ __all__ = [
     "console_log_path",
     "domain_name_for",
     "overlay_path",
-    "reject_rootfs_without_upload_window",
     "render_domain_xml",
 ]
 
@@ -142,27 +146,6 @@ def _parse_recorded_domain_xml(xml: str, *, domain_name: str, port_name: str) ->
         ) from exc
 
 
-def reject_rootfs_without_upload_window(rootfs: RootfsSource) -> None:
-    """Reject an ``upload`` rootfs in a lane that has no pre-provision upload window.
-
-    An ``upload`` rootfs resolves a System-owned object that exists only after
-    ``systems.define`` opens an upload window and the agent PUTs it (ADR-0048 §5). The
-    one-step ``systems.provision`` *create* lane and ``systems.reprovision`` have no such
-    window, so an ``upload`` reference there can never have a staged object — fail fast at the
-    boundary rather than insert/replace and dead-letter (or leak a started domain) at commit.
-    ``define`` and the worker do **not** call this guard.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` for an ``upload`` rootfs.
-    """
-    if isinstance(rootfs, _UploadRootfs):
-        raise CategorizedError(
-            "rootfs 'upload' kind requires systems.define + artifacts.create_system_upload first; "
-            "use 'local' or 'catalog' for a one-step provision",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-
-
 type MaterializeRootfs = Callable[[RootfsSource, UUID, str], str]
 
 
@@ -191,6 +174,7 @@ class LocalLibvirtProvisioning:
         allowed_roots: list[Path] | None = None,
         materialize_rootfs: MaterializeRootfs | None = None,
         catalog_fetch: CatalogFetch | None = None,
+        upload_fetch: UploadFetch | None = None,
         free_port: FreePort | None = None,
         extract_baseline_kernel: ExtractBaselineKernel | None = None,
         guest_egress: bool = False,
@@ -199,6 +183,7 @@ class LocalLibvirtProvisioning:
         self._files = files or ProvisioningFiles()
         self._allowed_roots = allowed_roots or [Path(ROOTFS_DIR)]
         self._catalog_fetch = catalog_fetch
+        self._upload_fetch = upload_fetch
         self._materialize_rootfs = materialize_rootfs or self._materialize_rootfs_base
         self._free_port = free_port or _bind_probe_free_port
         self._extract_baseline_kernel = extract_baseline_kernel or _real_extract_baseline_kernel
@@ -224,6 +209,7 @@ class LocalLibvirtProvisioning:
             connect=lambda: libvirt.open(host_uri),
             allowed_roots=allowed_roots,
             catalog_fetch=rootfs_catalog_fetch_from_env(allowed_roots),
+            upload_fetch=rootfs_upload_fetch_from_env(),
             guest_egress=guest_egress,
         )
 
@@ -505,9 +491,13 @@ class LocalLibvirtProvisioning:
 
         A ``catalog`` reference is validated by name against the baseline catalog (its object is
         resolved at provision time through the DB-backed materialize fetch, ADR-0092, which needs
-        a connection this admission-time validator does not hold); a ``local``/``upload``
-        reference is validated by materializing it within the provider roots.
+        a connection this admission-time validator does not hold). An ``upload`` reference is
+        deferred to provision the same way (ADR-0434): the object exists only after the upload
+        window, so materializing it here — with no real ``system_id`` — would issue a bogus HEAD.
+        A ``local`` reference is validated by materializing it within the provider roots.
         """
+        if isinstance(rootfs, _UploadRootfs):
+            return
         if isinstance(rootfs, CatalogComponentRef):
             validate_rootfs_reference(rootfs)
             return
@@ -543,11 +533,12 @@ class LocalLibvirtProvisioning:
         return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     def teardown(self, domain_name: str) -> None:
-        """Destroy+undefine the domain and reclaim its overlay + baseline kernel dir; idempotent.
+        """Destroy+undefine the domain and reclaim its overlay, baseline dir, and uploaded rootfs.
 
-        The overlay and the per-System baseline-kernel directory (ADR-0272) are removed after the
-        libvirt teardown — including the already-absent-domain path — so a torn-down System leaves
-        no orphaned disk or kernel files (ADR-0060). An absent overlay/directory is a no-op.
+        The overlay, the per-System baseline-kernel directory (ADR-0272), and any staged uploaded
+        rootfs (ADR-0434) are removed after the libvirt teardown — including the already-absent-
+        domain path — so a torn-down System leaves no orphaned disk, kernel, or uploaded-image
+        files (ADR-0060). An absent file/directory is a no-op; idempotent.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error other than the
@@ -556,6 +547,7 @@ class LocalLibvirtProvisioning:
         self._teardown_domain(domain_name)
         self._files.remove_overlay_for_domain(domain_name)
         self._files.remove_baseline_for_domain(domain_name)
+        self._files.remove_uploaded_rootfs_for_domain(domain_name)
 
     def _materialize_rootfs_base(
         self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"
@@ -567,8 +559,9 @@ class LocalLibvirtProvisioning:
                 context=RootfsMaterializationContext(
                     allowed_roots=self._allowed_roots,
                     arch=arch,
-                    upload=RootfsUploadContext("local", system_id, Path(ROOTFS_DIR)),
+                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR)),
                     catalog_fetch=self._catalog_fetch,
+                    upload_fetch=self._upload_fetch,
                 ),
             )
         )

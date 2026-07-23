@@ -12,11 +12,17 @@ from pathlib import Path
 from uuid import UUID
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import upload_rootfs_path
 from kdive.providers.shared.runtime_paths import console_log_path
 
 _log = logging.getLogger(__name__)
 
 ROOTFS_DIR = "/var/lib/kdive/rootfs"
+# A System-owned uploaded rootfs is staged here, OUTSIDE the provider ``allowed_roots`` (which
+# default to ``[ROOTFS_DIR]``) and beside the catalog ``rootfs-cache`` (ADR-0228) — so a staged
+# SENSITIVE image is never reachable as another System's ``local`` staged-path candidate
+# (ADR-0434 §3, the no-escape invariant).
+UPLOADS_DIR = str(Path(ROOTFS_DIR).parent / "rootfs-uploads")
 _QEMU_IMG_TIMEOUT_S = 5 * 60
 _QEMU_IMG = "qemu-img"
 _QEMU_IMG_ERROR_TAIL_CHARS = 2000
@@ -44,6 +50,23 @@ def _real_remove_baseline(baseline: str) -> None:
             "failed to remove the per-System baseline kernel directory",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"op": "remove_baseline", "baseline": Path(baseline).name},
+        ) from exc
+
+
+def _real_remove_uploaded_rootfs(path: str) -> None:
+    """Remove a System's staged uploaded rootfs; an absent file is the achieved post-state.
+
+    Fail-loud on a real ``OSError`` (like the overlay/baseline removal it sits beside): a
+    persistent failure dead-letters the teardown job rather than silently leaking the SENSITIVE
+    image on disk (ADR-0434 §4).
+    """
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as exc:
+        raise CategorizedError(
+            "failed to remove the per-System uploaded rootfs",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"op": "remove_uploaded_rootfs", "path": Path(path).name},
         ) from exc
 
 
@@ -253,6 +276,7 @@ class ProvisioningFiles:
     overlay_virtual_size: OverlayVirtualSize = _real_overlay_virtual_size
     remove_overlay: RemoveOverlay = _real_remove_overlay
     remove_baseline: RemoveBaseline = _real_remove_baseline
+    remove_uploaded_rootfs: RemoveOverlay = _real_remove_uploaded_rootfs
     overlay_exists: OverlayExists = _real_overlay_exists
     # The baseline directory presence check reuses the overlay path-presence predicate.
     baseline_exists: OverlayExists = _real_overlay_exists
@@ -303,3 +327,8 @@ class ProvisioningFiles:
 
     def remove_baseline_for_domain(self, domain_name: str) -> None:
         self.remove_baseline(baseline_dir(domain_name.removeprefix("kdive-")))
+
+    def remove_uploaded_rootfs_for_domain(self, domain_name: str) -> None:
+        system_id = domain_name.removeprefix("kdive-")
+        path = upload_rootfs_path("local", system_id, upload_dir=Path(UPLOADS_DIR))
+        self.remove_uploaded_rootfs(str(path))

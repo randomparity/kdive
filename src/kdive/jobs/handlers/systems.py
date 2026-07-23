@@ -154,7 +154,7 @@ async def _commit_uploaded_rootfs(
     """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
     if not rootfs_upload_window_allowed(profile_policy, profile):
         return
-    key = artifact_key("local", "systems", str(system.id), "rootfs")
+    key = _uploaded_rootfs_key(system.id)
     head = await asyncio.to_thread(artifact_store.head, key)
     if head is None:
         raise CategorizedError(
@@ -700,6 +700,41 @@ async def _reclaim_sysrq_artifacts(
             await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
 
 
+_DELETE_ROOTFS_ROW_SQL: LiteralString = (
+    "DELETE FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
+)
+
+
+def _uploaded_rootfs_key(system_id: UUID) -> str:
+    # Committed under the local tenant (ADR-0048 §6, `_commit_uploaded_rootfs`).
+    return artifact_key("local", "systems", str(system_id), "rootfs")
+
+
+async def _delete_uploaded_rootfs_object(store: ObjectStore, system_id: UUID) -> None:
+    """Delete the System's uploaded rootfs object (best-effort) — ADR-0434 §4.
+
+    ``owner_kind='systems'`` objects are exempt from the #768 expiry reaper, so a torn-down
+    System's SENSITIVE uploaded rootfs must be reclaimed here. This byte-delete is best-effort (a
+    store fault must not block teardown, like the console/sysrq reclaim); the ``artifacts`` row —
+    the download handle — is deleted fail-loud in :func:`_delete_uploaded_rootfs_row`, so a store
+    fault leaves at most an unreferenced orphan, never a live download handle. A non-upload System
+    has no such object; the delete is a no-op.
+    """
+    await asyncio.to_thread(store.delete, _uploaded_rootfs_key(system_id))
+
+
+async def _delete_uploaded_rootfs_row(conn: AsyncConnection, system_id: UUID) -> None:
+    """Delete the uploaded rootfs ``artifacts`` row (fail-loud) so the download handle is revoked.
+
+    Anchored on the exact object key, so a non-upload System (no such row) is a no-op and an
+    at-least-once teardown redelivery is idempotent. Fail-loud like ``delete_system_bootstrap_key``
+    (a stale row after teardown would keep the SENSITIVE rootfs downloadable), so it runs outside
+    the best-effort reclaim block.
+    """
+    async with conn.transaction():
+        await conn.execute(_DELETE_ROOTFS_ROW_SQL, (system_id, _uploaded_rootfs_key(system_id)))
+
+
 async def _reclaim_snapshots(
     conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
 ) -> None:
@@ -763,6 +798,10 @@ async def teardown_handler(
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
+    # Revoke the uploaded-rootfs download handle fail-loud (ADR-0434 §4), like the bootstrap key:
+    # a stale artifacts row would keep the SENSITIVE image downloadable after teardown. The object
+    # bytes are reclaimed best-effort below.
+    await _delete_uploaded_rootfs_row(conn, system_id)
     # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
@@ -774,6 +813,16 @@ async def teardown_handler(
     except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
         _log.warning(
             "best-effort System-artifact reclaim for system %s failed",
+            system_id,
+            exc_info=True,
+        )
+    # Isolated from the console/sysrq reclaim above: a fault there must not skip reclaiming the
+    # SENSITIVE uploaded-rootfs object, which no #768 reaper would ever collect (ADR-0434 §4).
+    try:
+        await _delete_uploaded_rootfs_object(artifact_store, system_id)
+    except Exception:  # noqa: BLE001 - object reclaim is best-effort; the row was already revoked
+        _log.warning(
+            "best-effort uploaded-rootfs object reclaim for system %s failed",
             system_id,
             exc_info=True,
         )
