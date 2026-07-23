@@ -65,6 +65,12 @@ def _entry_payload(entry: ManifestEntry) -> dict[str, object]:
     }
     if entry.chunks is not None:
         payload["chunks"] = [{"sha256": c.sha256, "size_bytes": c.size_bytes} for c in entry.chunks]
+    if entry.encoding is not None:
+        # Absent ⇒ identity, so only a non-identity encoding is persisted; a pre-existing manifest
+        # without these keys deserializes as identity (ADR-0437). ``uncompressed_size`` is always
+        # present alongside a non-identity ``encoding`` (the validator requires it).
+        payload["encoding"] = entry.encoding
+        payload["uncompressed_size"] = entry.uncompressed_size
     return payload
 
 
@@ -156,8 +162,16 @@ def _entry_from_payload(payload: Any) -> ManifestEntry:
         if isinstance(raw_chunks, list)
         else None
     )
+    encoding = payload.get("encoding")  # absent ⇒ identity (ADR-0437)
+    raw_uncompressed = payload.get("uncompressed_size")
+    uncompressed_size = int(raw_uncompressed) if raw_uncompressed is not None else None
     return ManifestEntry(
-        payload["name"], payload["sha256"], int(payload["size_bytes"]), chunks=chunks
+        payload["name"],
+        payload["sha256"],
+        int(payload["size_bytes"]),
+        chunks=chunks,
+        encoding=encoding,
+        uncompressed_size=uncompressed_size,
     )
 
 

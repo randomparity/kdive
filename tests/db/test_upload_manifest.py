@@ -79,6 +79,38 @@ def test_round_trips_chunks(migrated_url: str) -> None:
     asyncio.run(_run_test())
 
 
+def test_round_trips_encoding(migrated_url: str) -> None:
+    """An encoded entry persists encoding + uncompressed_size; a plain entry stays identity."""
+
+    async def _run_test() -> None:
+        owner_id = uuid4()
+        entries = [
+            ManifestEntry("rootfs", "whole", 4096, encoding="gzip", uncompressed_size=6 * 1024**3),
+            ManifestEntry("kernel", "Zm9v", 3),
+        ]
+        async with await _connect(migrated_url) as conn:
+            await replace_manifest(conn, _request(owner_id, entries))
+            got = await get_manifest(conn, "runs", owner_id)
+        assert got is not None
+        by_name = {e.name: e for e in got.entries}
+        assert by_name["rootfs"].encoding == "gzip"
+        assert by_name["rootfs"].uncompressed_size == 6 * 1024**3
+        # A plain (no-encoding) entry deserializes as identity.
+        assert by_name["kernel"].encoding is None
+        assert by_name["kernel"].uncompressed_size is None
+
+    asyncio.run(_run_test())
+
+
+def test_preexisting_payload_without_encoding_defaults_to_identity() -> None:
+    """A manifest payload written before ADR-0437 (no encoding keys) deserializes as identity."""
+    from kdive.artifacts.upload_manifest import _entry_from_payload
+
+    entry = _entry_from_payload({"name": "rootfs", "sha256": "a", "size_bytes": 10})
+    assert entry.encoding is None
+    assert entry.uncompressed_size is None
+
+
 def test_full_set_replacement(migrated_url: str) -> None:
     """A second replace_manifest with fewer entries replaces, not merges, the prior set."""
 
