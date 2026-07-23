@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge generated verbs into the parser, retire the nine aliases
 - Add --<param>-json escape for non-scalar generated verbs
 - Generic dispatch handler for generated verbs
+- Offline shell completion over the generated verb surface
 
 ### Changed
 
