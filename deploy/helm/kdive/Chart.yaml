@@ -10,4 +10,4 @@ type: application
 #                (ADR-0041 source of truth); `just set-version` rewrites it and
 #                `just chart-version-check` fails CI on any appVersion != pyproject drift.
 version: 0.4.0
-appVersion: "0.4.0"
+appVersion: "0.4.1"
