@@ -121,6 +121,39 @@ def _session_lock_key(name: str) -> int:
     return int.from_bytes(digest.digest(), "big", signed=True)
 
 
+def _advisory_lock_oids(key: int) -> tuple[int, int]:
+    """Split a single-bigint advisory key into the ``(classid, objid)`` ``pg_locks`` exposes.
+
+    Postgres splits a single-bigint advisory lock into two oid columns: ``classid`` is the high
+    32 bits and ``objid`` the low 32 bits, both unsigned. Deriving them here avoids signed-int4
+    bit-math in SQL for keys whose high bit is set (blake2b can produce a negative int8).
+    """
+    unsigned = key & 0xFFFF_FFFF_FFFF_FFFF
+    return (unsigned >> 32) & 0xFFFF_FFFF, unsigned & 0xFFFF_FFFF
+
+
+async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
+    """Report whether **any** backend currently holds the named session advisory lock.
+
+    Unlike :meth:`SessionAdvisoryLock.is_held` — which scopes to this connection's own backend
+    pid — this scans ``pg_locks`` across all backends, so a worker can tell a live leader from a
+    dead one without contending for leadership itself. Postgres releases a session lock the
+    instant the holding connection drops, so ``False`` means no live holder is present (e.g. no
+    console-hosting leader is pumping). Only granted locks are counted: a would-be acquirer
+    blocked on ``pg_advisory_lock`` leaves an ungranted row that must not read as a live holder.
+    """
+    classid, objid = _advisory_lock_oids(_session_lock_key(name))
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM pg_locks "
+            "WHERE locktype = 'advisory' AND classid = %s AND objid = %s "
+            "  AND objsubid = 1 AND granted",
+            (classid, objid),
+        )
+        row = await cur.fetchone()
+    return bool(row[0]) if row is not None else False
+
+
 @asynccontextmanager
 async def session_advisory_lock(conn: AsyncConnection, name: str) -> AsyncIterator[None]:
     """Hold a **session-scoped** advisory lock named ``name`` for the whole ``with`` block.
@@ -166,12 +199,7 @@ class SessionAdvisoryLock:
     def __init__(self, conn: AsyncConnection, name: str) -> None:
         self._conn = conn
         self._key = _session_lock_key(name)
-        # Postgres splits a single-bigint advisory lock into the two oid columns
-        # pg_locks exposes: classid = high 32 bits, objid = low 32 bits (both unsigned).
-        # Deriving them here avoids signed-int4 bit-math in SQL for negative keys.
-        unsigned = self._key & 0xFFFF_FFFF_FFFF_FFFF
-        self._classid = (unsigned >> 32) & 0xFFFF_FFFF
-        self._objid = unsigned & 0xFFFF_FFFF
+        self._classid, self._objid = _advisory_lock_oids(self._key)
 
     async def try_acquire(self) -> bool:
         """Try to claim leadership without blocking; ``True`` iff this call won it.

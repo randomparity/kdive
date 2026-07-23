@@ -15,6 +15,7 @@ from kdive.db.locks import (
     _lock_key,
     _session_lock_key,
     advisory_xact_lock,
+    session_advisory_lock_held,
 )
 from tests.db_waits import wait_until_backend_waiting
 
@@ -277,5 +278,58 @@ def test_session_lock_released_on_connection_loss(postgres_url: str) -> None:
             standby = SessionAdvisoryLock(b, CONSOLE_HOSTING_LEADER)
             assert await standby.try_acquire() is True
             await standby.release()
+
+    asyncio.run(_run())
+
+
+def test_session_advisory_lock_held_observes_another_backend(postgres_url: str) -> None:
+    """A non-holder observes a live leader across backends, and its release, from its own conn."""
+
+    async def _run() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as leader_conn,
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
+        ):
+            leader = SessionAdvisoryLock(leader_conn, CONSOLE_HOSTING_LEADER)
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
+            assert await leader.try_acquire() is True
+            # The observer sees the leader on a different backend — not just its own pid.
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is True
+            await leader.release()
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
+
+    asyncio.run(_run())
+
+
+def test_session_advisory_lock_held_for_negative_key(postgres_url: str) -> None:
+    # "a" hashes to a negative int8 key; the cross-backend query must not mis-detect it through
+    # signed-int4 reconstruction (mirrors the SessionAdvisoryLock.is_held negative-key case).
+    assert _session_lock_key("a") < 0
+
+    async def _run() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as holder_conn,
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
+        ):
+            holder = SessionAdvisoryLock(holder_conn, "a")
+            assert await session_advisory_lock_held(observer, "a") is False
+            assert await holder.try_acquire() is True
+            assert await session_advisory_lock_held(observer, "a") is True
+            await holder.release()
+
+    asyncio.run(_run())
+
+
+def test_session_advisory_lock_held_released_on_holder_loss(postgres_url: str) -> None:
+    """A dropped holder connection releases the lock, and the observer sees it go free."""
+
+    async def _run() -> None:
+        holder_conn = await psycopg.AsyncConnection.connect(postgres_url, autocommit=True)
+        holder = SessionAdvisoryLock(holder_conn, CONSOLE_HOSTING_LEADER)
+        assert await holder.try_acquire() is True
+        async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer:
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is True
+            await holder_conn.close()  # a dead leader releases the lock with no notice
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
 
     asyncio.run(_run())
