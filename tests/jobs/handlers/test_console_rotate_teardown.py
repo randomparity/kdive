@@ -257,6 +257,66 @@ def test_teardown_reclaims_sysrq_diagnostic_artifacts(migrated_url: str) -> None
     assert not still_present, "sysrq object must be deleted at teardown"
 
 
+async def _seed_rootfs_artifact(
+    pool: AsyncConnectionPool, store: _FakeStore, system_id: UUID
+) -> str:
+    stored = store.put_artifact(
+        ArtifactWriteRequest(
+            tenant="local",
+            owner_kind="systems",
+            owner_id=str(system_id),
+            name="rootfs",
+            data=b"uploaded rootfs bytes\n",
+            sensitivity=Sensitivity.SENSITIVE,
+            retention_class="rootfs",
+        )
+    )
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('systems', %s, %s, %s, 'sensitive', 'rootfs')",
+            (system_id, stored.key, stored.etag),
+        )
+    return stored.key
+
+
+def test_teardown_reclaims_uploaded_rootfs_object_and_row(migrated_url: str) -> None:
+    async def _run() -> tuple[str, list[str], bool]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            store = _FakeStore()
+            key = await _seed_rootfs_artifact(pool, store, system_id)
+            assert key in store.objects
+            await _teardown(pool, store, system_id)
+            return key, await _part_rows(pool, system_id), key in store.objects
+
+    key, rows, still_present = asyncio.run(_run())
+
+    assert rows == [], "the uploaded rootfs artifacts row must be reclaimed at teardown"
+    assert not still_present, "the uploaded rootfs object must be deleted at teardown"
+
+
+def test_teardown_revokes_rootfs_row_even_when_object_delete_fails(migrated_url: str) -> None:
+    # The row delete (download handle) is fail-loud and runs BEFORE the best-effort object delete,
+    # so a store outage still revokes access — the SENSITIVE image is no longer downloadable even
+    # though its orphaned bytes linger (ADR-0434 §4 asymmetry).
+    async def _run() -> tuple[str, list[str], bool]:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            store = _FakeStore(fail_delete=True)
+            key = await _seed_rootfs_artifact(pool, store, system_id)
+            result = await _teardown(pool, store, system_id)
+            return result, await _part_rows(pool, system_id), key in store.objects
+
+    result, rows, orphan_present = asyncio.run(_run())
+
+    assert result is not None, "a store delete failure must not fail the teardown job"
+    assert rows == [], "the rootfs row is revoked fail-loud regardless of the object delete"
+    assert orphan_present, "the object bytes linger as an unreferenced orphan on a store fault"
+
+
 def test_teardown_succeeds_with_nothing_to_clean(migrated_url: str) -> None:
     async def _run() -> tuple[str, list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:

@@ -26,6 +26,10 @@ from kdive.profiles.provisioning import _UploadRootfs
 # Resolve a `catalog` reference (for a target arch) to a provider-readable local path. A staged-path
 # row resolves to its host path; an s3 row resolves DB row → object → cache (ADR-0092/0228).
 type CatalogFetch = Callable[[CatalogComponentRef, str], Path]
+# Download + checksum-verify a System-owned uploaded rootfs object to a provider-readable local
+# path (ADR-0434). Injected like ``CatalogFetch`` because the provider provision seam is
+# synchronous and owns no object store; the worker wires a concrete fetch.
+type UploadFetch = Callable[["RootfsUploadContext"], Path]
 type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _UploadRootfs
 
 
@@ -48,12 +52,17 @@ class RootfsMaterializationContext:
     ``arch`` is the provisioning profile's target arch, threaded into ``catalog_fetch`` so a
     same-name multi-arch image resolves deterministically (ADR-0228); it is unused on the
     ``local``/``upload`` lanes.
+
+    ``upload_fetch`` downloads and checksum-verifies a System-owned uploaded rootfs object to a
+    local path (ADR-0434); it is ``None`` in lanes that never resolve an ``upload`` reference
+    (then an ``upload`` reference is a configuration error), mirroring ``catalog_fetch``.
     """
 
     allowed_roots: list[Path]
     arch: str = "x86_64"
     upload: RootfsUploadContext | None = None
     catalog_fetch: CatalogFetch | None = None
+    upload_fetch: UploadFetch | None = None
 
 
 def materialize_rootfs_base(
@@ -74,19 +83,32 @@ def materialize_rootfs_base(
     )
 
 
-def upload_rootfs_path(tenant: str, system_id: UUID, *, upload_dir: Path) -> Path:
-    """Return the local staging path for a System-owned uploaded rootfs object."""
+def upload_rootfs_path(tenant: str, system_id: UUID | str, *, upload_dir: Path) -> Path:
+    """Return the local staging path for a System-owned uploaded rootfs object.
+
+    ``system_id`` accepts a ``str`` (like ``overlay_path`` / ``baseline_dir``) so a teardown
+    that only holds the domain name can reconstruct the path.
+    """
     return upload_dir / f"{tenant}-systems-{system_id}-rootfs.qcow2"
 
 
 def _materialize_uploaded_rootfs(context: RootfsMaterializationContext) -> Path:
+    """Download + checksum-verify the System-owned uploaded rootfs to a local path (ADR-0434).
+
+    The download is injected (``context.upload_fetch``) so the synchronous provider seam stays
+    connectionless; an unwired lane treats an ``upload`` reference as a configuration error.
+    """
     if context.upload is None:
         raise CategorizedError(
             "uploaded rootfs materialization requires upload context",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    upload = context.upload
-    return upload_rootfs_path(upload.tenant, upload.system_id, upload_dir=upload.upload_dir)
+    if context.upload_fetch is None:
+        raise CategorizedError(
+            "upload rootfs materialization is not wired for this lane",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    return context.upload_fetch(context.upload)
 
 
 def _materialize_local_rootfs(

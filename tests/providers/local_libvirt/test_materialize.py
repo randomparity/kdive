@@ -109,18 +109,42 @@ def test_materialize_catalog_rootfs_unwired_lane_is_config_error(tmp_path: Path)
     assert error.value.details == {"provider": "local-libvirt", "name": "base"}
 
 
-def test_materialize_uploaded_rootfs_uses_system_keyed_path(tmp_path: Path) -> None:
+def test_materialize_uploaded_rootfs_delegates_to_injected_fetch(tmp_path: Path) -> None:
+    # The `upload` path is injected like `catalog` (ADR-0434): the context supplies a fetch that
+    # downloads + checksum-verifies the object and returns the staged local path.
     system_id = uuid4()
+    staged = tmp_path / "staged.qcow2"
+    staged.write_bytes(b"img")
+    seen: list[RootfsUploadContext] = []
 
+    def _fetch(upload: RootfsUploadContext) -> Path:
+        seen.append(upload)
+        return staged
+
+    upload = RootfsUploadContext("local", system_id, tmp_path)
     result = materialize_rootfs_base(
         _UploadRootfs(kind="upload"),
         context=RootfsMaterializationContext(
-            allowed_roots=[tmp_path],
-            upload=RootfsUploadContext("local", system_id, tmp_path),
+            allowed_roots=[tmp_path], upload=upload, upload_fetch=_fetch
         ),
     )
 
-    assert result == tmp_path / f"local-systems-{system_id}-rootfs.qcow2"
+    assert result == staged
+    assert seen == [upload]
+
+
+def test_materialize_uploaded_rootfs_unwired_lane_is_config_error(tmp_path: Path) -> None:
+    with pytest.raises(CategorizedError) as error:
+        materialize_rootfs_base(
+            _UploadRootfs(kind="upload"),
+            context=RootfsMaterializationContext(
+                allowed_roots=[tmp_path],
+                upload=RootfsUploadContext("local", uuid4(), tmp_path),
+            ),
+        )
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(error.value) == "upload rootfs materialization is not wired for this lane"
 
 
 def test_materialize_uploaded_rootfs_requires_system_context(tmp_path: Path) -> None:

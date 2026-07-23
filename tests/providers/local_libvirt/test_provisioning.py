@@ -1484,6 +1484,48 @@ def test_remove_baseline_for_domain_strips_prefix_and_rmtrees() -> None:
     assert seen == [storage_module.baseline_dir(_SYS)]
 
 
+def test_remove_uploaded_rootfs_for_domain_targets_uploads_dir() -> None:
+    seen: list[str] = []
+    files = ProvisioningFiles(remove_uploaded_rootfs=seen.append)
+    files.remove_uploaded_rootfs_for_domain("kdive-" + str(_SYS))
+    expected = f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
+    assert seen == [expected]
+
+
+def test_teardown_reclaims_uploaded_rootfs() -> None:
+    # teardown removes the staged uploaded rootfs alongside the overlay/baseline, even on the
+    # already-absent-domain path (ADR-0434 §4).
+    seen: list[str] = []
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN),
+        files=ProvisioningFiles(
+            remove_overlay=lambda _overlay: None,
+            remove_baseline=lambda _baseline: None,
+            remove_uploaded_rootfs=seen.append,
+        ),
+    )
+    prov.teardown(domain_name_for(_SYS))
+    expected = f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
+    assert seen == [expected]
+
+
+def test_real_remove_uploaded_rootfs_absent_is_noop(tmp_path: Path) -> None:
+    storage_module._real_remove_uploaded_rootfs(str(tmp_path / "missing.qcow2"))  # no raise
+
+
+def test_real_remove_uploaded_rootfs_oserror_is_infrastructure_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(self: object, *, missing_ok: bool = False) -> None:
+        del self, missing_ok
+        raise OSError("busy")
+
+    monkeypatch.setattr(storage_module.Path, "unlink", _boom)
+    with pytest.raises(CategorizedError) as error:
+        storage_module._real_remove_uploaded_rootfs("/var/lib/kdive/rootfs-uploads/x.qcow2")
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
 def test_baseline_exists_seam_is_injectable() -> None:
     files = ProvisioningFiles(baseline_exists=lambda path: True)
     assert files.baseline_exists(storage_module.baseline_dir(_SYS)) is True
@@ -2040,6 +2082,60 @@ def test_validate_rootfs_ref_local_uses_default_allowed_roots(
     prov.validate_rootfs_ref(_profile().provider.local_libvirt.rootfs)
 
     assert seen_roots == [[Path(provisioning_module.ROOTFS_DIR)]]
+
+
+def test_provision_upload_rootfs_stages_via_injected_fetch() -> None:
+    # The wired upload lane (ADR-0434): provisioning an `upload` rootfs runs the real
+    # _materialize_rootfs_base, which calls the injected upload_fetch and passes its returned
+    # path to make_overlay as the base.
+    from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import RootfsUploadContext
+
+    seen: list[RootfsUploadContext] = []
+    made: list[tuple[str, str]] = []
+    staged = Path(provisioning_module.UPLOADS_DIR) / "local-systems-staged-rootfs.qcow2"
+
+    def _fetch(upload: RootfsUploadContext) -> Path:
+        seen.append(upload)
+        return staged
+
+    conn = _ProvConn()
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            make_overlay=lambda base, overlay: made.append((base, overlay)),
+            overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
+            prepare_console_log=lambda _path: None,
+            overlay_virtual_size=lambda _overlay: 1 << 60,
+            resize_overlay=lambda _overlay, _gb: None,
+        ),
+        upload_fetch=_fetch,
+        free_port=lambda: next(_FREE_PORTS),
+        extract_baseline_kernel=_fake_extract,
+    )
+    prov.provision(_SYS, _profile(rootfs={"kind": "upload"}))
+
+    assert len(seen) == 1 and seen[0].system_id == _SYS
+    assert seen[0].upload_dir == Path(provisioning_module.UPLOADS_DIR)
+    assert made == [(str(staged), overlay_path(_SYS))]
+
+
+def test_validate_rootfs_ref_upload_defers_to_provision() -> None:
+    # An `upload` rootfs is validated by deferral (ADR-0434): validate_rootfs_ref must not invoke
+    # the upload fetch (which would issue a bogus HEAD for a non-real system id) and must not raise.
+    from kdive.profiles.provisioning import _UploadRootfs
+
+    called = False
+
+    def _fetch(_upload: object) -> Path:
+        nonlocal called
+        called = True
+        return Path("/never")
+
+    prov = LocalLibvirtProvisioning(connect=lambda: _ProvConn(), upload_fetch=_fetch)
+    prov.validate_rootfs_ref(_UploadRootfs(kind="upload"))  # does not raise
+
+    assert called is False
 
 
 def test_domain_xml_has_serial_console_with_log() -> None:
