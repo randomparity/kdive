@@ -282,6 +282,12 @@ PUBLIC_TOOLS: frozenset[str] = frozenset(
 #: Union of every gated tool, for the completeness guard.
 CLASSIFIED_TOOLS: frozenset[str] = frozenset(_TOOL_SCOPES)
 
+#: Every tool name the live registry exposes. ``test_all_tools_classified_or_public``
+#: (tests/mcp/core/test_app.py) pins this union to the real registry, so it is a synchronous
+#: source of truth without importing and walking the whole registry at call time. Used by
+#: :func:`visible_next_actions` to reject a suggested action that names no registered tool.
+_REGISTERED_TOOLS: frozenset[str] = CLASSIFIED_TOOLS | PUBLIC_TOOLS
+
 
 def required_scopes(tool_name: str) -> frozenset[ExposureScope]:
     """The any-of scopes a caller must satisfy to see ``tool_name``; empty = public."""
@@ -340,5 +346,20 @@ def visible_next_actions(actions: Iterable[str], ctx: RequestContext, project: s
     """Drop suggested next-action tool names ``ctx`` cannot invoke for ``project`` (ADR-0261).
 
     Preserves order and does not deduplicate; an all-filtered or empty input yields ``[]``.
+
+    Raises:
+        ValueError: if any input action names a tool absent from the live registry. Because
+            :func:`required_scopes` fail-opens an unknown name to the empty (public) scope set,
+            an unregistered action would otherwise be kept and silently mislead the agent's
+            navigation contract instead of surfacing the drift (#1444). Callers feed static,
+            registered breadcrumb lists, so this raise flags a programming error, not caller input.
     """
-    return [name for name in actions if project_tool_visible(name, ctx, project)]
+    materialized = list(actions)
+    for name in materialized:
+        if name not in _REGISTERED_TOOLS:
+            raise ValueError(
+                f"visible_next_actions: suggested action {name!r} names no registered tool "
+                f"(not in CLASSIFIED_TOOLS | PUBLIC_TOOLS); fix the breadcrumb list or classify "
+                f"the tool in exposure.py"
+            )
+    return [name for name in materialized if project_tool_visible(name, ctx, project)]
