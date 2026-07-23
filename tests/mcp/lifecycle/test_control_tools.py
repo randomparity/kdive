@@ -860,62 +860,23 @@ def test_diagnostic_sysrq_viewer_is_denied(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_diagnostic_sysrq_non_local_provider_is_config_error(migrated_url: str) -> None:
+def test_diagnostic_sysrq_unsupported_provider_is_capability_error(migrated_url: str) -> None:
+    # A provider that does not advertise supports_diagnostic_sysrq is refused with a
+    # capability_unsupported configuration_error (ADR-0427), not an identity check.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            disc = LocalLibvirtDiscovery(
-                host_uri="qemu:///system",
-                connect=lambda: FakeLibvirtConn(),
-                concurrent_allocation_cap=2,
-            )
-            async with pool.connection() as conn:
-                res = await register_discovered_resource(
-                    conn, disc.list_resources()[0], pool="remote-libvirt", cost_class="local"
-                )
-                await conn.execute(
-                    "UPDATE resources SET kind = 'remote-libvirt' WHERE id = %s", (res.id,)
-                )
-                alloc = await ALLOCATIONS.insert(
-                    conn,
-                    Allocation(
-                        id=uuid4(),
-                        created_at=_DT,
-                        updated_at=_DT,
-                        principal="user-1",
-                        project="proj",
-                        resource_id=res.id,
-                        state=AllocationState.GRANTED,
-                    ),
-                )
-                system = await SYSTEMS.insert(
-                    conn,
-                    System(
-                        id=uuid4(),
-                        created_at=_DT,
-                        updated_at=_DT,
-                        principal="user-1",
-                        project="proj",
-                        allocation_id=alloc.id,
-                        state=SystemState.READY,
-                        provisioning_profile=_PROFILE,
-                    ),
-                )
-            runtime = provider_resolver().runtimes()[0]
-            resolver = ProviderResolver(
-                {
-                    ResourceKind.LOCAL_LIBVIRT: runtime,
-                    ResourceKind.REMOTE_LIBVIRT: runtime,
-                }
-            )
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
             resp = await _diagnostic_sysrq(
                 pool,
                 _ctx(Role.CONTRIBUTOR),
-                system_id=str(system.id),
+                system_id=sys_id,
                 command="show_memory",
-                resolver=resolver,
+                resolver=provider_resolver(supports_diagnostic_sysrq=False),
             )
             assert resp.error_category == "configuration_error"
-            assert resp.data["reason"] == "not_local_libvirt"
+            assert resp.data["reason"] == "capability_unsupported"
+            assert resp.data["capability"] == "diagnostic_sysrq"
 
     asyncio.run(_run())
 
@@ -1075,6 +1036,26 @@ def test_watch_for_crash_unknown_system_is_config_error(migrated_url: str) -> No
         async with _pool(migrated_url) as pool:
             resp = await _watch_for_crash(pool, _ctx(Role.CONTRIBUTOR), system_id=str(uuid4()))
             assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_watch_for_crash_unsupported_provider_is_capability_error(migrated_url: str) -> None:
+    # A provider that does not advertise supports_crash_watch is refused with a
+    # capability_unsupported configuration_error (ADR-0427), not an identity check.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.READY)
+            resp = await _watch_for_crash(
+                pool,
+                _ctx(Role.CONTRIBUTOR),
+                system_id=sys_id,
+                resolver=provider_resolver(supports_crash_watch=False),
+            )
+            assert resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "capability_unsupported"
+            assert resp.data["capability"] == "crash_watch"
 
     asyncio.run(_run())
 

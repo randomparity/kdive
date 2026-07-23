@@ -30,7 +30,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, JOBS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.context import context_from_job as job_context_from_job
@@ -117,12 +116,10 @@ async def _snapshot(conn: AsyncConnection, run_id: UUID, resolver: ProviderResol
             raise _changed_state_error(run_id)
         binding = await resolver.binding_for_system(conn, system.id)
         set_provider_kind(binding.kind.value)
-        if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
-            raise CategorizedError(
-                "traffic capture is supported only on local-libvirt Systems",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
-            )
+        # No identity gate here: the tool layer already refuses a provider without the
+        # ``supports_traffic_capture`` capability (registrar.py), and this port-presence check is
+        # the defence-in-depth backstop — so a second provider that wires a ``TrafficCapturer`` is
+        # reachable the moment it is composed, with no gate change (ADR-0427).
         capturer = binding.runtime.traffic_capturer
         if capturer is None:
             raise CategorizedError(

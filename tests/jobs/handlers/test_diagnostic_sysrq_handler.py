@@ -452,3 +452,36 @@ def test_handler_reads_console_for_its_own_system(
     system_id = asyncio.run(_go())
     assert seen  # the console path is resolved at least once
     assert set(seen) == {system_id}  # always this System's id, never None
+
+
+def test_unsupported_provider_fails_capability_configuration_error(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A provider that does not advertise supports_diagnostic_sysrq is refused at the handler
+    # with a capability-shaped configuration_error (ADR-0427), not an identity check.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot\n")
+    monkeypatch.setattr(diagnostic_sysrq, "console_log_path", lambda _sid: log)
+    control = _FakeControl(log, b"dump\n")
+
+    async def _go() -> None:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            resolver = provider_resolver(controller=control, supports_diagnostic_sysrq=False)
+            async with pool.connection() as conn:
+                await diagnostic_sysrq.diagnostic_sysrq_handler(
+                    conn,
+                    _job(system_id, "show_memory"),
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    artifact_store=cast(ObjectStore, _FakeStore()),
+                )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(_go())
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "diagnostic_sysrq_unsupported"
+    # The fake Control port is never invoked once the capability gate refuses.
+    assert control.calls == []

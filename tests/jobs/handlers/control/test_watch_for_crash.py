@@ -415,6 +415,31 @@ def test_handler_not_ready_raises_configuration_error(
     assert str(excinfo.value) == "system is not ready; cannot watch for a crash signature"
 
 
+def test_handler_unsupported_provider_raises_capability_configuration_error(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A provider that does not advertise supports_crash_watch is refused with a capability-shaped
+    # configuration_error (ADR-0427), not an identity check.
+    log = tmp_path / "console.log"
+    log.write_bytes(b"boot\n")
+    monkeypatch.setattr(watch_for_crash, "console_log_path", lambda _sid: log)
+
+    async def _go() -> None:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_system(pool, SystemState.READY)
+            resolver = provider_resolver(supports_crash_watch=False)
+            async with pool.connection() as conn:
+                await watch_for_crash_handler(
+                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
+                )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(_go())
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "crash_watch_unsupported"
+
+
 def test_handler_not_fired_at_deadline(
     migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

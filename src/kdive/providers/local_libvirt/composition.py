@@ -168,6 +168,10 @@ def build_runtime(
             supports_snapshots=True,
             # Host-side pcap via QEMU filter-dump on the local guest netdev (ADR-0385, #1258).
             supports_traffic_capture=True,
+            # Magic-SysRq injection over the libvirt Control port on the local guest (ADR-0285).
+            supports_diagnostic_sysrq=True,
+            # Out-of-band crash-signature watch on the local guest's serial console (ADR-0367).
+            supports_crash_watch=True,
         ),
         debug=DebugCapabilities(
             attach_seam=default_attach_seam,

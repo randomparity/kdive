@@ -28,7 +28,6 @@ from pydantic import Field
 
 from kdive.db.repositories import ALLOCATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind, PowerAction
@@ -270,12 +269,13 @@ async def diagnostic_sysrq_system(
     resolver: ProviderResolver,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit a diagnostic SysRq on a ready local-libvirt System and enqueue the capture job.
+    """Admit a diagnostic SysRq on a ready, SysRq-capable System and enqueue the capture job.
 
     Non-destructive: requires ``contributor`` (no destructive-op gate), rejects an unknown or
-    destructive ``command`` and any non-local-libvirt or non-``ready`` System with a
-    ``configuration_error``. The role check binds to the target System's project and runs after
-    the in-project check, so it is never evaluated against a foreign project.
+    destructive ``command``, refuses a provider that does not advertise
+    ``supports_diagnostic_sysrq`` with a ``capability_unsupported`` ``configuration_error``, and
+    rejects a non-``ready`` System. The role check binds to the target System's project and runs
+    after the in-project check, so it is never evaluated against a foreign project.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -291,11 +291,12 @@ async def diagnostic_sysrq_system(
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(system_id, exc)
             binding = await resolver.binding_for_system(conn, system.id)
-            if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
-                return _config_error(
+            if not binding.runtime.support.supports_diagnostic_sysrq:
+                return _capability_unsupported(
                     system_id,
-                    detail="diagnostic SysRq is supported only on local-libvirt Systems",
-                    data={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+                    capability="diagnostic_sysrq",
+                    provider=binding.runtime.support.component_sources.provider,
+                    supported=[],
                 )
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
@@ -330,13 +331,14 @@ async def watch_for_crash_system(
     resolver: ProviderResolver,
     idempotency_key: str | None = None,
 ) -> ToolResponse:
-    """Admit an out-of-band crash-signature console watch on a ready local-libvirt System.
+    """Admit an out-of-band crash-signature console watch on a ready, crash-watch-capable System.
 
     Non-destructive: requires ``contributor``. ``deadline_s`` is validated (finite, positive) and
     clamped to ``WATCH_MAX_DEADLINE_S`` before enqueue, so a pure-wait watch cannot hold a worker
-    slot past the cap. Rejects a non-local-libvirt or non-``ready`` System with a
-    ``configuration_error``. The role check binds to the target System's project and runs after
-    the in-project check, so it is never evaluated against a foreign project.
+    slot past the cap. Refuses a provider that does not advertise ``supports_crash_watch`` with a
+    ``capability_unsupported`` ``configuration_error``, and rejects a non-``ready`` System. The
+    role check binds to the target System's project and runs after the in-project check, so it is
+    never evaluated against a foreign project.
     """
     uid = _as_uuid(system_id)
     if uid is None:
@@ -351,11 +353,12 @@ async def watch_for_crash_system(
                 return _config_error(system_id)
             require_role(ctx, system.project, Role.CONTRIBUTOR)
             binding = await resolver.binding_for_system(conn, system.id)
-            if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
-                return _config_error(
+            if not binding.runtime.support.supports_crash_watch:
+                return _capability_unsupported(
                     system_id,
-                    detail="watch_for_crash is supported only on local-libvirt Systems",
-                    data={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+                    capability="crash_watch",
+                    provider=binding.runtime.support.component_sources.provider,
+                    supported=[],
                 )
             if system.state is not SystemState.READY:
                 return _config_error(system_id, data={"current_status": system.state.value})
@@ -588,7 +591,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     )
     async def control_diagnostic_sysrq(
         system_id: Annotated[
-            str, Field(description="The ready local-libvirt System to inspect (non-destructive).")
+            str,
+            Field(
+                description=(
+                    "The ready System to inspect (non-destructive). The bound provider must "
+                    "support diagnostic SysRq injection."
+                )
+            ),
         ],
         command: Annotated[
             str,
@@ -605,14 +614,15 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Inject one non-destructive diagnostic SysRq into a ready local-libvirt guest and
-        capture the kernel's console dump. Requires contributor (no destructive gate); enqueues
-        a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's
-        `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. A
-        guest that rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
+        """Inject one non-destructive diagnostic SysRq into a ready guest and capture the kernel's
+        console dump. The bound provider must support diagnostic SysRq injection (today
+        local-libvirt); a provider that does not is refused with a `capability_unsupported`
+        `configuration_error`. Requires contributor (no destructive gate); enqueues a job and
+        returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result`
+        is the redacted console-dump artifact id; read it with `artifacts.get`. A guest that
+        rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
         `configuration_error`, as does no console output at all (no keyboard driver); an
-        unknown/destructive `command`, a non-local-libvirt System, or a non-ready System is also
-        a `configuration_error`."""
+        unknown/destructive `command` or a non-ready System is also a `configuration_error`."""
         return await diagnostic_sysrq_system(
             pool,
             current_context(),
@@ -629,7 +639,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     )
     async def control_watch_for_crash(
         system_id: Annotated[
-            str, Field(description="The ready local-libvirt System whose console to watch.")
+            str,
+            Field(
+                description=(
+                    "The ready System whose console to watch. The bound provider must support "
+                    "out-of-band crash-watch."
+                )
+            ),
         ],
         deadline_s: Annotated[
             float,
@@ -647,9 +663,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Watch a ready local-libvirt guest's serial console out-of-band for a kernel-crash
-        signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on
-        the first hit. Use this to catch a crash your own reproducer provokes: drive the
+        """Watch a ready guest's serial console out-of-band for a kernel-crash signature
+        (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
+        hit. The bound provider must support out-of-band crash-watch (today local-libvirt); a
+        provider that does not is refused with a `capability_unsupported` `configuration_error`.
+        Use this to catch a crash your own reproducer provokes: drive the
         repeat-until-crash loop over your root SSH, and this watches the console — which survives
         the panic that drops SSH. Requires contributor; enqueues a job and returns
         `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
@@ -658,8 +676,8 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         signature before the deadline). Start the watch **before** you begin the reproducer loop
         so it does not miss an early crash; if your reproducer's SSH channel drops but the verdict
         is `not_fired`, the crash landed outside the watched window — read the full console with
-        the `artifacts` tools. A non-local-libvirt or non-ready System, or a non-positive
-        `deadline_s`, is a `configuration_error`."""
+        the `artifacts` tools. A non-ready System or a non-positive `deadline_s` is a
+        `configuration_error`."""
         return await watch_for_crash_system(
             pool,
             current_context(),
@@ -678,7 +696,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         run_id: Annotated[
             str,
             Field(
-                description="The Run whose bound ready local-libvirt System's traffic to capture."
+                description=(
+                    "The Run whose bound ready System's traffic to capture. The bound provider "
+                    "must support traffic capture."
+                )
             ),
         ],
         duration_s: Annotated[
@@ -731,9 +752,11 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
             Field(description="Replay-safe key; a repeated key returns the prior envelope."),
         ] = None,
     ) -> ToolResponse:
-        """Capture host-side network traffic from a Run's bound ready local-libvirt guest into a
-        Run-owned pcap. Only the guest's SSH-forward netdev is visible (the platform runs the guest
-        on a restricted user-mode network), so this sees the traffic on that path, not arbitrary
+        """Capture host-side network traffic from a Run's bound ready guest into a Run-owned pcap.
+        The bound provider must support traffic capture (today local-libvirt); a provider that
+        does not is refused with a `capability_unsupported` `configuration_error`. Only the guest's
+        SSH-forward netdev is visible (the platform runs the guest on a restricted user-mode
+        network), so this sees the traffic on that path, not arbitrary
         guest egress. Requires contributor; enqueues a fixed-duration job and returns
         `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result` is the
         captured pcap's artifact id; the pcap is sensitive (packet bytes) and is fetched only with
