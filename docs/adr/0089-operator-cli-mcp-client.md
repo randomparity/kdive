@@ -65,6 +65,11 @@ Two facts from the codebase decide it:
    verbs over the core,
    operator-shaped (table default, `--json` everywhere); read-only first, mutating verbs
    through the break-glass path. (c) `kdivectl login`, the token-acquisition affordance.
+   *Extended by [ADR-0421](0421-schema-generated-kdivectl-verbs.md): the curated-verb set is no
+   longer the enumerated surface — the verb tree is generated from the live tool schemas by a
+   canonical name rule, and a curated verb becomes a handler override of its derived canonical
+   path (never a second path). The break-glass routing and read-only-default policy are
+   unchanged.*
 
 3. **Bootstrap is an IdP concern, not a kdive side-door.** Because kdive only verifies
    tokens, the first admin is provisioned in the IdP. `kdivectl login` drives the mock-OIDC

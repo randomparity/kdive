@@ -1,6 +1,10 @@
 # ADR 0250 — Expose the accounting report tools as `kdivectl` ledger verbs
 
-- **Status:** Accepted
+- **Status:** Accepted — the **verb names** `ledger report-all` / `ledger report-granted`
+  (Decision) and the **`{"items", "totals"}` `--json` projection rationale** (Decision, the
+  `render_report` bullet) are superseded by
+  [ADR-0421](0421-schema-generated-kdivectl-verbs.md); the window/`--projects`/`--group-by`
+  flag handling and server-side-only authorization remain in force.
 - **Date:** 2026-06-25
 - **Issue:** [#818](https://github.com/randomparity/kdive/issues/818)
 - **Spec:** [`../superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md`](../archive/superpowers/specs/2026-06-25-ledger-report-cli-verbs-818.md)
@@ -29,9 +33,15 @@ choices:
 
 ## Decision
 
-We will add two `read_only` registry verbs under the `ledger` group —
+*Superseded by [ADR-0421](0421-schema-generated-kdivectl-verbs.md) — canonical path
+derivation retires the hand-picked `ledger report-*` verb names: the tools
+`accounting.report_all_projects` / `accounting.report_granted_set` derive to `kdivectl
+accounting report-all-projects` / `report-granted-set`, and a curated handler overrides that
+derived path rather than adding a `ledger`-namespaced alias.*
+
+~~We will add two `read_only` registry verbs under the `ledger` group —
 `ledger report-all` → `accounting.report_all_projects` and `ledger report-granted` →
-`accounting.report_granted_set` — with:
+`accounting.report_granted_set`~~ — with:
 
 - **`--since` / `--until` window flags**, assembled by the verb handler into the
   `[start, end]` pair (omitted when both absent; `null` for an absent half). Values pass
@@ -41,10 +51,16 @@ We will add two `read_only` registry verbs under the `ledger` group —
   list, so a typo fails loudly instead of returning a clean-but-misleading empty rollup.
 - **`--group-by principal`**, a pass-through string the server validates.
 - **A new `render_report` path** that tables the rows and prints the envelope totals as a
-  footer; under `--json` it emits one `{"items": [...], "totals": {...}}` object. Both halves
-  are projected onto a declared key set (rows like the existing list verbs, totals onto the
-  envelope's documented `data` keys), so a server-side `data` addition cannot silently change
-  the scriptable contract.
+  footer. *The `--json` projection rationale below is superseded by
+  [ADR-0421](0421-schema-generated-kdivectl-verbs.md) decision 6: under schema-generated
+  verbs `--json` emits the tool's `structured_content` envelope verbatim, and the committed
+  verb artifact plus CI drift guard — not a per-verb key projection — is what makes a
+  server-side `data` addition a reviewed contract change rather than a silent one (the same
+  property, enforced once across every verb instead of hand-maintained per verb).* ~~Under
+  `--json` it emits one `{"items": [...], "totals": {...}}` object. Both halves are projected
+  onto a declared key set (rows like the existing list verbs, totals onto the envelope's
+  documented `data` keys), so a server-side `data` addition cannot silently change the
+  scriptable contract.~~
 - **Server-side authorization only.** The verbs add no role logic; `report-all`'s help text
   notes the `platform_auditor` requirement, and a non-auditor token surfaces the server's
   `authorization_denied` envelope (exit `3`).

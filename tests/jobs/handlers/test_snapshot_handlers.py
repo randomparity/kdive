@@ -39,7 +39,10 @@ from kdive.jobs.handlers.systems import (
     snapshot_handler,
     teardown_handler,
 )
+from kdive.jobs.provider_context import clear_provider_kind, take_provider_kind
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
+from kdive.providers.shared.runtime_paths import domain_name_for
+from kdive.security.audit import args_digest
 from tests.mcp.systems_support import (
     PROVISIONING_PROFILE,
     FakeProvisioning,
@@ -82,6 +85,7 @@ async def _seed_system(
     state: SystemState,
     *,
     provisioning_profile: dict[str, object] | None = None,
+    domain_name: str | None = "kdive-x",
 ) -> UUID:
     async with pool.connection() as conn:
         res = await RESOURCES.insert(
@@ -120,7 +124,7 @@ async def _seed_system(
                 allocation_id=alloc.id,
                 state=state,
                 provisioning_profile=provisioning_profile or {},
-                domain_name="kdive-x",
+                domain_name=domain_name,
             ),
         )
     return system.id
@@ -175,6 +179,16 @@ async def _snap_state(conn: AsyncConnection, snap_id: UUID) -> SnapshotState:
     row = await SNAPSHOTS.get(conn, snap_id)
     assert row is not None
     return row.state
+
+
+async def _audit_rows(conn: AsyncConnection, object_id: UUID) -> list[tuple[object, ...]]:
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT tool, object_kind, object_id, transition, args_digest, project "
+            "FROM audit_log WHERE object_id = %s ORDER BY ts",
+            (object_id,),
+        )
+        return list(await cur.fetchall())
 
 
 def test_snapshot_success_drives_row_available_and_leaves_system_ready(migrated_url: str) -> None:
@@ -360,6 +374,17 @@ def test_restore_provider_error_fails_the_system(migrated_url: str) -> None:
                     assert exc.terminal is True  # dead-letters; a retry must not report success
                 assert raised
                 assert await _sys_state(conn, sid) is SystemState.FAILED
+                # The failure audits systems.restore with the restoring->failed transition.
+                assert await _audit_rows(conn, sid) == [
+                    (
+                        "systems.restore",
+                        "systems",
+                        sid,
+                        "restoring->failed",
+                        args_digest({"system_id": str(sid)}),
+                        "proj",
+                    ),
+                ]
         finally:
             await pool.close()
 
@@ -492,3 +517,246 @@ def test_reprovision_deletes_snapshot_ledger_rows(migrated_url: str) -> None:
             await pool.close()
 
     asyncio.run(scenario())
+
+
+# --- #1415 mutation sweep: pin return ids, provider-kind tags, audit rows, derived-domain -------
+
+
+def test_snapshot_success_returns_id_and_tags_provider_kind(migrated_url: str) -> None:
+    clear_provider_kind()
+
+    async def scenario() -> tuple[str | None, str | None, str]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.CREATING)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await snapshot_handler(
+                    conn,
+                    _job(
+                        JobKind.SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(snap_id), "name": "cp", "include_memory": True},
+                    ),
+                    resolver=resolver,
+                )
+            return result, take_provider_kind(), str(snap_id)
+        finally:
+            await pool.close()
+
+    result, kind, snap_id = asyncio.run(scenario())
+    assert result == snap_id
+    assert kind == "local-libvirt"
+
+
+def test_snapshot_non_ready_returns_snapshot_id(migrated_url: str) -> None:
+    async def scenario() -> tuple[str | None, str]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.REPROVISIONING)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.CREATING)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await snapshot_handler(
+                    conn,
+                    _job(
+                        JobKind.SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(snap_id), "name": "cp", "include_memory": True},
+                    ),
+                    resolver=resolver,
+                )
+            return result, str(snap_id)
+        finally:
+            await pool.close()
+
+    result, snap_id = asyncio.run(scenario())
+    assert result == snap_id  # the handler returns the snapshot id, not str(None)
+
+
+def test_snapshot_unnamed_system_uses_derived_domain(migrated_url: str) -> None:
+    async def scenario() -> tuple[list[tuple[str, str, bool]], UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY, domain_name=None)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.CREATING)
+            snapshotter = _FakeSnapshotter()
+            resolver = provider_resolver(snapshotter=snapshotter)
+            async with pool.connection() as conn:
+                await snapshot_handler(
+                    conn,
+                    _job(
+                        JobKind.SNAPSHOT,
+                        sid,
+                        {"snapshot_id": str(snap_id), "name": "cp", "include_memory": True},
+                    ),
+                    resolver=resolver,
+                )
+            return snapshotter.created, sid
+        finally:
+            await pool.close()
+
+    created, sid = asyncio.run(scenario())
+    assert created == [(domain_name_for(sid), "cp", True)]
+
+
+def test_snapshot_unsupported_provider_reports_system_id(migrated_url: str) -> None:
+    async def scenario() -> tuple[CategorizedError, UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.CREATING)
+            resolver = provider_resolver(snapshotter=None, supports_snapshots=False)
+            async with pool.connection() as conn:
+                try:
+                    await snapshot_handler(
+                        conn,
+                        _job(
+                            JobKind.SNAPSHOT,
+                            sid,
+                            {"snapshot_id": str(snap_id), "name": "cp", "include_memory": True},
+                        ),
+                        resolver=resolver,
+                    )
+                except CategorizedError as exc:
+                    return exc, sid
+                raise AssertionError("expected CategorizedError")
+        finally:
+            await pool.close()
+
+    exc, sid = asyncio.run(scenario())
+    assert str(exc) == "provider does not support snapshots"
+    assert exc.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.details["system_id"] == str(sid)
+
+
+def test_restore_returns_system_id_and_audits(migrated_url: str) -> None:
+    clear_provider_kind()
+
+    async def scenario() -> tuple[str | None, str | None, list[tuple[object, ...]], UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.RESTORING)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await restore_handler(
+                    conn,
+                    _job(JobKind.RESTORE, sid, {"name": "cp", "start_paused": False}),
+                    resolver=resolver,
+                )
+                audit = await _audit_rows(conn, sid)
+            return result, take_provider_kind(), audit, sid
+        finally:
+            await pool.close()
+
+    result, kind, audit, sid = asyncio.run(scenario())
+    assert result == str(sid)
+    assert kind == "local-libvirt"
+    assert audit == [
+        (
+            "systems.restore",
+            "systems",
+            sid,
+            "restoring->ready",
+            args_digest({"system_id": str(sid)}),
+            "proj",
+        ),
+    ]
+
+
+def test_restore_unnamed_system_uses_derived_domain(migrated_url: str) -> None:
+    async def scenario() -> tuple[list[tuple[str, str, bool]], UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.RESTORING, domain_name=None)
+            snapshotter = _FakeSnapshotter()
+            resolver = provider_resolver(snapshotter=snapshotter)
+            async with pool.connection() as conn:
+                await restore_handler(
+                    conn,
+                    _job(JobKind.RESTORE, sid, {"name": "cp", "start_paused": False}),
+                    resolver=resolver,
+                )
+            return snapshotter.reverted, sid
+        finally:
+            await pool.close()
+
+    reverted, sid = asyncio.run(scenario())
+    assert reverted == [(domain_name_for(sid), "cp", False)]
+
+
+def test_delete_returns_system_id_and_tags_provider_kind(migrated_url: str) -> None:
+    clear_provider_kind()
+
+    async def scenario() -> tuple[str | None, str | None, UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await snapshot_delete_handler(
+                    conn,
+                    _job(JobKind.DELETE_SNAPSHOT, sid, {"snapshot_id": str(snap_id), "name": "cp"}),
+                    resolver=resolver,
+                )
+            return result, take_provider_kind(), sid
+        finally:
+            await pool.close()
+
+    result, kind, sid = asyncio.run(scenario())
+    assert result == str(sid)
+    assert kind == "local-libvirt"
+
+
+def test_delete_noop_returns_system_id(migrated_url: str) -> None:
+    async def scenario() -> tuple[str | None, UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY)
+            await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            resolver = provider_resolver(snapshotter=_FakeSnapshotter())
+            async with pool.connection() as conn:
+                result = await snapshot_delete_handler(
+                    conn,
+                    _job(JobKind.DELETE_SNAPSHOT, sid, {"snapshot_id": str(uuid4()), "name": "cp"}),
+                    resolver=resolver,
+                )
+            return result, sid
+        finally:
+            await pool.close()
+
+    result, sid = asyncio.run(scenario())
+    assert result == str(sid)  # stale redelivery is a no-op that still returns the system id
+
+
+def test_delete_unnamed_system_uses_derived_domain(migrated_url: str) -> None:
+    async def scenario() -> tuple[list[tuple[str, str]], UUID]:
+        pool = _pool(migrated_url)
+        await pool.open()
+        try:
+            sid = await _seed_system(pool, SystemState.READY, domain_name=None)
+            snap_id = await _seed_snapshot(pool, sid, "cp", SnapshotState.AVAILABLE)
+            snapshotter = _FakeSnapshotter()
+            resolver = provider_resolver(snapshotter=snapshotter)
+            async with pool.connection() as conn:
+                await snapshot_delete_handler(
+                    conn,
+                    _job(JobKind.DELETE_SNAPSHOT, sid, {"snapshot_id": str(snap_id), "name": "cp"}),
+                    resolver=resolver,
+                )
+            return snapshotter.deleted, sid
+        finally:
+            await pool.close()
+
+    deleted, sid = asyncio.run(scenario())
+    assert deleted == [(domain_name_for(sid), "cp")]
