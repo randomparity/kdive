@@ -782,6 +782,8 @@ def _prov(
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
+    remove_uploaded_rootfs: Callable[[str], None] = lambda _path: None,
+    uploaded_rootfs_exists: Callable[[str], bool] = lambda _path: False,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
@@ -800,8 +802,10 @@ def _prov(
             make_overlay=make_overlay,
             remove_overlay=remove_overlay,
             remove_baseline=remove_baseline,
+            remove_uploaded_rootfs=remove_uploaded_rootfs,
             overlay_exists=overlay_exists,
             baseline_exists=baseline_exists,
+            uploaded_rootfs_exists=uploaded_rootfs_exists,
             prepare_console_log=lambda _path: None,
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
@@ -1150,6 +1154,7 @@ def _prov_with_port(conn: _ProvConn, *, free_port: Callable[[], int]) -> LocalLi
         files=ProvisioningFiles(
             make_overlay=lambda _base, _overlay: None,
             remove_overlay=lambda _overlay: None,
+            remove_baseline=lambda _baseline: None,
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
@@ -1460,16 +1465,6 @@ def test_prepare_overlay_resize_failure_removes_the_created_overlay() -> None:
     with pytest.raises(CategorizedError) as exc:
         files.prepare_overlay(_SYS, base="/base.qcow2", disk_gb=60)
     assert exc.value.category is ErrorCategory.PROVISIONING_FAILURE
-    assert removed == [overlay_path(_SYS)]
-
-
-def test_cleanup_overlay_if_created_removes_only_created_overlay() -> None:
-    removed: list[str] = []
-    files = ProvisioningFiles(remove_overlay=removed.append)
-
-    files.cleanup_overlay_if_created(storage_module.PreparedOverlay(overlay_path(_SYS), True))
-    files.cleanup_overlay_if_created(storage_module.PreparedOverlay("/existing.qcow2", False))
-
     assert removed == [overlay_path(_SYS)]
 
 
@@ -1930,6 +1925,146 @@ def test_provision_failure_still_closes_connection() -> None:
     # capabilities resolution (ADR-0340) + SSH-port reuse lookup + the failed define, all closed
     # even on a libvirt failure.
     assert conn.closed == 3
+
+
+# --- failure-path host-artifact reclaim (ADR-0435, #1501) ----------------------------------
+
+
+def _upload_profile() -> ProvisioningProfile:
+    return _profile(rootfs={"kind": "upload"})
+
+
+def _staged_upload_path() -> str:
+    return f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
+
+
+def _raise_baseline_multiple_kernels(
+    _base: Path, _dest: Path, _hint: str | None = None
+) -> BaselineKernel:
+    raise CategorizedError(
+        "rootfs /boot has multiple kernels", category=ErrorCategory.CONFIGURATION_ERROR
+    )
+
+
+def test_provision_baseline_failure_reclaims_staged_upload_and_baseline() -> None:
+    # The reported #1501 trigger: an upload-kind provision whose baseline extraction raises after
+    # materializing the staged rootfs. The staged image and the (partial) baseline dir this call
+    # created are reclaimed; the overlay is never touched (its create step was not reached).
+    removed_overlay: list[str] = []
+    removed_baseline: list[str] = []
+    removed_upload: list[str] = []
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _prov(
+            conn,
+            remove_overlay=removed_overlay.append,
+            remove_baseline=removed_baseline.append,
+            remove_uploaded_rootfs=removed_upload.append,
+            extract_baseline_kernel=_raise_baseline_multiple_kernels,
+        ).provision(_SYS, _upload_profile())
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert removed_baseline == [storage_module.baseline_dir(_SYS)]
+    assert removed_upload == [_staged_upload_path()]
+    assert removed_overlay == []  # overlay create step never reached
+    assert conn.recorded_xml == []  # no domain defined
+
+
+def test_provision_create_failure_reclaims_baseline_dir_and_overlay() -> None:
+    # A local-kind start failure now reclaims the baseline dir this call extracted alongside the
+    # overlay (the pre-existing baseline-dir leak, #1501). The upload staging path is never touched
+    # for a non-upload System.
+    removed_overlay: list[str] = []
+    removed_baseline: list[str] = []
+    removed_upload: list[str] = []
+    name = domain_name_for(_SYS)
+    conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
+    with pytest.raises(CategorizedError):
+        _prov(
+            conn,
+            remove_overlay=removed_overlay.append,
+            remove_baseline=removed_baseline.append,
+            remove_uploaded_rootfs=removed_upload.append,
+        ).provision(_SYS, _profile())
+    assert removed_overlay == [overlay_path(_SYS)]
+    assert removed_baseline == [storage_module.baseline_dir(_SYS)]
+    assert removed_upload == []  # non-upload System: no staged image to reclaim
+
+
+def test_provision_failure_keeps_preexisting_staged_and_baseline() -> None:
+    # Mirrors test_provision_failure_keeps_preexisting_overlay for the staged rootfs and baseline
+    # dir: an upload-kind retry that fails after finding all three already present must not remove a
+    # file it did not create — it may back a live or recoverable previous attempt.
+    removed_overlay: list[str] = []
+    removed_baseline: list[str] = []
+    removed_upload: list[str] = []
+    conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
+    with pytest.raises(CategorizedError):
+        _prov(
+            conn,
+            remove_overlay=removed_overlay.append,
+            remove_baseline=removed_baseline.append,
+            remove_uploaded_rootfs=removed_upload.append,
+            overlay_exists=lambda _overlay: True,
+            baseline_exists=lambda _path: True,
+            uploaded_rootfs_exists=lambda _path: True,
+            extract_baseline_kernel=_raise_baseline_multiple_kernels,  # must be reused, not called
+        ).provision(_SYS, _upload_profile())
+    assert removed_overlay == []
+    assert removed_baseline == []
+    assert removed_upload == []
+
+
+def test_provision_baseline_reclaim_failure_preserves_original_error() -> None:
+    # A reclaim-time CategorizedError (e.g. an OSError removing the baseline dir) is swallowed so
+    # the original provisioning error's category survives, like the overlay-cleanup case.
+    def fail_remove_baseline(_baseline: str) -> None:
+        raise CategorizedError(
+            "synthetic baseline reclaim failure",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+
+    conn = _ProvConn()
+    with pytest.raises(CategorizedError) as caught:
+        _prov(
+            conn,
+            remove_baseline=fail_remove_baseline,
+            extract_baseline_kernel=_raise_baseline_multiple_kernels,
+        ).provision(_SYS, _upload_profile())
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_provision_materialize_failure_reclaims_only_staged_upload() -> None:
+    # If materialization itself fails, only the staged upload (whose creation step was reached) is
+    # reclaimed — the baseline and overlay steps were never entered, so they are not touched.
+    removed_overlay: list[str] = []
+    removed_baseline: list[str] = []
+    removed_upload: list[str] = []
+
+    def fail_materialize(_rootfs: object, _system_id: UUID, _arch: str) -> str:
+        raise CategorizedError(
+            "upload-kind rootfs was never uploaded", category=ErrorCategory.CONFIGURATION_ERROR
+        )
+
+    conn = _ProvConn()
+    prov = LocalLibvirtProvisioning(
+        connect=lambda: conn,
+        files=ProvisioningFiles(
+            remove_overlay=removed_overlay.append,
+            remove_baseline=removed_baseline.append,
+            remove_uploaded_rootfs=removed_upload.append,
+            overlay_exists=lambda _overlay: False,
+            baseline_exists=lambda _path: False,
+            uploaded_rootfs_exists=lambda _path: False,
+            prepare_console_log=lambda _path: None,
+        ),
+        materialize_rootfs=fail_materialize,
+        extract_baseline_kernel=_fake_extract,
+    )
+    with pytest.raises(CategorizedError):
+        prov.provision(_SYS, _upload_profile())
+    assert removed_upload == [_staged_upload_path()]
+    assert removed_baseline == []
+    assert removed_overlay == []
 
 
 def test_teardown_absent_domain_closes_connection() -> None:
