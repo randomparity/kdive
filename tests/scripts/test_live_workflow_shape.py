@@ -137,3 +137,22 @@ def test_native_block_boots_provisioned_family_under_session() -> None:
         "the provisioned family must boot under qemu:///session, not qemu:///system "
         "(the non-root, no-sudo runner cannot read a root-owned console log — ADR-0223)"
     )
+
+
+def test_tcg_job_makes_the_host_kernel_readable_for_supermin() -> None:
+    """libguestfs builds its supermin appliance from the host kernel (ADR-0222 cause 1).
+
+    ubuntu-latest ships /boot/vmlinuz-* as 0600 root:root, so the non-root runner cannot read it
+    and `virt-tar-out` dies with "supermin exited with error status 1" — build-fs never produces a
+    rootfs. The self-hosted runner gets this from deploy/ansible/roles/live_vm_host; the hosted
+    runner has no provisioning step, so the workflow must do it before staging.
+    """
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    assert "chmod" in joined and "/boot/vmlinuz-" in joined, (
+        "the tcg job must make /boot/vmlinuz-* readable before build-fs runs"
+    )
+    # It has to happen before the spine stages the image, not after.
+    order = [i for i, s in enumerate(steps) if "run" in s and "/boot/vmlinuz-" in s["run"]]
+    spine = next(i for i, s in enumerate(steps) if "spine" in s.get("name", "").lower())
+    assert order and min(order) <= spine, "the kernel chmod must precede the staging spine"
