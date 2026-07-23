@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Snapshotter port + advertise supports_snapshots (#1430)
 - Add TrafficCapturer with pcap fetch-back (#1434)
 - Accept supplied KERNEL + VMLINUX component source
+- Sysrq + crash-watch on remote-libvirt (#1435)
 
 ### Changed
 
