@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Honor a real KDIVE_S3_* over the conftest dummy
 - Propagate errexit into the store builders
 - Preflight that the interpreter can import kdive
+- Make the host kernel readable to libguestfs on the tcg gate
 
 ### Build
 
