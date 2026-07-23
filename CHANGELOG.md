@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remote leaked-domain InfraReaper + composite fault isolation
 - Add Snapshotter port + advertise supports_snapshots (#1430)
 - Add TrafficCapturer with pcap fetch-back (#1434)
+- Accept supplied KERNEL + VMLINUX component source
 
 ### Changed
 
