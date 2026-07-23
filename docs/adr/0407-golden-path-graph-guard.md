@@ -1,6 +1,6 @@
 # ADR 0407 — Guard the agent-index golden path as a directed graph
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-07-21
 - **Deciders:** David Christensen
 
