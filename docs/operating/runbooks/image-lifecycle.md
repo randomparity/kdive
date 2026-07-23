@@ -139,8 +139,7 @@ exactly the line `build-fs` prints on stdout:
 
 ```bash
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
-bash scripts/fetch-kernel-tree.sh
-export KDIVE_KERNEL_SRC=/path/to/kernel-tree
+export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh)"
 export KDIVE_LIVE_SSH_TARGET=<host>          # the criterion-5 env gate
 just stack-up                                # bring up backends + migrate (see the live-stack runbook)
 just test-live-stack                         # runs the `live_stack` suite (skips cleanly if ungated)

@@ -144,9 +144,9 @@ operator-provided guest image and kernel tree:
 ```bash
 python -m kdive build-fs --image fedora-kdive-ready-44 \
   --workspace ~/.local/share/kdive/build/images
-bash scripts/fetch-kernel-tree.sh        # checks out the pinned kernel source tree
 export KDIVE_GUEST_IMAGE=/var/lib/kdive/rootfs/local/fedora-kdive-ready-44.qcow2
-export KDIVE_KERNEL_SRC=/path/to/kernel-tree
+# checks out the pinned kernel source tree; prints the checkout path on stdout
+export KDIVE_KERNEL_SRC="$(bash scripts/fetch-kernel-tree.sh)"
 ```
 
 The kernel-tree fetch helper lives under `scripts` (the `fetch-kernel-tree.sh` fixture script);
