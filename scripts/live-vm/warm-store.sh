@@ -3,6 +3,12 @@
 # debuginfo, kept warm (NVR-pinned) between nightly runs (ADR-0388). Emits the eval-safe
 # KDIVE_LIVE_VM_* wiring block on stdout; human progress goes to stderr.
 set -euo pipefail
+# Bash disables errexit INSIDE `$(...)`, and the builders below are captured that way
+# (`build_id="$(produce_rootfs_and_kernel ...)"`). Without inherit_errexit a failing virt-copy-out
+# or mv is swallowed and the refresh runs on to report a misleading downstream fault (an absent
+# vmlinux reads as "needs extract-vmlinux") instead of the real one. Needs bash 4.4+, which every
+# Linux host this script targets has; it is unusable on macOS's bash 3.2 regardless (libguestfs).
+shopt -s inherit_errexit
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
@@ -14,9 +20,10 @@ TARGET="${KDIVE_WARM_STORE_TARGET_NVR:?set KDIVE_WARM_STORE_TARGET_NVR to the pi
 IMAGE="${KDIVE_WARM_STORE_IMAGE:?set KDIVE_WARM_STORE_IMAGE to the catalog rootfs image}"
 
 require_tools \
-  "${KDIVE_PYTHON:-python3}:the kdive venv (set KDIVE_PYTHON), runs build-fs" \
+  "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
+require_kdive_module
 
 mkdir -p -- "$STORE"
 

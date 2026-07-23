@@ -3,6 +3,12 @@
 # runner's /mnt scratch, under a measured, enforced disk budget (ADR-0388). Debuginfo is fetched on
 # demand by build-id via debuginfod. Emits the eval-safe KDIVE_LIVE_VM_* wiring block on stdout.
 set -euo pipefail
+# Bash disables errexit INSIDE `$(...)`, and the builder below is captured that way
+# (`build_id="$(produce_rootfs_and_kernel ...)"`). Without inherit_errexit a failing virt-copy-out
+# or mv is swallowed and staging runs on to report a misleading downstream fault (an absent
+# vmlinux reads as "needs extract-vmlinux") instead of the real one. Needs bash 4.4+, which every
+# Linux host this script targets has; it is unusable on macOS's bash 3.2 regardless (libguestfs).
+shopt -s inherit_errexit
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/live-vm/lib.sh
@@ -22,9 +28,10 @@ esac
 [ "$mnt_root" = "/" ] && die "refusing rm -rf on the top-level path ${STAGE}; use a subdirectory"
 
 require_tools \
-  "${KDIVE_PYTHON:-python3}:the kdive venv (set KDIVE_PYTHON), runs build-fs" \
+  "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
+require_kdive_module
 
 trap 'rm -rf -- "$STAGE"' EXIT # a failed run leaves no half-populated /mnt for the next to trust.
 rm -rf -- "$STAGE"

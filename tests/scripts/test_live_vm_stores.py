@@ -7,9 +7,17 @@ import stat
 import subprocess
 from pathlib import Path
 
+from tests.host_capabilities import requires_bash
+
 ROOT = Path(__file__).resolve().parents[2]
 LIB = ROOT / "scripts" / "live-vm" / "lib.sh"
 BASH = shutil.which("bash") or "bash"
+
+# warm-store.sh and stage-tcg-images.sh enable `shopt -s inherit_errexit` (bash 4.4+) so a failure
+# inside the `$(...)`-captured builders aborts the run instead of continuing on a half-built set.
+# Tests that EXECUTE either script therefore need that bash; the lib.sh function tests below and
+# the `bash -n` syntax checks do not. Linux CI and the Linux hosts these scripts target satisfy it.
+_needs_inherit_errexit = requires_bash(4, 4, "shopt -s inherit_errexit")
 
 
 def _run(
@@ -187,6 +195,9 @@ def _produce_stubs(
     _stub(
         bindir,
         "python3",
+        # `python -c 'import kdive'` is the preflight importability probe, NOT a build: answer it
+        # before the marker so a probe never counts as a build-fs invocation.
+        '[ "$1" = "-c" ] && exit 0; '
         f'{mark}dest=""; ws=""; want=""; for a in "$@"; do '
         'case "$want" in dest) dest="$a";; ws) ws="$a";; esac; want=""; '
         '[ "$a" = "--dest" ] && want=dest; [ "$a" = "--workspace" ] && want=ws; done; '
@@ -273,6 +284,7 @@ def test_warm_store_syntax_valid() -> None:
     assert subprocess.run([BASH, "-n", str(WARM)], check=False).returncode == 0
 
 
+@_needs_inherit_errexit
 def test_warm_store_requires_the_pins(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -284,6 +296,7 @@ def test_warm_store_requires_the_pins(tmp_path: Path) -> None:
     assert "KDIVE_WARM_STORE_TARGET_NVR" in r.stderr
 
 
+@_needs_inherit_errexit
 def test_warm_store_requires_debuginfod_urls_before_building(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -299,6 +312,7 @@ def test_warm_store_requires_debuginfod_urls_before_building(tmp_path: Path) -> 
     assert not marker.exists()  # failed fast — the multi-GB build never ran
 
 
+@_needs_inherit_errexit
 def test_warm_store_dies_on_pin_kernel_mismatch(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -316,6 +330,7 @@ def test_warm_store_dies_on_pin_kernel_mismatch(tmp_path: Path) -> None:
     assert r.returncode != 0 and "does not contain" in r.stderr
 
 
+@_needs_inherit_errexit
 def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -339,6 +354,7 @@ def test_warm_store_stdout_is_exactly_three_wiring_lines(tmp_path: Path) -> None
     assert ".dbgcache" not in names and ".kver" not in names
 
 
+@_needs_inherit_errexit
 def test_warm_store_dies_on_debuginfo_kernel_mismatch(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -360,6 +376,7 @@ def test_warm_store_dies_on_debuginfo_kernel_mismatch(tmp_path: Path) -> None:
     assert r.returncode != 0 and "mismatch" in r.stderr
 
 
+@_needs_inherit_errexit
 def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -376,6 +393,7 @@ def test_warm_store_second_run_is_warm_and_skips_build(tmp_path: Path) -> None:
     assert marker.read_text().count("x") == 1  # warm: build ran once, not twice
 
 
+@_needs_inherit_errexit
 def test_warm_store_force_rebuilds(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -422,6 +440,7 @@ def _stage_stubs(bindir: Path) -> None:
     _stub(bindir, "df", "echo Avail; echo 900000000000")  # plenty free
 
 
+@_needs_inherit_errexit
 def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -441,6 +460,7 @@ def test_stage_tcg_happy_path_emits_wiring(tmp_path: Path) -> None:
     assert keys == ["KDIVE_LIVE_VM_BZIMAGE", "KDIVE_LIVE_VM_ROOTFS", "KDIVE_LIVE_VM_VMLINUX"]
 
 
+@_needs_inherit_errexit
 def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -466,6 +486,7 @@ def test_stage_tcg_distinguishes_fetch_failure_tiers(tmp_path: Path) -> None:
     assert infra.returncode != 0 and "not configured" in infra.stderr
 
 
+@_needs_inherit_errexit
 def test_stage_tcg_refuses_top_level_stage_dir(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -483,6 +504,7 @@ def test_stage_tcg_refuses_top_level_stage_dir(tmp_path: Path) -> None:
     assert r.returncode != 0 and "refusing" in r.stderr.lower()
 
 
+@_needs_inherit_errexit
 def test_stage_tcg_fails_loud_when_disk_too_full(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -525,3 +547,77 @@ def test_kernel_build_id_names_extract_vmlinux_when_missing(tmp_path: Path) -> N
     env = {"PATH": f"{bindir}:/usr/bin:/bin"}  # no extract-vmlinux
     r = _run('kernel_build_id "$1"', str(kimg), env=env)
     assert r.returncode != 0 and "extract-vmlinux" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# errexit propagation into command substitutions (`shopt -s inherit_errexit`)
+# ---------------------------------------------------------------------------
+#
+# Both entrypoints capture the builders as `x="$(produce_rootfs_and_kernel ...)"`. Bash disables
+# errexit inside a command substitution unless inherit_errexit is set, so without it a failing
+# virt-copy-out/mv is swallowed and the run continues on a half-built set, surfacing as a
+# misleading downstream error (kernel_build_id's "needs extract-vmlinux" on the absent vmlinux)
+# rather than the actual fault.
+
+
+@_needs_inherit_errexit
+def test_stage_tcg_aborts_at_a_failing_virt_copy_out(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
+    _stage_stubs(bindir)
+    _stub(bindir, "virt-copy-out", "exit 1")  # the kernel extract fails mid-build
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert r.returncode != 0
+    # The real fault, not the downstream red herring from continuing on an absent vmlinux.
+    assert "extract-vmlinux" not in r.stderr
+    assert r.stdout.strip() == ""  # no wiring emitted for a set that was never completed
+
+
+@_needs_inherit_errexit
+def test_warm_store_aborts_at_a_failing_virt_copy_out(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    _produce_stubs(bindir)
+    _debuginfod_ok(bindir)
+    _stub(bindir, "virt-copy-out", "exit 1")
+    r = subprocess.run(
+        [BASH, str(WARM)], capture_output=True, text=True, check=False, env=_warm_env(bindir, store)
+    )
+    assert r.returncode != 0
+    assert "extract-vmlinux" not in r.stderr
+    assert r.stdout.strip() == ""
+    assert not (store / "current").exists()  # nothing committed from a failed refresh
+
+
+@_needs_inherit_errexit
+def test_stage_tcg_fails_fast_when_the_interpreter_cannot_import_kdive(tmp_path: Path) -> None:
+    """The preflight probe must fire BEFORE the minutes-long build, not deep inside build-fs."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
+    marker = tmp_path / "build.calls"
+    _stage_stubs(bindir)
+    _produce_stubs(bindir, build_id="cafe02", build_marker=marker)
+    # An interpreter that exists but carries no kdive — the uv-managed-runner failure mode.
+    _stub(bindir, "python3", 'echo "No module named kdive" >&2; exit 1')
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert r.returncode != 0
+    assert "cannot import kdive" in r.stderr
+    assert not marker.exists()  # failed fast — the build never ran

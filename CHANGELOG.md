@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merge generated verbs into the parser, retire the nine aliases
 - Add --<param>-json escape for non-scalar generated verbs
 - Generic dispatch handler for generated verbs
+- Offline shell completion over the generated verb surface
+- Host_dump profile-section opt-in
 
 ### Changed
 
@@ -28,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add ADR-0422 clarifying force tool params keep their name
 - Flip ADR-0407 status to Accepted
 - Flip ADR-0114 and ADR-0389 status to Accepted
+- Document generated kdivectl verb surface; fix stale passthrough claims
+- Correct projects.list to a public read in the axis matrix
+- Flip ADR-0387 status to Accepted
 
 ### Fixed
 
@@ -37,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the ppc64le uv wheel pin in step with the image pins
 - Images list surfaces envelope exit code, not hardcoded 0
 - Adr-status-check also scans tests/ for citations
+- Resolve build-fs interpreter to the workspace venv
+- Honor a real KDIVE_S3_* over the conftest dummy
+- Propagate errexit into the store builders
+- Preflight that the interpreter can import kdive
+- Make the host kernel readable to libguestfs on the tcg gate
+- Give the tcg gate an importable guestfs binding
 
 ### Build
 
