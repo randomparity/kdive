@@ -104,6 +104,7 @@ contributor on the Allocation's project.
     - `base_image_volume` (`string`, required)
     - `crashkernel` (`string (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
+    - `host_dump` (`boolean`, optional)
 
 See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
 
@@ -254,6 +255,7 @@ pick one of those or an allocation on a host that offers the arch you need.
     - `base_image_volume` (`string`, required)
     - `crashkernel` (`string (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
+    - `host_dump` (`boolean`, optional)
 
 See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
 
@@ -327,6 +329,7 @@ destructive_ops opt-in).
     - `base_image_volume` (`string`, required)
     - `crashkernel` (`string (nullable)`, optional)
     - `destructive_ops` (`array<string>`, optional)
+    - `host_dump` (`boolean`, optional)
 
 ## `systems.restore`
 
