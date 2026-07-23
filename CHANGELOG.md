@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build the app image before the live_vm_tcg app tier
 - Raise when visible_next_actions names an unregistered tool
 
+### Build
+
+- Bump the github-actions group with 2 updates
+
 ## [0.4.0] - 2026-07-23
 
 ### Added
