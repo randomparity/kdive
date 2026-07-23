@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add column-agnostic render_envelope for generated verbs
 - Generate committed kdivectl verb descriptors from tool schemas
 - Unify --json on curated verbs onto the whole envelope
+- Merge generated verbs into the parser, retire the nine aliases
 
 ### Changed
 
