@@ -25,12 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add TrafficCapturer with pcap fetch-back (#1434)
 - Accept supplied KERNEL + VMLINUX component source
 - Sysrq + crash-watch on remote-libvirt (#1435)
+- Stage and reclaim agent-uploaded rootfs (#743)
 
 ### Changed
 
 - Consolidate mutations _flatten onto flatten_envelope
 - Make verb-classification branch explicit in gen_cli_verbs
 - Capability gates, not identity gates
+- Simplify rootfs upload cleanups from /simplify pass
 
 ### Documentation
 
@@ -47,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Catalog the live_vm_remote test env vars
 - Regenerate the reference for KDIVE_HOST_RUNTIME_DIRS
 - Flag what the compose app tier cannot serve
+- Spec + ADR for local-libvirt agent-uploaded rootfs staging
+- Implementation plan for local-libvirt agent-uploaded rootfs (#743)
 
 ### Fixed
 
@@ -68,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope pcap pre-delete to the job's own volume
 - Run the live_vm_tcg app tier as host processes
 - Stage the tcg image set inside the provider's allowed root
+- Isolate uploaded-rootfs object reclaim from console/sysrq faults
 
 ### Build
 
