@@ -9,6 +9,29 @@ die() {
   exit 1
 }
 
+# The interpreter that runs `python -m kdive` (build-fs). KDIVE_PYTHON overrides it — the
+# self-hosted job points it at /opt/kdive's libguestfs venv. Unset, it resolves to the workspace
+# .venv (scripts/live-vm/ -> repo root is two levels up), matching scripts/live-stack/lib.sh.
+# NOT a bare `python3`: on the uv-managed hosted runner that is the *system* interpreter, which has
+# no kdive, so build-fs died with "No module named kdive" and staging failed at its rootfs guard.
+# A function, not a source-time assignment, because this file must have no side effects when sourced.
+kdive_python() {
+  local repo_root
+  repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+  printf '%s' "${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
+}
+
+# Preflight that the resolved interpreter can actually import kdive, BEFORE the minutes-long build.
+# require_tools only proves the binary exists — an interpreter that is present but carries no kdive
+# (an un-synced checkout, a stale venv, or the system python3 on a uv-managed runner) otherwise
+# fails deep inside build-fs with a bare "No module named kdive" and an empty rootfs.
+require_kdive_module() {
+  local py
+  py="$(kdive_python)"
+  "$py" -c 'import kdive' >/dev/null 2>&1 ||
+    die "interpreter ${py} cannot import kdive: run 'uv sync' in the checkout, or point KDIVE_PYTHON at a venv that has kdive installed"
+}
+
 # Preflight required host tools BEFORE any slow work, naming each missing binary and how to get it
 # (a missing tool otherwise surfaces as a misleading downstream failure — e.g. an empty build-id or
 # an rc=127 "transient" fetch error). Each arg is "cmd:where-to-get-it".
@@ -166,7 +189,7 @@ prune_other_sets() {
 # removed after the build so it does not inflate the staged-set footprint enforce_budget measures.
 produce_rootfs_and_kernel() {
   local dest="$1" image="$2" py boot_ls vmlinuz
-  py="${KDIVE_PYTHON:-python3}"
+  py="$(kdive_python)"
   "$py" -m kdive build-fs --image "$image" --workspace "${dest}/.build" \
     --dest "${dest}/rootfs.qcow2" >/dev/null
   rm -rf -- "${dest}/.build"
