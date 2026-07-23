@@ -225,3 +225,18 @@ def test_fetch_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
 
     assert result.read_bytes() == _QCOW2
     assert store.range_calls == 0
+
+
+def test_fetch_unsupported_encoding_is_config_error(tmp_path: Path) -> None:
+    # Defence in depth: a codec the declaration validator would reject is named, not staged as-is.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    upload = _upload(tmp_path)
+
+    with pytest.raises(CategorizedError) as error:
+        fetch_uploaded_rootfs(store, upload, encoding="zstd", uncompressed_size=999)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "unsupported transport encoding" in str(error.value)
+    assert store.get_calls == 0
+    assert store.range_calls == 0
+    assert not _dest(upload, tmp_path).exists()
