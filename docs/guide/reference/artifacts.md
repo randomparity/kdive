@@ -26,6 +26,10 @@ upload if it is not finalized. If a window lapses, re-call this tool to reset th
 deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
 single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
 
+Build artifacts are uploaded as-is: a transport `encoding` (gzip) is not accepted on this
+lane and is rejected at declaration — it is a systems-only (rootfs) surface. See
+`artifacts.create_system_upload`.
+
 Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
 System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
 read the Run with `runs.get`.
@@ -97,12 +101,23 @@ is the reference clock — compute remaining time as a deadline minus `server_ti
 from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
 earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
 upload if it is not finalized. If a window lapses, re-call this tool to reset the
-deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
-single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
+deadline (`manifest_mode: "replace"`); see `data.on_expiry`. Re-minting resets the deadline
+but is not a way to beat the clock, and neither is chunking — the rootfs must be a single
+PUT (gzip a large qcow2 instead; see below).
+
+Large rootfs (transport encoding): the rootfs must be a single PUT — chunked upload is
+rejected. To upload a qcow2 whose size exceeds the 5 GiB single-PUT limit, gzip it and
+declare `encoding: "gzip"` with `uncompressed_size` set to the canonical (decompressed)
+qcow2 size in bytes. kdive strips the gzip on download, streaming and bomb-bounded, then
+verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
+`uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
+encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
+(compressed) bytes. Omit `encoding` to upload a qcow2 directly. Encoding is a rootfs-only
+surface — `artifacts.create_run_upload` rejects it.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. |
+| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. Single PUT only (no chunks). To upload a qcow2 larger than the 5 GiB single-PUT limit, gzip it and add encoding='gzip' + uncompressed_size (canonical qcow2 size). |
 | `system_id` | string | yes | The DEFINED System id. |
 
 `artifacts` fields:
@@ -113,6 +128,8 @@ single object larger than the 5 GiB single-PUT size limit, not a way to beat the
   - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
       - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
       - `size_bytes` (`integer`, required) — This chunk's size in bytes.
+  - `encoding` (``gzip`, `identity``, optional) — Optional transport encoding of the uploaded object. 'gzip' means you upload a gzip of the canonical qcow2 (kdive strips it on download to recover the qcow2); omit (or 'identity') to upload the qcow2 directly. gzip is single-PUT only — it cannot be combined with chunks — and requires uncompressed_size. sha256/size_bytes still describe the uploaded (compressed) bytes.
+  - `uncompressed_size` (`integer`, optional) — Required with encoding='gzip': the canonical (decompressed) qcow2 size in bytes. It is the gzip-bomb bound and is checked at declaration against the 50 GiB canonical-object cap. Omit when there is no encoding.
 
 Examples for `artifacts`:
 
@@ -129,19 +146,11 @@ Examples for `artifacts`:
 ```json
 [
   {
-    "chunks": [
-      {
-        "sha256": "p1...base64...",
-        "size_bytes": 5242880
-      },
-      {
-        "sha256": "p2...base64...",
-        "size_bytes": 2097152
-      }
-    ],
+    "encoding": "gzip",
     "name": "rootfs",
     "sha256": "kZ8s1f9q...base64...",
-    "size_bytes": 7340032
+    "size_bytes": 402653184,
+    "uncompressed_size": 6442450944
   }
 ]
 ```
