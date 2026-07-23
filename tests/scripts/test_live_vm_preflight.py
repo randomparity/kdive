@@ -116,6 +116,7 @@ def test_host_ok_when_libvirt_connects_and_kvm_is_usable(tmp_path: Path) -> None
         "PATH": str(bindir),
         "KDIVE_LIBVIRT_URI": "qemu:///session",
         "KDIVE_KVM_NODE": "/dev/null",  # readable+writable stand-in for /dev/kvm
+        "KDIVE_HOST_RUNTIME_DIRS": str(tmp_path),  # provisioned; the dir cases cover the gap
     }
     r = _run(["host"], env)
     assert r.returncode == 0, r.stderr
@@ -128,6 +129,7 @@ def test_host_fails_when_libvirt_is_unreachable(tmp_path: Path) -> None:
         "PATH": str(bindir),
         "KDIVE_LIBVIRT_URI": "qemu:///session",
         "KDIVE_KVM_NODE": "/dev/null",
+        "KDIVE_HOST_RUNTIME_DIRS": str(tmp_path),
     }
     r = _run(["host"], env)
     assert r.returncode != 0
@@ -141,6 +143,7 @@ def test_host_fails_when_kvm_node_is_not_usable(tmp_path: Path) -> None:
         "PATH": str(bindir),
         "KDIVE_LIBVIRT_URI": "qemu:///session",
         "KDIVE_KVM_NODE": str(tmp_path / "absent-kvm"),
+        "KDIVE_HOST_RUNTIME_DIRS": str(tmp_path),
     }
     r = _run(["host"], env)
     assert r.returncode != 0
@@ -153,3 +156,58 @@ def test_host_fails_without_a_libvirt_uri(tmp_path: Path) -> None:
     r = _run(["host"], {"PATH": str(bindir), "KDIVE_KVM_NODE": "/dev/null"})
     assert r.returncode != 0
     assert "KDIVE_LIBVIRT_URI" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# host family: runtime directories the provider hardcodes
+# ---------------------------------------------------------------------------
+
+
+def _script_runtime_dirs() -> list[str]:
+    """The default KDIVE_HOST_RUNTIME_DIRS list the script declares."""
+    line = next(ln for ln in _SCRIPT.read_text().splitlines() if "KDIVE_HOST_RUNTIME_DIRS:-" in ln)
+    return line.split("KDIVE_HOST_RUNTIME_DIRS:-", 1)[1].split("}", 1)[0].split()
+
+
+def test_host_runtime_dirs_cover_every_hardcoded_provider_path() -> None:
+    """Drift guard: these paths are constants in src, so they cannot be pointed elsewhere.
+
+    A non-root worker cannot create them under root-owned /var/lib/kdive, so each must be
+    provisioned ahead of the run. If someone adds another hardcoded runtime dir, this fails in PR
+    CI rather than several minutes into a live gate — which is how the console dir was found.
+    Reads the private constants deliberately: they are precisely what the deployment must match.
+    """
+    from kdive.providers.local_libvirt.lifecycle import storage
+    from kdive.providers.shared import runtime_paths
+
+    declared = set(_script_runtime_dirs())
+    for const in (runtime_paths._CONSOLE_DIR, runtime_paths._PCAP_DIR, storage.ROOTFS_DIR):
+        assert const in declared, f"{const} is hardcoded in src but not preflighted"
+
+
+def test_host_fails_when_a_runtime_dir_is_not_writable(tmp_path: Path) -> None:
+    bindir = _host_bin(tmp_path)
+    absent = tmp_path / "not-provisioned"
+    env = {
+        "PATH": str(bindir),
+        "KDIVE_LIBVIRT_URI": "qemu:///session",
+        "KDIVE_KVM_NODE": "/dev/null",
+        "KDIVE_HOST_RUNTIME_DIRS": str(absent),
+    }
+    r = _run(["host"], env)
+    assert r.returncode != 0
+    assert str(absent) in r.stderr
+
+
+def test_host_ok_when_runtime_dirs_are_writable(tmp_path: Path) -> None:
+    bindir = _host_bin(tmp_path)
+    good = tmp_path / "console"
+    good.mkdir()
+    env = {
+        "PATH": str(bindir),
+        "KDIVE_LIBVIRT_URI": "qemu:///session",
+        "KDIVE_KVM_NODE": "/dev/null",
+        "KDIVE_HOST_RUNTIME_DIRS": str(good),
+    }
+    r = _run(["host"], env)
+    assert r.returncode == 0, r.stderr

@@ -33,9 +33,21 @@ require_path() {
 # error. Deliberately checks the CONFIGURED uri rather than qemu:///system: the live_vm gates run
 # session-mode (worker-owned QEMU, readable console — ADR-0223), which the system-mode probe in
 # scripts/check-local-libvirt.sh cannot express.
+# Runtime dirs the provider writes into whose paths are HARDCODED in src (runtime_paths.py's
+# console/pcap dirs, storage.py's ROOTFS_DIR) — no env points them elsewhere. They live under
+# root-owned /var/lib/kdive, so a non-root worker cannot create them and the deployment must.
+# tests/scripts/test_live_vm_preflight.py pins this list against those constants so a newly
+# hardcoded dir fails in PR CI rather than minutes into a live gate.
+KDIVE_HOST_RUNTIME_DIRS="${KDIVE_HOST_RUNTIME_DIRS:-/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs}"
+
 check_host() {
   require_set KDIVE_LIBVIRT_URI
   require_tools "virsh:libvirt-clients" "qemu-img:qemu-utils"
+  local dir
+  for dir in $KDIVE_HOST_RUNTIME_DIRS; do
+    [ -d "$dir" ] && [ -w "$dir" ] ||
+      die "${dir} is not a directory writable by $(id -un): the provider hardcodes this path, so it must be pre-created (see deploy/ansible/roles/live_vm_host)"
+  done
   local kvm="${KDIVE_KVM_NODE:-/dev/kvm}"
   # Fatal, not a warning: without KVM the libguestfs appliance falls back to emulation and a gate
   # that already spends minutes building would run well past its timeout.
