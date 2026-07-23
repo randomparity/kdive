@@ -8,6 +8,8 @@
 #
 # Usage: fetch-kernel-tree.sh [DEST_DIR]
 #   DEST_DIR  destination for the checkout (default: ./.live-vm/linux)
+#   stdout    the absolute checkout path, and nothing else — capture it directly:
+#             export KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
 # Env:
 #   KDIVE_KERNEL_REPO  git URL (default: the mainline tree)
 #   KDIVE_KERNEL_REF   tag/branch/sha to check out (default: v6.9)
@@ -16,6 +18,15 @@ set -euo pipefail
 readonly DEFAULT_REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
 readonly DEFAULT_REF="v6.9"
 
+# STDOUT is the checkout path and nothing else, so a caller can take it directly:
+#   KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
+# (the live.yml tcg block does exactly this). Every human line goes to stderr, matching the
+# stdout contract the scripts/live-vm store scripts document. Absolute, because the caller
+# exports it for children that need not share this cwd.
+emit_dest() {
+  printf '%s\n' "$(cd -- "$1" && pwd)"
+}
+
 main() {
   local dest="${1:-./.live-vm/linux}"
   local repo="${KDIVE_KERNEL_REPO:-$DEFAULT_REPO}"
@@ -23,6 +34,7 @@ main() {
 
   if [[ -d "$dest/.git" ]]; then
     echo "kernel tree already present at $dest; leaving as-is (idempotent)" >&2
+    emit_dest "$dest"
     return 0
   fi
 
@@ -35,6 +47,7 @@ main() {
   mkdir -p "$(dirname "$dest")"
   git clone --depth 1 --branch "$ref" "$repo" "$dest"
   echo "kernel tree ready: $dest (ref $ref)" >&2
+  emit_dest "$dest"
 }
 
 main "$@"
