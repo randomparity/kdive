@@ -8,6 +8,7 @@ Mutating verbs (a later M2.2 task) append their own entries to this same tuple (
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from kdive.cli.reserved_flags import derive_cli_flag
 
 __all__ = [
     "GENERATED_ARG_PREFIX",
@@ -247,9 +249,9 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
     """Declare one schema-derived ``--flag`` on ``parser`` per its :class:`GeneratedFlag`.
 
     Honors ``action`` (``store_true`` / ``append``), ``arg_type`` (``str`` / ``int`` /
-    ``float``), and ``choices`` (enum). The ``--<param>-json`` escape for non-scalar params
-    (#1449) and the flag-value-to-payload assembly (#1450) are downstream; this only shapes the
-    parser so every generated verb is reachable at its canonical path.
+    ``float``), and ``choices`` (enum). The ``--<param>-json`` escape for non-scalar params is
+    a sibling (:func:`_add_generated_json_flag`); the flag-value-to-payload assembly (#1450) is
+    downstream. This only shapes the parser so every generated verb is reachable at its path.
     """
     dest = f"{GENERATED_ARG_PREFIX}{flag.dest}"
     help_ = flag.help or None
@@ -277,15 +279,55 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
         )
 
 
+def _json_container_arg(value: str) -> str:
+    """argparse ``type=`` validating a ``--<param>-json`` value is a JSON object or array.
+
+    Mirrors :func:`kdive.cli.dispatch._parse_payload`'s "valid JSON, not a bare scalar" gate,
+    but raises :class:`argparse.ArgumentTypeError` so a malformed or scalar value fails as a
+    clean usage error (exit 2) at parse time — before the verb dispatches — instead of the
+    server-side error a bad payload would otherwise raise. Both a JSON object and a JSON array
+    are accepted because the non-scalar params span both shapes (e.g. ``profile`` is an object,
+    ``artifacts`` is a ``Sequence[...]`` array); the descriptor does not record which, and the
+    per-param typed payload assembly is #1450. The raw string is returned unchanged.
+    """
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict | list):
+        raise argparse.ArgumentTypeError("must be a JSON object or array")
+    return value
+
+
+def _add_generated_json_flag(parser: argparse.ArgumentParser, param: str) -> None:
+    """Declare the ``--<param>-json`` escape for a non-scalar generated-verb parameter (#1449).
+
+    Params the generator cannot express as a typed scalar flag — nested objects, object arrays —
+    are recorded in :attr:`GeneratedVerb.json_params` (#1447) and surfaced here as a single
+    JSON-valued flag, validated to a JSON container (:func:`_json_container_arg`) at parse time.
+    The raw string lands on the namespace under the ``genarg_<param>_json`` dest for the
+    flag-value-to-payload assembly seam (#1450).
+    """
+    parser.add_argument(
+        f"{derive_cli_flag(param)}-json",
+        dest=f"{GENERATED_ARG_PREFIX}{param}_json",
+        default=None,
+        type=_json_container_arg,
+        help=f"JSON-encoded value (object or array) for the {param!r} parameter",
+    )
+
+
 def _generated_verb_parser(
     group_parser: argparse._SubParsersAction,
     verb: GeneratedVerb,
     parent: argparse.ArgumentParser,
 ) -> None:
-    """Add a schema-generated verb's sub-subparser, declaring its scalar ``--flags``."""
+    """Add a schema-generated verb's sub-subparser, declaring its scalar and JSON ``--flags``."""
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     for flag in verb.flags:
         _add_generated_flag(parser, flag)
+    for param in verb.json_params:
+        _add_generated_json_flag(parser, param)
 
 
 def add_subparsers(sub: argparse._SubParsersAction) -> None:
