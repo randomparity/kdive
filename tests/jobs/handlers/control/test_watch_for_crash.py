@@ -37,6 +37,7 @@ from kdive.jobs.handlers.control.watch_for_crash import (
 from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.ports.console import ConsoleWindowRead
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.systems_support import provider_resolver
@@ -272,6 +273,23 @@ def test_verdict_to_json_shapes() -> None:
 # --- handler gates + end-to-end -------------------------------------------------------
 
 
+class _SeqReader:
+    """A RemoteConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
+
+    def __init__(self, windows: list[ConsoleWindowRead]) -> None:
+        self._windows = windows
+        self._i = 0
+        self.calls: list[tuple[UUID, int]] = []
+
+    async def read_window(
+        self, conn: object, system_id: UUID, start_index: int = 0
+    ) -> ConsoleWindowRead:
+        self.calls.append((system_id, start_index))
+        window = self._windows[min(self._i, len(self._windows) - 1)]
+        self._i += 1
+        return window
+
+
 async def _seed_system(pool: AsyncConnectionPool, state: SystemState) -> UUID:
     disc = LocalLibvirtDiscovery(
         host_uri="qemu:///system", connect=lambda: FakeLibvirtConn(), concurrent_allocation_cap=2
@@ -457,6 +475,66 @@ def test_handler_not_fired_at_deadline(
     result_ref = asyncio.run(_go())
     assert result_ref is not None
     doc = json.loads(result_ref)
+    assert doc["outcome"] == "not_fired"
+    assert doc["fired"] is False
+
+
+def test_handler_remote_fires_via_console_read_seam(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A remote provider (console.reader_factory set, ADR-0433) watches the console through the
+    # ADR-0429 strict read seam instead of a worker-local file. The seam's cumulative bytes grow
+    # past the watch mark with a panic, so the verdict fires.
+    monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
+    booting = b"[1] booting\n"
+    panicked = booting + b"[2] Kernel panic - not syncing: die\n"
+    reader = _SeqReader([ConsoleWindowRead(booting, 1, True), ConsoleWindowRead(panicked, 2, True)])
+
+    async def _go() -> tuple[str | None, list[tuple[UUID, int]], UUID]:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_system(pool, SystemState.READY)
+            resolver = provider_resolver(console_reader=reader)
+            async with pool.connection() as conn:
+                ref = await watch_for_crash_handler(
+                    conn, _job(system_id, 5.0), resolver=resolver, secret_registry=SecretRegistry()
+                )
+            return ref, reader.calls, system_id
+
+    ref, reader_calls, system_id = asyncio.run(_go())
+    assert ref is not None
+    doc = json.loads(ref)
+    assert doc["outcome"] == "fired"
+    assert doc["signature"] == "Kernel panic"
+    # The seam is always read for THIS System's console, never None.
+    assert reader_calls and all(sid == system_id for sid, _ in reader_calls)
+
+
+def test_handler_remote_unpumped_console_retries_to_not_fired(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Unlike one-shot SysRq, crash-watch is a poll loop: an un-pumped console (pumped=False) is not
+    # fatal — the loop keeps polling the window and returns not_fired at the deadline (ADR-0433), so
+    # a console that only starts pumping mid-watch could still fire.
+    monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
+    reader = _SeqReader([ConsoleWindowRead(b"", 0, False)])
+
+    async def _go() -> str | None:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_system(pool, SystemState.READY)
+            resolver = provider_resolver(console_reader=reader)
+            async with pool.connection() as conn:
+                return await watch_for_crash_handler(
+                    conn,
+                    _job(system_id, 0.001),
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                )
+
+    ref = asyncio.run(_go())
+    assert ref is not None
+    doc = json.loads(ref)
     assert doc["outcome"] == "not_fired"
     assert doc["fired"] is False
 

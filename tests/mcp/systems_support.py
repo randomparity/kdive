@@ -31,6 +31,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.core.runtime import (
     BootstrapKeyCapabilities,
+    ConsoleCapabilities,
     ProviderRuntime,
     ProviderSupport,
     RootfsCapabilities,
@@ -147,6 +148,7 @@ def provider_resolver(
     supports_traffic_capture: bool = True,
     supports_diagnostic_sysrq: bool = True,
     supports_crash_watch: bool = True,
+    console_reader: object | None = None,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -213,6 +215,16 @@ def provider_resolver(
         ),
         snapshot=cast(Any, snapshotter) if snapshotter is not None else None,
         traffic_capturer=cast(Any, traffic_capturer) if traffic_capturer is not None else None,
+        # ``console_reader`` models a provider (remote-libvirt) whose console is read through the
+        # ADR-0429 strict read seam rather than a worker-local file; the control handlers pick the
+        # remote path when ``console.reader_factory`` is set (ADR-0433, #1435).
+        console=(
+            None
+            if console_reader is None
+            else ConsoleCapabilities(
+                snapshotter=unused_port, reader_factory=lambda: cast(Any, console_reader)
+            )
+        ),
     )
     return ProviderResolver({ResourceKind.LOCAL_LIBVIRT: runtime})
 

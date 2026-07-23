@@ -36,12 +36,34 @@ from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_en
 _log = logging.getLogger(__name__)
 
 
+# Linux input-event keycodes for the magic-SysRq combination (VIR_KEYCODE_SET_LINUX), as
+# `virsh send-key <dom> --codeset linux KEY_LEFTALT KEY_SYSRQ KEY_<X>` sends them (ADR-0285). The
+# table is duplicated from local-libvirt rather than shared: each provider realizes the Control
+# port independently, with no shared layer (ADR-0076), the same way power/injectNMI are duplicated.
+_KEY_LEFTALT = 56
+_KEY_SYSRQ = 99
+_SYSRQ_KEYCODES: dict[str, int] = {
+    "t": 20,  # KEY_T
+    "w": 17,  # KEY_W
+    "m": 50,  # KEY_M
+    "d": 32,  # KEY_D
+    "p": 25,  # KEY_P
+    "l": 38,  # KEY_L
+    "q": 16,  # KEY_Q
+}
+# Hold the Alt+SysRq+key chord briefly so the guest input layer registers the combination.
+_SYSRQ_HOLDTIME_MS = 100
+
+
 class _Domain(Protocol):
     def create(self) -> int: ...
     def destroy(self) -> int: ...
     def reset(self, flags: int) -> int: ...
     def reboot(self, flags: int) -> int: ...
     def injectNMI(self, flags: int) -> int: ...  # noqa: N802 - libvirt binding name
+    def sendKey(  # noqa: N802 - libvirt binding name
+        self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
+    ) -> int: ...
 
 
 class _ControlConn(Protocol):
@@ -117,19 +139,34 @@ class RemoteLibvirtControl:
                 raise self._control_failure("injecting NMI into", domain_name) from exc
 
     def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
-        """Diagnostic SysRq is local-libvirt only (ADR-0285); remote raises ``CONTROL_FAILURE``.
+        """Inject a magic-SysRq keystroke via ``sendKey`` (Alt+SysRq+<trigger>) over qemu+tls.
 
-        The tool never routes a non-local System here; this stub satisfies the ``Controller``
-        Protocol and fails closed if ever reached.
+        The injection is a plain transport-agnostic libvirt domain call — the same ``sendKey``
+        local-libvirt uses (ADR-0285) — so it works unchanged on the remote host (ADR-0433). This
+        port only injects; the resulting console dump is read back out-of-band via the console read
+        seam (ADR-0429), mirroring ``force_crash``'s single-libvirt-call shape.
 
         Raises:
-            CategorizedError: ``CONTROL_FAILURE`` (``not_supported``) always.
+            CategorizedError: ``CONFIGURATION_ERROR`` if ``trigger`` is not an allowlisted SysRq
+                character (a programming error — the tool validates it), or ``CONTROL_FAILURE`` if
+                the domain is absent or libvirt errors; ``CONFIGURATION_ERROR`` for invalid remote
+                connection configuration, ``INFRASTRUCTURE_FAILURE`` for TLS materialization
+                faults, or ``TRANSPORT_FAILURE`` when the libvirt TLS connection fails.
         """
-        raise CategorizedError(
-            "diagnostic SysRq is not supported on remote-libvirt",
-            category=ErrorCategory.CONTROL_FAILURE,
-            details={"domain": domain_name, "trigger": trigger, "reason": "not_supported"},
-        )
+        keycode = _SYSRQ_KEYCODES.get(trigger)
+        if keycode is None:
+            raise CategorizedError(
+                f"unsupported SysRq trigger {trigger!r}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"domain": domain_name, "trigger": trigger},
+            )
+        with self._connection() as conn:
+            domain = self._lookup(conn, domain_name)
+            keycodes = [_KEY_LEFTALT, _KEY_SYSRQ, keycode]
+            try:
+                domain.sendKey(libvirt.VIR_KEYCODE_SET_LINUX, _SYSRQ_HOLDTIME_MS, keycodes, 3, 0)
+            except libvirt.libvirtError as exc:
+                raise self._control_failure("sending SysRq to", domain_name) from exc
 
     def _connection(self) -> AbstractContextManager[_ControlConn]:
         return remote_connection(

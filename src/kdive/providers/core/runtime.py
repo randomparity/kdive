@@ -17,7 +17,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.images.planes.base import RootfsBuildPlane
 from kdive.profiles.provider_policy import ProfilePolicy
 from kdive.profiles.provisioning import RootfsSource
-from kdive.providers.ports.console import ConsoleSnapshotter
+from kdive.providers.ports.console import ConsoleSnapshotter, RemoteConsoleReader
 from kdive.providers.ports.debug import (
     AttachSeam,
     GdbMiEngine,
@@ -47,6 +47,7 @@ type StagedVolumeProbe = Callable[[list[str]], Awaitable[dict[str, str]]]
 type ResourceDetailProjector = Callable[
     [AsyncConnectionPool, tuple[str, ...]], Awaitable[dict[str, JsonValue]]
 ]
+type ConsoleReaderFactory = Callable[[], RemoteConsoleReader]
 
 
 def _unconfigured_component_sources() -> ComponentSourceCapabilities:
@@ -109,6 +110,12 @@ class ConsoleCapabilities:
     """Provider-managed console artifact capture support."""
 
     snapshotter: ConsoleSnapshotter
+    # Strict worker-side console read for a running System, used by tools whose whole output is the
+    # console they just read (post-SysRq capture, crash watch) — remote-libvirt only (ADR-0429/0433,
+    # #1435). A factory so the reader (which reaches the S3 object store) is built lazily at job
+    # time, keeping composition buildable without S3 config (ADR-0076); a provider whose console is
+    # a worker-local file (local-libvirt) leaves it None and the handler reads the file directly.
+    reader_factory: ConsoleReaderFactory | None = None
 
 
 @dataclass(frozen=True, slots=True)
