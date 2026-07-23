@@ -165,6 +165,23 @@ test-live-tcg:
     fi
     exit "$rc"
 
+# --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
+# clean skip, other codes propagate. Needs an operator-provided qemu+tls:// host (KDIVE_LIVE_VM_REMOTE_URI
+# + base-image volume + KDIVE_S3_* + a running reconciler); the require_live_vm_remote gate skips
+# cleanly with no remote env and fails loud on a partial one (docs/operating/runbooks/remote-live-stack.md).
+#
+# Run the remote-libvirt live_vm family: direct provider ops against a genuinely remote qemu+tls:// host.
+test-live-remote:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    uv run python -m pytest -m live_vm_remote --strict-markers -q || rc=$?
+    if [[ "$rc" -eq 5 ]]; then
+      echo "no live_vm_remote tests collected — skipping cleanly (remote env or marked suite absent)"
+      exit 0
+    fi
+    exit "$rc"
+
 # Apply database migrations using the live-stack default environment.
 stack-migrate:
     ./scripts/live-stack/apply-migrations.sh
