@@ -97,7 +97,14 @@ kdivectl inventory show [--project <project>]
 ```
 
 `--json` may be given before or after the verb (`kdivectl --json resources list` or
-`kdivectl resources list --json`) for a stable, scriptable contract.
+`kdivectl resources list --json`). It emits the server response envelope **verbatim** — the
+same shape every verb returns, curated or generated: `object_id`, `status`, `data`,
+`suggested_next_actions`, `refs`, `error_category`, and nested `items` for a collection. The
+scriptable contract is the tool's own published output schema (ADR-0421 §6), not a CLI-chosen
+column subset. The default (no `--json`) table output is unchanged; only its columns are
+projected. **Breaking change (pre-1.0):** `--json` previously emitted only the verb's declared
+columns; scripts that read those column keys must now read them from the envelope's `data`
+(and each row from `items[*].data`).
 
 `--project` is **required** for `allocations list` and `ledger get` (no square brackets):
 each underlying tool (`allocations.list`, `accounting.usage_project`) reads exactly one
@@ -132,8 +139,10 @@ kdivectl ledger report-granted [--projects a,b] [--group-by principal] [--since 
   `--until` are timezone-aware ISO-8601 bounds forming a half-open window; omit both for all
   time. The bounds are validated server-side — a non-ISO-8601, timezone-naive, or inverted
   (`start >= end`) window returns `configuration_error` (exit `2`).
-- Both render the per-project rows as a table with a totals footer, or, under `--json`, a
-  single `{"items": [...], "totals": {...}}` object for scripting.
+- Both render the per-project rows as a table with a totals footer. Under `--json` they emit
+  the whole server envelope (like every verb): the rollup totals in `data` and the per-project
+  rows as nested `items[*]` envelopes — not the former projected `{"items": ..., "totals": ...}`
+  object.
 
 ### Read authorization: platform axis vs. project axis
 
@@ -195,7 +204,7 @@ kdivectl fixtures list                       # available fixtures, plain authent
 kdivectl doctor                              # the three cheap read checks (default)
 kdivectl doctor --provider remote-libvirt    # diagnose one named registered provider
 kdivectl doctor --with-egress                # also run the heavyweight egress probe
-kdivectl doctor --json                       # the verdict rows as stable JSON
+kdivectl doctor --json                       # the whole verdict envelope (checks under items)
 ```
 
 The exit code is **gate-safe** (ADR-0091 §5): all-`pass` exits `0`; any `fail` exits `1`

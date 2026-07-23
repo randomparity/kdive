@@ -118,12 +118,22 @@ def test_resources_get_renders_single_record(monkeypatch: pytest.MonkeyPatch, ca
     assert "id" in out and "r1" in out and "pool" in out and "p" in out
 
 
-def test_record_verb_json_mode_emits_flat_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    record = {"object_id": "s1", "status": "running", "data": {"project": "p"}, "items": []}
+def test_record_verb_json_mode_emits_whole_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # --json is the server envelope verbatim, not the flat id/state/data projection (ADR-0421 §6).
+    record = {
+        "object_id": "s1",
+        "status": "running",
+        "data": {"project": "p"},
+        "items": [],
+        "suggested_next_actions": ["systems.release"],
+    }
     _install_session(monkeypatch, record)
     asyncio.run(reads.systems_get(argparse.Namespace(json=True, system_id="s1")))
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed["id"] == "s1" and parsed["state"] == "running" and parsed["project"] == "p"
+    assert parsed == record
+    assert parsed["suggested_next_actions"] == ["systems.release"]
 
 
 def test_ledger_get_is_a_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -160,11 +170,14 @@ def test_secrets_list_renders_refs_from_data(monkeypatch: pytest.MonkeyPatch, ca
     assert "ref" in out and "ref://a" in out and "ref://b" in out
 
 
-def test_secrets_list_json_mode_emits_ref_rows(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install_session(monkeypatch, _data_envelope({"secrets": ["ref://a"]}))
+def test_secrets_list_json_mode_emits_whole_envelope(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # --json is the whole envelope; the ref rows are a default-table projection, not the contract.
+    envelope = _data_envelope({"secrets": ["ref://a"]})
+    _install_session(monkeypatch, envelope)
     asyncio.run(reads.secrets_list(argparse.Namespace(json=True)))
-    parsed = json.loads(capsys.readouterr().out)
-    assert parsed == [{"ref": "ref://a"}]
+    assert json.loads(capsys.readouterr().out) == envelope
 
 
 def test_fixtures_list_renders_rows_from_data(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -297,70 +310,58 @@ def test_fixtures_list_denial_exits_authorization_denied(
     assert code == 3
 
 
-def test_allocations_list_json_projects_declared_columns(
+def test_list_verb_json_emits_whole_envelope_with_next_actions(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    _install_session(
-        monkeypatch,
-        _collection([_item("al-1", "active", {"project": "p", "system": "s"})]),
-    )
+    # A curated list verb's --json is the server envelope verbatim: nested item envelopes plus
+    # the navigation contract (suggested_next_actions) the old column projection dropped.
+    envelope = _collection([_item("al-1", "active", {"project": "p", "system": "s"})])
+    envelope["suggested_next_actions"] = ["allocations.release"]
+    _install_session(monkeypatch, envelope)
     asyncio.run(reads.allocations_list(argparse.Namespace(json=True, project="p")))
-    assert json.loads(capsys.readouterr().out) == [
-        {"id": "al-1", "project": "p", "system": "s", "state": "active"}
-    ]
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == envelope
+    assert parsed["suggested_next_actions"] == ["allocations.release"]
+    assert parsed["items"][0]["object_id"] == "al-1"
 
 
-def test_systems_list_json_projects_columns_and_passes_state_filter(
+def test_systems_list_json_emits_whole_envelope_and_passes_state_filter(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    client = _install_session(
-        monkeypatch,
-        _collection([_item("sy-1", "running", {"project": "p"})]),
-    )
+    envelope = _collection([_item("sy-1", "running", {"project": "p"})])
+    client = _install_session(monkeypatch, envelope)
     asyncio.run(reads.systems_list(argparse.Namespace(json=True, state="running")))
     assert client.calls == [("systems.list", {"request": {"state": "running"}})]
-    assert json.loads(capsys.readouterr().out) == [
-        {"id": "sy-1", "project": "p", "state": "running"}
-    ]
+    assert json.loads(capsys.readouterr().out) == envelope
 
 
-def test_jobs_list_json_projects_declared_columns(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    client = _install_session(
-        monkeypatch,
-        _collection([_item("jo-1", "queued", {"kind": "boot"})]),
-    )
+def test_jobs_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    envelope = _collection([_item("jo-1", "queued", {"kind": "boot"})])
+    client = _install_session(monkeypatch, envelope)
     asyncio.run(reads.jobs_list(argparse.Namespace(json=True, limit=None)))
     assert client.calls == [("jobs.list", {"request": {}})]
-    assert json.loads(capsys.readouterr().out) == [
-        {"id": "jo-1", "kind": "boot", "state": "queued"}
-    ]
+    assert json.loads(capsys.readouterr().out) == envelope
 
 
-def test_inventory_show_json_projects_columns_and_passes_project_filter(
+def test_inventory_show_json_emits_whole_envelope_and_passes_project_filter(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    client = _install_session(
-        monkeypatch,
-        _collection([_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]),
+    envelope = _collection(
+        [_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]
     )
+    client = _install_session(monkeypatch, envelope)
     asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
     assert client.calls == [("inventory.list", {"project": "proj-a"})]
-    assert json.loads(capsys.readouterr().out) == [
-        {"key": "k1", "backend": "minio", "status": "ready"}
-    ]
+    assert json.loads(capsys.readouterr().out) == envelope
 
 
-def test_fixtures_list_json_projects_declared_columns(
-    monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    _install_session(
-        monkeypatch,
-        _data_envelope({"fixtures": [{"provider": "local-libvirt", "name": "base", "arch": "x"}]}),
+def test_fixtures_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    envelope = _data_envelope(
+        {"fixtures": [{"provider": "local-libvirt", "name": "base", "arch": "x"}]}
     )
+    _install_session(monkeypatch, envelope)
     asyncio.run(reads.fixtures_list(argparse.Namespace(json=True)))
-    assert json.loads(capsys.readouterr().out) == [
-        {"provider": "local-libvirt", "name": "base", "arch": "x"}
-    ]
+    assert json.loads(capsys.readouterr().out) == envelope
 
 
 def test_record_verbs_send_the_declared_id_payload_key(
@@ -454,7 +455,9 @@ def test_report_granted_all_empty_projects_is_usage_error(
     assert "--projects" in capsys.readouterr().err
 
 
-def test_report_renders_rows_and_totals_json(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_report_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    # A report verb's --json is the server envelope verbatim: the totals live in ``data`` and
+    # the per-project rows in nested ``items`` envelopes, not a projected ``{items, totals}``.
     items = [
         _item(
             "p",
@@ -478,18 +481,17 @@ def test_report_renders_rows_and_totals_json(monkeypatch: pytest.MonkeyPatch, ca
         "total_reconciled": "-19",
         "total_variance": "1",
     }
-    _install_session(monkeypatch, _report_collection(items, totals))
+    envelope = _report_collection(items, totals)
+    _install_session(monkeypatch, envelope)
     asyncio.run(
         reads.ledger_report_all(
             argparse.Namespace(json=True, group_by=None, since=None, until=None)
         )
     )
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed["items"] == [
-        {"project": "p", "principal": "", "reserved": "20", "reconciled": "-19", "variance": "1"}
-    ]
-    assert parsed["totals"]["total_reserved"] == "20"
-    assert parsed["totals"]["scope"] == "all-projects"
+    assert parsed == envelope
+    assert parsed["data"]["total_reserved"] == "20"
+    assert parsed["items"][0]["data"]["project"] == "p"
 
 
 def test_report_all_denial_exits_authorization_denied(

@@ -321,23 +321,25 @@ def test_list_renders_exact_column_set(monkeypatch: pytest.MonkeyPatch, capsys) 
     assert header.split() == ["id", "name", "arch", "visibility", "owner", "state"]
 
 
-def test_list_json_projects_onto_declared_columns(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install(
-        monkeypatch,
-        _collection(
-            [
-                {
-                    "object_id": "i1",
-                    "status": "registered",
-                    "data": {"name": "fedora", "arch": "x86_64"},
-                    "items": [],
-                }
-            ]
-        ),
+def test_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    # --json is the server envelope verbatim, not the projected column set (ADR-0421 §6).
+    envelope = _collection(
+        [
+            {
+                "object_id": "i1",
+                "status": "registered",
+                "data": {"name": "fedora", "arch": "x86_64"},
+                "items": [],
+            }
+        ]
     )
+    envelope["suggested_next_actions"] = ["images.describe"]
+    _install(monkeypatch, envelope)
     asyncio.run(images.images_list(_json_args()))
-    payload = json.loads(capsys.readouterr().out)
-    assert list(payload[0].keys()) == ["id", "name", "arch", "visibility", "owner", "state"]
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == envelope
+    assert parsed["suggested_next_actions"] == ["images.describe"]
+    assert parsed["items"][0]["object_id"] == "i1"
 
 
 def test_list_missing_optional_attrs_not_required(
@@ -366,7 +368,7 @@ def test_upload_json_flag_threads_through_to_render(
         )
     )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["name"] == "custom"
+    assert payload["object_id"] == "o" and payload["data"]["name"] == "custom"
 
 
 def test_upload_tolerates_missing_lifetime_attr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,7 +400,7 @@ def test_delete_json_flag_threads_through_to_render(
     _install(monkeypatch, {"object_id": "img-1", "status": "deleted", "data": {}})
     asyncio.run(images.images_delete(_json_args(image_id="img-1")))
     payload = json.loads(capsys.readouterr().out)
-    assert payload["id"] == "img-1"
+    assert payload["object_id"] == "img-1" and payload["status"] == "deleted"
 
 
 def test_build_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -413,7 +415,7 @@ def test_build_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPat
         )
     )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["id"] == "b1"
+    assert payload["object_id"] == "b1"
 
 
 def test_build_tolerates_missing_packages_attr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -449,7 +451,7 @@ def test_publish_sends_request_envelope_and_threads_json(
         "packages": ["crash"],
     }
     payload = json.loads(capsys.readouterr().out)
-    assert payload["id"] == "p1"
+    assert payload["object_id"] == "p1"
 
 
 def test_prune_exit_message_names_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -471,7 +473,7 @@ def test_prune_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPat
     _install(monkeypatch, {"object_id": "sweep", "status": "ok", "data": {}})
     asyncio.run(images.images_prune(_json_args(expired=True, reason="cleanup")))
     payload = json.loads(capsys.readouterr().out)
-    assert payload["id"] == "sweep"
+    assert payload["object_id"] == "sweep"
 
 
 def test_extend_json_flag_threads_through_to_render(
@@ -480,7 +482,7 @@ def test_extend_json_flag_threads_through_to_render(
     _install(monkeypatch, {"object_id": "img-1", "status": "extended", "data": {}})
     asyncio.run(images.images_extend(_json_args(image_id="img-1", seconds=86400, reason="keep")))
     payload = json.loads(capsys.readouterr().out)
-    assert payload["id"] == "img-1"
+    assert payload["object_id"] == "img-1" and payload["status"] == "extended"
 
 
 def test_image_verbs_registered_with_expected_read_only_flags() -> None:

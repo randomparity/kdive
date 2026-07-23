@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidate mutations _flatten onto flatten_envelope
 - Make verb-classification branch explicit in gen_cli_verbs
 
+### Changed
+
+- BREAKING: kdivectl `--json` on the curated verbs now emits the whole server
+  envelope verbatim (`object_id`/`status`/`data`/`suggested_next_actions`/`refs`/
+  `error_category`/nested `items`), the same shape as the generated verbs, instead
+  of the projected column set (and reports' `{"items", "totals"}`). Scripts must read
+  the former columns from `data`/`items[*].data`. Table output is unchanged (ADR-0421 §6).
+
 ### Documentation
 
 - Add ADR-0421 schema-generated kdivectl verbs
