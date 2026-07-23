@@ -240,16 +240,10 @@ def _stage_gzip(
             _require_qcow2_magic(reader.read(4), system_id=str(upload.system_id))
         os.replace(tmp, dest)
     except OSError as err:
-        with suppress(OSError):
-            tmp.unlink()
-        raise CategorizedError(
-            f"failed to stage the uploaded rootfs to {str(dest)!r}: {err.strerror}",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"system_id": str(upload.system_id), "dest": str(dest)},
-        ) from err
-    except CategorizedError:
-        with suppress(OSError):
-            tmp.unlink()
+        _discard(tmp)
+        raise _staging_fault(dest, err, system_id=str(upload.system_id)) from err
+    except CategorizedError:  # a bomb, hash mismatch, or failed magic check discards the partial
+        _discard(tmp)
         raise
 
 
@@ -271,10 +265,20 @@ def _atomic_write(dest: Path, data: bytes, *, system_id: str) -> None:
         tmp.write_bytes(data)
         os.replace(tmp, dest)
     except OSError as err:
-        with suppress(OSError):
-            tmp.unlink()
-        raise CategorizedError(
-            f"failed to stage the uploaded rootfs to {str(dest)!r}: {err.strerror}",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"system_id": system_id, "dest": str(dest)},
-        ) from err
+        _discard(tmp)
+        raise _staging_fault(dest, err, system_id=system_id) from err
+
+
+def _discard(tmp: Path) -> None:
+    """Best-effort removal of a partial staging file so a raised error leaves no orphan."""
+    with suppress(OSError):
+        tmp.unlink()
+
+
+def _staging_fault(dest: Path, err: OSError, *, system_id: str) -> CategorizedError:
+    """The uniform ``INFRASTRUCTURE_FAILURE`` for an IO fault while staging the rootfs base."""
+    return CategorizedError(
+        f"failed to stage the uploaded rootfs to {str(dest)!r}: {err.strerror}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"system_id": system_id, "dest": str(dest)},
+    )
