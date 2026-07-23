@@ -434,3 +434,30 @@ def test_handler_not_fired_at_deadline(
     doc = json.loads(result_ref)
     assert doc["outcome"] == "not_fired"
     assert doc["fired"] is False
+
+
+def test_handler_reads_console_for_its_own_system(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The handler must resolve the console log path for THIS System's id; a hardcoded/None id would
+    # watch the wrong (or no) guest's console. Record the id console_log_path is called with.
+    monkeypatch.setattr(watch_for_crash, "POLL_INTERVAL_S", 0.0)
+    log = tmp_path / "console.log"
+    log.write_bytes(b"[1] still booting\n")
+    seen: list[UUID] = []
+
+    def _console_path(sid: UUID) -> Path:
+        seen.append(sid)
+        return log
+
+    monkeypatch.setattr(watch_for_crash, "console_log_path", _console_path)
+
+    async def _go() -> UUID:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_system(pool, SystemState.READY)
+            await _run_handler(pool, _job(system_id, 0.001))
+            return system_id
+
+    system_id = asyncio.run(_go())
+    assert seen == [system_id]
