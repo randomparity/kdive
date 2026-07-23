@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offline shell completion over the generated verb surface
 - Host_dump profile-section opt-in
 - Preflight the libvirt/KVM host contract
+- Add worker-side strict console read seam
 
 ### Changed
 
