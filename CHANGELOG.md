@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preflight the hardcoded provider runtime dirs
 - Remote leaked-domain InfraReaper + composite fault isolation
 - Add Snapshotter port + advertise supports_snapshots (#1430)
+- Add TrafficCapturer with pcap fetch-back (#1434)
 
 ### Changed
 
@@ -61,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision the libvirt/KVM host contract on the tcg gate
 - Provision the runtime directories on the tcg gate
 - Print the kernel-tree path on stdout
+- Scope pcap pre-delete to the job's own volume
 
 ### Build
 
