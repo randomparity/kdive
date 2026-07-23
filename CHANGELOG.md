@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Add ADR-0421 schema-generated kdivectl verbs
+- Capture output schema in verb artifact; tighten ADR-0421
+
 ### Fixed
 
 - Build the app image before the live_vm_tcg app tier
