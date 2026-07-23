@@ -134,7 +134,10 @@ def _verb_for(tool: Any) -> GeneratedVerb:
     json_params: list[str] = []
     for name, spec in props.items():
         flag = _flag_for(name, spec, name in required)
-        (json_params.append(name) if flag is None else flags.append(flag))
+        if flag is None:
+            json_params.append(name)
+        else:
+            flags.append(flag)
     return GeneratedVerb(
         group=group,
         sub=op.replace("_", "-"),
