@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the live_vm_tcg app tier as host processes
 - Stage the tcg image set inside the provider's allowed root
 - Isolate uploaded-rootfs object reclaim from console/sysrq faults
+- Reject chunked rootfs upload for local-libvirt Systems
 
 ### Build
 
