@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generate committed kdivectl verb descriptors from tool schemas
 - Unify --json on curated verbs onto the whole envelope
 - Merge generated verbs into the parser, retire the nine aliases
+- Add --<param>-json escape for non-scalar generated verbs
 
 ### Changed
 
