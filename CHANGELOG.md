@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add ADR-0422 clarifying force tool params keep their name
 - Flip ADR-0407 status to Accepted
 - Flip ADR-0114 and ADR-0389 status to Accepted
+- Document generated kdivectl verb surface; fix stale passthrough claims
+- Correct projects.list to a public read in the axis matrix
 
 ### Fixed
 
