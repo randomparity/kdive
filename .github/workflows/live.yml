@@ -85,9 +85,14 @@ jobs:
         # and the mapped spine env must live in the same shell as the preflight and the suite.
         run: |
           set -euo pipefail
-          # Backends (postgres/minio/oidc + bucket + migrate) then the app tier (server/worker/
-          # reconciler) as compose services; the tcg tier drives them over HTTP.
+          # Backends (postgres/minio/oidc + bucket + migrations) then the app tier (server/
+          # worker/reconciler) as compose services; the tcg tier drives them over HTTP.
           just stack-up
+          # stack-up brings up backends only. Build the shared app image before the app tier:
+          # only the `migrate` service carries `build: .` (tagging kdive:dev); server/worker/
+          # reconciler are image-only, so with no local kdive:dev `compose up` tries to PULL it
+          # from a registry and dies "pull access denied for kdive". Build it explicitly first.
+          docker compose build migrate
           docker compose up -d --wait server worker reconciler
 
           # Stage the ppc64le TCG image set onto /mnt under the measured budget (#1292); it exports
