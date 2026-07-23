@@ -216,6 +216,47 @@ dependency). `doctor` is operator-gated, so it exits `3` if your token lacks
 `platform_operator`. The default run is the three read checks; `--with-egress` is opt-in
 because the egress probe provisions a probe guest.
 
+## Shell completion
+
+`kdivectl completion {bash,zsh}` prints a self-contained completion script covering every
+group, verb, and per-verb flag across the merged curated + generated surface (ADR-0424). It
+resolves **offline** — no bearer token, no server call — so it is safe to run and install on any
+host, authenticated or not: the script is walked from the parser tree, which the CLI builds
+without opening a session. Regenerate it after upgrading `kdivectl` to pick up new verbs.
+
+Positional argument *values* (a `resource_id`, a tool `name`) are not completed — they are
+runtime/tenant data with no offline source; completion of a verb's `--` flags still works after
+one is typed.
+
+### bash
+
+```bash
+# System-wide (bash-completion loads it lazily):
+kdivectl completion bash | sudo tee /usr/share/bash-completion/completions/kdivectl >/dev/null
+
+# Or per-user:
+mkdir -p ~/.local/share/bash-completion/completions
+kdivectl completion bash > ~/.local/share/bash-completion/completions/kdivectl
+
+# Or source it directly from ~/.bashrc:
+source <(kdivectl completion bash)
+```
+
+Requires `bash-completion` (bash 4+). Start a new shell to load it.
+
+### zsh
+
+```zsh
+# Autoload from your fpath (run once, then restart the shell):
+kdivectl completion zsh > "${fpath[1]}/_kdivectl"
+
+# Or source it from ~/.zshrc, after `compinit`:
+source <(kdivectl completion zsh)
+```
+
+The same script works either way: autoloaded from `$fpath` zsh runs it as the completion
+function; sourced from `~/.zshrc` it registers itself with `compdef`.
+
 ## Read-only passthrough (`tool call`)
 
 To reach any read-only MCP tool not covered by a curated verb, use the passthrough. It is
