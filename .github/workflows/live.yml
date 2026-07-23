@@ -68,6 +68,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev
 
+      # libguestfs builds its supermin appliance from the HOST kernel, which Ubuntu ships
+      # 0600 root:root — the non-root runner cannot read it, so virt-tar-out dies with a bare
+      # "supermin exited with error status 1" and build-fs never produces a rootfs (ADR-0222
+      # cause 1). The self-hosted runner gets this from deploy/ansible/roles/live_vm_host, which
+      # uses 0640 root:kvm because that box is persistent and its runner user is in the kvm group.
+      # A hosted runner is ephemeral and single-tenant with no such group, so 0644 is the simpler
+      # equivalent and exposes nothing that outlives the job. Must precede the staging spine.
+      - name: Make the host kernel readable to libguestfs (supermin appliance build)
+        run: |
+          sudo chmod 0644 /boot/vmlinuz-*
+          ls -l /boot/vmlinuz-*
+
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
