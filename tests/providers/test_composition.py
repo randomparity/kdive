@@ -432,6 +432,94 @@ def test_composite_reaper_destroy_fans_out_for_unlisted_name() -> None:
     assert child_b.destroyed == ["kdive-egress-probe-xyz"]
 
 
+class _RaisingReaper:
+    """A child reaper whose list_owned/destroy both raise (an unreachable-host stand-in)."""
+
+    def __init__(self) -> None:
+        self.destroy_attempts: list[str] = []
+
+    async def list_owned(self) -> list[OwnedDomain]:
+        raise RuntimeError("remote host unreachable")
+
+    async def destroy(self, name: str) -> None:
+        self.destroy_attempts.append(name)
+        raise RuntimeError("remote host unreachable")
+
+
+def test_composite_list_owned_isolates_a_failing_child() -> None:
+    """#1429: one child raising (an unreachable remote host) must not strand the others.
+
+    A remote-only deployment now composes a second reaper, so a persistently unreachable remote
+    host must not abort the whole sweep — local's leaked domains are still listed.
+    """
+    local = _FakeLibvirtReaper(_FakeOwnedDomain(name="kdive-local"))
+    remote = _RaisingReaper()
+    reaper = composition._CompositeReaper((remote, local))
+
+    owned = asyncio.run(reaper.list_owned())
+
+    assert [d.name for d in owned] == ["kdive-local"]
+
+
+def test_composite_destroy_fan_out_attempts_every_child_then_surfaces() -> None:
+    """A raising child in the destroy fan-out must not mask another child's destroy (#1429).
+
+    The reconciler's egress-probe sweep fans destroy out to every child; a raising remote child
+    must still let the local child destroy its probe guest, and the fault must surface (be
+    re-raised), never be silently absorbed.
+    """
+    remote = _RaisingReaper()  # listed first, raises
+    local = _FakeLibvirtReaper()
+    reaper = composition._CompositeReaper((remote, local))
+
+    with pytest.raises(RuntimeError, match="unreachable"):
+        asyncio.run(reaper.destroy("kdive-egress-probe-xyz"))
+
+    # The local child's destroy was still attempted despite the remote child raising first.
+    assert local.destroyed == ["kdive-egress-probe-xyz"]
+    assert remote.destroy_attempts == ["kdive-egress-probe-xyz"]
+
+
+def test_composite_destroy_routes_to_the_recorded_owner_only() -> None:
+    # After list_owned records the owner, destroy routes to that child alone (no fan-out), so a
+    # failing sibling never sees an owned domain's destroy.
+    local = _FakeLibvirtReaper(_FakeOwnedDomain(name="kdive-local"))
+    remote = _RaisingReaper()
+    reaper = composition._CompositeReaper((remote, local))
+
+    asyncio.run(reaper.list_owned())
+    asyncio.run(reaper.destroy("kdive-local"))
+
+    assert local.destroyed == ["kdive-local"]
+    assert remote.destroy_attempts == []
+
+
+def test_remote_only_deployment_composes_the_remote_reaper() -> None:
+    """#1429: a remote-only deployment reaps its own domains instead of getting a NullReaper.
+
+    With local libvirt disabled and remote enabled, the reconciler reaper is the remote-libvirt
+    fleet reaper (buildable without a live connection, ADR-0076) — not :class:`NullReaper`.
+    """
+    from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
+
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_reaper(enable_local_libvirt=False, enable_remote_libvirt=True)
+
+    assert isinstance(reaper, RemoteLibvirtInfraReaper)
+
+
+def test_local_and_remote_compose_a_fault_isolating_composite() -> None:
+    # Both providers enabled → a _CompositeReaper (so a down remote host cannot strand local).
+    comp = composition.ProviderComposition()
+    reaper = comp.build_reconciler_reaper(
+        enable_local_libvirt=True,
+        enable_remote_libvirt=True,
+        libvirt_reaper=_FakeLibvirtReaper(),
+    )
+
+    assert isinstance(reaper, composition._CompositeReaper)
+
+
 def test_reconciler_reaper_is_null_when_local_libvirt_disabled() -> None:
     # A deployment with no local libvirt (e.g. k8s, remote-libvirt only) opts the local reaper
     # out so repair_leaked_domains never tries to open a non-existent qemu:///system socket.
