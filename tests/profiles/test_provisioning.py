@@ -454,7 +454,10 @@ def test_profile_is_frozen() -> None:
     profile = ProvisioningProfile.parse(_valid())
 
     with pytest.raises(ValidationError):
-        profile.arch = "aarch64"
+        # The assignment is the thing under test: the model is frozen, so this must raise at
+        # runtime. ty flags the write statically because the field is read-only, which is
+        # exactly the invariant being asserted.
+        profile.arch = "aarch64"  # ty: ignore[invalid-assignment]
 
 
 def test_direct_construction_bypasses_configuration_error_mapping() -> None:
