@@ -194,3 +194,42 @@ def test_force_crash_failure_message_and_details_name_the_domain(tmp_path: Path)
 
     assert str(exc.value) == "libvirt error injecting NMI into domain"
     assert exc.value.details == {"domain": name}
+
+
+def test_diagnostic_sysrq_sends_alt_sysrq_chord(tmp_path: Path) -> None:
+    # The transport-agnostic sendKey injection local uses (ADR-0285/0433): Alt+SysRq+<trigger> over
+    # the remote connection. 'w' (show_blocked_tasks) → KEY_W keycode 17, with Alt(56)+SysRq(99).
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name)
+    _control(domain, tmp_path).diagnostic_sysrq(name, "w")
+    assert domain.calls == [f"sendKey:{libvirt.VIR_KEYCODE_SET_LINUX}:100:{[56, 99, 17]}:3:0"]
+
+
+def test_diagnostic_sysrq_unknown_trigger_is_configuration_error(tmp_path: Path) -> None:
+    # An unallowlisted trigger is a programming error (the tool validates the enum): it fails as a
+    # CONFIGURATION_ERROR before any libvirt call, so no connection or sendKey is attempted.
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name)
+    with pytest.raises(CategorizedError) as exc:
+        _control(domain, tmp_path).diagnostic_sysrq(name, "c")  # destructive/absent from allowlist
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.details == {"domain": name, "trigger": "c"}
+    assert domain.calls == []
+
+
+def test_diagnostic_sysrq_libvirt_error_is_control_failure(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
+    domain = FakeDomain(name, raise_on={"sendKey": libvirt.VIR_ERR_INTERNAL_ERROR})
+    with pytest.raises(CategorizedError) as exc:
+        _control(domain, tmp_path).diagnostic_sysrq(name, "w")
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == "libvirt error sending SysRq to domain"
+    assert exc.value.details == {"domain": name}
+
+
+def test_diagnostic_sysrq_absent_domain_is_control_failure(tmp_path: Path) -> None:
+    name = domain_name_for(_SYSTEM_ID)
+    with pytest.raises(CategorizedError) as exc:
+        _control(None, tmp_path).diagnostic_sysrq(name, "w")
+    assert exc.value.category is ErrorCategory.CONTROL_FAILURE
+    assert str(exc.value) == "libvirt error looking up domain"

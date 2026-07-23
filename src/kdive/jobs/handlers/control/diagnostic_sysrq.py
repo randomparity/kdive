@@ -1,12 +1,14 @@
-"""Worker handler for the `diagnostic_sysrq` job (ADR-0285, #925; ADR-0292, #952).
+"""Worker handler for the `diagnostic_sysrq` job (ADR-0285, #925; ADR-0292, #952; ADR-0433, #1435).
 
-Injects one allowlisted magic-SysRq keystroke into a ready local-libvirt guest and captures
-the console dump the kernel prints as a redacted System-owned artifact. The provider Control
-port is called lock-free between two brief per-System-locked transactions: the first snapshots
-the console length + domain and verifies the System is live/local/READY, the second re-verifies
-and stores the redacted capture. Correctness allows the lock-free poll because the local serial
-log only grows while the System is READY (``append="off"`` truncates only on power-cycle,
-ADR-0258), so the tail read needs no cross-op exclusion.
+Injects one allowlisted magic-SysRq keystroke into a ready guest and captures the console dump
+the kernel prints as a redacted System-owned artifact. The provider Control port is called
+lock-free between two brief per-System-locked transactions: the first snapshots the domain +
+console-read seam and verifies the System supports SysRq and is READY, the second re-verifies and
+stores the redacted capture. Correctness allows the lock-free poll because the console only grows
+while the System is READY (local-libvirt's serial log with ``append="off"`` truncates only on
+power-cycle, ADR-0258; remote-libvirt's S3 parts are immutable and assembled cumulatively,
+ADR-0429), so the tail read needs no cross-op exclusion. The console source is provider-gated: a
+worker-local serial log for local-libvirt, the strict S3-part read seam for remote-libvirt.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import SysRqPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.ports.console import RemoteConsoleReader
 from kdive.providers.ports.lifecycle import Controller
 from kdive.providers.shared.runtime_paths import (
     console_log_path,
@@ -133,6 +136,36 @@ class _Snapshot(NamedTuple):
     domain_name: str
     project: str
     controller: Controller
+    # The strict console read seam when the provider exposes one (remote-libvirt, ADR-0429/0433);
+    # ``None`` for a provider whose console is a worker-local file (local-libvirt).
+    reader: RemoteConsoleReader | None
+
+
+def _console_reader(
+    conn: AsyncConnection, system_id: UUID, reader: RemoteConsoleReader | None
+) -> Callable[[], Awaitable[bytes]]:
+    """Pick the console source: the remote read seam when present, else the worker-local log file.
+
+    Remote-libvirt's console lives in reconciler-pumped S3 parts the worker cannot reach as a file
+    (ADR-0429). A SysRq capture is one-shot — the whole output is the dump it just triggered — so
+    an un-pumped console read is fatal here (unlike the retrying crash-watch): a ``pumped=False``
+    window means the console source is unreachable, and returning its empty bytes would masquerade
+    as "the kernel printed nothing". It raises so the handler fails with a ``configuration_error``.
+    """
+    if reader is None:
+        return lambda: asyncio.to_thread(read_console_log, console_log_path(system_id))
+
+    async def _read_remote() -> bytes:
+        window = await reader.read_window(conn, system_id)
+        if not window.pumped:
+            raise CategorizedError(
+                "the System's console is not being pumped; cannot capture the SysRq dump",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"reason": "console_not_pumped", "system_id": str(system_id)},
+            )
+        return window.data
+
+    return _read_remote
 
 
 def _resolved_domain_name(system: System) -> str:
@@ -170,10 +203,17 @@ async def _snapshot(
                     "provider_kind": binding.kind.value,
                 },
             )
+        console = binding.runtime.console
+        reader = (
+            console.reader_factory()
+            if console is not None and console.reader_factory is not None
+            else None
+        )
         return _Snapshot(
             domain_name=_resolved_domain_name(system),
             project=system.project,
             controller=binding.runtime.controller,
+            reader=reader,
         )
 
 
@@ -269,7 +309,7 @@ async def diagnostic_sysrq_handler(
         )
 
     result = await capture_console_delta(
-        lambda: asyncio.to_thread(read_console_log, console_log_path(system_id)),
+        _console_reader(conn, system_id, snapshot.reader),
         _inject,
         asyncio.sleep,
         seam_overlap=SEAM_OVERLAP,

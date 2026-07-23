@@ -29,6 +29,7 @@ from kdive.jobs.handlers.control import diagnostic_sysrq
 from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.core.resource_registration import register_discovered_resource
 from kdive.providers.local_libvirt.discovery import LocalLibvirtDiscovery
+from kdive.providers.ports.console import ConsoleWindowRead
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -71,6 +72,33 @@ class _FakeControl:
         if self._dump:
             with self._log.open("ab") as handle:
                 handle.write(self._dump)
+
+
+class _RecordingControl:
+    """A Control port that only records the injected SysRq (remote injects, no local log file)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def diagnostic_sysrq(self, domain_name: str, trigger: str) -> None:
+        self.calls.append((domain_name, trigger))
+
+
+class _SeqReader:
+    """A RemoteConsoleReader returning each window in turn, then repeating the last (ADR-0429)."""
+
+    def __init__(self, windows: list[ConsoleWindowRead]) -> None:
+        self._windows = windows
+        self._i = 0
+        self.calls: list[tuple[UUID, int]] = []
+
+    async def read_window(
+        self, conn: object, system_id: UUID, start_index: int = 0
+    ) -> ConsoleWindowRead:
+        self.calls.append((system_id, start_index))
+        window = self._windows[min(self._i, len(self._windows) - 1)]
+        self._i += 1
+        return window
 
 
 async def _seed_ready_system(
@@ -452,6 +480,78 @@ def test_handler_reads_console_for_its_own_system(
     system_id = asyncio.run(_go())
     assert seen  # the console path is resolved at least once
     assert set(seen) == {system_id}  # always this System's id, never None
+
+
+def test_remote_captures_dump_via_console_read_seam(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A remote provider (console.reader_factory set, ADR-0433) reads the dump back through the
+    # ADR-0429 strict seam instead of a worker-local file: the seam supplies cumulative bytes that
+    # grow past the pre-injection mark and stabilize. Injection still goes through the Control port.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    control = _RecordingControl()
+    boot = b"boot\n"
+    grown = boot + b"SysRq : Show Memory\n dump\n"
+    reader = _SeqReader([ConsoleWindowRead(boot, 1, True), ConsoleWindowRead(grown, 2, True)])
+    store = _FakeStore()
+
+    async def _go() -> tuple[str | None, list[tuple[str, str]], UUID, list[tuple[str, str, str]]]:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            resolver = provider_resolver(controller=control, console_reader=reader)
+            async with pool.connection() as conn:
+                ref = await diagnostic_sysrq.diagnostic_sysrq_handler(
+                    conn,
+                    _job(system_id, "show_memory"),
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    artifact_store=cast(ObjectStore, store),
+                )
+            return ref, control.calls, system_id, await _artifact_rows(pool, system_id)
+
+    ref, calls, system_id, rows = asyncio.run(_go())
+
+    assert calls == [("kdive-x", "m")]  # injection routed through the Control port
+    # The seam is always read for THIS System's console, never None.
+    assert reader.calls and all(sid == system_id for sid, _ in reader.calls)
+    assert ref is not None
+    assert len(rows) == 1
+    stored = b"".join(data for data, _s, _r in store.objects.values())
+    assert b"Show Memory" in stored  # the dump captured from the seam is what got stored
+
+
+def test_remote_unpumped_console_raises_configuration_error(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One-shot SysRq treats an un-pumped console as fatal (ADR-0433): a pumped=False window means
+    # the console source is unreachable, so it must not masquerade as an empty capture. The read
+    # raises before injection, so the Control port is never called.
+    monkeypatch.setattr(diagnostic_sysrq, "POLL_INTERVAL_SECONDS", 0.0)
+    control = _RecordingControl()
+    reader = _SeqReader([ConsoleWindowRead(b"", 0, False)])
+    store = _FakeStore()
+
+    async def _go() -> None:
+        async with _pool(migrated_url) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool, SystemState.READY)
+            resolver = provider_resolver(controller=control, console_reader=reader)
+            async with pool.connection() as conn:
+                await diagnostic_sysrq.diagnostic_sysrq_handler(
+                    conn,
+                    _job(system_id, "show_memory"),
+                    resolver=resolver,
+                    secret_registry=SecretRegistry(),
+                    artifact_store=cast(ObjectStore, store),
+                )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        asyncio.run(_go())
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["reason"] == "console_not_pumped"
+    assert control.calls == []  # never injected — fail fast before touching the guest
+    assert store.put_calls == []  # no empty artifact stored
 
 
 def test_unsupported_provider_fails_capability_configuration_error(

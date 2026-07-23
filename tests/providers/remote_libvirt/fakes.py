@@ -47,6 +47,13 @@ class FakeDomain:
         self._maybe_raise("injectNMI")
         return 0
 
+    def sendKey(  # noqa: N802 - libvirt binding name
+        self, codeset: int, holdtime: int, keycodes: list[int], nkeycodes: int, flags: int
+    ) -> int:
+        self.calls.append(f"sendKey:{codeset}:{holdtime}:{keycodes}:{nkeycodes}:{flags}")
+        self._maybe_raise("sendKey")
+        return 0
+
     def qemuMonitorCommand(self, cmd: str, flags: int) -> str:  # noqa: N802 - libvirt binding name
         self.calls.append(f"monitor:{cmd}")
         self._maybe_raise("qemuMonitorCommand")

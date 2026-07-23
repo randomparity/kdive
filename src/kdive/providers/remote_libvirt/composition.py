@@ -56,6 +56,7 @@ from kdive.providers.remote_libvirt.config import (
 from kdive.providers.remote_libvirt.connection.staged_volumes import probe_staged_volumes
 from kdive.providers.remote_libvirt.connection.transport_reset import RemoteLibvirtTransportResetter
 from kdive.providers.remote_libvirt.console.collector import ConsoleCollector, ConsoleStream
+from kdive.providers.remote_libvirt.console.read import build_remote_console_reader
 from kdive.providers.remote_libvirt.console.snapshot import RemoteLibvirtConsoleSnapshotter
 from kdive.providers.remote_libvirt.console.wiring import (
     RemoteConsolePartStore,
@@ -342,6 +343,13 @@ def build_runtime(
             # -volume download stream (ADR-0432, #1434). The deferred ADR-0385 opt-in; matches the
             # wired ``traffic_capturer`` port below.
             supports_traffic_capture=True,
+            # Magic-SysRq injection over the libvirt Control port (transport-agnostic ``sendKey``)
+            # plus out-of-band console read-back of the dump (ADR-0285/0433, #1435). The deferred
+            # ADR-0427 opt-in; matches the wired ``controller`` + ``console.reader_factory`` below.
+            supports_diagnostic_sysrq=True,
+            # Out-of-band crash-signature watch over the reconciler-pumped S3 console parts
+            # (ADR-0367/0433, #1435). The deferred ADR-0427 opt-in; matches the reader factory.
+            supports_crash_watch=True,
         ),
         debug=_debug_capabilities(secret_registry),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
@@ -353,7 +361,14 @@ def build_runtime(
         # worker assembles them into an immutable per-Run `console-<run>` artifact so a later boot
         # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
         # (this composition stays buildable without S3 config, ADR-0076).
-        console=ConsoleCapabilities(snapshotter=RemoteLibvirtConsoleSnapshotter()),
+        # ``reader_factory`` is the strict worker-side console read seam (ADR-0429, #1431) the
+        # remote ``diagnostic_sysrq``/``watch_for_crash`` handlers use to read back a running
+        # System's console (ADR-0433, #1435). Built lazily at job time so this composition stays
+        # buildable without S3 config (ADR-0076), like the snapshotter's own lazy store.
+        console=ConsoleCapabilities(
+            snapshotter=RemoteLibvirtConsoleSnapshotter(),
+            reader_factory=lambda: build_remote_console_reader(secret_registry=secret_registry),
+        ),
         # Internal RAM+disk/disk-only domain snapshots over qemu+tls (ADR-0428, #1430). Matches
         # ``support.supports_snapshots``; the teardown path reclaims them via ``delete_all``.
         snapshot=RemoteLibvirtSnapshotter.from_env(

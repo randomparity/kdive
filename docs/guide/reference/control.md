@@ -34,10 +34,11 @@ invalid `capture_filter` is a `configuration_error`; no job is created.
 
 Inject one non-destructive diagnostic SysRq into a ready guest and capture the kernel's
 console dump. The bound provider must support diagnostic SysRq injection (today
-local-libvirt); a provider that does not is refused with a `capability_unsupported`
-`configuration_error`. Requires contributor (no destructive gate); enqueues a job and
-returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result`
-is the redacted console-dump artifact id; read it with `artifacts.get`. A guest that
+local-libvirt and remote-libvirt); a provider that does not is refused with a
+`capability_unsupported` `configuration_error`. Requires contributor (no destructive gate);
+enqueues a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the
+job's `refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`.
+A guest that
 rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
 `configuration_error`, as does no console output at all (no keyboard driver); an
 unknown/destructive `command` or a non-ready System is also a `configuration_error`.
@@ -84,9 +85,9 @@ job.
 
 Watch a ready guest's serial console out-of-band for a kernel-crash signature
 (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
-hit. The bound provider must support out-of-band crash-watch (today local-libvirt); a
-provider that does not is refused with a `capability_unsupported` `configuration_error`.
-Use this to catch a crash your own reproducer provokes: drive the
+hit. The bound provider must support out-of-band crash-watch (today local-libvirt and
+remote-libvirt); a provider that does not is refused with a `capability_unsupported`
+`configuration_error`. Use this to catch a crash your own reproducer provokes: drive the
 repeat-until-crash loop over your root SSH, and this watches the console — which survives
 the panic that drops SSH. Requires contributor; enqueues a job and returns
 `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's

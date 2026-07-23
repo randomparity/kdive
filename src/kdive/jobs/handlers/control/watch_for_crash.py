@@ -49,7 +49,7 @@ from kdive.jobs.context import context_from_job
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import WatchForCrashPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
-from kdive.providers.core.resolver import ProviderResolver
+from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.shared.runtime_paths import console_log_path, read_console_log
 from kdive.security import audit
 from kdive.security.secrets.redaction import Redactor
@@ -171,6 +171,33 @@ def _observed_at() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _console_reader(
+    conn: AsyncConnection, system_id: UUID, binding: ProviderBinding
+) -> Callable[[], Awaitable[bytes]]:
+    """Pick the console source: the remote read seam when the provider exposes one, else the file.
+
+    A provider whose console is a worker-local serial log (local-libvirt) reads the file directly;
+    remote-libvirt's console lives in reconciler-pumped S3 parts the worker cannot reach as a file,
+    so it uses the strict read seam (ADR-0429, #1431), which assembles the parts and returns the
+    redacted cumulative bytes. Crash-watch is a poll loop, so an un-pumped read is not fatal
+    (``pumped`` is not treated as an error here, unlike the one-shot SysRq capture): the loop
+    returns the possibly-empty window and retries until the deadline, so a console that only starts
+    being pumped mid-watch can still fire.
+    """
+    console = binding.runtime.console
+    if console is not None and console.reader_factory is not None:
+        reader = console.reader_factory()
+
+        async def _read_remote() -> bytes:
+            window = await reader.read_window(conn, system_id)
+            return window.data
+
+        return _read_remote
+
+    log_path = console_log_path(system_id)
+    return lambda: asyncio.to_thread(read_console_log, log_path)
+
+
 async def watch_for_crash_handler(
     conn: AsyncConnection,
     job: Job,
@@ -178,7 +205,7 @@ async def watch_for_crash_handler(
     resolver: ProviderResolver,
     secret_registry: SecretRegistry,
 ) -> str | None:
-    """Watch a ready local-libvirt System's console for a crash signature; return the JSON verdict.
+    """Watch a ready System's console for a crash signature; return the JSON verdict.
 
     Both outcomes (fired / not_fired) are successful runs — only an inability to run raises. A
     rising failure rate for ``kind=watch_for_crash`` in the worker's per-kind job telemetry
@@ -206,11 +233,11 @@ async def watch_for_crash_handler(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details={"reason": "crash_watch_unsupported", "provider_kind": binding.kind.value},
         )
-    log_path = console_log_path(system_id)
-    mark = len(await asyncio.to_thread(read_console_log, log_path))
+    read_console = _console_reader(conn, system_id, binding)
+    mark = len(await read_console())
     redactor = Redactor(registry=secret_registry)
     verdict = await watch_console_for_crash(
-        lambda: asyncio.to_thread(read_console_log, log_path),
+        read_console,
         asyncio.sleep,
         time.monotonic,
         redactor.redact_text,
