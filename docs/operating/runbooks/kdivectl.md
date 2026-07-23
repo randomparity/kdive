@@ -3,10 +3,14 @@
 Operator guide for `kdivectl`, the kdive admin CLI. `kdivectl` is a FastMCP **client**: it
 attaches an OIDC bearer token and calls the same MCP tools an agent does — there is no new
 server transport and no direct database or object-store access from the operator host (the
-host holds only the bearer token). Curated verbs render read tools as tables/JSON; a
-fail-closed read-only `tool call` passthrough reaches the rest of the surface; the mutating
-verbs route through the M1.3 break-glass tools. See
-[ADR-0089](../../adr/0089-operator-cli-mcp-client.md) and the
+host holds only the bearer token). Every registered MCP tool is reachable as a
+`group subcommand` verb: a hand-curated subset renders read tools as tables/JSON and wraps the
+M1.3 break-glass mutations, and every other tool is a **schema-generated verb** with typed
+flags (see [The generated verb surface](#the-generated-verb-surface)). A tiered, fail-closed
+`tool call` passthrough additionally reaches any tool by raw name for scripting. See
+[ADR-0089](../../adr/0089-operator-cli-mcp-client.md),
+[ADR-0421](../../adr/0421-schema-generated-kdivectl-verbs.md),
+[ADR-0423](../../adr/0423-generic-generated-verb-dispatch.md), and the
 [M2.2 plan](../../archive/superpowers/plans/2026-06-10-m22-admin-cli.md).
 
 Every call `kdivectl` makes is attributed: the server records the OIDC `client_id` and
@@ -76,9 +80,72 @@ The `--platform-role` axis encodes the platform role into the minted token. Brea
 mutating verbs need the platform role the underlying tool gates on — see
 [Break-glass mutating verbs](#break-glass-mutating-verbs).
 
+## The generated verb surface
+
+`kdivectl` exposes **every** registered MCP tool as a verb, not just the hand-curated ones
+below. Each tool contributes one verb at a canonical path derived from its name, so the CLI
+surface tracks the server's tool surface automatically (ADR-0421, ADR-0423). Run `kdivectl
+--help` to list the groups, `kdivectl <group> --help` to list a group's verbs, and `kdivectl
+<group> <verb> --help` to see a verb's flags — the parser is built offline, so `--help` and
+[shell completion](#shell-completion) never open a session.
+
+### Canonical path derivation
+
+A tool named `namespace.op` maps to the verb `namespace op`, with underscores in `op`
+becoming dashes; each scalar tool parameter `some_param` maps to the flag `--some-param`
+(ADR-0421 §2). For example:
+
+| MCP tool | generated verb |
+|----------|----------------|
+| `control.force_crash` | `kdivectl control force-crash` |
+| `systems.authorize_ssh_key` | `kdivectl systems authorize-ssh-key` |
+| `accounting.set_quota` | `kdivectl accounting set-quota` |
+| `debug.set_breakpoint` | `kdivectl debug set-breakpoint` |
+
+A parameter the generator cannot express as a typed scalar flag — a nested object, an object
+array — is surfaced as a single `--<param>-json` escape that takes a JSON object or array
+(validated at parse time; a malformed or bare-scalar value is a usage error, exit `2`). A
+generated verb emits the server response envelope the same way `--json` does for curated verbs
+(the scriptable contract is the tool's own output schema, not a CLI-chosen column subset).
+
+### Curated vs. generated verbs
+
+A **curated** verb (the read verbs and break-glass mutations documented below) overrides the
+generated shape at its path with hand-tuned positionals, flags, and table rendering; it wins at
+its own path only. **Every other tool** takes the schema-derived shape: typed `--flags` plus
+the `--<param>-json` escapes, rendering the response envelope. Both kinds call the same
+underlying tool and are gated by the **same** server-side authorization — the generated shape
+is a convenience layer, never a second authorization path.
+
+### Generated-verb mutation ceremony
+
+Curated break-glass verbs and the `tool call` passthrough are not the only way to reach a
+mutating or destructive tool: a generated verb reaches its own tool directly. The ceremony
+differs from the passthrough's in one way — **naming the generated verb is itself the
+acknowledgement, so no `--allow-mutating` / `--allow-destructive` opt-in flag is used** (ADR-0421
+§4, ADR-0423). The tier is resolved from the tool's **live** server annotations at call time
+(never the committed artifact, so a stale artifact cannot downgrade a tool's tier), and drives
+the ceremony:
+
+- **read-only** tool → called directly.
+- **mutating** tool → a fail-closed token-`exp` preflight runs first (a near-expired token is
+  refused up front; re-run `kdivectl login` and retry), then the call.
+- **destructive** tool → the preflight **plus** a typed-`yes` confirmation on a TTY (or `--yes`
+  for non-interactive use; a non-interactive stdin without `--yes` refuses).
+- **unclassifiable** tool (annotations missing or not a literal `readOnlyHint`/`destructiveHint`)
+  → fail-closed and **unreachable** (exit `3`), so nothing slips through unclassified.
+
+The server-side destructive-op gate (ADR-0006/0020) remains the real authorization boundary;
+this ceremony is the client-side UX guard on top of it. Server-side authorization for each
+generated verb is the underlying tool's own — a mutating/destructive verb still requires
+whatever platform role or project grant the tool enforces, exactly as the break-glass verbs do.
+
 ## Read verbs
 
-Curated read verbs call one read-only MCP tool and render a table (or JSON with `--json`):
+The curated read verbs call one read-only MCP tool and render a table (or JSON with `--json`).
+They are a hand-tuned subset of the [generated surface](#the-generated-verb-surface) above;
+every other read tool is reachable as a generated verb (`kdivectl <group> <verb>`) or through
+the read-only [`tool call` passthrough](#tiered-passthrough-tool-call):
 
 ```bash
 kdivectl resources list [--kind <kind>]
@@ -164,6 +231,15 @@ Note `inventory list` is the **cross-project auditor** read (it maps to the `inv
 tool, gated `platform_auditor`), not a per-project read — it is the one read verb where a
 platform-axis token is *granted* and a bare project member is *denied*. Every other project-data
 read is the inverse.
+
+The matrix is keyed by the **underlying tool**, so every [generated read
+verb](#the-generated-verb-surface) inherits the axis of its tool — the curated verbs above are
+a subset, not the whole authorized surface. For example `audit query` (`audit.query`) and
+`projects list` (`projects.list`) are platform-axis auditor reads like `inventory list`;
+`session whoami` (`session.whoami`) is a plain authenticated read like `resources list`; and
+`runs list` / `jobs wait` are per-project `viewer` reads like `systems get`. When in doubt,
+`kdivectl <group> <verb>` returns the same `authorization_denied` (exit `3`) or
+not-found-shaped (exit `4`) result its tool would for an agent.
 
 Three project-axis outcomes are distinct and should not be conflated. (1) A **non-member**
 (including a platform-only token) reaching a **by-id** `get` gets the
@@ -257,18 +333,31 @@ source <(kdivectl completion zsh)
 The same script works either way: autoloaded from `$fpath` zsh runs it as the completion
 function; sourced from `~/.zshrc` it registers itself with `compdef`.
 
-## Read-only passthrough (`tool call`)
+## Tiered passthrough (`tool call`)
 
-To reach any read-only MCP tool not covered by a curated verb, use the passthrough. It is
-**fail-closed**: it lists the server's tools and refuses any tool not annotated
-`readOnlyHint`, so it can never reach a mutating tool — the curated break-glass verb is the
-only path to those.
+To reach any MCP tool by raw name — for scripting, or a tool with no convenient generated
+verb — use the passthrough. It is **read-only by default and fail-closed**: it lists the
+server's tools, classifies the target from its live annotations, and admits only tiers you
+have explicitly opted into (ADR-0107).
 
 ```bash
-kdivectl tool call accounting.usage_project --json '{"project": "my-proj"}'
+kdivectl tool call accounting.usage_project --json '{"project": "my-proj"}'  # read-only default
+kdivectl tool call resources.set_status --allow-mutating --json '{...}'       # opt in to mutating
+kdivectl tool call systems.teardown --allow-destructive --yes --json '{...}'  # opt in to destructive
 ```
 
-A non-read-only target exits `3` without calling the tool.
+The tier opt-in is cumulative: no flag admits read-only tools only; `--allow-mutating` also
+admits mutating tools; `--allow-destructive` implies `--allow-mutating` and also admits
+destructive tools. A target above the tier you opted into exits `3` without calling the tool,
+naming the flag that would admit it. A mutating or destructive call runs the same fail-closed
+token-`exp` preflight the [break-glass verbs](#break-glass-mutating-verbs) do; a destructive
+call additionally needs a typed-`yes` confirmation on a TTY (or `--yes`). An unclassifiable
+tool (annotations missing or not a literal hint) is fail-closed and unreachable at every tier
+(exit `3`), so nothing slips through unclassified.
+
+This is a client-side policy/UX guard; the server-side destructive-op gate (ADR-0006/0020)
+remains the real authorization boundary, so opting a tier in never bypasses the platform-role
+or project grant the underlying tool enforces.
 
 ## Break-glass mutating verbs
 
@@ -276,8 +365,11 @@ These verbs route through the M1.3 break-glass tools. Each is single-call and re
 (the server tools are idempotent against already-torn-down/already-released state). Before
 its one call, each verb runs a fail-closed token-`exp` preflight: a near-expired token is
 refused up front (re-run `kdivectl login` and retry) rather than risking a mid-operation
-401. These tools are `destructive()`-annotated server-side, so the read-only passthrough
-cannot reach them.
+401. These curated verbs are the ergonomic path to the break-glass tools; the same tools are
+also reachable — with the same server-side authorization — as [generated
+verbs](#the-generated-verb-surface) or through the `tool call`
+[passthrough](#tiered-passthrough-tool-call) with an explicit `--allow-mutating` /
+`--allow-destructive` opt-in.
 
 ```bash
 kdivectl ops force-teardown <system_id> --reason <R> --force   # ops.force_teardown (needs --force)
@@ -309,7 +401,7 @@ the denial is itself audited under `actor=operator-cli` (separation-of-duties ac
 | `0` | success |
 | `1` | generic failure |
 | `2` | configuration error |
-| `3` | authorization denied (or a non-read-only passthrough target) |
+| `3` | authorization denied, **or** a client-side ceremony refusal: a `tool call` target above the opted-in tier, an unclassifiable (fail-closed) tool on the passthrough or a generated verb, a token-`exp` preflight refusal, or an unconfirmed destructive call |
 | `4` | not found |
 | `5` | conflict |
 | `6` | `doctor` only: a check could not run to a verdict (`error`); not a passed contract |
