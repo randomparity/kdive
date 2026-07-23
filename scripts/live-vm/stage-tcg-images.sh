@@ -22,7 +22,7 @@ esac
 [ "$mnt_root" = "/" ] && die "refusing rm -rf on the top-level path ${STAGE}; use a subdirectory"
 
 require_tools \
-  "${KDIVE_PYTHON:-python3}:the kdive venv (set KDIVE_PYTHON), runs build-fs" \
+  "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
 
