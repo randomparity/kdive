@@ -202,6 +202,22 @@ The default MCP URL is `http://127.0.0.1:8000/mcp`. Override the bind address wi
 `KDIVE_HTTP_HOST` / `KDIVE_HTTP_PORT` if `127.0.0.1:8000` is taken; keep
 `KDIVE_STACK_BASE_URL` in sync.
 
+> **The compose app tier cannot serve the host-side suite (§5) or the `local-libvirt`
+> provider.** Two independent reasons, both by design:
+>
+> - **One issuer, two identities.** The mock issuer derives `iss` from the request host, so a
+>   token minted from the host carries `iss=http://localhost:8090/default` while the compose
+>   `server` is configured `iss=http://oidc:8080/default`. `JWTVerifier` enforces `iss`, so every
+>   host-side call returns `401 Unauthorized` even though the signature is valid.
+> - **No VM access.** The kdive image is built to drive the remote-libvirt and fault-inject
+>   providers over the network; `local-libvirt` is deliberately not containerized. The compose
+>   services get no `/dev/kvm`, no libvirt socket and no privileged flag.
+>
+> Use the compose app tier for in-network clients only. For the suite, the CLI, or anything that
+> provisions a local VM, run the app tier as **host processes** via
+> [`scripts/live-stack/up.sh`](../../../scripts/live-stack/up.sh) — the path at the top of this
+> section, and the one both `live.yml` gates use.
+
 ## 5. Run the suite
 
 ```bash

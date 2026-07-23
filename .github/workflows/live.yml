@@ -151,21 +151,11 @@ jobs:
           ln -sfn "$pure" "${native[@]}" "${site}/"
           .venv/bin/python -c 'import guestfs; print("guestfs binding:", guestfs.__file__)'
 
-      - name: Run the live_vm_tcg spine (stage -> map -> preflight -> test, one shell)
+      - name: Run the live_vm_tcg spine (stage -> up -> preflight -> test, one shell)
         # ONE run: block — each Actions run: is a fresh shell, so the staged KDIVE_LIVE_VM_* exports
         # and the mapped spine env must live in the same shell as the preflight and the suite.
         run: |
           set -euo pipefail
-          # Backends (postgres/minio/oidc + bucket + migrations) then the app tier (server/
-          # worker/reconciler) as compose services; the tcg tier drives them over HTTP.
-          just stack-up
-          # stack-up brings up backends only. Build the shared app image before the app tier:
-          # only the `migrate` service carries `build: .` (tagging kdive:dev); server/worker/
-          # reconciler are image-only, so with no local kdive:dev `compose up` tries to PULL it
-          # from a registry and dies "pull access denied for kdive". Build it explicitly first.
-          docker compose build migrate
-          docker compose up -d --wait server worker reconciler
-
           # Session mode (worker-owned QEMU, runner-readable console — ADR-0223), for the same
           # reason the native job below pins it: under qemu:///system the console log and core are
           # root-owned and this non-root job could not read them back. It also needs no libvirt
@@ -198,16 +188,36 @@ jobs:
           tcg_wiring="$(scripts/live-vm/stage-tcg-images.sh)"
           eval "$tcg_wiring"
 
-          # The canonical host-side stack env (KDIVE_DATABASE_URL / _OIDC_ISSUER / _STACK_BASE_URL /
-          # _S3_* / AWS_* minioadmin) lives in env.sh — source it rather than duplicate the values,
-          # which would drift from the compose ports and re-declare the credential literals.
+          # The kernel tree must resolve BEFORE the app tier starts: up.sh's
+          # restart_host_processes reads KDIVE_KERNEL_SRC when it forks the worker and otherwise
+          # defaults it to ${HOME}/src/linux, which no hosted runner has.
+          export KDIVE_KERNEL_SRC
+          KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
+
+          # App tier as HOST PROCESSES, exactly as the native job runs it — never as compose
+          # services. The local-libvirt provider this gate exercises is deliberately NOT
+          # containerized (Dockerfile header): the kdive image carries no /dev/kvm, no libvirt
+          # socket and no privileged flag, so a containerized worker cannot boot the guest, cannot
+          # see the runtime dirs provisioned above, and cannot reach the rootfs staged on /mnt.
+          # Host processes also put the suite and the server on ONE OIDC identity. The mock issuer
+          # is host-header-relative: a token minted here carries iss=http://localhost:8090/default,
+          # while a compose `server` is configured iss=http://oidc:8080/default and JWTVerifier
+          # rejects it with a 401 that looks like an auth bug rather than a topology one.
+          # up.sh owns the whole bring-up (backends + bucket, migrations, libvirt, host processes,
+          # inventory reconcile), so it replaces `just stack-up` outright. WORKER_AS_ROOT=0 keeps
+          # the worker as the runner user so its session domain and console log stay readable
+          # (ADR-0223); --skip-obs drops the prometheus/grafana this gate never reads.
+          KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-obs
+
+          # up.sh sources env.sh in its OWN process; source it here for the KDIVE_STACK_BASE_URL /
+          # _OIDC_ISSUER / _DATABASE_URL / _S3_* / AWS_* minioadmin the suite reads. Sourcing it
+          # rather than duplicating the values keeps them from drifting off the compose ports and
+          # re-declaring the credential literals.
           # shellcheck disable=SC1091
           source scripts/live-stack/env.sh
           # Map C's store output onto the spine env (the tcg proofs read KDIVE_GUEST_IMAGE_PPC64LE,
-          # not the throwaway KDIVE_LIVE_VM_ROOTFS) and supply the arch-opaque kernel tree.
+          # not the throwaway KDIVE_LIVE_VM_ROOTFS).
           export KDIVE_GUEST_IMAGE_PPC64LE="$KDIVE_LIVE_VM_ROOTFS"
-          export KDIVE_KERNEL_SRC
-          KDIVE_KERNEL_SRC="$(scripts/fetch-kernel-tree.sh)"
           # KDIVE_PPC64LE_BUNDLE is the opt-in fourth proof; unset -> the three core proofs run.
           [ -n "${BUNDLE_INPUT:-}" ] && export KDIVE_PPC64LE_BUNDLE="$BUNDLE_INPUT"
 

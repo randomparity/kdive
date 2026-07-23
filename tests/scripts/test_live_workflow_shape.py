@@ -235,3 +235,80 @@ def test_tcg_job_provisions_the_hardcoded_runtime_directories() -> None:
     joined = "\n".join(s["run"] for s in steps if "run" in s)
     for path in ("/var/lib/kdive/console", "/var/lib/kdive/pcap", "/var/lib/kdive/rootfs"):
         assert path in joined, f"the tcg job must provision {path}"
+
+
+# --- app-tier topology: host processes, never containers -------------------------------------
+#
+# The local-libvirt provider is explicitly NOT containerized (Dockerfile header): the compose
+# image carries no /dev/kvm, no libvirt socket and no privileged flag, so a containerized worker
+# cannot boot the ppc64le guest at all. It also cannot see the host-side resources this job
+# provisions (/var/lib/kdive/*, the staged rootfs under /mnt, qemu-system-ppc64).
+#
+# The auth symptom is the same root cause: the mock issuer is host-header-relative, so a token
+# minted by the host-side test carries iss=http://localhost:8090/default while a compose `server`
+# is configured with iss=http://oidc:8080/default and JWTVerifier rejects it (401). Host processes
+# read scripts/live-stack/env.sh, so minting side and verifying side share one identity.
+
+_APP_TIER_SERVICES = ("server", "worker", "reconciler")
+
+
+def _job_run_blocks(job: str) -> str:
+    return "\n".join(s["run"] for s in _load(_LIVE)["jobs"][job]["steps"] if "run" in s)
+
+
+def test_both_live_jobs_start_the_app_tier_with_up_sh() -> None:
+    """One vehicle for both gates: the host-process path scripts/live-stack/up.sh owns.
+
+    The native job has always used it. The tcg job briefly ran the app tier as compose services,
+    which put the worker in a container with no libvirt and gave the server a different OIDC
+    issuer identity than the host-side test mints against. Pinning both jobs to up.sh keeps the
+    two gates from drifting onto different topologies again.
+    """
+    for job in ("tcg", "native"):
+        assert "scripts/live-stack/up.sh" in _job_run_blocks(job), (
+            f"the {job} job must start the app tier via up.sh (host processes), "
+            "not as compose containers"
+        )
+
+
+def test_tcg_job_does_not_containerize_the_app_tier() -> None:
+    """A `docker compose up` of server/worker/reconciler re-breaks the boot AND the auth."""
+    for line in _tcg_spine().splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("docker compose"):
+            continue
+        # `docker compose rm -sf` / `down` of the app tier is the CLEANUP direction and is fine;
+        # only bringing the services UP puts the worker in a container.
+        if "up" not in stripped.split():
+            continue
+        for service in _APP_TIER_SERVICES:
+            assert service not in stripped.split(), (
+                f"the tcg spine must not `docker compose up` {service}: the local-libvirt "
+                "provider is not containerized (Dockerfile header) — the container has no "
+                f"libvirt and no /dev/kvm. Offending line: {stripped!r}"
+            )
+
+
+def test_tcg_job_runs_the_worker_unprivileged() -> None:
+    """KDIVE_WORKER_AS_ROOT=0, as the native job does.
+
+    A root worker would take up.sh's sudo path and own the domain, putting the console log back
+    behind the ADR-0223 root-readback wall that qemu:///session exists to avoid.
+    """
+    assert "KDIVE_WORKER_AS_ROOT=0" in _tcg_spine(), (
+        "the tcg job must run the worker as the runner user so its qemu:///session domain "
+        "and console log stay readable (ADR-0223)"
+    )
+
+
+def test_tcg_job_resolves_the_kernel_tree_before_the_app_tier_starts() -> None:
+    """Ordering: restart_host_processes captures KDIVE_KERNEL_SRC when it forks the worker.
+
+    up.sh's restart_host_processes reads KDIVE_KERNEL_SRC at fork time and defaults it to
+    ${HOME}/src/linux, which does not exist on a hosted runner. Exporting the fetched tree after
+    up.sh would leave the worker permanently pointed at that nonexistent path.
+    """
+    spine = _tcg_spine()
+    assert spine.index("fetch-kernel-tree.sh") < spine.index("scripts/live-stack/up.sh"), (
+        "KDIVE_KERNEL_SRC must be resolved before up.sh forks the worker, which captures it"
+    )
