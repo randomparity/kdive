@@ -20,6 +20,7 @@ from fastmcp.exceptions import ToolError
 
 from kdive.cli.commands import registry as commands
 from kdive.cli.commands.mutations import TokenExpiringError, ensure_token_valid
+from kdive.cli.commands.verb_spec import GeneratedVerb
 from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.passthrough import ToolNotAllowedError, ToolTier, assert_tool_allowed
 from kdive.cli.transport import Session, tool_envelope
@@ -146,6 +147,27 @@ async def _tool_call(args: argparse.Namespace) -> int:
     envelope = tool_envelope(result)
     print(json.dumps(envelope, indent=2, default=str))
     return exit_code_for_envelope(envelope)
+
+
+async def invoke_generated_verb(verb: GeneratedVerb, args: argparse.Namespace) -> int:
+    """Route a schema-generated verb through the generic ``tool call`` passthrough (the seam).
+
+    This lands the dispatch seam for the merged generated-verb surface (#1448): a non-curated
+    verb resolves to its tool and invokes it through the existing passthrough. The full
+    flag-to-payload assembly and per-tier ceremony are #1450; here the tool is called with an
+    empty argument payload, and any top-level tier opt-in (``--allow-mutating`` /
+    ``--allow-destructive`` / ``--yes``) is honored if present.
+    """
+    synthetic = argparse.Namespace(
+        command="tool",
+        tool_command="call",
+        name=verb.tool,
+        payload="{}",
+        allow_mutating=getattr(args, "allow_mutating", False),
+        allow_destructive=getattr(args, "allow_destructive", False),
+        yes=getattr(args, "yes", False),
+    )
+    return await _tool_call(synthetic)
 
 
 def _parse_payload(payload: str) -> dict[str, object]:

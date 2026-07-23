@@ -15,8 +15,18 @@ import kdive.cli.commands.doctor as doctor
 import kdive.cli.commands.images as images
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
+from kdive.cli.commands._generated_verbs import GENERATED_VERBS
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
-__all__ = ["REGISTRY", "Verb", "add_subparsers", "doctor", "images", "run_verb"]
+__all__ = [
+    "GENERATED_ARG_PREFIX",
+    "REGISTRY",
+    "Verb",
+    "add_subparsers",
+    "doctor",
+    "images",
+    "run_verb",
+]
 
 
 @dataclass(frozen=True)
@@ -54,7 +64,7 @@ class Verb:
 
 REGISTRY: tuple[Verb, ...] = (
     Verb("resources", "list", reads.resources_list, "resources.list", options=("kind",)),
-    Verb("resources", "get", reads.resources_get, "resources.describe", ("resource_id",)),
+    Verb("resources", "describe", reads.resources_get, "resources.describe", ("resource_id",)),
     Verb(
         "allocations",
         "list",
@@ -69,34 +79,34 @@ REGISTRY: tuple[Verb, ...] = (
     Verb("jobs", "list", reads.jobs_list, "jobs.list"),
     Verb("jobs", "get", reads.jobs_get, "jobs.get", ("job_id",)),
     Verb(
-        "ledger",
-        "get",
+        "accounting",
+        "usage-project",
         reads.ledger_get,
         "accounting.usage_project",
         required_options=("project",),
     ),
     Verb(
-        "ledger",
-        "report-all",
+        "accounting",
+        "report-all-projects",
         reads.ledger_report_all,
         "accounting.report_all_projects",
         options=("group_by", "since", "until"),
         help="platform-wide accounting rollup (requires a platform_auditor token)",
     ),
     Verb(
-        "ledger",
-        "report-granted",
+        "accounting",
+        "report-granted-set",
         reads.ledger_report_granted,
         "accounting.report_granted_set",
         options=("projects", "group_by", "since", "until"),
         help="accounting rollup across your granted projects",
     ),
-    Verb("inventory", "show", reads.inventory_show, "inventory.list", options=("project",)),
+    Verb("inventory", "list", reads.inventory_show, "inventory.list", options=("project",)),
     Verb("secrets", "list", reads.secrets_list, "secrets.list"),
     Verb("fixtures", "list", reads.fixtures_list, "fixtures.list"),
     Verb(
-        "teardown",
-        "system",
+        "ops",
+        "force-teardown",
         mutations.teardown,
         "ops.force_teardown",
         ("system_id",),
@@ -105,7 +115,7 @@ REGISTRY: tuple[Verb, ...] = (
         read_only=False,
     ),
     Verb(
-        "allocations",
+        "ops",
         "force-release",
         mutations.allocations_force_release,
         "ops.force_release",
@@ -133,7 +143,7 @@ REGISTRY: tuple[Verb, ...] = (
     Verb("images", "list", images.images_list, "images.list"),
     Verb(
         "images",
-        "get",
+        "describe",
         reads.images_get,
         "images.describe",
         ("image_id",),
@@ -173,7 +183,7 @@ REGISTRY: tuple[Verb, ...] = (
     ),
     Verb(
         "images",
-        "prune",
+        "prune-expired",
         images.images_prune,
         "images.prune_expired",
         options=("reason",),
@@ -190,6 +200,18 @@ REGISTRY: tuple[Verb, ...] = (
         read_only=False,
     ),
 )
+
+
+_CURATED_BY_PATH: dict[tuple[str, str], Verb] = {(v.group, v.sub): v for v in REGISTRY}
+_GENERATED_BY_PATH: dict[tuple[str, str], GeneratedVerb] = {
+    (v.group, v.sub): v for v in GENERATED_VERBS
+}
+_ARG_TYPES: dict[str, type] = {"str": str, "int": int, "float": float}
+
+#: Generated-verb flag values land on the namespace under this prefix (``genarg_<param>``),
+#: so a tool parameter named ``command``/``subcommand``/``json`` can never clobber argparse's
+#: routing keys. The generic dispatch handler (#1450) strips the prefix to rebuild the payload.
+GENERATED_ARG_PREFIX = "genarg_"
 
 
 def _json_parent() -> argparse.ArgumentParser:
@@ -221,17 +243,72 @@ def _verb_parser(
         parser.add_argument(f"--{flag.replace('_', '-')}", dest=flag, action="store_true")
 
 
+def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) -> None:
+    """Declare one schema-derived ``--flag`` on ``parser`` per its :class:`GeneratedFlag`.
+
+    Honors ``action`` (``store_true`` / ``append``), ``arg_type`` (``str`` / ``int`` /
+    ``float``), and ``choices`` (enum). The ``--<param>-json`` escape for non-scalar params
+    (#1449) and the flag-value-to-payload assembly (#1450) are downstream; this only shapes the
+    parser so every generated verb is reachable at its canonical path.
+    """
+    dest = f"{GENERATED_ARG_PREFIX}{flag.dest}"
+    help_ = flag.help or None
+    choices = flag.choices or None
+    if flag.action == "store_true":
+        parser.add_argument(flag.name, dest=dest, action="store_true", help=help_)
+    elif flag.action == "append":
+        parser.add_argument(
+            flag.name,
+            dest=dest,
+            action="append",
+            required=flag.required,
+            choices=choices,
+            help=help_,
+        )
+    else:
+        parser.add_argument(
+            flag.name,
+            dest=dest,
+            default=None,
+            required=flag.required,
+            choices=choices,
+            type=_ARG_TYPES[flag.arg_type] if flag.arg_type is not None else str,
+            help=help_,
+        )
+
+
+def _generated_verb_parser(
+    group_parser: argparse._SubParsersAction,
+    verb: GeneratedVerb,
+    parent: argparse.ArgumentParser,
+) -> None:
+    """Add a schema-generated verb's sub-subparser, declaring its scalar ``--flags``."""
+    parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
+    for flag in verb.flags:
+        _add_generated_flag(parser, flag)
+
+
 def add_subparsers(sub: argparse._SubParsersAction) -> None:
-    """Add one subparser per registry group, with a sub-subparser per verb."""
+    """Add one subparser per verb across the merged generated + curated surface.
+
+    Every registered MCP tool contributes a verb at its canonical ``group subcommand`` path
+    (derived from the tool name). A curated :class:`Verb` overrides the argparse shape at its
+    derived path — never a second path — so its hand-tuned positionals/options win; every other
+    path takes the schema-derived generated shape.
+    """
     parent = _json_parent()
     groups: dict[str, argparse._SubParsersAction] = {}
-    for verb in REGISTRY:
-        group_parser = groups.get(verb.group)
+    for generated in GENERATED_VERBS:
+        group_parser = groups.get(generated.group)
         if group_parser is None:
-            parser = sub.add_parser(verb.group)
+            parser = sub.add_parser(generated.group)
             group_parser = parser.add_subparsers(dest="subcommand", required=True)
-            groups[verb.group] = group_parser
-        _verb_parser(group_parser, verb, parent)
+            groups[generated.group] = group_parser
+        curated = _CURATED_BY_PATH.get((generated.group, generated.sub))
+        if curated is not None:
+            _verb_parser(group_parser, curated, parent)
+        else:
+            _generated_verb_parser(group_parser, generated, parent)
     _doctor_parser(sub, parent)
 
 
@@ -247,13 +324,23 @@ def _doctor_parser(sub: argparse._SubParsersAction, parent: argparse.ArgumentPar
 
 
 async def run_verb(args: argparse.Namespace) -> int:
-    """Resolve ``(command, subcommand)`` against the registry and await its handler.
+    """Resolve ``(command, subcommand)`` against the merged verb surface and dispatch it.
+
+    A curated :class:`Verb` at the path runs its hand-written handler. Any other registered
+    tool routes through the generic generated-verb seam, which invokes the tool via the same
+    ``tool call`` passthrough (:func:`kdive.cli.dispatch.invoke_generated_verb`).
 
     Raises:
-        SystemExit: When no registry entry matches the parsed command/subcommand.
+        SystemExit: When no registered tool matches the parsed command/subcommand.
     """
     subcommand = getattr(args, "subcommand", None)
-    for verb in REGISTRY:
-        if verb.group == args.command and verb.sub == subcommand:
-            return await verb.handler(args)
+    key = (args.command, subcommand)
+    curated = _CURATED_BY_PATH.get(key)
+    if curated is not None:
+        return await curated.handler(args)
+    generated = _GENERATED_BY_PATH.get(key)
+    if generated is not None:
+        from kdive.cli import dispatch
+
+        return await dispatch.invoke_generated_verb(generated, args)
     raise SystemExit(f"unknown command: {args.command} {subcommand or ''}".rstrip())

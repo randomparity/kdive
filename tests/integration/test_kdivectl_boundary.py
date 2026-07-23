@@ -1,7 +1,7 @@
 """The kdivectl exit-criterion boundary test (M2.2, ADR-0089).
 
 The load-bearing proof that the operator CLI's break-glass mutation is both *authorized* and
-*accountable*: drive ``kdivectl allocations force-release`` through the real CLI entry point
+*accountable*: drive ``kdivectl ops force-release`` through the real CLI entry point
 (as a subprocess, so the asserted exit code is the one a script or CI actually sees) twice
 against the live stack —
 
@@ -119,7 +119,7 @@ async def _drive_boundary(issuer: OidcIssuer, server_url: str, db_url: str) -> N
         await pool.open()
         allocation_id = await seed_granted_allocation(pool, project=_PROJECT)
 
-    argv = ["allocations", "force-release", allocation_id, "--reason", "boundary-test"]
+    argv = ["ops", "force-release", allocation_id, "--reason", "boundary-test"]
 
     admin_code = await _run_kdivectl(argv, token=admin, server_url=server_url)
     assert admin_code == 0, "platform_admin force-release should succeed (exit 0)"

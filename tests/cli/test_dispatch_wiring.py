@@ -60,7 +60,9 @@ def test_every_registry_verb_parses_through_the_built_parser() -> None:
         assert args.command == verb.group and args.subcommand == verb.sub
 
 
-@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "get")])
+@pytest.mark.parametrize(
+    ("group", "sub"), [("allocations", "list"), ("accounting", "usage-project")]
+)
 def test_project_required_verb_rejects_a_missing_project(group: str, sub: str) -> None:
     # The underlying tool's ``project`` is a required argument, so the CLI enforces it up
     # front (clean argparse usage error / exit 2) instead of a server-side missing-arg error.
@@ -69,7 +71,9 @@ def test_project_required_verb_rejects_a_missing_project(group: str, sub: str) -
     assert excinfo.value.code == 2
 
 
-@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("ledger", "get")])
+@pytest.mark.parametrize(
+    ("group", "sub"), [("allocations", "list"), ("accounting", "usage-project")]
+)
 def test_project_required_verb_accepts_an_explicit_project(group: str, sub: str) -> None:
     args = build_parser().parse_args([group, sub, "--project", "proj-a"])
     assert args.project == "proj-a"
@@ -78,7 +82,7 @@ def test_project_required_verb_accepts_an_explicit_project(group: str, sub: str)
 def test_inventory_project_filter_stays_optional() -> None:
     # ``inventory.list`` is a cross-project auditor read; ``--project`` is a narrowing
     # filter, not a requirement.
-    args = build_parser().parse_args(["inventory", "show"])
+    args = build_parser().parse_args(["inventory", "list"])
     assert args.project is None
 
 
@@ -168,19 +172,81 @@ def test_dispatch_routes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_report_all_parses_window_and_group_by() -> None:
     args = build_parser().parse_args(
-        ["ledger", "report-all", "--group-by", "principal", "--since", "2026-01-01T00:00:00+00:00"]
+        [
+            "accounting",
+            "report-all-projects",
+            "--group-by",
+            "principal",
+            "--since",
+            "2026-01-01T00:00:00+00:00",
+        ]
     )
-    assert args.command == "ledger" and args.subcommand == "report-all"
+    assert args.command == "accounting" and args.subcommand == "report-all-projects"
     assert args.group_by == "principal"
     assert args.since == "2026-01-01T00:00:00+00:00" and args.until is None
 
 
 def test_report_granted_parses_projects_flag() -> None:
-    args = build_parser().parse_args(["ledger", "report-granted", "--projects", "a,b"])
-    assert args.subcommand == "report-granted" and args.projects == "a,b"
+    args = build_parser().parse_args(["accounting", "report-granted-set", "--projects", "a,b"])
+    assert args.subcommand == "report-granted-set" and args.projects == "a,b"
 
 
 def test_report_all_rejects_projects_flag() -> None:
-    # report-all has no --projects (only report-granted scopes a subset).
+    # report-all-projects has no --projects (only report-granted-set scopes a subset).
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["ledger", "report-all", "--projects", "a,b"])
+        build_parser().parse_args(["accounting", "report-all-projects", "--projects", "a,b"])
+
+
+def test_run_verb_routes_generated_only_verb_to_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-curated generated path resolves to its tool and routes through the passthrough seam.
+    from kdive.cli.commands import registry
+    from kdive.cli.commands.verb_spec import GeneratedVerb
+
+    seen: dict[str, str] = {}
+
+    async def _fake_seam(verb: GeneratedVerb, args: argparse.Namespace) -> int:
+        seen["tool"] = verb.tool
+        return 0
+
+    monkeypatch.setattr(dispatch, "invoke_generated_verb", _fake_seam)
+    args = argparse.Namespace(command="accounting", subcommand="estimate")
+    assert asyncio.run(registry.run_verb(args)) == 0
+    assert seen["tool"] == "accounting.estimate"
+
+
+def test_run_verb_unknown_generated_path_exits() -> None:
+    from kdive.cli.commands import registry
+
+    args = argparse.Namespace(command="accounting", subcommand="does-not-exist")
+    with pytest.raises(SystemExit):
+        asyncio.run(registry.run_verb(args))
+
+
+def test_invoke_generated_verb_calls_passthrough_with_empty_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kdive.cli.commands.verb_spec import GeneratedVerb
+
+    captured: dict[str, argparse.Namespace] = {}
+
+    async def _fake_tool_call(args: argparse.Namespace) -> int:
+        captured["args"] = args
+        return 7
+
+    monkeypatch.setattr(dispatch, "_tool_call", _fake_tool_call)
+    verb = GeneratedVerb(
+        group="control",
+        sub="diagnostic-sysrq",
+        tool="control.diagnostic_sysrq",
+        read_only=False,
+        destructive=True,
+    )
+    args = argparse.Namespace(
+        command="control", subcommand="diagnostic-sysrq", allow_destructive=True
+    )
+    assert asyncio.run(dispatch.invoke_generated_verb(verb, args)) == 7
+    synthetic = captured["args"]
+    assert synthetic.command == "tool" and synthetic.tool_command == "call"
+    assert synthetic.name == "control.diagnostic_sysrq" and synthetic.payload == "{}"
+    assert synthetic.allow_destructive is True
+    assert synthetic.allow_mutating is False and synthetic.yes is False
