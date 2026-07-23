@@ -12,9 +12,13 @@ from kdive.artifacts.upload_manifest import (
     UploadManifestReplaceRequest,
     delete_manifest,
     get_manifest,
+    get_manifest_sync,
     replace_manifest,
 )
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    read_rootfs_upload_encoding,
+)
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
@@ -109,6 +113,66 @@ def test_preexisting_payload_without_encoding_defaults_to_identity() -> None:
     entry = _entry_from_payload({"name": "rootfs", "sha256": "a", "size_bytes": 10})
     assert entry.encoding is None
     assert entry.uncompressed_size is None
+
+
+def test_get_manifest_sync_round_trips(migrated_url: str) -> None:
+    """The sync manifest read returns the same entries an async replace persisted (ADR-0438)."""
+
+    async def _seed(owner_id: UUID) -> None:
+        async with await _connect(migrated_url) as conn:
+            await replace_manifest(
+                conn,
+                UploadManifestReplaceRequest(
+                    owner_kind="systems",
+                    owner_id=owner_id,
+                    prefix=f"local/systems/{owner_id}/",
+                    entries=[
+                        ManifestEntry(
+                            "rootfs", "whole", 4096, encoding="gzip", uncompressed_size=6 * 1024**3
+                        )
+                    ],
+                    ttl=timedelta(hours=1),
+                ),
+            )
+
+    owner_id = uuid4()
+    asyncio.run(_seed(owner_id))
+    with psycopg.connect(migrated_url) as conn:
+        got = get_manifest_sync(conn, "systems", owner_id)
+        absent = get_manifest_sync(conn, "systems", uuid4())
+    assert got is not None
+    assert got.entries[0].encoding == "gzip"
+    assert got.entries[0].uncompressed_size == 6 * 1024**3
+    assert absent is None
+
+
+def test_read_rootfs_upload_encoding(migrated_url: str) -> None:
+    """read_rootfs_upload_encoding resolves the rootfs entry; absent manifest ⇒ identity."""
+
+    async def _seed(owner_id: UUID, entry: ManifestEntry) -> None:
+        async with await _connect(migrated_url) as conn:
+            await replace_manifest(
+                conn,
+                UploadManifestReplaceRequest(
+                    owner_kind="systems",
+                    owner_id=owner_id,
+                    prefix=f"local/systems/{owner_id}/",
+                    entries=[entry],
+                    ttl=timedelta(hours=1),
+                ),
+            )
+
+    gzip_owner = uuid4()
+    identity_owner = uuid4()
+    asyncio.run(
+        _seed(gzip_owner, ManifestEntry("rootfs", "w", 4096, encoding="gzip", uncompressed_size=99))
+    )
+    asyncio.run(_seed(identity_owner, ManifestEntry("rootfs", "w", 4096)))
+    with psycopg.connect(migrated_url) as conn:
+        assert read_rootfs_upload_encoding(conn, gzip_owner) == ("gzip", 99)
+        assert read_rootfs_upload_encoding(conn, identity_owner) == (None, None)
+        # No manifest at all ⇒ identity fallback (today's behavior).
+        assert read_rootfs_upload_encoding(conn, uuid4()) == (None, None)
 
 
 def test_full_set_replacement(migrated_url: str) -> None:
