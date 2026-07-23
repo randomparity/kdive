@@ -134,7 +134,8 @@ def test_uploaded_rootfs_staged_from_real_store(minio_store: ObjectStore, tmp_pa
     ``test_provisioning.py::test_provision_upload_rootfs_stages_via_injected_fetch``.
     """
     system_id = uuid4()
-    data = b"real-minio-uploaded-rootfs-bytes\n" * 512
+    # The staged base must pass the ADR-0438 qcow2 magic check, so it starts with the qcow2 magic.
+    data = b"QFI\xfb" + b"real-minio-uploaded-rootfs-bytes\n" * 512
     spool = tmp_path / "source.qcow2"
     spool.write_bytes(data)
     sha256_b64 = base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")

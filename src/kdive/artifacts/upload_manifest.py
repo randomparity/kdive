@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -149,6 +149,37 @@ async def get_manifest(
             (owner_kind, owner_id),
         )
         row = await cur.fetchone()
+    if row is None:
+        return None
+    entries = tuple(_entry_from_payload(e) for e in row["manifest"])
+    return UploadManifest(entries=entries, prefix=row["prefix"], deadline=row["deadline"])
+
+
+def get_manifest_sync(
+    conn: Connection, owner_kind: UploadOwnerKind, owner_id: UUID
+) -> UploadManifest | None:
+    """Return the owner's manifest over a **sync** connection, or ``None`` if none is recorded.
+
+    The sync twin of :func:`get_manifest`, sharing the :func:`_entry_from_payload` deserializer. It
+    exists for the connectionless local-libvirt provider fetch, which — like the ADR-0228 catalog
+    fetch — runs off the event loop (``asyncio.to_thread``) and opens its own short-lived sync
+    connection rather than borrowing the async pool.
+
+    Args:
+        conn: A sync connection.
+        owner_kind: The owning table name — ``'runs'`` or ``'systems'``.
+        owner_id: The owning row's primary key.
+
+    Returns:
+        The persisted manifest, or ``None`` if no row exists for this owner.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT prefix, manifest, deadline FROM upload_manifests "
+            "WHERE owner_kind = %s AND owner_id = %s",
+            (owner_kind, owner_id),
+        )
+        row = cur.fetchone()
     if row is None:
         return None
     entries = tuple(_entry_from_payload(e) for e in row["manifest"])
