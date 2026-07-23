@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Add ADR-0421 schema-generated kdivectl verbs
+- Capture output schema in verb artifact; tighten ADR-0421
+- Add ADR-0422 clarifying force tool params keep their name
+
+### Fixed
+
+- Build the app image before the live_vm_tcg app tier
+- Raise when visible_next_actions names an unregistered tool
+
+### Build
+
+- Bump the github-actions group with 2 updates
+
+## [0.4.0] - 2026-07-23
+
 ### Added
 
 - Surface data.liveness on runs.get for a wedged-after-ready guest
@@ -4797,7 +4814,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add psycopg-pool and testcontainers; pin .sql to LF
 
-[unreleased]: https://github.com/randomparity/kdive/compare/v0.3.0..HEAD
+[unreleased]: https://github.com/randomparity/kdive/compare/v0.4.0..HEAD
+[0.4.0]: https://github.com/randomparity/kdive/compare/v0.3.0..v0.4.0
 [0.3.0]: https://github.com/randomparity/kdive/compare/v0.2.0..v0.3.0
 [0.2.0]: https://github.com/randomparity/kdive/compare/v0.1.0..v0.2.0
 [0.1.0]: https://github.com/randomparity/kdive/tree/v0.1.0

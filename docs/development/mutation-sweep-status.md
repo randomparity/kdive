@@ -299,13 +299,35 @@ are its sub-issues.
   runs); no source change is needed. This joins the ADR-0229 env shims as a `just mutate`
   workaround for `__file__`-relative resource loads outside the package.
 
-  **Deferred killable remainder (needs a follow-up).** Three large handlers were not swept in this
-  session and carry killable survivors in the same audit / message / arg-passthrough / core-logic
-  clusters handled above (not equivalents): `control/capture_traffic.py` (356 mutants, 99
-  surviving), `runs/boot_evidence.py` (290, 105), and `systems.py` (766, 143). A couple of smaller
-  deferrals also remain: `console_log_path(None)` in `watch_for_crash` / `diagnostic_sysrq` needs a
-  system-id-dependent console-read fixture, and the `_real_probe` timing cluster needs a fake-clock
-  socket harness.
+  **Deferred killable remainder — SWEPT by #1415.** Three large handlers were deferred from this
+  session and carried killable survivors in the same audit / message / arg-passthrough / core-logic
+  clusters handled above; the #1415 follow-up took each to 0 killable survivors (residuals are
+  equivalents in the same classes). Per module (mutants, surviving before → after): `control/
+  capture_traffic.py` 356, 99→29 equivalent; `runs/boot_evidence.py` 290, 105→26 equivalent;
+  `systems.py` 766, 143→27 equivalent (a further ~57 mutants intermittently report `[timeout]`
+  under container contention — re-running serially confirms them killed, not surviving). The kills pinned the changed-state / unsupported-provider /
+  unwritten-pcap / no-snapshot error messages + details; the audit-row tuples (tool / object_kind /
+  object_id / transition / args_digest / project) across provision / reprovision / restore /
+  teardown / capture; the returned ids and their run_id / artifact columns; the provider-kind tags;
+  the collaborator-arg passthrough into the capture loop, the provider provision/reprovision call,
+  the boot-evidence record/capture seams, and the snapshot attach/detach/create/revert/delete calls;
+  the derived-domain fallback; the DB-backed job-cancel re-check; the resolved-cpu / billing /
+  fingerprint / upload-rootfs-commit + manifest-delete transitions; and the console-part object
+  reclaim. The **surviving residuals are equivalent**, in the classes documented for the sibling
+  buckets: Postgres case-folded SQL keywords, advisory-lock key args, `_log.*` statement mutations,
+  the `search_text` before/after/max-matches params (they change only discarded context lines or a
+  capped `>0`), `max_polls`' dead `max(1, …)` floor (a positive-int duration is always ≥ the poll
+  interval), the codec error-handler on already-valid UTF-8, `_unlink_quietly`'s `missing_ok`
+  masked by `suppress(OSError)`, the `operation=` arg that feeds only a failure-path log line, and
+  defense-in-depth re-checks masked by a sibling guard. The two smaller fixture-dependent deferrals
+  were also **SWEPT by #1415**: `control/watch_for_crash.py` and `control/diagnostic_sysrq.py` gained
+  a recording `console_log_path` fixture so the handler is pinned to read *its own* System's console
+  (killing the `console_log_path(None)` mutant in each — watch_for_crash 20→19, diagnostic_sysrq
+  14→13, residuals the same poll-loop / byte-cap / log equivalents), and `connectivity/
+  ssh_reachable.py` gained a fake-clock socket harness (a manually-driven coroutine over a patched
+  asyncio clock / connect / read / sleep) that pins every `_real_probe` connect/backoff/read timeout,
+  the exact deadline boundary, the derived host/port, the `suppress(OSError)` on close, and the
+  handler's `datetime.now(UTC)` stamp — **11→0 surviving**.
 
 - `inventory/` bucket (#1403) — the override-ledger / serializer / writeback / CLI / loader modules
   and the `inventory/reconcile/` merge-reconcile passes, swept serially against their `migrated_url`
@@ -422,8 +444,10 @@ are its sub-issues.
   (best-effort snapshot read), `_pass_loop`'s lag/interval arithmetic, and `_tick_until_stop` — the same
   classes as the sibling buckets.
 
-**Not yet swept:** the deferred `jobs/handlers/` remainder above
-(`capture_traffic` / `boot_evidence` / `systems`) — a #1402 follow-up.
+**Not yet swept:** nothing in the `jobs/handlers/` bucket. #1415 swept the three large modules
+(`capture_traffic` / `boot_evidence` / `systems`) and both smaller fixture-dependent deferrals
+(`console_log_path(None)` in `watch_for_crash` / `diagnostic_sysrq`, and the `ssh_reachable`
+`_real_probe` timing cluster) to 0 killable surviving (see above).
 
 ### No direct unit test — DONE (#665; reopened, re-closed by #1298 / #1304)
 

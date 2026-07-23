@@ -7,6 +7,8 @@ plus the connection's platform roles, any-of for dual-gated tools).
 
 from __future__ import annotations
 
+import pytest
+
 from kdive.mcp.exposure import (
     ExposureScope,
     project_tool_visible,
@@ -344,3 +346,22 @@ def test_visible_next_actions_filters_preserves_order_no_dedup() -> None:
     operator = _ctx(roles={"a": Role.OPERATOR})
     assert visible_next_actions(actions, operator, "a") == actions
     assert visible_next_actions([], contributor, "a") == []
+
+
+def test_visible_next_actions_raises_on_unregistered_tool() -> None:
+    # An action naming a tool that is not in the live registry is a navigation dead end: without
+    # this guard required_scopes() fail-opens to empty scopes, so the unknown name is treated as
+    # public and silently kept. The filter must instead surface the drift by raising (#1444).
+    contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
+    with pytest.raises(ValueError, match="allocations.does_not_exist"):
+        visible_next_actions(["allocations.get", "allocations.does_not_exist"], contributor, "a")
+
+
+def test_visible_next_actions_still_filters_registered_but_invisible() -> None:
+    # A registered tool the caller's role cannot invoke on the project still filters cleanly — the
+    # unregistered-name guard must not turn a legitimate role-based filter into an error.
+    viewer = _ctx(roles={"a": Role.VIEWER})
+    # images.upload is registered (project-operator) but a viewer cannot invoke it.
+    assert visible_next_actions(["allocations.get", "images.upload"], viewer, "a") == [
+        "allocations.get"
+    ]
