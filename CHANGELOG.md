@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Print the kernel-tree path on stdout
 - Scope pcap pre-delete to the job's own volume
 - Run the live_vm_tcg app tier as host processes
+- Stage the tcg image set inside the provider's allowed root
 
 ### Build
 
