@@ -32,10 +32,10 @@ live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
 **skips cleanly** when its environment is absent — but a tier whose env is set
 *wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
 
-The native `live_vm` tier spans four families (below); `just test-live` runs all
-of them (each gated), and one — the remote-libvirt family — additionally has a
-focused `just test-live-remote` recipe (`-m live_vm_remote`) for driving it
-against a `qemu+tls://` host on its own.
+The `live_vm` tier spans four families (below); `just test-live` runs all of them
+(each gated), and one — the remote-libvirt family, which drives a remote
+`qemu+tls://` host rather than local silicon — additionally has a focused
+`just test-live-remote` recipe (`-m live_vm_remote`) for driving it on its own.
 
 `live_vm_tcg` is deliberately **not** a throwaway-domain test: by ADR-0353 every
 `live_vm_tcg` proof also carries the `live_stack` marker and runs the spine over
