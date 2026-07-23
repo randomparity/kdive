@@ -156,3 +156,35 @@ def test_tcg_job_makes_the_host_kernel_readable_for_supermin() -> None:
     order = [i for i, s in enumerate(steps) if "run" in s and "/boot/vmlinuz-" in s["run"]]
     spine = next(i for i, s in enumerate(steps) if "spine" in s.get("name", "").lower())
     assert order and min(order) <= spine, "the kernel chmod must precede the staging spine"
+
+
+def test_tcg_job_runs_on_the_image_that_ships_a_matching_guestfs_binding() -> None:
+    """kdive pins Python 3.14 and `guestfs` is a C extension, so the ABI must match (ADR-0387).
+
+    Only Ubuntu 26.04 ships a system Python 3.14 with a matching python3-guestfs; on 24.04 the
+    binding is built for 3.12 and cannot be imported by the 3.14 venv at all. `ubuntu-latest`
+    tracks the GA image, so it must not be used here — it silently regresses to 24.04.
+    """
+    assert _load(_LIVE)["jobs"]["tcg"]["runs-on"] == "ubuntu-26.04"
+
+
+def test_tcg_job_builds_its_venv_against_the_system_interpreter() -> None:
+    """uv's managed CPython would not ABI-match the distro's binding; pin the system one."""
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    assert "python3-guestfs" in joined, "the system libguestfs binding must be installed"
+    assert "--python /usr/bin/python3" in joined, (
+        "the venv must be pinned to the system interpreter"
+    )
+
+
+def test_tcg_job_links_the_guestfs_binding_into_the_venv_and_proves_it_imports() -> None:
+    """No PyPI wheel exists, so the binding is symlinked in — and the import is verified here.
+
+    build-fs only reaches `import guestfs` several minutes into the image build, so a setup-time
+    proof is what keeps a broken link from costing a whole run to diagnose.
+    """
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    assert "libguestfsmod" in joined, "the native module must be linked, not just guestfs.py"
+    assert "import guestfs" in joined, "the tcg job must prove the binding imports before staging"

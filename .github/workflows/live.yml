@@ -43,7 +43,13 @@ jobs:
     # No fork-PR risk (hosted, no /dev/kvm, secrets ride trusted events); belt-and-suspenders to
     # the workflow having no pull_request trigger at all.
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # NOT ubuntu-latest. build-fs imports the `guestfs` C extension, which must ABI-match the
+    # interpreter, and kdive pins Python 3.14 — only Ubuntu 26.04 ships a system 3.14 with a
+    # matching python3-guestfs (ADR-0387; 24.04's binding is 3.12-only and cannot be imported at
+    # all). `ubuntu-latest` tracks the GA image, so it would silently drop back to 24.04.
+    # 26.04 is a GitHub public-preview image: pin the explicit label so a preview-to-GA relabel
+    # cannot move this job, and expect occasional capacity queueing.
+    runs-on: ubuntu-26.04
     # timeout-minutes is set from the measured boot-to-panic wall-time (ceil(measured x 1.5), floor
     # 30) by the local TCG proof (#1293 plan Task 7); 30 is the floor default until measured.
     timeout-minutes: 30
@@ -66,7 +72,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev
+            qemu-system-ppc libguestfs-tools e2fsprogs elfutils debuginfod libvirt-dev \
+            python3-guestfs
 
       # libguestfs builds its supermin appliance from the HOST kernel, which Ubuntu ships
       # 0600 root:root — the non-root runner cannot read it, so virt-tar-out dies with a bare
@@ -89,8 +96,35 @@ jobs:
       - name: Set up just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
-      - name: Sync dependencies
-        run: uv sync --locked --group live
+      # --python /usr/bin/python3: uv otherwise installs its own managed CPython, whose minor
+      # version need not match the distro's python3-guestfs .so. The binding is a C extension, so
+      # the venv must be built against the SAME interpreter the .so was compiled for — the same
+      # pin deploy/ansible/roles/live_vm_host applies on the self-hosted box.
+      - name: Sync dependencies against the system interpreter (ABI-match python3-guestfs)
+        run: uv sync --locked --group live --python /usr/bin/python3
+
+      # libguestfs publishes no PyPI wheel, so the system binding is symlinked into the venv
+      # exactly as live_vm_host does. Debian installs it into the version-agnostic
+      # /usr/lib/python3/dist-packages as guestfs.py plus libguestfsmod.cpython-<abi>.so — both
+      # are needed; guestfs.py alone imports nothing. The final import is the point of the step:
+      # build-fs only reaches `import guestfs` several minutes into the image build, so proving it
+      # here turns a slow, opaque mid-build failure into an immediate, obvious one.
+      - name: Link the system libguestfs binding into the venv
+        run: |
+          shopt -s nullglob
+          # Checked separately, and the .so via a glob: nullglob drops an unmatched WILDCARD, but
+          # a literal missing guestfs.py would survive and become a dangling symlink.
+          pure=/usr/lib/python3/dist-packages/guestfs.py
+          native=(/usr/lib/python3/dist-packages/libguestfsmod*.so)
+          if [ ! -e "$pure" ] || [ "${#native[@]}" -eq 0 ]; then
+            echo "libguestfs binding incomplete under /usr/lib/python3/dist-packages" \
+                 "(guestfs.py: $([ -e "$pure" ] && echo present || echo MISSING)," \
+                 "native module: ${#native[@]} found) — is python3-guestfs installed?" >&2
+            exit 1
+          fi
+          site="$(.venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          ln -sfn "$pure" "${native[@]}" "${site}/"
+          .venv/bin/python -c 'import guestfs; print("guestfs binding:", guestfs.__file__)'
 
       - name: Run the live_vm_tcg spine (stage -> map -> preflight -> test, one shell)
         # ONE run: block — each Actions run: is a fresh shell, so the staged KDIVE_LIVE_VM_* exports

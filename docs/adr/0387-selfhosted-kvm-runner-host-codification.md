@@ -1,6 +1,6 @@
 # ADR 0387 — Self-hosted KVM runner host codification
 
-- **Status:** Proposed <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
+- **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-07-19
 - **Deciders:** Maintainer (randomparity), Claude Code
 
