@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Capture output schema in verb artifact; tighten ADR-0421
 - Add ADR-0422 clarifying force tool params keep their name
 - Flip ADR-0407 status to Accepted
+- Flip ADR-0114 and ADR-0389 status to Accepted
 
 ### Fixed
 
@@ -35,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adapt to ty 0.0.59 narrowing and read-only property checks
 - Keep the ppc64le uv wheel pin in step with the image pins
 - Images list surfaces envelope exit code, not hardcoded 0
+- Adr-status-check also scans tests/ for citations
 
 ### Build
 
