@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Generic dispatch handler for generated verbs
 - Offline shell completion over the generated verb surface
 - Host_dump profile-section opt-in
+- Preflight the libvirt/KVM host contract
 
 ### Changed
 
@@ -52,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preflight that the interpreter can import kdive
 - Make the host kernel readable to libguestfs on the tcg gate
 - Give the tcg gate an importable guestfs binding
+- Provision the libvirt/KVM host contract on the tcg gate
 
 ### Build
 
