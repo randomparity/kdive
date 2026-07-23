@@ -78,6 +78,14 @@ class ProviderSupport:
     # Host-side network traffic capture support (ADR-0385). Static provider property, surfaced on
     # ``systems.get`` for discovery. Fail-closed: only local-libvirt advertises it today.
     supports_traffic_capture: bool = False
+    # Diagnostic magic-SysRq injection support (ADR-0285/0427). Static provider property read at the
+    # ``control.diagnostic_sysrq`` gate. Fail-closed: a provider that cannot inject SysRq into its
+    # guests' consoles leaves it False and the tool refuses with ``capability_unsupported``.
+    supports_diagnostic_sysrq: bool = False
+    # Out-of-band crash-signature console-watch support (ADR-0367/0427). Static provider property
+    # read at the ``control.watch_for_crash`` gate. Fail-closed: a provider whose console the
+    # platform cannot watch leaves it False and the tool refuses with ``capability_unsupported``.
+    supports_crash_watch: bool = False
 
 
 @dataclass(frozen=True, slots=True)

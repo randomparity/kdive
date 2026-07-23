@@ -145,6 +145,8 @@ def provider_resolver(
     supports_snapshots: bool = True,
     traffic_capturer: object | None = None,
     supports_traffic_capture: bool = True,
+    supports_diagnostic_sysrq: bool = True,
+    supports_crash_watch: bool = True,
 ) -> ProviderResolver:
     """Return a local-libvirt resolver with optional fake runtime ports.
 
@@ -199,6 +201,8 @@ def provider_resolver(
             ),
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
+            supports_diagnostic_sysrq=supports_diagnostic_sysrq,
+            supports_crash_watch=supports_crash_watch,
         ),
         rootfs=RootfsCapabilities(validator=lambda _: None),
         platform_root_cmdline=platform_root_cmdline,

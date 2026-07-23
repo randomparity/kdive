@@ -11,12 +11,13 @@ each tool's own description.
 - `control.force_crash` — force the guest to panic via NMI, producing a vmcore you then
   capture with `vmcore.fetch` and triage (see the postmortem guide). This is the deliberate
   path to a crash dump.
-- `control.diagnostic_sysrq` — send a diagnostic SysRq key to a ready local-libvirt system to
-  provoke kernel diagnostics (for example a task-state or memory dump) without destroying it.
+- `control.diagnostic_sysrq` — send a diagnostic SysRq key to a ready system whose provider
+  supports SysRq injection (today local-libvirt) to provoke kernel diagnostics (for example a
+  task-state or memory dump) without destroying it.
 
 ## Catching a crash you provoke
 
-- `control.watch_for_crash` — watch a ready local-libvirt system's serial console **out of
+- `control.watch_for_crash` — watch a ready crash-watch-capable system's serial console **out of
   band** for a kernel-crash signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until a
   deadline, returning on the first hit. This is the primitive for a repeat-until-crash race
   reproduction: you drive the reproducer loop over your own root SSH, and this watches the
@@ -31,7 +32,7 @@ each tool's own description.
 ## Capturing guest traffic
 
 - `control.capture_traffic` — capture host-side network traffic from a Run's bound **READY**
-  local-libvirt guest into a Run-owned pcap, for a bounded window. Only the guest's SSH-forward
+  traffic-capture-capable guest into a Run-owned pcap, for a bounded window. Only the guest's SSH-forward
   netdev is visible (the guest runs on a restricted user-mode network), so this sees the traffic
   on that path, not arbitrary guest egress. Contributor-level; it enqueues a fixed-duration job —
   poll `jobs.wait`, then fetch the pcap with `artifacts.fetch_raw(run_id, asset="pcap",

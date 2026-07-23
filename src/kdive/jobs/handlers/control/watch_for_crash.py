@@ -42,7 +42,6 @@ from psycopg import AsyncConnection
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import SystemState
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.crash_signatures import first_crash_signature
 from kdive.domain.operations.jobs import Job, JobKind
@@ -187,7 +186,8 @@ async def watch_for_crash_handler(
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` ``reason="system_not_ready"`` when the System is
-            not ready, or ``reason="not_local_libvirt"`` for a non-local-libvirt provider.
+            not ready, or ``reason="crash_watch_unsupported"`` for a provider that does not
+            advertise ``supports_crash_watch``.
     """
     payload = load_payload(job, WatchForCrashPayload)
     system_id = UUID(payload.system_id)
@@ -200,11 +200,11 @@ async def watch_for_crash_handler(
         )
     binding = await resolver.binding_for_system(conn, system_id)
     set_provider_kind(binding.kind.value)
-    if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
+    if not binding.runtime.support.supports_crash_watch:
         raise CategorizedError(
-            "watch_for_crash is supported only on local-libvirt Systems",
+            "provider does not support out-of-band crash-watch",
             category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+            details={"reason": "crash_watch_unsupported", "provider_kind": binding.kind.value},
         )
     log_path = console_log_path(system_id)
     mark = len(await asyncio.to_thread(read_console_log, log_path))

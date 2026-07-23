@@ -26,7 +26,6 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, SYSTEMS
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import Job, JobKind
@@ -151,7 +150,7 @@ def _changed_state_error(system_id: UUID) -> CategorizedError:
 async def _snapshot(
     conn: AsyncConnection, system_id: UUID, resolver: ProviderResolver
 ) -> _Snapshot:
-    """Under the per-System lock (tx 1): verify live+local+READY and resolve domain+controller.
+    """Under the per-System lock (tx 1): verify READY + SysRq capability, resolve domain+controller.
 
     The pre-injection mark is read by the capture core just before injection (tighter than a
     lock-held read here), so this snapshot only validates state and resolves the ports.
@@ -162,11 +161,14 @@ async def _snapshot(
             raise _changed_state_error(system_id)
         binding = await resolver.binding_for_system(conn, system_id)
         set_provider_kind(binding.kind.value)
-        if binding.kind is not ResourceKind.LOCAL_LIBVIRT:
+        if not binding.runtime.support.supports_diagnostic_sysrq:
             raise CategorizedError(
-                "diagnostic SysRq is supported only on local-libvirt Systems",
+                "provider does not support diagnostic SysRq injection",
                 category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"reason": "not_local_libvirt", "provider_kind": binding.kind.value},
+                details={
+                    "reason": "diagnostic_sysrq_unsupported",
+                    "provider_kind": binding.kind.value,
+                },
             )
         return _Snapshot(
             domain_name=_resolved_domain_name(system),

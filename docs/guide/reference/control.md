@@ -6,9 +6,11 @@
 
 `implemented`
 
-Capture host-side network traffic from a Run's bound ready local-libvirt guest into a
-Run-owned pcap. Only the guest's SSH-forward netdev is visible (the platform runs the guest
-on a restricted user-mode network), so this sees the traffic on that path, not arbitrary
+Capture host-side network traffic from a Run's bound ready guest into a Run-owned pcap.
+The bound provider must support traffic capture (today local-libvirt); a provider that
+does not is refused with a `capability_unsupported` `configuration_error`. Only the guest's
+SSH-forward netdev is visible (the platform runs the guest on a restricted user-mode
+network), so this sees the traffic on that path, not arbitrary
 guest egress. Requires contributor; enqueues a fixed-duration job and returns
 `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result` is the
 captured pcap's artifact id; the pcap is sensitive (packet bytes) and is fetched only with
@@ -23,27 +25,28 @@ invalid `capture_filter` is a `configuration_error`; no job is created.
 | `duration_s` | integer | no | Capture window in seconds (1-300); the job auto-stops when it elapses. Cancel early with jobs.cancel. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `max_bytes` | integer | no | Stop early once the pcap reaches this many bytes (1048576-536870912). |
-| `run_id` | string | yes | The Run whose bound ready local-libvirt System's traffic to capture. |
+| `run_id` | string | yes | The Run whose bound ready System's traffic to capture. The bound provider must support traffic capture. |
 | `snaplen` | integer | no | Bytes captured per packet (1-262144); the default 128 captures headers only. Raise it to keep payloads. |
 
 ## `control.diagnostic_sysrq`
 
 `implemented`
 
-Inject one non-destructive diagnostic SysRq into a ready local-libvirt guest and
-capture the kernel's console dump. Requires contributor (no destructive gate); enqueues
-a job and returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's
-`refs.result` is the redacted console-dump artifact id; read it with `artifacts.get`. A
-guest that rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
+Inject one non-destructive diagnostic SysRq into a ready guest and capture the kernel's
+console dump. The bound provider must support diagnostic SysRq injection (today
+local-libvirt); a provider that does not is refused with a `capability_unsupported`
+`configuration_error`. Requires contributor (no destructive gate); enqueues a job and
+returns `{job_id, status: queued}` — poll `jobs.wait`. On success the job's `refs.result`
+is the redacted console-dump artifact id; read it with `artifacts.get`. A guest that
+rejected the SysRq (`kernel.sysrq` restricts the operation) fails with a
 `configuration_error`, as does no console output at all (no keyboard driver); an
-unknown/destructive `command`, a non-local-libvirt System, or a non-ready System is also
-a `configuration_error`.
+unknown/destructive `command` or a non-ready System is also a `configuration_error`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `command` | string | yes | The diagnostic SysRq to inject. One of: show_task_states, show_blocked_tasks, show_memory, show_locks, show_registers, show_backtrace_all_cpus, show_timers. Destructive SysRq (crash/reboot/poweroff) is rejected — use control.force_crash to crash a System. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `system_id` | string | yes | The ready local-libvirt System to inspect (non-destructive). |
+| `system_id` | string | yes | The ready System to inspect (non-destructive). The bound provider must support diagnostic SysRq injection. |
 
 ## `control.force_crash`
 
@@ -79,9 +82,11 @@ job.
 
 `implemented`
 
-Watch a ready local-libvirt guest's serial console out-of-band for a kernel-crash
-signature (panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on
-the first hit. Use this to catch a crash your own reproducer provokes: drive the
+Watch a ready guest's serial console out-of-band for a kernel-crash signature
+(panic/BUG/Oops/GPF/KASAN/KFENCE/soft-lockup) until `deadline_s`, returning on the first
+hit. The bound provider must support out-of-band crash-watch (today local-libvirt); a
+provider that does not is refused with a `capability_unsupported` `configuration_error`.
+Use this to catch a crash your own reproducer provokes: drive the
 repeat-until-crash loop over your root SSH, and this watches the console — which survives
 the panic that drops SSH. Requires contributor; enqueues a job and returns
 `{job_id, status: queued}` — poll `jobs.wait`, then read the verdict from the job's
@@ -90,11 +95,11 @@ the panic that drops SSH. Requires contributor; enqueues a job and returns
 signature before the deadline). Start the watch **before** you begin the reproducer loop
 so it does not miss an early crash; if your reproducer's SSH channel drops but the verdict
 is `not_fired`, the crash landed outside the watched window — read the full console with
-the `artifacts` tools. A non-local-libvirt or non-ready System, or a non-positive
-`deadline_s`, is a `configuration_error`.
+the `artifacts` tools. A non-ready System or a non-positive `deadline_s` is a
+`configuration_error`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `deadline_s` | number | no | Seconds to watch the guest's serial console before returning a 'not fired' verdict; defaults to 60 and is clamped to 300. Size it to the reproducer batch you are about to run; re-issue the watch for a longer campaign. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `system_id` | string | yes | The ready local-libvirt System whose console to watch. |
+| `system_id` | string | yes | The ready System whose console to watch. The bound provider must support out-of-band crash-watch. |
