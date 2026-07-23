@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the ppc64le uv wheel pin in step with the image pins
 - Images list surfaces envelope exit code, not hardcoded 0
 - Adr-status-check also scans tests/ for citations
+- Resolve build-fs interpreter to the workspace venv
+- Honor a real KDIVE_S3_* over the conftest dummy
+- Propagate errexit into the store builders
+- Preflight that the interpreter can import kdive
 
 ### Build
 
