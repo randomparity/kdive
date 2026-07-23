@@ -21,6 +21,15 @@ live_vm_host_packages:
   - libdw-dev          # drgn build
   - libkdumpfile-dev   # drgn kdump support
 
+# The remote-libvirt `live_vm` family (#1424, ADR-0425, `just test-live-remote`) needs NO
+# additional host package here: it connects OUT to a remote qemu+tls:// host over the libvirt TLS
+# client stack (`libvirt-clients` + `gnutls-bin`) the `libvirt_stack` role already declares, and
+# its introspect leg reuses the worker-side vmcore postmortem (`drgn`, built into the venv above
+# via libvirt-dev/libelf-dev/libdw-dev/libkdumpfile-dev). The reconciler it depends on is a kdive
+# host process, not a system package. This nil delta is recorded so the "declare host deps in the
+# same change" discipline (AGENTS.md) is auditable rather than silent — add packages here if a
+# remote proof ever grows a genuine host-tool need.
+
 # Container runtime for the #1293 self-hosted job's on-box compose stack (scripts/live-stack/up.sh).
 # docker-compose-v2 provides `docker compose` (the plugin) on Ubuntu 26.04.
 live_vm_host_docker_packages:

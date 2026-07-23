@@ -1,7 +1,7 @@
 """Non-gated guard: the live_vm family sub-markers are additive (#1290, epic #1289).
 
-Every test carrying live_vm_throwaway or live_vm_provisioned must ALSO carry the bare live_vm
-marker, so `-m live_vm` still selects both families and the shipped test-live recipe
+Every test carrying live_vm_throwaway, live_vm_provisioned, or live_vm_remote must ALSO carry the
+bare live_vm marker, so `-m live_vm` still selects every family and the shipped test-live recipe
 (-m "live_vm and not live_vm_tcg") is unaffected. This asserts additivity only — NOT completeness
 (every live_vm test has a family sub-marker): the debug/panic tests are un-migrated until sub-issue
 E, and some live_vm tests (e.g. the retained-vmcore introspect test) fit neither family, so a
@@ -15,7 +15,7 @@ import pathlib
 from functools import cache
 
 _TESTS_ROOT = pathlib.Path(__file__).resolve().parent.parent
-_FAMILY_SUBMARKERS = ("live_vm_throwaway", "live_vm_provisioned")
+_FAMILY_SUBMARKERS = ("live_vm_throwaway", "live_vm_provisioned", "live_vm_remote")
 
 
 def _mark_name(node: ast.expr) -> str | None:
@@ -75,6 +75,6 @@ def test_every_family_submarker_test_also_carries_live_vm() -> None:
     carriers = _functions_with_any(_FAMILY_SUBMARKERS)
     offenders = {name for name, marks in carriers.items() if "live_vm" not in marks}
     assert not offenders, (
-        "live_vm_throwaway/live_vm_provisioned are ADDITIVE — every carrier must also carry the "
-        f"bare live_vm marker; missing on: {sorted(offenders)}"
+        "live_vm_throwaway/live_vm_provisioned/live_vm_remote are ADDITIVE — every carrier must "
+        f"also carry the bare live_vm marker; missing on: {sorted(offenders)}"
     )

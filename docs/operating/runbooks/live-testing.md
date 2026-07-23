@@ -2,7 +2,7 @@
 
 The canonical answer to "how do I run each live test tier, and what does it
 need?" KDIVE has three live-test tiers — one per `just` recipe — at different
-maturity and hardware levels, and the native `live_vm` tier further spans three
+maturity and hardware levels, and the `live_vm` tier further spans four
 families (below). Their environment quirks — session vs system libvirt, a short
 session-mode socket path (`XDG_CONFIG_HOME`), modular daemons, per-mode guest
 confinement — used to live only in one test file and in maintainer memory, so
@@ -32,20 +32,25 @@ live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
 **skips cleanly** when its environment is absent — but a tier whose env is set
 *wrong* fails loud rather than skipping (see [Skip vs. fail](#skip-vs-fail-a-skip-must-not-look-like-a-pass)).
 
+The `live_vm` tier spans four families (below); `just test-live` runs all of them
+(each gated), and one — the remote-libvirt family, which drives a remote
+`qemu+tls://` host rather than local silicon — additionally has a focused
+`just test-live-remote` recipe (`-m live_vm_remote`) for driving it on its own.
+
 `live_vm_tcg` is deliberately **not** a throwaway-domain test: by ADR-0353 every
 `live_vm_tcg` proof also carries the `live_stack` marker and runs the spine over
 the stack. It needs no `/dev/kvm`, but it does need a full stack bring-up.
 
-## The `live_vm` marker spans three families
+## The `live_vm` marker spans four families
 
 `pytest -m live_vm` selects every family below. A run that exports only one
 family's env would silently skip the others and still report green — the "green
 run that is no coverage" failure this framework exists to kill. So each family
-has its own `require_live_vm_*` gate that fails loud on a mis-set env. Two
-additive sub-markers exist — `live_vm_throwaway` and `live_vm_provisioned` — and
-every test keeps the bare `live_vm` marker alongside its sub-marker. There is
-**no third sub-marker**: the gdbstub-preserve debug tests reuse
-`live_vm_throwaway`, so they are told apart from the ordinary throwaway tests by
+has its own `require_live_vm_*` gate that fails loud on a mis-set env. Three
+additive sub-markers exist — `live_vm_throwaway`, `live_vm_provisioned`, and
+`live_vm_remote` — and every test keeps the bare `live_vm` marker alongside its
+sub-marker. The gdbstub-preserve debug tests are **not** a fourth sub-marker:
+they reuse `live_vm_throwaway`, told apart from the ordinary throwaway tests by
 their env (`KDIVE_LIVE_VM_BZIMAGE`) and gate (`require_live_vm_bzimage`), not by
 marker.
 
@@ -54,13 +59,28 @@ marker.
 | Throwaway (`live_vm_throwaway`) | `KDIVE_LIVE_VM_ROOTFS` (a bootable rootfs qcow2) | `qemu:///system` (per-test; some tests force `qemu:///session`) | `boot_throwaway_domain` (`kdive.testing.live_vm`) |
 | gdbstub-preserve debug (`live_vm_throwaway`, shared) | `KDIVE_LIVE_VM_BZIMAGE` (an early-panicking kernel) | `qemu:///session` | `boot_preserved_gdbstub_domain` (`kdive.testing.live_vm`); the caller renders the domain XML (ADR-0392) |
 | Provisioned (`live_vm_provisioned`) | `KDIVE_LIVE_VM_SYSTEM_ID` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` | `qemu:///system` | an externally provisioned System through the live stack |
+| Remote (`live_vm_remote`) | `KDIVE_LIVE_VM_REMOTE_URI` (a `qemu+tls://` host) + `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE` + `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET` + `KDIVE_LIVE_VM_REMOTE_RECONCILER` | `qemu+tls://` (operator-named; no default host) | direct provider ops against a genuinely remote libvirt host (ADR-0425) |
 
 The env reads live in `tests/live_vm/__init__.py` (kept out of `src/` so the
 ADR-0087 config-env guard is not tripped by test-only vars). That module also
 exposes the `require_live_vm_throwaway` / `require_live_vm_bzimage` /
-`require_live_vm_provisioned` gates — the `live_vm` analogue of the
-`require_issuer` / `require_stack` / `require_guest_arch` gates the stack tiers
-use.
+`require_live_vm_provisioned` / `require_live_vm_remote` gates — the `live_vm`
+analogue of the `require_issuer` / `require_stack` / `require_guest_arch` gates
+the stack tiers use.
+
+The **remote** family is the fourth (#1424, epic #1423): the only `live_vm`
+family that drives a genuinely remote `qemu+tls://` host the worker shares no
+filesystem with, so remote-provider capabilities get a direct provider-op proof
+instead of being asserted only through the operator-run `live_stack` spine
+(`test_remote_live_stack.py`). Its contract is wider than a URI because two
+dependents are otherwise unprovable: the two-phase vmcore retrieve flows through
+a **guest-routable** object store (`KDIVE_S3_*`, ADR-0084/ADR-0110), and remote's
+console collector is **reconciler-resident** (ADR-0095/ADR-0235), so a
+console-dependent proof needs one alive — hence the `KDIVE_LIVE_VM_REMOTE_RECONCILER`
+presence marker. The trigger is the `qemu+tls://` URI itself (there is no default
+remote host, so `KDIVE_LIBVIRT_URI` is not the lever here); a non-TLS URI or one
+carrying `no_verify` **fails loud**, because remote mandates verified mutual TLS
+(ADR-0076; the [remote live-stack runbook](remote-live-stack.md) forbids `no_verify`).
 
 ## The environment contract
 
@@ -141,6 +161,24 @@ dependency for one of these: declare it in the owning Ansible role in the same
 change, or the next clean runner reprovision breaks (see the cross-platform and
 provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 
+### `live_vm_remote` — direct provider ops against a remote `qemu+tls://` host
+
+```
+just test-live-remote  # -m live_vm_remote; skips cleanly with no remote env
+```
+
+This drives the remote-libvirt family (a sub-selection of `live_vm`, also run by
+`just test-live`) directly against an operator-provided `qemu+tls://` host. Set
+`KDIVE_LIVE_VM_REMOTE_URI` to the host's control URI, `KDIVE_LIVE_VM_REMOTE_BASE_IMAGE`
+to the staged base-image volume name, `KDIVE_S3_ENDPOINT_URL` + `KDIVE_S3_BUCKET`
+to the **guest-routable** object store, and `KDIVE_LIVE_VM_REMOTE_RECONCILER` to a
+presence marker for a running reconciler (its metrics endpoint, or `1`). Standing
+up the host — mutual TLS, the staged base volume, the gdbstub-port ACL, and
+object-store reachability — is the [remote live-stack runbook](remote-live-stack.md).
+The URI must be `qemu+tls://` and must not carry `no_verify` (remote mandates
+verified mutual TLS, ADR-0076); a wrong scheme or a missing companion fails loud
+rather than skipping.
+
 ### `live_vm_tcg` — the emulated foreign-arch spine
 
 ```
@@ -194,7 +232,7 @@ by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
 - **Staged images need the right label under system mode** — `virt_image_t`
   (SELinux) or the `libvirt-qemu` AppArmor profile — and the rootfs's parent
   dir must be writable, because the boot stages an overlay beside it.
-- **`pytest -m live_vm` selects all three families.** If you run a nightly for
+- **`pytest -m live_vm` selects all four families.** If you run a nightly for
   only one, declare which families you intend to run and let the fail-loud gate
   catch a missing declared family, rather than skipping to green.
 - **Fakes are blind to what these tiers prove.** `FakeLibvirtConn` / `FakeDomain`
@@ -208,5 +246,6 @@ by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
 - Spec: [`2026-07-18-live-test-framework.md`](../../design/2026-07-18-live-test-framework.md)
 - [ADR-0386 — live-test framework and arch-additive runner topology](../../adr/0386-live-test-framework-runner-topology.md)
 - [ADR-0353 — the `live_vm_tcg` tier](../../adr/0353-live-vm-tcg-tier.md)
+- [ADR-0425 — the remote-libvirt `live_vm` family](../../adr/0425-remote-live-vm-tier.md)
 - [ADR-0387 — self-hosted KVM runner host codification](../../adr/0387-selfhosted-kvm-runner-host-codification.md)
 - [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host bring-up](power-host-bringup.md) · [four-method live run](four-method-live-run.md)

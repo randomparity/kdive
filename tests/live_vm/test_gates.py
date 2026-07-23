@@ -10,11 +10,23 @@ from tests.live_vm import (
     LiveVmEnvState,
     require_live_vm_bzimage,
     require_live_vm_provisioned,
+    require_live_vm_remote,
     require_live_vm_throwaway,
     resolve_bzimage_contract,
     resolve_provisioned_contract,
+    resolve_remote_contract,
     resolve_throwaway_contract,
 )
+
+_REMOTE_URI = "qemu+tls://host.example/system"
+
+
+def _set_remote_companions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set every remote companion env (base image, S3 endpoint+bucket, reconciler) to valid data."""
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_BASE_IMAGE", "kdive-base-fedora.qcow2")
+    monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://s3.example:9000")
+    monkeypatch.setenv("KDIVE_S3_BUCKET", "kdive-artifacts")
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", "http://127.0.0.1:9466/metrics")
 
 
 def test_throwaway_absent_when_rootfs_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,3 +212,90 @@ def test_provisioned_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KDIVE_LIVE_VM_SYSTEM_ID", raising=False)
     with pytest.raises(pytest.skip.Exception):
         require_live_vm_provisioned()
+
+
+def test_remote_absent_when_uri_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_URI", raising=False)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.ABSENT
+    assert "KDIVE_LIVE_VM_REMOTE_URI" in result.reason
+
+
+def test_remote_misconfigured_when_uri_not_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", "qemu:///system")
+    _set_remote_companions(monkeypatch)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "qemu+tls://" in result.reason
+
+
+def test_remote_misconfigured_when_uri_carries_no_verify(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", f"{_REMOTE_URI}?no_verify=1")
+    _set_remote_companions(monkeypatch)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "no_verify" in result.reason
+
+
+def test_remote_misconfigured_when_base_image_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_BASE_IMAGE", raising=False)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIVE_VM_REMOTE_BASE_IMAGE" in result.reason
+
+
+def test_remote_misconfigured_on_partial_s3(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_S3_BUCKET" in result.reason
+
+
+def test_remote_misconfigured_when_reconciler_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", raising=False)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.MISCONFIGURED
+    assert "KDIVE_LIVE_VM_REMOTE_RECONCILER" in result.reason
+
+
+def test_remote_available_resolves_full_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    result = resolve_remote_contract()
+    assert result.state is LiveVmEnvState.AVAILABLE
+    assert result.contract is not None
+    assert result.contract.libvirt_uri == _REMOTE_URI
+    assert result.contract.base_image == "kdive-base-fedora.qcow2"
+    assert result.contract.s3_endpoint_url == "http://s3.example:9000"
+    assert result.contract.s3_bucket == "kdive-artifacts"
+    assert result.contract.reconciler == "http://127.0.0.1:9466/metrics"
+
+
+def test_remote_skips_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_URI", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        require_live_vm_remote()
+
+
+def test_remote_fails_loud_when_misconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)  # set, but no companions
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_BASE_IMAGE", raising=False)
+    monkeypatch.delenv("KDIVE_S3_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("KDIVE_S3_BUCKET", raising=False)
+    monkeypatch.delenv("KDIVE_LIVE_VM_REMOTE_RECONCILER", raising=False)
+    with pytest.raises(pytest.fail.Exception):
+        require_live_vm_remote()
+
+
+def test_remote_returns_contract_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_LIVE_VM_REMOTE_URI", _REMOTE_URI)
+    _set_remote_companions(monkeypatch)
+    contract = require_live_vm_remote()
+    assert contract.libvirt_uri == _REMOTE_URI
+    assert contract.base_image == "kdive-base-fedora.qcow2"

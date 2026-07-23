@@ -27,6 +27,18 @@ LIVE_VM_BZIMAGE_ENV = "KDIVE_LIVE_VM_BZIMAGE"
 LIVE_VM_SYSTEM_ID_ENV = "KDIVE_LIVE_VM_SYSTEM_ID"
 LIBVIRT_URI_ENV = "KDIVE_LIBVIRT_URI"
 
+# The remote-libvirt family's trigger + required-companion env. The trigger is the qemu+tls:// URI
+# (there is no default remote host, so — unlike the local families — KDIVE_LIBVIRT_URI is not the
+# lever; a remote run must name its own host). Remote mandates verified mutual TLS: a non-qemu+tls://
+# URI, or one carrying no_verify, is a misconfiguration, not "no environment" (ADR-0076, the
+# remote-live-stack runbook: no_verify is forbidden). The base-image volume + KDIVE_S3_* + a running
+# reconciler are the required companions a remote provider-op proof cannot run without (ADR-0084
+# two-phase vmcore, ADR-0095 reconciler-resident console collector).
+LIVE_VM_REMOTE_URI_ENV = "KDIVE_LIVE_VM_REMOTE_URI"
+LIVE_VM_REMOTE_BASE_IMAGE_ENV = "KDIVE_LIVE_VM_REMOTE_BASE_IMAGE"
+LIVE_VM_REMOTE_RECONCILER_ENV = "KDIVE_LIVE_VM_REMOTE_RECONCILER"
+_REMOTE_TLS_SCHEME = "qemu+tls://"
+
 # The object-store env a provisioned-System live run needs. Verified against
 # src/kdive/config/core_settings.py: KDIVE_S3_ENDPOINT_URL and KDIVE_S3_BUCKET are the required
 # env settings; KDIVE_S3_REGION is defaulted (not required). S3 *credentials* are NOT env vars —
@@ -70,6 +82,27 @@ class ProvisionedContract:
 
     system_id: str
     libvirt_uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteContract:
+    """The remote-libvirt family's resolved env: a qemu+tls:// host + the deps a proof needs.
+
+    Remote is the fourth live_vm family and the only one that drives a genuinely *remote*
+    ``qemu+tls://`` host the worker shares no filesystem with (ADR-0076). A remote provider-op proof
+    needs more than the control URI: the operator-staged base-image volume the provision profile
+    feeds into ``base_image_volume`` (ADR-0112), the object store the two-phase vmcore retrieve
+    flows through (``s3_endpoint_url`` must be guest-routable, ADR-0084/ADR-0110), and a running
+    reconciler, since remote's console collector is reconciler-resident (ADR-0095, ADR-0235). The
+    ``reconciler`` value is the operator's presence marker for that daemon (an endpoint or ``"1"``),
+    presence-checked — not probed — as ``s3_endpoint_url`` is checked present, not reachable.
+    """
+
+    libvirt_uri: str
+    base_image: str
+    s3_endpoint_url: str
+    s3_bucket: str
+    reconciler: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +197,73 @@ def resolve_provisioned_contract(default_uri: str) -> EnvResolution[ProvisionedC
     )
 
 
+def resolve_remote_contract() -> EnvResolution[RemoteContract]:
+    """Resolve the remote-libvirt family's env: qemu+tls:// URI + base image + S3 + reconciler.
+
+    The trigger is ``KDIVE_LIVE_VM_REMOTE_URI`` (no default remote host exists). Once set, every
+    companion is required — a declared intent to run remote with a partial env is a misconfig, not
+    "no environment", so it fails loud (mirrors the provisioned family, where a set SYSTEM_ID with
+    partial ``KDIVE_S3_*`` is MISCONFIGURED). The URI must be a verified-TLS ``qemu+tls://`` URI: a
+    plain ``qemu:///`` URI here, or one carrying ``no_verify``, is the remote-mandates-mutual-TLS
+    misconfiguration (ADR-0076; the remote-live-stack runbook forbids ``no_verify``).
+    """
+    uri = os.environ.get(LIVE_VM_REMOTE_URI_ENV)
+    if not uri:
+        return EnvResolution(
+            LiveVmEnvState.ABSENT,
+            reason=(
+                f"{LIVE_VM_REMOTE_URI_ENV} unset; point it at a qemu+tls:// host "
+                "(see docs/operating/runbooks/remote-live-stack.md)"
+            ),
+        )
+    if not uri.startswith(_REMOTE_TLS_SCHEME):
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=(
+                f"{LIVE_VM_REMOTE_URI_ENV}={uri!r} is not a {_REMOTE_TLS_SCHEME} URI; the remote "
+                "family mandates verified mutual TLS (ADR-0076)"
+            ),
+        )
+    if "no_verify" in uri:
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=(
+                f"{LIVE_VM_REMOTE_URI_ENV}={uri!r} carries no_verify; the remote family forbids it "
+                "(the CA must verify the libvirtd server cert — remote-live-stack runbook)"
+            ),
+        )
+    base_image = os.environ.get(LIVE_VM_REMOTE_BASE_IMAGE_ENV)
+    reconciler = os.environ.get(LIVE_VM_REMOTE_RECONCILER_ENV)
+    companions = {
+        LIVE_VM_REMOTE_BASE_IMAGE_ENV: base_image,
+        LIVE_VM_REMOTE_RECONCILER_ENV: reconciler,
+        **{name: os.environ.get(name) for name in _S3_REQUIRED_ENV},
+    }
+    missing = [name for name, value in companions.items() if not value]
+    if missing:
+        return EnvResolution(
+            LiveVmEnvState.MISCONFIGURED,
+            reason=(
+                f"{LIVE_VM_REMOTE_URI_ENV} is set but the required remote companions are "
+                f"incomplete (missing: {', '.join(sorted(missing))}); the base-image volume, the "
+                "guest-routable object store, and a running reconciler are all needed for a remote "
+                "provider-op proof (S3 credentials are file-based under KDIVE_SECRETS_ROOT)"
+            ),
+        )
+    assert base_image is not None
+    assert reconciler is not None
+    return EnvResolution(
+        LiveVmEnvState.AVAILABLE,
+        RemoteContract(
+            libvirt_uri=uri,
+            base_image=base_image,
+            s3_endpoint_url=companions["KDIVE_S3_ENDPOINT_URL"] or "",
+            s3_bucket=companions["KDIVE_S3_BUCKET"] or "",
+            reconciler=reconciler,
+        ),
+    )
+
+
 def require_live_vm_throwaway(
     default_uri: str = "qemu:///system", *, session_required: bool = False
 ) -> ThrowawayContract:
@@ -205,6 +305,23 @@ def require_live_vm_bzimage(default_uri: str = "qemu:///session") -> BzimageCont
 def require_live_vm_provisioned(default_uri: str = "qemu:///system") -> ProvisionedContract:
     """Skip if the provisioned-System env is absent, fail loud if misconfigured, else return it."""
     resolution = resolve_provisioned_contract(default_uri)
+    if resolution.state is LiveVmEnvState.ABSENT:
+        pytest.skip(resolution.reason)
+    if resolution.state is LiveVmEnvState.MISCONFIGURED:
+        pytest.fail(resolution.reason)
+    assert resolution.contract is not None
+    return resolution.contract
+
+
+def require_live_vm_remote() -> RemoteContract:
+    """Skip if the remote env is absent, fail loud if it is set-but-incomplete, else return it.
+
+    The gate the remote ``live_vm`` family threads: an unset ``KDIVE_LIVE_VM_REMOTE_URI`` means
+    this host is not set up for the remote tier (skip); a set URI with a wrong scheme,
+    ``no_verify``, or a missing companion (base image / ``KDIVE_S3_*`` / reconciler) means a
+    mis-provisioned host that must not masquerade as "no environment" (fail loud).
+    """
+    resolution = resolve_remote_contract()
     if resolution.state is LiveVmEnvState.ABSENT:
         pytest.skip(resolution.reason)
     if resolution.state is LiveVmEnvState.MISCONFIGURED:

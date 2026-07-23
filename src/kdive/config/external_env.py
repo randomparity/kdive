@@ -150,6 +150,30 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "(#1254); unset → that test skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_URI",
+        "test",
+        None,
+        "qemu+tls:// control URI of an operator-provided remote-libvirt host for the "
+        "live_vm_remote family (#1424, ADR-0425); the trigger for require_live_vm_remote. Unset → "
+        "that family skips; a non-qemu+tls:// URI or one carrying no_verify fails loud (remote "
+        "mandates mutual TLS).",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_BASE_IMAGE",
+        "test",
+        None,
+        "Operator-staged base-image volume name the live_vm_remote provision profile feeds into "
+        "base_image_volume (#1424, ADR-0425). Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
+        "KDIVE_LIVE_VM_REMOTE_RECONCILER",
+        "test",
+        None,
+        "Presence marker for a running reconciler (its metrics endpoint, or 1) that the "
+        "live_vm_remote family needs for its reconciler-resident console collector (#1424, "
+        "ADR-0425). Presence-checked, not probed. Required once KDIVE_LIVE_VM_REMOTE_URI is set.",
+    ),
+    ExternalEnvVar(
         "KDIVE_LIVE_VM_VMCORE",
         "test",
         None,
