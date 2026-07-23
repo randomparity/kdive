@@ -2,7 +2,8 @@
 
 The reaper prefix-reaps uncommitted objects of a past-deadline manifest, then deletes the
 manifest row. For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
-finalized with leftover chunks (ADR-0104 §7); for ``systems`` it keeps the DEFINED gate. It
+finalized with leftover chunks (ADR-0104 §7); for ``systems`` it reaps a ``defined`` (abandoned)
+or terminal ``failed`` System (ADR-0435), keeping ``provisioning``/``ready`` gated out. It
 exempts any object with a committed ``artifacts`` row, and the per-owner locked re-read
 declines a manifest whose deadline was renewed since the candidate select.
 
@@ -25,9 +26,9 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.db.locks import LockScope
-from kdive.domain.capacity.state import RunState
+from kdive.domain.capacity.state import RunState, SystemState
 from kdive.reconciler.cleanup.uploads import (
-    owner_pre_finalize as _owner_pre_finalize,
+    owner_reapable as _owner_reapable,
 )
 from kdive.reconciler.cleanup.uploads import (
     reap_one_owner as _reap_one_owner,
@@ -244,8 +245,8 @@ def test_succeeded_run_with_lingering_manifest_reaps_chunks_not_final(migrated_u
 
 
 def test_finalized_system_with_lingering_manifest_is_not_reaped(migrated_url: str) -> None:
-    """A System advanced past DEFINED keeps its gate: a lingering manifest is not swept, so the
-    out-of-scope provisioning path is unchanged (ADR-0104 §7)."""
+    """A READY System keeps its gate: a lingering manifest is not swept past the deadline, because
+    a committed rootfs object must not be deleted (ADR-0104 §7; ADR-0435 keeps ready out)."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
@@ -257,6 +258,70 @@ def test_finalized_system_with_lingering_manifest_is_not_reaped(migrated_url: st
             count = await run_repair(pool, _reap(store))
         assert count == 0
         assert store.deleted == []  # finalized System's objects untouched
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "systems", system_id) is not None
+
+    asyncio.run(_run())
+
+
+def test_reaps_uncommitted_objects_past_deadline_for_failed_system(migrated_url: str) -> None:
+    """A terminal ``failed`` upload System past its manifest deadline has its uncommitted staged
+    object + manifest reaped (ADR-0435): a provision that failed after staging never commits the
+    rootfs ``artifacts`` row and cannot tear down, so the reconciler is its only backstop."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.FAILED)
+            prefix, request = _system_manifest(system_id, timedelta(seconds=-1))
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}rootfs", f"{prefix}stray"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert sorted(store.deleted) == [f"{prefix}rootfs", f"{prefix}stray"]
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "systems", system_id) is None
+
+    asyncio.run(_run())
+
+
+def test_failed_system_committed_object_is_exempt(migrated_url: str) -> None:
+    """Even for a ``failed`` System, a committed object (with an ``artifacts`` row) is never
+    deleted — the per-key skip protects it, so only the truly uncommitted staged bytes go."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.FAILED)
+            prefix, request = _system_manifest(system_id, timedelta(seconds=-1))
+            await _insert_artifact_row(
+                seed, owner_kind="systems", owner_id=system_id, object_key=f"{prefix}rootfs"
+            )
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}rootfs"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == []  # committed object exempt even for a failed System
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "systems", system_id) is None
+
+    asyncio.run(_run())
+
+
+def test_provisioning_system_with_lingering_manifest_is_not_reaped(migrated_url: str) -> None:
+    """An in-flight ``provisioning`` System is excluded (ADR-0435): its provision may still be
+    reading the staged object, so a past-deadline manifest is not swept out from under it."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed, system_state=SystemState.PROVISIONING)
+            prefix, request = _system_manifest(system_id, timedelta(seconds=-1))
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}rootfs"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 0
+        assert store.deleted == []
         async with await connect(migrated_url) as check:
             assert await upload_manifest.get_manifest(check, "systems", system_id) is not None
 
@@ -277,12 +342,12 @@ def test_reap_one_owner_declines_renewed_manifest(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_owner_pre_finalize_rejects_unknown_owner_kind_before_sql(migrated_url: str) -> None:
+def test_owner_reapable_rejects_unknown_owner_kind_before_sql(migrated_url: str) -> None:
     async def _run() -> None:
         async with await connect(migrated_url) as conn:
             system_id = await seed_system(conn)
             try:
-                await _owner_pre_finalize(
+                await _owner_reapable(
                     conn, cast(upload_manifest.UploadOwnerKind, "allocations"), system_id
                 )
             except ValueError as exc:

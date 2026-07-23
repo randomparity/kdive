@@ -18,13 +18,18 @@ _log = logging.getLogger(__name__)
 
 _UPLOAD_RUN_OWNER_KIND = upload_manifest.RUN_UPLOAD_OWNER
 _UPLOAD_SYSTEM_OWNER_KIND = upload_manifest.SYSTEM_UPLOAD_OWNER
-_UPLOAD_PRE_FINALIZE_VALUES: dict[upload_manifest.UploadOwnerKind, str] = {
-    _UPLOAD_RUN_OWNER_KIND: RunState.CREATED.value,
-    _UPLOAD_SYSTEM_OWNER_KIND: SystemState.DEFINED.value,
+_UPLOAD_REAPABLE_STATES: dict[upload_manifest.UploadOwnerKind, tuple[str, ...]] = {
+    _UPLOAD_RUN_OWNER_KIND: (RunState.CREATED.value,),
+    # A `defined` System never entered provisioning (a true abandon); a terminal `failed` System's
+    # provision aborted without committing the rootfs `artifacts` row (ADR-0435). Neither is
+    # actively reading the staged object, so a past-deadline manifest's uncommitted object +
+    # manifest are reapable. `provisioning` is excluded — an in-flight provision may still be
+    # reading the object; `ready`/`torn_down` already committed or reclaimed via teardown.
+    _UPLOAD_SYSTEM_OWNER_KIND: (SystemState.DEFINED.value, SystemState.FAILED.value),
 }
-_OWNER_PRE_FINALIZE_QUERIES: dict[upload_manifest.UploadOwnerKind, sql.SQL] = {
-    _UPLOAD_RUN_OWNER_KIND: sql.SQL("SELECT 1 FROM runs WHERE id = %s AND state = %s"),
-    _UPLOAD_SYSTEM_OWNER_KIND: sql.SQL("SELECT 1 FROM systems WHERE id = %s AND state = %s"),
+_OWNER_REAPABLE_QUERIES: dict[upload_manifest.UploadOwnerKind, sql.SQL] = {
+    _UPLOAD_RUN_OWNER_KIND: sql.SQL("SELECT 1 FROM runs WHERE id = %s AND state = ANY(%s)"),
+    _UPLOAD_SYSTEM_OWNER_KIND: sql.SQL("SELECT 1 FROM systems WHERE id = %s AND state = ANY(%s)"),
 }
 
 
@@ -41,8 +46,9 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
 
     For ``runs`` the obligation is "a Run manifest past its deadline", swept whether the Run is
     pre-finalize (a true abandon) or finalized with incomplete chunk cleanup (the backstop for a
-    failed post-commit delete, ADR-0104 §7). The ``systems`` branch keeps its ``DEFINED`` gate
-    so the out-of-scope rootfs path is unchanged.
+    failed post-commit delete, ADR-0104 §7). The ``systems`` branch reaps a ``defined`` (abandoned)
+    or terminal ``failed`` System (ADR-0435), so a provision that failed after staging the uploaded
+    rootfs no longer strands its object + manifest; ``provisioning``/``ready`` stay gated out.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -50,11 +56,11 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
             "WHERE m.deadline < now() AND ("
             "  m.owner_kind = %s "
             "  OR (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = %s)))",
+            "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = ANY(%s))))",
             (
                 _UPLOAD_RUN_OWNER_KIND,
                 _UPLOAD_SYSTEM_OWNER_KIND,
-                _UPLOAD_PRE_FINALIZE_VALUES[_UPLOAD_SYSTEM_OWNER_KIND],
+                list(_UPLOAD_REAPABLE_STATES[_UPLOAD_SYSTEM_OWNER_KIND]),
             ),
         )
         candidates = await cur.fetchall()
@@ -86,8 +92,8 @@ async def reap_one_owner(
         if row is None:
             return False
         # The runs branch reaps a finalized Run's leftover chunks too (ADR-0104 §7); only the
-        # systems branch retains the pre-finalize (DEFINED) gate.
-        if owner_kind == _UPLOAD_SYSTEM_OWNER_KIND and not await owner_pre_finalize(
+        # systems branch re-checks its reapable-state gate ({defined, failed}, ADR-0435) under lock.
+        if owner_kind == _UPLOAD_SYSTEM_OWNER_KIND and not await owner_reapable(
             conn, owner_kind, owner_id
         ):
             return False
@@ -104,16 +110,16 @@ async def reap_one_owner(
     return True
 
 
-async def owner_pre_finalize(
+async def owner_reapable(
     conn: AsyncConnection, owner_kind: upload_manifest.UploadOwnerKind, owner_id: UUID
 ) -> bool:
-    """Report whether the owner is still in its pre-finalize state."""
-    query = _OWNER_PRE_FINALIZE_QUERIES.get(owner_kind)
+    """Report whether the owner is in a state whose past-deadline upload is reapable (ADR-0435)."""
+    query = _OWNER_REAPABLE_QUERIES.get(owner_kind)
     if query is None:
         raise ValueError(f"unsupported upload owner kind: {owner_kind}")
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             query,
-            (owner_id, _UPLOAD_PRE_FINALIZE_VALUES[owner_kind]),
+            (owner_id, list(_UPLOAD_REAPABLE_STATES[owner_kind])),
         )
         return await cur.fetchone() is not None
