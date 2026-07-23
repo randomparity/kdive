@@ -14,7 +14,7 @@ ARG TARGETARCH
 FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv-amd64
 FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv-arm64
 FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS uv-ppc64le
-RUN pip install --no-cache-dir uv==0.11.19 && cp "$(command -v uv)" /uv
+RUN pip install --no-cache-dir uv==0.11.29 && cp "$(command -v uv)" /uv
 FROM uv-${TARGETARCH} AS uv
 
 # Builder: resolve the uv environment (deps first for layer caching, then project).
