@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Carry transport encoding on the upload manifest entry
 - Validate transport encoding at upload declaration
 - Transport-strip gzip uploads + qcow2 format check (#1510)
+- Advertise transport-encoding upload surface (#1511)
 
 ### Changed
 
