@@ -353,6 +353,15 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "virtualization (the latter for its native-arch advisory line).",
     ),
     ExternalEnvVar(
+        "KDIVE_HOST_RUNTIME_DIRS",
+        "script",
+        "/var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs",
+        "Space-separated runtime directories `preflight-env.sh host` asserts are writable. These "
+        "paths are hardcoded in the provider (no setting redirects them) and live under "
+        "root-owned `/var/lib/kdive`, so a non-root worker needs them pre-created; the default "
+        "tracks the constants in `runtime_paths.py` and `lifecycle/storage.py`.",
+    ),
+    ExternalEnvVar(
         "KDIVE_BOOT_DIR",
         "script",
         "/boot",

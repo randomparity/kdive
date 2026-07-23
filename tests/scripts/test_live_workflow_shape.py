@@ -223,3 +223,15 @@ def test_tcg_job_preflights_the_host_before_staging() -> None:
     host_check = spine.index("preflight-env.sh host")
     staging = spine.index("stage-tcg-images.sh")
     assert host_check < staging, "the host preflight must run before the staging spine"
+
+
+def test_tcg_job_provisions_the_hardcoded_runtime_directories() -> None:
+    """The provider cannot be pointed elsewhere for these, and /var/lib/kdive is root-owned.
+
+    The console dir is the one that actually broke a run; pcap and rootfs are the rest of the same
+    class, provisioned together so the next System-provisioning proof does not rediscover them.
+    """
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    for path in ("/var/lib/kdive/console", "/var/lib/kdive/pcap", "/var/lib/kdive/rootfs"):
+        assert path in joined, f"the tcg job must provision {path}"

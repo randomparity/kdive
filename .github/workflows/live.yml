@@ -99,6 +99,19 @@ jobs:
           sudo loginctl enable-linger "$(id -un)"
           ls -l /dev/kvm
 
+      # The provider hardcodes these paths (runtime_paths.py's console/pcap dirs, storage.py's
+      # ROOTFS_DIR) — no env points them elsewhere — and they sit under root-owned /var/lib/kdive,
+      # which this non-root job cannot create in. deploy/ansible/roles/live_vm_host provisions the
+      # equivalent set on the self-hosted box; a hosted runner starts bare, so do it here.
+      # preflight-env.sh's host family asserts the same list, and a test pins that list against the
+      # constants in src so a newly hardcoded dir cannot silently reintroduce this.
+      - name: Provision the runner-owned runtime directories under /var/lib/kdive
+        run: |
+          sudo mkdir -p /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
+          sudo chown -R "$(id -u):$(id -g)" /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
+          sudo chmod 0755 /var/lib/kdive
+          ls -ld /var/lib/kdive /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
+
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
