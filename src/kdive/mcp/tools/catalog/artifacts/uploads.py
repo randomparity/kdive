@@ -17,7 +17,12 @@ import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
-from kdive.artifacts.transport_encoding import KNOWN_ENCODINGS, normalize_encoding
+from kdive.artifacts.transport_encoding import (
+    GZIP_ENCODING,
+    IDENTITY_ENCODING,
+    KNOWN_ENCODINGS,
+    normalize_encoding,
+)
 from kdive.artifacts.uploads import (
     MAX_PART_BYTES,
     MAX_PARTS,
@@ -126,6 +131,51 @@ UPLOAD_DECLARATION_ITEM_SCHEMA: dict[str, JsonValue] = {
     },
 }
 
+# The transport-encoding properties (ADR-0437/0439), advertised only on an owner whose consumer
+# strips the encoding (systems/rootfs; runs rejects a non-identity encoding at declaration). Kept in
+# a separate dict so ``sha256``/``size_bytes`` above stay described as the stored (transport) bytes.
+_ENCODING_DECLARATION_PROPERTIES: dict[str, JsonValue] = {
+    "encoding": {
+        "type": "string",
+        "enum": [GZIP_ENCODING, IDENTITY_ENCODING],
+        "description": (
+            "Optional transport encoding of the uploaded object. 'gzip' means you upload a gzip of "
+            "the canonical qcow2 (kdive strips it on download to recover the qcow2); omit (or "
+            "'identity') to upload the qcow2 directly. gzip is single-PUT only — it cannot be "
+            "combined with chunks — and requires uncompressed_size. sha256/size_bytes still "
+            "describe the uploaded (compressed) bytes."
+        ),
+    },
+    "uncompressed_size": {
+        "type": "integer",
+        "description": (
+            "Required with encoding='gzip': the canonical (decompressed) qcow2 size in bytes. It "
+            "is the gzip-bomb bound and is checked at declaration against the 50 GiB "
+            "canonical-object cap. Omit when there is no encoding."
+        ),
+    },
+}
+
+
+def _with_encoding(base: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Return a copy of ``base`` whose ``properties`` also advertise the transport-encoding fields.
+
+    Used to build the systems declaration item schema (its rootfs consumer strips the encoding)
+    without mutating the shared ``UPLOAD_DECLARATION_ITEM_SCHEMA`` runs advertises unchanged.
+    """
+    properties = {
+        **cast("dict[str, JsonValue]", base["properties"]),
+        **_ENCODING_DECLARATION_PROPERTIES,
+    }
+    return {**base, "properties": properties}
+
+
+# The systems (rootfs) declaration item schema: the shared shape plus the transport-encoding fields
+# its ADR-0438 consumer strips. Runs keeps the base schema (it rejects a non-identity encoding).
+SYSTEM_UPLOAD_DECLARATION_ITEM_SCHEMA: dict[str, JsonValue] = _with_encoding(
+    UPLOAD_DECLARATION_ITEM_SCHEMA
+)
+
 
 # One single-PUT and one chunked declaration per owner-kind, rendered into the generated
 # tool reference (ADR-0047/0173). The item *shape* is shared, but the example artifact
@@ -150,7 +200,22 @@ def _declaration_examples(single_name: str, chunked_name: str) -> list[JsonValue
 
 
 RUN_DECLARATION_EXAMPLES: list[JsonValue] = _declaration_examples("kernel", "vmlinux")
-SYSTEM_DECLARATION_EXAMPLES: list[JsonValue] = _declaration_examples("rootfs", "rootfs")
+# Systems reject chunked uploads (ADR-0436) and their rootfs consumer strips a gzip transport
+# encoding (ADR-0438), so the two worked examples are both single-PUT: an identity qcow2 and a gzip
+# of a canonical qcow2 larger than the 5 GiB single-PUT cap (compressed under it) carrying
+# encoding + uncompressed_size (ADR-0439).
+SYSTEM_DECLARATION_EXAMPLES: list[JsonValue] = [
+    [{"name": "rootfs", "sha256": "rL0Y20zC...base64...", "size_bytes": 12582912}],
+    [
+        {
+            "name": "rootfs",
+            "sha256": "kZ8s1f9q...base64...",
+            "size_bytes": 402653184,
+            "encoding": GZIP_ENCODING,
+            "uncompressed_size": 6442450944,
+        }
+    ],
+]
 
 
 def _upload_ttl() -> timedelta:

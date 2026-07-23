@@ -27,19 +27,22 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.serialization import JsonValue
 
 
-def _declaration_schema_extra(examples: Sequence[JsonValue]) -> dict[str, object]:
-    """Advertise the upload-declaration item schema + ``examples`` (ADR-0173).
+def _declaration_schema_extra(
+    examples: Sequence[JsonValue], *, item_schema: dict[str, JsonValue]
+) -> dict[str, object]:
+    """Advertise the upload-declaration ``item_schema`` + ``examples`` (ADR-0173).
 
     Merged into the ``artifacts`` array parameter's advertised JSON Schema so a black-box
     client can discover the declaration shape. Returns a fresh dict so pydantic/FastMCP
     never mutates the shared module constants. Advertisement only: the runtime parameter
     stays a permissive ``Mapping`` (``ArtifactDeclaration``), so a malformed declaration
     still reaches the ADR-0166 self-correcting validators rather than a boundary error. The
-    item *shape* is shared across both upload tools; ``examples`` carry each tool's
-    accepted artifact names.
+    item schema is per-owner (ADR-0439): the systems schema advertises the transport
+    ``encoding``/``uncompressed_size`` its rootfs consumer strips, the run schema does not
+    (runs rejects a non-identity encoding); ``examples`` carry each tool's accepted names.
     """
     return {
-        "items": artifact_uploads.UPLOAD_DECLARATION_ITEM_SCHEMA,
+        "items": item_schema,
         "examples": examples,
     }
 
@@ -211,7 +214,8 @@ def _register_artifacts_create_run_upload(
             Field(
                 description="Declared build artifacts: [{name, sha256 (base64), size_bytes}].",
                 json_schema_extra=_declaration_schema_extra(
-                    artifact_uploads.RUN_DECLARATION_EXAMPLES
+                    artifact_uploads.RUN_DECLARATION_EXAMPLES,
+                    item_schema=artifact_uploads.UPLOAD_DECLARATION_ITEM_SCHEMA,
                 ),
             ),
         ],
@@ -235,6 +239,10 @@ def _register_artifacts_create_run_upload(
         upload if it is not finalized. If a window lapses, re-call this tool to reset the
         deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
         single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
+
+        Build artifacts are uploaded as-is: a transport `encoding` (gzip) is not accepted on this
+        lane and is rejected at declaration — it is a systems-only (rootfs) surface. See
+        `artifacts.create_system_upload`.
 
         Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
         System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
@@ -262,9 +270,14 @@ def _register_artifacts_create_system_upload(
         artifacts: Annotated[
             list[artifact_uploads.ArtifactDeclaration],
             Field(
-                description="Declared rootfs artifact: [{name, sha256 (base64), size_bytes}].",
+                description=(
+                    "Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. Single PUT "
+                    "only (no chunks). To upload a qcow2 larger than the 5 GiB single-PUT limit, "
+                    "gzip it and add encoding='gzip' + uncompressed_size (canonical qcow2 size)."
+                ),
                 json_schema_extra=_declaration_schema_extra(
-                    artifact_uploads.SYSTEM_DECLARATION_EXAMPLES
+                    artifact_uploads.SYSTEM_DECLARATION_EXAMPLES,
+                    item_schema=artifact_uploads.SYSTEM_UPLOAD_DECLARATION_ITEM_SCHEMA,
                 ),
             ),
         ],
@@ -286,8 +299,19 @@ def _register_artifacts_create_system_upload(
         from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
         earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
         upload if it is not finalized. If a window lapses, re-call this tool to reset the
-        deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only for a
-        single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
+        deadline (`manifest_mode: "replace"`); see `data.on_expiry`. Re-minting resets the deadline
+        but is not a way to beat the clock, and neither is chunking — the rootfs must be a single
+        PUT (gzip a large qcow2 instead; see below).
+
+        Large rootfs (transport encoding): the rootfs must be a single PUT — chunked upload is
+        rejected. To upload a qcow2 whose size exceeds the 5 GiB single-PUT limit, gzip it and
+        declare `encoding: "gzip"` with `uncompressed_size` set to the canonical (decompressed)
+        qcow2 size in bytes. kdive strips the gzip on download, streaming and bomb-bounded, then
+        verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
+        `uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
+        encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
+        (compressed) bytes. Omit `encoding` to upload a qcow2 directly. Encoding is a rootfs-only
+        surface — `artifacts.create_run_upload` rejects it.
         """
         return await artifact_uploads.create_system_upload(
             pool,

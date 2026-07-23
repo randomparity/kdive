@@ -111,10 +111,48 @@ def test_run_tool_carries_single_put_and_chunked_examples() -> None:
     assert single[0]["name"] == "kernel"
 
 
-def test_system_tool_examples_use_rootfs_vocabulary() -> None:
+def test_system_tool_examples_are_single_put_identity_and_gzip() -> None:
+    """Systems reject chunks (ADR-0436); the two examples are single-PUT identity + gzip (#1511)."""
     examples = _artifacts_examples("artifacts.create_system_upload")
     assert len(examples) == 2
-    single, chunked = examples
-    assert single[0]["name"] == "rootfs"
-    assert chunked[0]["name"] == "rootfs"
-    assert "chunks" in chunked[0]
+    identity, gzipped = examples
+    assert identity[0]["name"] == "rootfs"
+    assert "chunks" not in identity[0]
+    assert "encoding" not in identity[0]
+    # The gzip example advertises the transport-encoding surface with its required companion.
+    assert gzipped[0]["name"] == "rootfs"
+    assert "chunks" not in gzipped[0]
+    assert gzipped[0]["encoding"] == "gzip"
+    assert isinstance(gzipped[0]["uncompressed_size"], int)
+    # sha256/size_bytes describe the compressed bytes, which are smaller than the canonical object.
+    assert gzipped[0]["size_bytes"] < gzipped[0]["uncompressed_size"]
+
+
+def test_only_system_tool_advertises_transport_encoding_fields() -> None:
+    """The systems item schema advertises encoding/uncompressed_size; the run schema does not.
+
+    The transport encoding is a per-owner (rootfs) surface (ADR-0439): the run lane rejects a
+    non-identity encoding at declaration, so advertising it there would invite a guaranteed
+    rejection. This binds the per-owner schema split.
+    """
+    system_props = _artifacts_item_schema("artifacts.create_system_upload")["properties"]
+    assert system_props["encoding"]["enum"] == ["gzip", "identity"]
+    assert system_props["uncompressed_size"]["type"] == "integer"
+
+    run_props = _artifacts_item_schema("artifacts.create_run_upload")["properties"]
+    assert "encoding" not in run_props
+    assert "uncompressed_size" not in run_props
+
+
+def test_system_tool_description_documents_encoding_constraints() -> None:
+    description = _tool_description("artifacts.create_system_upload").lower()
+    assert "encoding" in description
+    assert "gzip" in description
+    assert "uncompressed_size" in description
+    assert "50 gib" in description
+
+
+def test_run_tool_description_states_encoding_not_accepted() -> None:
+    description = _tool_description("artifacts.create_run_upload").lower()
+    assert "encoding" in description
+    assert "systems-only" in description or "rootfs" in description
