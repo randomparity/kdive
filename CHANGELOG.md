@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preflight the libvirt/KVM host contract
 - Add worker-side strict console read seam
 - Preflight the hardcoded provider runtime dirs
+- Remote leaked-domain InfraReaper + composite fault isolation
 
 ### Changed
 
