@@ -1,6 +1,6 @@
 # ADR-0114: Production-release readiness — docs structure, host preflight, packaging
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-14
 - Deciders: maintainers
 - Supersedes: none
