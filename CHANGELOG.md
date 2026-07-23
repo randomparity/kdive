@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add column-agnostic render_envelope for generated verbs
 
+### Changed
+
+- Consolidate mutations _flatten onto flatten_envelope
+
 ### Documentation
 
 - Add ADR-0421 schema-generated kdivectl verbs
