@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Host_dump profile-section opt-in
 - Preflight the libvirt/KVM host contract
 - Add worker-side strict console read seam
+- Preflight the hardcoded provider runtime dirs
 
 ### Changed
 
@@ -39,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0425 remote-libvirt live_vm family + tier-map + host-dep note
 - Clarify remote live_vm family drives a remote host, not local silicon
 - Catalog the live_vm_remote test env vars
+- Regenerate the reference for KDIVE_HOST_RUNTIME_DIRS
 
 ### Fixed
 
@@ -55,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the host kernel readable to libguestfs on the tcg gate
 - Give the tcg gate an importable guestfs binding
 - Provision the libvirt/KVM host contract on the tcg gate
+- Provision the runtime directories on the tcg gate
 
 ### Build
 
