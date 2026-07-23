@@ -17,6 +17,7 @@ import kdive.config as config
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
+from kdive.artifacts.transport_encoding import KNOWN_ENCODINGS, normalize_encoding
 from kdive.artifacts.uploads import (
     MAX_PART_BYTES,
     MAX_PARTS,
@@ -200,6 +201,13 @@ class _UploadOwnerSpec:
     project: Callable[[AsyncConnection, UUID], Awaitable[str | None]]
     accepts_upload: Callable[[AsyncConnection, UUID, ProviderResolver], Awaitable[bool]]
     allow_chunks: bool = True  # False when the owner's install path reads only a single-PUT object
+    # ADR-0437: only an owner with a registered decompressing consumer accepts a non-identity
+    # transport ``encoding``; others reject it at declaration (no accept-then-ignore).
+    accepts_encoding: bool = False
+    # The canonical-object (decompressed) size ceiling this owner enforces at declaration when a
+    # transport encoding is declared. Both owner caps live here so a consumer never edits the
+    # validator; the compressed single-PUT size is bound separately by ``SINGLE_PUT_MAX_BYTES``.
+    uncompressed_cap: int = SINGLE_PUT_MAX_BYTES
 
 
 def _bad_declaration(
@@ -254,6 +262,86 @@ def _validate_one_declaration(
     return name, sha256, size
 
 
+def _validate_encoding(
+    object_id: str,
+    declaration: ArtifactDeclaration,
+    *,
+    accepts_encoding: bool,
+    uncompressed_cap: int,
+    has_chunks: bool,
+) -> tuple[str | None, int | None] | ToolResponse:
+    """Validate the optional transport ``encoding``/``uncompressed_size`` fields (ADR-0437).
+
+    Returns the effective ``(encoding, uncompressed_size)`` — ``(None, None)`` for an identity
+    declaration (absent or ``"identity"``) — or a self-correcting rejection (ADR-0166) when the
+    encoding is unknown, unsupported for the owner, combined with chunks, missing a required
+    ``uncompressed_size``, over the owner's canonical-object cap, or carries a stray
+    ``uncompressed_size`` with no encoding.
+    """
+    raw_encoding = declaration.get("encoding")
+    raw_uncompressed = declaration.get("uncompressed_size")
+    if raw_encoding is not None and (
+        not isinstance(raw_encoding, str) or raw_encoding not in KNOWN_ENCODINGS
+    ):
+        return _config_error(
+            object_id,
+            detail=(
+                "unknown transport encoding: only 'gzip' (or 'identity'/omitted for no encoding) "
+                "is supported; re-declare without encoding or with encoding='gzip'"
+            ),
+            data={"reason": "unknown_encoding"},
+        )
+    encoding = normalize_encoding(raw_encoding) if isinstance(raw_encoding, str) else None
+    if encoding is None:
+        if raw_uncompressed is not None:
+            return _config_error(
+                object_id,
+                detail=(
+                    "uncompressed_size is only meaningful with a transport encoding: omit it, or "
+                    "declare encoding='gzip' with the canonical object's size"
+                ),
+                data={"reason": "uncompressed_size_without_encoding"},
+            )
+        return None, None
+    if not accepts_encoding:
+        return _config_error(
+            object_id,
+            detail=(
+                "this upload does not accept a transport encoding: re-declare without encoding and "
+                "upload the canonical object directly"
+            ),
+            data={"reason": "encoding_not_supported"},
+        )
+    if has_chunks:
+        return _config_error(
+            object_id,
+            detail=(
+                "a transport-encoded upload must be a single PUT: encoding cannot be combined with "
+                "chunks (omit chunks and declare a single-PUT encoded upload)"
+            ),
+            data={"reason": "encoding_with_chunks"},
+        )
+    if not isinstance(raw_uncompressed, int) or raw_uncompressed <= 0:
+        return _config_error(
+            object_id,
+            detail=(
+                "a transport encoding requires a positive integer uncompressed_size (the canonical "
+                "object's size in bytes); re-declare with uncompressed_size"
+            ),
+            data={"reason": "uncompressed_size_required"},
+        )
+    if raw_uncompressed > uncompressed_cap:
+        return _config_error(
+            object_id,
+            detail=(
+                f"uncompressed_size exceeds the {uncompressed_cap}-byte canonical-object cap for "
+                "this upload; the decompressed object is too large"
+            ),
+            data={"reason": "uncompressed_size_over_cap"},
+        )
+    return encoding, raw_uncompressed
+
+
 def _validate_artifact_declarations(
     object_id: str,
     artifacts: Sequence[ArtifactDeclaration],
@@ -261,6 +349,8 @@ def _validate_artifact_declarations(
     cap: int,
     *,
     allow_chunks: bool = True,
+    accepts_encoding: bool = False,
+    uncompressed_cap: int = SINGLE_PUT_MAX_BYTES,
 ) -> list[ManifestEntry] | ToolResponse:
     entries: list[ManifestEntry] = []
     for declaration in artifacts:
@@ -270,10 +360,28 @@ def _validate_artifact_declarations(
         name, sha256, size = validated_declaration
         artifact_cap = EFFECTIVE_CONFIG_MAX_BYTES if name == "effective_config" else cap
         raw_chunks = declaration.get("chunks")
+        encoding_result = _validate_encoding(
+            object_id,
+            declaration,
+            accepts_encoding=accepts_encoding,
+            uncompressed_cap=uncompressed_cap,
+            has_chunks=raw_chunks is not None,
+        )
+        if isinstance(encoding_result, ToolResponse):
+            return encoding_result
+        encoding, uncompressed_size = encoding_result
         if raw_chunks is None:
             if size <= 0 or size > min(SINGLE_PUT_MAX_BYTES, artifact_cap):
                 return _config_error(object_id, data={"reason": "size_out_of_range"})
-            entries.append(ManifestEntry(name=name, sha256=sha256, size_bytes=size))
+            entries.append(
+                ManifestEntry(
+                    name=name,
+                    sha256=sha256,
+                    size_bytes=size,
+                    encoding=encoding,
+                    uncompressed_size=uncompressed_size,
+                )
+            )
             continue
         if not allow_chunks:
             # ADR-0436: a chunked (multipart) upload reassembles into an object whose only stored
@@ -424,6 +532,15 @@ async def _system_accepts_upload(
     return rootfs_upload_window_allowed(runtime.profile_policy, parsed)
 
 
+# Canonical-object (decompressed) size ceilings, enforced at declaration when a transport encoding
+# is declared (ADR-0437). Systems (rootfs) is the only owner with a decompressing consumer (Sub 2,
+# #1510); its cap matches the ``KDIVE_MAX_UPLOAD_BYTES`` per-artifact ceiling (50 GiB) — the
+# canonical object is bound by the same ceiling whether it arrives raw or transport-gzipped. Runs
+# has no decompressing consumer and rejects a non-identity encoding outright, so its cap (the 5 GiB
+# single-PUT ceiling) only ever gates a future opt-in.
+_SYSTEM_UNCOMPRESSED_CAP = 50 * 1024 * 1024 * 1024
+_RUN_UNCOMPRESSED_CAP = SINGLE_PUT_MAX_BYTES
+
 _RUN_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.RUN_UPLOAD_OWNER,
     required_role=Role.CONTRIBUTOR,
@@ -433,6 +550,8 @@ _RUN_UPLOAD = _UploadOwnerSpec(
     audit_object_kind="runs",
     project=_run_project,
     accepts_upload=_run_accepts_upload,
+    accepts_encoding=False,  # no decompressing consumer for build artifacts (ADR-0437)
+    uncompressed_cap=_RUN_UNCOMPRESSED_CAP,
 )
 _SYSTEM_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
@@ -444,6 +563,8 @@ _SYSTEM_UPLOAD = _UploadOwnerSpec(
     project=_system_project,
     accepts_upload=_system_accepts_upload,
     allow_chunks=False,  # #743 install verifies plain SHA-256; a composite can't (ADR-0436)
+    accepts_encoding=True,  # rootfs consumer strips gzip on download (Sub 2, #1510; ADR-0437)
+    uncompressed_cap=_SYSTEM_UNCOMPRESSED_CAP,
 )
 
 
@@ -480,6 +601,8 @@ async def _create_upload(
                 spec.allowed_names,
                 _max_upload_bytes(),
                 allow_chunks=spec.allow_chunks,
+                accepts_encoding=spec.accepts_encoding,
+                uncompressed_cap=spec.uncompressed_cap,
             )
             if isinstance(validated, ToolResponse):
                 return validated
