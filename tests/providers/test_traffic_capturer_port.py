@@ -11,8 +11,17 @@ def test_traffic_capture_is_fail_closed_by_default() -> None:
     assert ProviderRuntime.__dataclass_fields__["traffic_capturer"].default is None
 
 
-def test_traffic_capturer_is_a_runtime_protocol() -> None:
-    # Structural check: an object with attach/detach satisfies the protocol at type-check time;
-    # here we assert the protocol names the two primitives the handler drives.
-    assert hasattr(TrafficCapturer, "attach")
-    assert hasattr(TrafficCapturer, "detach")
+def test_traffic_capturer_names_the_file_side_primitives() -> None:
+    # Structural check: the protocol names attach/detach plus the provider-dispatched file side
+    # (ADR-0432) the handler drives — prepare/captured_size/fetch/reclaim/write_remediation — so a
+    # remote provider can own where the pcap lives, not just how it is captured.
+    for name in (
+        "prepare",
+        "attach",
+        "detach",
+        "captured_size",
+        "fetch",
+        "reclaim",
+        "write_remediation",
+    ):
+        assert hasattr(TrafficCapturer, name)

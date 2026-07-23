@@ -1,24 +1,50 @@
-"""Traffic-capture provider port (ADR-0385): host-side pcap of a running guest's netdev.
+"""Traffic-capture provider port (ADR-0385/0432): host-side pcap of a running guest's netdev.
 
-Thin primitives — the worker handler owns the bounded poll loop and cancellation, so a provider
-only attaches/detaches a capture sink keyed on the provider domain name (DB-free, like the
-Controller port). This keeps the size-poll and the async job-cancel read in the handler, off the
-synchronous libvirt thread.
+The worker handler owns the bounded poll loop and cancellation, so the provider stays thin: it
+attaches/detaches a capture sink keyed on the provider domain name (DB-free, like the Controller
+port), and owns the *file side* of the capture — where the pcap lives, its growing size, reading it
+back, and reclaiming it. That file side is provider-dispatched (ADR-0432) rather than assumed
+worker-local: local-libvirt writes a worker-readable file, remote-libvirt writes on the remote host
+and streams it back over ``qemu+tls``. The handler names only the sink (``qom_id``), the snaplen,
+and an opaque ``dest_path`` token the provider returns from :meth:`prepare`.
 """
 
 from __future__ import annotations
 
 from typing import Protocol
+from uuid import UUID
 
 
 class TrafficCapturer(Protocol):
-    """Attach/detach a host-side packet-capture sink on a running guest's netdev.
+    """Attach/detach a host-side packet-capture sink and own the pcap file lifecycle.
 
-    Which netdev is captured is a provider-internal detail (the local-libvirt SSH-forward netdev),
-    so it is not a port parameter — the handler names only the sink (``qom_id``), the destination,
-    and the snaplen. This keeps the local-libvirt XML netdev id from crossing the provider boundary
-    into the handler.
+    Which netdev is captured is a provider-internal detail (local-libvirt's SSH-forward netdev;
+    remote-libvirt's runtime-discovered data-plane netdev), so it is not a port parameter. The
+    ``dest_path`` returned by :meth:`prepare` is an opaque provider token — a worker path for
+    local-libvirt, a remote storage-pool path for remote-libvirt — that the handler threads through
+    :meth:`attach`/:meth:`detach`/:meth:`captured_size`/:meth:`fetch`/:meth:`reclaim` without
+    interpreting it.
     """
+
+    @property
+    def write_remediation(self) -> str:
+        """Operator guidance when a short/absent pcap means the hypervisor could not write it.
+
+        The handler attaches this to the ``pcap_not_written`` configuration error; each provider
+        returns the remedy for *its* write path (local: the qemu:///system pcap dir; remote: the
+        storage pool).
+        """
+        ...
+
+    def prepare(self, system_id: UUID, job_id: UUID) -> str:
+        """Prepare the capture destination and return the opaque ``dest_path`` token.
+
+        Local-libvirt prepares the per-System pcap directory (QEMU-writable, SELinux-labelled) and
+        returns the worker path. Remote-libvirt pre-deletes this job's own stale pcap volume (so an
+        at-least-once retry starts clean, without disturbing a concurrent capture on the same
+        System) and returns the remote storage-pool path. Called once before :meth:`attach`.
+        """
+        ...
 
     def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
         """Start capturing into libpcap file ``dest_path`` (``snaplen`` bytes/pkt).
@@ -31,4 +57,20 @@ class TrafficCapturer(Protocol):
 
     def detach(self, domain_name: str, *, qom_id: str) -> None:
         """Remove the capture sink ``qom_id`` (tolerating not-found)."""
+        ...
+
+    def captured_size(self, dest_path: str) -> int:
+        """Current byte size of the growing pcap (0 if not yet written), for the poll loop."""
+        ...
+
+    def fetch(self, dest_path: str, *, max_bytes: int) -> bytes:
+        """Read the captured pcap back to worker memory; an absent capture is empty ``bytes``.
+
+        Bounded by ``max_bytes`` (a mid-stream overrun on the remote download raises). Raises
+        ``CategorizedError`` on a genuine read fault (e.g. the ADR-0223 root-readback wall).
+        """
+        ...
+
+    def reclaim(self, dest_path: str) -> None:
+        """Delete the host-side pcap; best-effort, never masks the handler's real result."""
         ...

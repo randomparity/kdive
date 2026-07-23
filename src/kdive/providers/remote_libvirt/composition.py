@@ -69,6 +69,7 @@ from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtContro
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.lifecycle.snapshot import RemoteLibvirtSnapshotter
+from kdive.providers.remote_libvirt.lifecycle.traffic_capture import RemoteLibvirtTrafficCapture
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
@@ -326,6 +327,10 @@ def build_runtime(
             # Internal libvirt snapshots over qemu+tls on the remote host (ADR-0428, #1430). The
             # deferred ADR-0378 opt-in; matches the wired ``snapshot`` port below.
             supports_snapshots=True,
+            # Host-side pcap via QEMU filter-dump over qemu+tls, fetched back through the storage
+            # -volume download stream (ADR-0432, #1434). The deferred ADR-0385 opt-in; matches the
+            # wired ``traffic_capturer`` port below.
+            supports_traffic_capture=True,
         ),
         debug=_debug_capabilities(secret_registry),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
@@ -341,6 +346,12 @@ def build_runtime(
         # Internal RAM+disk/disk-only domain snapshots over qemu+tls (ADR-0428, #1430). Matches
         # ``support.supports_snapshots``; the teardown path reclaims them via ``delete_all``.
         snapshot=RemoteLibvirtSnapshotter.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
+        # Host-side filter-dump traffic capture with pcap fetch-back over qemu+tls (ADR-0432,
+        # #1434). Matches ``support.supports_traffic_capture``; the handler drives its
+        # prepare/attach/size/detach/fetch/reclaim primitives provider-agnostically.
+        traffic_capturer=RemoteLibvirtTrafficCapture.from_env(
             secret_registry=secret_registry, config_factory=config_factory
         ),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
