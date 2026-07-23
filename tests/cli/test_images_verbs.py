@@ -281,6 +281,23 @@ def test_denied_envelope_maps_to_exit_3(monkeypatch: pytest.MonkeyPatch) -> None
     assert code == 3
 
 
+def test_list_denial_envelope_maps_to_exit_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A server-side denial returns a failure envelope; images list must surface exit 3, not the
+    # empty-success exit 0 that ignoring the envelope's error_category would leave (ADR-0089).
+    _install(
+        monkeypatch,
+        payload={
+            "object_id": "images",
+            "status": "error",
+            "error_category": "authorization_denied",
+            "data": {},
+            "items": [],
+        },
+    )
+    code = asyncio.run(images.images_list(_args()))
+    assert code == 3
+
+
 def test_mutating_image_verbs_run_preflight_first(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _FakeClient({"object_id": "o", "status": "ok", "data": {}})
     monkeypatch.setattr(mutations, "_session_factory", lambda: _FakeSession(client))

@@ -16,6 +16,7 @@ import argparse
 
 from kdive.cli.commands.mutations import run_mutating_tool
 from kdive.cli.commands.reads import collection_rows, fetch_collection_envelope
+from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.render import emit, render
 
 
@@ -39,7 +40,7 @@ async def images_list(args: argparse.Namespace) -> int:
     envelope = await fetch_collection_envelope("images.list", {})
     columns = ["id", "name", "arch", "visibility", "owner", "state"]
     emit(envelope, lambda: render(collection_rows(envelope), columns=columns), as_json=args.json)
-    return 0
+    return exit_code_for_envelope(envelope)
 
 
 async def images_upload(args: argparse.Namespace) -> int:
