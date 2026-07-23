@@ -418,6 +418,14 @@ rbac-matrix:
 rbac-matrix-check:
     uv run python scripts/gen_rbac_tool_matrix.py --check
 
+# Regenerate the committed kdivectl verb descriptors from the live tool schemas (mutating, #1447).
+cli-verbs:
+    uv run python scripts/gen_cli_verbs.py
+
+# Verify the committed kdivectl verb descriptors match a fresh generation (CI gate, #1447).
+cli-verbs-check:
+    uv run python scripts/gen_cli_verbs.py --check
+
 # Structural guard: no KDIVE_* env read outside kdive.config (ADR-0087). Stdlib-only.
 config-guard:
     uv run python scripts/config_env_guard.py
@@ -457,4 +465,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check doc-constants-check chart-version-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
