@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add shared streaming gzip strip-decode utility
 - Carry transport encoding on the upload manifest entry
 - Validate transport encoding at upload declaration
+- Transport-strip gzip uploads + qcow2 format check (#1510)
 
 ### Changed
 
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make verb-classification branch explicit in gen_cli_verbs
 - Capability gates, not identity gates
 - Simplify rootfs upload cleanups from /simplify pass
+- Extract shared staging-fault + partial-discard helpers
 
 ### Documentation
 
@@ -82,6 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reap a failed upload System's stranded object
 - Reject chunked rootfs upload for local-libvirt Systems
 - Fail closed on trailing data after the gzip member
+- Name an unsupported transport encoding instead of staging it
 
 ### Build
 
