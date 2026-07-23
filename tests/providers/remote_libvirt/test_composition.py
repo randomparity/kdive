@@ -51,6 +51,19 @@ def test_remote_runtime_advertises_and_wires_snapshots() -> None:
     assert isinstance(runtime.snapshot, RemoteLibvirtSnapshotter)
 
 
+def test_remote_runtime_advertises_and_wires_traffic_capture() -> None:
+    # ADR-0432 (#1434): remote sets supports_traffic_capture=True *and* wires the TrafficCapturer
+    # port. The two must agree (the #1428 parity guard enforces the pairing); a capture-capable
+    # provider sets both, so control.capture_traffic is reachable against a remote System.
+    from kdive.providers.remote_libvirt.lifecycle.traffic_capture import (
+        RemoteLibvirtTrafficCapture,
+    )
+
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+    assert runtime.support.supports_traffic_capture is True
+    assert isinstance(runtime.traffic_capturer, RemoteLibvirtTrafficCapture)
+
+
 def test_remote_runtime_sets_rebind_for_resource() -> None:
     # ADR-0187: the remote runtime carries a per-resource rebind hook so the resolver can bind it
     # to the granted host; the base runtime is buildable without operator config (ADR-0076).

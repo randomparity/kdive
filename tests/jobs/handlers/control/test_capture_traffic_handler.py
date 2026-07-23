@@ -59,12 +59,28 @@ class _FakeStore:
 
 
 class _FakeCapturer:
-    """Records the full attach/detach argument set; ``attach`` writes ``pcap`` to the dest path."""
+    """Full TrafficCapturer lifecycle over a worker temp dir; records every argument.
+
+    ``prepare`` returns a per-job path under its own temp dir, ``attach`` writes ``pcap`` there, and
+    ``fetch``/``captured_size``/``reclaim`` operate on that path — so the handler drives the same
+    provider-dispatched file side both providers use, with no monkeypatching of module helpers.
+    """
 
     def __init__(self, pcap: bytes | None = _PCAP_ONE) -> None:
         self._pcap = pcap
+        self._dir = Path(tempfile.mkdtemp(prefix="kdive-pcap-test-"))
+        self.prepared: list[tuple[UUID, UUID]] = []
         self.attached: list[dict[str, Any]] = []
         self.detached: list[dict[str, Any]] = []
+        self.reclaimed: list[str] = []
+
+    @property
+    def write_remediation(self) -> str:
+        return "fake remediation: make the capture destination writable"
+
+    def prepare(self, system_id: UUID, job_id: UUID) -> str:
+        self.prepared.append((system_id, job_id))
+        return str(self._dir / f"{job_id}.pcap")
 
     def attach(self, domain_name, *, qom_id, dest_path, snaplen) -> None:
         self.attached.append(
@@ -75,6 +91,18 @@ class _FakeCapturer:
 
     def detach(self, domain_name, *, qom_id) -> None:
         self.detached.append({"domain": domain_name, "qom_id": qom_id})
+
+    def captured_size(self, dest_path: str) -> int:
+        path = Path(dest_path)
+        return path.stat().st_size if path.exists() else 0
+
+    def fetch(self, dest_path: str, *, max_bytes: int) -> bytes:
+        path = Path(dest_path)
+        return path.read_bytes() if path.exists() else b""
+
+    def reclaim(self, dest_path: str) -> None:
+        self.reclaimed.append(dest_path)
+        Path(dest_path).unlink(missing_ok=True)
 
 
 def _job(run_id: str, *, capture_filter: str | None = None, duration_s: int = 1) -> Job:
@@ -152,35 +180,18 @@ class _LoopSpy:
 
 
 async def _run_with_spy(pool, store, capturer, job, *, loop_spy, monkeypatch):
-    """Drive the handler with a stubbed loop; return the result + recorded pcap-path args."""
+    """Drive the handler with a stubbed loop; the capturer owns its own dest path (no patching)."""
     resolver = provider_resolver(traffic_capturer=capturer)
-    base = Path(tempfile.mkdtemp(prefix="kdive-pcap-test-"))
-    path_calls: dict[str, Any] = {}
-
-    def _pcap_path(sid, jid):
-        path_calls["pcap_path"] = (sid, jid)
-        return base / f"{jid}.pcap"
-
-    def _prepare(sid):
-        path_calls["prepare"] = sid
-        return base
-
     monkeypatch.setattr(capture_traffic, "run_capture_loop", loop_spy)
-    monkeypatch.setattr(capture_traffic, "prepare_pcap_dir", _prepare)
-    monkeypatch.setattr(capture_traffic, "pcap_path", _pcap_path)
     async with pool.connection() as conn:
-        result = await capture_traffic.capture_traffic_handler(
+        return await capture_traffic.capture_traffic_handler(
             conn, job, resolver=resolver, artifact_store=cast(ObjectStore, store)
         )
-    return result, path_calls
 
 
 async def _run(pool, store, capturer, job, *, loop_result, monkeypatch):
     spy = _LoopSpy(loop_result)
-    result, _ = await _run_with_spy(
-        pool, store, capturer, job, loop_spy=spy, monkeypatch=monkeypatch
-    )
-    return result
+    return await _run_with_spy(pool, store, capturer, job, loop_spy=spy, monkeypatch=monkeypatch)
 
 
 async def _artifact_rows(pool, run_id: str):
@@ -216,7 +227,7 @@ def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch)
             job = _job(run_id)
             await _insert_job(pool, job, JobState.RUNNING)
             spy = _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False))
-            ref, path_calls = await _run_with_spy(
+            ref = await _run_with_spy(
                 pool, store, capturer, job, loop_spy=spy, monkeypatch=monkeypatch
             )
             kind = take_provider_kind()
@@ -231,7 +242,6 @@ def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch)
                 "provider_kind": kind,
                 "loop_kwargs": spy.kwargs,
                 "canceled_probe": spy.canceled_probe,
-                "path_calls": path_calls,
             }
 
     out = asyncio.run(_go())
@@ -250,11 +260,12 @@ def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch)
     # Provider-kind tag is set for the worker's provider-op telemetry.
     assert out["provider_kind"] == "local-libvirt"
 
-    # Attach/detach carry the resolved domain, the per-job qom id, the requested snaplen, dest.
+    # The provider prepares its own destination keyed on (system_id, job_id) — no worker-local
+    # path assumption leaks into the handler.
     sys_id = out["sys_id"]
     job = out["job"]
-    assert out["path_calls"]["pcap_path"] == (UUID(sys_id), job.id)
-    assert out["path_calls"]["prepare"] == UUID(sys_id)
+    assert out["capturer"].prepared == [(UUID(sys_id), job.id)]
+    # Attach/detach carry the resolved domain, the per-job qom id, the requested snaplen, dest.
     (attach,) = out["capturer"].attached
     assert attach["domain"] == "kdive-x"
     assert attach["qom_id"] == f"kdive-dump-{job.id}"
@@ -263,6 +274,8 @@ def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch)
     (detach,) = out["capturer"].detached
     assert detach["domain"] == "kdive-x"
     assert detach["qom_id"] == f"kdive-dump-{job.id}"
+    # The host-side pcap is reclaimed on the success path.
+    assert out["capturer"].reclaimed == [attach["dest_path"]]
 
     # The audit row records the exact capture_traffic transition tuple.
     audit = out["audit"]
@@ -467,7 +480,7 @@ def test_canceled_job_before_store_writes_nothing(migrated_url: str, monkeypatch
             job = _job(run_id)
             await _insert_job(pool, job, JobState.CANCELED)
             spy = _LoopSpy(capture_traffic.LoopResult(truncated=False, canceled=False))
-            ref, _ = await _run_with_spy(
+            ref = await _run_with_spy(
                 pool, store, capturer, job, loop_spy=spy, monkeypatch=monkeypatch
             )
             return ref, await _artifact_rows(pool, run_id), spy.canceled_probe

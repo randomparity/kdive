@@ -1,12 +1,16 @@
-"""Worker handler for the `capture_traffic` job (ADR-0385, #1258).
+"""Worker handler for the `capture_traffic` job (ADR-0385/0432, #1258/#1434).
 
-Runs a QEMU filter-dump on a ready local-libvirt guest's SSH netdev for a bounded window and
-stores the pcap as a Run-owned SENSITIVE artifact. The provider port is thin (attach/detach); this
-handler owns the size-poll and the cooperative cancel-check (a plain async read of the job row on
-the autocommit dispatch connection), so nothing crosses the synchronous libvirt thread boundary.
-An optional BPF ``capture_filter`` is applied after capture with ``tcpdump -r/-w`` (validated by
-``tcpdump -d``). The pcap is bounded by ``max_bytes``, so it is read whole and stored via
-``put_artifact`` (that read also serves the ADR-0223 readback-wall check and the telemetry count).
+Runs a host-side packet capture on a ready guest's data-plane netdev for a bounded window and
+stores the pcap as a Run-owned SENSITIVE artifact. The provider port owns the file side of the
+capture (prepare/attach/size/detach/fetch/reclaim), provider-dispatched so this handler is
+provider-agnostic: local-libvirt writes a worker-readable pcap, remote-libvirt writes on the remote
+host and streams it back over ``qemu+tls`` (ADR-0432). This handler owns the size-poll and the
+cooperative cancel-check (a plain async read of the job row on the autocommit dispatch connection),
+so nothing crosses the synchronous libvirt thread boundary. An optional BPF ``capture_filter`` is
+applied after capture with ``tcpdump -r/-w`` (validated by ``tcpdump -d``), on the worker. The pcap
+is bounded by ``max_bytes``, fetched to memory whole, and stored via ``put_artifact`` (that read
+also serves the ADR-0223 readback-wall check and the telemetry count); the host-side pcap is
+reclaimed on every exit path.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import LiteralString, NamedTuple
@@ -38,13 +43,7 @@ from kdive.jobs.payloads import CaptureTrafficPayload, load_payload
 from kdive.jobs.provider_context import set_provider_kind
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.ports.traffic import TrafficCapturer
-from kdive.providers.shared.runtime_paths import (
-    PCAP_HYPERVISOR_WRITE_REMEDIATION,
-    domain_name_for,
-    pcap_path,
-    prepare_pcap_dir,
-    read_pcap_bytes,
-)
+from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security import audit
 from kdive.security.artifacts.bpf_filter import trim_pcap, validate_bpf
 from kdive.store.objectstore import ObjectStore
@@ -199,9 +198,30 @@ async def _store_capture(
 
 
 def _unlink_quietly(path: Path) -> None:
-    """Best-effort delete of a host pcap file; never masks the handler's real result or error."""
+    """Best-effort delete of a worker temp file; never masks the handler's real result or error."""
     with contextlib.suppress(OSError):
         path.unlink(missing_ok=True)
+
+
+def _trim_on_worker(data: bytes, capture_filter: str) -> bytes:
+    """Apply the BPF ``capture_filter`` to fetched pcap bytes, entirely worker-locally.
+
+    The capture bytes may originate on a remote host (ADR-0432), so trimming operates on the
+    fetched bytes via two worker temp files (``tcpdump -r/-w``) rather than the provider dest. The
+    temps are always reclaimed.
+    """
+    workdir = Path(tempfile.mkdtemp(prefix="kdive-pcap-trim-"))
+    raw = workdir / "raw.pcap"
+    trimmed = workdir / "filtered.pcap"
+    try:
+        raw.write_bytes(data)
+        trim_pcap(raw, trimmed, capture_filter)
+        return trimmed.read_bytes()
+    finally:
+        _unlink_quietly(raw)
+        _unlink_quietly(trimmed)
+        with contextlib.suppress(OSError):
+            workdir.rmdir()
 
 
 async def capture_traffic_handler(
@@ -228,22 +248,21 @@ async def capture_traffic_handler(
         await asyncio.to_thread(validate_bpf, payload.capture_filter)
 
     qom_id = f"kdive-dump-{job.id}"
-    dest = pcap_path(snapshot.system_id, job.id)
-    trimmed = dest.with_suffix(".filtered.pcap")
-    # Prepare the dir so the confined qemu:///system hypervisor can write the pcap (own to the
-    # QEMU user + SELinux svirt_image_t); a bare mkdir leaves it unwritable by QEMU (ADR-0385).
-    await asyncio.to_thread(prepare_pcap_dir, snapshot.system_id)
+    capturer = snapshot.capturer
+    # The provider prepares its own destination (local: the QEMU-writable pcap dir; remote: a swept
+    # storage-pool path) and returns the opaque dest token threaded through attach/size/fetch.
+    dest = await asyncio.to_thread(capturer.prepare, snapshot.system_id, job.id)
 
     max_polls = max(1, math.ceil(payload.duration_s / POLL_INTERVAL_SECONDS))
 
     async def _stat() -> int:
-        return await asyncio.to_thread(lambda: dest.stat().st_size if dest.exists() else 0)
+        return await asyncio.to_thread(capturer.captured_size, dest)
 
     await asyncio.to_thread(
-        snapshot.capturer.attach,
+        capturer.attach,
         snapshot.domain_name,
         qom_id=qom_id,
-        dest_path=str(dest),
+        dest_path=dest,
         snaplen=payload.snaplen,
     )
     try:
@@ -255,19 +274,20 @@ async def capture_traffic_handler(
             max_polls=max_polls,
         )
     finally:
-        await asyncio.to_thread(snapshot.capturer.detach, snapshot.domain_name, qom_id=qom_id)
+        await asyncio.to_thread(capturer.detach, snapshot.domain_name, qom_id=qom_id)
 
     if result.canceled:
-        await asyncio.to_thread(_unlink_quietly, dest)
+        await asyncio.to_thread(capturer.reclaim, dest)
         return None
 
-    # The host pcap files are always reclaimed — a read/trim/store failure must not leak them.
+    # The host-side pcap is always reclaimed — a fetch/trim/store failure must not leak it.
     try:
-        # The whole read also performs the ADR-0223 readback-wall check (PermissionError -> error).
-        data = await asyncio.to_thread(read_pcap_bytes, dest)
-        # A successful filter-dump writes the 24-byte libpcap header immediately, so a missing or
-        # short raw file means the hypervisor could not write it (dir not QEMU-writable/labeled) —
-        # a config failure, NOT a valid zero-packet capture (which is exactly the 24-byte header).
+        # The bounded fetch also performs the ADR-0223 readback-wall check (raises on it).
+        data = await asyncio.to_thread(capturer.fetch, dest, max_bytes=payload.max_bytes)
+        # A successful capture writes the 24-byte libpcap header immediately, so a missing or short
+        # raw file means the hypervisor could not write it (dir not QEMU-writable/labeled, or the
+        # remote storage pool rejected the file) — a config failure, NOT a valid zero-packet capture
+        # (which is exactly the 24-byte header).
         if len(data) < _PCAP_HEADER_LEN:
             raise CategorizedError(
                 "traffic capture produced no readable pcap",
@@ -275,12 +295,11 @@ async def capture_traffic_handler(
                 details={
                     "reason": "pcap_not_written",
                     "bytes": len(data),
-                    "remediation": PCAP_HYPERVISOR_WRITE_REMEDIATION,
+                    "remediation": capturer.write_remediation,
                 },
             )
         if payload.capture_filter:
-            await asyncio.to_thread(trim_pcap, dest, trimmed, payload.capture_filter)
-            data = await asyncio.to_thread(read_pcap_bytes, trimmed)
+            data = await asyncio.to_thread(_trim_on_worker, data, payload.capture_filter)
 
         packets = count_pcap_packets(data)
         _log.info(
@@ -298,8 +317,7 @@ async def capture_traffic_handler(
             conn, artifact_store, job, run_id, snapshot.project, data
         )
     finally:
-        await asyncio.to_thread(_unlink_quietly, dest)
-        await asyncio.to_thread(_unlink_quietly, trimmed)
+        await asyncio.to_thread(capturer.reclaim, dest)
     return None if artifact_id is None else str(artifact_id)
 
 

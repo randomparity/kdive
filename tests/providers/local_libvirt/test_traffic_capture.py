@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from uuid import uuid4
 
 import libvirt
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle import traffic_capture as traffic_capture_module
 from kdive.providers.local_libvirt.lifecycle.traffic_capture import LocalLibvirtTrafficCapture
+from kdive.providers.shared.runtime_paths import PCAP_HYPERVISOR_WRITE_REMEDIATION
 
 
 class _FakeConn:
@@ -89,3 +92,50 @@ def test_detach_issues_object_del() -> None:
     _capturer(monitor).detach("kdive-x", qom_id="kdive-dump-J")
     assert seen[0]["execute"] == "object-del"
     assert seen[0]["arguments"]["id"] == "kdive-dump-J"
+
+
+def _noop_monitor(domain, cmd, flags):  # pragma: no cover - unused by the file-side tests
+    return "{}"
+
+
+def test_write_remediation_is_the_local_hypervisor_remedy() -> None:
+    assert _capturer(_noop_monitor).write_remediation == PCAP_HYPERVISOR_WRITE_REMEDIATION
+
+
+def test_prepare_prepares_dir_and_returns_worker_pcap_path(monkeypatch, tmp_path) -> None:
+    system_id, job_id = uuid4(), uuid4()
+    prepared: list[object] = []
+    monkeypatch.setattr(traffic_capture_module, "prepare_pcap_dir", prepared.append)
+    monkeypatch.setattr(
+        traffic_capture_module, "pcap_path", lambda sid, jid: tmp_path / f"{sid}-{jid}.pcap"
+    )
+
+    dest = _capturer(_noop_monitor).prepare(system_id, job_id)
+
+    assert prepared == [system_id]  # the QEMU-writable dir prep ran for the System
+    assert dest == str(tmp_path / f"{system_id}-{job_id}.pcap")
+
+
+def test_captured_size_reads_growing_file_and_zero_when_absent(tmp_path) -> None:
+    cap = _capturer(_noop_monitor)
+    dest = tmp_path / "cap.pcap"
+    assert cap.captured_size(str(dest)) == 0  # not yet written
+    dest.write_bytes(b"abcd")
+    assert cap.captured_size(str(dest)) == 4
+
+
+def test_fetch_reads_whole_file_and_empty_when_absent(tmp_path) -> None:
+    cap = _capturer(_noop_monitor)
+    dest = tmp_path / "cap.pcap"
+    assert cap.fetch(str(dest), max_bytes=10) == b""  # absent capture is empty
+    dest.write_bytes(b"pcapbytes")
+    assert cap.fetch(str(dest), max_bytes=10) == b"pcapbytes"
+
+
+def test_reclaim_deletes_file_and_tolerates_absent(tmp_path) -> None:
+    cap = _capturer(_noop_monitor)
+    dest = tmp_path / "cap.pcap"
+    dest.write_bytes(b"x")
+    cap.reclaim(str(dest))
+    assert not dest.exists()
+    cap.reclaim(str(dest))  # second reclaim (already gone) must not raise

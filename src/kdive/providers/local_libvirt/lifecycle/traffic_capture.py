@@ -11,10 +11,13 @@ the typed ``control._idempotent`` / ``snapshot._delete_if_exists`` code-based sw
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 import libvirt
 
@@ -23,6 +26,12 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.xml import SYSTEM_SSH_NETDEV_ID
 from kdive.providers.local_libvirt.settings import LIBVIRT_URI
 from kdive.providers.ports.traffic import TrafficCapturer as TrafficCapturer
+from kdive.providers.shared.runtime_paths import (
+    PCAP_HYPERVISOR_WRITE_REMEDIATION,
+    pcap_path,
+    prepare_pcap_dir,
+    read_pcap_bytes,
+)
 
 
 class _LibvirtConn(Protocol):
@@ -70,6 +79,21 @@ class LocalLibvirtTrafficCapture:
             monitor=libvirt_qemu.qemuMonitorCommand,
         )
 
+    @property
+    def write_remediation(self) -> str:
+        """Operator guidance when the qemu:///system hypervisor could not write the pcap dir."""
+        return PCAP_HYPERVISOR_WRITE_REMEDIATION
+
+    def prepare(self, system_id: UUID, job_id: UUID) -> str:
+        """Prepare the QEMU-writable per-System pcap dir and return the worker pcap path.
+
+        The confined qemu:///system hypervisor writes the filter-dump as the QEMU runtime user, so
+        the dir is owned to that user and SELinux-labelled ``svirt_image_t`` (ADR-0385); a genuine
+        write failure surfaces loudly at :meth:`fetch` via a short/absent file.
+        """
+        prepare_pcap_dir(system_id)
+        return str(pcap_path(system_id, job_id))
+
     def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
         """Add a filter-dump on the SSH-forward netdev writing ``dest_path`` (idempotent re-attach).
 
@@ -102,6 +126,25 @@ class LocalLibvirtTrafficCapture:
             self._object_del(domain, domain_name, qom_id, tolerate_missing=True)
         finally:
             _close(conn)
+
+    def captured_size(self, dest_path: str) -> int:
+        """Current size of the growing local pcap (0 until the hypervisor writes the header)."""
+        path = Path(dest_path)
+        return path.stat().st_size if path.exists() else 0
+
+    def fetch(self, dest_path: str, *, max_bytes: int) -> bytes:
+        """Read the local pcap whole; an absent capture is empty (the ADR-0223 wall raises).
+
+        ``max_bytes`` is unused: the local file is already bounded by the handler's poll loop and
+        the filter-dump ``maxlen``; it exists only so the remote provider can bound its download.
+        """
+        del max_bytes
+        return read_pcap_bytes(Path(dest_path))
+
+    def reclaim(self, dest_path: str) -> None:
+        """Best-effort delete of the local pcap file; never masks the handler's real result."""
+        with contextlib.suppress(OSError):
+            Path(dest_path).unlink(missing_ok=True)
 
     def _object_add(self, domain: object, domain_name: str, arguments: dict[str, object]) -> None:
         cmd = {"execute": "object-add", "arguments": arguments}
