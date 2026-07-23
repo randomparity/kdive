@@ -955,6 +955,69 @@ def test_create_upload_for_defined_system_mints_rootfs_and_persists(migrated_url
     asyncio.run(_run())
 
 
+def test_create_system_upload_rejects_chunked_rootfs(migrated_url: str) -> None:
+    # #1503 / ADR-0436: the System rootfs install path (#743) verifies plain sha256(body) ==
+    # head.checksum_sha256, which a reassembled multipart object's composite checksum can never
+    # satisfy. So a chunked rootfs declaration is rejected AT DECLARATION with a clear message —
+    # never accepted-then-failed at provision with "upload-kind rootfs was never uploaded".
+    _5gib = 5 * 1024 * 1024 * 1024
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            store = _FakeStore()
+            out = await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[
+                    {
+                        "name": "rootfs",
+                        "sha256": "whole",
+                        "size_bytes": _5gib + 100,
+                        "chunks": [
+                            {"sha256": "c0", "size_bytes": _5gib},
+                            {"sha256": "c1", "size_bytes": 100},
+                        ],
+                    },
+                ],
+                resolver=provider_resolver(),
+                store=store,
+            )
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
+        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert out.data["reason"] == "chunking_not_supported"
+        assert out.detail is not None and "single PUT" in out.detail
+        assert store.calls == []  # rejected before minting any part URL
+        assert manifest is None  # nothing persisted
+
+    asyncio.run(_run())
+
+
+def test_create_system_upload_rejects_rootfs_over_5gib(migrated_url: str) -> None:
+    # Boundary (#1503 AC): a single-PUT rootfs over the 5 GiB single-object cap is rejected up
+    # front — the pre-existing size guard, kept covered for the System owner.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            store = _FakeStore()
+            five_gib = 5 * 1024 * 1024 * 1024
+            out = await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": five_gib + 1}],
+                resolver=provider_resolver(),
+                store=store,
+            )
+        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert out.data["reason"] == "size_out_of_range"
+        assert store.calls == []
+
+    asyncio.run(_run())
+
+
 def test_create_system_upload_resolves_provider_runtime_once(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1200,6 +1263,49 @@ def test_large_object_chunked_accepted() -> None:
         "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
     }
     out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP)
+    assert isinstance(out, list)
+    assert out[0].chunks is not None and len(out[0].chunks) == 2
+
+
+def test_chunked_rejected_when_owner_forbids_chunks() -> None:
+    # #1503 / ADR-0436: an owner whose install path is single-PUT-only (allow_chunks=False, the
+    # System rootfs) rejects a chunked declaration up front, before per-chunk validation.
+    decl = {
+        "name": "vmlinux",
+        "sha256": "whole",
+        "size_bytes": _5GIB + 100,
+        "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP, allow_chunks=False)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "chunking_not_supported"
+    assert out.detail is not None and "single PUT" in out.detail
+
+
+def test_single_put_accepted_when_owner_forbids_chunks() -> None:
+    # The chunk ban does not touch the single-PUT path: a single-PUT declaration for a
+    # chunk-forbidding owner still passes (no regression for the common rootfs case).
+    out = _validate_artifact_declarations(
+        "rid",
+        [{"name": "vmlinux", "sha256": "a", "size_bytes": 300}],
+        _ALLOWED,
+        _CAP,
+        allow_chunks=False,
+    )
+    assert isinstance(out, list)
+    assert out[0].chunks is None
+
+
+def test_chunked_accepted_when_owner_allows_chunks() -> None:
+    # The guard is owner-scoped: with allow_chunks=True (the RUN owner / complete_build default)
+    # a well-formed chunked declaration is still accepted.
+    decl = {
+        "name": "vmlinux",
+        "sha256": "whole",
+        "size_bytes": _5GIB + 100,
+        "chunks": [{"sha256": "c0", "size_bytes": _5GIB}, {"sha256": "c1", "size_bytes": 100}],
+    }
+    out = _validate_artifact_declarations("rid", [decl], _ALLOWED, _CAP, allow_chunks=True)
     assert isinstance(out, list)
     assert out[0].chunks is not None and len(out[0].chunks) == 2
 

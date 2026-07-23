@@ -199,6 +199,7 @@ class _UploadOwnerSpec:
     audit_object_kind: str  # the owner table for the audit_log row ("runs" / "systems")
     project: Callable[[AsyncConnection, UUID], Awaitable[str | None]]
     accepts_upload: Callable[[AsyncConnection, UUID, ProviderResolver], Awaitable[bool]]
+    allow_chunks: bool = True  # False when the owner's install path reads only a single-PUT object
 
 
 def _bad_declaration(
@@ -254,7 +255,12 @@ def _validate_one_declaration(
 
 
 def _validate_artifact_declarations(
-    object_id: str, artifacts: Sequence[ArtifactDeclaration], allowed: frozenset[str], cap: int
+    object_id: str,
+    artifacts: Sequence[ArtifactDeclaration],
+    allowed: frozenset[str],
+    cap: int,
+    *,
+    allow_chunks: bool = True,
 ) -> list[ManifestEntry] | ToolResponse:
     entries: list[ManifestEntry] = []
     for declaration in artifacts:
@@ -269,6 +275,20 @@ def _validate_artifact_declarations(
                 return _config_error(object_id, data={"reason": "size_out_of_range"})
             entries.append(ManifestEntry(name=name, sha256=sha256, size_bytes=size))
             continue
+        if not allow_chunks:
+            # ADR-0436: a chunked (multipart) upload reassembles into an object whose only stored
+            # checksum is the composite "<base64>-<N>", but the System rootfs install path verifies
+            # sha256(body) == head.checksum_sha256 (plain SHA-256, ADR-0434), which a composite can
+            # never satisfy. Reject at declaration with an actionable message rather than mint part
+            # URLs that dead-end at provision ("upload-kind rootfs was never uploaded").
+            return _config_error(
+                object_id,
+                detail=(
+                    "System rootfs must be a single PUT <= 5 GiB; chunked/multipart upload is not "
+                    "supported (omit chunks and declare a single-PUT upload)"
+                ),
+                data={"reason": "chunking_not_supported"},
+            )
         if name == "effective_config":
             return _config_error(object_id, data={"reason": "size_out_of_range"})
         validated = _validate_chunks(object_id, raw_chunks, size, artifact_cap, allowed)
@@ -423,6 +443,7 @@ _SYSTEM_UPLOAD = _UploadOwnerSpec(
     audit_object_kind="systems",
     project=_system_project,
     accepts_upload=_system_accepts_upload,
+    allow_chunks=False,  # #743 install verifies plain SHA-256; a composite can't (ADR-0436)
 )
 
 
@@ -454,7 +475,11 @@ async def _create_upload(
             require_role(ctx, project, spec.required_role)
 
             validated = _validate_artifact_declarations(
-                owner_id, artifacts, spec.allowed_names, _max_upload_bytes()
+                owner_id,
+                artifacts,
+                spec.allowed_names,
+                _max_upload_bytes(),
+                allow_chunks=spec.allow_chunks,
             )
             if isinstance(validated, ToolResponse):
                 return validated
