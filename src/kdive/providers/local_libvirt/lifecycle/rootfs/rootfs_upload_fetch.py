@@ -161,7 +161,10 @@ def fetch_uploaded_rootfs(
             details={"system_id": str(upload.system_id)},
         )
 
-    if normalize_encoding(encoding) == GZIP_ENCODING:
+    effective = normalize_encoding(encoding)
+    if effective is None:
+        _stage_identity(store, upload, key=key, checksum=head.checksum_sha256, dest=dest)
+    elif effective == GZIP_ENCODING:
         _stage_gzip(
             store,
             upload,
@@ -172,7 +175,15 @@ def fetch_uploaded_rootfs(
             dest=dest,
         )
     else:
-        _stage_identity(store, upload, key=key, checksum=head.checksum_sha256, dest=dest)
+        # Defence in depth: the declaration validator (ADR-0437) rejects an unknown codec, so this
+        # is unreachable with valid data — but naming the codec beats silently staging it as
+        # identity and failing with a misleading "not a qcow2" magic error.
+        raise CategorizedError(
+            f"uploaded rootfs declared an unsupported transport encoding {effective!r}; "
+            "only gzip is supported",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"system_id": str(upload.system_id)},
+        )
     return dest
 
 
