@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give the tcg gate an importable guestfs binding
 - Provision the libvirt/KVM host contract on the tcg gate
 - Provision the runtime directories on the tcg gate
+- Print the kernel-tree path on stdout
 
 ### Build
 
