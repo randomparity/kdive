@@ -234,9 +234,9 @@ read is the inverse.
 
 The matrix is keyed by the **underlying tool**, so every [generated read
 verb](#the-generated-verb-surface) inherits the axis of its tool — the curated verbs above are
-a subset, not the whole authorized surface. For example `audit query` (`audit.query`) and
-`projects list` (`projects.list`) are platform-axis auditor reads like `inventory list`;
-`session whoami` (`session.whoami`) is a plain authenticated read like `resources list`; and
+a subset, not the whole authorized surface. For example `audit query` (`audit.query`) is a
+platform-axis auditor read like `inventory list`; `session whoami` (`session.whoami`) and
+`projects list` (`projects.list`) are plain authenticated reads like `resources list`; and
 `runs list` / `jobs wait` are per-project `viewer` reads like `systems get`. When in doubt,
 `kdivectl <group> <verb>` returns the same `authorization_denied` (exit `3`) or
 not-found-shaped (exit `4`) result its tool would for an agent.
