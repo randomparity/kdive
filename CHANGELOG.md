@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify remote live_vm family drives a remote host, not local silicon
 - Catalog the live_vm_remote test env vars
 - Regenerate the reference for KDIVE_HOST_RUNTIME_DIRS
+- Flag what the compose app tier cannot serve
 
 ### Fixed
 
@@ -64,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision the runtime directories on the tcg gate
 - Print the kernel-tree path on stdout
 - Scope pcap pre-delete to the job's own volume
+- Run the live_vm_tcg app tier as host processes
 
 ### Build
 
