@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raise when visible_next_actions names an unregistered tool
 - Adapt to ty 0.0.59 narrowing and read-only property checks
 - Keep the ppc64le uv wheel pin in step with the image pins
+- Images list surfaces envelope exit code, not hardcoded 0
 
 ### Build
 
