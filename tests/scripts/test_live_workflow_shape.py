@@ -188,3 +188,38 @@ def test_tcg_job_links_the_guestfs_binding_into_the_venv_and_proves_it_imports()
     joined = "\n".join(s["run"] for s in steps if "run" in s)
     assert "libguestfsmod" in joined, "the native module must be linked, not just guestfs.py"
     assert "import guestfs" in joined, "the tcg job must prove the binding imports before staging"
+
+
+def _tcg_spine() -> str:
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    return next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
+
+
+def test_tcg_job_installs_the_libvirt_daemon_not_just_the_headers() -> None:
+    """libvirt-dev is headers for building libvirt-python; the daemon is a separate package.
+
+    build-fs opens a libvirt connection to resolve the customization-boot accelerator, so without
+    a daemon it dies on "Failed to connect socket to /var/run/libvirt/libvirt-sock" — minutes into
+    the build. Mirrors libvirt_stack's Debian package set.
+    """
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    for pkg in ("libvirt-daemon-system", "libvirt-clients", "qemu-utils"):
+        assert pkg in joined, f"the tcg job must install {pkg}"
+
+
+def test_tcg_job_pins_the_session_libvirt_uri() -> None:
+    """Session mode, as the native job uses: worker-owned QEMU with a readable console (ADR-0223).
+
+    It also sidesteps libvirt group membership, which a `usermod` inside a job cannot grant to the
+    already-running shell.
+    """
+    assert 'KDIVE_LIBVIRT_URI="qemu:///session"' in _tcg_spine()
+
+
+def test_tcg_job_preflights_the_host_before_staging() -> None:
+    """The whole point is ordering: a missing daemon must fail in seconds, not mid-build."""
+    spine = _tcg_spine()
+    host_check = spine.index("preflight-env.sh host")
+    staging = spine.index("stage-tcg-images.sh")
+    assert host_check < staging, "the host preflight must run before the staging spine"
