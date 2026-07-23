@@ -248,26 +248,19 @@ def test_table_shows_all_three_states(monkeypatch: pytest.MonkeyPatch, capsys) -
     assert "pass" in out and "fail" in out and "error" in out
 
 
-def test_json_mode_emits_rows(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install_session(
-        monkeypatch,
-        _verdict(
-            [_check("secret_ref", "pass", "ok")],
-            has_failure=False,
-            has_error=False,
-        ),
+def test_json_mode_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    # --json is the server envelope verbatim (ADR-0421 §6): the per-check rows survive as nested
+    # ``items`` envelopes, not the flat projected check-row list the CLI used to freeze.
+    envelope = _verdict(
+        [_check("secret_ref", "pass", "ok")],
+        has_failure=False,
+        has_error=False,
     )
+    _install_session(monkeypatch, envelope)
     asyncio.run(doctor.doctor(_args(json=True)))
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed == [
-        {
-            "check": "secret_ref",
-            "status": "pass",
-            "detail": "ok",
-            "fix": None,
-            "provider": None,
-        }
-    ]
+    assert parsed == envelope
+    assert parsed["items"][0]["data"]["check"] == "secret_ref"
 
 
 def test_default_run_passes_no_provider_and_no_egress(

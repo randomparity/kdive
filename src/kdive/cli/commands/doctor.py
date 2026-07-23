@@ -22,7 +22,7 @@ import argparse
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_category
-from kdive.cli.render import render
+from kdive.cli.render import emit, render
 from kdive.cli.transport import Session, tool_envelope
 
 _TOOL = "ops.diagnostics"
@@ -119,5 +119,5 @@ async def doctor(args: argparse.Namespace) -> int:
         denial. The nonzero codes make ``doctor`` usable as a deployment/CI gate (ADR-0091 §5).
     """
     fields = _envelope_fields(await _call(_payload(args)))
-    render(_rows(fields), columns=_COLUMNS, as_json=args.json)
+    emit(fields, lambda: render(_rows(fields), columns=_COLUMNS), as_json=args.json)
     return _exit_code(fields)

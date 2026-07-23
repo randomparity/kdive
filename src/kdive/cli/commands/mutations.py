@@ -26,7 +26,7 @@ import time
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_envelope
-from kdive.cli.render import flatten_envelope, render_record
+from kdive.cli.render import emit, flatten_envelope, render_record
 from kdive.cli.transport import Session, tool_envelope
 
 
@@ -104,7 +104,7 @@ async def _run(name: str, arguments: Mapping[str, object], *, as_json: bool) -> 
     this is what makes a separation-of-duties denial observable as exit ``3`` (ADR-0089).
     """
     envelope = await _call(name, arguments)
-    render_record(flatten_envelope(envelope), as_json=as_json)
+    emit(envelope, lambda: render_record(flatten_envelope(envelope)), as_json=as_json)
     return exit_code_for_envelope(envelope)
 
 

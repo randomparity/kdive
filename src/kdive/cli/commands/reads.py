@@ -16,7 +16,7 @@ import sys
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_envelope
-from kdive.cli.render import flatten_envelope, render, render_record, render_report
+from kdive.cli.render import emit, flatten_envelope, render, render_record, render_report
 from kdive.cli.transport import Session, tool_envelope
 
 
@@ -31,18 +31,19 @@ async def _fetch(name: str, arguments: Mapping[str, object]) -> Mapping[str, obj
     return tool_envelope(result)
 
 
-def _rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
+def collection_rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
+    """Flatten a collection envelope's ``items`` into rows (shared with the images verbs)."""
     items = envelope.get("items")
     if not isinstance(items, list):
         return []
     return [flatten_envelope(item) for item in items]
 
 
-async def fetch_collection_rows(
+async def fetch_collection_envelope(
     name: str, arguments: Mapping[str, object]
-) -> list[dict[str, object]]:
-    """Fetch one collection-shaped read tool and flatten its item envelopes into rows."""
-    return _rows(await _fetch(name, arguments))
+) -> Mapping[str, object]:
+    """Fetch one collection-shaped read tool and return its whole response envelope."""
+    return await _fetch(name, arguments)
 
 
 def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
@@ -56,20 +57,24 @@ def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
 
 async def _list(name: str, args: argparse.Namespace, columns: list[str], *params: str) -> int:
     envelope = await _fetch(name, _payload(args, *params))
-    render(_rows(envelope), columns=columns, as_json=args.json)
+    emit(envelope, lambda: render(collection_rows(envelope), columns=columns), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
 async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, object]) -> int:
     envelope = await _fetch(name, payload)
-    render_record(flatten_envelope(envelope), as_json=args.json)
+    emit(envelope, lambda: render_record(flatten_envelope(envelope)), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
 async def resources_list(args: argparse.Namespace) -> int:
     request = _payload(args, "kind")
     envelope = await _fetch("resources.list", {"request": request} if request else {})
-    render(_rows(envelope), columns=["id", "kind", "host"], as_json=args.json)
+    emit(
+        envelope,
+        lambda: render(collection_rows(envelope), columns=["id", "kind", "host"]),
+        as_json=args.json,
+    )
     return exit_code_for_envelope(envelope)
 
 
@@ -84,7 +89,11 @@ async def images_get(args: argparse.Namespace) -> int:
 
 async def allocations_list(args: argparse.Namespace) -> int:
     envelope = await _fetch("allocations.list", {"request": _payload(args, "project")})
-    render(_rows(envelope), columns=["id", "project", "system", "state"], as_json=args.json)
+    emit(
+        envelope,
+        lambda: render(collection_rows(envelope), columns=["id", "project", "system", "state"]),
+        as_json=args.json,
+    )
     return exit_code_for_envelope(envelope)
 
 
@@ -94,7 +103,11 @@ async def allocations_get(args: argparse.Namespace) -> int:
 
 async def systems_list(args: argparse.Namespace) -> int:
     envelope = await _fetch("systems.list", {"request": _payload(args, "state")})
-    render(_rows(envelope), columns=["id", "project", "state"], as_json=args.json)
+    emit(
+        envelope,
+        lambda: render(collection_rows(envelope), columns=["id", "project", "state"]),
+        as_json=args.json,
+    )
     return exit_code_for_envelope(envelope)
 
 
@@ -108,7 +121,11 @@ async def runs_get(args: argparse.Namespace) -> int:
 
 async def jobs_list(args: argparse.Namespace) -> int:
     envelope = await _fetch("jobs.list", {"request": {}})
-    render(_rows(envelope), columns=["id", "kind", "state"], as_json=args.json)
+    emit(
+        envelope,
+        lambda: render(collection_rows(envelope), columns=["id", "kind", "state"]),
+        as_json=args.json,
+    )
     return exit_code_for_envelope(envelope)
 
 
@@ -134,7 +151,7 @@ async def secrets_list(args: argparse.Namespace) -> int:
     """List secret-reference *presence* (keys only; never values). Platform operator-gated."""
     envelope = await _fetch("secrets.list", {})
     refs = [{"ref": str(ref)} for ref in _data_list(envelope, "secrets")]
-    render(refs, columns=["ref"], as_json=args.json)
+    emit(envelope, lambda: render(refs, columns=["ref"]), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
@@ -146,7 +163,7 @@ async def fixtures_list(args: argparse.Namespace) -> int:
         for row in _data_list(envelope, "fixtures")
         if isinstance(row, Mapping)
     ]
-    render(rows, columns=["provider", "name", "arch"], as_json=args.json)
+    emit(envelope, lambda: render(rows, columns=["provider", "name", "arch"]), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
@@ -204,11 +221,14 @@ def _totals(envelope: Mapping[str, object]) -> dict[str, object]:
 
 async def _report(name: str, args: argparse.Namespace, payload: Mapping[str, object]) -> int:
     envelope = await _fetch(name, payload)
-    render_report(
-        _rows(envelope),
-        _totals(envelope),
-        columns=_REPORT_COLUMNS,
-        total_columns=_REPORT_TOTAL_COLUMNS,
+    emit(
+        envelope,
+        lambda: render_report(
+            collection_rows(envelope),
+            _totals(envelope),
+            columns=_REPORT_COLUMNS,
+            total_columns=_REPORT_TOTAL_COLUMNS,
+        ),
         as_json=args.json,
     )
     return exit_code_for_envelope(envelope)

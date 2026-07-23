@@ -1,10 +1,16 @@
-"""``render`` emits a stable JSON list or an aligned table; ``render_record`` one record."""
+"""``render``/``render_record``/``render_report`` emit the default human table.
+
+``--json`` is no longer a projection here: every curated verb's ``--json`` prints the whole
+server envelope via :func:`render_envelope` (ADR-0421 §6), routed through :func:`emit`. The
+table renderers below are the default (non-``--json``) path only and take no ``as_json`` flag.
+"""
 
 from __future__ import annotations
 
 import json
 
 from kdive.cli.render import (
+    emit,
     flatten_envelope,
     render,
     render_envelope,
@@ -15,40 +21,14 @@ from kdive.cli.render import (
 ROWS = [{"id": "r1", "kind": "local-libvirt"}, {"id": "r2", "kind": "remote-libvirt"}]
 
 
-def test_json_mode_is_stable(capsys) -> None:
-    render(ROWS, columns=["id", "kind"], as_json=True)
-    assert json.loads(capsys.readouterr().out) == ROWS
-
-
-def test_json_mode_is_pretty_printed_with_two_space_indent(capsys) -> None:
-    # The JSON contract is a 2-space indented, multi-line document (not compact).
-    render([{"id": "r1"}], columns=["id"], as_json=True)
-    out = capsys.readouterr().out
-    assert out == '[\n  {\n    "id": "r1"\n  }\n]\n'
-
-
-def test_json_mode_serializes_non_json_values_via_str(capsys) -> None:
-    # ``default=str`` lets non-JSON-native values (e.g. a path) serialize as their str().
-    from pathlib import PurePosixPath
-
-    render([{"id": PurePosixPath("/a/b")}], columns=["id"], as_json=True)
-    assert json.loads(capsys.readouterr().out) == [{"id": "/a/b"}]
-
-
-def test_json_mode_projects_only_requested_columns(capsys) -> None:
-    rows = [{"id": "r1", "kind": "k", "secret": "x"}]
-    render(rows, columns=["id", "kind"], as_json=True)
-    assert json.loads(capsys.readouterr().out) == [{"id": "r1", "kind": "k"}]
-
-
 def test_table_mode_has_header_and_rows(capsys) -> None:
-    render(ROWS, columns=["id", "kind"], as_json=False)
+    render(ROWS, columns=["id", "kind"])
     out = capsys.readouterr().out
     assert "id" in out and "r1" in out and "remote-libvirt" in out
 
 
 def test_table_mode_columns_are_aligned(capsys) -> None:
-    render(ROWS, columns=["id", "kind"], as_json=False)
+    render(ROWS, columns=["id", "kind"])
     lines = capsys.readouterr().out.splitlines()
     # Header plus two data rows.
     assert len(lines) == 3
@@ -61,7 +41,7 @@ def test_table_mode_left_justifies_header_and_cells(capsys) -> None:
     # A short cell in a column widened by a long cell is padded on the RIGHT (left-justified),
     # so the next column starts at a fixed offset. Right-justification would flip the padding.
     rows = [{"id": "short"}, {"id": "a-much-longer-value"}, {"id": "x"}]
-    render(rows, columns=["id", "kind"], as_json=False)
+    render(rows, columns=["id", "kind"])
     lines = capsys.readouterr().out.splitlines()
     # Header column is left-justified: "id" sits at the start, padding follows it.
     assert lines[0].startswith("id ")
@@ -71,20 +51,15 @@ def test_table_mode_left_justifies_header_and_cells(capsys) -> None:
 
 
 def test_empty_rows_table_still_prints_header(capsys) -> None:
-    render([], columns=["id", "kind"], as_json=False)
+    render([], columns=["id", "kind"])
     out = capsys.readouterr().out.strip()
     assert out == "id    kind" or ("id" in out and "kind" in out)
     # Exactly the header line, no data rows.
     assert len(out.splitlines()) == 1
 
 
-def test_empty_rows_json_is_empty_list(capsys) -> None:
-    render([], columns=["id"], as_json=True)
-    assert json.loads(capsys.readouterr().out) == []
-
-
 def test_missing_key_renders_blank_cell(capsys) -> None:
-    render([{"id": "r1"}], columns=["id", "kind"], as_json=False)
+    render([{"id": "r1"}], columns=["id", "kind"])
     lines = capsys.readouterr().out.splitlines()
     # The data row keeps the column slot but leaves the missing cell blank.
     assert lines[1].startswith("r1")
@@ -92,28 +67,24 @@ def test_missing_key_renders_blank_cell(capsys) -> None:
 
 
 def test_none_value_renders_as_empty(capsys) -> None:
-    render([{"id": "r1", "kind": None}], columns=["id", "kind"], as_json=False)
+    render([{"id": "r1", "kind": None}], columns=["id", "kind"])
     lines = capsys.readouterr().out.splitlines()
     assert lines[1].rstrip() == "r1"
 
 
-def test_render_record_keyvalue_and_json(capsys) -> None:
-    render_record({"id": "r1", "kind": "local-libvirt"}, as_json=False)
+def test_render_record_keyvalue(capsys) -> None:
+    render_record({"id": "r1", "kind": "local-libvirt"})
     out = capsys.readouterr().out
     assert "id" in out and "r1" in out and "kind" in out
-    render_record({"id": "r1"}, as_json=True)
-    assert json.loads(capsys.readouterr().out) == {"id": "r1"}
 
 
 def test_render_record_empty_record(capsys) -> None:
-    render_record({}, as_json=False)
+    render_record({})
     assert capsys.readouterr().out == ""
-    render_record({}, as_json=True)
-    assert json.loads(capsys.readouterr().out) == {}
 
 
 def test_render_record_none_value_renders_blank(capsys) -> None:
-    render_record({"id": "r1", "host": None}, as_json=False)
+    render_record({"id": "r1", "host": None})
     out = capsys.readouterr().out
     assert "host" in out
     assert "None" not in out
@@ -121,7 +92,7 @@ def test_render_record_none_value_renders_blank(capsys) -> None:
 
 def test_render_record_lines_have_no_trailing_whitespace(capsys) -> None:
     # A ``None`` value renders blank, and the trailing gap/pad is stripped from the line.
-    render_record({"id": "r1", "host": None}, as_json=False)
+    render_record({"id": "r1", "host": None})
     lines = capsys.readouterr().out.splitlines()
     for line in lines:
         assert line == line.rstrip(), f"unexpected trailing whitespace: {line!r}"
@@ -131,7 +102,7 @@ def test_render_record_lines_have_no_trailing_whitespace(capsys) -> None:
 
 def test_render_record_keys_are_left_justified(capsys) -> None:
     # Keys are padded to the widest key on the RIGHT so values line up in a column.
-    render_record({"id": "r1", "hostname": "h"}, as_json=False)
+    render_record({"id": "r1", "hostname": "h"})
     lines = capsys.readouterr().out.splitlines()
     # "id" is the short key: left-justified means it starts the line, padding follows.
     assert lines[0].startswith("id ")
@@ -140,38 +111,14 @@ def test_render_record_keys_are_left_justified(capsys) -> None:
     assert lines[0].index("r1") == lines[1].rindex("h")
 
 
-def test_render_record_json_is_pretty_printed(capsys) -> None:
-    render_record({"id": "r1"}, as_json=True)
-    out = capsys.readouterr().out
-    assert out == '{\n  "id": "r1"\n}\n'
-
-
-def test_render_record_json_serializes_non_json_values_via_str(capsys) -> None:
-    from pathlib import PurePosixPath
-
-    render_record({"path": PurePosixPath("/a/b")}, as_json=True)
-    assert json.loads(capsys.readouterr().out) == {"path": "/a/b"}
-
-
 _REPORT_COLS = ["project", "reserved"]
 _REPORT_TCOLS = ["scope", "total_reserved"]
-
-
-def test_render_report_json_emits_items_and_projected_totals(capsys) -> None:
-    rows = [{"project": "p", "reserved": "1.0", "secret": "x"}]
-    totals = {"scope": "all-projects", "total_reserved": "1.0", "extra": "drop-me"}
-    render_report(rows, totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=True)
-    parsed = json.loads(capsys.readouterr().out)
-    assert parsed == {
-        "items": [{"project": "p", "reserved": "1.0"}],
-        "totals": {"scope": "all-projects", "total_reserved": "1.0"},
-    }
 
 
 def test_render_report_table_has_rows_then_totals_footer(capsys) -> None:
     rows = [{"project": "p", "reserved": "1.0"}]
     totals = {"scope": "all-projects", "total_reserved": "1.0"}
-    render_report(rows, totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=False)
+    render_report(rows, totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS)
     lines = capsys.readouterr().out.splitlines()
     assert "project" in lines[0] and any("p" in line for line in lines)  # row table
     assert "" in lines  # blank separator line
@@ -179,17 +126,47 @@ def test_render_report_table_has_rows_then_totals_footer(capsys) -> None:
 
 
 def test_render_report_empty_rows_still_prints_header_and_totals(capsys) -> None:
-    render_report(
-        [], {"scope": "all-projects"}, columns=_REPORT_COLS, total_columns=["scope"], as_json=False
-    )
+    render_report([], {"scope": "all-projects"}, columns=_REPORT_COLS, total_columns=["scope"])
     out = capsys.readouterr().out
     assert "project" in out and "scope" in out and "all-projects" in out
 
 
-def test_render_report_json_missing_total_key_renders_null(capsys) -> None:
-    render_report([], {}, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=True)
+def test_render_report_footer_projects_onto_total_columns(capsys) -> None:
+    # A totals key outside total_columns never reaches the footer; a missing one renders blank.
+    totals = {"scope": "all-projects", "extra": "drop-me"}
+    render_report([], totals, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS)
+    out = capsys.readouterr().out
+    assert "all-projects" in out
+    assert "drop-me" not in out
+    assert "total_reserved" in out  # the missing total keeps its (blank) footer slot
+
+
+# --- emit: the single --json branch shared by every curated verb (ADR-0421 §6) ---
+
+
+def test_emit_json_prints_whole_envelope_and_skips_table(capsys) -> None:
+    envelope = {
+        "object_id": "r1",
+        "status": "ok",
+        "data": {"kind": "k"},
+        "items": [],
+        "suggested_next_actions": ["jobs.wait"],
+    }
+
+    def _table() -> None:  # pragma: no cover - must not run in --json mode
+        raise AssertionError("table renderer must not run when as_json=True")
+
+    emit(envelope, _table, as_json=True)
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed == {"items": [], "totals": {"scope": None, "total_reserved": None}}
+    assert parsed == envelope
+    assert parsed["suggested_next_actions"] == ["jobs.wait"]
+
+
+def test_emit_table_runs_the_callback_and_prints_no_json(capsys) -> None:
+    called: list[bool] = []
+    emit({"object_id": "r1"}, lambda: called.append(True), as_json=False)
+    assert called == [True]
+    assert capsys.readouterr().out == ""
 
 
 # --- flatten_envelope (the id/state/data projection shared with the read/mutation verbs) ---
@@ -215,11 +192,11 @@ def test_flatten_envelope_non_mapping_is_empty_row() -> None:
     assert flatten_envelope(None) == {}
 
 
-# --- render_envelope: column-agnostic renderer for generated verbs (R11) ---
+# --- render_envelope: the whole-envelope --json path for every verb (ADR-0421 §6) ---
 
 
 def test_render_envelope_json_emits_whole_unprojected_envelope(capsys) -> None:
-    # R11's key property: --json keeps the navigation contract fields, not a projection.
+    # The key property: --json keeps the navigation contract fields, not a projection.
     envelope = _item("r1", "ok", {"kind": "k"})
     envelope["suggested_next_actions"] = ["jobs.wait", "jobs.cancel"]
     envelope["refs"] = {"result": "s3://x"}
@@ -228,6 +205,18 @@ def test_render_envelope_json_emits_whole_unprojected_envelope(capsys) -> None:
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == envelope
     assert parsed["suggested_next_actions"] == ["jobs.wait", "jobs.cancel"]
+
+
+def test_render_envelope_json_is_pretty_printed_with_two_space_indent(capsys) -> None:
+    render_envelope({"id": "r1"}, as_json=True)
+    assert capsys.readouterr().out == '{\n  "id": "r1"\n}\n'
+
+
+def test_render_envelope_json_serializes_non_json_values_via_str(capsys) -> None:
+    from pathlib import PurePosixPath
+
+    render_envelope({"path": PurePosixPath("/a/b")}, as_json=True)
+    assert json.loads(capsys.readouterr().out) == {"path": "/a/b"}
 
 
 def test_render_envelope_json_collection_keeps_items_and_next_actions(capsys) -> None:
