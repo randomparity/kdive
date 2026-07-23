@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,8 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers.connectivity import ssh_reachable
 from kdive.jobs.handlers.connectivity.ssh_reachable import (
+    _BACKOFF_S,
+    _CONNECT_TIMEOUT_S,
     ReachResult,
     _real_probe,
     check_ssh_reachable_handler,
@@ -425,3 +428,220 @@ def test_handler_dead_letters_when_no_forward(migrated_url: str) -> None:
                 )
 
     asyncio.run(_run())
+
+
+# --- #1415: fake-clock socket harness for the _real_probe timing/backoff cluster ---------------
+#
+# _real_probe's deadline/backoff/read-timeout arithmetic and socket params are invisible to the
+# real-loopback-server tests above (a real monotonic clock never lands on an exact boundary, and a
+# real connect never records the timeout it was handed). These tests drive the coroutine by hand
+# against a fake asyncio clock + fake connect/read/sleep so every timeout/backoff value is asserted.
+
+
+class _Clock:
+    def __init__(self, start: float = 0.0) -> None:
+        self.t = start
+
+    def time(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+class _FakeLoop:
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+
+    def time(self) -> float:
+        return self._clock.time()
+
+
+class _FakeReader:
+    def __init__(self, banner: bytes) -> None:
+        self._banner = banner
+
+    async def read(self, _n: int) -> bytes:
+        return self._banner
+
+
+class _FakeWriter:
+    def __init__(self, *, close_raises: bool = False) -> None:
+        self.close_raises = close_raises
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        if self.close_raises:
+            raise OSError("simulated close failure")
+
+
+def _drive(coro: Coroutine[object, object, ReachResult]) -> ReachResult:
+    """Step a coroutine whose every await resolves synchronously (fake I/O), returning its value."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    raise AssertionError("probe unexpectedly yielded to a real event loop")
+
+
+def _install_fake_asyncio(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: _Clock,
+    *,
+    connect,
+    sleeps: list[float],
+    timeouts: list[object],
+    conns: list[tuple[str, int]],
+) -> None:
+    """Patch asyncio's clock/connect/read/sleep on the ssh_reachable module for a manual drive.
+
+    ``timeouts`` records every ``asyncio.wait_for`` timeout in call order (per iteration the connect
+    wait_for precedes the banner-read wait_for), so a test asserts the exact bounded values.
+    """
+
+    async def _open_connection(host: str, port: int):
+        conns.append((host, port))
+        return connect(host, port)  # returns (reader, writer) or raises OSError
+
+    async def _wait_for(aw, timeout=None):
+        timeouts.append(timeout)
+        return await aw
+
+    async def _sleep(dt: float) -> None:
+        sleeps.append(dt)
+        clock.advance(dt)
+
+    monkeypatch.setattr(ssh_reachable.asyncio, "get_running_loop", lambda: _FakeLoop(clock))
+    monkeypatch.setattr(ssh_reachable.asyncio, "open_connection", _open_connection)
+    monkeypatch.setattr(ssh_reachable.asyncio, "wait_for", _wait_for)
+    monkeypatch.setattr(ssh_reachable.asyncio, "sleep", _sleep)
+
+
+def test_probe_reachable_pins_connect_and_banner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock(0.0)
+    timeouts: list[object] = []
+    conns: list[tuple[str, int]] = []
+    sleeps: list[float] = []
+    writer = _FakeWriter(close_raises=True)  # a close-time OSError must be suppressed (not raised)
+
+    def _connect(_host: str, _port: int):
+        clock.advance(2.5)  # the connect consumed 2.5s of the 3.0s deadline
+        return _FakeReader(b"SSH-2.0-OpenSSH\r\n"), writer
+
+    _install_fake_asyncio(
+        monkeypatch,
+        clock,
+        connect=_connect,
+        sleeps=sleeps,
+        timeouts=timeouts,
+        conns=conns,
+    )
+    result = _drive(_real_probe("the-host", 2222, deadline_s=3.0))
+
+    assert result == ReachResult.ok()
+    assert conns == [("the-host", 2222)]  # host/port threaded to open_connection, not None
+    # connect timeout = min(_CONNECT_TIMEOUT_S, remaining=3.0); banner timeout = max(0.1, 3.0-2.5).
+    assert timeouts == [min(_CONNECT_TIMEOUT_S, 3.0), pytest.approx(0.5)]
+    assert writer.closed is True  # writer.wait_closed raised OSError but suppress(OSError) ate it
+
+
+def test_probe_backoff_and_deadline_boundary_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock(0.0)
+    timeouts: list[object] = []
+    conns: list[tuple[str, int]] = []
+    sleeps: list[float] = []
+    end = 1.2  # deadline; the loop must exit the instant remaining hits 0, before connecting
+
+    def _connect(_host: str, _port: int):
+        # Refuse while inside the window; only a mutant that ignores the deadline reaches here.
+        if clock.time() < end:
+            raise OSError("connection refused")
+        return _FakeReader(b"SSH-2.0-late\r\n"), _FakeWriter()
+
+    _install_fake_asyncio(
+        monkeypatch,
+        clock,
+        connect=_connect,
+        sleeps=sleeps,
+        timeouts=timeouts,
+        conns=conns,
+    )
+    result = _drive(_real_probe("h", 22, deadline_s=end))
+
+    # The deadline is honoured exactly (remaining <= 0 returns before another connect).
+    assert result == ReachResult.tcp_unreachable()
+    # Backoff = min(_BACKOFF_S, max(0.0, end - now)) at now = 0.0, 0.5, 1.0 -> 0.5, 0.5, 0.2.
+    assert sleeps == [
+        pytest.approx(min(_BACKOFF_S, 1.2)),
+        pytest.approx(min(_BACKOFF_S, 0.7)),
+        pytest.approx(0.2),
+    ]
+    # Connect timeout each retry = min(_CONNECT_TIMEOUT_S, remaining) at now = 0.0, 0.5, 1.0.
+    assert timeouts == [
+        pytest.approx(min(_CONNECT_TIMEOUT_S, 1.2)),
+        pytest.approx(min(_CONNECT_TIMEOUT_S, 0.7)),
+        pytest.approx(min(_CONNECT_TIMEOUT_S, 0.2)),
+    ]
+
+
+def test_probe_returns_before_connecting_when_already_past_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(5.0)  # a non-zero clock so `end + now` (a mutated `end - now`) stays positive
+    conns: list[tuple[str, int]] = []
+
+    def _connect(_host: str, _port: int):
+        return _FakeReader(b"SSH-2.0-should-not-run\r\n"), _FakeWriter()
+
+    _install_fake_asyncio(
+        monkeypatch,
+        clock,
+        connect=_connect,
+        sleeps=[],
+        timeouts=[],
+        conns=conns,
+    )
+    result = _drive(_real_probe("h", 22, deadline_s=0.0))
+
+    assert result == ReachResult.tcp_unreachable()
+    assert conns == []  # zero remaining -> return without ever opening a connection
+
+
+class _TzAwareClock:
+    """A datetime stand-in that honours its tz arg: now(UTC) is aware, now(None) is naive."""
+
+    def __init__(self, instant: datetime) -> None:
+        self._instant = instant
+
+    def now(self, tz: object = None) -> datetime:
+        return self._instant if tz is not None else self._instant.replace(tzinfo=None)
+
+
+def test_handler_stamps_checked_at_in_utc(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # checked_at is stamped from datetime.now(UTC): a naive now(None) would drop the +00:00 offset.
+    monkeypatch.setattr(ssh_reachable, "datetime", _TzAwareClock(_FROZEN))
+
+    async def probe(_host: str, _port: int) -> ReachResult:
+        return ReachResult.ok()
+
+    async def _run() -> str | None:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            async with pool.connection() as conn:
+                system_id = await _seed_system(conn)
+                return await check_ssh_reachable_handler(
+                    conn,
+                    _job_for(system_id),
+                    resolver=_resolver(("127.0.0.1", 22001)),
+                    secret_registry=SecretRegistry(),
+                    probe=probe,
+                )
+
+    raw = asyncio.run(_run())
+    assert raw is not None
+    assert '"checked_at":"2026-07-02T00:00:00+00:00"' in raw
