@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flip ADR-0114 and ADR-0389 status to Accepted
 - Document generated kdivectl verb surface; fix stale passthrough claims
 - Correct projects.list to a public read in the axis matrix
+- Flip ADR-0387 status to Accepted
 
 ### Fixed
 
@@ -45,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Propagate errexit into the store builders
 - Preflight that the interpreter can import kdive
 - Make the host kernel readable to libguestfs on the tcg gate
+- Give the tcg gate an importable guestfs binding
 
 ### Build
 
