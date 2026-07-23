@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add ADR-0421 schema-generated kdivectl verbs
 - Capture output schema in verb artifact; tighten ADR-0421
+- Add ADR-0422 clarifying force tool params keep their name
 
 ### Fixed
 
