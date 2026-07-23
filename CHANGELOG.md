@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Consolidate mutations _flatten onto flatten_envelope
 - Make verb-classification branch explicit in gen_cli_verbs
+- Capability gates, not identity gates
 
 ### Documentation
 
@@ -30,12 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add ADR-0422 clarifying force tool params keep their name
 - Flip ADR-0407 status to Accepted
 - Flip ADR-0114 and ADR-0389 status to Accepted
-- ADR-0425 remote-libvirt live_vm family + tier-map + host-dep note
-- Clarify remote live_vm family drives a remote host, not local silicon
-- Catalog the live_vm_remote test env vars
 - Document generated kdivectl verb surface; fix stale passthrough claims
 - Correct projects.list to a public read in the axis matrix
 - Flip ADR-0387 status to Accepted
+- ADR-0425 remote-libvirt live_vm family + tier-map + host-dep note
+- Clarify remote live_vm family drives a remote host, not local silicon
+- Catalog the live_vm_remote test env vars
 
 ### Fixed
 
