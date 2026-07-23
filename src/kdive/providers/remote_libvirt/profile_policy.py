@@ -34,8 +34,9 @@ class RemoteLibvirtProfilePolicy:
         return True
 
     def host_dump_provisioned(self, profile: ProvisioningProfile) -> bool:
-        # The remote section has no preserve-on-crash flag; no host-side dump.
-        return False
+        # Deny-by-default opt-in for the remote host-side dump (ADR-0426); the capture itself
+        # is a virsh dump to an operator-pool coredump volume (ADR-0094).
+        return profile.provider.remote_libvirt.host_dump
 
     def fadump_provisioned(self, profile: ProvisioningProfile) -> bool:
         # fadump is a local-libvirt/pseries opt-in (ADR-0349); remote does not offer it.

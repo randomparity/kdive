@@ -213,7 +213,7 @@ class FaultInjectProfile(_ProfileBase):
 
 
 # Provenance: ADR-0080; image-content obligations ADR-0078/0079; destructive opt-in ADR-0028 §2;
-# gdbstub port ADR-0079/0080.
+# gdbstub port ADR-0079/0080; host_dump opt-in ADR-0426/0094.
 class RemoteLibvirtProfile(_ProfileBase):
     """The ``remote-libvirt`` provider section.
 
@@ -224,15 +224,22 @@ class RemoteLibvirtProfile(_ProfileBase):
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
     deny-by-default opt-in factor for ``force_crash`` (not ``control.power`` or
-    ``systems.reprovision``, which are contributor lifecycle). There is no rootfs,
-    SSH credential, or gdbstub flag: the base image is the rootfs, in-guest access
-    rides the guest-agent seam, and the gdbstub is unconditionally enabled with a
-    per-System port the provisioning plane allocates.
+    ``systems.reprovision``, which are contributor lifecycle).
+    ``host_dump`` is the deny-by-default opt-in authorizing the remote host-side dump
+    — a ``virsh dump`` of a halted guest's memory to an operator-pool coredump volume,
+    streamed to the object store. It mirrors the *policy* of local's
+    ``debug.preserve_on_crash`` (per-profile, off by default) but not its mechanism:
+    remote takes the dump on demand from a halted System, so this flag adds no
+    provisioning-time device — unlike local's pvpanic + ``<on_crash>preserve</on_crash>``.
+    There is no rootfs, SSH credential, or gdbstub flag: the base image is the rootfs,
+    in-guest access rides the guest-agent seam, and the gdbstub is unconditionally
+    enabled with a per-System port the provisioning plane allocates.
     """
 
     base_image_volume: NonEmptyStr
     crashkernel: CrashkernelToken | None = None
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
+    host_dump: bool = False
 
 
 # Provenance: ADR-0024 decision 1.
