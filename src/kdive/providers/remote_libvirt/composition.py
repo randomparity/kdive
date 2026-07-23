@@ -10,7 +10,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.references import (
     CONFIG_COMPONENT,
+    KERNEL_COMPONENT,
     PATCH_COMPONENT,
+    VMLINUX_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
 )
@@ -94,12 +96,21 @@ RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 
 def _component_sources() -> ComponentSourceCapabilities:
-    # Remote-libvirt accepts catalog/local kernel config inputs and local patch artifacts for
-    # uploaded-artifact workflows. No rootfs/kernel/initrd component source is accepted: the
-    # target boots from an operator-staged disk-image base OS.
+    # Remote-libvirt accepts catalog/local kernel config inputs, local patch artifacts, and a
+    # worker-host-local supplied KERNEL and VMLINUX (ADR-0430, #1432) — the same `local` source
+    # kind local accepts. `local` is a worker-host absolute path (LocalComponentRef), not an agent
+    # upload: `component-upload` stays unaccepted for every kind. The target iterates kernels on top
+    # of the operator-staged disk-image base OS, and the install plane already pulls + installs a
+    # vmlinuz+modules bundle into the deterministic `kdive` grub slot (ADR-0078/0081) whether the
+    # bundle was built or supplied, so accepting these needs no install-path change; provenance is
+    # the recorded component source kind (local vs the built artifact). No rootfs/initrd source is
+    # accepted here: the rootfs is fixed by the operator-staged base image, and initrd is future
+    # work in the parity epic (#1423).
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
+        KERNEL_COMPONENT: frozenset({"local"}),
         PATCH_COMPONENT: frozenset({"local"}),
+        VMLINUX_COMPONENT: frozenset({"local"}),
     }
     return ComponentSourceCapabilities(
         provider=ResourceKind.REMOTE_LIBVIRT.value,

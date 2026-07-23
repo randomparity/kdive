@@ -15,7 +15,9 @@ import kdive.config as config
 from kdive.artifacts.storage import StoredArtifact
 from kdive.components.references import (
     CONFIG_COMPONENT,
+    KERNEL_COMPONENT,
     PATCH_COMPONENT,
+    VMLINUX_COMPONENT,
 )
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -1128,13 +1130,15 @@ def test_remote_runtime_wires_connect_and_introspect_ports(
 
 
 def test_remote_runtime_accepts_local_and_catalog_config_and_local_patch_sources() -> None:
-    # runs.build rejects a config whose source-kind is not advertised; an empty set rejects
-    # every remote build. The remote server build merges a kdump fragment from a local .config
-    # or the seeded catalog entry + applies an optional local patch, so it advertises CONFIG as
-    # {"catalog", "local"} and PATCH as {"local"} (ADR-0081/0096).
+    # The remote build merges a kdump fragment from a local .config or the seeded catalog entry +
+    # applies an optional local patch, so it advertises CONFIG as {"catalog", "local"} and PATCH as
+    # {"local"} (ADR-0081/0096). Since ADR-0430 (#1432) it also accepts a worker-host-local supplied
+    # KERNEL and VMLINUX, matching local-libvirt.
     runtime = composition.build_remote_runtime(secret_registry=SecretRegistry())
 
     accepted = runtime.support.component_sources.accepted_component_sources
     assert accepted.get(CONFIG_COMPONENT) == frozenset({"catalog", "local"})
     assert accepted.get(PATCH_COMPONENT) == frozenset({"local"})
+    assert accepted.get(KERNEL_COMPONENT) == frozenset({"local"})
+    assert accepted.get(VMLINUX_COMPONENT) == frozenset({"local"})
     assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value

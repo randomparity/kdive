@@ -9,9 +9,18 @@ from uuid import uuid4
 
 import pytest
 
-from kdive.components.references import CONFIG_COMPONENT, PATCH_COMPONENT
+from kdive.components.references import (
+    CONFIG_COMPONENT,
+    KERNEL_COMPONENT,
+    PATCH_COMPONENT,
+    VMLINUX_COMPONENT,
+    ArtifactComponentRef,
+    LocalComponentRef,
+)
+from kdive.components.validation import reject_unsupported_component_source
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.core.runtime import DebugCapabilities
 from kdive.providers.remote_libvirt import composition
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
@@ -221,6 +230,10 @@ def test_build_runtime_validators_and_component_sources() -> None:
     assert sources.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert sources.accepted_component_sources[CONFIG_COMPONENT] == frozenset({"catalog", "local"})
     assert sources.accepted_component_sources[PATCH_COMPONENT] == frozenset({"local"})
+    # ADR-0430 (#1432): remote now accepts a supplied kernel + vmlinux from the worker-host `local`
+    # source kind, matching local-libvirt.
+    assert sources.accepted_component_sources[KERNEL_COMPONENT] == frozenset({"local"})
+    assert sources.accepted_component_sources[VMLINUX_COMPONENT] == frozenset({"local"})
 
 
 def test_component_sources_map_directly() -> None:
@@ -229,8 +242,32 @@ def test_component_sources_map_directly() -> None:
     assert caps.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert caps.accepted_component_sources == {
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
+        KERNEL_COMPONENT: frozenset({"local"}),
         PATCH_COMPONENT: frozenset({"local"}),
+        VMLINUX_COMPONENT: frozenset({"local"}),
     }
+
+
+def test_remote_accepts_supplied_kernel_and_vmlinux_from_local_source() -> None:
+    # ADR-0430 (#1432): a worker-host-local supplied KERNEL/VMLINUX is accepted (parity with local);
+    # the reject-path helper returns without raising for the `local` source kind.
+    caps = composition._component_sources()
+    local_ref = LocalComponentRef(kind="local", path="/var/lib/kdive/kernel/vmlinuz-6.9")
+    for kind in (KERNEL_COMPONENT, VMLINUX_COMPONENT):
+        reject_unsupported_component_source(caps, component_kind=kind, ref=local_ref)
+
+
+def test_remote_rejects_component_upload_and_artifact_kernel_vmlinux_sources() -> None:
+    # component-upload stays unaccepted for every kind (agent upload is a non-goal, #1423); an
+    # artifact source is likewise not advertised. Both keep the existing configuration-error shape.
+    caps = composition._component_sources()
+    artifact_ref = ArtifactComponentRef(kind="artifact", artifact_id=uuid4())
+    for kind in (KERNEL_COMPONENT, VMLINUX_COMPONENT):
+        with pytest.raises(CategorizedError) as caught:
+            reject_unsupported_component_source(caps, component_kind=kind, ref=artifact_ref)
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.details["source_kind"] == "artifact"
+        assert caught.value.details["accepted_source_kinds"] == ["local"]
 
 
 def test_build_runtime_threads_secret_registry_into_each_registry_port() -> None:
