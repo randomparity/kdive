@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import shutil
 import subprocess  # noqa: S404 - qemu-img uses fixed argv, no shell  # nosec B404
 from collections.abc import Callable
@@ -14,8 +13,6 @@ from uuid import UUID
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import upload_rootfs_path
 from kdive.providers.shared.runtime_paths import console_log_path
-
-_log = logging.getLogger(__name__)
 
 ROOTFS_DIR = "/var/lib/kdive/rootfs"
 # A System-owned uploaded rootfs is staged here, OUTSIDE the provider ``allowed_roots`` (which
@@ -280,6 +277,10 @@ class ProvisioningFiles:
     overlay_exists: OverlayExists = _real_overlay_exists
     # The baseline directory presence check reuses the overlay path-presence predicate.
     baseline_exists: OverlayExists = _real_overlay_exists
+    # The staged-uploaded-rootfs presence check (ADR-0435): the failure-path reclaim snapshots
+    # whether provision() itself staged the file before removing it, so a reused (pre-existing)
+    # staged base backing a prior attempt is never removed. Reuses the same path-presence predicate.
+    uploaded_rootfs_exists: OverlayExists = _real_overlay_exists
     prepare_console_log: PrepareConsoleLog = _prepare_console_log
 
     def prepare_overlay(
@@ -314,14 +315,6 @@ class ProvisioningFiles:
     def prepare_console(self, system_id: UUID) -> None:
         self.prepare_console_log(console_log_path(system_id))
 
-    def cleanup_overlay_if_created(self, overlay: PreparedOverlay) -> None:
-        if not overlay.created:
-            return
-        try:
-            self.remove_overlay(overlay.path)
-        except CategorizedError:
-            _log.warning("failed to remove overlay after failed provision", exc_info=True)
-
     def remove_overlay_for_domain(self, domain_name: str) -> None:
         self.remove_overlay(overlay_path(domain_name.removeprefix("kdive-")))
 
@@ -332,3 +325,8 @@ class ProvisioningFiles:
         system_id = domain_name.removeprefix("kdive-")
         path = upload_rootfs_path("local", system_id, upload_dir=Path(UPLOADS_DIR))
         self.remove_uploaded_rootfs(str(path))
+
+    def uploaded_rootfs_exists_for(self, system_id: UUID) -> bool:
+        """Whether the per-System staged uploaded rootfs already exists on disk (ADR-0435)."""
+        path = upload_rootfs_path("local", system_id, upload_dir=Path(UPLOADS_DIR))
+        return self.uploaded_rootfs_exists(str(path))

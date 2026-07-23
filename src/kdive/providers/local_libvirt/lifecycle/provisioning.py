@@ -17,6 +17,7 @@ import logging
 import socket
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -163,6 +164,22 @@ def _materializable_rootfs(rootfs: RootfsSource) -> MaterializableRootfsRef:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _MaterializedPreExistence:
+    """Which per-System host artifacts existed before ``provision`` materialized them (ADR-0435).
+
+    The failure reclaim removes only what this call creates, so a pre-existing artifact — which may
+    back a live or recoverable prior attempt — is preserved (mirrors the overlay's
+    create-only-when-absent contract, ADR-0060). ``staged`` is meaningful only for the ``upload``
+    rootfs kind (``is_upload``).
+    """
+
+    overlay: bool
+    baseline: bool
+    staged: bool
+    is_upload: bool
+
+
 class LocalLibvirtProvisioning:
     """The realized provisioning port for the local libvirt host."""
 
@@ -251,44 +268,109 @@ class LocalLibvirtProvisioning:
         # a fail-closed arch drift or a caps-read fault rejects with zero overlay/baseline and
         # skips the expensive rootfs materialization for a System that cannot be provisioned.
         accel, emulator = self._resolve_guest_arch(profile.arch)
-        base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
-        baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
-        overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
-        gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
-        # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
-        # allocated. drgn-live no longer needs a profile credential — it authenticates with the
-        # per-System bootstrap key (ADR-0289/0315). Reuse-on-retry (_ssh_port_for) is unchanged.
-        ssh_port = self._ssh_port_for(system_id)
-        if self._guest_egress:
-            # Positive, greppable signal for a security-relevant state: the operator opted this
-            # resource into guest egress, so the guest NIC renders restrict=off (ADR-0313, #1031).
-            _log.info(
-                "provisioning System %s with guest egress enabled (restrict=off): the guest can "
-                "reach the network; the network-zone firewall is the enforcement boundary",
-                system_id,
-            )
-        xml = render_domain_xml(  # validates the profile
-            system_id,
-            profile,
-            disk_path=overlay.path,
-            gdb_port=gdb_port,
-            ssh_port=ssh_port,
-            kernel_path=baseline.kernel,
-            initrd_path=baseline.initrd,
-            guest_egress=self._guest_egress,
-            accel=accel,
-            emulator=emulator,
-        )
+        # Snapshot which host artifacts pre-exist BEFORE materializing anything, so a failure after
+        # materialization reclaims only what THIS call creates (ADR-0435): a pre-existing overlay,
+        # baseline dir, or staged uploaded rootfs may back a live or recoverable prior attempt.
+        pre_existing = self._snapshot_pre_existing(system_id, section.rootfs)
+        # Each flag flips to "this call created it" immediately BEFORE its creating step, so a
+        # failure reclaims exactly the artifacts whose creation was reached (never a step we never
+        # got to, never a pre-existing artifact) — ADR-0435.
+        staged_created = baseline_created = overlay_created = False
         try:
+            staged_created = pre_existing.is_upload and not pre_existing.staged
+            base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
+            baseline_created = not pre_existing.baseline
+            baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
+            overlay_created = not pre_existing.overlay
+            overlay = self._files.prepare_overlay(system_id, base=base, disk_gb=profile.disk_gb)
+            gdb_port = self._gdb_port_for(system_id) if section.debug.gdbstub else None
+            # The SSH forward is rendered on every domain (ADR-0281, #937), so the port is always
+            # allocated. drgn-live no longer needs a profile credential — it authenticates with the
+            # per-System bootstrap key (ADR-0289/0315). Reuse-on-retry (_ssh_port_for) is unchanged.
+            ssh_port = self._ssh_port_for(system_id)
+            if self._guest_egress:
+                # Positive, greppable signal for a security-relevant state: the operator opted this
+                # resource into guest egress, so the guest NIC renders restrict=off (ADR-0313).
+                _log.info(
+                    "provisioning System %s with guest egress enabled (restrict=off): the guest "
+                    "can reach the network; the network-zone firewall is the enforcement boundary",
+                    system_id,
+                )
+            xml = render_domain_xml(  # validates the profile
+                system_id,
+                profile,
+                disk_path=overlay.path,
+                gdb_port=gdb_port,
+                ssh_port=ssh_port,
+                kernel_path=baseline.kernel,
+                initrd_path=baseline.initrd,
+                guest_egress=self._guest_egress,
+                accel=accel,
+                emulator=emulator,
+            )
             if overlay.created:
                 for customize in overlay_customizers:
                     customize(overlay.path)
             self._files.prepare_console(system_id)
             self._define_and_start(xml, system_id)
         except CategorizedError:
-            self._files.cleanup_overlay_if_created(overlay)
+            self._reclaim_materialized_on_failure(
+                system_id,
+                overlay=overlay_created,
+                baseline=baseline_created,
+                staged=staged_created,
+            )
             raise
         return domain_name_for(system_id)
+
+    def _snapshot_pre_existing(
+        self, system_id: UUID, rootfs: RootfsSource
+    ) -> _MaterializedPreExistence:
+        """Record which per-System host artifacts exist before materialization (ADR-0435)."""
+        is_upload = isinstance(rootfs, _UploadRootfs)
+        return _MaterializedPreExistence(
+            overlay=self._files.overlay_exists(overlay_path(system_id)),
+            baseline=self._files.baseline_exists(baseline_dir(system_id)),
+            staged=is_upload and self._files.uploaded_rootfs_exists_for(system_id),
+            is_upload=is_upload,
+        )
+
+    def _reclaim_materialized_on_failure(
+        self, system_id: UUID, *, overlay: bool, baseline: bool, staged: bool
+    ) -> None:
+        """Best-effort reclaim the host artifacts this failed provision created (ADR-0435).
+
+        Removes only what this call created — an overlay, baseline directory, or staged uploaded
+        rootfs that pre-existed (or a step this call never reached) is left in place. Each removal
+        swallows a secondary ``CategorizedError`` so a reclaim fault never masks the original
+        provisioning error; the reconciler and a later teardown remain the backstops.
+        """
+        domain_name = domain_name_for(system_id)
+        if overlay:
+            self._best_effort_reclaim(self._files.remove_overlay_for_domain, domain_name, "overlay")
+        if baseline:
+            self._best_effort_reclaim(
+                self._files.remove_baseline_for_domain, domain_name, "baseline directory"
+            )
+        if staged:
+            self._best_effort_reclaim(
+                self._files.remove_uploaded_rootfs_for_domain,
+                domain_name,
+                "staged uploaded rootfs",
+            )
+
+    @staticmethod
+    def _best_effort_reclaim(remove: Callable[[str], None], domain_name: str, what: str) -> None:
+        try:
+            remove(domain_name)
+        except CategorizedError:
+            _log.warning(
+                "failed to reclaim %s after a failed provision of %s; leaving it for the "
+                "reconciler/teardown backstop",
+                what,
+                domain_name,
+                exc_info=True,
+            )
 
     def _prepare_baseline_kernel(
         self, system_id: UUID, base: str, baseline_kernel: str | None
