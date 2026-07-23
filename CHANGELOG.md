@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flag what the compose app tier cannot serve
 - Spec + ADR for local-libvirt agent-uploaded rootfs staging
 - Implementation plan for local-libvirt agent-uploaded rootfs (#743)
+- Add ADR-0435 for reclaiming failed-provision artifacts
 
 ### Fixed
 
@@ -73,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run the live_vm_tcg app tier as host processes
 - Stage the tcg image set inside the provider's allowed root
 - Isolate uploaded-rootfs object reclaim from console/sysrq faults
+- Reclaim host artifacts on a failed provision
+- Reap a failed upload System's stranded object
 - Reject chunked rootfs upload for local-libvirt Systems
 
 ### Build
