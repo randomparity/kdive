@@ -1334,3 +1334,181 @@ def test_chunked_effective_config_rejected() -> None:
     out = _validate_artifact_declarations("rid", [decl], frozenset({"effective_config"}), _CAP)
     assert isinstance(out, ToolResponse)
     assert out.data["reason"] == "size_out_of_range"
+
+
+# --- Transport-encoding declaration validation (ADR-0437) -------------------------------
+
+from kdive.mcp.tools.catalog.artifacts.uploads import (  # noqa: E402
+    _RUN_UPLOAD,
+    _SYSTEM_UNCOMPRESSED_CAP,
+    _SYSTEM_UPLOAD,
+)
+
+_ENC_CAP = 8 * 1024 * 1024 * 1024  # a per-owner canonical-object cap for these unit cases
+
+
+def _enc_ok(**over: Any) -> dict[str, Any]:
+    decl: dict[str, Any] = {
+        "name": "vmlinux",
+        "sha256": "a",
+        "size_bytes": 4096,
+        "encoding": "gzip",
+        "uncompressed_size": 6 * 1024 * 1024 * 1024,
+    }
+    decl.update(over)
+    return decl
+
+
+def _validate_enc(decl: dict[str, Any], *, accepts_encoding: bool = True) -> Any:
+    return _validate_artifact_declarations(
+        "rid",
+        [decl],
+        _ALLOWED,
+        _CAP,
+        accepts_encoding=accepts_encoding,
+        uncompressed_cap=_ENC_CAP,
+    )
+
+
+def test_encoding_accepted_carries_fields_on_entry() -> None:
+    out = _validate_enc(_enc_ok())
+    assert isinstance(out, list)
+    assert out[0].encoding == "gzip"
+    assert out[0].uncompressed_size == 6 * 1024 * 1024 * 1024
+    assert out[0].chunks is None
+
+
+def test_encoding_identity_normalizes_to_none() -> None:
+    # An explicit "identity" is no encoding; uncompressed_size must be absent.
+    decl = {"name": "vmlinux", "sha256": "a", "size_bytes": 300, "encoding": "identity"}
+    out = _validate_enc(decl)
+    assert isinstance(out, list)
+    assert out[0].encoding is None
+    assert out[0].uncompressed_size is None
+
+
+def test_plain_declaration_defaults_to_no_encoding() -> None:
+    out = _validate_enc({"name": "vmlinux", "sha256": "a", "size_bytes": 300})
+    assert isinstance(out, list)
+    assert out[0].encoding is None
+    assert out[0].uncompressed_size is None
+
+
+def test_encoding_without_uncompressed_size_rejected() -> None:
+    decl = _enc_ok()
+    del decl["uncompressed_size"]
+    out = _validate_enc(decl)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "uncompressed_size_required"
+    assert out.detail is not None and "uncompressed_size" in out.detail
+
+
+def test_unknown_codec_rejected() -> None:
+    out = _validate_enc(_enc_ok(encoding="zstd"))
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "unknown_encoding"
+    assert out.detail is not None and "gzip" in out.detail
+
+
+def test_encoding_with_chunks_rejected() -> None:
+    decl = _enc_ok(size_bytes=_5GIB + 100)
+    decl["chunks"] = [
+        {"sha256": "c0", "size_bytes": _5GIB},
+        {"sha256": "c1", "size_bytes": 100},
+    ]
+    out = _validate_enc(decl)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "encoding_with_chunks"
+    assert out.detail is not None and "single PUT" in out.detail
+
+
+def test_over_cap_uncompressed_size_rejected() -> None:
+    out = _validate_enc(_enc_ok(uncompressed_size=_ENC_CAP + 1))
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "uncompressed_size_over_cap"
+
+
+def test_encoding_rejected_when_owner_does_not_accept() -> None:
+    out = _validate_enc(_enc_ok(), accepts_encoding=False)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "encoding_not_supported"
+
+
+def test_uncompressed_size_without_encoding_rejected() -> None:
+    decl = {"name": "vmlinux", "sha256": "a", "size_bytes": 300, "uncompressed_size": 10}
+    out = _validate_enc(decl)
+    assert isinstance(out, ToolResponse)
+    assert out.data["reason"] == "uncompressed_size_without_encoding"
+
+
+def test_owner_specs_wire_encoding_capability() -> None:
+    # First cut (ADR-0437): systems accepts a transport encoding (rootfs consumer, #1510); runs
+    # has no decompressing consumer and rejects it.
+    assert _SYSTEM_UPLOAD.accepts_encoding is True
+    assert _SYSTEM_UPLOAD.uncompressed_cap == _SYSTEM_UNCOMPRESSED_CAP
+    assert _RUN_UPLOAD.accepts_encoding is False
+
+
+def test_create_system_upload_accepts_gzip_encoding_and_persists(migrated_url: str) -> None:
+    # End-to-end: a gzip rootfs whose canonical size exceeds 5 GiB but whose compressed object is a
+    # single PUT <= 5 GiB is accepted, signs the compressed bytes, and round-trips the two fields.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id = await _defined_system_via_tool(pool)
+            store = _FakeStore()
+            responses = await create_system_upload(
+                pool,
+                _ctx(),
+                system_id=sys_id,
+                artifacts=[
+                    {
+                        "name": "rootfs",
+                        "sha256": "aaa",
+                        "size_bytes": 4096,
+                        "encoding": "gzip",
+                        "uncompressed_size": 6 * 1024 * 1024 * 1024,
+                    }
+                ],
+                resolver=provider_resolver(),
+                store=store,
+            )
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
+        assert responses.status == "upload_ready"
+        # The signed/stored bytes are the compressed transport object, not the canonical size.
+        assert store.calls == [(f"local/systems/{sys_id}/rootfs", "aaa", 4096)]
+        assert manifest is not None
+        rootfs = manifest.entries[0]
+        assert rootfs.encoding == "gzip"
+        assert rootfs.uncompressed_size == 6 * 1024 * 1024 * 1024
+
+    asyncio.run(_run())
+
+
+def test_create_run_upload_rejects_encoding(migrated_url: str) -> None:
+    # The runs owner rejects a non-identity encoding at declaration (no decompressing consumer).
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_created_run(pool, build_profile=_EXTERNAL_PROFILE)
+            store = _FakeStore()
+            out = await create_run_upload(
+                pool,
+                _ctx(),
+                run_id=run_id,
+                artifacts=[
+                    {
+                        "name": "kernel",
+                        "sha256": "a",
+                        "size_bytes": 100,
+                        "encoding": "gzip",
+                        "uncompressed_size": 1000,
+                    }
+                ],
+                store=store,
+            )
+            assert store.calls == []
+            return out
+
+    out = asyncio.run(_run())
+    assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert out.data["reason"] == "encoding_not_supported"
