@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add column-agnostic render_envelope for generated verbs
+
 ### Documentation
 
 - Add ADR-0421 schema-generated kdivectl verbs
@@ -18,11 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build the app image before the live_vm_tcg app tier
 - Raise when visible_next_actions names an unregistered tool
 - Adapt to ty 0.0.59 narrowing and read-only property checks
+- Keep the ppc64le uv wheel pin in step with the image pins
 
 ### Build
 
 - Bump the github-actions group with 2 updates
 - Bump the python-dependencies group with 4 updates
+- Bump the docker-images group across 1 directory with 2 updates
 
 ## [0.4.0] - 2026-07-23
 
