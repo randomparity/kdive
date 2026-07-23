@@ -61,14 +61,17 @@ every verb by a single canonical rule with no aliases and no exclusions, and kee
 handlers only as overrides of their derived canonical path.**
 
 1. **Build-time generation from `list_tools()`, committed artifact, CI drift guard.** A
-   build step queries the server's `list_tools()` and emits the verb tree (path, positional
-   and option arguments, required-vs-optional, help text) as a **committed artifact** checked
-   into the tree. The CLI loads that artifact; it does not call `list_tools()` at startup, so
-   the shipped CLI stays offline-parseable and its surface is reviewable in a diff. A **CI
-   drift guard** regenerates the artifact against the live schemas and fails if it differs
-   from the committed copy — so any tool added, renamed, or reshaped surfaces as a required,
-   reviewed artifact change, never as silent CLI drift. Regeneration is the fix; the guard is
-   the tripwire.
+   build step queries the server's `list_tools()` and emits the verb tree as a **committed
+   artifact** checked into the tree. The artifact records, per verb, both halves of the tool's
+   contract: its **input** shape (path, positional and option arguments, required-vs-optional,
+   help text) *and* its **output/envelope schema** — the latter so a `--json` contract change
+   is a diffable artifact change (decision 6), not just the input surface. The CLI loads that
+   artifact; it does not call `list_tools()` at startup, so the shipped CLI stays
+   offline-parseable and its surface is reviewable in a diff. A **CI drift guard** regenerates
+   the artifact against the live schemas and fails if it differs from the committed copy — so
+   any tool added, renamed, or reshaped on *either* its input or output side surfaces as a
+   required, reviewed artifact change, never as silent CLI drift. Regeneration is the fix; the
+   guard is the tripwire.
 
 2. **Canonical path derivation, no aliases, no exclusions.** The verb path is a pure function
    of the tool name: `<ns>.<op>` → `kdivectl <ns> <op-with-dashes>` (underscores in `<op>`
@@ -157,6 +160,13 @@ handlers only as overrides of their derived canonical path.**
 
 - **Coverage is O(1) to maintain.** A new tool gets a typed, rendered, helped verb with no
   hand-written registry entry; the curated set shrinks to genuine ergonomic overrides.
+- **The ceremony to reach a mutating tool drops for the whole census at once.** Where reaching
+  an un-curated mutating tool meant `tool call --allow-mutating` (ADR-0107), it is now a named
+  derived verb run with no flag (decision 4). This is the intended consequence — a named,
+  argument-typed verb is not the fat-finger surface a generic `tool call` is, and it matches
+  the zero-flag ceremony ADR-0107 already grants curated mutating verbs — but it is a
+  deliberate, census-wide lowering, not a per-verb one, and destructive verbs still keep the
+  typed-`yes` confirm.
 - **The verb name is now derivable from the tool name and vice versa.** An operator or agent
   can predict `kdivectl <ns> <op>` from a tool name and read a tool name off a verb, removing
   the lookup the disagreeing legacy names forced.
