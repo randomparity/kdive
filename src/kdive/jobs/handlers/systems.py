@@ -814,10 +814,19 @@ async def teardown_handler(
     try:
         await _reclaim_console_artifacts(conn, artifact_store, system_id)
         await _reclaim_sysrq_artifacts(conn, artifact_store, system_id)
-        await _delete_uploaded_rootfs_object(conn, artifact_store, system_id)
     except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
         _log.warning(
             "best-effort System-artifact reclaim for system %s failed",
+            system_id,
+            exc_info=True,
+        )
+    # Isolated from the console/sysrq reclaim above: a fault there must not skip reclaiming the
+    # SENSITIVE uploaded-rootfs object, which no #768 reaper would ever collect (ADR-0434 §4).
+    try:
+        await _delete_uploaded_rootfs_object(conn, artifact_store, system_id)
+    except Exception:  # noqa: BLE001 - object reclaim is best-effort; the row was already revoked
+        _log.warning(
+            "best-effort uploaded-rootfs object reclaim for system %s failed",
             system_id,
             exc_info=True,
         )

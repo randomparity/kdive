@@ -317,6 +317,41 @@ def test_teardown_revokes_rootfs_row_even_when_object_delete_fails(migrated_url:
     assert orphan_present, "the object bytes linger as an unreferenced orphan on a store fault"
 
 
+def test_teardown_reclaims_rootfs_object_despite_console_reclaim_fault(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A console/sysrq reclaim fault must NOT skip the SENSITIVE uploaded-rootfs object reclaim:
+    # the two are isolated best-effort blocks, so the reaper-exempt image is not leaked by an
+    # unrelated fault (ADR-0434 §4).
+    class _FailConsoleStore(_FakeStore):
+        def delete(self, key: str) -> None:
+            if "console-part-" in key:
+                raise CategorizedError(
+                    f"delete {key!r} failed",
+                    category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                    details={"key": key},
+                )
+            super().delete(key)
+
+    async def _run() -> bool:
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
+            await pool.open()
+            system_id = await _seed_ready_system(pool)
+            log = tmp_path / f"{system_id}.log"
+            log.write_bytes(_CONSOLE)
+            monkeypatch.setattr(console_rotate, "console_log_path", lambda _sid: log)
+            store = _FailConsoleStore()
+            await _rotate(pool, store, system_id)
+            rootfs_key = await _seed_rootfs_artifact(pool, store, system_id)
+            result = await _teardown(pool, store, system_id)
+            assert result is not None, "a console reclaim fault must not fail teardown"
+            return rootfs_key in store.objects
+
+    still_present = asyncio.run(_run())
+
+    assert not still_present, "rootfs object is reclaimed despite the console reclaim fault"
+
+
 def test_teardown_succeeds_with_nothing_to_clean(migrated_url: str) -> None:
     async def _run() -> tuple[str, list[str], list[str]]:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False) as pool:
