@@ -107,10 +107,21 @@ jobs:
       # constants in src so a newly hardcoded dir cannot silently reintroduce this.
       - name: Provision the runner-owned runtime directories under /var/lib/kdive
         run: |
-          sudo mkdir -p /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
-          sudo chown -R "$(id -u):$(id -g)" /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
+          sudo mkdir -p /var/lib/kdive/console /var/lib/kdive/pcap
+          # The rootfs dir is the provider's ALLOWED ROOT: LocalLibvirtProvisioning.from_env pins
+          # allowed_roots=[ROOTFS_DIR] with no env override (ADR-0224/#731), so anything staged
+          # outside it is rejected at provision time. It also holds every per-System overlay. But
+          # the staged ppc64le set alone budgets ~7 GB (#1292) and the hosted runner's root
+          # filesystem is the small one, so back that fixed path with /mnt, the large ephemeral
+          # disk. validate_local_component_path resolves BOTH the candidate and the roots, so a
+          # symlinked root still matches, and `df` follows it — which keeps stage-tcg-images.sh's
+          # pre-stage free-space check measuring the disk the bytes actually land on.
+          sudo mkdir -p /mnt/kdive-rootfs
+          sudo ln -sfn /mnt/kdive-rootfs /var/lib/kdive/rootfs
+          sudo chown -R "$(id -u):$(id -g)" /var/lib/kdive/console /var/lib/kdive/pcap /mnt/kdive-rootfs
           sudo chmod 0755 /var/lib/kdive
-          ls -ld /var/lib/kdive /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs
+          ls -ld /var/lib/kdive /var/lib/kdive/console /var/lib/kdive/pcap /var/lib/kdive/rootfs /mnt/kdive-rootfs
+          df -h /mnt/kdive-rootfs
 
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
@@ -172,13 +183,11 @@ jobs:
           # KDIVE_LIVE_VM_ROOTFS / _BZIMAGE / _VMLINUX. Capture-then-eval so a staging failure
           # (enforce_budget die, a fetch error) fails HERE with its own message — set -e does not
           # catch a non-zero exit inside `eval "$(cmd)"` directly.
-          # /mnt is the hosted runner's large ephemeral disk, but it is root-owned, so the runner
-          # user cannot mkdir there. Pre-create a runner-owned parent (hosted runners have
-          # passwordless sudo) and point the stager at a SUBDIR it fully controls — the script
-          # rm -rf's + recreates KDIVE_TCG_STAGE_DIR, which must not be the root-owned mount point.
-          sudo mkdir -p /mnt/kdive-tcg
-          sudo chown "$(id -u):$(id -g)" /mnt/kdive-tcg
-          export KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/set
+          # Stage INSIDE the provider's allowed root (provisioned above, and backed by /mnt): the
+          # provisioner rejects a rootfs path outside it. A SUBDIR, never the root itself — the
+          # stager rm -rf's + recreates KDIVE_TCG_STAGE_DIR, which would otherwise take the
+          # provider's per-System overlay dir with it. The parent is already runner-owned.
+          export KDIVE_TCG_STAGE_DIR=/var/lib/kdive/rootfs/tcg-set
           # On schedule/push TCG_IMAGE_INPUT is empty, so this fallback must be a REAL catalog entry
           # (kept identical to the workflow_dispatch tcg_image default above) — a bogus name like the
           # old `fedora-ppc64le` made every non-dispatch run fail at build-fs. test_live_workflow_shape

@@ -65,15 +65,57 @@ def test_native_block_exports_warm_store_wiring() -> None:
         assert var in exported, f"{var} not exported in the native run block"
 
 
-def test_tcg_block_stages_into_a_runner_owned_dir() -> None:
-    # /mnt is root-owned on the ubuntu-latest hosted runner, so stage-tcg-images.sh's `mkdir` there
-    # fails (permission denied). The tcg block must sudo-create + chown a parent and stage into a
-    # SUBDIR — the script rm -rf's + recreates its stage dir, which must not be the mount point.
+def _tcg_stage_dir() -> str:
     steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
     run = next(s["run"] for s in steps if "run" in s and "spine" in s.get("name", "").lower())
-    stage_subdir = "KDIVE_TCG_STAGE_DIR=/mnt/kdive-tcg/"  # pragma: allowlist secret
-    assert "sudo chown" in run, "the tcg staging dir must be chowned to the runner user"
-    assert stage_subdir in run, "stage into a runner-owned subdir, not /mnt"
+    prefix = "export KDIVE_TCG_STAGE_DIR="
+    line = next(ln.strip() for ln in run.splitlines() if ln.strip().startswith(prefix))
+    return line[len(prefix) :]
+
+
+def test_tcg_block_stages_inside_the_provider_allowed_root() -> None:
+    """The provisioner only accepts rootfs paths under its allowed root (ADR-0224, #731).
+
+    ``LocalLibvirtProvisioning.from_env`` hardcodes ``allowed_roots=[Path(ROOTFS_DIR)]`` with no
+    env override, so a set staged anywhere else is rejected at provision time with "local component
+    path is outside provider allowed roots" — minutes into the run, after the whole image build.
+    Read ROOTFS_DIR from src rather than repeating the literal, so moving the constant fails here.
+    """
+    from kdive.providers.local_libvirt.lifecycle import storage
+
+    stage = _tcg_stage_dir()
+    assert stage.startswith(f"{storage.ROOTFS_DIR}/"), (
+        f"KDIVE_TCG_STAGE_DIR={stage} is outside the provider's allowed root "
+        f"{storage.ROOTFS_DIR}; provision would reject the staged rootfs"
+    )
+    # A SUBDIR, never the root itself: stage-tcg-images.sh rm -rf's + recreates its stage dir, and
+    # the provider writes every per-System overlay into the root alongside it.
+    assert stage.rstrip("/") != storage.ROOTFS_DIR, (
+        "stage into a subdirectory: the stager deletes and recreates KDIVE_TCG_STAGE_DIR, "
+        "which would take the provider's overlay dir with it"
+    )
+
+
+def test_tcg_allowed_root_is_backed_by_the_large_scratch_disk() -> None:
+    """~7 GB of staged set (#1292) must not land on the runner's small root filesystem.
+
+    The provider's allowed root is a fixed path, so the only way to keep the budget on /mnt is to
+    back that path with the scratch disk. validate_local_component_path resolves both the candidate
+    and the roots, so a symlinked root still matches; `df` follows it too, which keeps
+    stage-tcg-images.sh's pre-stage free-space check measuring the disk the bytes actually land on.
+    """
+    from kdive.providers.local_libvirt.lifecycle import storage
+
+    steps = _load(_LIVE)["jobs"]["tcg"]["steps"]
+    joined = "\n".join(s["run"] for s in steps if "run" in s)
+    link = next(
+        (ln.strip() for ln in joined.splitlines() if "ln -" in ln and storage.ROOTFS_DIR in ln),
+        None,
+    )
+    assert link is not None, (
+        f"{storage.ROOTFS_DIR} must be backed by the /mnt scratch disk, not the root filesystem"
+    )
+    assert "/mnt/" in link, f"the allowed root must point at /mnt; got {link!r}"
 
 
 def _catalog_names() -> set[str]:
