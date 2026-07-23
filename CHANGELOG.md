@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accept supplied KERNEL + VMLINUX component source
 - Sysrq + crash-watch on remote-libvirt (#1435)
 - Stage and reclaim agent-uploaded rootfs (#743)
+- Add shared streaming gzip strip-decode utility
+- Carry transport encoding on the upload manifest entry
+- Validate transport encoding at upload declaration
 
 ### Changed
 
@@ -52,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Spec + ADR for local-libvirt agent-uploaded rootfs staging
 - Implementation plan for local-libvirt agent-uploaded rootfs (#743)
 - Add ADR-0435 for reclaiming failed-provision artifacts
+- ADR-0437 transport-encoding vs payload-format model
 
 ### Fixed
 
@@ -77,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reclaim host artifacts on a failed provision
 - Reap a failed upload System's stranded object
 - Reject chunked rootfs upload for local-libvirt Systems
+- Fail closed on trailing data after the gzip member
 
 ### Build
 
