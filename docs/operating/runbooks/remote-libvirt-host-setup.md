@@ -422,7 +422,7 @@ kdivectl images list
 kdivectl tool call <read-only-tool> --json '{}'        # fail-closed: non-read-only exits 3
 # break-glass (role-gated, audited as operator-cli):
 kdivectl resources cordon <id>                         # platform_operator
-kdivectl teardown system <id> --reason R --force       # platform_admin
+kdivectl ops force-teardown <id> --reason R --force    # platform_admin
 ```
 
 Exit codes: `0` ok, `1` generic, `2` configuration, `3` authorization-denied (or non-read-only

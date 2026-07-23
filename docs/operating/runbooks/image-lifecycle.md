@@ -271,7 +271,7 @@ row-first (the catalog row is written before the object), so a live publish is n
   dangling sweep heals — never a rowless object.
 
 To force the expired-private sweep immediately (e.g. to reclaim quota now), an operator runs
-`kdivectl images prune --expired` (`platform_admin` break-glass).
+`kdivectl images prune-expired --expired` (`platform_admin` break-glass).
 
 ## Runtime tool installs on local-libvirt (operator-gated egress)
 
