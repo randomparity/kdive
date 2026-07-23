@@ -7,6 +7,7 @@ runtime assembly lives next to each provider.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -42,6 +43,8 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 
 if TYPE_CHECKING:
     from kdive.providers.infra.console_hosting import ConsoleHosting
+
+_log = logging.getLogger(__name__)
 
 type _ConsoleHostingFactory = Callable[[], Awaitable["ConsoleHosting | None"]]
 
@@ -150,10 +153,22 @@ class _CompositeReaper:
         self._owners: dict[str, InfraReaper] = {}
 
     async def list_owned(self) -> list[OwnedDomain]:
+        # Per-child fault isolation: one provider reaper raising (e.g. an unreachable remote
+        # host) must not abort the whole composite sweep, or a single down provider would strand
+        # every other provider's leaked domains. A failing child is logged (surfaced, never
+        # silently absorbed) and skipped; the healthy children are still swept.
         domains: list[OwnedDomain] = []
         owners: dict[str, InfraReaper] = {}
         for reaper in self._reapers:
-            owned = await reaper.list_owned()
+            try:
+                owned = await reaper.list_owned()
+            except Exception:  # noqa: BLE001 - one child's fault must not strand the others
+                _log.warning(
+                    "reconciler: leaked-domain listing failed for one provider reaper; "
+                    "other providers still swept",
+                    exc_info=True,
+                )
+                continue
             domains.extend(owned)
             for domain in owned:
                 owners.setdefault(domain.name, reaper)
@@ -171,8 +186,26 @@ class _CompositeReaper:
         # Routing only via the list_owned side effect would silently no-op and leak the domain,
         # so fan the destroy out to every child. Provider teardown is idempotent over an absent
         # domain, so a destroy reaching a non-owner is harmless.
+        #
+        # Each child is guarded so a raising child cannot mask another child's destroy (one
+        # unreachable remote host must not strand a local probe-guest teardown in the same
+        # fan-out). Failures are logged, and the first is re-raised after every child is
+        # attempted so a persistent fault surfaces to the caller and is retried next pass —
+        # never silently absorbed.
+        first_error: Exception | None = None
         for reaper in self._reapers:
-            await reaper.destroy(name)
+            try:
+                await reaper.destroy(name)
+            except Exception as exc:  # noqa: BLE001 - attempt every child, then surface
+                _log.warning(
+                    "reconciler: leaked-domain destroy of %s failed for one provider reaper; "
+                    "other providers still attempted",
+                    name,
+                    exc_info=True,
+                )
+                first_error = first_error or exc
+        if first_error is not None:
+            raise first_error
 
 
 class ProviderComposition:
@@ -250,11 +283,16 @@ class ProviderComposition:
         *,
         enable_fault_inject: bool | None,
         enable_local_libvirt: bool | None,
+        enable_remote_libvirt: bool | None,
         libvirt_reaper: InfraReaper | None,
     ) -> tuple[Callable[[], InfraReaper], ...]:
         factories: list[Callable[[], InfraReaper]] = []
         if _local_libvirt_enabled(enable_local_libvirt):
             factories.append(lambda: libvirt_reaper or local_composition.build_reaper())
+        if _remote_libvirt_enabled(enable_remote_libvirt):
+            factories.append(
+                lambda: remote_composition.build_infra_reaper(secret_registry=self._secret_registry)
+            )
         if _fault_inject_enabled(enable_fault_inject):
             factories.append(
                 lambda: fault_inject_composition.build_reaper(self._fault_inject_inventory)
@@ -328,23 +366,28 @@ class ProviderComposition:
         *,
         enable_fault_inject: bool | None = None,
         enable_local_libvirt: bool | None = None,
+        enable_remote_libvirt: bool | None = None,
         libvirt_reaper: InfraReaper | None = None,
     ) -> InfraReaper:
         """Assemble the provider-aware leaked-infra reaper for reconciliation.
 
         Local-libvirt is on by default (``KDIVE_LOCAL_LIBVIRT_ENABLED``), so a stock deployment
         composes the libvirt-backed reaper (ADR-0111) and an orphaned ``kdive-<uuid>`` domain
-        reaches ``repair_leaked_domains``. A remote-libvirt-only deployment with no local libvirt
-        socket (e.g. k8s) sets the flag false so the sweep does not fail every pass; the fault-
-        inject reaper is composed in when enabled. With neither enabled the reaper is a
-        :class:`NullReaper`. ``libvirt_reaper`` is an injection seam for tests (the real reaper
-        opens a libvirt connection on ``list_owned``); production passes ``None``.
+        reaches ``repair_leaked_domains``. When remote-libvirt is configured its fleet reaper is
+        composed in the same way, so a remote-only deployment with no local libvirt socket (e.g.
+        k8s) still reaps its own leaked ``kdive-<uuid>`` domains instead of getting a
+        :class:`NullReaper`; the fault-inject reaper is composed in when enabled. Two or more
+        reapers compose into a fault-isolating :class:`_CompositeReaper` (a down provider never
+        strands the others); with none enabled the reaper is a :class:`NullReaper`.
+        ``libvirt_reaper`` is an injection seam for tests (the real reaper opens a libvirt
+        connection on ``list_owned``); production passes ``None``.
         """
         reapers = [
             factory()
             for factory in self._reconciler_reaper_factories(
                 enable_fault_inject=enable_fault_inject,
                 enable_local_libvirt=enable_local_libvirt,
+                enable_remote_libvirt=enable_remote_libvirt,
                 libvirt_reaper=libvirt_reaper,
             )
         ]

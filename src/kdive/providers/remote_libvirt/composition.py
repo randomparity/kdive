@@ -44,7 +44,7 @@ from kdive.providers.infra.console_hosting import (
     ConsoleHostingLoop,
     RunningSystems,
 )
-from kdive.providers.infra.reaping import DumpVolumeReaper
+from kdive.providers.infra.reaping import DumpVolumeReaper, InfraReaper
 from kdive.providers.remote_libvirt.config import (
     RemoteLibvirtConfig,
     is_remote_libvirt_configured,
@@ -69,6 +69,7 @@ from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtContro
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
+from kdive.providers.remote_libvirt.reaping.domains import RemoteLibvirtInfraReaper
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
 from kdive.providers.remote_libvirt.retrieve.postmortem import CrashPostmortemAdapter
@@ -110,6 +111,10 @@ def build_transport_resetter(*, secret_registry: SecretRegistry) -> TransportRes
 
 def build_dump_volume_reaper(*, secret_registry: SecretRegistry) -> DumpVolumeReaper:
     return RemoteLibvirtDumpVolumeReaper.from_env(secret_registry=secret_registry)
+
+
+def build_infra_reaper(*, secret_registry: SecretRegistry) -> InfraReaper:
+    return RemoteLibvirtInfraReaper.from_env(secret_registry=secret_registry)
 
 
 def resource_name_for_system(conninfo: str, system_id: UUID) -> str:
