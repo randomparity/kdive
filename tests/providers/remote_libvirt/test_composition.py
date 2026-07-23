@@ -40,6 +40,17 @@ def test_remote_runtime_owns_no_platform_root_cmdline() -> None:
     assert runtime.platform_root_cmdline is None
 
 
+def test_remote_runtime_advertises_and_wires_snapshots() -> None:
+    # ADR-0428 (#1430): remote sets supports_snapshots=True *and* wires the Snapshotter port. The
+    # two must agree (the #1428 parity guard enforces the pairing); a snapshot-capable provider
+    # sets both, so systems.snapshot/restore/list/delete are reachable against a remote System.
+    from kdive.providers.remote_libvirt.lifecycle.snapshot import RemoteLibvirtSnapshotter
+
+    runtime = composition.build_runtime(secret_registry=SecretRegistry())
+    assert runtime.support.supports_snapshots is True
+    assert isinstance(runtime.snapshot, RemoteLibvirtSnapshotter)
+
+
 def test_remote_runtime_sets_rebind_for_resource() -> None:
     # ADR-0187: the remote runtime carries a per-resource rebind hook so the resolver can bind it
     # to the granted host; the base runtime is buildable without operator config (ADR-0076).

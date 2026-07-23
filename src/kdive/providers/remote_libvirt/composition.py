@@ -68,6 +68,7 @@ from kdive.providers.remote_libvirt.lifecycle.connect import RemoteLibvirtConnec
 from kdive.providers.remote_libvirt.lifecycle.control import RemoteLibvirtControl
 from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
 from kdive.providers.remote_libvirt.lifecycle.provisioning import RemoteLibvirtProvisioning
+from kdive.providers.remote_libvirt.lifecycle.snapshot import RemoteLibvirtSnapshotter
 from kdive.providers.remote_libvirt.profile_policy import RemoteLibvirtProfilePolicy
 from kdive.providers.remote_libvirt.reaping.dump_volume import RemoteLibvirtDumpVolumeReaper
 from kdive.providers.remote_libvirt.resource_details import project_resource_details
@@ -317,6 +318,9 @@ def build_runtime(
             # RemoteLibvirtVmcoreIntrospect / RemoteLibvirtLiveIntrospect ports).
             debug_transports=frozenset({"gdbstub", "drgn-live"}),
             introspection=frozenset({"offline-vmcore", "live", "live-script"}),
+            # Internal libvirt snapshots over qemu+tls on the remote host (ADR-0428, #1430). The
+            # deferred ADR-0378 opt-in; matches the wired ``snapshot`` port below.
+            supports_snapshots=True,
         ),
         debug=_debug_capabilities(secret_registry),
         rootfs=RootfsCapabilities(build_plane=RemoteLibvirtRootfsBuildPlane.from_env()),
@@ -329,6 +333,11 @@ def build_runtime(
         # of the same System never overwrites earlier crash→fix evidence. Builds its store lazily
         # (this composition stays buildable without S3 config, ADR-0076).
         console=ConsoleCapabilities(snapshotter=RemoteLibvirtConsoleSnapshotter()),
+        # Internal RAM+disk/disk-only domain snapshots over qemu+tls (ADR-0428, #1430). Matches
+        # ``support.supports_snapshots``; the teardown path reclaims them via ``delete_all``.
+        snapshot=RemoteLibvirtSnapshotter.from_env(
+            secret_registry=secret_registry, config_factory=config_factory
+        ),
         # The remote base image is partitioned and boots via in-guest GRUB, which already carries
         # the correct root=UUID=… (inherited by the install helper's grubby --copy-default). The
         # platform must not inject a root device or it overrides that (ADR-0183, #587).
