@@ -18,8 +18,10 @@ No shared code layer with local-libvirt (ADR-0076); the connection lifecycle is 
 mutual-TLS ``remote_connection`` (ADR-0077), exactly as every other remote-libvirt port. The
 blocking libvirt calls run only under the ``live_vm`` gate; orchestration, netdev discovery, and
 the bounded sink are unit-tested with fakes. Reclaim is guaranteed on every worker-driven exit by
-handler's ``finally``; :meth:`prepare` additionally sweeps stale pcap volumes for the System, so a
-volume orphaned by worker death is reclaimed by the System's next capture.
+the handler's ``finally``; :meth:`prepare` additionally pre-deletes *this job's own* stale volume
+(concurrency-safe, unlike a whole-System sweep), so an at-least-once retry of a job that died
+mid-capture starts clean. A pcap orphaned by a job that exhausts its retries is reclaimed by the
+reconciler's volume reaper (a noted follow-up).
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -69,10 +71,6 @@ def pcap_volume_name(system_id: UUID, job_id: UUID) -> str:
     return f"kdive-pcap-{system_id}-{job_id}{_PCAP_VOLUME_SUFFIX}"
 
 
-def _system_prefix(system_id: UUID) -> str:
-    return f"kdive-pcap-{system_id}-"
-
-
 class _CaptureVolume(Protocol):
     def name(self) -> str: ...
     def info(self) -> list[int]: ...
@@ -83,7 +81,6 @@ class _CaptureVolume(Protocol):
 class _CapturePool(Protocol):
     def refresh(self, flags: int = 0) -> int: ...
     def XMLDesc(self, flags: int = 0) -> str: ...  # noqa: N802 - libvirt binding name
-    def listAllVolumes(self, flags: int = 0) -> Sequence[_CaptureVolume]: ...  # noqa: N802
     def storageVolLookupByName(self, name: str) -> _CaptureVolume: ...  # noqa: N802
 
 
@@ -198,16 +195,19 @@ class RemoteLibvirtTrafficCapture:
         return REMOTE_PCAP_WRITE_REMEDIATION
 
     def prepare(self, system_id: UUID, job_id: UUID) -> str:
-        """Sweep stale pcap volumes for the System and return the remote pool pcap path.
+        """Pre-delete this job's stale pcap volume and return the remote pool pcap path.
 
-        The stale sweep reclaims a pcap orphaned by a worker that died mid-capture (its handler
-        ``finally`` never ran), so a re-capture on the same System never leaks. The returned path is
-        the ``filter-dump`` ``file=`` target on the remote host.
+        The pre-delete is keyed on this job's own deterministic volume name (not a whole-System
+        sweep, which would nuke a concurrent capture on the same System), so an at-least-once retry
+        of a job whose prior attempt died mid-capture starts from a clean volume. The returned path
+        is the ``filter-dump`` ``file=`` target on the remote host. A pcap orphaned by a job that
+        exhausts its retries is reclaimed by the reconciler's volume reaper (a noted follow-up), not
+        here.
         """
         vol_name = pcap_volume_name(system_id, job_id)
         with self._connection() as conn:
             pool_dir = self._pool_dir(conn)
-            self._sweep_stale_volumes(conn, system_id)
+            self._delete_stale_volume(conn, vol_name)
             return str(PurePosixPath(pool_dir) / vol_name)
 
     def attach(self, domain_name: str, *, qom_id: str, dest_path: str, snaplen: int) -> None:
@@ -292,19 +292,13 @@ class RemoteLibvirtTrafficCapture:
             )
         return target
 
-    def _sweep_stale_volumes(self, conn: _CaptureConn, system_id: UUID) -> None:
+    def _delete_stale_volume(self, conn: _CaptureConn, vol_name: str) -> None:
         pool = self._lookup_pool(conn)
         self._refresh_pool(pool)
-        prefix = _system_prefix(system_id)
-        try:
-            volumes = pool.listAllVolumes(0)
-        except libvirt.libvirtError as exc:
-            raise self._infra("listing storage-pool volumes for") from exc
-        for volume in volumes:
-            name = volume.name()
-            if name.startswith(prefix) and name.endswith(_PCAP_VOLUME_SUFFIX):
-                _log.info("reclaiming stale pcap volume %s before capture", name)
-                _delete_volume(volume)
+        volume = self._lookup_volume_optional(pool, vol_name)
+        if volume is not None:
+            _log.info("reclaiming stale pcap volume %s before capture", vol_name)
+            _delete_volume(volume)
 
     def _lookup_pool(self, conn: _CaptureConn) -> _CapturePool:
         pool_name = self._config_factory().storage_pool

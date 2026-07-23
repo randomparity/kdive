@@ -40,9 +40,9 @@ class TrafficCapturer(Protocol):
         """Prepare the capture destination and return the opaque ``dest_path`` token.
 
         Local-libvirt prepares the per-System pcap directory (QEMU-writable, SELinux-labelled) and
-        returns the worker path. Remote-libvirt sweeps any stale pcap volumes for the System (so a
-        worker-death orphan is reclaimed here) and returns the remote storage-pool path. Called once
-        before :meth:`attach`.
+        returns the worker path. Remote-libvirt pre-deletes this job's own stale pcap volume (so an
+        at-least-once retry starts clean, without disturbing a concurrent capture on the same
+        System) and returns the remote storage-pool path. Called once before :meth:`attach`.
         """
         ...
 

@@ -236,23 +236,30 @@ def test_detach_issues_object_del_and_closes(tmp_path: Path) -> None:
     assert conn.closed is True
 
 
-# --- prepare / stale sweep --------------------------------------------------------------------
+# --- prepare / per-job pre-delete -------------------------------------------------------------
 
 
-def test_prepare_sweeps_stale_pcap_volumes_and_returns_pool_path(tmp_path: Path) -> None:
+def test_prepare_predeletes_this_jobs_stale_volume_and_returns_pool_path(tmp_path: Path) -> None:
     system_id, job_id = uuid4(), uuid4()
-    stale = _FakeVolume(f"kdive-pcap-{system_id}-{uuid4()}.pcap")
-    other_system = _FakeVolume(f"kdive-pcap-{uuid4()}-{uuid4()}.pcap")
+    own = _FakeVolume(pcap_volume_name(system_id, job_id))  # a prior attempt of THIS job
+    concurrent = _FakeVolume(f"kdive-pcap-{system_id}-{uuid4()}.pcap")  # another job, same System
     disk = _FakeVolume("some-domain-disk.qcow2")
-    pool = _FakePool(volumes={v.name(): v for v in (stale, other_system, disk)})
+    pool = _FakePool(volumes={v.name(): v for v in (own, concurrent, disk)})
     cap = _capturer(_FakeConn(pool=pool), tmp_path)
 
     dest = cap.prepare(system_id, job_id)
 
     assert dest == f"/var/lib/libvirt/images/{pcap_volume_name(system_id, job_id)}"
-    assert stale.deleted is True  # this System's worker-death orphan is reclaimed
-    assert other_system.deleted is False  # another System's pcap is left alone
-    assert disk.deleted is False  # a non-pcap volume is never swept
+    assert own.deleted is True  # this job's own stale volume is cleared before a retry
+    assert concurrent.deleted is False  # a concurrent capture on the same System is NOT disturbed
+    assert disk.deleted is False  # a non-pcap volume is never touched
+
+
+def test_prepare_tolerates_no_stale_volume(tmp_path: Path) -> None:
+    system_id, job_id = uuid4(), uuid4()
+    cap = _capturer(_FakeConn(pool=_FakePool()), tmp_path)
+    dest = cap.prepare(system_id, job_id)  # first-ever capture: nothing to pre-delete
+    assert dest == f"/var/lib/libvirt/images/{pcap_volume_name(system_id, job_id)}"
 
 
 def test_prepare_rejects_a_non_dir_storage_pool(tmp_path: Path) -> None:

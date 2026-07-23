@@ -73,11 +73,13 @@ local — the same `remote_connection` materialize→connect→cleanup lifecycle
 The remote-side pcap volume is reclaimed on every handler exit path — cancel, failure, and success —
 in the handler's `finally` via `reclaim`, mirroring local's unlink. Two additional guarantees cover
 a non-graceful exit: `attach`'s `object-del`-first is idempotent (a leaked filter-dump re-attaches
-cleanly), and `prepare` sweeps **every** stale `kdive-pcap-<system_id>-*.pcap` volume for the System
-before a new capture, so a volume orphaned by worker death is reclaimed by the System's next capture.
-A System that never captures again leaves the volume until operator storage-pool hygiene; extending
-the reconciler's `DumpVolumeReaper` sweep to pcap volumes is a noted follow-up, not part of this
-change.
+cleanly), and `prepare` pre-deletes **this job's own** deterministic `kdive-pcap-<system_id>-<job_id>.pcap`
+volume before a new capture, so an at-least-once retry of a job that died mid-capture starts from a
+clean volume. The pre-delete is deliberately keyed on the job's own volume, not a whole-System
+sweep: a sweep would delete a *concurrent* capture on the same System (each job writes its own
+volume, so per-job pre-delete is both sufficient for retry and concurrency-safe). A pcap orphaned by
+a job that exhausts its retries leaks until reclaimed; extending the reconciler's `DumpVolumeReaper`
+sweep to pcap volumes is a noted follow-up, not part of this change.
 
 ### Port and handler generalization
 
