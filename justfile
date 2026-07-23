@@ -208,8 +208,10 @@ stack-up:
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh
     @echo "Backends healthy and schema migrated."
-    @echo "Start the app tier with: docker compose up -d migrate server worker reconciler"
-    @echo "(or, for the full local-libvirt host path: scripts/live-stack/up.sh)"
+    @echo "App tier, for IN-NETWORK clients: docker compose up -d migrate server worker reconciler"
+    @echo "For the live suites, the CLI, or any local-libvirt VM: scripts/live-stack/up.sh"
+    @echo "  (compose containers get a different OIDC issuer identity than a host-minted token"
+    @echo "   carries -> 401, and no /dev/kvm or libvirt socket -> no local VM. See the runbook.)"
     @echo "MCP URL: http://127.0.0.1:8000/mcp"
     @echo "Full runbook: docs/operating/runbooks/live-stack.md"
 
