@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the destructive-call confirmation prompt (for non-interactive use)",
     )
 
+    completion = sub.add_parser(
+        "completion",
+        help="print a shell completion script (offline; no token or server required)",
+    )
+    completion.add_argument("shell", choices=["bash", "zsh"])
+
     from kdive.cli.commands.registry import add_subparsers
 
     add_subparsers(sub)

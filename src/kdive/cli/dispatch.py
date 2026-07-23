@@ -64,9 +64,23 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _tool_call(args)
     if args.command == "login":
         return _login(args)
+    if args.command == "completion":
+        return _completion(args)
     if args.command == "doctor":
         return await commands.doctor.doctor(args)
     return await commands.run_verb(args)
+
+
+def _completion(args: argparse.Namespace) -> int:
+    """Print the offline shell completion script for the requested shell (ADR-0424).
+
+    Dispatched before any handler builds a ``Session``, so it never reads a token or reaches the
+    server — completing a command line is not an authenticated operation.
+    """
+    from kdive.cli.completion import render_completion
+
+    print(render_completion(args.shell), end="")
+    return 0
 
 
 def _login(args: argparse.Namespace) -> int:
