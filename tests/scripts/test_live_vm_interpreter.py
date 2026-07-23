@@ -104,6 +104,33 @@ def test_builder_runs_build_fs_under_the_venv_not_path_python3(tmp_path: Path) -
     assert result.stdout.strip() == "beef01"
 
 
+def _require_module(interpreter: Path) -> subprocess.CompletedProcess[str]:
+    snippet = f'source "{_LIB}" && require_kdive_module'
+    return subprocess.run(
+        [_BASH, "-c", snippet],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "KDIVE_PYTHON": str(interpreter)},
+    )
+
+
+def test_require_kdive_module_accepts_an_interpreter_that_imports_kdive(tmp_path: Path) -> None:
+    interpreter = tmp_path / "python"
+    _stub(interpreter, "exit 0")
+    assert _require_module(interpreter).returncode == 0
+
+
+def test_require_kdive_module_dies_when_the_interpreter_cannot_import_kdive(tmp_path: Path) -> None:
+    """`command -v` proves the binary exists; only an import proves the venv carries kdive."""
+    interpreter = tmp_path / "python"
+    _stub(interpreter, 'echo "No module named kdive" >&2; exit 1')
+    result = _require_module(interpreter)
+    assert result.returncode != 0
+    assert str(interpreter) in result.stderr  # names WHICH interpreter is wrong
+    assert "uv sync" in result.stderr  # and how to fix it
+
+
 def test_consumers_preflight_the_same_interpreter_they_build_with() -> None:
     """require_tools must probe the resolved interpreter, not a separately-defaulted `python3`.
 
@@ -114,3 +141,4 @@ def test_consumers_preflight_the_same_interpreter_they_build_with() -> None:
         body = (_ROOT / "scripts" / "live-vm" / name).read_text()
         assert "$(kdive_python)" in body, f"{name} does not preflight the resolved interpreter"
         assert "KDIVE_PYTHON:-python3" not in body, f"{name} still defaults to a bare python3"
+        assert "require_kdive_module" in body, f"{name} does not probe kdive importability"

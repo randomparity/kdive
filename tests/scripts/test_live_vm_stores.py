@@ -195,6 +195,9 @@ def _produce_stubs(
     _stub(
         bindir,
         "python3",
+        # `python -c 'import kdive'` is the preflight importability probe, NOT a build: answer it
+        # before the marker so a probe never counts as a build-fs invocation.
+        '[ "$1" = "-c" ] && exit 0; '
         f'{mark}dest=""; ws=""; want=""; for a in "$@"; do '
         'case "$want" in dest) dest="$a";; ws) ws="$a";; esac; want=""; '
         '[ "$a" = "--dest" ] && want=dest; [ "$a" = "--workspace" ] && want=ws; done; '
@@ -594,3 +597,27 @@ def test_warm_store_aborts_at_a_failing_virt_copy_out(tmp_path: Path) -> None:
     assert "extract-vmlinux" not in r.stderr
     assert r.stdout.strip() == ""
     assert not (store / "current").exists()  # nothing committed from a failed refresh
+
+
+@_needs_inherit_errexit
+def test_stage_tcg_fails_fast_when_the_interpreter_cannot_import_kdive(tmp_path: Path) -> None:
+    """The preflight probe must fire BEFORE the minutes-long build, not deep inside build-fs."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stage = tmp_path / "mnt" / "kdive-tcg"
+    stage.parent.mkdir()
+    marker = tmp_path / "build.calls"
+    _stage_stubs(bindir)
+    _produce_stubs(bindir, build_id="cafe02", build_marker=marker)
+    # An interpreter that exists but carries no kdive — the uv-managed-runner failure mode.
+    _stub(bindir, "python3", 'echo "No module named kdive" >&2; exit 1')
+    r = subprocess.run(
+        [BASH, str(STAGE)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_stage_env(bindir, stage, DEBUGINFOD_URLS="https://debuginfod.example"),
+    )
+    assert r.returncode != 0
+    assert "cannot import kdive" in r.stderr
+    assert not marker.exists()  # failed fast — the build never ran

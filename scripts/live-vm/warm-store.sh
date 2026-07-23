@@ -23,6 +23,7 @@ require_tools \
   "$(kdive_python):the kdive venv (set KDIVE_PYTHON), runs build-fs" \
   "virt-ls:libguestfs-tools" "virt-copy-out:libguestfs-tools" \
   "eu-readelf:elfutils" "debuginfod-find:debuginfod"
+require_kdive_module
 
 mkdir -p -- "$STORE"
 

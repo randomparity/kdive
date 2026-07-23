@@ -21,6 +21,17 @@ kdive_python() {
   printf '%s' "${KDIVE_PYTHON:-${repo_root}/.venv/bin/python}"
 }
 
+# Preflight that the resolved interpreter can actually import kdive, BEFORE the minutes-long build.
+# require_tools only proves the binary exists — an interpreter that is present but carries no kdive
+# (an un-synced checkout, a stale venv, or the system python3 on a uv-managed runner) otherwise
+# fails deep inside build-fs with a bare "No module named kdive" and an empty rootfs.
+require_kdive_module() {
+  local py
+  py="$(kdive_python)"
+  "$py" -c 'import kdive' >/dev/null 2>&1 ||
+    die "interpreter ${py} cannot import kdive: run 'uv sync' in the checkout, or point KDIVE_PYTHON at a venv that has kdive installed"
+}
+
 # Preflight required host tools BEFORE any slow work, naming each missing binary and how to get it
 # (a missing tool otherwise surfaces as a misleading downstream failure — e.g. an empty build-id or
 # an rc=127 "transient" fetch error). Each arg is "cmd:where-to-get-it".
