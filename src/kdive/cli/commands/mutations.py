@@ -26,7 +26,7 @@ import time
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_envelope
-from kdive.cli.render import render_record
+from kdive.cli.render import flatten_envelope, render_record
 from kdive.cli.transport import Session, tool_envelope
 
 
@@ -95,18 +95,6 @@ async def _call(name: str, arguments: Mapping[str, object]) -> Mapping[str, obje
     return tool_envelope(result)
 
 
-def _flatten(envelope: object) -> dict[str, object]:
-    if not isinstance(envelope, Mapping):
-        return {}
-    fields: Mapping[str, object] = {str(k): v for k, v in envelope.items()}
-    record: dict[str, object] = {"id": fields.get("object_id"), "state": fields.get("status")}
-    data = fields.get("data")
-    if isinstance(data, Mapping):
-        for key, value in data.items():
-            record[str(key)] = value
-    return record
-
-
 async def _run(name: str, arguments: Mapping[str, object], *, as_json: bool) -> int:
     """Preflight, call ``name``, render the response record, and return the exit code.
 
@@ -116,7 +104,7 @@ async def _run(name: str, arguments: Mapping[str, object], *, as_json: bool) -> 
     this is what makes a separation-of-duties denial observable as exit ``3`` (ADR-0089).
     """
     envelope = await _call(name, arguments)
-    render_record(_flatten(envelope), as_json=as_json)
+    render_record(flatten_envelope(envelope), as_json=as_json)
     return exit_code_for_envelope(envelope)
 
 
