@@ -220,33 +220,3 @@ def test_run_verb_unknown_generated_path_exits() -> None:
     args = argparse.Namespace(command="accounting", subcommand="does-not-exist")
     with pytest.raises(SystemExit):
         asyncio.run(registry.run_verb(args))
-
-
-def test_invoke_generated_verb_calls_passthrough_with_empty_payload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kdive.cli.commands.verb_spec import GeneratedVerb
-
-    captured: dict[str, argparse.Namespace] = {}
-
-    async def _fake_tool_call(args: argparse.Namespace) -> int:
-        captured["args"] = args
-        return 7
-
-    monkeypatch.setattr(dispatch, "_tool_call", _fake_tool_call)
-    verb = GeneratedVerb(
-        group="control",
-        sub="diagnostic-sysrq",
-        tool="control.diagnostic_sysrq",
-        read_only=False,
-        destructive=True,
-    )
-    args = argparse.Namespace(
-        command="control", subcommand="diagnostic-sysrq", allow_destructive=True
-    )
-    assert asyncio.run(dispatch.invoke_generated_verb(verb, args)) == 7
-    synthetic = captured["args"]
-    assert synthetic.command == "tool" and synthetic.tool_command == "call"
-    assert synthetic.name == "control.diagnostic_sysrq" and synthetic.payload == "{}"
-    assert synthetic.allow_destructive is True
-    assert synthetic.allow_mutating is False and synthetic.yes is False

@@ -322,12 +322,26 @@ def _generated_verb_parser(
     verb: GeneratedVerb,
     parent: argparse.ArgumentParser,
 ) -> None:
-    """Add a schema-generated verb's sub-subparser, declaring its scalar and JSON ``--flags``."""
+    """Add a schema-generated verb's sub-subparser, declaring its scalar and JSON ``--flags``.
+
+    A verb the committed artifact marks ``destructive`` also gets ``--yes`` so its typed-``yes``
+    confirmation (ADR-0421 decision 4, driven by :func:`kdive.cli.dispatch.invoke_generated_verb`)
+    is dischargeable non-interactively. ``--yes`` is reserved (``RESERVED_CLI_FLAGS``), so it can
+    never shadow a generated parameter flag. The live-annotation tier still governs the actual
+    ceremony at call time — the committed ``destructive`` bit only decides whether the flag exists.
+    """
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     for flag in verb.flags:
         _add_generated_flag(parser, flag)
     for param in verb.json_params:
         _add_generated_json_flag(parser, param)
+    if verb.destructive:
+        parser.add_argument(
+            "--yes",
+            dest="yes",
+            action="store_true",
+            help="skip the destructive-call confirmation prompt (for non-interactive use)",
+        )
 
 
 def add_subparsers(sub: argparse._SubParsersAction) -> None:
