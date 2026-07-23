@@ -124,7 +124,11 @@ per-tier opt-in. Read-only stays the zero-flag default; mutation requires a deli
 - **Keep it read-only; grow curated verbs to cover everything.** Rejected: 91 tools (growing) is
   an unbounded hand-maintenance burden, and the campaign needs to drive arbitrary tools, including
   ones with no curated verb. The curated verbs stay for ergonomics but cannot be the only mutation
-  path.
+  path. *Narrowed by [ADR-0421](0421-schema-generated-kdivectl-verbs.md): the objection is to
+  hand-maintenance specifically, not to coverage — generating the verb tree from the live
+  schemas makes full coverage O(1) to maintain, so curated verbs derived (not hand-written) can
+  cover everything. The tiered `tool call` opt-in this ADR decides is unchanged; only this
+  rejected alternative's premise is narrowed.*
 - **A single `--force`/`--allow-mutating` flag with no destructive tier.** Rejected: it collapses
   a cordon (mutating, reversible) and a force-crash/teardown (destructive, data-affecting) into one
   acknowledgement. The server already distinguishes `mutating()` from `destructive()`; the client
