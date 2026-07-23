@@ -21,7 +21,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, LiteralString, cast
+from typing import TYPE_CHECKING, Any, LiteralString
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -308,13 +308,12 @@ class DebugSessionHandlers:
                 accepted_values=sorted(DEBUG_TRANSPORT_KINDS),
                 detail=f"transport {transport!r} is not a supported debug transport",
             )
-        transport_kind = cast(DebugTransportKind, transport)
         session_id = uuid4()
         return await _attach_debug_session(
             pool,
             ctx,
             run_id=uid,
-            transport=transport_kind,
+            transport=transport,
             session_id=session_id,
             prepare_attach_request=self._prepare_attach_request,
             augment_after_open=self._augment_after_open,

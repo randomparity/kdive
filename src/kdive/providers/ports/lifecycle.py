@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Protocol, cast
+from typing import Literal, NamedTuple, Protocol
 from uuid import UUID
 
 from kdive.domain.capture import CaptureMethod
@@ -55,7 +55,7 @@ class TransportHandleData(NamedTuple):
         scheme, sep, remainder = raw.partition("://")
         if not sep or scheme not in _TRANSPORT_KINDS:
             raise config_error("transport handle has no known transport scheme")
-        kind = cast(TransportHandleKind, scheme)
+        kind = scheme
         host, sep, port_text = remainder.rpartition(":")
         if not sep or not host:
             raise config_error("transport handle must be <kind>://host:port")

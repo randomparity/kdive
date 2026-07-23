@@ -108,7 +108,10 @@ def test_validation_error_details_omit_input_url_and_context() -> None:
 def test_profile_is_frozen() -> None:
     profile = BuildProfile.parse(_valid())
     with pytest.raises(ValidationError):
-        profile.schema_version = 1  # type: ignore[misc]
+        # The assignment is the thing under test: the model is frozen, so this must raise at
+        # runtime. ty flags the write statically because the field is read-only, which is
+        # exactly the invariant being asserted.
+        profile.schema_version = 1  # ty: ignore[invalid-assignment]
 
 
 def test_direct_construction_bypasses_configuration_error_mapping() -> None:
