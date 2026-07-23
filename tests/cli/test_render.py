@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 
-from kdive.cli.render import render, render_record, render_report
+from kdive.cli.render import (
+    flatten_envelope,
+    render,
+    render_envelope,
+    render_record,
+    render_report,
+)
 
 ROWS = [{"id": "r1", "kind": "local-libvirt"}, {"id": "r2", "kind": "remote-libvirt"}]
 
@@ -184,3 +190,103 @@ def test_render_report_json_missing_total_key_renders_null(capsys) -> None:
     render_report([], {}, columns=_REPORT_COLS, total_columns=_REPORT_TCOLS, as_json=True)
     parsed = json.loads(capsys.readouterr().out)
     assert parsed == {"items": [], "totals": {"scope": None, "total_reserved": None}}
+
+
+# --- flatten_envelope (the id/state/data projection shared with the read/mutation verbs) ---
+
+
+def _item(object_id: str, status: str, data: dict) -> dict:
+    return {"object_id": object_id, "status": status, "data": data, "items": []}
+
+
+def _collection(items: list[dict], **extra: object) -> dict:
+    base = {"object_id": "col", "status": "ok", "data": {"count": len(items)}, "items": items}
+    return {**base, **extra}
+
+
+def test_flatten_envelope_keeps_id_state_and_data(capsys) -> None:
+    row = flatten_envelope(_item("r1", "ok", {"kind": "k", "host": "h"}))
+    assert row == {"id": "r1", "state": "ok", "kind": "k", "host": "h"}
+
+
+def test_flatten_envelope_non_mapping_is_empty_row() -> None:
+    # A degraded/untyped item flattens to an empty row rather than raising.
+    assert flatten_envelope("not-a-mapping") == {}
+    assert flatten_envelope(None) == {}
+
+
+# --- render_envelope: column-agnostic renderer for generated verbs (R11) ---
+
+
+def test_render_envelope_json_emits_whole_unprojected_envelope(capsys) -> None:
+    # R11's key property: --json keeps the navigation contract fields, not a projection.
+    envelope = _item("r1", "ok", {"kind": "k"})
+    envelope["suggested_next_actions"] = ["jobs.wait", "jobs.cancel"]
+    envelope["refs"] = {"result": "s3://x"}
+    envelope["error_category"] = None
+    render_envelope(envelope, as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed == envelope
+    assert parsed["suggested_next_actions"] == ["jobs.wait", "jobs.cancel"]
+
+
+def test_render_envelope_json_collection_keeps_items_and_next_actions(capsys) -> None:
+    coll = _collection(
+        [_item("r1", "ok", {"kind": "k"})],
+        suggested_next_actions=["allocations.release"],
+    )
+    render_envelope(coll, as_json=True)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["items"][0]["object_id"] == "r1"
+    assert parsed["suggested_next_actions"] == ["allocations.release"]
+
+
+def test_render_envelope_collection_tables_over_union_of_keys(capsys) -> None:
+    # Heterogeneous item data keys: the table's columns are the UNION across all rows,
+    # not any single item's keys, and never a declared list.
+    coll = _collection(
+        [
+            _item("r1", "ok", {"kind": "k"}),
+            _item("r2", "ok", {"host": "h", "kind": "k2"}),
+        ]
+    )
+    render_envelope(coll, as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    header = lines[0]
+    # id/state come first (from flatten), then first-seen data keys: kind, then host.
+    assert header.split() == ["id", "state", "kind", "host"]
+    # The row missing "kind" keeps the slot blank; the row missing "host" likewise.
+    assert "r1" in lines[1] and "k" in lines[1]
+    assert "r2" in lines[2] and "h" in lines[2] and "k2" in lines[2]
+
+
+def test_render_envelope_collection_columns_are_deterministic_first_seen(capsys) -> None:
+    coll = _collection(
+        [
+            _item("a", "ok", {"b": 1, "a": 2}),
+            _item("c", "ok", {"c": 3, "a": 4}),
+        ]
+    )
+    render_envelope(coll, as_json=False)
+    header = capsys.readouterr().out.splitlines()[0]
+    # First-seen order across the union: id, state, b, a, c.
+    assert header.split() == ["id", "state", "b", "a", "c"]
+
+
+def test_render_envelope_single_renders_as_record(capsys) -> None:
+    # Empty items -> flatten the one envelope and render it as a key/value record.
+    render_envelope(_item("r1", "ok", {"kind": "k", "host": "h"}), as_json=False)
+    lines = capsys.readouterr().out.splitlines()
+    joined = "\n".join(lines)
+    assert "id" in joined and "r1" in joined
+    assert "state" in joined and "ok" in joined
+    assert "kind" in joined and "k" in joined
+    # A record is one key per line, not a single header+row table.
+    assert any(line.startswith("id") for line in lines)
+
+
+def test_render_envelope_empty_collection_uses_record_path(capsys) -> None:
+    # An empty item list is not a table; it falls to the single-record path (spec).
+    render_envelope(_collection([]), as_json=False)
+    out = capsys.readouterr().out
+    assert "id" in out and "col" in out and "count" in out

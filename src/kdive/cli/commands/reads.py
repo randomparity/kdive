@@ -16,7 +16,7 @@ import sys
 from collections.abc import Mapping
 
 from kdive.cli.errors import exit_code_for_envelope
-from kdive.cli.render import render, render_record, render_report
+from kdive.cli.render import flatten_envelope, render, render_record, render_report
 from kdive.cli.transport import Session, tool_envelope
 
 
@@ -31,28 +31,11 @@ async def _fetch(name: str, arguments: Mapping[str, object]) -> Mapping[str, obj
     return tool_envelope(result)
 
 
-def _flatten(envelope: object) -> dict[str, object]:
-    """Flatten one envelope into a row: ``id``/``state`` plus the envelope's ``data``.
-
-    Accepts ``object`` because the items of a collection envelope arrive untyped from the
-    wire; a non-mapping (e.g. a degraded row) flattens to an empty row rather than raising.
-    """
-    if not isinstance(envelope, Mapping):
-        return {}
-    fields: Mapping[str, object] = {str(k): v for k, v in envelope.items()}
-    row: dict[str, object] = {"id": fields.get("object_id"), "state": fields.get("status")}
-    data = fields.get("data")
-    if isinstance(data, Mapping):
-        for key, value in data.items():
-            row[str(key)] = value
-    return row
-
-
 def _rows(envelope: Mapping[str, object]) -> list[dict[str, object]]:
     items = envelope.get("items")
     if not isinstance(items, list):
         return []
-    return [_flatten(item) for item in items]
+    return [flatten_envelope(item) for item in items]
 
 
 async def fetch_collection_rows(
@@ -79,7 +62,7 @@ async def _list(name: str, args: argparse.Namespace, columns: list[str], *params
 
 async def _record(name: str, args: argparse.Namespace, payload: Mapping[str, object]) -> int:
     envelope = await _fetch(name, payload)
-    render_record(_flatten(envelope), as_json=args.json)
+    render_record(flatten_envelope(envelope), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 
