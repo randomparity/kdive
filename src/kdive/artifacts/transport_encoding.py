@@ -125,6 +125,17 @@ def strip_gzip_to_writer(
             "gzip transport stream is truncated: it ended before the gzip trailer, so the "
             "canonical object is incomplete; re-upload the full object"
         )
+    if decompressor.unused_data or offset < request.compressed_size:
+        # The single gzip member ended before the stored object did: trailing bytes remain — either
+        # after the member within a read range (``unused_data``) or in an unread range once ``eof``
+        # stopped the loop early. That is a concatenated/multi-member gzip or garbage after the
+        # stream; we strip one gzip member only, so fail closed with a clear message rather than the
+        # checksum-mismatch branch below.
+        raise _decode_error(
+            "trailing data after the gzip stream: the stored object is not a single gzip member "
+            "(concatenated/multi-member gzip is not supported); re-upload a single gzip of the "
+            "canonical object"
+        )
     actual = base64.b64encode(hasher.digest()).decode("ascii")
     if actual != request.expected_sha256:
         raise _decode_error(

@@ -145,6 +145,21 @@ def test_strip_gzip_rejects_truncated_stream() -> None:
     assert "truncated" in str(exc.value)
 
 
+def test_strip_gzip_rejects_trailing_data_after_stream() -> None:
+    # We strip a single gzip member; a concatenated/multi-member object fails closed with a clear
+    # message rather than the confusing checksum-mismatch branch.
+    payload = b"canonical bytes" * 20
+    concatenated = gzip.compress(payload) + gzip.compress(b"trailing member")
+    store = _FakeRangedStore(concatenated)
+    writer = io.BytesIO()
+
+    with pytest.raises(CategorizedError) as exc:
+        strip_gzip_to_writer(store, _req(concatenated, len(payload)), writer)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "trailing data after the gzip stream" in str(exc.value)
+
+
 def test_strip_gzip_rejects_corrupt_stream() -> None:
     payload = b"canonical bytes" * 50
     corrupt = bytearray(gzip.compress(payload))
