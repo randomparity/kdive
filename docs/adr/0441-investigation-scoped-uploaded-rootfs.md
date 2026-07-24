@@ -79,8 +79,10 @@ the new sweep only ever sees `owner_kind='investigations'`, and no evidence is w
 ### 2. Bind a System to an investigation with a nullable `systems.investigation_id`
 
 Migration **0076** adds `investigation_id uuid REFERENCES investigations(id)` to `systems`, **nullable**
-— a classic allocation-only System keeps it NULL and is unaffected by everything below — and the
-dedicated `rootfs_cleanup_pending_at timestamptz` marker to `investigations` (decision 6). `systems.define`
+— a classic allocation-only System keeps it NULL and is unaffected by everything below — the dedicated
+`rootfs_cleanup_pending_at timestamptz` marker to `investigations` (decision 6), and a **partial UNIQUE
+index** `artifacts (object_key) WHERE owner_kind = 'investigations'` (decision 3's finalize idempotency;
+partial so it never touches existing rows of other owner kinds). `systems.define`
 and `systems.provision` gain an **optional** `investigation_id`; an agent working in an investigation
 sets it. This is an *advisory* binding (a System belongs to an Allocation for capacity; the
 investigation link scopes the uploaded-rootfs trust boundary and the close coupling), not a second
@@ -99,12 +101,14 @@ profile that references an uploaded rootfs (decision 4) **requires** a bound `in
 are validated together at admission (a `{"kind":"upload"}` rootfs with no investigation binding is a
 `configuration_error` naming the missing binding, never a late provision failure).
 
-`systems.investigation_id` is **write-once**: set at define (or first provision) and immutable thereafter
-— `provision`'s optional value must equal what `define` recorded, and there is no rebind. The decision-6
-gate enumerates the Systems that reference a base by this column, so a mutable binding could silently drop
-a System that still backs the base out of the gate's enumeration and let the base be reclaimed under its
-live overlay. The invariant is stated here and enforced at admission because the gate's correctness
-depends on it, not on the mere absence of a rebind tool today.
+`systems.investigation_id` is **write-once**, with the NULL-at-define case made explicit: if `define`
+recorded a **non-NULL** binding, `provision` must supply the **same** value or omit it (a differing value
+is rejected); if `define` recorded **NULL**, the first `provision` may set it **once**, after which it is
+immutable. An upload-ref profile forces a non-NULL binding at `define` (the admission invariant above), so
+only non-upload Systems ever reach the NULL-at-define branch. The decision-6 gate enumerates the Systems
+that reference a base by this column, so a mutable binding could silently drop a still-backing System from
+the enumeration and reclaim the base under its live overlay — the invariant is enforced at admission
+because the gate's correctness depends on it, not on the mere absence of a rebind tool today.
 
 ### 3. The upload window opens against the investigation, with an explicit finalize
 
@@ -118,10 +122,13 @@ The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
   the investigation's manifest, and audits the grant.
 - **`investigations.complete_rootfs_upload(investigation_id)`** — the explicit finalize (symmetric with
   `runs.complete_build`): HEADs the object for its stored checksum, verifies it is present and
-  checksum-bearing, writes the write-once `owner_kind='investigations'` `artifacts` row, deletes the
-  manifest, and returns the **`checksum_sha256` handle** the agent puts in each System's profile. This
-  replaces the provision-time `_commit_uploaded_rootfs`: the row now exists **before** any System
-  provisions, because multiple Systems reference it.
+  checksum-bearing, writes the `owner_kind='investigations'` `artifacts` row via **`INSERT … ON CONFLICT
+  DO NOTHING`** against a **UNIQUE index on `object_key`** (migration 0076) so two concurrent finalizes
+  (retries, or two agents) converge on **one** row rather than inserting duplicate rows for the same
+  content-addressed key, then re-SELECTs and returns the **`checksum_sha256` handle** the agent puts in
+  each System's profile. Idempotent by construction; deletes the manifest. This replaces the
+  provision-time `_commit_uploaded_rootfs`: the row now exists **before** any System provisions, because
+  multiple Systems reference it (and resolution — decision 4 — expects exactly one row).
 
 The System-scoped upload path is **removed, not deprecated** (`artifacts.create_system_upload`, the
 `_SYSTEM_UPLOAD` spec, `_commit_uploaded_rootfs`, `_system_accepts_upload`, the
@@ -130,21 +137,25 @@ accepted only `rootfs`, so nothing else rode that lane.
 
 ### 4. Reference by checksum; resolve only within the System's own investigation
 
-`_UploadRootfs` becomes `{"kind": "upload", "checksum_sha256": <base64>}`. At provision,
-`_materialize_uploaded_rootfs` resolves the object with a lookup pinned to the System's own
-investigation:
+`_UploadRootfs` becomes `{"kind": "upload", "checksum_sha256": <base64>}`. The `artifacts` table has **no
+checksum column** (and this ADR adds none), so resolution is **content-addressed via `object_key`**, which
+already embeds the checksum: the key is `artifact_key("local","investigations",<inv>,"rootfs-"<token>)`
+where `<token>` is unpadded **base64url** of the SHA-256. At provision, `_materialize_uploaded_rootfs`
+transcodes the ref's canonical-base64 `checksum_sha256` → the base64url token, builds the expected key,
+and looks it up pinned to the System's own investigation:
 
 ```
 SELECT object_key FROM artifacts
  WHERE owner_kind = 'investigations'
    AND owner_id   = <system.investigation_id>
-   AND checksum_sha256 = <ref.checksum_sha256>
+   AND object_key = artifact_key("local","investigations",<system.investigation_id>,"rootfs-"<token>)
 ```
 
-A System in investigation *Y* can therefore only name a base **its own investigation owns** — the
-cross-investigation no-escape boundary is enforced at the SQL predicate, not by directory layout alone.
-A miss (no such object in this investigation) fails fast with `configuration_error` naming the
-unresolved checksum, exactly as the old missing-object guard did.
+A System in investigation *Y* can therefore only name a base **its own investigation owns** (the
+`owner_id` predicate is the no-escape boundary; the derived-key match is the content address). A miss
+fails fast with `configuration_error` naming the unresolved checksum. The base64↔base64url transcoding is
+the single canonical mapping between the profile ref (base64, the store's stored form) and the object-key
+token (base64url, path/key-safe); it is total and reversible.
 
 ### 5. Per-investigation content-addressed staging, outside `allowed_roots`
 
@@ -155,7 +166,18 @@ ADR-0438 qcow2-magic gate are unchanged. A present verified file is **reused**, 
 downloaded **at most once per host per (investigation, checksum)** and shared by every System in the
 investigation — the reuse #1502 asks for. Dedup is deliberately scoped to the investigation, not the
 host: two investigations on one host that upload identical bytes each stage their own copy — isolation
-(decision 4) is chosen over cross-investigation dedup. `.partial` + `os.replace` atomicity is unchanged.
+(decision 4) is chosen over cross-investigation dedup.
+
+Because the staging path is now **shared** (per-(investigation, checksum), not per-System), two sibling
+Systems provisioning concurrently — the explicit goal, run as parallel worker jobs — would both resolve
+the same `<token>.qcow2` and, finding no verified file, both download and write the same fixed
+`.partial`, corrupting it (caught by the SHA-256 verify, failing a provision) and downloading the
+multi-GiB object twice (violating "written once"). The fetch therefore takes a **per-(investigation,
+checksum) lock** around check-and-download — a Postgres advisory lock over the fetch's existing
+short-lived connection (ADR-0438), keyed on `hash(investigation_id, token)` — so exactly one downloader
+runs and the rest wait then hit the verified file as a cache hit. (`.partial` + `os.replace` is retained;
+the lock is what makes "downloaded once per host per (investigation, checksum)" hold under concurrency,
+not just sequentially.)
 
 Because the base is now **shared and investigation-owned**, it is no longer "created by" the provision
 that happened to stage it: an individual provision's failure path (ADR-0435 §1) must **not** reclaim it,
@@ -200,8 +222,21 @@ defers the whole checksum, `drained=False`), and **only then** delete the `artif
 failed unlink never orphans a SENSITIVE base file with no row for a future sweep to find. Gate fails → skip
 the checksum this pass (`drained=False`, retried next); remove the empty `rootfs-uploads/<inv>/` dir once
 drained. Condition (b) matters mainly for the TTL backstop, which fires on never-closed investigations with
-no close-time block; the close-driven sweep
-already sees no `defined`/`provisioning` System because default close blocks on them (decision 7).
+no close-time block; the close-driven sweep already sees no `defined`/`provisioning` System because
+default close blocks on them (decision 7).
+
+**Referencer enumeration.** A System is bound to an investigation by `investigation_id`, not to a
+checksum, and one investigation can own several bases (multi-arch) while a bound System may reference a
+`catalog` rootfs or a different checksum. The gate must therefore run over exactly the Systems that
+reference **this** checksum, not all bound Systems (else one unrelated live System would pin the base
+forever). For checksum *X* the sweep selects `systems WHERE investigation_id = <inv> AND state <> 'torn_down'`,
+parses each `provisioning_profile`'s rootfs ref, and keeps only those whose ref is
+`{"kind":"upload","checksum_sha256": X}`; a profile that is unparseable, has no rootfs, or references a
+`catalog`/`local`/different-checksum rootfs is **not** a referencer of *X* and is skipped. For each real
+referencer it derives the overlay path from `overlay_path(system_id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`)
+and stats it for condition (a). Because the probe reads overlay files under `ROOTFS_DIR` and unlinks bases
+under `UPLOADS_DIR`, both sweeps are **local-libvirt-host-only** operations and require the reconciler to
+run co-located with that host's filesystem (as the existing overlay/base lifecycle already does).
 
 The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
 exact thing that holds the base open as a qcow2 backing file (ADR-0060) — no state value is a faithful

@@ -30,9 +30,11 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/db/schema/0076_systems_investigation_id.sql` (new); regenerate any schema
   snapshot/reference the repo checks in.
 - **Do:** `ALTER TABLE systems ADD COLUMN investigation_id uuid REFERENCES investigations (id);` (nullable,
-  no default); index it (close-coupling + liveness queries filter by it). **Also** `ALTER TABLE
-  investigations ADD COLUMN rootfs_cleanup_pending_at timestamptz;` — the dedicated rootfs reclaim marker
-  (Task 4.1; must not reuse `cleanup_pending_at`, which `gc_investigation_artifacts` owns/clears).
+  no default); index it (close-coupling + liveness queries filter by it). `ALTER TABLE investigations ADD
+  COLUMN rootfs_cleanup_pending_at timestamptz;` — the dedicated rootfs reclaim marker (Task 4.1; must not
+  reuse `cleanup_pending_at`, which `gc_investigation_artifacts` owns/clears). `CREATE UNIQUE INDEX … ON
+  artifacts (object_key) WHERE owner_kind='investigations';` — **partial** (never touches other owner
+  kinds), backing finalize idempotency (Task 2.2).
 - **Acceptance:** `just test` migration round-trip passes; `test_migrate.py` sees 0076 as the new head;
   a NULL-investigation System row inserts unchanged.
 - **Rollback:** drop-column (no data loss for NULL rows).
@@ -65,9 +67,11 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/mcp/tools/lifecycle/investigations/…` (new handler); `artifacts/registration.py`
   (write `owner_kind='investigations'`, `retention_class='rootfs'`); reuse the ADR-0434 §2 HEAD-verify.
 - **Do:** HEAD the object (`ChecksumMode=ENABLED`); reject missing/checksum-less (`configuration_error`);
-  write the write-once row; delete the manifest; return `data.checksum_sha256` (canonical base64).
-  Idempotent when the row already exists.
-- **Acceptance:** spec AC-4 (row written, manifest deleted, handle returned, idempotent re-call).
+  write the row via **`INSERT … ON CONFLICT DO NOTHING`** against the Task 1.1 partial UNIQUE index on
+  `object_key`, then **re-SELECT** the row and return `data.checksum_sha256` (canonical base64); delete the
+  manifest. Concurrent finalizes converge on one row.
+- **Acceptance:** spec AC-4 (row written, manifest deleted, handle returned, idempotent re-call **and under
+  two concurrent calls → exactly one row**).
 
 ### Task 2.3 — Remove the System-scoped upload path
 - **Fits:** ADR-0441 §3 — replace, not deprecate.
@@ -95,23 +99,29 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/mcp/tools/lifecycle/systems/provision.py` (`define_system`/`provision_system`
   optional `investigation_id`); `SystemAdmission` (`systems/…`) validates: supplied ⇒ non-terminal
   investigation whose **project equals the System's own (Allocation) project** (reject cross-project;
-  closes the `close(force)` deadlock + keeps the SENSITIVE base in one trust boundary); **write-once**
-  (provision's `investigation_id` must equal define's; reject a change — the reclaim gate enumerates
-  referencers by this column); and **upload rootfs ⇒ binding present** (`configuration_error` naming the
-  missing binding).
+  closes the `close(force)` deadlock + keeps the SENSITIVE base in one trust boundary); **write-once with
+  NULL carve-out** (non-NULL define ⇒ provision must match or omit; NULL define ⇒ first provision may set
+  once then immutable — an upload-ref forces non-NULL at define, so only non-upload Systems hit the NULL
+  branch; the reclaim gate enumerates referencers by this column); and **upload rootfs ⇒ binding present**
+  (`configuration_error` naming the missing binding).
 - **Acceptance:** spec AC-3 (upload ref without binding rejected at admission); a bound System persists
   its `investigation_id`.
 
 ### Task 3.3 — Resolve + stage within the System's investigation
 - **Fits:** ADR-0441 §4/§5.
 - **Files:** `providers/local_libvirt/lifecycle/rootfs/materialize.py` +
-  `rootfs_upload_fetch.py` (resolve `owner_kind='investigations' AND owner_id=system.investigation_id
-  AND checksum_sha256=<ref>` via the short-lived sync connection; no per-System manifest read);
+  `rootfs_upload_fetch.py` (resolve **by content-addressed `object_key`** — transcode ref base64 →
+  base64url `<token>`, build `artifact_key("local","investigations",<inv>,"rootfs-"<token>)`, look up
+  `owner_kind='investigations' AND owner_id=system.investigation_id AND object_key=<derived>`; **no
+  checksum column**; via the short-lived sync connection);
   `providers/local_libvirt/lifecycle/storage.py` (`UPLOADS_DIR` path → `rootfs-uploads/<inv>/<token>.qcow2`).
 - **Do:** miss ⇒ `configuration_error` naming the checksum; keep ADR-0434 §2 SHA-256 verify + ADR-0438
-  qcow2-magic gate; reuse a present verified file (cache hit).
-- **Acceptance:** spec AC-1 (reuse: one download for two Systems) and AC-2 (isolation: cross-investigation
-  checksum → resolution miss, no file staged).
+  qcow2-magic gate; reuse a present verified file (cache hit). Take a **per-(investigation, checksum)
+  advisory lock** (over the fetch's sync connection) around check-and-download so concurrent sibling
+  provisions do not both write the shared `.partial` (a unique `.partial` suffix is the fallback).
+- **Acceptance:** spec AC-1 (reuse: one download for two Systems, **sequential and concurrent**), AC-2
+  (isolation: cross-investigation checksum → resolution miss, no file staged), AC-4b (resolve-by-object_key
+  + transcode round-trip).
 
 ---
 
@@ -135,12 +145,19 @@ deprecate"). Keep the whole branch green at each commit.
   **pinned order**: object (best-effort) → **unlink file** (failure defers, `drained=False`) → row
   (fail-loud-in-txn, **last** — the worklist anchor). Gate fails → skip the checksum; remove the empty
   `rootfs-uploads/<inv>/` dir when drained.
+- **Referencer enumeration (per checksum X):** `systems WHERE investigation_id=<inv> AND state<>'torn_down'`,
+  parse each `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}`
+  (unparseable / no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X — so one
+  unrelated live System never pins X); for each, derive `overlay_path(system_id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`)
+  and stat it. The probe reads `ROOTFS_DIR` and unlinks under `UPLOADS_DIR` — **both** local-host-only, so
+  assert the reconciler runs co-located with the libvirt host filesystem.
 - **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present; a
   `failed` referencer whose overlay was reclaimed must drain), AC-8b (TTL reclaims a never-closed
   investigation), AC-8c (defers while a referencer is `reprovisioning`/`restoring`), AC-8d (**marker
   independence** — a drained build artifact nulling `cleanup_pending_at` does not starve the rootfs sweep),
-  AC-8e (**pinned-order** — a forced `unlink` failure keeps the row + retries), AC-10 (residual committed +
-  stale-window object collected).
+  AC-8e (**pinned-order** — a forced `unlink` failure keeps the row + retries), AC-8f (**enumeration** — an
+  unrelated bound live System referencing a different checksum/catalog does not pin X), AC-10 (residual
+  committed + stale-window object collected).
 - **Watch:** gate on overlay-file **absence**, not `systems.state`. `SystemState.FAILED` is a terminal
   sink (no `→torn_down`) and is excluded from `repair_orphaned_systems`, so a state gate pins a `failed`
   System's base forever and defeats the TTL backstop. The AC-8 test must include a `failed` referencer and

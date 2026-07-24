@@ -55,18 +55,22 @@ See ADR-0441 for rationale; this section is the buildable shape and the failure 
 ### System↔Investigation binding (ADR-0441 §2)
 
 - **Migration 0076:** `ALTER TABLE systems ADD COLUMN investigation_id uuid REFERENCES investigations(id)`
-  (**nullable**) **and** `ALTER TABLE investigations ADD COLUMN rootfs_cleanup_pending_at timestamptz`
-  (the dedicated rootfs reclaim marker, decision 6). `domain/lifecycle/records.py` `System` gains
-  `investigation_id: UUID | None = None`; `Investigation` gains `rootfs_cleanup_pending_at`.
+  (**nullable**); `ALTER TABLE investigations ADD COLUMN rootfs_cleanup_pending_at timestamptz` (the
+  dedicated rootfs reclaim marker); and a partial `CREATE UNIQUE INDEX … ON artifacts (object_key) WHERE
+  owner_kind='investigations'` (finalize idempotency; partial so it never touches other owner kinds).
+  `domain/lifecycle/records.py` `System` gains `investigation_id: UUID | None = None`; `Investigation`
+  gains `rootfs_cleanup_pending_at`.
 - `systems.define` / `systems.provision` gain optional `investigation_id`. Supplied ⇒ must name a
   non-terminal (OPEN/ACTIVE) investigation whose project **equals the System's own (Allocation)
   project** — cross-project binding is rejected (`configuration_error`). Same-project keeps the SENSITIVE
   base within one trust boundary and prevents the `close(force)` deadlock (a closer lacking the System's
   project role).
-- **Write-once:** `investigation_id` is set at define (or first provision) and immutable thereafter
-  (`provision`'s value must equal define's; no rebind). The reclaim gate enumerates a base's referencers
-  by this column, so a mutable binding could drop a still-backing System from the enumeration and reclaim
-  the base under its live overlay. Enforced at admission.
+- **Write-once (NULL case explicit):** if `define` recorded **non-NULL**, `provision` must supply the same
+  value or omit it (a differing value is rejected); if `define` recorded **NULL**, first `provision` may
+  set it once, then it is immutable. An upload-ref profile forces non-NULL at define (admission invariant),
+  so only non-upload Systems reach the NULL-at-define branch. The reclaim gate enumerates referencers by
+  this column, so a mutable binding could drop a still-backing System and reclaim the base under its live
+  overlay. Enforced at admission.
 - **Invariant (admission-enforced):** a profile whose rootfs is `{"kind":"upload",...}` requires a bound
   `investigation_id`. An upload ref with no binding is a `configuration_error` naming the missing
   binding — never a late provision failure. Validated in `SystemAdmission` alongside the existing
@@ -84,9 +88,12 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 2. Agent PUTs the object (store verifies the signed `x-amz-checksum-sha256` at PUT).
 3. `investigations.complete_rootfs_upload(investigation_id)` — finalize (symmetric with
    `runs.complete_build`): HEAD the object (`ChecksumMode=ENABLED`), reject a missing or checksum-less
-   object (`configuration_error`), write the write-once `owner_kind='investigations'` `artifacts` row,
-   delete the manifest, and return `data.checksum_sha256` — the handle for profiles. Idempotent: a second
-   call with the row already present returns the same handle.
+   object (`configuration_error`), write the `owner_kind='investigations'` `artifacts` row via **`INSERT …
+   ON CONFLICT DO NOTHING`** against the migration-0076 **partial UNIQUE index** on
+   `artifacts(object_key) WHERE owner_kind='investigations'`, then re-SELECT and return
+   `data.checksum_sha256` — the handle for profiles. The unique index makes two concurrent finalizes
+   (retries/two agents) converge on **one** row (no duplicate rows for one content-addressed key);
+   idempotent by construction, and resolution expects exactly one row. Delete the manifest.
 
 **Removed (replace, not deprecate):** `artifacts.create_system_upload`, `_SYSTEM_UPLOAD`,
 `_commit_uploaded_rootfs`, `_system_accepts_upload`, `rootfs_upload_window_allowed`, and the
@@ -95,14 +102,24 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 ### Reference + provision resolution (ADR-0441 §4/§5)
 
 - `_UploadRootfs` = `{"kind":"upload", "checksum_sha256": <base64>}` (a required field now).
-- `_materialize_uploaded_rootfs` resolves within the System's own investigation:
+- **Resolution is content-addressed via `object_key`** — the `artifacts` table has **no checksum column**
+  (and 0076 adds none). `_materialize_uploaded_rootfs` transcodes the ref's canonical-base64
+  `checksum_sha256` → the unpadded-base64url `<token>`, builds the expected key
+  `artifact_key("local","investigations",<inv>,"rootfs-"<token>)`, and looks up
   `SELECT object_key FROM artifacts WHERE owner_kind='investigations' AND owner_id=<system.investigation_id>
-  AND checksum_sha256=<ref>`; a miss ⇒ `configuration_error` naming the unresolved checksum.
+  AND object_key=<derived>`; the `owner_id` predicate is the isolation boundary, the derived-key match is
+  the content address. A miss ⇒ `configuration_error` naming the unresolved checksum. The base64↔base64url
+  transcoding is the single canonical, reversible mapping.
 - Stage to `rootfs-uploads/<investigation_id>/<token>.qcow2`, outside `allowed_roots`. Read-side SHA-256
   verify (ADR-0434 §2) and qcow2-magic gate (ADR-0438) unchanged. Present verified file reused → at most
-  one download per host per (investigation, checksum). `.partial` + `os.replace` unchanged. The connectionless sync fetch
-  opens its own short-lived connection to read the investigation's committed-object key + checksum (it no
-  longer reads a per-System manifest; the row is durable post-finalize).
+  one download per host per (investigation, checksum).
+- **Concurrent-fetch guard:** because the staging path is now shared per-(investigation, checksum), the
+  fetch takes a **per-(investigation, checksum) advisory lock** (over its short-lived sync connection,
+  keyed on `hash(investigation_id, token)`) around check-and-download, so two sibling provisions do not
+  both write the same fixed `.partial` (corruption + double download). One downloads; the rest wait then
+  hit the cache. This is what makes "written once" hold under concurrent (not just sequential) provisions.
+- The connectionless sync fetch opens its own short-lived connection to resolve the committed-object key
+  (it no longer reads a per-System manifest; the row is durable post-finalize).
 
 ### Reclaim sweep (ADR-0441 §6)
 
@@ -135,6 +152,14 @@ the whole checksum, `drained=False` — treated like the best-effort object dele
 the row (fail-loud in txn). The row is the worklist anchor, so removing it **last** means a failed unlink
 never strands a SENSITIVE file with no row for a future sweep to find. Gate fails → skip the checksum
 (`drained=False`, retried). Remove the empty `rootfs-uploads/<inv>/` dir once drained.
+- **Referencer enumeration (per checksum X):** `systems WHERE investigation_id=<inv> AND state<>'torn_down'`,
+  parse each `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}`; an
+  unparseable / no-rootfs / catalog / local / different-checksum profile is **not** a referencer of X (so
+  one unrelated live System never pins X). For each real referencer, derive `overlay_path(system_id)` =
+  `<ROOTFS_DIR>/<id>-overlay.qcow2` and stat it for condition (a).
+- **Reconciler filesystem access:** the probe reads overlays under `ROOTFS_DIR` and unlinks bases under
+  `UPLOADS_DIR` — **different dirs** — so both sweeps are local-libvirt-host-only and need the reconciler
+  co-located with that host's filesystem.
 - Both registered in the reconciler loop beside `gc_investigation_artifacts`.
 
 **Removed:** the ADR-0434 §4 teardown rootfs reclaim (local file + S3 object + row) from the systems
@@ -201,13 +226,18 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 
 ## Acceptance criteria (become tests in `/build-tdd`)
 
-1. **Reuse:** two Systems bound to one investigation, same `checksum_sha256`, both provision; the host
-   base file is written **once** (second provision is a cache hit — assert no second download).
+1. **Reuse (incl. concurrent):** two Systems bound to one investigation, same `checksum_sha256`, both
+   provision — sequentially **and concurrently** — with the host base written **once** (the
+   per-(investigation, checksum) fetch lock serializes; assert no second download and no `.partial`
+   corruption).
 2. **Isolation:** a System bound to investigation Y referencing a checksum owned only by investigation X
    fails resolution with `configuration_error`; no file under Y's staging dir is created.
 3. **Binding invariant:** `{"kind":"upload"}` rootfs with no `investigation_id` is rejected at admission.
 4. **Finalize:** `complete_rootfs_upload` writes the `owner_kind='investigations'` row, deletes the
-   manifest, returns the checksum handle; is idempotent on re-call.
+   manifest, returns the checksum handle; idempotent on re-call **and under two concurrent calls** (the
+   partial UNIQUE index converges them on one row — assert exactly one row).
+4b. **Resolution by object_key:** a profile ref resolves by the derived content-addressed `object_key`
+   (no checksum column); the base64→base64url transcoding round-trips.
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
 6. **Close-force:** `close(force=True)` with **admin** on each bound System's project enqueues teardown
    and closes; a same-project **contributor** is refused (no escalation via close — assert the admin gate).
@@ -227,6 +257,8 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    nulling `cleanup_pending_at` does not starve the rootfs sweep (which keys on `rootfs_cleanup_pending_at`).
 8e. **Pinned-order unlink failure:** with the object deleted, a forced `unlink` failure leaves the
    `artifacts` row intact and the checksum retried next pass (no orphaned file with no row).
+8f. **Enumeration precision:** a bound live System referencing a *different* checksum (or a `catalog`
+   rootfs) does **not** pin checksum X's base — X reclaims while that unrelated System stays live.
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)
@@ -254,5 +286,6 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 
 - Exact tool namespace for finalize (`investigations.complete_rootfs_upload` vs `artifacts.*`) — pick in
   the plan; keep create under `artifacts.*` to reuse `_create_upload`.
-- The reconciler's filesystem access to `UPLOADS_DIR` (co-located host for local-libvirt) — assert in the
-  plan that the sweep's file arm is a local-libvirt-host concern, matching where the base is staged.
+- Reconciler filesystem access (now specified in the Reclaim sweep section): the probe reads overlays
+  under `ROOTFS_DIR` and unlinks bases under `UPLOADS_DIR`, both local-libvirt-host-only — the plan must
+  assert the reconciler runs co-located with that host.
