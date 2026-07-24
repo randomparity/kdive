@@ -29,7 +29,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -61,17 +61,26 @@ _OWNER_KIND = "investigations"
 # The qcow2 magic every canonical rootfs base must start with (bytes ``51 46 49 fb``); a base that
 # does not is rejected here rather than failing late and confusingly at ``qemu-img`` (ADR-0438).
 _QCOW2_MAGIC = b"QFI\xfb"
+# The identity path's per-read window: the staging loop hashes and writes one chunk at a time, so
+# peak memory is this constant rather than the object size (up to the 5 GiB single-PUT ceiling).
+# Matches the gzip path's ranged-read window in ``transport_encoding``.
+_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 class UploadObjectStore(Protocol):
     """The narrow object-store capability the upload fetch needs (an :class:`ObjectStore`).
 
-    ``get_range`` widens it to satisfy :class:`transport_encoding.RangedReadStore`, so a gzip upload
-    can be streamed-decompressed without a whole-object buffer.
+    Neither staging path buffers the whole object: ``get_artifact_stream`` (ADR-0400) backs the
+    identity path's chunked read, and ``get_range`` satisfies
+    :class:`transport_encoding.RangedReadStore` so a gzip upload can be streamed-decompressed. The
+    whole-object ``get_artifact`` is deliberately absent — a multi-GiB rootfs must never be
+    materialized as ``bytes`` in a worker.
     """
 
     def head(self, key: str) -> artifact_types.HeadResult | None: ...
-    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact: ...
+    def get_artifact_stream(
+        self, key: str, etag: str | None
+    ) -> AbstractContextManager[artifact_types.StreamedArtifact]: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
 
 
@@ -82,11 +91,6 @@ class ResolvedRootfsObject:
     object_key: str
     encoding: str | None
     uncompressed_size: int | None
-
-
-def _sha256_b64(data: bytes) -> str:
-    """Return the base64-encoded SHA-256 of ``data`` (the object-store checksum format)."""
-    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
 
 
 def _fetch_lock_name(investigation_id: UUID, token: str) -> str:
@@ -308,16 +312,38 @@ def _stage_identity(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stage an unencoded upload verbatim: verify the checksum, magic-check, write the partial."""
-    data = store.get_artifact(key, None).data
-    if _sha256_b64(data) != checksum:
+    """Stage an unencoded upload verbatim, streaming it chunk-by-chunk into the partial.
+
+    The object is read in ``_STREAM_CHUNK_BYTES`` windows off a single unconditional GET (``etag``
+    is ``None``, ADR-0054: the provision plane holds no client handle), each chunk hashed and
+    written as it arrives, so peak memory is the chunk rather than the object — a multi-GiB rootfs
+    no longer spikes the worker (#1520). The magic gate runs on the first four bytes as soon as they
+    have accumulated, which rejects a non-qcow2 upload after one chunk instead of after a full
+    download; consequently an object that is *both* non-qcow2 and checksum-mismatched now reports
+    the format error rather than the checksum one. Each gate keeps its own category: a mismatched
+    checksum is an ``INFRASTRUCTURE_FAILURE``, a non-qcow2 base a ``CONFIGURATION_ERROR``
+    (ADR-0438). The read may return short chunks (the store's body wrapper is a ``RawIOBase``), so
+    the magic prefix accumulates across chunks; an object too short to hold the magic fails the gate
+    rather than staging unchecked.
+    """
+    hasher = hashlib.sha256()
+    prefix = b""
+    with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
+        while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
+            hasher.update(chunk)
+            writer.write(chunk)
+            if len(prefix) < len(_QCOW2_MAGIC):
+                prefix += chunk[: len(_QCOW2_MAGIC) - len(prefix)]
+                if len(prefix) == len(_QCOW2_MAGIC):
+                    _require_qcow2_magic(prefix, system_id=str(system_id))
+    if len(prefix) < len(_QCOW2_MAGIC):  # the object ended before the magic: not a qcow2 either
+        _require_qcow2_magic(prefix, system_id=str(system_id))
+    if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         raise CategorizedError(
             "uploaded rootfs object failed checksum verification",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    _require_qcow2_magic(data[:4], system_id=str(system_id))
-    partial.write_bytes(data)
 
 
 def _stage_gzip(

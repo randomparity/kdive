@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import gzip
 import hashlib
+import io
 import multiprocessing as mp
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -15,7 +18,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
-from kdive.artifacts.storage import FetchedArtifact, HeadResult
+from kdive.artifacts.storage import HeadResult, StreamedArtifact
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -24,6 +27,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     staged_rootfs_path,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
     fetch_uploaded_rootfs,
     stage_uploaded_rootfs,
@@ -41,13 +45,56 @@ def _sha256_b64(data: bytes) -> str:
     return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
 
 
+class _RecordingReader:
+    """A body reader that records the largest single ``bytes`` it ever handed the caller.
+
+    ``largest_read`` is the peak-buffered-bytes measurement the streaming requirement is stated in:
+    it is what the staging loop holds in memory at once. A sizeless ``read()`` / ``read(-1)`` — the
+    whole-object drain — is rejected outright rather than served, so a regression to buffering the
+    object fails here instead of quietly passing a bound computed over internal chunking.
+
+    ``max_chunk`` serves short reads (fewer bytes than asked, not end-of-stream), which the real
+    store's ``RawIOBase`` body wrapper is free to do.
+    """
+
+    def __init__(self, data: bytes, *, max_chunk: int | None = None) -> None:
+        self._data = data
+        self._offset = 0
+        self._max_chunk = max_chunk
+        self.largest_read = 0
+
+    @property
+    def bytes_served(self) -> int:
+        return self._offset
+
+    def read(self, size: int | None = None, /) -> bytes:
+        if size is None or size < 0:
+            raise AssertionError(
+                "the staging path asked for the whole object in one read; it must read in "
+                "bounded chunks so peak memory does not scale with the object size (#1520)"
+            )
+        if self._max_chunk is not None:
+            size = min(size, self._max_chunk)
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        self.largest_read = max(self.largest_read, len(chunk))
+        return chunk
+
+    def close(self) -> None:
+        return None
+
+
 class _FakeStore:
-    def __init__(self, data: bytes | None, *, checksum: str | None) -> None:
+    def __init__(
+        self, data: bytes | None, *, checksum: str | None, max_chunk: int | None = None
+    ) -> None:
         self._data = data
         self._checksum = checksum
+        self._max_chunk = max_chunk
         self.head_calls = 0
-        self.get_calls = 0
         self.range_calls = 0
+        self.stream_calls = 0
+        self.readers: list[_RecordingReader] = []
 
     def head(self, key: str) -> HeadResult | None:
         self.head_calls += 1
@@ -55,15 +102,68 @@ class _FakeStore:
             return None
         return HeadResult(size_bytes=len(self._data), checksum_sha256=self._checksum, etag="e")
 
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
-        self.get_calls += 1
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        self.stream_calls += 1
         assert self._data is not None
-        return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "rootfs")
+        reader = _RecordingReader(self._data, max_chunk=self._max_chunk)
+        self.readers.append(reader)
+        try:
+            yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
+        finally:
+            reader.close()
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         self.range_calls += 1
         assert self._data is not None
         return self._data[start : start + length]
+
+
+class _FailingReader:
+    """A reader that serves ``fail_after`` bytes, then raises the store's typed transport fault."""
+
+    def __init__(self, data: bytes, *, fail_after: int) -> None:
+        self._data = data
+        self._fail_after = fail_after
+        self._offset = 0
+
+    def read(self, size: int | None = None, /) -> bytes:
+        if self._offset >= self._fail_after:
+            raise CategorizedError(
+                "get_object on 'k' failed: ConnectionClosedError",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        want = self._fail_after - self._offset if size is None else min(size, self._fail_after)
+        chunk = self._data[self._offset : self._offset + want]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        return None
+
+
+class _FailingStreamStore:
+    """A store whose body read faults mid-stream, after the partial has bytes in it."""
+
+    def __init__(self, data: bytes, *, fail_after: int) -> None:
+        self._data = data
+        self._fail_after = fail_after
+
+    def head(self, key: str) -> HeadResult:
+        return HeadResult(
+            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+        )
+
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        reader = _FailingReader(self._data, fail_after=self._fail_after)
+        try:
+            yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
+        finally:
+            reader.close()
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        raise AssertionError("the identity path must not use ranged reads")
 
 
 def _dest(tmp_path: Path) -> Path:
@@ -98,7 +198,7 @@ def test_stage_missing_object_is_config_error(tmp_path: Path) -> None:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "never uploaded" in str(error.value)
-    assert store.get_calls == 0
+    assert store.stream_calls == 0
 
 
 def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
@@ -107,15 +207,36 @@ def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "no stored checksum" in str(error.value)
-    assert store.get_calls == 0
+    assert store.stream_calls == 0
 
 
 def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
-    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+    # A well-formed qcow2 whose bytes do not hash to the stored checksum: the format gate passes,
+    # so this isolates the checksum gate.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(b"different-bytes"))
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "checksum verification" in str(error.value)
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_non_qcow2_short_circuits_before_the_checksum_is_known(tmp_path: Path) -> None:
+    # #1520 precedence: the magic peek trips on the first chunk, before the whole object has been
+    # read, so an object that is both non-qcow2 AND checksum-mismatched reports the actionable
+    # format error. That is the point of the peek — a multi-GiB non-qcow2 upload is rejected after
+    # one chunk instead of after a full download.
+    payload = b"not-a-qcow2" + b"\xa5" * (_STREAM_CHUNK_BYTES * 2)
+    store = _FakeStore(payload, checksum=_sha256_b64(b"different-bytes"))
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "qcow2" in str(error.value)
+    # Bailed on the first chunk rather than draining the object to learn the checksum.
+    assert store.readers[0].bytes_served <= _STREAM_CHUNK_BYTES
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
@@ -137,13 +258,68 @@ def test_stage_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
     assert store.range_calls == 0
 
 
+def test_stage_identity_streams_without_buffering_the_whole_object(tmp_path: Path) -> None:
+    # #1520: peak memory is bounded by the read chunk, not the object size. The store fake offers
+    # no whole-object accessor at all, so a regression to ``get_artifact(...).data`` cannot even
+    # run; the read-size assertion pins the bound for anything that streams but reads unbounded.
+    payload = _QCOW2 + b"\xa5" * (_STREAM_CHUNK_BYTES * 3)
+    store = _FakeStore(payload, checksum=_sha256_b64(payload))
+
+    dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == payload
+    assert store.stream_calls == 1  # one GET, not a per-chunk ranged-read fan-out
+    assert store.readers[0].largest_read <= _STREAM_CHUNK_BYTES
+    assert len(payload) > _STREAM_CHUNK_BYTES  # the bound is a real bound for this object
+
+
+def test_stage_identity_tolerates_reads_shorter_than_the_magic(tmp_path: Path) -> None:
+    # The real body wrapper is a RawIOBase: read() may return fewer bytes than asked without being
+    # end-of-stream, so the magic peek must accumulate across chunks rather than assume the first
+    # read holds all four bytes.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2), max_chunk=3)
+
+    dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert store.readers[0].largest_read == 3  # the staging loop really did see short reads
+
+
+def test_stage_identity_shorter_than_the_magic_is_config_error(tmp_path: Path) -> None:
+    # An object too short to hold the magic can never be a qcow2; it must be rejected by the format
+    # gate rather than staged because the peek never completed.
+    data = b"QF"
+    store = _FakeStore(data, checksum=_sha256_b64(data))
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "qcow2" in str(error.value)
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_identity_transport_fault_leaves_no_partial(tmp_path: Path) -> None:
+    # A mid-stream transport fault (the typed INFRASTRUCTURE_FAILURE the store's body wrapper
+    # raises) must discard the partial the loop had already written.
+    store = _FailingStreamStore(_QCOW2 + b"\xa5" * 8192, fail_after=4096)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
 def test_stage_unsupported_encoding_is_config_error(tmp_path: Path) -> None:
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding="zstd", uncompressed_size=999)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "unsupported transport encoding" in str(error.value)
-    assert store.get_calls == 0 and store.range_calls == 0
+    assert store.stream_calls == 0 and store.range_calls == 0
     assert not _dest(tmp_path).exists()
 
 
@@ -156,7 +332,7 @@ def test_stage_gzip_streams_decompressed_qcow2(tmp_path: Path) -> None:
     store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
     dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
     assert dest.read_bytes() == canonical
-    assert store.get_calls == 0 and store.range_calls >= 1  # streamed, not whole-object buffered
+    assert store.stream_calls == 0 and store.range_calls >= 1  # ranged, never whole-object
 
 
 def test_stage_gzip_bomb_is_rejected_and_stages_nothing(tmp_path: Path) -> None:
@@ -334,7 +510,7 @@ def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> Non
     result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
     assert result == dest and result.read_bytes() == b"already-verified"
-    assert store.head_calls == 0 and store.get_calls == 0
+    assert store.head_calls == 0 and store.stream_calls == 0
     assert conn.lock_keys == []  # the pre-lock cache hit never even took the lock
 
 
@@ -387,10 +563,15 @@ class _CountingStore:
             size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
         )
 
-    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
         with self._counter.open("a") as fh:
             fh.write("1\n")
-        return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "rootfs")
+        reader = io.BytesIO(self._data)
+        try:
+            yield StreamedArtifact(reader, Sensitivity.SENSITIVE, "rootfs")
+        finally:
+            reader.close()
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         return self._data[start : start + length]
