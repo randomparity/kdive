@@ -231,9 +231,13 @@ def _unlink_orphan_partials(dest: Path) -> None:
     That premise holds only while the lock does. A session lock lost mid-transfer (an idle-session
     timeout or a recycled connection across a multi-GiB download) lets this sweep unlink a live
     sibling's partial; that fetcher writes on into the unlinked inode and fails at ``os.replace``,
-    so the cost is a failed provision, never a corrupt ``dest``. Bounding the sweep away from live
-    partials is #1524 — do not widen this glob (outside the lock, or over the whole uploads dir)
-    on the strength of the paragraph above.
+    so the cost is a failed provision, never a corrupt ``dest``. It is not only a failed provision,
+    though: the unlinked inode's blocks stay allocated until that worker exits, so for the rest of
+    the transfer they are charged to the filesystem (``df``) while belonging to no path — invisible
+    to ``du``, to this glob, and to the reclaim sweep, which both match on paths. Disk pressure
+    during a re-provision storm can therefore look like a leak the sweeps should have caught.
+    Bounding the sweep away from live partials is #1524 — do not widen this glob (outside the lock,
+    or over the whole uploads dir) on the strength of the paragraph above.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
@@ -348,7 +352,10 @@ def _stage_identity(
     The magic prefix is accumulated across chunks rather than sliced from the first, because the
     store's body wrapper is a ``RawIOBase`` free to return a read shorter than requested; an object
     too short to hold the magic keeps a short prefix and so fails the gate rather than staging
-    unchecked.
+    unchecked. :func:`_stage_gzip` instead reopens the finished partial to read its first four
+    bytes — not a different policy, just the consequence of delegating its write loop to
+    ``strip_gzip_to_writer``, which never surfaces the decompressed prefix. This path owns its loop
+    and already holds those bytes, so it checks them in memory rather than paying a reopen.
     """
     hasher = hashlib.sha256()
     prefix = b""

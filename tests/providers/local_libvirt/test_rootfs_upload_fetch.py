@@ -263,16 +263,19 @@ def test_stage_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
 def test_stage_identity_streams_without_buffering_the_whole_object(tmp_path: Path) -> None:
     # #1520: peak memory is bounded by the read chunk, not the object size. The store fake offers
     # no whole-object accessor at all, so a regression to ``get_artifact(...).data`` cannot even
-    # run; the read-size assertion pins the bound for anything that streams but reads unbounded.
-    payload = _QCOW2 + b"\xa5" * (_STREAM_CHUNK_BYTES * 3)
+    # run. The payload size is a literal and the bound is asserted against it, not against
+    # _STREAM_CHUNK_BYTES -- comparing the constant to itself would hold for any chunk size,
+    # including one large enough to re-introduce the multi-GiB spike this test exists to prevent.
+    assert _STREAM_CHUNK_BYTES <= 16 * 1024 * 1024  # the ceiling the memory claim rests on
+    payload = _QCOW2 + b"\xa5" * (48 * 1024 * 1024)
     store = _FakeStore(payload, checksum=_sha256_b64(payload))
 
     dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert dest.read_bytes() == payload
     assert store.stream_calls == 1  # one GET, not a per-chunk ranged-read fan-out
-    assert store.readers[0].largest_read <= _STREAM_CHUNK_BYTES
-    assert len(payload) > _STREAM_CHUNK_BYTES  # the bound is a real bound for this object
+    assert store.readers[0].largest_read < len(payload)  # never held the object in one buffer
+    assert store.readers[0].largest_read <= 16 * 1024 * 1024
 
 
 def test_stage_identity_tolerates_reads_shorter_than_the_magic(tmp_path: Path) -> None:
