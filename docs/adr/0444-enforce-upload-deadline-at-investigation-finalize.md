@@ -54,11 +54,12 @@ is told the wall it hit, the clock that wall is measured on, and the one call th
 sibling `no_upload_manifest` rejection — what a finalize arriving *after* a reap now sees — gains
 the same `suggested_next_actions`, so every "your window is gone" path routes to the same recovery.
 
-The check reads the deadline and the reference clock from **one statement** on the Postgres clock
-that stamped the deadline (`deadline = now() + ttl`) and that the reaper measures against — a new
-read-side `upload_manifest.deadline_stamp` returning the existing `ManifestStamp`
-(`server_time`, `deadline`). No Python-side `datetime.now()` enters the comparison; a session-TZ
-or host-clock disagreement cannot make finalize and the reaper reach opposite verdicts.
+The check measures the deadline against the **Postgres clock** that stamped it
+(`deadline = now() + ttl`) and that the reaper measures against — a new read-side
+`upload_manifest.deadline_stamp` pairing the already-fetched manifest's `deadline` with that
+transaction's `now()` in the existing `ManifestStamp`. No Python-side `datetime.now()` enters the
+comparison; a session-TZ or host-clock disagreement cannot make finalize and the reaper reach
+opposite verdicts.
 
 `now()` is `transaction_timestamp()`, so the clock is the finalize transaction's *start*, not the
 instant the row is read. That is deliberate and conservative in the right direction: a request that

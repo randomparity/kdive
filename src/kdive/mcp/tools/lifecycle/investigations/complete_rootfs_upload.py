@@ -120,10 +120,11 @@ async def _finalize_locked(
                 detail="investigation is not accepting a rootfs finalize; it is terminal",
                 data={"reason": "investigation_not_accepting_upload"},
             )
-        entry = await _rootfs_entry(conn, uid, raw_id)
-        if isinstance(entry, ToolResponse):
-            return entry
-        expired = await _reject_if_expired(conn, uid, raw_id)
+        window = await _rootfs_window(conn, uid, raw_id)
+        if isinstance(window, ToolResponse):
+            return window
+        manifest, entry = window
+        expired = await _reject_if_expired(conn, manifest, raw_id)
         if expired is not None:
             return expired
         object_key = artifact_key(
@@ -150,16 +151,17 @@ async def _finalize_locked(
     )
 
 
-async def _rootfs_entry(
+async def _rootfs_window(
     conn: AsyncConnection, uid: UUID, raw_id: str
-) -> upload_manifest.ManifestEntry | ToolResponse:
+) -> tuple[upload_manifest.UploadManifest, upload_manifest.ManifestEntry] | ToolResponse:
+    """Return the open window and its ``rootfs`` entry; the manifest carries the deadline."""
     manifest = await upload_manifest.get_manifest(conn, _OWNER_KIND, uid)
     if manifest is None:
         return _no_manifest_error(raw_id)
     entry = next((e for e in manifest.entries if e.name == "rootfs"), None)
     if entry is None:
         return _no_manifest_error(raw_id)
-    return entry
+    return manifest, entry
 
 
 def _no_manifest_error(raw_id: str) -> ToolResponse:
@@ -176,18 +178,17 @@ def _no_manifest_error(raw_id: str) -> ToolResponse:
     )
 
 
-async def _reject_if_expired(conn: AsyncConnection, uid: UUID, raw_id: str) -> ToolResponse | None:
+async def _reject_if_expired(
+    conn: AsyncConnection, manifest: upload_manifest.UploadManifest, raw_id: str
+) -> ToolResponse | None:
     """Reject a finalize past the manifest deadline; return ``None`` while the window is open.
 
-    The deadline and the clock it is measured against are read from one statement on the Postgres
-    clock that stamped it and that the reaper measures against (ADR-0444), so finalize and the
-    reaper cannot reach opposite verdicts on the same manifest. ``now()`` is the transaction's
-    start, so a request that arrived inside the window is never rejected for time it spent
-    waiting on the investigation lock.
+    The deadline is measured against the Postgres clock that stamped it and that the reaper
+    measures against (ADR-0444), so finalize and the reaper cannot reach opposite verdicts on the
+    same manifest. ``now()`` is the transaction's start, so a request that arrived inside the
+    window is never rejected for time it spent waiting on the investigation lock.
     """
-    stamp = await upload_manifest.deadline_stamp(conn, _OWNER_KIND, uid)
-    if stamp is None:
-        return _no_manifest_error(raw_id)
+    stamp = await upload_manifest.deadline_stamp(conn, manifest)
     if stamp.deadline >= stamp.server_time:
         return None
     return ToolResponse.failure(

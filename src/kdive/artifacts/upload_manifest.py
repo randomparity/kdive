@@ -129,10 +129,8 @@ async def refresh_deadline(
         return cur.rowcount == 1
 
 
-async def deadline_stamp(
-    conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID
-) -> ManifestStamp | None:
-    """Return the owner's deadline beside the DB reference clock, or ``None`` if no row exists.
+async def deadline_stamp(conn: AsyncConnection, manifest: UploadManifest) -> ManifestStamp:
+    """Pair a fetched manifest's deadline with the DB reference clock.
 
     The read-side twin of :func:`replace_manifest`'s write-side stamp (ADR-0444): both halves of
     the agent-facing deadline contract (#1336) are rendered from the same two fields, and both
@@ -140,20 +138,18 @@ async def deadline_stamp(
     a finalize and the reaper cannot reach opposite verdicts on one manifest.
 
     Args:
-        conn: An async connection.
-        owner_kind: The owning table name — ``'runs'`` or ``'investigations'``.
-        owner_id: The owning row's primary key.
+        conn: An async connection, in the transaction whose ``now()`` is the reference clock.
+        manifest: The already-fetched manifest whose deadline is being measured.
 
     Returns:
-        The manifest's ``ManifestStamp``, or ``None`` if no row exists for this owner.
+        The manifest's deadline beside that transaction's ``now()``.
     """
     async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT now(), deadline FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
-            (owner_kind, owner_id),
-        )
+        await cur.execute("SELECT now()")
         row = await cur.fetchone()
-    return None if row is None else ManifestStamp(server_time=row[0], deadline=row[1])
+    if row is None:  # a bare SELECT always yields one row; fail loud if it ever does not
+        raise RuntimeError("deadline_stamp could not read the database reference clock")
+    return ManifestStamp(server_time=row[0], deadline=manifest.deadline)
 
 
 async def get_manifest(

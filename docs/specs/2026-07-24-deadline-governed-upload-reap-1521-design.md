@@ -38,13 +38,16 @@ limit handed to an agent be real; today it is decorative on the finalize path.
 
 ## Design
 
-### Read the deadline and the reference clock in one statement
+### Measure the deadline against the DB reference clock
 
-`artifacts/upload_manifest.py` gains `deadline_stamp(conn, owner_kind, owner_id)`, returning the
-existing `ManifestStamp` — `server_time` (the transaction's `now()`) and the row's `deadline` —
-from a single `SELECT deadline, now() FROM upload_manifests WHERE …`, or `None` when no row
-exists. It is the read-side twin of `replace_manifest`'s write-side stamp, so both halves of the
-agent-facing deadline contract are rendered from the same pair of fields.
+`artifacts/upload_manifest.py` gains `deadline_stamp(conn, manifest)`, pairing an already-fetched
+manifest's `deadline` with the transaction's `now()` in the existing `ManifestStamp`. It is the
+read-side twin of `replace_manifest`'s write-side stamp, so both halves of the agent-facing
+deadline contract are rendered from the same pair of fields. It takes the fetched manifest rather
+than re-reading the row: finalize already holds it, and there is no state in which the row could
+have vanished between the two reads (every `investigations` manifest mutator takes the same
+`INVESTIGATION` advisory lock finalize holds), so a second read would only add an unreachable
+absent-row branch.
 
 `now()` is `transaction_timestamp()`, so the clock is the finalize transaction's *start*. That is
 the conservative direction: a request that arrived before the deadline and then waited on the
