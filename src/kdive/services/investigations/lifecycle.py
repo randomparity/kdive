@@ -102,6 +102,23 @@ async def _bound_live_systems(conn: AsyncConnection, uid: UUID) -> list[UUID]:
         return [row[0] for row in await cur.fetchall()]
 
 
+async def _reprovisioning_bound_systems(conn: AsyncConnection, uid: UUID) -> list[UUID]:
+    """Return bound Systems in ``reprovisioning`` — the one non-terminal state teardown can't reach.
+
+    ``REPROVISIONING`` is the only non-terminal ``SystemState`` with no ``torn_down`` transition, so
+    a force-close teardown enqueued for such a System raises ``IllegalTransition`` and, if the
+    reprovision then settles to ``failed`` (a terminal sink), never completes — leaving a System
+    bound to a closed Investigation, which decision 7 (ADR-0441 §7) forbids. Force-close refuses
+    (transiently) rather than promise a reap it cannot deliver.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM systems WHERE investigation_id = %s AND state = %s ORDER BY id",
+            (uid, SystemState.REPROVISIONING.value),
+        )
+        return [row[0] for row in await cur.fetchall()]
+
+
 def _require_admin_for_force(ctx: RequestContext, uid: UUID, project: str) -> None:
     """Gate the force-teardown escalation on project ADMIN, matching ``systems.teardown``.
 
@@ -145,6 +162,19 @@ async def _couple_bound_systems(
             data={"blocking_systems": blocking},
         )
     _require_admin_for_force(ctx, uid, project)
+    reprovisioning = await _reprovisioning_bound_systems(conn, uid)
+    if reprovisioning:
+        ids = [str(system_id) for system_id in reprovisioning]
+        raise InvestigationServiceError(
+            object_id=str(uid),
+            reason=InvestigationErrorReason.BOUND_SYSTEMS_LIVE,
+            detail=(
+                f"cannot force-close: {len(ids)} bound System(s) are mid-reprovision "
+                f"({', '.join(ids)}); a reprovisioning System has no teardown transition until it "
+                "settles to ready or failed — retry force-close once it does"
+            ),
+            data={"reprovisioning_systems": list(ids)},
+        )
     authorizing = Authorizing(
         principal=ctx.principal, agent_session=ctx.agent_session, project=project
     )

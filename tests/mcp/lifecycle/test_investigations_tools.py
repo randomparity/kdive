@@ -495,6 +495,27 @@ def test_close_force_tears_down_bound_systems_and_closes(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_close_force_refuses_reprovisioning_bound_system(migrated_url: str) -> None:
+    """A reprovisioning System has no teardown transition, so force-close refuses (all-or-nothing):
+    it cannot promise the reap decision 7 requires, so it closes nothing and enqueues nothing."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            reprov = await _seed_bound_system(pool, inv_id, SystemState.REPROVISIONING)
+            await _seed_bound_system(pool, inv_id, SystemState.READY)
+            resp = await close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+            assert str(reprov) in cast("list[str]", resp.data["reprovisioning_systems"])
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["state"] == "open"  # refused: nothing closed
+            assert markers["rootfs_cleanup_pending_at"] is None
+            assert await _teardown_dedup_keys(pool) == []  # all-or-nothing: no teardown enqueued
+
+    asyncio.run(_run())
+
+
 def test_close_force_contributor_is_denied_no_escalation(migrated_url: str) -> None:
     """AC-6 RBAC: a same-project contributor cannot force-teardown; nothing changes."""
 
