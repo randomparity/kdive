@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import gzip
 import hashlib
 import io
@@ -326,6 +327,27 @@ def test_stage_untyped_interrupt_still_leaves_no_partial(tmp_path: Path) -> None
     with pytest.raises(KeyboardInterrupt):
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
 
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_io_fault_maps_to_a_staging_fault_naming_the_destination(tmp_path: Path) -> None:
+    # The write loop now runs for the length of a multi-GiB transfer, so an ENOSPC/EIO mid-stage is
+    # the realistic IO failure. It must leave the seam as the uniform INFRASTRUCTURE_FAILURE naming
+    # `dest`, not a bare OSError -- this pins `except OSError -> _staging_fault`, which no longer
+    # carries the `_discard` call that used to make it visibly load-bearing.
+    store = _FailingStreamStore(
+        _QCOW2 + b"\xa5" * 8192,
+        fail_after=4096,
+        error=OSError(errno.ENOSPC, "No space left on device"),
+    )
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "failed to stage" in str(error.value)
+    assert error.value.details["dest"] == str(_dest(tmp_path))
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
