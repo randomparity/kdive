@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify rootfs upload cleanups from /simplify pass
 - Extract shared staging-fault + partial-discard helpers
 - Simplify cleanups from /simplify review
+- Stream identity upload staging instead of buffering
+- Gate the qcow2 magic once over the staged partial
 
 ### Documentation
 
@@ -92,6 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document investigation upload flow; ratify ADR-0441
 - Record the uncommitted-upload never-closed residual
 - Reclaim investigation rootfs via a worker job
+- Record the identity path now streams
+- Correct the finally and gate-order rationale
+- Finish the 0438 index row and 0441 lost-lock note
+- Record the RAM-to-disk trade in the #1520 note
+- Caveat the no-live-sibling-partial claim
 
 ### Fixed
 
@@ -130,6 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep one drain rule and isolate per-sweep faults
 - Bound the store delete held under the investigation lock
 - Stop the reclaim loop at the first real fault
+- Keep checksum-then-magic order and discard partials
 
 ### Build
 
