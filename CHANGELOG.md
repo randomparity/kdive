@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify cleanups from /simplify review
 - Stream identity upload staging instead of buffering
 - Gate the qcow2 magic once over the staged partial
+- Measure the deadline off the fetched manifest
+- Fold the owner-kind aliases into the scope map
 
 ### Documentation
 
@@ -100,6 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the RAM-to-disk trade in the #1520 note
 - Caveat the no-live-sibling-partial claim
 - Record the uploaded-rootfs manual proof
+- Deadline-governed reap of uncommitted uploads
 
 ### Fixed
 
@@ -139,6 +142,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the store delete held under the investigation lock
 - Stop the reclaim loop at the first real fault
 - Keep checksum-then-magic order and discard partials
+- Enforce the manifest deadline at rootfs finalize
+- Reap investigation uploads on the deadline alone
+- Point expiry recovery at re-mint, not re-upload
 
 ### Build
 
