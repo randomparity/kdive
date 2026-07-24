@@ -391,6 +391,7 @@ async def _reclaim_rootfs_checksum(
     *,
     artifact_id: UUID,
     object_key: str,
+    token: str,
     investigation_id: UUID,
     uploads_dir: str,
 ) -> bool:
@@ -400,7 +401,8 @@ async def _reclaim_rootfs_checksum(
     (fail-loud in txn — the worklist anchor). Both the object delete (idempotent on a 404) and the
     unlink (``ENOENT`` = success) share one fault contract: any **real** fault defers the whole
     checksum (``False``, row kept) *before* the row delete, so a genuine fault never drops the row
-    while the SENSITIVE object/file survives. Returns ``True`` when the checksum drained.
+    while the SENSITIVE object/file survives. Returns ``True`` when the checksum drained. ``token``
+    is the caller's already-derived content-address token (not re-derived from ``object_key``).
     """
     try:
         await asyncio.to_thread(store.delete, object_key)
@@ -411,7 +413,6 @@ async def _reclaim_rootfs_checksum(
             exc_info=True,
         )
         return False
-    token = _rootfs_token_from_key(object_key)
     try:
         await asyncio.to_thread(_unlink_staged_base, uploads_dir, investigation_id, token)
     except OSError:
@@ -450,6 +451,7 @@ async def _reclaim_object_if_reclaimable(
         store,
         artifact_id=artifact_id,
         object_key=object_key,
+        token=token,
         investigation_id=investigation_id,
         uploads_dir=uploads_dir,
     )

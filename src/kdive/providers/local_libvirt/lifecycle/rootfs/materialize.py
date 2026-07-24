@@ -65,8 +65,9 @@ class RootfsMaterializationContext:
     same-name multi-arch image resolves deterministically (ADR-0228); it is unused on the
     ``local``/``upload`` lanes.
 
-    ``upload_fetch`` downloads and checksum-verifies a System-owned uploaded rootfs object to a
-    local path (ADR-0434); it is ``None`` in lanes that never resolve an ``upload`` reference
+    ``upload_fetch`` downloads and checksum-verifies the investigation-scoped uploaded rootfs
+    object to a local path (ADR-0441); it is ``None`` in lanes that never resolve an ``upload``
+    reference
     (then an ``upload`` reference is a configuration error), mirroring ``catalog_fetch``.
     """
 
@@ -96,7 +97,7 @@ def materialize_rootfs_base(
 
 
 def _materialize_uploaded_rootfs(context: RootfsMaterializationContext) -> Path:
-    """Download + checksum-verify the System-owned uploaded rootfs to a local path (ADR-0434).
+    """Download + checksum-verify the investigation-scoped uploaded rootfs (ADR-0441).
 
     The download is injected (``context.upload_fetch``) so the synchronous provider seam stays
     connectionless; an unwired lane treats an ``upload`` reference as a configuration error.

@@ -82,6 +82,7 @@ def test_reclaim_deletes_object_file_and_row(migrated_url: str, tmp_path: Path) 
                 store,
                 artifact_id=artifact_id,
                 object_key=_object_key(inv),
+                token=_TOKEN,
                 investigation_id=inv,
                 uploads_dir=str(tmp_path),
             )
@@ -118,6 +119,7 @@ def test_reclaim_idempotent_when_target_absent(migrated_url: str, tmp_path: Path
                 store,
                 artifact_id=artifact_id,
                 object_key=_object_key(inv),
+                token=_TOKEN,
                 investigation_id=inv,
                 uploads_dir=str(tmp_path),
             )
@@ -154,6 +156,7 @@ def test_reclaim_defers_on_object_fault_keeps_row(migrated_url: str, tmp_path: P
                 _FlakyStore(),
                 artifact_id=artifact_id,
                 object_key=_object_key(inv),
+                token=_TOKEN,
                 investigation_id=inv,
                 uploads_dir=str(tmp_path),
             )
@@ -191,6 +194,7 @@ def test_reclaim_defers_on_unlink_fault_keeps_row(migrated_url: str, tmp_path: P
                 store,
                 artifact_id=artifact_id,
                 object_key=_object_key(inv),
+                token=_TOKEN,
                 investigation_id=inv,
                 uploads_dir=str(tmp_path),
             )
