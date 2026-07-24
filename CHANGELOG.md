@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Validate transport encoding at upload declaration
 - Transport-strip gzip uploads + qcow2 format check (#1510)
 - Advertise transport-encoding upload surface (#1511)
+- Stage a supplied qcow2 as a System base image (#1433)
 
 ### Changed
 
@@ -59,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Implementation plan for local-libvirt agent-uploaded rootfs (#743)
 - Add ADR-0435 for reclaiming failed-provision artifacts
 - ADR-0437 transport-encoding vs payload-format model
+- ADR-0440 remote-libvirt supplied rootfs staging (#1433)
 
 ### Fixed
 
