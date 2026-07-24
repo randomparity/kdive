@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-pass reclaim degradation, default-close marker (#1502)
 - Document investigation upload flow; ratify ADR-0441
 - Record the uncommitted-upload never-closed residual
+- Reclaim investigation rootfs via a worker job
 
 ### Fixed
 
@@ -124,6 +125,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Force-close refuses a reprovisioning bound System
 - Reject reprovision under a closed bound investigation
 - Drop reconciler ensure-create so the co-location probe fails closed
+- Run the investigation-rootfs reclaim as a worker job
+- Re-date and back off the reclaim job re-issue
+- Keep one drain rule and isolate per-sweep faults
+- Bound the store delete held under the investigation lock
+- Stop the reclaim loop at the first real fault
 
 ### Build
 
