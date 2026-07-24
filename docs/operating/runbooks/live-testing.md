@@ -219,6 +219,70 @@ takes the caller's already-rendered production domain XML: the debug rendering
 (`render_domain_xml(..., gdb_port=…, debug=…)`) is their subject under test, so
 by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
 
+## Manual proof: the investigation-scoped uploaded rootfs
+
+No pytest tier covers the uploaded-rootfs lifecycle end to end — its four arms
+(reuse, isolation, close coupling, reclaim) span the MCP surface, the object
+store, the provider staging path, and the reconciler, so it is driven by hand
+against a running `live_stack` on a KVM host. Recorded here because the 2026-07-24
+run found a defect (#1522) the unit and service suites could not, and because the
+setup has several traps worth not rediscovering.
+
+Bring-up is the normal one — `just stack-up`, then `scripts/live-stack/up.sh`,
+then `just onboard` for a funded project and a token. Then, per ADR-0441:
+
+| Arm | Drive | Assert |
+|-----|-------|--------|
+| Reuse | Two Systems provisioned **concurrently** in one investigation from the same `{"kind":"upload","checksum_sha256":X}` ref | Exactly one object-store `GetObject`; both domains' `<backingStore>` resolve to the same staged base; both boot |
+| Isolation | A third System in a *different* investigation, same checksum | `configuration_error` — "checksum is not owned by this System's investigation"; no staging dir created for it |
+| Close coupling | `investigations.close` with and without `force` | Bare close refuses and names the live bound Systems; `force` reaps Systems and overlays |
+| Reclaim | Close, then let the sweep run | Object, staged base, staging dir, `artifacts` row all gone; `rootfs_cleanup_pending_at` cleared |
+
+Traps this run hit, in the order they bite:
+
+- **Provision concurrently, not serially.** Two serial provisions prove nothing
+  about deduplication: the second short-circuits on `dest.is_file()` and never
+  reaches the fetch lock. Only concurrent provisions exercise the per-(investigation,
+  checksum) session advisory lock that collapses the redundant download.
+- **The catalog images are too big to upload as-is.** They are 6 GiB virtual,
+  over the 5 GiB single-PUT cap, so a declaration is rejected at
+  `artifacts.create_investigation_upload`. `qemu-img convert -O qcow2 <src> <dst>`
+  yields a ~1.9 GiB compact copy that exercises the identity lane. Uploading the
+  original requires the gzip transport lane instead.
+- **A multi-kernel rootfs needs a `baseline_kernel` hint.** `fedora-kdive-ready-43`
+  carries two kernels, so direct-kernel boot is `not_provisionable` until the
+  profile names one (bare version, e.g. `6.18.5-200.fc43.x86_64`).
+- **`systems.provision` returns a job, not a System.** `object_id` is the job id;
+  the System id is `data.system_id`. Polling `systems.get` on the returned
+  `object_id` answers `not_found` and looks like a failure.
+- **Count downloads at the store, not in the logs.** The staging path emits no
+  per-download log line, so "exactly one download" is only observable at the
+  object store. `mc admin trace` from a throwaway `minio/mc` container on the
+  compose network shows the request kind, the object key, and the transferred
+  bytes — enough to distinguish one full-object GET from two.
+- **The reclaim grace is a day.** `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`
+  defaults to `1`, so the close-driven sweep will not select a just-closed
+  investigation. Restart the reconciler with it set to `0` to fire the sweep in
+  the current pass, and restore the default afterwards.
+- **Reclaim is asynchronous and privileged.** Since ADR-0442 the reconciler only
+  enqueues; the worker performs the reclaim. Assert on the
+  `reclaim_investigation_rootfs` job reaching `succeeded` as well as on the
+  post-state, so a job that never ran is not mistaken for a clean sweep.
+
+**2026-07-24 run** (merged `main`, all daemons build-stamped identically): reuse,
+isolation, and close coupling passed; reclaim failed. The reconciler runs as the
+invoking user while the worker runs as root, so the stat-based co-location probe
+admitted a pass that could not unlink the root-owned staged base — the object was
+deleted but the base and its row leaked, with no TTL backstop (#1522, fixed by
+ADR-0442). Re-run after that fix: all four arms pass, reclaim drains object, base,
+staging dir, row, and marker with no reconciler warnings.
+
+The split-user layout is not a misconfiguration — `scripts/live-stack/lib.sh`
+deliberately runs the worker as root for install-staging and VM ops while the
+server and reconciler run as the invoking user. Any future work that has one
+daemon touch another's files must account for it, and a stack whose daemons all
+share a uid (compose, Helm) will not reproduce this class of defect.
+
 ## Hard-won quirks
 
 - **`qemu:///session` dodges the root-readback wall.** A `qemu:///system`
@@ -248,4 +312,6 @@ by ADR-0392 the caller keeps rendering it rather than the harness hiding it.
 - [ADR-0353 — the `live_vm_tcg` tier](../../adr/0353-live-vm-tcg-tier.md)
 - [ADR-0425 — the remote-libvirt `live_vm` family](../../adr/0425-remote-live-vm-tier.md)
 - [ADR-0387 — self-hosted KVM runner host codification](../../adr/0387-selfhosted-kvm-runner-host-codification.md)
+- [ADR-0441 — investigation-scoped uploaded rootfs](../../adr/0441-investigation-scoped-uploaded-rootfs.md)
+- [ADR-0442 — reclaim the investigation rootfs via a worker job](../../adr/0442-rootfs-reclaim-worker-job.md)
 - [live-stack runbook](live-stack.md) · [self-hosted KVM runner](self-hosted-kvm-runner.md) · [POWER host bring-up](power-host-bringup.md) · [four-method live run](four-method-live-run.md)
