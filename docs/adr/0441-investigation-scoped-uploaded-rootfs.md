@@ -93,6 +93,13 @@ profile that references an uploaded rootfs (decision 4) **requires** a bound `in
 are validated together at admission (a `{"kind":"upload"}` rootfs with no investigation binding is a
 `configuration_error` naming the missing binding, never a late provision failure).
 
+`systems.investigation_id` is **write-once**: set at define (or first provision) and immutable thereafter
+— `provision`'s optional value must equal what `define` recorded, and there is no rebind. The decision-6
+gate enumerates the Systems that reference a base by this column, so a mutable binding could silently drop
+a System that still backs the base out of the gate's enumeration and let the base be reclaimed under its
+live overlay. The invariant is stated here and enforced at admission because the gate's correctness
+depends on it, not on the mere absence of a rebind tool today.
+
 ### 3. The upload window opens against the investigation, with an explicit finalize
 
 The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
@@ -167,24 +174,26 @@ the TTL backstop is mandatory here too:
   expiry — ADR-0234 Context — so the reaper enforces the wall.)
 
 Both are deferred, audited, drain-and-retry, and reclaim **per checksum**, with the object + row +
-staged file for one checksum reclaimed **together on the same liveness gate**: *every System bound to
-the investigation that references that checksum is `torn_down`*. Gate holds → delete the object
+staged file for one checksum reclaimed **together on the same liveness gate**: *no bound System that
+references that checksum still has its per-System overlay present on the host* — a filesystem probe of
+each referencing System's overlay path, **not** a `systems.state` read. Gate holds → delete the object
 (best-effort) + row (fail-loud-in-txn, ADR-0234/0434) **and** unlink the staged base under
 `rootfs-uploads/<inv>/`. Gate fails → skip the whole checksum this pass (`drained=False`, retried next
 pass); remove the empty `rootfs-uploads/<inv>/` dir once drained.
 
-The gate keys on `torn_down` **specifically, not "terminal"**, because only `torn_down` guarantees the
-overlay is gone: teardown removes the overlay before it writes `torn_down` (ADR-0060 create-only-when-absent
-overlay + the teardown order), so a `torn_down` System never still backs a base. A `failed` System is
-also terminal but per ADR-0435 can never run teardown (`failed -> torn_down` is not a legal edge), so its
-overlay may persist; the gate therefore treats a `failed` referencer as **not drainable** — conservative,
-deferring rather than risking a base deleted under a `failed` System's residual overlay. A `failed`
-System's overlay is removed by ADR-0435's best-effort provision-failure reclaim and the reconciler's
-orphan teardown; once that completes the base drains, and the TTL backstop is the final collector if a
-System is permanently stuck. The gate is a point-in-time *liveness query*, not a persistent refcount (a
-stale read only defers one pass); keeping the object+row and file on one gate means a bound System that
-must re-materialize (reprovision, or a host base lost to a disk fault) always finds the object present to
-re-download.
+The gate keys on **overlay-file absence, not System state**, because the overlay file *is* the exact
+thing that holds the base open as a qcow2 backing file (ADR-0060) — so its absence is the precise,
+sufficient safety condition, and no state value is a faithful proxy for it. In particular a `failed`
+System is terminal but per ADR-0435 can never run teardown (`failed -> torn_down` is not a legal edge)
+and is excluded from the reconciler's orphan teardown (`repair_orphaned_systems` treats `failed` as
+terminal), so its row persists indefinitely; keying on state would let a single `failed` System pin the
+SENSITIVE base **forever**, defeating even the TTL backstop. Keying on overlay-absence instead lets the
+base drain the moment ADR-0435's provision-failure reclaim removes the `failed` System's overlay,
+regardless of its stuck state — while still deferring safely whenever any overlay actually remains (the
+genuinely stuck case an operator must resolve, surfaced as an un-drained marker). The gate is a
+point-in-time probe, not a persistent refcount (a stale read only defers one pass); keeping the object+row
+and file on one gate means a bound System that must re-materialize (reprovision, or a host base lost to a
+disk fault) always finds the object present to re-download.
 
 The per-System teardown rootfs reclaim (ADR-0434 §4) is **removed**, and so is ADR-0435's
 provision-failure reclaim of the (now shared) base (decision 5). #1501's *failed-provision* orphan was
@@ -254,12 +263,12 @@ parity waivers stay accurate.
   invariant is enforced at admission, not by the schema.
 - **Residual — object-store reclaim is best-effort.** As in ADR-0234/0434, a store fault leaves an
   object the sweep retries next pass; the `artifacts`-row delete (the download handle) is fail-loud.
-- **Residual — the liveness gate keys on `torn_down`, and a stuck System defers its base.** A base is
-  reclaimable only once every referencing bound System is `torn_down`; a `failed` System (which cannot
-  run teardown) or a permanently-stuck teardown defers its base indefinitely (correctly — deleting it
-  could corrupt a residual overlay). This surfaces as an un-drained `cleanup_pending_at`, observable like
-  a stuck `gc_investigation_artifacts` marker; the reconciler's orphan teardown normally clears a `failed`
-  System, after which the base drains.
+- **Residual — a genuinely-orphaned overlay defers its base.** A base is reclaimable only once no
+  referencing System's overlay file remains. In the normal path teardown (or ADR-0435's failure reclaim)
+  removes the overlay and the base drains. If an overlay is left on disk that neither teardown nor
+  ADR-0435 could remove (e.g. a `failed` System whose overlay reclaim itself failed), the base is deferred
+  — correctly, since deleting it under a present overlay would corrupt it — and both sweeps surface it as
+  an un-drained marker for an operator, the same way a stuck `gc_investigation_artifacts` marker does.
 
 ## Considered & rejected
 
@@ -282,7 +291,13 @@ parity waivers stay accurate.
 - **Content-addressed persistent refcount for base reclaim.** Rejected: it enables slightly-earlier
   reclaim of an unreferenced base mid-investigation, at the cost of stored refcount state and
   decrement-vs-new-reference races, for marginal benefit while the investigation is open. The
-  point-in-time liveness query at sweep time gives the same safety with no stored state.
+  point-in-time overlay-absence probe at sweep time gives the same safety with no stored state.
+- **Gate base reclaim on `systems.state` (`torn_down`) instead of overlay-file absence.** Rejected: a
+  `failed` System is terminal, can never reach `torn_down` (`failed` is a state-table sink), and is
+  excluded from `repair_orphaned_systems`, so a state gate would let one `failed` System pin the SENSITIVE
+  base **forever** — defeating even the TTL backstop and reintroducing the exact leak this ADR closes.
+  Overlay-file absence is the true safety condition (the overlay is what holds the base open), drains a
+  `failed` System the moment ADR-0435 reclaims its overlay, and needs no faithful state proxy.
 - **Let a running System outlive its investigation's close (naive close + grace).** Rejected: the
   overlay backing-file dependency means the sweep could delete a base under a live guest. Blocking close
   on bound live Systems (with `--force` to reap) fixes the root cause; the liveness guard covers the

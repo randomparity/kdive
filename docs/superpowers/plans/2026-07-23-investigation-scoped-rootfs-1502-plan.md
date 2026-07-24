@@ -93,8 +93,10 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/mcp/tools/lifecycle/systems/provision.py` (`define_system`/`provision_system`
   optional `investigation_id`); `SystemAdmission` (`systems/…`) validates: supplied ⇒ non-terminal
   investigation whose **project equals the System's own (Allocation) project** (reject cross-project;
-  closes the `close(force)` deadlock + keeps the SENSITIVE base in one trust boundary); and **upload
-  rootfs ⇒ binding present** (`configuration_error` naming the missing binding).
+  closes the `close(force)` deadlock + keeps the SENSITIVE base in one trust boundary); **write-once**
+  (provision's `investigation_id` must equal define's; reject a change — the reclaim gate enumerates
+  referencers by this column); and **upload rootfs ⇒ binding present** (`configuration_error` naming the
+  missing binding).
 - **Acceptance:** spec AC-3 (upload ref without binding rejected at admission); a bound System persists
   its `investigation_id`.
 
@@ -123,14 +125,17 @@ deprecate"). Keep the whole branch green at each commit.
 - **Do:** close-driven selects investigations past the grace window; TTL backstop selects committed
   `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL on a
   never-closed investigation. Both reclaim **per checksum**, with the object (best-effort) + row
-  (fail-loud-in-txn) + staged file on **one liveness gate**: every bound System referencing the checksum
-  is **`torn_down`** (a `failed` referencer is *not* drainable — defer). Gate fails → skip the checksum
-  (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
-- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while any referencer — incl. a
-  `failed` one — is not `torn_down`), AC-8b (TTL backstop reclaims a never-closed investigation), AC-10
-  (residual committed object + stale-window object collected).
-- **Watch:** the gate keys on `torn_down` specifically, not "terminal" — a `failed` System is terminal but
-  may still hold the base open; the AC-8 test must include a `failed` referencer.
+  (fail-loud-in-txn) + staged file on **one liveness gate**: *no referencing bound System's per-System
+  overlay file is present on the host* (a filesystem probe, not a `systems.state` read). Gate fails → skip
+  the checksum (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
+- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present;
+  **a `failed` referencer whose overlay was reclaimed must drain** — not pinned forever), AC-8b (TTL
+  backstop reclaims a never-closed investigation), AC-10 (residual committed object + stale-window object
+  collected).
+- **Watch:** gate on overlay-file **absence**, not `systems.state`. `SystemState.FAILED` is a terminal
+  sink (no `→torn_down`) and is excluded from `repair_orphaned_systems`, so a state gate pins a `failed`
+  System's base forever and defeats the TTL backstop. The AC-8 test must include a `failed` referencer and
+  assert eventual drainage.
 
 ### Task 4.2 — Remove teardown + provision-failure rootfs reclaim; re-scope the manifest reaper
 - **Fits:** ADR-0441 §5/§6 — reclaim is now sweep-driven; the shared base is no individual provision's

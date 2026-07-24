@@ -61,6 +61,10 @@ See ADR-0441 for rationale; this section is the buildable shape and the failure 
   project** — cross-project binding is rejected (`configuration_error`). Same-project keeps the SENSITIVE
   base within one trust boundary and prevents the `close(force)` deadlock (a closer lacking the System's
   project role).
+- **Write-once:** `investigation_id` is set at define (or first provision) and immutable thereafter
+  (`provision`'s value must equal define's; no rebind). The reclaim gate enumerates a base's referencers
+  by this column, so a mutable binding could drop a still-backing System from the enumeration and reclaim
+  the base under its live overlay. Enforced at admission.
 - **Invariant (admission-enforced):** a profile whose rootfs is `{"kind":"upload",...}` requires a bound
   `investigation_id`. An upload ref with no binding is a `configuration_error` naming the missing
   binding — never a late provision failure. Validated in `SystemAdmission` alongside the existing
@@ -110,11 +114,13 @@ TTL-backstop pair (`gc_investigation_artifacts` + `gc_expired_build_artifacts`):
   never-closed investigation, so bases do not accumulate unbounded. (`retention_class` is only an
   S3-lifecycle label, not an enforced TTL — ADR-0234 — hence the reaper.)
 
-Both reclaim **per checksum**, with the object + row + staged file on a **single liveness gate** —
-*every System bound to the investigation that references that checksum is `torn_down`* (keys on
-`torn_down`, **not** "terminal": only `torn_down` guarantees the overlay is gone; a `failed` System may
-retain a live overlay and per ADR-0435 never runs teardown, so it is treated as **not drainable** —
-deferred, never deleted-under). Gate holds → delete the object (best-effort) + row (fail-loud in txn)
+Both reclaim **per checksum**, with the object + row + staged file on a **single liveness gate** — *no
+bound System that references that checksum still has its per-System overlay present on the host* (a
+filesystem probe, **not** a `systems.state` read). Overlay-file absence is the true safety condition (the
+overlay is what holds the base open as a qcow2 backing file); keying on state would let a `failed` System
+— terminal, never reaching `torn_down`, excluded from `repair_orphaned_systems` — pin the base forever
+and defeat the TTL backstop. Keying on overlay-absence drains a `failed` System the moment ADR-0435's
+failure reclaim removes its overlay. Gate holds → delete the object (best-effort) + row (fail-loud in txn)
 **and** unlink `rootfs-uploads/<inv>/<token>.qcow2`. Gate fails → skip the checksum (`drained=False`,
 retried next pass). Remove the empty `rootfs-uploads/<inv>/` dir once drained. Keeping object and file on
 one gate means a reprovisioning / disk-fault-recovering System always finds the object present to
@@ -168,8 +174,9 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
 | `close(force=True)`, a bound System the caller can't tear down | fail listing it; nothing torn down |
 | Store fault deleting object in sweep | best-effort skip, retried next pass (marker stays set) |
-| Base referenced by a bound System not yet `torn_down` (incl. a `failed` one) | object + row + file all deferred on one gate, retried next pass |
-| Investigation never closed | TTL backstop `gc_expired_investigation_rootfs` reclaims past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, same gate |
+| Base still backed by a referencing System's overlay file on the host | object + row + file all deferred on one gate, retried next pass |
+| `failed` bound System referencing the base | deferred **only while its overlay remains**; drains once ADR-0435 reclaims the overlay (a state gate would pin it forever) |
+| Investigation never closed | TTL backstop `gc_expired_investigation_rootfs` reclaims past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, same overlay-absence gate |
 | Provision of System A **fails** while sibling B reuses the same shared base | A's failure path does **not** unlink the shared base (ADR-0435 §1 arm superseded); B keeps a valid backing |
 | Second `complete_rootfs_upload` (row already written) | idempotent; returns the same `checksum_sha256` |
 | Cross-investigation read attempt (System in Y names Y-not-owned checksum) | resolution miss ⇒ `configuration_error`; no escape |
@@ -186,11 +193,13 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
 6. **Close-force:** `close(force=True)` enqueues teardown for each bound live System and closes.
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
-8. **Liveness guard (`torn_down`-keyed):** the sweep does **not** unlink a base while a bound System
-   referencing it is not `torn_down` — including a **`failed`** one (assert a `failed` referencer defers);
-   it unlinks once every referencer is `torn_down`.
+8. **Liveness guard (overlay-absence):** the sweep does **not** reclaim a base while a referencing
+   System's overlay file is present; it reclaims once the overlay is gone. Critically, a **`failed`**
+   referencer whose overlay has been reclaimed **must eventually drain** (assert drainage — a state-keyed
+   gate that defers a `failed` System forever is the regression this test forbids).
 8b. **TTL backstop:** a never-closed investigation's committed rootfs object is reclaimed by
-   `gc_expired_investigation_rootfs` past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, on the same gate.
+   `gc_expired_investigation_rootfs` past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, on the same
+   overlay-absence gate (so it is not defeated by a stuck `failed` System).
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)
