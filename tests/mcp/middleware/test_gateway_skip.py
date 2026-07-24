@@ -31,6 +31,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.mcp.usage_support import open_warm_pool, recording_must_not_fail
 
 # ============================================================
 # Shared helpers
@@ -329,8 +330,7 @@ def test_invoke_writes_one_usage_row_keyed_to_inner(
     inner_ok = ToolResponse.success("session.whoami", "ok")
 
     async def _run() -> list[tuple[Any, ...]]:
-        async with AsyncConnectionPool(migrated_url, open=False) as pool:
-            await pool.open()
+        async with await open_warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
 
             inner_ctx = _Ctx("session.whoami")
@@ -342,7 +342,7 @@ def test_invoke_writes_one_usage_row_keyed_to_inner(
                 return inner_ok
 
             # Outer middleware processes tools.invoke; after the fix it records nothing.
-            with contextlib.suppress(Exception):
+            with recording_must_not_fail(), contextlib.suppress(Exception):
                 await mw.on_call_tool(outer_ctx, outer_call_next)
 
             async with pool.connection() as conn:
@@ -368,8 +368,7 @@ def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
     denial = _role_denied()
 
     async def _run() -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
-        async with AsyncConnectionPool(migrated_url, open=False) as pool:
-            await pool.open()
+        async with await open_warm_pool(migrated_url) as pool:
             usage_mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             denial_mw = DenialAuditMiddleware(pool, agent_session=lambda: "sess-1")
 
@@ -386,7 +385,7 @@ def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
 
             # Outer usage middleware processes tools.invoke.
             # After the fix: skips recording for tools.invoke.
-            with contextlib.suppress(Exception):
+            with recording_must_not_fail(), contextlib.suppress(Exception):
                 await usage_mw.on_call_tool(outer_ctx, outer_call_next)
 
             async with pool.connection() as conn:
