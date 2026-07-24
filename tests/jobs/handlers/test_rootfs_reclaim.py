@@ -652,3 +652,37 @@ def test_a_hung_store_delete_is_bounded_and_defers_the_checksum(
             await check.close()
 
     asyncio.run(_run())
+
+
+def test_reclaim_reconverges_when_both_targets_are_already_absent(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The property the file->object->row order, the fault contract, and the "a worker that dies
+    # mid-reclaim resumes" claim all rest on: an already-unlinked base (ENOENT) and an already-gone
+    # object (a 404 the store no-ops) are SUCCESS, so a re-attempt after a partial run completes
+    # the row delete instead of wedging.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)  # no staged base, no overlay
+        store = _RecordingStore()
+
+        assert await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == (
+            "1"
+        )
+        assert store.deleted == [_object_key(inv)]
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())

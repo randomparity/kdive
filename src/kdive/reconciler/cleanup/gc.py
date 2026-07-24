@@ -374,7 +374,14 @@ async def _enqueue_rootfs_reclaim(
             )
             if await cur.fetchone() is not None:
                 return False
-            await cur.execute("DELETE FROM jobs WHERE dedup_key = %s", (dedup_key,))
+            # The predicate rides the DELETE too, not just the fast-path SELECT above: a SELECT
+            # that matches nothing locks nothing, so two concurrent passes could both reach here —
+            # and an unconditional delete would then drop the job the other just admitted.
+            await cur.execute(
+                "DELETE FROM jobs WHERE dedup_key = %s "
+                "AND state IN ('succeeded', 'failed', 'canceled') AND updated_at <= now() - %s",
+                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+            )
         await queue.enqueue(
             conn,
             JobKind.RECLAIM_INVESTIGATION_ROOTFS,
