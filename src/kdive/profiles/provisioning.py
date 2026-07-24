@@ -217,20 +217,20 @@ class FaultInjectProfile(_ProfileBase):
 class RemoteLibvirtProfile(_ProfileBase):
     """The ``remote-libvirt`` provider section.
 
-    The base image is named **one** of two ways (exactly one is required, ADR-0440):
+    The base image is named **one** of two ways (exactly one is required):
 
     - ``base_image_volume`` names an **operator-staged** qcow2 volume already present on the
       remote host's storage pool; provisioning references it by name and verifies it exists.
     - ``base_image_source`` supplies a worker-host ``local`` qcow2 (a ``LocalComponentRef``,
-      the same ``local`` source kind remote accepts for kernel/vmlinux, ADR-0430) which
-      provisioning stages onto the pool per-System via the volume-upload primitive (ADR-0336).
+      the same ``local`` source kind remote accepts for kernel/vmlinux) which provisioning stages
+      onto the pool per-System via the volume-upload primitive.
 
     Either way the base image carries the **image-content obligations the supplier owns**: the
     base OS with qemu-guest-agent enabled, drgn, and matching vmlinux/debuginfo. Provisioning
     verifies the volume exists and — for a supplied qcow2 — that its bytes start with the qcow2
     magic; it does **not** verify these deeper obligations, which are not introspectable from a
-    volume lookup (ADR-0080). A base image missing them provisions successfully and then fails
-    later at guest-agent contact, install, or debug (ADR-0440).
+    volume lookup. A base image missing them provisions successfully and then fails later at
+    guest-agent contact, install, or debug.
 
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
