@@ -121,6 +121,15 @@ already logs each reaped owner. Adding one would be speculative surface.
   it. The window is `KDIVE_UPLOAD_TTL_SECONDS`, unchanged.
 - **The retention hole closes.** A PUT-but-never-finalized upload on a never-closed investigation is
   collected one reconciler pass after its deadline instead of lingering until close.
+- **Residual — a PUT still streaming when the reap fires.** A presigned PUT started just inside the
+  window can still be uploading when the deadline passes. The object store does not expose an
+  in-progress PUT, so `list_prefix` cannot see it and the reap deletes the manifest around it; the
+  PUT then lands as an object with no manifest, which this reaper cannot reach on a later pass. It
+  is strictly narrower than the hole being closed and self-heals on the recovery the rejection now
+  prescribes: the key is content-addressed, so a re-mint re-covers the same object with a fresh
+  window, and the following finalize commits it (or the next lapse reaps it). Left open rather than
+  designed around — closing it would need the reaper to reason about in-flight PUTs, which the store
+  gives it no handle on.
 - **Two `test_upload_reaper.py` tests are rewritten, deliberately.**
   `test_open_investigation_with_lingering_manifest_is_not_reaped` and
   `test_active_investigation_with_lingering_manifest_is_not_reaped` pinned ADR-0441 §6's terminal

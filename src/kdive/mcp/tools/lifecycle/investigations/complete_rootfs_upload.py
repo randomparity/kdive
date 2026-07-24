@@ -193,7 +193,9 @@ async def _reject_if_expired(conn: AsyncConnection, uid: UUID, raw_id: str) -> T
     return ToolResponse.failure(
         raw_id,
         ErrorCategory.CONFIGURATION_ERROR,
-        detail="the rootfs upload window has expired; re-mint it and re-upload the object",
+        # The object key is content-addressed, so a re-mint of the same declaration addresses the
+        # same object: re-uploading is needed only if the reaper already collected it (ADR-0441 §1).
+        detail="the rootfs upload window has expired; re-mint it and finalize again",
         suggested_next_actions=[CREATE_INVESTIGATION_UPLOAD_TOOL],
         data={
             "reason": "upload_window_expired",
