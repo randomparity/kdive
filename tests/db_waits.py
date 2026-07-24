@@ -7,7 +7,11 @@ import time
 
 import psycopg
 
-from kdive.db.locks import session_advisory_lock_held
+from kdive.db.locks import (
+    _advisory_lock_oids,
+    _session_lock_key,
+    session_advisory_lock_held,
+)
 
 
 async def wait_until_backend_waiting(
@@ -54,17 +58,42 @@ async def wait_until_session_lock_released(
     the backend exit, and ``pg_locks`` reflecting the release are three separate events.
     An observer on another backend must therefore wait for the release rather than assert
     it has already landed.
+
+    On timeout the error names the surviving holders — pid, database, and backend state —
+    because a bare "still held" is not enough to tell a genuine reap regression from
+    interference by an unrelated backend.
     """
     deadline = time.monotonic() + timeout_s
     while True:
         if not await session_advisory_lock_held(observer, name):
             return
         if time.monotonic() >= deadline:
+            holders = await _session_lock_holders(observer, name)
             raise AssertionError(
-                f"session advisory lock {name!r} was still held by some backend "
-                f"{timeout_s}s after the holder was lost"
+                f"session advisory lock {name!r} was still held {timeout_s}s after the "
+                f"holder was lost; holders (pid, database, state): {holders}"
             )
         await asyncio.sleep(0.02)
+
+
+async def _session_lock_holders(
+    observer: psycopg.AsyncConnection, name: str
+) -> list[tuple[int | None, str | None, str | None]]:
+    """Every backend on the cluster holding the named session advisory lock, for diagnostics.
+
+    Deliberately *not* scoped to the observer's database, unlike the probe itself: when the
+    wait times out, a holder in another database is one of the explanations worth seeing.
+    """
+    classid, objid = _advisory_lock_oids(_session_lock_key(name))
+    cur = await observer.execute(
+        "SELECT l.pid, d.datname, a.state FROM pg_locks l "
+        "LEFT JOIN pg_database d ON d.oid = l.database "
+        "LEFT JOIN pg_stat_activity a ON a.pid = l.pid "
+        "WHERE l.locktype = 'advisory' AND l.classid = %s AND l.objid = %s "
+        "  AND l.objsubid = 1 AND l.granted",
+        (classid, objid),
+    )
+    return await cur.fetchall()
 
 
 async def _has_waiting_lock(
