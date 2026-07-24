@@ -28,9 +28,17 @@ _LIVE_STATE_SIGNAL = frozenset({"READY", "CRASHING", "CRASHED"})
 _LIVE_STATES_REQUIRED = frozenset({"RESTORING", "PAUSED"})
 
 # Live-state sets that deliberately exclude a live state, keyed by (repo-relative path, frozenset
-# of the SystemState member names in the literal) -> reason. Empty today: all four live-state sets
-# include RESTORING and PAUSED.
-INTENTIONALLY_PARTIAL: dict[tuple[str, frozenset[str]], str] = {}
+# of the SystemState member names in the literal) -> reason.
+INTENTIONALLY_PARTIAL: dict[tuple[str, frozenset[str]], str] = {
+    # Not a live-state set: ROOTFS_BASE_OVERLAY_BACKED_SYSTEM_STATES classifies the non-terminal
+    # states whose overlay file backs the rootfs base for the reclaim gate's condition (a).
+    # RESTORING is deliberately excluded — it is a base-re-materialize state (overlay momentarily
+    # absent), classified in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES instead (ADR-0441 §6).
+    (
+        "domain/capacity/state.py",
+        frozenset({"READY", "PAUSED", "CRASHING", "CRASHED"}),
+    ): "overlay-backed reclaim-gate set; RESTORING is pre-overlay, classified apart (ADR-0441)",
+}
 
 
 def _system_state_member(node: ast.expr) -> str | None:

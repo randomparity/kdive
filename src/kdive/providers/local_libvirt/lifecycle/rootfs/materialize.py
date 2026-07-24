@@ -23,6 +23,11 @@ from kdive.components.references import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import _UploadRootfs
 
+# Re-exported for provider consumers (the upload fetch); its canonical home — and the reconciler's
+# provider-neutral access — is ``kdive.providers.shared.runtime_paths`` (the provider-boundary
+# guard, ADR-0441 §6).
+from kdive.providers.shared.runtime_paths import staged_rootfs_path as staged_rootfs_path
+
 # Resolve a `catalog` reference (for a target arch) to a provider-readable local path. A staged-path
 # row resolves to its host path; an s3 row resolves DB row → object → cache (ADR-0092/0228).
 type CatalogFetch = Callable[[CatalogComponentRef, str], Path]
@@ -88,27 +93,6 @@ def materialize_rootfs_base(
         "unsupported rootfs component reference",
         category=ErrorCategory.CONFIGURATION_ERROR,
     )
-
-
-def upload_rootfs_path(tenant: str, system_id: UUID | str, *, upload_dir: Path) -> Path:
-    """Return the legacy per-System staging path for an uploaded rootfs object.
-
-    Retained only for the per-System teardown/failure reclaim helpers (removed with ADR-0441's
-    reclaim rewrite); the live investigation-scoped staging path is :func:`staged_rootfs_path`.
-    ``system_id`` accepts a ``str`` so a teardown that only holds the domain name can reconstruct
-    the path.
-    """
-    return upload_dir / f"{tenant}-systems-{system_id}-rootfs.qcow2"
-
-
-def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: Path) -> Path:
-    """Return the investigation-scoped, content-addressed staging path (ADR-0441 §5).
-
-    The base is staged at ``<upload_dir>/<investigation_id>/<token>.qcow2`` — per-investigation
-    (isolation) and content-addressed by ``token`` (dedup across Systems sharing one checksum), so
-    every System in the investigation resolves the same file and it is fetched at most once.
-    """
-    return upload_dir / str(investigation_id) / f"{token}.qcow2"
 
 
 def _materialize_uploaded_rootfs(context: RootfsMaterializationContext) -> Path:

@@ -782,8 +782,6 @@ def _prov(
     overlay_exists: Callable[[str], bool] = lambda _overlay: False,
     remove_baseline: Callable[[str], None] = lambda _baseline: None,
     baseline_exists: Callable[[str], bool] = lambda _path: False,
-    remove_uploaded_rootfs: Callable[[str], None] = lambda _path: None,
-    uploaded_rootfs_exists: Callable[[str], bool] = lambda _path: False,
     extract_baseline_kernel: Callable[[Path, Path, str | None], BaselineKernel] = _fake_extract,
     free_port: Callable[[], int] = lambda: next(_FREE_PORTS),
     overlay_virtual_size: Callable[[str], int] = lambda _overlay: 1 << 60,
@@ -802,10 +800,8 @@ def _prov(
             make_overlay=make_overlay,
             remove_overlay=remove_overlay,
             remove_baseline=remove_baseline,
-            remove_uploaded_rootfs=remove_uploaded_rootfs,
             overlay_exists=overlay_exists,
             baseline_exists=baseline_exists,
-            uploaded_rootfs_exists=uploaded_rootfs_exists,
             prepare_console_log=lambda _path: None,
             overlay_virtual_size=overlay_virtual_size,
             resize_overlay=resize_overlay,
@@ -1479,46 +1475,22 @@ def test_remove_baseline_for_domain_strips_prefix_and_rmtrees() -> None:
     assert seen == [storage_module.baseline_dir(_SYS)]
 
 
-def test_remove_uploaded_rootfs_for_domain_targets_uploads_dir() -> None:
-    seen: list[str] = []
-    files = ProvisioningFiles(remove_uploaded_rootfs=seen.append)
-    files.remove_uploaded_rootfs_for_domain("kdive-" + str(_SYS))
-    expected = f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
-    assert seen == [expected]
-
-
-def test_teardown_reclaims_uploaded_rootfs() -> None:
-    # teardown removes the staged uploaded rootfs alongside the overlay/baseline, even on the
-    # already-absent-domain path (ADR-0434 §4).
-    seen: list[str] = []
+def test_teardown_does_not_reclaim_the_shared_uploaded_rootfs() -> None:
+    # The investigation-scoped uploaded rootfs base is shared and investigation-owned (ADR-0441):
+    # teardown reclaims only the per-System overlay + baseline, never the shared base — the
+    # reconciler sweeps own that. Assert teardown touches exactly the overlay + baseline.
+    removed_overlay: list[str] = []
+    removed_baseline: list[str] = []
     prov = LocalLibvirtProvisioning(
         connect=lambda: _ProvConn(lookup_error=libvirt.VIR_ERR_NO_DOMAIN),
         files=ProvisioningFiles(
-            remove_overlay=lambda _overlay: None,
-            remove_baseline=lambda _baseline: None,
-            remove_uploaded_rootfs=seen.append,
+            remove_overlay=lambda overlay: removed_overlay.append(overlay),
+            remove_baseline=lambda baseline: removed_baseline.append(baseline),
         ),
     )
     prov.teardown(domain_name_for(_SYS))
-    expected = f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
-    assert seen == [expected]
-
-
-def test_real_remove_uploaded_rootfs_absent_is_noop(tmp_path: Path) -> None:
-    storage_module._real_remove_uploaded_rootfs(str(tmp_path / "missing.qcow2"))  # no raise
-
-
-def test_real_remove_uploaded_rootfs_oserror_is_infrastructure_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _boom(self: object, *, missing_ok: bool = False) -> None:
-        del self, missing_ok
-        raise OSError("busy")
-
-    monkeypatch.setattr(storage_module.Path, "unlink", _boom)
-    with pytest.raises(CategorizedError) as error:
-        storage_module._real_remove_uploaded_rootfs("/var/lib/kdive/rootfs-uploads/x.qcow2")
-    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert removed_overlay == [storage_module.overlay_path(_SYS)]
+    assert removed_baseline == [storage_module.baseline_dir(_SYS)]
 
 
 def test_baseline_exists_seam_is_injectable() -> None:
@@ -1927,15 +1899,11 @@ def test_provision_failure_still_closes_connection() -> None:
     assert conn.closed == 3
 
 
-# --- failure-path host-artifact reclaim (ADR-0435, #1501) ----------------------------------
+# --- failure-path host-artifact reclaim (ADR-0435, superseded shared-base arm by ADR-0441) ---
 
 
 def _upload_profile() -> ProvisioningProfile:
     return _profile(rootfs={"kind": "upload", "checksum_sha256": "c"})
-
-
-def _staged_upload_path() -> str:
-    return f"{storage_module.UPLOADS_DIR}/local-systems-{_SYS}-rootfs.qcow2"
 
 
 def _raise_baseline_multiple_kernels(
@@ -1946,36 +1914,32 @@ def _raise_baseline_multiple_kernels(
     )
 
 
-def test_provision_baseline_failure_reclaims_staged_upload_and_baseline() -> None:
-    # The reported #1501 trigger: an upload-kind provision whose baseline extraction raises after
-    # materializing the staged rootfs. The staged image and the (partial) baseline dir this call
-    # created are reclaimed; the overlay is never touched (its create step was not reached).
+def test_provision_upload_baseline_failure_reclaims_baseline_not_shared_base() -> None:
+    # AC-9: an upload-kind provision whose baseline extraction fails reclaims the (partial) baseline
+    # dir this call created but NOT the shared, investigation-owned base (ADR-0441 supersedes the
+    # ADR-0435 §1 staged-base arm) — a failing System must not unlink a base a sibling still boots.
+    # The overlay is untouched (its create step was not reached).
     removed_overlay: list[str] = []
     removed_baseline: list[str] = []
-    removed_upload: list[str] = []
     conn = _ProvConn()
     with pytest.raises(CategorizedError) as caught:
         _prov(
             conn,
             remove_overlay=removed_overlay.append,
             remove_baseline=removed_baseline.append,
-            remove_uploaded_rootfs=removed_upload.append,
             extract_baseline_kernel=_raise_baseline_multiple_kernels,
         ).provision(_SYS, _upload_profile())
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert removed_baseline == [storage_module.baseline_dir(_SYS)]
-    assert removed_upload == [_staged_upload_path()]
     assert removed_overlay == []  # overlay create step never reached
     assert conn.recorded_xml == []  # no domain defined
 
 
 def test_provision_create_failure_reclaims_baseline_dir_and_overlay() -> None:
-    # A local-kind start failure now reclaims the baseline dir this call extracted alongside the
-    # overlay (the pre-existing baseline-dir leak, #1501). The upload staging path is never touched
-    # for a non-upload System.
+    # A start failure reclaims the baseline dir this call extracted alongside the overlay (the
+    # pre-existing baseline-dir leak, #1501).
     removed_overlay: list[str] = []
     removed_baseline: list[str] = []
-    removed_upload: list[str] = []
     name = domain_name_for(_SYS)
     conn = _ProvConn(defined={name: _ProvDomain(name, create_error=libvirt.VIR_ERR_INTERNAL_ERROR)})
     with pytest.raises(CategorizedError):
@@ -1983,35 +1947,28 @@ def test_provision_create_failure_reclaims_baseline_dir_and_overlay() -> None:
             conn,
             remove_overlay=removed_overlay.append,
             remove_baseline=removed_baseline.append,
-            remove_uploaded_rootfs=removed_upload.append,
         ).provision(_SYS, _profile())
     assert removed_overlay == [overlay_path(_SYS)]
     assert removed_baseline == [storage_module.baseline_dir(_SYS)]
-    assert removed_upload == []  # non-upload System: no staged image to reclaim
 
 
-def test_provision_failure_keeps_preexisting_staged_and_baseline() -> None:
-    # Mirrors test_provision_failure_keeps_preexisting_overlay for the staged rootfs and baseline
-    # dir: an upload-kind retry that fails after finding all three already present must not remove a
-    # file it did not create — it may back a live or recoverable previous attempt.
+def test_provision_upload_failure_keeps_preexisting_overlay_and_baseline() -> None:
+    # An upload-kind retry that fails after finding the overlay + baseline already present must not
+    # remove artifacts it did not create — they may back a live or recoverable previous attempt.
     removed_overlay: list[str] = []
     removed_baseline: list[str] = []
-    removed_upload: list[str] = []
     conn = _ProvConn(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     with pytest.raises(CategorizedError):
         _prov(
             conn,
             remove_overlay=removed_overlay.append,
             remove_baseline=removed_baseline.append,
-            remove_uploaded_rootfs=removed_upload.append,
             overlay_exists=lambda _overlay: True,
             baseline_exists=lambda _path: True,
-            uploaded_rootfs_exists=lambda _path: True,
             extract_baseline_kernel=_raise_baseline_multiple_kernels,  # must be reused, not called
         ).provision(_SYS, _upload_profile())
     assert removed_overlay == []
     assert removed_baseline == []
-    assert removed_upload == []
 
 
 def test_provision_baseline_reclaim_failure_preserves_original_error() -> None:
@@ -2033,12 +1990,12 @@ def test_provision_baseline_reclaim_failure_preserves_original_error() -> None:
     assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_provision_materialize_failure_reclaims_only_staged_upload() -> None:
-    # If materialization itself fails, only the staged upload (whose creation step was reached) is
-    # reclaimed — the baseline and overlay steps were never entered, so they are not touched.
+def test_provision_upload_materialize_failure_reclaims_nothing() -> None:
+    # AC-9: if the shared-base materialization itself fails, the failure path reclaims NOTHING — the
+    # baseline/overlay steps were never entered, and the shared base is not this provision's to
+    # unlink (ADR-0441). The reconciler sweeps own the base; a failing sibling never touches it.
     removed_overlay: list[str] = []
     removed_baseline: list[str] = []
-    removed_upload: list[str] = []
 
     def fail_materialize(_rootfs: object, _system_id: UUID, _arch: str) -> str:
         raise CategorizedError(
@@ -2051,10 +2008,8 @@ def test_provision_materialize_failure_reclaims_only_staged_upload() -> None:
         files=ProvisioningFiles(
             remove_overlay=removed_overlay.append,
             remove_baseline=removed_baseline.append,
-            remove_uploaded_rootfs=removed_upload.append,
             overlay_exists=lambda _overlay: False,
             baseline_exists=lambda _path: False,
-            uploaded_rootfs_exists=lambda _path: False,
             prepare_console_log=lambda _path: None,
         ),
         materialize_rootfs=fail_materialize,
@@ -2062,7 +2017,6 @@ def test_provision_materialize_failure_reclaims_only_staged_upload() -> None:
     )
     with pytest.raises(CategorizedError):
         prov.provision(_SYS, _upload_profile())
-    assert removed_upload == [_staged_upload_path()]
     assert removed_baseline == []
     assert removed_overlay == []
 

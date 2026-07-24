@@ -659,43 +659,6 @@ async def _reclaim_sysrq_artifacts(
             await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
 
 
-_DELETE_ROOTFS_ROW_SQL: LiteralString = (
-    "DELETE FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
-)
-
-
-def _uploaded_rootfs_key(system_id: UUID) -> str:
-    # The legacy System-scoped uploaded-rootfs object key; only the teardown reclaim below still
-    # references it (the investigation-scoped commit path never writes this key). ADR-0441 removes
-    # the reclaim in a follow-up commit once the sweep replaces it.
-    return artifact_key("local", "systems", str(system_id), "rootfs")
-
-
-async def _delete_uploaded_rootfs_object(store: ObjectStore, system_id: UUID) -> None:
-    """Delete the System's uploaded rootfs object (best-effort) — ADR-0434 §4.
-
-    ``owner_kind='systems'`` objects are exempt from the #768 expiry reaper, so a torn-down
-    System's SENSITIVE uploaded rootfs must be reclaimed here. This byte-delete is best-effort (a
-    store fault must not block teardown, like the console/sysrq reclaim); the ``artifacts`` row —
-    the download handle — is deleted fail-loud in :func:`_delete_uploaded_rootfs_row`, so a store
-    fault leaves at most an unreferenced orphan, never a live download handle. A non-upload System
-    has no such object; the delete is a no-op.
-    """
-    await asyncio.to_thread(store.delete, _uploaded_rootfs_key(system_id))
-
-
-async def _delete_uploaded_rootfs_row(conn: AsyncConnection, system_id: UUID) -> None:
-    """Delete the uploaded rootfs ``artifacts`` row (fail-loud) so the download handle is revoked.
-
-    Anchored on the exact object key, so a non-upload System (no such row) is a no-op and an
-    at-least-once teardown redelivery is idempotent. Fail-loud like ``delete_system_bootstrap_key``
-    (a stale row after teardown would keep the SENSITIVE rootfs downloadable), so it runs outside
-    the best-effort reclaim block.
-    """
-    async with conn.transaction():
-        await conn.execute(_DELETE_ROOTFS_ROW_SQL, (system_id, _uploaded_rootfs_key(system_id)))
-
-
 async def _reclaim_snapshots(
     conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
 ) -> None:
@@ -759,10 +722,11 @@ async def teardown_handler(
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
-    # Revoke the uploaded-rootfs download handle fail-loud (ADR-0434 §4), like the bootstrap key:
-    # a stale artifacts row would keep the SENSITIVE image downloadable after teardown. The object
-    # bytes are reclaimed best-effort below.
-    await _delete_uploaded_rootfs_row(conn, system_id)
+    # The investigation-scoped uploaded rootfs (ADR-0441) is a SHARED, investigation-owned base
+    # reused across Systems, so teardown no longer reclaims it — the object + staged file + row are
+    # reclaimed by the close-driven/TTL reconciler sweeps under the overlay-absence liveness gate
+    # (gc_investigation_uploaded_rootfs / gc_expired_investigation_rootfs). A per-System teardown
+    # delete would drop a base a sibling System still boots.
     # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
@@ -774,16 +738,6 @@ async def teardown_handler(
     except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
         _log.warning(
             "best-effort System-artifact reclaim for system %s failed",
-            system_id,
-            exc_info=True,
-        )
-    # Isolated from the console/sysrq reclaim above: a fault there must not skip reclaiming the
-    # SENSITIVE uploaded-rootfs object, which no #768 reaper would ever collect (ADR-0434 §4).
-    try:
-        await _delete_uploaded_rootfs_object(artifact_store, system_id)
-    except Exception:  # noqa: BLE001 - object reclaim is best-effort; the row was already revoked
-        _log.warning(
-            "best-effort uploaded-rootfs object reclaim for system %s failed",
             system_id,
             exc_info=True,
         )

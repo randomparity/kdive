@@ -12,24 +12,29 @@ from psycopg.rows import dict_row
 
 from kdive.artifacts import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.capacity.state import RunState, SystemState
+from kdive.domain.capacity.state import InvestigationState, RunState
 
 _log = logging.getLogger(__name__)
 
 _UPLOAD_RUN_OWNER_KIND = upload_manifest.RUN_UPLOAD_OWNER
-_UPLOAD_SYSTEM_OWNER_KIND = upload_manifest.SYSTEM_UPLOAD_OWNER
+_UPLOAD_INVESTIGATION_OWNER_KIND = upload_manifest.INVESTIGATION_UPLOAD_OWNER
 _UPLOAD_REAPABLE_STATES: dict[upload_manifest.UploadOwnerKind, tuple[str, ...]] = {
     _UPLOAD_RUN_OWNER_KIND: (RunState.CREATED.value,),
-    # A `defined` System never entered provisioning (a true abandon); a terminal `failed` System's
-    # provision aborted without committing the rootfs `artifacts` row (ADR-0435). Neither is
-    # actively reading the staged object, so a past-deadline manifest's uncommitted object +
-    # manifest are reapable. `provisioning` is excluded — an in-flight provision may still be
-    # reading the object; `ready`/`torn_down` already committed or reclaimed via teardown.
-    _UPLOAD_SYSTEM_OWNER_KIND: (SystemState.DEFINED.value, SystemState.FAILED.value),
+    # A terminal investigation (closed/abandoned) will never finalize its rootfs upload (finalize
+    # requires OPEN/ACTIVE under the investigation lock, ADR-0441 §3), so a past-deadline manifest's
+    # uncommitted object + manifest are reapable — a stale upload window. An OPEN/ACTIVE
+    # investigation is excluded: the agent can still finalize (or re-open the window), and the
+    # committed row, once written, is reclaimed by the rootfs sweeps, not this reaper.
+    _UPLOAD_INVESTIGATION_OWNER_KIND: (
+        InvestigationState.CLOSED.value,
+        InvestigationState.ABANDONED.value,
+    ),
 }
 _OWNER_REAPABLE_QUERIES: dict[upload_manifest.UploadOwnerKind, sql.SQL] = {
     _UPLOAD_RUN_OWNER_KIND: sql.SQL("SELECT 1 FROM runs WHERE id = %s AND state = ANY(%s)"),
-    _UPLOAD_SYSTEM_OWNER_KIND: sql.SQL("SELECT 1 FROM systems WHERE id = %s AND state = ANY(%s)"),
+    _UPLOAD_INVESTIGATION_OWNER_KIND: sql.SQL(
+        "SELECT 1 FROM investigations WHERE id = %s AND state = ANY(%s)"
+    ),
 }
 
 
@@ -46,9 +51,10 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
 
     For ``runs`` the obligation is "a Run manifest past its deadline", swept whether the Run is
     pre-finalize (a true abandon) or finalized with incomplete chunk cleanup (the backstop for a
-    failed post-commit delete, ADR-0104 §7). The ``systems`` branch reaps a ``defined`` (abandoned)
-    or terminal ``failed`` System (ADR-0435), so a provision that failed after staging the uploaded
-    rootfs no longer strands its object + manifest; ``provisioning``/``ready`` stay gated out.
+    failed post-commit delete, ADR-0104 §7). The ``investigations`` branch reaps a stale
+    investigation upload window on a terminal (``closed``/``abandoned``) investigation (ADR-0441
+    §6), so an upload that will never finalize no longer strands its uncommitted object + manifest;
+    an OPEN/ACTIVE investigation stays gated out (it can still finalize).
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -56,18 +62,18 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
             "WHERE m.deadline < now() AND ("
             "  m.owner_kind = %s "
             "  OR (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM systems s WHERE s.id = m.owner_id AND s.state = ANY(%s))))",
+            "     SELECT 1 FROM investigations i WHERE i.id = m.owner_id AND i.state = ANY(%s))))",
             (
                 _UPLOAD_RUN_OWNER_KIND,
-                _UPLOAD_SYSTEM_OWNER_KIND,
-                list(_UPLOAD_REAPABLE_STATES[_UPLOAD_SYSTEM_OWNER_KIND]),
+                _UPLOAD_INVESTIGATION_OWNER_KIND,
+                list(_UPLOAD_REAPABLE_STATES[_UPLOAD_INVESTIGATION_OWNER_KIND]),
             ),
         )
         candidates = await cur.fetchall()
     reaped = 0
     for cand in candidates:
         owner_kind = cast(upload_manifest.UploadOwnerKind, cand["owner_kind"])
-        scope = LockScope.RUN if owner_kind == _UPLOAD_RUN_OWNER_KIND else LockScope.SYSTEM
+        scope = LockScope.RUN if owner_kind == _UPLOAD_RUN_OWNER_KIND else LockScope.INVESTIGATION
         if await reap_one_owner(conn, store, owner_kind, cand["owner_id"], scope):
             reaped += 1
     return reaped
@@ -92,8 +98,9 @@ async def reap_one_owner(
         if row is None:
             return False
         # The runs branch reaps a finalized Run's leftover chunks too (ADR-0104 §7); only the
-        # systems branch re-checks its reapable-state gate ({defined, failed}, ADR-0435) under lock.
-        if owner_kind == _UPLOAD_SYSTEM_OWNER_KIND and not await owner_reapable(
+        # investigations branch re-checks its reapable-state gate (terminal investigation, ADR-0441)
+        # under lock.
+        if owner_kind == _UPLOAD_INVESTIGATION_OWNER_KIND and not await owner_reapable(
             conn, owner_kind, owner_id
         ):
             return False

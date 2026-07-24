@@ -89,6 +89,38 @@ class SystemState(StrEnum):
     FAILED = "failed"
 
 
+#: Non-terminal :class:`SystemState`\ s in which a bound System legitimately has **no** per-System
+#: overlay file yet still needs its rootfs base: the pre-overlay read window (``defined``/
+#: ``provisioning``) and the re-materialize window (``reprovisioning``/``restoring``), each of which
+#: reads or re-creates the overlay against the base with the overlay momentarily absent. The
+#: investigation-scoped rootfs reclaim sweep's condition (b) (ADR-0441 §6) must **not** unlink a
+#: base while any referencing System is in one of these states, even though no overlay file pins it.
+#: Co-located with :class:`SystemState` and guarded by ``test_reclaim_classification_is_exhaustive``
+#: so a new non-terminal state added without being classified here reddens CI.
+ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES: frozenset[SystemState] = frozenset(
+    {
+        SystemState.DEFINED,
+        SystemState.PROVISIONING,
+        SystemState.REPROVISIONING,
+        SystemState.RESTORING,
+    }
+)
+
+#: The remaining non-terminal :class:`SystemState`\ s: a live guest whose overlay file **does** back
+#: the base (``ready``/``paused``/``crashing``/``crashed``). These pin the base only through the
+#: overlay-file probe (ADR-0441 §6 condition (a)), never via state. Kept explicit — together with
+#: :data:`ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES` and the terminal states — so the drift guard
+#: reddens when a new non-terminal state escapes classification.
+ROOTFS_BASE_OVERLAY_BACKED_SYSTEM_STATES: frozenset[SystemState] = frozenset(
+    {
+        SystemState.READY,
+        SystemState.PAUSED,
+        SystemState.CRASHING,
+        SystemState.CRASHED,
+    }
+)
+
+
 class InvestigationState(StrEnum):
     """Project-scoped campaign; becomes ``active`` on its first Run."""
 

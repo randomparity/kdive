@@ -120,9 +120,9 @@ def test_get_manifest_sync_round_trips(migrated_url: str) -> None:
             await replace_manifest(
                 conn,
                 UploadManifestReplaceRequest(
-                    owner_kind="systems",
+                    owner_kind="investigations",
                     owner_id=owner_id,
-                    prefix=f"local/systems/{owner_id}/",
+                    prefix=f"local/investigations/{owner_id}/",
                     entries=[
                         ManifestEntry(
                             "rootfs", "whole", 4096, encoding="gzip", uncompressed_size=6 * 1024**3
@@ -135,8 +135,8 @@ def test_get_manifest_sync_round_trips(migrated_url: str) -> None:
     owner_id = uuid4()
     asyncio.run(_seed(owner_id))
     with psycopg.connect(migrated_url) as conn:
-        got = get_manifest_sync(conn, "systems", owner_id)
-        absent = get_manifest_sync(conn, "systems", uuid4())
+        got = get_manifest_sync(conn, "investigations", owner_id)
+        absent = get_manifest_sync(conn, "investigations", uuid4())
     assert got is not None
     assert got.entries[0].encoding == "gzip"
     assert got.entries[0].uncompressed_size == 6 * 1024**3
