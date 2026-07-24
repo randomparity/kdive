@@ -223,11 +223,12 @@ def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Pat
 
 
 def test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate(tmp_path: Path) -> None:
-    # Gate precedence (ADR-0438 §3, ADR-0441 §5): store-side corruption usually destroys the qcow2
-    # magic too, so gating on the unauthenticated first chunk would report a *terminal*
-    # CONFIGURATION_ERROR ("upload a qcow2 image", retryable=False in mcp/responses.py) for an
-    # operator-side fault the caller cannot fix. The checksum is compared first, so the object
-    # is fully drained and the failure stays a retryable INFRASTRUCTURE_FAILURE.
+    # Gate precedence (ADR-0438 §3, ADR-0441 §5). Store-side corruption usually destroys the qcow2
+    # magic too, so gating on the unauthenticated first chunk would report this as the *format*
+    # gate ("upload a qcow2 image", CONFIGURATION_ERROR) instead of the checksum gate. The checksum
+    # is compared first, so the object is fully drained and the failure keeps the category
+    # ADR-0434 §2 decided for it. This pins the gate that fires, not the wider retryability
+    # question the gzip path answers differently (#1523).
     payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * (_STREAM_CHUNK_BYTES * 2)
     store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"))
 
@@ -315,9 +316,11 @@ def test_stage_identity_transport_fault_leaves_no_partial(tmp_path: Path) -> Non
 
 def test_stage_untyped_interrupt_still_leaves_no_partial(tmp_path: Path) -> None:
     # The partial now exists for the whole multi-GiB download, not just the final write, so the
-    # discard must cover exceptions outside the store's typed taxonomy — a SIGTERM/interrupt landing
-    # on the worker mid-download would otherwise strand a SENSITIVE multi-GiB orphan until some
-    # later fetch of the same base happened to sweep it (ADR-0441 §5 specifies a `finally`).
+    # discard must cover any exception that unwinds the frame — not only the store's typed
+    # taxonomy — or a SENSITIVE multi-GiB orphan waits for some later fetch of the same base to
+    # sweep it (ADR-0441 §5 specifies a `finally`). KeyboardInterrupt stands in as a BaseException
+    # that no `except Exception` would catch. A *killed* worker is a different case and is not
+    # covered here: it unwinds nothing, and the sweeps collect it.
     store = _FailingStreamStore(_QCOW2 + b"\xa5" * 8192, fail_after=4096, error=KeyboardInterrupt())
 
     with pytest.raises(KeyboardInterrupt):

@@ -301,11 +301,14 @@ def stage_uploaded_rootfs(
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
     finally:
-        # ``os.replace`` consumed the partial on success, so this is a no-op there. On *any*
-        # failure — a bomb, a hash mismatch, a failed magic check, an IO fault, or a SIGTERM
-        # landing on the worker mid-download — the SENSITIVE partial is unlinked here, in the
-        # ``finally`` ADR-0441 §5 specifies, rather than left as a multi-GiB orphan for the
-        # next fetch's opportunistic sweep (which only runs if that base is fetched again).
+        # ``os.replace`` consumed the partial on success, so this is a no-op there. On any
+        # failure that *unwinds this frame* — a bomb, a hash mismatch, a failed magic check, an
+        # IO fault, or anything outside the store's typed taxonomy — the SENSITIVE partial is
+        # unlinked here, in the ``finally`` ADR-0441 §5 specifies. A **killed** worker unwinds
+        # nothing (SIGTERM sets an asyncio stop Event, it does not raise into this thread; SIGKILL
+        # raises nothing at all), so its partial is still collected only by
+        # ``_unlink_orphan_partials`` and the reclaim sweep — both stay load-bearing, and more so
+        # now that the identity partial spans the whole download rather than one final write.
         _discard(partial)
 
 
@@ -325,11 +328,14 @@ def _stage_identity(
     no longer spikes the worker (#1520).
 
     Verification order is unchanged (ADR-0438 §3, ADR-0441 §5): the SHA-256 is compared **first**,
-    so an object whose bytes do not match the stored checksum stays a retryable
-    ``INFRASTRUCTURE_FAILURE``, and only authenticated bytes reach the qcow2-magic gate's terminal
-    ``CONFIGURATION_ERROR``. Gating on the unauthenticated first chunk would let store-side
-    corruption — whose first casualty is usually the magic itself — surface as a non-retryable "this
-    is not a qcow2, upload a qcow2" that blames the uploader for an operator-side fault.
+    keeping ADR-0434 §2's ``INFRASTRUCTURE_FAILURE`` for a mismatch, and only bytes that match the
+    stored checksum reach the qcow2-magic gate's ``CONFIGURATION_ERROR``. Gating on the
+    unauthenticated first chunk instead would silently reassign the categories: store-side
+    corruption usually destroys the magic too, so a mismatch would surface as "this is not a qcow2,
+    upload a qcow2" — a different gate, a different category, and remediation advice aimed at the
+    wrong actor. (Whether that gate *should* be retryable is a separate, unsettled question: the
+    gzip path raises ``CONFIGURATION_ERROR`` for the byte-identical failure. Tracked in #1523; this
+    function keeps the category ADR-0434 §2 decided.)
 
     The magic prefix is accumulated across chunks rather than sliced from the first, because the
     store's body wrapper is a ``RawIOBase`` free to return a read shorter than requested; an object
