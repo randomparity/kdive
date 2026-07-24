@@ -277,6 +277,59 @@ def test_ttl_backstop_reclaims_never_closed(migrated_url: str, tmp_path: Path) -
     asyncio.run(_run())
 
 
+def test_ttl_leaves_live_partial_of_pinned_object(migrated_url: str, tmp_path: Path) -> None:
+    # A past-TTL object PINNED by a live System (overlay present) is not reclaimed; the TTL sweep
+    # must NOT glob-unlink a concurrent fetcher's in-flight <token>.<uuid>.partial while a rootfs
+    # row still exists (else it clobbers the re-provision #1502's reuse targets, persistently).
+    inv = uuid4()
+    sys_id = uuid4()
+
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            nonlocal inv, sys_id
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
+            sys_id = await _seed_system(seed, inv, "ready")
+        finally:
+            await seed.close()
+        rootfs_dir = tmp_path / "rootfs"
+        rootfs_dir.mkdir()
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        _stage(uploads, inv)
+        overlay = rootfs_dir / overlay_name(str(sys_id))
+        overlay.write_bytes(b"overlay")  # LIVE backing file pins the base (condition (a))
+        live_partial = uploads / str(inv) / f"{_TOKEN}.{uuid4()}.partial"
+        live_partial.write_bytes(b"in-flight download")
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            deleted = await gc_expired_investigation_rootfs(
+                conn,
+                store,
+                timedelta(days=30),
+                rootfs_dir=str(rootfs_dir),
+                uploads_dir=str(uploads),
+            )
+        finally:
+            await conn.close()
+        assert deleted == 0  # pinned by the live overlay
+        assert store.deleted == []
+        assert live_partial.exists()  # the in-flight download was NOT clobbered
+        check = await connect(migrated_url)
+        try:
+            cur = await check.execute(
+                "SELECT 1 FROM artifacts WHERE owner_kind = 'investigations' AND owner_id = %s",
+                (inv,),
+            )
+            assert await cur.fetchone() is not None  # row retained (still referenced)
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
 def test_marker_independence_from_build_sweep(migrated_url: str, tmp_path: Path) -> None:
     # AC-8d: cleanup_pending_at NULL (build sweep drained it) but rootfs_cleanup_pending_at set —
     # the rootfs sweep still fires, keyed on its OWN marker.

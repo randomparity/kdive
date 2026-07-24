@@ -544,10 +544,26 @@ async def gc_expired_investigation_rootfs(
         ):
             deleted += 1
     for investigation_id in touched:
-        await asyncio.to_thread(_sweep_investigation_staging_dir, uploads_dir, investigation_id)
+        if not await _investigation_has_rootfs_objects(conn, investigation_id):
+            await asyncio.to_thread(_sweep_investigation_staging_dir, uploads_dir, investigation_id)
     if deleted:
         _log.info("reconciler: GC'd %d uploaded rootfs base(s) past TTL", deleted)
     return deleted
+
+
+async def _investigation_has_rootfs_objects(conn: AsyncConnection, investigation_id: UUID) -> bool:
+    """Return ``True`` while any committed uploaded-rootfs object row remains for the investigation.
+
+    Gates the TTL staging-dir sweep (glob-unlink ``*.partial`` + rmdir): a live provider fetch
+    resolves against a committed row before it writes ``<token>.<uuid>.partial``, so a remaining row
+    means a download may be in flight and its partial must not be clobbered. Only when **no** rootfs
+    row remains — every past-TTL base drained and no not-yet-TTL base still in use — is a stray
+    ``*.partial`` necessarily a crash orphan, matching the close-driven sweep's ``if drained`` guard
+    (ADR-0441 §5/§6).
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(_INV_ROOTFS_OBJECTS_SQL, (investigation_id,))
+        return await cur.fetchone() is not None
 
 
 async def _now_epoch(conn: AsyncConnection) -> float:
