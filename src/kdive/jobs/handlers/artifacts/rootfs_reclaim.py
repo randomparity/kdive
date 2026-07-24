@@ -42,6 +42,14 @@ from kdive.providers.shared.runtime_paths import (
 
 _log = logging.getLogger(__name__)
 
+#: Wall-clock budget for one object-store delete. The delete runs inside the transaction holding the
+#: ``INVESTIGATION`` advisory lock, and the TTL backstop reclaims **live** ``open``/``active``
+#: investigations, so an untimed store call could stall a bind, a close, or a ``runs.create`` for as
+#: long as the client's own retry budget. A timeout is treated like any other real fault (defer the
+#: checksum, keep the row): the request may still land, which is harmless because the retry is
+#: 404-tolerant.
+_STORE_DELETE_TIMEOUT_S = 10.0
+
 #: The state values of the pre-overlay/re-materialize referencer states — condition (b) of the
 #: investigation-rootfs reclaim gate (ADR-0441 §6). A referencer in one of these pins the base even
 #: with its overlay file momentarily absent.
@@ -207,10 +215,12 @@ async def _reclaim_one_checksum(
             )
             return False
         try:
-            await asyncio.to_thread(store.delete, object_key)
-        except Exception:  # noqa: BLE001 - a real store fault defers before the row delete
+            await asyncio.wait_for(
+                asyncio.to_thread(store.delete, object_key), timeout=_STORE_DELETE_TIMEOUT_S
+            )
+        except Exception:  # noqa: BLE001 - a real store fault or timeout defers before the row
             _log.warning(
-                "deleting the investigation rootfs object %s failed; its row is kept",
+                "deleting the investigation rootfs object %s failed or timed out; its row is kept",
                 object_key,
                 exc_info=True,
             )

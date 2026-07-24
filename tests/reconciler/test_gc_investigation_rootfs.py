@@ -24,6 +24,7 @@ from kdive.reconciler.cleanup.gc import (
     sweep_expired_investigation_rootfs_reclaim,
     sweep_investigation_rootfs_reclaim,
 )
+from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.reconciler.conftest import connect
 
 _TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
@@ -370,6 +371,50 @@ def test_ttl_backstop_skips_a_closed_investigation(migrated_url: str) -> None:
         try:
             assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
             assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_dead_worker_recovers_via_the_abandoned_jobs_repair(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A worker that dies mid-reclaim leaves the job `running` with a lapsed lease, and the sweep's
+    # admission gate treats `running` as in flight — so recovery is not the sweep's own doing. It
+    # runs through `repair_abandoned_jobs`, which dead-letters the zombie (attempt >= max_attempts,
+    # which max_attempts=1 makes true on the first claim); only then does the sweep re-issue. This
+    # reddens if that coupling is ever broken.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            # A worker claimed it, then the process died: running, lease lapsed, attempt spent.
+            await conn.execute(
+                "UPDATE jobs SET state = 'running', worker_id = 'dead-worker', attempt = 1, "
+                "lease_expires_at = now() - interval '1 hour' WHERE id = %s",
+                (job_id,),
+            )
+
+            monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+            # Without the abandoned-jobs repair the slot stays wedged: `running` is in flight.
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+
+            assert await repair_abandoned_jobs(conn) == 1
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["state"] == "queued"
+            assert jobs[0]["id"] != job_id  # a fresh, re-dated row
         finally:
             await conn.close()
 

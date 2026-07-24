@@ -157,6 +157,8 @@ two `_RepairCatalogEntry` metric names become `investigation_rootfs_reclaims_enq
 - **AC-15** — The handler blocks on the `INVESTIGATION` lock while a bind holds it uncommitted, and
   then observes the newly-bound pre-overlay referencer as a pin. Verified to fail with the lock
   removed.
+- **AC-16** — A worker that dies mid-reclaim leaves its job `running` and the slot held; the sweep
+  re-issues only after `repair_abandoned_jobs` dead-letters the zombie.
 - **AC-13** — The TTL sweep enqueues only past-retention rows, and only for `open`/`active`
   investigations.
 - **AC-14** — Migration 0078 admits the new kind and the enum↔constraint tie holds.

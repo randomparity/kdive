@@ -215,9 +215,17 @@ under the same `INVESTIGATION` lock. Only when none remains does it sweep the st
 
 Reading the real post-state rather than tracking a per-pass flag is what makes this correct across
 a worker that dies mid-reclaim, a job whose payload is a stale due-set, and a concurrent finalize
-that commits a new row: each is just a different answer to "are there rows left?". A worker that
-dies mid-reclaim leaves the marker set and some rows present, so the next sweep re-enqueues and the
-job resumes from the real state — the completed steps are `ENOENT`/404 no-ops.
+that commits a new row: each is just a different answer to "are there rows left?".
+
+Recovery from a dead worker is worth stating exactly, because it is **not** the sweep's own doing.
+A worker that dies mid-reclaim leaves its job `running` with a lapsed lease, and the sweep's
+admission gate treats `running` as in flight — so the slot stays held. The existing
+`repair_abandoned_jobs` reconciler repair is what frees it: it dead-letters a running job whose
+lease has lapsed and whose `attempt >= max_attempts`, which `max_attempts=1` makes true on the very
+first claim. Only once that repair has marked the job `failed` does the reclaim sweep see a settled
+slot and, past the backoff, re-issue. Worst-case latency to resume is therefore lease expiry plus
+one reconcile pass plus one backoff interval. The re-issued job resumes from the real state, since
+every completed step is an `ENOENT`/404 no-op.
 
 The condition also subsumes ADR-0441's TTL-side `_investigation_has_rootfs_objects` guard on the
 staging-dir sweep (a remaining row means a live fetch may be writing a `*.partial` that must not be
@@ -261,10 +269,15 @@ SQL↔enum tie `test_migrate.py` asserts).
   audit trail; the per-fault log line naming the object key remains the durable record.
 - A reclaim now costs one job round-trip of latency after the sweep observes it is due. Reclaim is
   a grace/TTL-governed background activity measured in days, so a sub-minute delay is immaterial.
-- The `INVESTIGATION` advisory lock is held across an S3 delete per checksum. `close_investigation`,
-  `runs.create`, and System bind contend on it, so a slow store could briefly delay those. The
-  upload reaper already holds the same lock across store calls, and reclaim runs on closed or
-  long-idle investigations where that contention is least likely.
+- The `INVESTIGATION` advisory lock is held across an object-store delete per checksum, and
+  `close_investigation`, `runs.create`, and System bind all contend on it. This is not confined to
+  quiet investigations: the TTL backstop reclaims **live** `open`/`active` ones by design. The
+  delete is therefore given an explicit wall-clock budget (`_STORE_DELETE_TIMEOUT_S`), so a
+  degraded store bounds the lock hold instead of stalling a bind for the client's whole retry
+  budget; a timeout is treated as a real fault (defer the checksum, keep the row), and the request
+  landing late afterwards is harmless because the retry is 404-tolerant. The upload reaper
+  (`cleanup/uploads.py`) sets the precedent for holding this lock across store calls, though its
+  `investigations` arm is gated to terminal owners, so it does not by itself justify the live case.
 - A split reconciler/libvirt-host topology gains working local-libvirt reclaim, which ADR-0441 §6
   explicitly deferred.
 - A multi-worker-host local-libvirt deployment would route a reclaim job to a host that may not

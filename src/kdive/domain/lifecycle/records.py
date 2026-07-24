@@ -122,8 +122,9 @@ class Investigation(DomainModel, Attribution):
     #: Set when the investigation closes; the reconciler `gc_investigation_artifacts` sweep reclaims
     #: its run-owned build artifacts after a grace window, then clears it (ADR-0234 §4, #768).
     cleanup_pending_at: datetime | None = None
-    #: Set alongside `cleanup_pending_at` at close; the dedicated `gc_investigation_uploaded_rootfs`
-    #: sweep reclaims the investigation-owned uploaded rootfs after a grace window, then clears it
+    #: Set alongside `cleanup_pending_at` at close; the dedicated close-driven rootfs sweep
+    #: (`sweep_investigation_rootfs_reclaim`) enqueues the worker job that reclaims the
+    #: investigation-owned uploaded rootfs after a grace window, and that job clears this marker
     #: (ADR-0441 §6, #1502). Deliberately a separate marker — `gc_investigation_artifacts` owns and
     #: clears `cleanup_pending_at` as soon as its own run-owned worklist drains, independent of
     #: whether the rootfs sweep has finished.

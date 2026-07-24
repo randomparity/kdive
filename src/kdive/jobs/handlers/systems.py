@@ -725,8 +725,9 @@ async def teardown_handler(
     # The investigation-scoped uploaded rootfs (ADR-0441) is a SHARED, investigation-owned base
     # reused across Systems, so teardown no longer reclaims it — the object + staged file + row are
     # reclaimed by the close-driven/TTL reconciler sweeps under the overlay-absence liveness gate
-    # (gc_investigation_uploaded_rootfs / gc_expired_investigation_rootfs). A per-System teardown
-    # delete would drop a base a sibling System still boots.
+    # (sweep_investigation_rootfs_reclaim / sweep_expired_investigation_rootfs_reclaim), which
+    # enqueue the reclaim_investigation_rootfs job that performs the reclaim (ADR-0442). A
+    # per-System teardown delete would drop a base a sibling System still boots.
     # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
