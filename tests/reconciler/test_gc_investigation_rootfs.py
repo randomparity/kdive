@@ -153,9 +153,13 @@ def test_close_driven_skips_an_investigation_inside_grace(migrated_url: str) -> 
     asyncio.run(_run())
 
 
-def test_close_driven_clears_a_marker_with_nothing_to_reclaim(migrated_url: str) -> None:
-    # A marker past grace with no rootfs rows has no work for a worker, so enqueuing one would
-    # leave the investigation on the worklist forever. The sweep clears it directly (a DB write).
+def test_close_driven_enqueues_an_empty_worklist_rather_than_short_circuiting(
+    migrated_url: str,
+) -> None:
+    # A marker past grace with no rootfs rows still gets a job, carrying an empty worklist. The
+    # handler's drain tail sweeps the staging dir (a crash-orphaned SENSITIVE *.partial no row owns)
+    # and clears the marker. Short-circuiting here would strand the orphan or put a filesystem write
+    # back in the reconciler, and would split one drain rule into two.
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
@@ -166,9 +170,11 @@ def test_close_driven_clears_a_marker_with_nothing_to_reclaim(migrated_url: str)
             await seed.close()
         conn = await connect(migrated_url)
         try:
-            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
-            assert await _reclaim_jobs(conn, inv) == []
-            assert await _marker(conn, inv) is None
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == []
+            assert await _marker(conn, inv) is not None  # the handler clears it, not the sweep
         finally:
             await conn.close()
 

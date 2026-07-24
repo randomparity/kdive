@@ -69,11 +69,11 @@ investigation's `project`. Admission is gated in the sweep rather than by `queue
 faulting background reclaim head-of-line-block interactive work). `max_attempts=1` — the sweep is
 the retry loop.
 
-An investigation whose marker is past grace but which has **no** rootfs rows left is not a reclaim
-candidate — its marker is cleared by whichever job drained its last row. A marker set on an
-investigation that never had a rootfs upload is cleared by a job enqueued with an empty due set;
-to avoid that special case, the close-driven sweep enqueues only when at least one row exists and
-clears such a marker directly (a DB-only write the reconciler may make).
+An investigation whose marker is past grace but which has **no** rootfs rows left still gets a job,
+carrying an empty due set: the handler's drain tail is the only path that reaps a crash-orphaned
+`*.partial` and clears the marker, so short-circuiting it in the reconciler would strand the orphan
+or reintroduce a reconciler-side filesystem write. The reconciler therefore never writes to
+`investigations` at all — its only write is the enqueue.
 
 `rootfs_dir_accessible`, `_overlay_pins_base`, `_references_token`, `rootfs_base_reclaimable`,
 `_rootfs_token_from_key`, `_unlink_staged_base`, `_sweep_investigation_staging_dir`,
@@ -146,7 +146,8 @@ two `_RepairCatalogEntry` metric names become `investigation_rootfs_reclaims_enq
   already absent (`ENOENT` = success) and completes.
 - **AC-9** — A payload naming an already-deleted artifact id is a no-op, not a failure.
 - **AC-10** — The marker clears only when no rootfs row remains for the investigation, and the
-  staging dir is swept (stale `*.partial` unlinked, then `rmdir`) under the same condition.
+  staging dir is swept (stale `*.partial` unlinked, then `rmdir`) under the same condition —
+  including for a job whose due set is empty.
 - **AC-11** — A partially-pinned investigation keeps its marker and its staging dir, and an
   in-flight `<token>.<uuid>.partial` is not clobbered.
 - **AC-12** — Both sweeps enqueue on the stable per-investigation dedup key: a second pass while a

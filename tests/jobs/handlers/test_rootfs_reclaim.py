@@ -432,6 +432,41 @@ def test_already_deleted_artifact_id_is_a_no_op(migrated_url: str, tmp_path: Pat
     asyncio.run(_run())
 
 
+def test_an_empty_worklist_still_sweeps_the_staging_dir_and_clears_the_marker(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The sweep enqueues a job even when an investigation past grace has no rootfs rows, because
+    # this is the only path that reaps a crash-orphaned SENSITIVE `*.partial` no row owns and clears
+    # the marker. Short-circuiting it in the reconciler would strand the orphan.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        inv_dir = uploads / str(inv)
+        inv_dir.mkdir(parents=True)
+        orphan = inv_dir / f"{_TOKEN}.{uuid4()}.partial"
+        orphan.write_bytes(b"crash-orphaned download")
+        store = _RecordingStore()
+
+        assert await _run_handler(migrated_url, inv, [], store, rootfs_dir, uploads) == "0"
+
+        assert not orphan.exists()
+        assert not inv_dir.exists()
+        check = await connect(migrated_url)
+        try:
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
 def test_marker_survives_a_partially_drained_investigation(
     migrated_url: str, tmp_path: Path
 ) -> None:

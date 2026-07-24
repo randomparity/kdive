@@ -150,9 +150,15 @@ delete" is retained. What changes is how a real fault is **surfaced**. In the re
 
 Now: a checksum whose gate pins it is skipped and the job **succeeds** (having reclaimed the rest).
 A checksum that hits a real unlink or store fault is skipped, the remaining checksums are still
-attempted, and the job then **fails** — surfacing in the `jobs` table, in `jobs.list`, and in the
-worker's failure metrics, with the dead-letter path after `max_attempts`. A reclaim that cannot
-make progress is a SENSITIVE-data-retention problem and must be loud, not a log line.
+attempted, and the job then **fails** — surfacing in the `jobs` table and in the worker's failure
+metrics. A reclaim that cannot make progress is a SENSITIVE-data-retention problem and must be
+loud, not a log line.
+
+Note the reach of that signal precisely: `jobs.list`'s `investigation_id` filter joins `runs` on
+`payload->>'run_id'`, and a reclaim job carries no `run_id`, so the job is listable **by kind**
+(and by state), not by the investigation it reclaims. Widening that filter is a `jobs.list` change
+outside this fix; until then, `kind=reclaim_investigation_rootfs` plus the per-fault `WARN` naming
+the object key is the operator path.
 
 ### 6. One reclaim job per investigation, recycled — not one per pass
 
@@ -217,6 +223,13 @@ The condition also subsumes ADR-0441's TTL-side `_investigation_has_rootfs_objec
 staging-dir sweep (a remaining row means a live fetch may be writing a `*.partial` that must not be
 clobbered), so both sweeps now share one drain rule instead of two.
 
+For the same reason the close-driven sweep enqueues a job even when a past-grace investigation has
+**no** rootfs rows, carrying an empty worklist. That job does nothing but run the drain tail — which
+is exactly the point: it is the only path that reaps a crash-orphaned SENSITIVE `*.partial` no row
+owns and clears the marker. Short-circuiting the empty case in the reconciler would either strand
+that orphan or put the filesystem write back in the reconciler that decision 1 removes, and it
+would split one drain rule into two.
+
 The marker clear is unconditional on the drain rather than on which sweep enqueued the job. A TTL
 job only ever runs against an `open`/`active` investigation, whose marker is NULL, so the clear is
 a no-op there; the handler needs no discriminator and carries none.
@@ -242,10 +255,10 @@ SQL↔enum tie `test_migrate.py` asserts).
   where it was completely non-functional. Both sweeps are fixed by the same change.
 - The reconciler is DB/S3-only again. The one exception ADR-0441 introduced is gone, and the
   invariant is worth stating because it is what makes the reconciler safe to run anywhere.
-- A stuck reclaim becomes a `failed` job with a category and a failure context, visible through
-  `jobs.list`, rather than only a `WARN` line. The row is replaced by the next re-issue past the
-  backoff, so it is a bounded-window signal, not a permanent audit trail; the per-fault log line
-  naming the object key remains the durable record.
+- A stuck reclaim becomes a `failed` job with a category and a failure context, listable by
+  `kind` (not by `investigation_id` — see decision 5), rather than only a `WARN` line. The row is
+  replaced by the next re-issue past the backoff, so it is a bounded-window signal, not a permanent
+  audit trail; the per-fault log line naming the object key remains the durable record.
 - A reclaim now costs one job round-trip of latency after the sweep observes it is due. Reclaim is
   a grace/TTL-governed background activity measured in days, so a sub-minute delay is immaterial.
 - The `INVESTIGATION` advisory lock is held across an S3 delete per checksum. `close_investigation`,

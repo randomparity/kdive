@@ -265,9 +265,11 @@ async def sweep_investigation_rootfs_reclaim(conn: AsyncConnection, grace: timed
     worklist to the worker. It touches neither the host filesystem nor the object store — the whole
     reclaim, including the liveness gate, runs on the worker that created the staging tree.
 
-    A marker past grace with **no** rootfs rows left is cleared here rather than enqueued: there is
-    nothing for a worker to reclaim, so the investigation would otherwise stay on the worklist
-    forever. Returns the number of reclaim jobs ensured this pass.
+    A marker past grace with **no** rootfs rows left still gets a job, carrying an empty worklist:
+    the handler falls straight through to its drain tail, which sweeps the staging directory (a
+    crash-orphaned SENSITIVE ``*.partial`` no row owns) and clears the marker. Short-circuiting that
+    here would either strand the orphan or put a filesystem write back in the reconciler, and it
+    would split one drain rule into two. Returns the number of reclaim jobs ensured this pass.
     """
     async with conn.cursor() as cur:
         await cur.execute(_CLOSE_DRIVEN_INV_SQL, (grace,))
@@ -275,14 +277,7 @@ async def sweep_investigation_rootfs_reclaim(conn: AsyncConnection, grace: timed
     enqueued = 0
     for investigation_id, project in candidates:
         artifact_ids = await _investigation_rootfs_artifact_ids(conn, investigation_id)
-        if not artifact_ids:
-            async with conn.transaction():
-                await conn.execute(
-                    "UPDATE investigations SET rootfs_cleanup_pending_at = NULL WHERE id = %s",
-                    (investigation_id,),
-                )
-            continue
-        if await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
             enqueued += 1
     if enqueued:
         _log.info("reconciler: enqueued %d closed-investigation rootfs reclaim job(s)", enqueued)
@@ -310,7 +305,7 @@ async def sweep_expired_investigation_rootfs_reclaim(
         ids.append(artifact_id)
     enqueued = 0
     for investigation_id, (project, artifact_ids) in due.items():
-        if await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
             enqueued += 1
     if enqueued:
         _log.info("reconciler: enqueued %d past-TTL rootfs reclaim job(s)", enqueued)
@@ -324,6 +319,26 @@ async def _investigation_rootfs_artifact_ids(
     async with conn.cursor() as cur:
         await cur.execute(_INV_ROOTFS_OBJECTS_SQL, (investigation_id,))
         return [row[0] for row in await cur.fetchall()]
+
+
+async def _try_enqueue_rootfs_reclaim(
+    conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
+) -> bool:
+    """Issue one investigation's reclaim job, logging and skipping a fault rather than aborting.
+
+    Matches the neighbouring sweeps' "one failure must not starve the rest" contract: a fault on one
+    investigation leaves its worklist untouched (the marker stays set, the rows stay) and the pass
+    continues with the next.
+    """
+    try:
+        return await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids)
+    except Exception:  # noqa: BLE001 - one enqueue failure must not starve the rest
+        _log.warning(
+            "reconciler: enqueuing the rootfs reclaim for investigation %s failed; retry next pass",
+            investigation_id,
+            exc_info=True,
+        )
+        return False
 
 
 async def _enqueue_rootfs_reclaim(
@@ -343,36 +358,38 @@ async def _enqueue_rootfs_reclaim(
       reclaim that keeps faulting retries on the order of minutes rather than twice a minute — and
       its ``failed`` row stays inspectable for that window instead of being reset within 30 s.
 
-    A ``queued``/``running`` job is left untouched (in-flight dedup). ``max_attempts=1`` because an
-    in-job retry of a permission wall or a dead store buys nothing the next pass does not: the sweep
-    is the retry loop.
+    The delete and the insert share one transaction, so a fault between them cannot leave the
+    investigation with neither a failure record nor a queued reclaim. A ``queued``/``running`` job
+    is left untouched (in-flight dedup). ``max_attempts=1`` because an in-job retry of a permission
+    wall or a dead store buys nothing the next pass does not: the sweep is the retry loop.
     """
     dedup_key = f"rootfs-reclaim:{investigation_id}"
-    async with conn.transaction(), conn.cursor() as cur:
-        await cur.execute(
-            "SELECT state FROM jobs WHERE dedup_key = %s "
-            "AND (state NOT IN ('succeeded', 'failed', 'canceled') "
-            "     OR updated_at > now() - %s) FOR UPDATE",
-            (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+    async with conn.transaction():
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT state FROM jobs WHERE dedup_key = %s "
+                "AND (state NOT IN ('succeeded', 'failed', 'canceled') "
+                "     OR updated_at > now() - %s) FOR UPDATE",
+                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+            )
+            if await cur.fetchone() is not None:
+                return False
+            await cur.execute("DELETE FROM jobs WHERE dedup_key = %s", (dedup_key,))
+        await queue.enqueue(
+            conn,
+            JobKind.RECLAIM_INVESTIGATION_ROOTFS,
+            ReclaimInvestigationRootfsPayload(
+                investigation_id=str(investigation_id),
+                artifact_ids=[str(a) for a in artifact_ids],
+            ),
+            {
+                "principal": SYSTEM_RECONCILER_PRINCIPAL,
+                "agent_session": None,
+                "project": project,
+            },
+            dedup_key,
+            max_attempts=1,
         )
-        if await cur.fetchone() is not None:
-            return False
-        await cur.execute("DELETE FROM jobs WHERE dedup_key = %s", (dedup_key,))
-    await queue.enqueue(
-        conn,
-        JobKind.RECLAIM_INVESTIGATION_ROOTFS,
-        ReclaimInvestigationRootfsPayload(
-            investigation_id=str(investigation_id),
-            artifact_ids=[str(a) for a in artifact_ids],
-        ),
-        {
-            "principal": SYSTEM_RECONCILER_PRINCIPAL,
-            "agent_session": None,
-            "project": project,
-        },
-        dedup_key,
-        max_attempts=1,
-    )
     return True
 
 
