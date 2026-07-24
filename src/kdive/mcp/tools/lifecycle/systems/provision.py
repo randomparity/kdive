@@ -82,6 +82,21 @@ def _validated_label(object_id: str, label: str | None) -> str | None | ToolResp
         return ToolResponse.failure_from_error(object_id, exc)
 
 
+def _parse_investigation_id(investigation_id: str | None) -> UUID | None | ToolResponse:
+    """Parse the optional ``investigation_id`` binding, or a ``configuration_error`` envelope.
+
+    ``None`` (omitted) stays ``None``; a malformed id is rejected before any DB work with the
+    project's structured invalid-UUID error (ADR-0174). The binding's existence, non-terminal
+    state, and same-project rule are validated in-lane at admission (ADR-0441 §2), not here.
+    """
+    if investigation_id is None:
+        return None
+    parsed = _as_uuid(investigation_id)
+    if parsed is None:
+        return _invalid_uuid_error("investigation_id", investigation_id)
+    return parsed
+
+
 def _admission_failure_data(result: AdmissionFailure) -> ResponseData:
     data: dict[str, object] = dict(result.failure_details or {})
     if result.current_status is not None:
@@ -185,11 +200,15 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
         idempotency_key: str | None = None,
         label: str | None = None,
+        investigation_id: str | None = None,
     ) -> ToolResponse:
         """Mint a System for a ``granted`` Allocation and enqueue its provision job."""
         uid = _as_uuid(allocation_id)
         if uid is None:
             return _invalid_uuid_error("allocation_id", allocation_id)
+        inv_id = _parse_investigation_id(investigation_id)
+        if isinstance(inv_id, ToolResponse):
+            return inv_id
         cleaned = _validated_label(allocation_id, label)
         if isinstance(cleaned, ToolResponse):
             return cleaned
@@ -203,6 +222,7 @@ class SystemProvisionHandlers:
             profile,
             "provision",
             cleaned,
+            investigation_id=inv_id,
         )
 
     async def provision_defined_system(
@@ -237,11 +257,15 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
         idempotency_key: str | None = None,
         label: str | None = None,
+        investigation_id: str | None = None,
     ) -> ToolResponse:
         """Create a System in ``defined`` for a ``granted`` Allocation."""
         uid = _as_uuid(allocation_id)
         if uid is None:
             return _config_error(allocation_id)
+        inv_id = _parse_investigation_id(investigation_id)
+        if isinstance(inv_id, ToolResponse):
+            return inv_id
         cleaned = _validated_label(allocation_id, label)
         if isinstance(cleaned, ToolResponse):
             return cleaned
@@ -255,6 +279,7 @@ class SystemProvisionHandlers:
             profile,
             "define",
             cleaned,
+            investigation_id=inv_id,
         )
 
     async def _keyed_create(
@@ -268,6 +293,8 @@ class SystemProvisionHandlers:
         profile: ProvisioningProfileInput,
         mode: CreateSystemMode,
         label: str | None = None,
+        *,
+        investigation_id: UUID | None = None,
     ) -> ToolResponse:
         async def _create_for_allocation(recorder: SystemRecorder | None) -> AdmissionResult:
             with bind_context(principal=ctx.principal):
@@ -280,6 +307,7 @@ class SystemProvisionHandlers:
                         mode=mode,
                         recorder=recorder,
                         label=label,
+                        investigation_id=investigation_id,
                     ),
                 )
 

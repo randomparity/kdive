@@ -27,8 +27,14 @@ import kdive.config as config
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.config.core_settings import PROVISION_PREMUTATION_TIMEOUT_S
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
-from kdive.domain.capacity.state import AllocationState, IllegalTransition, JobState, SystemState
+from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
+from kdive.domain.capacity.state import (
+    AllocationState,
+    IllegalTransition,
+    InvestigationState,
+    JobState,
+    SystemState,
+)
 from kdive.domain.catalog.resource_capabilities import ResourceCapabilities, host_cpu_json
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, System
@@ -115,6 +121,10 @@ class CreateSystemRequest:
     # Optional client label, already validated/stripped at the handler (ADR-0264, #867);
     # persistence only — the handler owns rejection (AdmissionFailureReason is closed).
     label: str | None = None
+    # Optional advisory System->Investigation binding (ADR-0441, #1502). Validated in-lane
+    # (non-terminal, same-project, write-once) once the Allocation is in scope, then persisted
+    # on the new System row. None = a classic allocation-only System.
+    investigation_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +456,9 @@ class SystemAdmission:
             conn, alloc, existing = locked
             try:
                 stored = _stored_profile_for(request.profile, alloc)
+                await _validate_investigation_binding(
+                    conn, alloc, existing, request.investigation_id
+                )
             except CategorizedError as exc:
                 return _failure_from_error(alloc.id, exc)
             if request.mode == "provision":
@@ -459,6 +472,7 @@ class SystemAdmission:
                     rootfs_validator=self.rootfs_validator,
                     timeout=timeout,
                     label=request.label,
+                    investigation_id=request.investigation_id,
                 )
             else:
                 result = await _define_create_response(
@@ -471,6 +485,7 @@ class SystemAdmission:
                     rootfs_validator=self.rootfs_validator,
                     timeout=timeout,
                     label=request.label,
+                    investigation_id=request.investigation_id,
                 )
             # Record the success envelope inside the admission transaction (idempotency,
             # ADR-0193) — atomic with the System insert / job enqueue. A failure is not cached.
@@ -588,6 +603,57 @@ async def _failed_system_retry_failure(
     )
 
 
+_INVESTIGATION_NON_TERMINAL = (InvestigationState.OPEN, InvestigationState.ACTIVE)
+
+
+async def _validate_investigation_binding(
+    conn: AsyncConnection,
+    alloc: Allocation,
+    existing: System | None,
+    investigation_id: UUID | None,
+) -> None:
+    """Validate a supplied System->Investigation binding (ADR-0441 §2, #1502).
+
+    Omitting the binding is always allowed and never mutates a recorded one. A supplied binding is
+    rejected when it would change an existing non-NULL binding (write-once), when it names a
+    missing or terminal investigation, or when it crosses the System's own (Allocation) project —
+    the last keeps a SENSITIVE investigation-owned rootfs base inside one project's trust boundary.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` naming the specific violation.
+    """
+    if investigation_id is None:
+        return
+    if (
+        existing is not None
+        and existing.investigation_id is not None
+        and existing.investigation_id != investigation_id
+    ):
+        raise CategorizedError(
+            f"system is already bound to investigation {existing.investigation_id}; the "
+            f"investigation binding is write-once and cannot be changed to {investigation_id}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    investigation = await INVESTIGATIONS.get(conn, investigation_id)
+    if investigation is None:
+        raise CategorizedError(
+            f"investigation {investigation_id} does not exist",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if investigation.state not in _INVESTIGATION_NON_TERMINAL:
+        raise CategorizedError(
+            f"investigation {investigation_id} is {investigation.state.value}; a System can bind "
+            "only to an open or active investigation",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+    if investigation.project != alloc.project:
+        raise CategorizedError(
+            f"investigation {investigation_id} does not belong to the System's project "
+            f"{alloc.project!r}; a System can bind only to an investigation in its own project",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+        )
+
+
 async def _provision_create_response(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -599,10 +665,19 @@ async def _provision_create_response(
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
     label: str | None = None,
+    investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_provisioning_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout, label
+            conn,
+            ctx,
+            alloc,
+            profile,
+            profile_policy,
+            rootfs_validator,
+            timeout,
+            label,
+            investigation_id=investigation_id,
         )
     if existing.state is SystemState.DEFINED:
         return AdmissionFailure(
@@ -644,10 +719,19 @@ async def _define_create_response(
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
     label: str | None = None,
+    investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     if existing is None:
         return await _insert_defined_system(
-            conn, ctx, alloc, profile, profile_policy, rootfs_validator, timeout, label
+            conn,
+            ctx,
+            alloc,
+            profile,
+            profile_policy,
+            rootfs_validator,
+            timeout,
+            label,
+            investigation_id=investigation_id,
         )
     if existing.state is SystemState.DEFINED:
         return DefinedSystemAdmitted(existing)  # idempotent re-define
@@ -850,6 +934,7 @@ async def _insert_system_and_activate(
     accel: str | None,
     resolved_cpu: dict[str, JsonValue] | None,
     label: str | None = None,
+    investigation_id: UUID | None = None,
 ) -> System:
     now = datetime.now(UTC)  # placeholder; the DB sets created_at/updated_at
     system = await SYSTEMS.insert(
@@ -868,6 +953,7 @@ async def _insert_system_and_activate(
             label=label,
             accel=accel,
             resolved_cpu=resolved_cpu,
+            investigation_id=investigation_id,
         ),
     )
     await audit.record(
@@ -907,6 +993,7 @@ async def _insert_defined_system(
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
     label: str | None = None,
+    investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     # Validate arch + resolve host bindings before the granted->active flip (ADR-0339/0368): a
     # mis-arch rejection writes no System and leaves the allocation granted (all-or-nothing).
@@ -931,6 +1018,7 @@ async def _insert_defined_system(
         accel=accel,
         resolved_cpu=resolved_cpu,
         label=label,
+        investigation_id=investigation_id,
     )
     return DefinedSystemAdmitted(system)
 
@@ -944,6 +1032,7 @@ async def _insert_provisioning_system(
     rootfs_validator: RootfsValidator,
     timeout: PreMutationTimeout,
     label: str | None = None,
+    investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     try:
         reject_rootfs_upload_without_window(profile_policy, profile)
@@ -969,6 +1058,7 @@ async def _insert_provisioning_system(
         accel=accel,
         resolved_cpu=resolved_cpu,
         label=label,
+        investigation_id=investigation_id,
     )
     return await _enqueue_provision_job(
         conn,

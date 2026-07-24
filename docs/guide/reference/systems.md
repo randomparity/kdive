@@ -58,6 +58,7 @@ contributor on the Allocation's project.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
 | `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
 
@@ -213,6 +214,7 @@ pick one of those or an allocation on a host that offers the arch you need.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to provision a System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
 | `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
 
