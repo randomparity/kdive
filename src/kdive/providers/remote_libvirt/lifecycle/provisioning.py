@@ -55,6 +55,7 @@ from kdive.providers.remote_libvirt.lifecycle.rootfs.volume_upload import (
 )
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     Pool,
+    PreparedOverlay,
     VolumeStaging,
     cleanup_created_volume,
     cleanup_overlay_if_created,
@@ -243,8 +244,12 @@ class RemoteLibvirtProvisioning:
         with self._connection(config) as conn:
             pool = lookup_pool(conn, config.storage_pool)
             base_volume, base_created = self._resolve_base_volume(conn, section, system_id, config)
-            overlay = ensure_overlay(pool, base_volume, system_id)
+            # ensure_overlay is inside the try so a supplied base staged just above is reclaimed if
+            # overlay creation (not just define/start) then fails — reclaim only what this call
+            # created (ADR-0435). The upload primitive already cleans up its own mid-stream partial.
+            overlay: PreparedOverlay | None = None
             try:
+                overlay = ensure_overlay(pool, base_volume, system_id)
                 self._define_and_start(
                     conn,
                     system_id,
@@ -255,7 +260,8 @@ class RemoteLibvirtProvisioning:
                     ssh_forward=ssh_forward,
                 )
             except CategorizedError:
-                cleanup_overlay_if_created(pool, overlay)
+                if overlay is not None:
+                    cleanup_overlay_if_created(pool, overlay)
                 cleanup_created_volume(pool, base_volume, created=base_created)
                 raise
             # Agent-gate failures deliberately leave the domain (and its overlay) in

@@ -1404,6 +1404,25 @@ def test_provision_supplied_base_reclaimed_on_start_failure(tmp_path: Path) -> N
     assert _BASE_NAME in conn.pools["default"].deleted
 
 
+def test_provision_supplied_base_reclaimed_on_overlay_create_failure(tmp_path: Path) -> None:
+    # An overlay-create fault after a successful stage still reclaims the base this call staged
+    # (ensure_overlay is inside the reclaim try, ADR-0435).
+    conn = FakeProvisionConn()
+    conn.pools["default"].create_error = libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+    qcow2 = _supplied_qcow2(tmp_path)
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path,), stage_base_volume=_RecordingStage()
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    assert conn.defined_xml == []  # never reached define
+    assert _BASE_NAME not in conn.pools["default"].volumes  # staged base reclaimed
+    assert _BASE_NAME in conn.pools["default"].deleted
+
+
 def test_provision_reuses_already_staged_supplied_base_and_does_not_reclaim(tmp_path: Path) -> None:
     # A base a prior attempt already staged is reused (created=False), so a later start failure
     # does NOT reclaim it — only a base THIS call staged is removed (ADR-0435).
