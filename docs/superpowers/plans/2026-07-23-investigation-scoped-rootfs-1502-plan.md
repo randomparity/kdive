@@ -91,9 +91,10 @@ deprecate"). Keep the whole branch green at each commit.
 ### Task 3.2 — define/provision `investigation_id` param + binding invariant
 - **Fits:** ADR-0441 §2.
 - **Files:** `src/kdive/mcp/tools/lifecycle/systems/provision.py` (`define_system`/`provision_system`
-  optional `investigation_id`); `SystemAdmission` (`systems/…`) validates: supplied ⇒ caller-held
-  project + OPEN/ACTIVE; and **upload rootfs ⇒ binding present** (`configuration_error` naming the
-  missing binding).
+  optional `investigation_id`); `SystemAdmission` (`systems/…`) validates: supplied ⇒ non-terminal
+  investigation whose **project equals the System's own (Allocation) project** (reject cross-project;
+  closes the `close(force)` deadlock + keeps the SENSITIVE base in one trust boundary); and **upload
+  rootfs ⇒ binding present** (`configuration_error` naming the missing binding).
 - **Acceptance:** spec AC-3 (upload ref without binding rejected at admission); a bound System persists
   its `investigation_id`.
 

@@ -21,9 +21,10 @@ uploaded rootfs is the same kind of investigation-scoped *input*.
 
 Re-scope the local-libvirt agent-uploaded rootfs from System-lease lifetime to **investigation
 lifetime**: one upload, referenced by content checksum, provisions many Systems in the same
-investigation; the host base is fetched at most once per host per checksum; the object and staged base
-are reclaimed on investigation close + grace, not per-System teardown; and cross-investigation isolation
-is preserved.
+investigation; the host base is fetched at most once per host per (investigation, checksum); the object
+and staged base are reclaimed on investigation close + grace, not per-System teardown; and
+cross-investigation isolation is preserved (dedup is per investigation, not per host — isolation over
+cross-investigation dedup).
 
 ## Non-goals
 
@@ -55,8 +56,11 @@ See ADR-0441 for rationale; this section is the buildable shape and the failure 
 
 - **Migration 0076:** `ALTER TABLE systems ADD COLUMN investigation_id uuid REFERENCES investigations(id)`,
   **nullable**. `domain/lifecycle/records.py` `System` gains `investigation_id: UUID | None = None`.
-- `systems.define` / `systems.provision` gain optional `investigation_id`. Supplied ⇒ must name an
-  investigation in a caller-held project and a non-terminal state (OPEN/ACTIVE); else `configuration_error`.
+- `systems.define` / `systems.provision` gain optional `investigation_id`. Supplied ⇒ must name a
+  non-terminal (OPEN/ACTIVE) investigation whose project **equals the System's own (Allocation)
+  project** — cross-project binding is rejected (`configuration_error`). Same-project keeps the SENSITIVE
+  base within one trust boundary and prevents the `close(force)` deadlock (a closer lacking the System's
+  project role).
 - **Invariant (admission-enforced):** a profile whose rootfs is `{"kind":"upload",...}` requires a bound
   `investigation_id`. An upload ref with no binding is a `configuration_error` naming the missing
   binding — never a late provision failure. Validated in `SystemAdmission` alongside the existing
@@ -90,7 +94,7 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
   AND checksum_sha256=<ref>`; a miss ⇒ `configuration_error` naming the unresolved checksum.
 - Stage to `rootfs-uploads/<investigation_id>/<token>.qcow2`, outside `allowed_roots`. Read-side SHA-256
   verify (ADR-0434 §2) and qcow2-magic gate (ADR-0438) unchanged. Present verified file reused → at most
-  one download per host per checksum. `.partial` + `os.replace` unchanged. The connectionless sync fetch
+  one download per host per (investigation, checksum). `.partial` + `os.replace` unchanged. The connectionless sync fetch
   opens its own short-lived connection to read the investigation's committed-object key + checksum (it no
   longer reads a per-System manifest; the row is durable post-finalize).
 
@@ -193,6 +197,11 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 - Because this **removes** `create_system_upload` and changes the profile ref shape, it is a breaking
   change to any in-flight `{"kind":"upload"}` System — acceptable pre-1.0 and consistent with
   "replace, not deprecate." No dual-format shim.
+- **No backfill (pre-1.0):** migration 0076 does not re-own pre-existing `owner_kind='systems'` rootfs
+  objects, and the new sweep only sees `owner_kind='investigations'`. Removing the teardown reclaim would
+  strand any legacy systems-owned rootfs object — safe only because no deployed instance holds one
+  (greenfield, fresh DBs). If that ever fails, a one-time reaper of legacy systems-owned rootfs objects is
+  a prerequisite.
 
 ## Open items for the plan
 

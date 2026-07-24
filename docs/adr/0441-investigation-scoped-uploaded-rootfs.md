@@ -81,10 +81,14 @@ investigation link scopes the uploaded-rootfs trust boundary and the close coupl
 capacity owner.
 
 Binding is validated at define/provision: a supplied `investigation_id` must name an investigation in a
-project the caller holds and in a non-terminal state (OPEN/ACTIVE). A profile that references an
-uploaded rootfs (decision 4) **requires** a bound `investigation_id`; the two are validated together at
-admission (a `{"kind":"upload"}` rootfs with no investigation binding is a `configuration_error` naming
-the missing binding, never a late provision failure).
+non-terminal state (OPEN/ACTIVE) whose project **equals the System's own (Allocation) project** — a
+cross-project binding is rejected at admission. This same-project rule does double duty: it keeps a
+SENSITIVE, investigation-owned base within one project's trust boundary (no P-inv object backing a
+P-sys guest), and it forecloses the `close(force)` deadlock decision 7 would otherwise admit (a closer
+holding the investigation's project but not the System's could neither close nor force-close). A
+profile that references an uploaded rootfs (decision 4) **requires** a bound `investigation_id`; the two
+are validated together at admission (a `{"kind":"upload"}` rootfs with no investigation binding is a
+`configuration_error` naming the missing binding, never a late provision failure).
 
 ### 3. The upload window opens against the investigation, with an explicit finalize
 
@@ -132,8 +136,10 @@ The fetch stages to `rootfs-uploads/<investigation_id>/<token>.qcow2`, still **o
 `allowed_roots` (ADR-0434 §3 no-escape, now at investigation granularity: a staged image is never a
 `local` staged-path candidate for any System). The verify (ADR-0434 §2 read-side SHA-256) and the
 ADR-0438 qcow2-magic gate are unchanged. A present verified file is **reused**, so the base is
-downloaded **at most once per host per checksum** and shared by every System in the investigation —
-the reuse #1502 asks for. `.partial` + `os.replace` atomicity is unchanged.
+downloaded **at most once per host per (investigation, checksum)** and shared by every System in the
+investigation — the reuse #1502 asks for. Dedup is deliberately scoped to the investigation, not the
+host: two investigations on one host that upload identical bytes each stage their own copy — isolation
+(decision 4) is chosen over cross-investigation dedup. `.partial` + `os.replace` atomicity is unchanged.
 
 Because the base is now **shared and investigation-owned**, it is no longer "created by" the provision
 that happened to stage it: an individual provision's failure path (ADR-0435 §1) must **not** reclaim it,
@@ -156,6 +162,10 @@ predicate** — *no non-terminal System bound to the investigation still referen
 - If it does not: skip the whole checksum this pass, leaving `cleanup_pending_at` set (`drained=False`)
   → retried next pass. Remove the empty `rootfs-uploads/<inv>/` dir once the investigation fully drains.
 
+The predicate reads `systems.state`, which is a safe proxy for backing-file liveness **because
+teardown removes the overlay before it writes the terminal state** (ADR-0060 create-only-when-absent
+overlay + the teardown order): a System reaches a terminal state only after its overlay — the only thing
+that holds the base open as a qcow2 backing file — is gone, so no terminal System can still back a base.
 The predicate is a point-in-time *liveness query*, not a persistent refcount — it has no
 decrement-vs-new-reference race (a stale read only defers a delete one pass). Keeping the object+row and
 the file on the **same** gate (rather than deleting the object immediately and deferring only the file)
@@ -212,6 +222,18 @@ parity waivers stay accurate.
   surface** (`artifacts.create_system_upload`), and a **new close parameter** (`force`) with a new
   refusal path. This is a larger blast radius than ADR-0434 by design — it is a re-scope, not a bugfix.
 - Not an AI surface (no LLM/prompt/retrieval/classifier), so no eval plan is required.
+- **No backfill — pre-1.0, fresh DBs.** Migration 0076 adds a nullable column only; it does not re-own
+  pre-existing `owner_kind='systems'` rootfs objects, and the new sweep filters strictly on
+  `owner_kind='investigations'`. Removing the teardown reclaim therefore *would* strand any already-committed
+  systems-owned rootfs object. This is safe **only** because KDIVE is pre-1.0 greenfield (no deployed
+  instance holds such objects), which is also what makes the `create_system_upload` removal and the
+  profile-ref change acceptable. If that assumption ever fails, a one-time reaper of legacy systems-owned
+  rootfs objects is required before this lands; it is out of scope here on the stated pre-1.0 assertion.
+- **Residual — cross-investigation identical rootfs is not deduped.** Two investigations on one host that
+  upload the same bytes each store the SENSITIVE object and stage the base separately (isolation over
+  dedup, decision 4/5). An operator opening a fresh investigation per kernel version while reusing one
+  debug rootfs pays per-investigation storage/bandwidth; a shared cross-investigation cache is rejected on
+  the trust boundary.
 - **Residual — advisory System→Investigation binding.** `systems.investigation_id` is nullable and not a
   capacity owner; a System still belongs to an Allocation. A profile referencing an uploaded rootfs
   requires the binding, but the column itself permits NULL, so the "upload ref ⇒ binding present"
@@ -262,6 +284,14 @@ parity waivers stay accurate.
   provision's to reclaim at all, so a liveness-gated per-call unlink would duplicate the sweep's job and
   add a second place the same shared object is deleted. Sweep-only reclaim keeps one owner of that
   decision.
+- **Fix only the #1501 residual leak, defer reuse (minimal path).** A cheaper change closes just the
+  committed-object exemption — give the systems-owned rootfs object a TTL, or add an `owner_kind='systems'`
+  rootfs arm to the existing artifact-expiry reaper — with no migration, no removed MCP surface, and no
+  profile-ref break. Rejected as the framing for *this* issue: #1502 is the **reuse** issue (its title),
+  and reuse genuinely needs an owner scope above the System — the *object*, not just the download, must be
+  shared, which the minimal path does not deliver. The leak is an incidental beneficiary, not the driver.
+  The reaper arm stays a valid standalone option if reuse is ever descoped; it is listed here so the
+  coupling is a deliberate choice, not an unweighed default.
 - **Do nothing.** Rejected: the per-System model's re-upload cost is the primary motivation, and its
   reclaim is teardown-shaped — the wrong shape for an object meant to outlive any single System. (ADR-0435
   already fixed the *failed-provision* orphan; #1502 is about reuse and the residual committed-object
