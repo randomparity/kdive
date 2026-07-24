@@ -7,6 +7,8 @@ import time
 
 import psycopg
 
+from kdive.db.locks import session_advisory_lock_held
+
 
 async def wait_until_backend_waiting(
     observer: psycopg.AsyncConnection,
@@ -37,6 +39,32 @@ async def wait_until_any_backend_waiting(
             return
         await asyncio.sleep(0.02)
     raise AssertionError("no backend began waiting on the expected database lock")
+
+
+async def wait_until_session_lock_released(
+    observer: psycopg.AsyncConnection,
+    name: str,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    """Poll pg_locks until no backend holds the named session advisory lock.
+
+    Postgres frees a session advisory lock when the holding *backend* exits, which is a
+    distinct moment from the holder's client-side ``close()`` returning: the socket close,
+    the backend exit, and ``pg_locks`` reflecting the release are three separate events.
+    An observer on another backend must therefore wait for the release rather than assert
+    it has already landed.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if not await session_advisory_lock_held(observer, name):
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"session advisory lock {name!r} was still held by some backend "
+                f"{timeout_s}s after the holder was lost"
+            )
+        await asyncio.sleep(0.02)
 
 
 async def _has_waiting_lock(
