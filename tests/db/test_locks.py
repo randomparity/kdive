@@ -17,7 +17,7 @@ from kdive.db.locks import (
     advisory_xact_lock,
     session_advisory_lock_held,
 )
-from tests.db_waits import wait_until_backend_waiting
+from tests.db_waits import wait_until_backend_waiting, wait_until_session_lock_released
 
 _KEY = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -330,6 +330,9 @@ def test_session_advisory_lock_held_released_on_holder_loss(postgres_url: str) -
         async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer:
             assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is True
             await holder_conn.close()  # a dead leader releases the lock with no notice
-            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
+            # The release is Postgres reaping the holder's backend, which the client-side
+            # close does not wait for, so the observer waits for the release instead of
+            # asserting it has already landed.
+            await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER)
 
     asyncio.run(_run())
