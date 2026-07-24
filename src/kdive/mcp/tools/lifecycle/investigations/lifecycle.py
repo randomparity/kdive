@@ -67,7 +67,12 @@ async def open_investigation(
 
 
 async def close_investigation(
-    pool: AsyncConnectionPool, ctx: RequestContext, investigation_id: str, summary: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    investigation_id: str,
+    summary: str,
+    *,
+    force: bool = False,
 ) -> ToolResponse:
     """Drive an Investigation to `closed`, recording a required summary of the work."""
     uid = _as_uuid(investigation_id)
@@ -75,7 +80,7 @@ async def close_investigation(
         return _invalid_uuid_error("investigation_id", investigation_id)
     try:
         inv = await close_investigation_record(
-            pool, ctx, uid, raw_id=investigation_id, summary=summary
+            pool, ctx, uid, raw_id=investigation_id, summary=summary, force=force
         )
     except InvestigationServiceError as exc:
         return investigation_error_response(exc)

@@ -15,22 +15,15 @@ kwargs (mirrors `tests/adversarial/test_provider_state_races.py`'s `_TrackingPro
 from __future__ import annotations
 
 import asyncio
-import copy
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import HeadResult
-from kdive.artifacts.upload_manifest import (
-    UploadManifestReplaceRequest,
-    get_manifest,
-    replace_manifest,
-)
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
@@ -45,7 +38,6 @@ from kdive.prereqs.system_bootstrap_key import ensure_system_bootstrap_key
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.security.audit import args_digest
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import PROVISIONING_PROFILE, provider_resolver
 
 _RESOLVED_CPU: dict[str, Any] = {"model": "SapphireRapids", "arch": "x86_64"}
@@ -281,84 +273,6 @@ def test_provision_handler_ensures_key_and_passes_one_customizer(migrated_url: s
             "proj",
         )
     ]
-
-
-class _RootfsHeadStore:
-    """A store whose ``head`` reports the pre-uploaded rootfs object (upload-window path)."""
-
-    def __init__(self) -> None:
-        self.head_keys: list[str] = []
-
-    def head(self, key: str) -> HeadResult:
-        self.head_keys.append(key)
-        return HeadResult(size_bytes=1024, checksum_sha256=None, etag="rootfs-etag")
-
-
-def test_provision_commits_uploaded_rootfs_artifact(migrated_url: str) -> None:
-    """An upload-kind rootfs commits its write-once artifacts row at READY (ADR-0048 §6)."""
-    upload_profile = copy.deepcopy(PROVISIONING_PROFILE)
-    upload_profile["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload"}
-
-    async def _run() -> dict[str, Any]:
-        async with _pool(migrated_url) as pool:
-            system_id = await _seed_system(
-                pool, SystemState.PROVISIONING, provisioning_profile=upload_profile
-            )
-            async with pool.connection() as conn:
-                await replace_manifest(
-                    conn,
-                    UploadManifestReplaceRequest(
-                        owner_kind="systems",
-                        owner_id=system_id,
-                        prefix=f"local/systems/{system_id}",
-                        entries=(),
-                        ttl=timedelta(hours=1),
-                    ),
-                )
-            store = _RootfsHeadStore()
-            resolver = provider_resolver(provisioner=_RecordingProvisioner())
-            async with pool.connection() as conn:
-                job = await queue.enqueue(
-                    conn,
-                    JobKind.PROVISION,
-                    SystemPayload(system_id=str(system_id)),
-                    {"principal": "alice", "agent_session": "s", "project": "proj"},
-                    f"{system_id}:provision",
-                )
-            async with pool.connection() as conn:
-                result = await systems_handlers.provision_handler(
-                    conn,
-                    job,
-                    resolver=resolver,
-                    artifact_store=cast(ObjectStore, store),
-                )
-            async with pool.connection() as conn:
-                manifest = await get_manifest(conn, "systems", system_id)
-            async with pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT object_key, retention_class FROM artifacts "
-                    "WHERE owner_kind = 'systems' AND owner_id = %s",
-                    (system_id,),
-                )
-                rows = list(await cur.fetchall())
-            return {
-                "result": result,
-                "rows": rows,
-                "head_keys": store.head_keys,
-                "sid": system_id,
-                "manifest": manifest,
-            }
-
-    out = asyncio.run(_run())
-    sid = out["sid"]
-    rootfs_key = artifact_key("local", "systems", str(sid), "rootfs")
-    # The commit reads the uploaded object's head under the exact rootfs key ...
-    assert out["head_keys"] == [rootfs_key]
-    # ... persists the write-once rootfs artifacts row for the System ...
-    assert (rootfs_key, "rootfs") in out["rows"]
-    # ... and deletes this System's upload manifest (owner_kind/owner_id threaded exactly).
-    assert out["manifest"] is None
-    assert out["result"] == str(sid)
 
 
 def test_key_row_survives_provision_transaction_rollback(migrated_url: str) -> None:

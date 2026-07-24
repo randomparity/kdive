@@ -29,9 +29,11 @@ the first tool to call.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
 3. **Define and provision a system** — `images.describe` to pick a base image and check its
    capabilities first. Then take one of two lanes: `systems.provision` directly (profile
-   inline, no rootfs-upload window), or `systems.define` followed by
-   `systems.provision_defined` (opens a rootfs-upload window between the two calls). See the
-   images guide.
+   inline), or `systems.define` followed by `systems.provision_defined`. To boot an
+   agent-uploaded rootfs instead of a catalog image, `artifacts.create_investigation_upload`
+   then `investigations.complete_rootfs_upload` into your open investigation, and reference it
+   by `checksum_sha256` in the profile with the system bound to that investigation — one upload
+   serves many systems. See the images guide.
 4. **Build** — `runs.create` on the external lane, then declare and upload the prebuilt
    kernel with `artifacts.expected_uploads` to see what is required, `artifacts.create_run_upload`
    per artifact to get a presigned PUT URL, and the presigned PUT itself; once every expected

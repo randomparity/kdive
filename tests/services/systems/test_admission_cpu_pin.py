@@ -35,7 +35,7 @@ def _profile(
 
 
 def _local(arch: str, model: str | None) -> ProvisioningProfile:
-    section: dict[str, Any] = {"rootfs": {"kind": "upload"}}
+    section: dict[str, Any] = {"rootfs": {"kind": "upload", "checksum_sha256": "c"}}
     if model is not None:
         section["cpu"] = {"model": model}
     return _profile({"local-libvirt": section}, "direct-kernel", arch)

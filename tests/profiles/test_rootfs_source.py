@@ -50,7 +50,7 @@ def test_artifact_kind_requires_uuid() -> None:
 
 
 def test_upload_kind_parses() -> None:
-    parsed = ProvisioningProfile.parse(_profile({"kind": "upload"}))
+    parsed = ProvisioningProfile.parse(_profile({"kind": "upload", "checksum_sha256": "c"}))
     assert parsed.provider.local_libvirt.rootfs.kind == "upload"
 
 

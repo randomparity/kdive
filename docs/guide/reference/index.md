@@ -17,8 +17,8 @@
 | [`allocations.renew`](allocations.md#allocationsrenew) | `implemented` |
 | [`allocations.request`](allocations.md#allocationsrequest) | `implemented` |
 | [`allocations.wait`](allocations.md#allocationswait) | `implemented` |
+| [`artifacts.create_investigation_upload`](artifacts.md#artifactscreate_investigation_upload) | `implemented` |
 | [`artifacts.create_run_upload`](artifacts.md#artifactscreate_run_upload) | `implemented` |
-| [`artifacts.create_system_upload`](artifacts.md#artifactscreate_system_upload) | `implemented` |
 | [`artifacts.expected_uploads`](artifacts.md#artifactsexpected_uploads) | `implemented` |
 | [`artifacts.feature_config_requirements`](artifacts.md#artifactsfeature_config_requirements) | `implemented` |
 | [`artifacts.fetch_raw`](artifacts.md#artifactsfetch_raw) | `implemented` |
@@ -72,6 +72,7 @@
 | [`inventory.clear_override`](inventory.md#inventoryclear_override) | `implemented` |
 | [`inventory.list`](inventory.md#inventorylist) | `implemented` |
 | [`investigations.close`](investigations.md#investigationsclose) | `implemented` |
+| [`investigations.complete_rootfs_upload`](investigations.md#investigationscomplete_rootfs_upload) | `implemented` |
 | [`investigations.get`](investigations.md#investigationsget) | `implemented` |
 | [`investigations.link`](investigations.md#investigationslink) | `implemented` |
 | [`investigations.list`](investigations.md#investigationslist) | `implemented` |

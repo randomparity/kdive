@@ -176,6 +176,58 @@ async def _connect(url: str) -> psycopg.AsyncConnection:
     return await psycopg.AsyncConnection.connect(url, autocommit=True)
 
 
+def test_system_investigation_id_roundtrips(migrated_url: str) -> None:
+    # A System bound to an investigation (ADR-0441, #1502) persists and reads back the binding.
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
+            inv = await INVESTIGATIONS.insert(conn, _investigation())
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id, investigation_id=inv.id))
+            assert sysm.investigation_id == inv.id
+            reloaded = await SYSTEMS.get(conn, sysm.id)
+            assert reloaded is not None and reloaded.investigation_id == inv.id
+
+    asyncio.run(_run_test())
+
+
+def test_system_investigation_id_defaults_to_none(migrated_url: str) -> None:
+    # A classic allocation-only System (no investigation binding) is unaffected (ADR-0441 §2).
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            res = await RESOURCES.insert(conn, _resource())
+            alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id))
+            assert sysm.investigation_id is None
+            reloaded = await SYSTEMS.get(conn, sysm.id)
+            assert reloaded is not None and reloaded.investigation_id is None
+
+    asyncio.run(_run_test())
+
+
+def test_investigation_rootfs_cleanup_pending_at_roundtrips(migrated_url: str) -> None:
+    # The dedicated rootfs reclaim marker (ADR-0441 §6), distinct from cleanup_pending_at.
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            inv = await INVESTIGATIONS.insert(conn, _investigation(rootfs_cleanup_pending_at=_DT))
+            assert inv.rootfs_cleanup_pending_at == _DT
+            reloaded = await INVESTIGATIONS.get(conn, inv.id)
+            assert reloaded is not None and reloaded.rootfs_cleanup_pending_at == _DT
+
+    asyncio.run(_run_test())
+
+
+def test_investigation_rootfs_cleanup_pending_at_defaults_to_none(migrated_url: str) -> None:
+    async def _run_test() -> None:
+        async with await _connect(migrated_url) as conn:
+            inv = await INVESTIGATIONS.insert(conn, _investigation())
+            assert inv.rootfs_cleanup_pending_at is None
+            reloaded = await INVESTIGATIONS.get(conn, inv.id)
+            assert reloaded is not None and reloaded.rootfs_cleanup_pending_at is None
+
+    asyncio.run(_run_test())
+
+
 def test_roundtrip_every_object(migrated_url: str) -> None:
     async def _run_test() -> None:
         async with await _connect(migrated_url) as conn:

@@ -36,6 +36,7 @@ from kdive.providers.infra.reaping import (
     InfraReaper,
     NullDumpVolumeReaper,
 )
+from kdive.providers.shared.runtime_paths import ROOTFS_DIR, UPLOADS_DIR
 from kdive.reconciler.cleanup import gc as gc_repairs
 from kdive.reconciler.cleanup.images import (
     repair_dangling_images as _repair_dangling_images,
@@ -87,12 +88,15 @@ DEFAULT_DUMP_VOLUME_GRACE = gc_repairs.DEFAULT_DUMP_VOLUME_GRACE
 DEFAULT_REPORT_ARTIFACT_RETENTION = gc_repairs.DEFAULT_REPORT_ARTIFACT_RETENTION
 DEFAULT_INVESTIGATION_CLEANUP_GRACE = gc_repairs.DEFAULT_INVESTIGATION_CLEANUP_GRACE
 DEFAULT_BUILD_ARTIFACT_RETENTION = gc_repairs.DEFAULT_BUILD_ARTIFACT_RETENTION
+DEFAULT_INVESTIGATION_ROOTFS_RETENTION = gc_repairs.DEFAULT_INVESTIGATION_ROOTFS_RETENTION
 
 _expire_one = allocation_repairs._expire_one
 _gc_idempotency_keys = gc_repairs.gc_idempotency_keys
 _gc_report_artifacts = gc_repairs.gc_report_artifacts
 _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
+_gc_investigation_uploaded_rootfs = gc_repairs.gc_investigation_uploaded_rootfs
+_gc_expired_investigation_rootfs = gc_repairs.gc_expired_investigation_rootfs
 _promote_pending = allocation_promotion.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
@@ -190,6 +194,8 @@ class ReconcileReport:
     reaped_runtime_resources: int = 0
     investigation_artifacts_gc_count: int = 0
     expired_build_artifacts_gc_count: int = 0
+    investigation_rootfs_gc_count: int = 0
+    expired_investigation_rootfs_gc_count: int = 0
     #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
     #: fields above feed callers that read named categories; this dict feeds the repairs
     #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
@@ -228,6 +234,11 @@ class ReconcileConfig:
     report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
     investigation_cleanup_grace: timedelta = DEFAULT_INVESTIGATION_CLEANUP_GRACE
     build_artifact_retention: timedelta = DEFAULT_BUILD_ARTIFACT_RETENTION
+    investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
+    #: Host-local staging/overlay roots the rootfs reclaim sweeps probe + unlink under (ADR-0441
+    #: §6). Default to the local-libvirt constants; the sweeps fail closed per pass if inaccessible.
+    rootfs_dir: str = ROOTFS_DIR
+    rootfs_uploads_dir: str = UPLOADS_DIR
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
     heartbeat: Heartbeat | None = None
@@ -292,6 +303,30 @@ def _expired_build_artifacts_gc_repair(
 ) -> _RepairFn | None:
     return lambda conn: _gc_expired_build_artifacts(
         conn, config.upload_store, config.build_artifact_retention
+    )
+
+
+def _investigation_rootfs_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _gc_investigation_uploaded_rootfs(
+        conn,
+        config.upload_store,
+        config.investigation_cleanup_grace,
+        rootfs_dir=config.rootfs_dir,
+        uploads_dir=config.rootfs_uploads_dir,
+    )
+
+
+def _expired_investigation_rootfs_gc_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _gc_expired_investigation_rootfs(
+        conn,
+        config.upload_store,
+        config.investigation_rootfs_retention,
+        rootfs_dir=config.rootfs_dir,
+        uploads_dir=config.rootfs_uploads_dir,
     )
 
 
@@ -369,6 +404,10 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
     _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
     _RepairCatalogEntry("expired_build_artifacts_gc_count", _expired_build_artifacts_gc_repair),
+    _RepairCatalogEntry("investigation_rootfs_gc_count", _investigation_rootfs_gc_repair),
+    _RepairCatalogEntry(
+        "expired_investigation_rootfs_gc_count", _expired_investigation_rootfs_gc_repair
+    ),
     _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
     _RepairCatalogEntry("reconcile_inventory", _reconcile_inventory_repair, "reconciled_inventory"),
     _RepairCatalogEntry("leaked_images", _leaked_images_repair),
@@ -421,6 +460,8 @@ _REPORT_FIELDS: tuple[str, ...] = (
     "reaped_runtime_resources",
     "investigation_artifacts_gc_count",
     "expired_build_artifacts_gc_count",
+    "investigation_rootfs_gc_count",
+    "expired_investigation_rootfs_gc_count",
 )
 
 

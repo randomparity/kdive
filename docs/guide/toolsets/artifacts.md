@@ -21,13 +21,14 @@ read each tool's own description.
 - `artifacts.feature_config_requirements` — advisory map of each debug feature to the
   kernel `CONFIG_*` it needs, so you can build them in before uploading.
 - `artifacts.create_run_upload` — mint presigned PUTs for a run's build artifacts.
-- `artifacts.create_system_upload` — mint presigned PUTs for a system's artifacts.
+- `artifacts.create_investigation_upload` — mint a presigned PUT for an investigation-scoped
+  rootfs, reusable across every system bound to that investigation.
 
 ## Uploading a large rootfs (gzip transport encoding)
 
-A system's rootfs is uploaded as a single PUT (chunked upload is rejected), so a canonical qcow2
-larger than the 5 GiB single-PUT cap cannot be uploaded directly. Instead, gzip the qcow2 and
-declare a transport encoding on `artifacts.create_system_upload`: set `encoding: "gzip"` and
+An investigation's rootfs is uploaded as a single PUT (chunked upload is rejected), so a canonical
+qcow2 larger than the 5 GiB single-PUT cap cannot be uploaded directly. Instead, gzip the qcow2 and
+declare a transport encoding on `artifacts.create_investigation_upload`: set `encoding: "gzip"` and
 `uncompressed_size` to the canonical (decompressed) qcow2 size in bytes. kdive strips the gzip on
 download — streaming and bomb-bounded against `uncompressed_size` — then verifies the qcow2 magic
 before the image backs the guest, so a wrong-format or truncated upload is rejected early with a

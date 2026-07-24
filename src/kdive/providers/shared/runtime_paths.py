@@ -17,6 +17,13 @@ _log = logging.getLogger(__name__)
 _CONSOLE_DIR = "/var/lib/kdive/console"
 _PCAP_DIR = "/var/lib/kdive/pcap"
 
+#: The host directory holding per-System rootfs overlays and extracted baselines.
+ROOTFS_DIR = "/var/lib/kdive/rootfs"
+#: The host directory an investigation-scoped uploaded rootfs base is staged under, OUTSIDE the
+#: provider ``allowed_roots`` (ADR-0434 §3 / ADR-0441 §5 no-escape). A staged SENSITIVE image is
+#: never reachable as another System's ``local`` staged-path candidate.
+UPLOADS_DIR = str(Path(ROOTFS_DIR).parent / "rootfs-uploads")
+
 # The qemu:///system hypervisor runtime user (in preference order). QEMU's filter-dump writes the
 # pcap as this unprivileged, SELinux-confined user, so the root worker owns the capture directory
 # to it before attaching the filter.
@@ -83,6 +90,30 @@ def system_id_from_domain_name(name: str) -> UUID | None:
         return UUID(match.group(1))
     except ValueError:  # pragma: no cover - the regex already constrains the shape
         return None
+
+
+def overlay_name(system_id: UUID | str) -> str:
+    """The per-System qcow2 overlay filename (the base name of :func:`overlay_path`).
+
+    Split out so the investigation-rootfs reclaim sweep (ADR-0441 §6) can derive the overlay path
+    under an injected ``rootfs_dir`` without duplicating the ``<id>-overlay.qcow2`` format.
+    """
+    return f"{system_id}-overlay.qcow2"
+
+
+def overlay_path(system_id: UUID | str) -> str:
+    """The per-System qcow2 overlay path."""
+    return f"{ROOTFS_DIR}/{overlay_name(system_id)}"
+
+
+def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: Path) -> Path:
+    """Return the investigation-scoped, content-addressed staging path (ADR-0441 §5).
+
+    The base is staged at ``<upload_dir>/<investigation_id>/<token>.qcow2`` — per-investigation
+    (isolation) and content-addressed by ``token`` (dedup across Systems sharing one checksum), so
+    every System in the investigation resolves the same file and it is fetched at most once.
+    """
+    return upload_dir / str(investigation_id) / f"{token}.qcow2"
 
 
 def console_log_path(system_id: UUID) -> Path:

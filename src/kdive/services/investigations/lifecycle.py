@@ -11,12 +11,16 @@ from pydantic import ValidationError
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
-from kdive.domain.capacity.state import IllegalTransition, InvestigationState
+from kdive.domain.capacity.state import IllegalTransition, InvestigationState, SystemState
 from kdive.domain.lifecycle.records import Investigation
+from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.payloads import Authorizing, SystemPayload
 from kdive.log import bind_context
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext, require_project
-from kdive.security.authz.rbac import Role, require_role
+from kdive.security.authz.rbac import Role, RoleDenied, require_role
+from kdive.serialization import JsonValue
 from kdive.services.investigations.common import (
     ExternalRefInput,
     InvestigationErrorReason,
@@ -27,6 +31,11 @@ from kdive.services.investigations.common import (
     resolve_contributor_investigation,
     validate_text,
 )
+
+# A System is "bound and live" — and so blocks/needs a forced teardown at close — when it names
+# this Investigation and has not reached a terminal state (ADR-0441 §7). `torn_down` and `failed`
+# are the two terminal `SystemState` sinks; a NULL-investigation System is never considered.
+_TERMINAL_SYSTEM_STATES = (SystemState.TORN_DOWN.value, SystemState.FAILED.value)
 
 
 async def open_investigation_record(
@@ -83,8 +92,110 @@ async def open_investigation_record(
         return inv
 
 
+async def _bound_live_systems(conn: AsyncConnection, uid: UUID) -> list[UUID]:
+    """Return the ids of non-terminal Systems bound to Investigation ``uid`` (ordered)."""
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM systems WHERE investigation_id = %s AND state <> ALL(%s) ORDER BY id",
+            (uid, list(_TERMINAL_SYSTEM_STATES)),
+        )
+        return [row[0] for row in await cur.fetchall()]
+
+
+async def _reprovisioning_bound_systems(conn: AsyncConnection, uid: UUID) -> list[UUID]:
+    """Return bound Systems in ``reprovisioning`` — the one non-terminal state teardown can't reach.
+
+    ``REPROVISIONING`` is the only non-terminal ``SystemState`` with no ``torn_down`` transition, so
+    a force-close teardown enqueued for such a System raises ``IllegalTransition`` and, if the
+    reprovision then settles to ``failed`` (a terminal sink), never completes — leaving a System
+    bound to a closed Investigation, which decision 7 (ADR-0441 §7) forbids. Force-close refuses
+    (transiently) rather than promise a reap it cannot deliver.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM systems WHERE investigation_id = %s AND state = %s ORDER BY id",
+            (uid, SystemState.REPROVISIONING.value),
+        )
+        return [row[0] for row in await cur.fetchall()]
+
+
+def _require_admin_for_force(ctx: RequestContext, uid: UUID, project: str) -> None:
+    """Gate the force-teardown escalation on project ADMIN, matching ``systems.teardown``.
+
+    ``investigations.close`` is a contributor tool, but ``force=True`` tears bound Systems down,
+    which is an admin-tier destructive op. Every bound System shares the Investigation's project
+    (the same-project binding invariant), so one project-level admin check authorizes the whole
+    reap; a same-project contributor is refused here, before any teardown is enqueued.
+    """
+    try:
+        require_role(ctx, project, Role.ADMIN)
+    except RoleDenied:
+        raise InvestigationServiceError(
+            object_id=str(uid),
+            reason=InvestigationErrorReason.FORCE_REQUIRES_ADMIN,
+            detail="close(force=True) tears down bound Systems and requires admin on the project",
+        ) from None
+
+
+async def _couple_bound_systems(
+    conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, project: str, force: bool
+) -> None:
+    """Refuse the close (default) or force-teardown (all-or-nothing) any bound live Systems.
+
+    Runs inside the caller's close transaction so the teardown enqueues and the close itself are
+    atomic: an enqueue error rolls the whole close back with zero teardowns enqueued and the
+    Investigation unchanged.
+    """
+    live = await _bound_live_systems(conn, uid)
+    if not live:
+        return
+    ids = [str(system_id) for system_id in live]
+    if not force:
+        blocking: list[JsonValue] = list(ids)
+        raise InvestigationServiceError(
+            object_id=str(uid),
+            reason=InvestigationErrorReason.BOUND_SYSTEMS_LIVE,
+            detail=(
+                f"cannot close: {len(ids)} bound System(s) still live "
+                f"({', '.join(ids)}); tear them down first or retry with force=true"
+            ),
+            data={"blocking_systems": blocking},
+        )
+    _require_admin_for_force(ctx, uid, project)
+    reprovisioning = await _reprovisioning_bound_systems(conn, uid)
+    if reprovisioning:
+        ids = [str(system_id) for system_id in reprovisioning]
+        raise InvestigationServiceError(
+            object_id=str(uid),
+            reason=InvestigationErrorReason.BOUND_SYSTEMS_LIVE,
+            detail=(
+                f"cannot force-close: {len(ids)} bound System(s) are mid-reprovision "
+                f"({', '.join(ids)}); a reprovisioning System has no teardown transition until it "
+                "settles to ready or failed — retry force-close once it does"
+            ),
+            data={"reprovisioning_systems": list(ids)},
+        )
+    authorizing = Authorizing(
+        principal=ctx.principal, agent_session=ctx.agent_session, project=project
+    )
+    for system_id in live:
+        await queue.enqueue(
+            conn,
+            JobKind.TEARDOWN,
+            SystemPayload(system_id=str(system_id)),
+            authorizing,
+            f"{system_id}:teardown",
+        )
+
+
 async def _close_locked(
-    conn: AsyncConnection, ctx: RequestContext, uid: UUID, *, summary: str, project: str
+    conn: AsyncConnection,
+    ctx: RequestContext,
+    uid: UUID,
+    *,
+    summary: str,
+    project: str,
+    force: bool,
 ) -> Investigation:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.INVESTIGATION, uid):
         current = await INVESTIGATIONS.get(conn, uid)
@@ -102,10 +213,13 @@ async def _close_locked(
                 detail="cannot close an abandoned Investigation",
                 data={"current_status": "abandoned"},
             )
+        await _couple_bound_systems(conn, ctx, uid, project=project, force=force)
         old = current.state
         updated = await INVESTIGATIONS.update_state(conn, uid, InvestigationState.CLOSED)
         await conn.execute(
-            "UPDATE investigations SET cleanup_pending_at = now(), summary = %s WHERE id = %s",
+            "UPDATE investigations "
+            "SET cleanup_pending_at = now(), rootfs_cleanup_pending_at = now(), summary = %s "
+            "WHERE id = %s",
             (summary, uid),
         )
         await audit.record(
@@ -124,15 +238,27 @@ async def _close_locked(
 
 
 async def close_investigation_record(
-    pool: AsyncConnectionPool, ctx: RequestContext, uid: UUID, *, raw_id: str, summary: str
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    uid: UUID,
+    *,
+    raw_id: str,
+    summary: str,
+    force: bool = False,
 ) -> Investigation:
-    """Drive an Investigation to `closed`, recording a required summary of the work."""
+    """Drive an Investigation to `closed`, recording a required summary of the work.
+
+    A default close is refused while any bound live System remains (ADR-0441 §7); ``force=True``
+    tears those Systems down first (admin-gated, all-or-nothing) and then closes.
+    """
     require_summary(raw_id, summary)
     with bind_context(principal=ctx.principal):
         async with pool.connection() as conn:
             inv = await resolve_contributor_investigation(conn, ctx, uid, raw_id)
             try:
-                return await _close_locked(conn, ctx, uid, summary=summary, project=inv.project)
+                return await _close_locked(
+                    conn, ctx, uid, summary=summary, project=inv.project, force=force
+                )
             except IllegalTransition:
                 async with pool.connection() as conn2:
                     latest = await INVESTIGATIONS.get(conn2, uid)

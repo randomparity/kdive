@@ -58,6 +58,7 @@ contributor on the Allocation's project.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
 | `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
 
@@ -88,6 +89,7 @@ contributor on the Allocation's project.
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
@@ -213,6 +215,7 @@ pick one of those or an allocation on a host that offers the arch you need.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to provision a System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
+| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
 | `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
 
@@ -243,6 +246,7 @@ pick one of those or an allocation on a host that offers the arch you need.
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
@@ -321,6 +325,7 @@ destructive_ops opt-in).
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)

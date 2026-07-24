@@ -21,9 +21,9 @@ from psycopg.types.json import Jsonb
 
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 
-UploadOwnerKind = Literal["runs", "systems"]
+UploadOwnerKind = Literal["runs", "investigations"]
 RUN_UPLOAD_OWNER: UploadOwnerKind = "runs"
-SYSTEM_UPLOAD_OWNER: UploadOwnerKind = "systems"
+INVESTIGATION_UPLOAD_OWNER: UploadOwnerKind = "investigations"
 
 
 class UploadManifest(NamedTuple):

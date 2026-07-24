@@ -29,6 +29,8 @@ class InvestigationErrorReason(StrEnum):
     """Transport-neutral Investigation service failure reasons."""
 
     ABANDONED = "abandoned"
+    BOUND_SYSTEMS_LIVE = "bound_systems_live"
+    FORCE_REQUIRES_ADMIN = "force_requires_admin"
     ILLEGAL_STATE = "illegal_state"
     INVALID_EXTERNAL_REF = "invalid_external_ref"
     INVALID_TEXT = "invalid_text"

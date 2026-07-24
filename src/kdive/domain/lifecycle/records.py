@@ -87,6 +87,10 @@ class System(DomainModel, Attribution):
     #: at mint (ADR-0368): `{model, vendor?, arch, baseline_level?}`. NULL when the resource
     #: advertises none (local/fault/un-refreshed remote) — treat NULL as unknown, never crash.
     resolved_cpu: dict[str, JsonValue] | None = None
+    #: Advisory binding to the owning Investigation (ADR-0441, #1502); NULL for a classic
+    #: allocation-only System. Write-once at the admission layer once set — the reclaim gate's
+    #: referencer enumeration depends on this column never silently dropping a live System.
+    investigation_id: UUID | None = None
 
 
 class Snapshot(DomainModel, Attribution):
@@ -118,6 +122,12 @@ class Investigation(DomainModel, Attribution):
     #: Set when the investigation closes; the reconciler `gc_investigation_artifacts` sweep reclaims
     #: its run-owned build artifacts after a grace window, then clears it (ADR-0234 §4, #768).
     cleanup_pending_at: datetime | None = None
+    #: Set alongside `cleanup_pending_at` at close; the dedicated `gc_investigation_uploaded_rootfs`
+    #: sweep reclaims the investigation-owned uploaded rootfs after a grace window, then clears it
+    #: (ADR-0441 §6, #1502). Deliberately a separate marker — `gc_investigation_artifacts` owns and
+    #: clears `cleanup_pending_at` as soon as its own run-owned worklist drains, independent of
+    #: whether the rootfs sweep has finished.
+    rootfs_cleanup_pending_at: datetime | None = None
 
 
 class ExpectedBootFailure(DomainBase):

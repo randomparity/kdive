@@ -54,7 +54,9 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "allocations.request": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "allocations.wait": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "artifacts.create_run_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
-    "artifacts.create_system_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
+    "artifacts.create_investigation_upload": (
+        "tests/mcp/lifecycle/test_investigation_upload_tool.py",
+    ),
     "artifacts.expected_uploads": ("tests/mcp/catalog/test_expected_uploads_tool.py",),
     "artifacts.feature_config_requirements": (
         "tests/mcp/catalog/test_feature_config_requirements_tool.py",
@@ -110,6 +112,9 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "inventory.clear_override": ("tests/mcp/ops/test_inventory_clear_override.py",),
     "inventory.list": ("tests/mcp/ops/test_inventory_list.py",),
     "investigations.close": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.complete_rootfs_upload": (
+        "tests/mcp/lifecycle/test_complete_rootfs_upload_tool.py",
+    ),
     "investigations.get": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "investigations.link": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "investigations.list": ("tests/mcp/lifecycle/test_investigations_tools.py",),
@@ -537,7 +542,7 @@ def test_upload_tools_state_deadline_scope_and_non_constraint() -> None:
     # expires_at; in-flight not interrupted), the reference clock, the re-mint recovery, and
     # that chunks are a size mechanism, not a way to beat the clock.
     tools = {t.name: t for t in TOOLS}
-    for name in ("artifacts.create_run_upload", "artifacts.create_system_upload"):
+    for name in ("artifacts.create_run_upload", "artifacts.create_investigation_upload"):
         description = (tools[name].description or "").lower()
         assert "expires_at" in description
         assert "in flight" in description  # the not-interrupted scope clause
@@ -553,7 +558,7 @@ def test_upload_tools_warn_extra_header_breaks_signature() -> None:
     # any extra header (e.g. a default Content-Type) breaks the SigV4 signature with a 403. Points
     # the agent at data.upload_hint, which restates it on the response itself.
     tools = {t.name: t for t in TOOLS}
-    for name in ("artifacts.create_run_upload", "artifacts.create_system_upload"):
+    for name in ("artifacts.create_run_upload", "artifacts.create_investigation_upload"):
         description = (tools[name].description or "").lower()
         assert "required_headers" in description
         assert "content-type" in description  # the concrete extra-header trap

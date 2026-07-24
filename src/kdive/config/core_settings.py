@@ -286,6 +286,21 @@ BUILD_ARTIFACT_RETENTION_DAYS = Setting(
     suggest="an integer number of days, e.g. 30",
 )
 
+INVESTIGATION_ROOTFS_RETENTION_DAYS = Setting(
+    name="KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS",
+    parse=_int,
+    default="30",
+    group="reports",
+    processes=_STORE_USERS,
+    help=(
+        "Age in days after which the reconciler `gc_expired_investigation_rootfs` sweep reclaims "
+        "an investigation-scoped uploaded rootfs base (object + staged file + row) on an "
+        "investigation that never closed — the TTL backstop to the close+grace reclaim, both "
+        "gated on per-System overlay-file absence. ADR-0441 §6."
+    ),
+    suggest="an integer number of days, e.g. 30",
+)
+
 MAX_INVENTORY_EXPORT_BYTES = Setting(
     name="KDIVE_MAX_INVENTORY_EXPORT_BYTES",
     parse=_int,
@@ -688,6 +703,7 @@ SETTINGS = [
     REPORT_ARTIFACT_RETENTION_DAYS,
     INVESTIGATION_CLEANUP_GRACE_DAYS,
     BUILD_ARTIFACT_RETENTION_DAYS,
+    INVESTIGATION_ROOTFS_RETENTION_DAYS,
     MAX_INVENTORY_EXPORT_BYTES,
     DEBUG_DIR,
     CRASH_DIR,

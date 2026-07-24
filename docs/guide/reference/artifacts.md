@@ -2,6 +2,85 @@
 
 # `artifacts` tools
 
+## `artifacts.create_investigation_upload`
+
+`implemented`
+
+Mint a presigned PUT for an Investigation's uploaded rootfs. Requires contributor on
+the Investigation's project.
+
+The rootfs is owned by the Investigation and reusable across every System bound to it: one
+upload, referenced by content checksum, provisions many Systems and is fetched to the host
+at most once. Finalize with `investigations.complete_rootfs_upload`, which returns the
+`checksum_sha256` handle you put in each System's `{kind: "upload"}` rootfs profile.
+
+The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
+send exactly those headers on the PUT and nothing else — an HTTP client that injects its
+own header (e.g. a default `Content-Type`) invalidates the signature and the PUT fails
+with `403 SignatureDoesNotMatch`. The presigned PUT also binds the object's
+`x-amz-checksum-sha256`; a direct `put_object` that skips it stores the bytes without
+that integrity check, so upload through the signed URL. `data.upload_hint` restates the
+header footgun.
+
+Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
+instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
+is the reference clock — compute remaining time as a deadline minus `server_time`, not
+from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
+earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
+upload if it is not finalized. If a window lapses, re-call this tool to reset the
+deadline (`manifest_mode: "replace"`); see `data.on_expiry`. Re-minting resets the deadline
+but is not a way to beat the clock, and neither is chunking — the rootfs must be a single
+PUT (gzip a large qcow2 instead; see below).
+
+Large rootfs (transport encoding): the rootfs must be a single PUT — chunked upload is
+rejected. To upload a qcow2 whose size exceeds the 5 GiB single-PUT limit, gzip it and
+declare `encoding: "gzip"` with `uncompressed_size` set to the canonical (decompressed)
+qcow2 size in bytes. kdive strips the gzip on download, streaming and bomb-bounded, then
+verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
+`uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
+encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
+(compressed) bytes. Omit `encoding` to upload a qcow2 directly.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. Single PUT only (no chunks). To upload a qcow2 larger than the 5 GiB single-PUT limit, gzip it and add encoding='gzip' + uncompressed_size (canonical qcow2 size). |
+| `investigation_id` | string | yes | The OPEN or ACTIVE Investigation id to upload a rootfs for. |
+
+`artifacts` fields:
+
+  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
+  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
+  - `size_bytes` (`integer`, required) — Total object size in bytes.
+  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
+      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
+      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
+  - `encoding` (``gzip`, `identity``, optional) — Optional transport encoding of the uploaded object. 'gzip' means you upload a gzip of the canonical qcow2 (kdive strips it on download to recover the qcow2); omit (or 'identity') to upload the qcow2 directly. gzip is single-PUT only — it cannot be combined with chunks — and requires uncompressed_size. sha256/size_bytes still describe the uploaded (compressed) bytes.
+  - `uncompressed_size` (`integer`, optional) — Required with encoding='gzip': the canonical (decompressed) qcow2 size in bytes. It is the gzip-bomb bound and is checked at declaration against the 50 GiB canonical-object cap. Omit when there is no encoding.
+
+Examples for `artifacts`:
+
+```json
+[
+  {
+    "name": "rootfs",
+    "sha256": "rL0Y20zC...base64...",
+    "size_bytes": 12582912
+  }
+]
+```
+
+```json
+[
+  {
+    "encoding": "gzip",
+    "name": "rootfs",
+    "sha256": "kZ8s1f9q...base64...",
+    "size_bytes": 402653184,
+    "uncompressed_size": 6442450944
+  }
+]
+```
+
 ## `artifacts.create_run_upload`
 
 `implemented`
@@ -27,8 +106,8 @@ deadline (`manifest_mode: "replace"`); see `data.on_expiry`. `chunks` are only f
 single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
 
 Build artifacts are uploaded as-is: a transport `encoding` (gzip) is not accepted on this
-lane and is rejected at declaration — it is a systems-only (rootfs) surface. See
-`artifacts.create_system_upload`.
+lane and is rejected at declaration — it is a rootfs-only surface. See
+`artifacts.create_investigation_upload`.
 
 Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
 System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
@@ -76,81 +155,6 @@ Examples for `artifacts`:
     "name": "vmlinux",
     "sha256": "kZ8s1f9q...base64...",
     "size_bytes": 7340032
-  }
-]
-```
-
-## `artifacts.create_system_upload`
-
-`implemented`
-
-Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
-System's project.
-
-The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
-send exactly those headers on the PUT and nothing else — an HTTP client that injects its
-own header (e.g. a default `Content-Type`) invalidates the signature and the PUT fails
-with `403 SignatureDoesNotMatch`. The presigned PUT also binds the object's
-`x-amz-checksum-sha256`; a direct `put_object` that skips it stores the bytes without
-that integrity check, so upload through the signed URL. `data.upload_hint` restates the
-header footgun.
-
-Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
-instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
-is the reference clock — compute remaining time as a deadline minus `server_time`, not
-from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
-earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
-upload if it is not finalized. If a window lapses, re-call this tool to reset the
-deadline (`manifest_mode: "replace"`); see `data.on_expiry`. Re-minting resets the deadline
-but is not a way to beat the clock, and neither is chunking — the rootfs must be a single
-PUT (gzip a large qcow2 instead; see below).
-
-Large rootfs (transport encoding): the rootfs must be a single PUT — chunked upload is
-rejected. To upload a qcow2 whose size exceeds the 5 GiB single-PUT limit, gzip it and
-declare `encoding: "gzip"` with `uncompressed_size` set to the canonical (decompressed)
-qcow2 size in bytes. kdive strips the gzip on download, streaming and bomb-bounded, then
-verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
-`uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
-encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
-(compressed) bytes. Omit `encoding` to upload a qcow2 directly. Encoding is a rootfs-only
-surface — `artifacts.create_run_upload` rejects it.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `artifacts` | array<object> | yes | Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. Single PUT only (no chunks). To upload a qcow2 larger than the 5 GiB single-PUT limit, gzip it and add encoding='gzip' + uncompressed_size (canonical qcow2 size). |
-| `system_id` | string | yes | The DEFINED System id. |
-
-`artifacts` fields:
-
-  - `name` (`string`, required) — Accepted artifact name (see artifacts.expected_uploads).
-  - `sha256` (`string`, required) — Base64-encoded SHA-256 of the whole object.
-  - `size_bytes` (`integer`, required) — Total object size in bytes.
-  - `chunks` (`array<object>`, optional) — Optional chunked-upload parts; omit for a single PUT.
-      - `sha256` (`string`, required) — Base64-encoded SHA-256 of this chunk.
-      - `size_bytes` (`integer`, required) — This chunk's size in bytes.
-  - `encoding` (``gzip`, `identity``, optional) — Optional transport encoding of the uploaded object. 'gzip' means you upload a gzip of the canonical qcow2 (kdive strips it on download to recover the qcow2); omit (or 'identity') to upload the qcow2 directly. gzip is single-PUT only — it cannot be combined with chunks — and requires uncompressed_size. sha256/size_bytes still describe the uploaded (compressed) bytes.
-  - `uncompressed_size` (`integer`, optional) — Required with encoding='gzip': the canonical (decompressed) qcow2 size in bytes. It is the gzip-bomb bound and is checked at declaration against the 50 GiB canonical-object cap. Omit when there is no encoding.
-
-Examples for `artifacts`:
-
-```json
-[
-  {
-    "name": "rootfs",
-    "sha256": "rL0Y20zC...base64...",
-    "size_bytes": 12582912
-  }
-]
-```
-
-```json
-[
-  {
-    "encoding": "gzip",
-    "name": "rootfs",
-    "sha256": "kZ8s1f9q...base64...",
-    "size_bytes": 402653184,
-    "uncompressed_size": 6442450944
   }
 ]
 ```

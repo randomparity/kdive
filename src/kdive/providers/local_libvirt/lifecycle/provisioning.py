@@ -170,14 +170,13 @@ class _MaterializedPreExistence:
 
     The failure reclaim removes only what this call creates, so a pre-existing artifact — which may
     back a live or recoverable prior attempt — is preserved (mirrors the overlay's
-    create-only-when-absent contract, ADR-0060). ``staged`` is meaningful only for the ``upload``
-    rootfs kind (``is_upload``).
+    create-only-when-absent contract, ADR-0060). The uploaded rootfs base is **not** tracked here:
+    it is a shared, investigation-owned base (ADR-0441) reclaimed only by the reconciler sweeps, so
+    a failing provision must never unlink it out from under a concurrently-booting sibling.
     """
 
     overlay: bool
     baseline: bool
-    staged: bool
-    is_upload: bool
 
 
 class LocalLibvirtProvisioning:
@@ -271,13 +270,13 @@ class LocalLibvirtProvisioning:
         # Snapshot which host artifacts pre-exist BEFORE materializing anything, so a failure after
         # materialization reclaims only what THIS call creates (ADR-0435): a pre-existing overlay,
         # baseline dir, or staged uploaded rootfs may back a live or recoverable prior attempt.
-        pre_existing = self._snapshot_pre_existing(system_id, section.rootfs)
+        pre_existing = self._snapshot_pre_existing(system_id)
         # Each flag flips to "this call created it" immediately BEFORE its creating step, so a
         # failure reclaims exactly the artifacts whose creation was reached (never a step we never
-        # got to, never a pre-existing artifact) — ADR-0435.
-        staged_created = baseline_created = overlay_created = False
+        # got to, never a pre-existing artifact) — ADR-0435. The uploaded rootfs base is a shared,
+        # investigation-owned artifact (ADR-0441) and is deliberately NOT in this per-call reclaim.
+        baseline_created = overlay_created = False
         try:
-            staged_created = pre_existing.is_upload and not pre_existing.staged
             base = self._materialize_rootfs(section.rootfs, system_id, profile.arch)
             baseline_created = not pre_existing.baseline
             baseline = self._prepare_baseline_kernel(system_id, base, section.baseline_kernel)
@@ -318,32 +317,29 @@ class LocalLibvirtProvisioning:
                 system_id,
                 overlay=overlay_created,
                 baseline=baseline_created,
-                staged=staged_created,
             )
             raise
         return domain_name_for(system_id)
 
-    def _snapshot_pre_existing(
-        self, system_id: UUID, rootfs: RootfsSource
-    ) -> _MaterializedPreExistence:
+    def _snapshot_pre_existing(self, system_id: UUID) -> _MaterializedPreExistence:
         """Record which per-System host artifacts exist before materialization (ADR-0435)."""
-        is_upload = isinstance(rootfs, _UploadRootfs)
         return _MaterializedPreExistence(
             overlay=self._files.overlay_exists(overlay_path(system_id)),
             baseline=self._files.baseline_exists(baseline_dir(system_id)),
-            staged=is_upload and self._files.uploaded_rootfs_exists_for(system_id),
-            is_upload=is_upload,
         )
 
     def _reclaim_materialized_on_failure(
-        self, system_id: UUID, *, overlay: bool, baseline: bool, staged: bool
+        self, system_id: UUID, *, overlay: bool, baseline: bool
     ) -> None:
         """Best-effort reclaim the host artifacts this failed provision created (ADR-0435).
 
-        Removes only what this call created — an overlay, baseline directory, or staged uploaded
-        rootfs that pre-existed (or a step this call never reached) is left in place. Each removal
-        swallows a secondary ``CategorizedError`` so a reclaim fault never masks the original
-        provisioning error; the reconciler and a later teardown remain the backstops.
+        Removes only what this call created — a pre-existing overlay or baseline directory (or a
+        step this call never reached) is left in place. The **shared uploaded rootfs base** is
+        deliberately excluded (ADR-0441 supersedes ADR-0435 §1's staged-base arm): it is
+        investigation-owned and reused across Systems, so a failing provision must not unlink it
+        under a concurrently-booting or already-booted sibling — the reconciler sweeps reclaim it.
+        Each removal swallows a secondary ``CategorizedError`` so a reclaim fault never masks the
+        original provisioning error; the reconciler and a later teardown remain the backstops.
         """
         domain_name = domain_name_for(system_id)
         if overlay:
@@ -351,12 +347,6 @@ class LocalLibvirtProvisioning:
         if baseline:
             self._best_effort_reclaim(
                 self._files.remove_baseline_for_domain, domain_name, "baseline directory"
-            )
-        if staged:
-            self._best_effort_reclaim(
-                self._files.remove_uploaded_rootfs_for_domain,
-                domain_name,
-                "staged uploaded rootfs",
             )
 
     @staticmethod
@@ -615,12 +605,13 @@ class LocalLibvirtProvisioning:
         return self.provision(system_id, profile, overlay_customizers=overlay_customizers)
 
     def teardown(self, domain_name: str) -> None:
-        """Destroy+undefine the domain and reclaim its overlay, baseline dir, and uploaded rootfs.
+        """Destroy+undefine the domain and reclaim its per-System overlay and baseline dir.
 
-        The overlay, the per-System baseline-kernel directory (ADR-0272), and any staged uploaded
-        rootfs (ADR-0434) are removed after the libvirt teardown — including the already-absent-
-        domain path — so a torn-down System leaves no orphaned disk, kernel, or uploaded-image
-        files (ADR-0060). An absent file/directory is a no-op; idempotent.
+        The overlay and the per-System baseline-kernel directory (ADR-0272) are removed after the
+        libvirt teardown — including the already-absent-domain path — so a torn-down System leaves
+        no orphaned disk or kernel files (ADR-0060). The **shared uploaded rootfs base** is
+        investigation-owned (ADR-0441) and is reclaimed only by the reconciler sweeps, never at a
+        single System's teardown. An absent file/directory is a no-op; idempotent.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error other than the
@@ -629,19 +620,22 @@ class LocalLibvirtProvisioning:
         self._teardown_domain(domain_name)
         self._files.remove_overlay_for_domain(domain_name)
         self._files.remove_baseline_for_domain(domain_name)
-        self._files.remove_uploaded_rootfs_for_domain(domain_name)
 
     def _materialize_rootfs_base(
         self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"
     ) -> str:
         rootfs = _materializable_rootfs(rootfs)
+        # The upload context carries the profile's content checksum; it is consumed only on the
+        # upload lane (a non-upload rootfs never reads it). Investigation resolution happens in the
+        # connectionless fetch (ADR-0441 §4).
+        checksum = rootfs.checksum_sha256 if isinstance(rootfs, _UploadRootfs) else ""
         return str(
             materialize_rootfs_base(
                 rootfs,
                 context=RootfsMaterializationContext(
                     allowed_roots=self._allowed_roots,
                     arch=arch,
-                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR)),
+                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR), checksum),
                     catalog_fetch=self._catalog_fetch,
                     upload_fetch=self._upload_fetch,
                 ),

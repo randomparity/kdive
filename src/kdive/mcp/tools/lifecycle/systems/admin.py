@@ -13,7 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
+from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
@@ -35,12 +35,16 @@ from kdive.mcp.tools._idempotency import (
     resolve_envelope_replay,
     validate_idempotency_key,
 )
-from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
+from kdive.profiles.provider_policy import (
+    ProfilePolicy,
+    require_investigation_binding_for_upload,
+)
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied, require_role
+from kdive.services.investigations.common import TERMINAL_INVESTIGATION
 from kdive.services.systems.admission import require_pinned_cpu_selectable
 from kdive.services.systems.validation import (
     RootfsValidator,
@@ -79,7 +83,6 @@ class SystemAdminHandlers:
         try:
             parsed = ProvisioningProfile.parse(profile)
             validate_profile_for_provider(parsed, self.profile_policy, self.component_sources)
-            reject_rootfs_upload_without_window(self.profile_policy, parsed)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(system_id, exc)
         if idempotency_key is not None:
@@ -162,6 +165,24 @@ async def _reprovision_in_lock(
     # System is iterating, not administering. Enforced in-handler (the handler-direct path
     # bypasses the registrar gate), mirroring control.power.
     require_role(ctx, system.project, Role.CONTRIBUTOR)
+    try:
+        # An upload-rootfs reprovision resolves the base within the System's investigation, so the
+        # System must already carry a write-once binding (ADR-0441 §2); reject a missing one here
+        # rather than let the worker fetch fail late.
+        require_investigation_binding_for_upload(profile_policy, profile, system.investigation_id)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(str(system_id), exc)
+    if system.investigation_id is not None:
+        # A reprovision re-materializes the base under the System's investigation, so it must not
+        # begin under a closed/abandoned one (ADR-0441 §7). Take the INVESTIGATION lock
+        # close_investigation holds so a reprovision and a close serialize: the close sees this
+        # System (and blocks or force-reaps it), or this read sees the close and rejects. The xact
+        # lock is held to commit, covering the ready->reprovisioning transition, not only the read.
+        async with advisory_xact_lock(conn, LockScope.INVESTIGATION, system.investigation_id):
+            investigation = await INVESTIGATIONS.get(conn, system.investigation_id)
+        if investigation is None or investigation.state in TERMINAL_INVESTIGATION:
+            state = investigation.state.value if investigation is not None else "missing"
+            return _config_error(str(system_id), data={"investigation_state": state})
     digest = profile_digest(profile)
     dedup_key = f"{system_id}:reprovision:{digest}"
     if system.state is SystemState.REPROVISIONING:

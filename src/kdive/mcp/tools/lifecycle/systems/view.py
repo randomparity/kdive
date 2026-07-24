@@ -108,11 +108,11 @@ def system_envelope(
 
 
 def defined_system_envelope(system: System) -> ToolResponse:
-    """Render a newly defined System with its upload/provision next actions."""
+    """Render a newly defined System with its provision next action."""
     return ToolResponse.success(
         str(system.id),
         SystemState.DEFINED.value,
-        suggested_next_actions=["artifacts.create_system_upload", "systems.provision_defined"],
+        suggested_next_actions=["systems.provision_defined"],
         data={"project": system.project},
     )
 

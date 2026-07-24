@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.artifacts.transport_encoding import (
@@ -34,16 +35,14 @@ from kdive.artifacts.uploads import (
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import RUNS, SYSTEMS
-from kdive.domain.capacity.state import RunState, SystemState
+from kdive.db.repositories import INVESTIGATIONS, RUNS
+from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.profiles.provider_policy import rootfs_upload_window_allowed
-from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -63,8 +62,12 @@ _TENANT = "local"
 # ``artifacts.expected_uploads`` discovery tool (ADR-0166) projects the same sets the
 # validator below enforces — the advertisement can never drift from the accepted names.
 CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
-CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
+CREATE_INVESTIGATION_UPLOAD_TOOL = "artifacts.create_investigation_upload"
+COMPLETE_INVESTIGATION_ROOTFS_TOOL = "investigations.complete_rootfs_upload"
 _RETENTION_CLASS = "build"
+# An investigation-scoped uploaded rootfs is committed under this retention class (its finalize
+# and the reclaim sweeps filter on it), distinct from the build-artifact upload class above.
+_ROOTFS_RETENTION_CLASS = "rootfs"
 
 # Agent-visible PUT ergonomics, carried in the collection ``data`` so a tool-schema-only
 # client sees the two presigned-PUT footguns in the response itself, not only in a resource
@@ -218,6 +221,21 @@ SYSTEM_DECLARATION_EXAMPLES: list[JsonValue] = [
 ]
 
 
+def _entry_name(entry: ManifestEntry) -> str:
+    """Default object-name derivation: the declared artifact name verbatim."""
+    return entry.name
+
+
+def investigation_rootfs_object_name(entry: ManifestEntry) -> str:
+    """The content-addressed object name (``rootfs-<token>``) for an investigation upload.
+
+    Derives the object name from the declared checksum via the shared
+    :func:`kdive.artifacts.content_address` derivation the provider fetch also resolves against,
+    so finalize commits and a System resolves the same key.
+    """
+    return rootfs_object_name(rootfs_object_token(entry.sha256))
+
+
 def _upload_ttl() -> timedelta:
     return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
 
@@ -266,6 +284,13 @@ class _UploadOwnerSpec:
     project: Callable[[AsyncConnection, UUID], Awaitable[str | None]]
     accepts_upload: Callable[[AsyncConnection, UUID, ProviderResolver], Awaitable[bool]]
     allow_chunks: bool = True  # False when the owner's install path reads only a single-PUT object
+    # The object-store retention class stamped on the presigned object; also the class the finalize
+    # commits on the ``artifacts`` row. Defaults to the build-artifact class; the investigation
+    # rootfs owner uses ``rootfs`` so the TTL reclaim sweep can filter committed rows on it.
+    retention_class: str = _RETENTION_CLASS
+    # Derives the object-key name component from a declared entry. Defaults to the declared name;
+    # a content-addressed owner (investigation rootfs) derives ``rootfs-<token>`` from the checksum.
+    object_name: Callable[[ManifestEntry], str] = _entry_name
     # ADR-0437: only an owner with a registered decompressing consumer accepts a non-identity
     # transport ``encoding``; others reject it at declaration (no accept-then-ignore).
     accepts_encoding: bool = False
@@ -520,16 +545,25 @@ def _materialize_uploads(
     kind: upload_manifest.UploadOwnerKind,
     owner_id: UUID,
     store: _PresignStore,
+    object_name: Callable[[ManifestEntry], str],
+    retention_class: str,
 ) -> list[_MaterializedUpload]:
     uploads: list[_MaterializedUpload] = []
     expires_in = _presign_ttl_seconds()
     prefix = owner_prefix(_TENANT, kind, str(owner_id))
     for entry in entries:
         if entry.chunks is None:
-            key = artifact_key(_TENANT, kind, str(owner_id), entry.name)
+            key = artifact_key(_TENANT, kind, str(owner_id), object_name(entry))
             uploads.append(
                 _materialize_one(
-                    store, key, entry.sha256, entry.size_bytes, entry, None, expires_in
+                    store,
+                    key,
+                    entry.sha256,
+                    entry.size_bytes,
+                    entry,
+                    None,
+                    expires_in,
+                    retention_class,
                 )
             )
             continue
@@ -537,7 +571,14 @@ def _materialize_uploads(
             key = chunk_key(prefix, entry.name, part_number)
             uploads.append(
                 _materialize_one(
-                    store, key, chunk.sha256, chunk.size_bytes, entry, part_number, expires_in
+                    store,
+                    key,
+                    chunk.sha256,
+                    chunk.size_bytes,
+                    entry,
+                    part_number,
+                    expires_in,
+                    retention_class,
                 )
             )
     return uploads
@@ -551,6 +592,7 @@ def _materialize_one(
     entry: ManifestEntry,
     part_number: int | None,
     expires_in: int,
+    retention_class: str,
 ) -> _MaterializedUpload:
     presigned = store.presign_put(
         PresignPutRequest(
@@ -558,7 +600,7 @@ def _materialize_one(
             sha256=sha256,
             size_bytes=size_bytes,
             sensitivity=Sensitivity.SENSITIVE,
-            retention_class=_RETENTION_CLASS,
+            retention_class=retention_class,
             expires_in=expires_in,
         )
     )
@@ -572,13 +614,6 @@ async def _run_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
     return row["project"] if row else None
 
 
-async def _system_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT project FROM systems WHERE id = %s", (owner_id,))
-        row = await cur.fetchone()
-    return row["project"] if row else None
-
-
 async def _run_accepts_upload(
     conn: AsyncConnection, owner_id: UUID, _resolver: ProviderResolver
 ) -> bool:
@@ -586,15 +621,21 @@ async def _run_accepts_upload(
     return run is not None and run.state is RunState.CREATED
 
 
-async def _system_accepts_upload(
-    conn: AsyncConnection, owner_id: UUID, resolver: ProviderResolver
+async def _investigation_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT project FROM investigations WHERE id = %s", (owner_id,))
+        row = await cur.fetchone()
+    return row["project"] if row else None
+
+
+async def _investigation_accepts_upload(
+    conn: AsyncConnection, owner_id: UUID, _resolver: ProviderResolver
 ) -> bool:
-    system = await SYSTEMS.get(conn, owner_id)
-    if system is None or system.state is not SystemState.DEFINED:
-        return False
-    parsed = ProvisioningProfile.parse(system.provisioning_profile)
-    runtime = await resolver.runtime_for_system(conn, owner_id)
-    return rootfs_upload_window_allowed(runtime.profile_policy, parsed)
+    investigation = await INVESTIGATIONS.get(conn, owner_id)
+    return investigation is not None and investigation.state in {
+        InvestigationState.OPEN,
+        InvestigationState.ACTIVE,
+    }
 
 
 # Canonical-object (decompressed) size ceilings, enforced at declaration when a transport encoding
@@ -618,17 +659,19 @@ _RUN_UPLOAD = _UploadOwnerSpec(
     accepts_encoding=False,  # no decompressing consumer for build artifacts (ADR-0437)
     uncompressed_cap=_RUN_UNCOMPRESSED_CAP,
 )
-_SYSTEM_UPLOAD = _UploadOwnerSpec(
-    owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
+_INVESTIGATION_UPLOAD = _UploadOwnerSpec(
+    owner_kind=upload_manifest.INVESTIGATION_UPLOAD_OWNER,
     required_role=Role.CONTRIBUTOR,
-    lock_scope=LockScope.SYSTEM,
-    allowed_names=SYSTEM_ARTIFACT_NAMES,
-    next_action="systems.provision_defined",
-    audit_object_kind="systems",
-    project=_system_project,
-    accepts_upload=_system_accepts_upload,
-    allow_chunks=False,  # #743 install verifies plain SHA-256; a composite can't (ADR-0436)
-    accepts_encoding=True,  # rootfs consumer strips gzip on download (Sub 2, #1510; ADR-0437)
+    lock_scope=LockScope.INVESTIGATION,
+    allowed_names=SYSTEM_ARTIFACT_NAMES,  # only rootfs is uploaded at investigation scope
+    next_action=COMPLETE_INVESTIGATION_ROOTFS_TOOL,
+    audit_object_kind="investigations",
+    project=_investigation_project,
+    accepts_upload=_investigation_accepts_upload,
+    allow_chunks=False,  # the rootfs install path verifies plain SHA-256 (ADR-0436)
+    retention_class=_ROOTFS_RETENTION_CLASS,
+    object_name=investigation_rootfs_object_name,  # content-addressed rootfs-<token>
+    accepts_encoding=True,  # rootfs consumer strips gzip on download (ADR-0437)
     uncompressed_cap=_SYSTEM_UNCOMPRESSED_CAP,
 )
 
@@ -685,6 +728,8 @@ async def _create_upload(
                         kind=spec.owner_kind,
                         owner_id=uid,
                         store=store,
+                        object_name=spec.object_name,
+                        retention_class=spec.retention_class,
                     )
                     stamp = await upload_manifest.replace_manifest(
                         conn,
@@ -773,7 +818,7 @@ def _upload_response(
 def _upload_tool_name(spec: _UploadOwnerSpec) -> str:
     if spec.owner_kind == upload_manifest.RUN_UPLOAD_OWNER:
         return CREATE_RUN_UPLOAD_TOOL
-    return CREATE_SYSTEM_UPLOAD_TOOL
+    return CREATE_INVESTIGATION_UPLOAD_TOOL
 
 
 async def create_run_upload(
@@ -797,21 +842,21 @@ async def create_run_upload(
     )
 
 
-async def create_system_upload(
+async def create_investigation_upload(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    system_id: str,
+    investigation_id: str,
     artifacts: Sequence[ArtifactDeclaration],
     resolver: ProviderResolver,
     store: _PresignStore | None = None,
 ) -> ToolResponse:
-    """Mint presigned PUTs for a DEFINED System's uploaded rootfs."""
+    """Mint a presigned PUT for an OPEN/ACTIVE Investigation's uploaded rootfs."""
     return await _create_upload(
         pool,
         ctx,
-        spec=_SYSTEM_UPLOAD,
-        owner_id=system_id,
+        spec=_INVESTIGATION_UPLOAD,
+        owner_id=investigation_id,
         artifacts=artifacts,
         resolver=resolver,
         store=store,

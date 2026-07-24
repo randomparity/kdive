@@ -12,7 +12,7 @@ from kdive.profiles.provisioning import _UploadRootfs, validate_rootfs_reference
 def test_validate_rootfs_reference_accepts_well_formed_upload() -> None:
     # upload is well-formed (no fields to check); the worker's render path must accept it
     # so an admitted DEFINED System can render (#111). Lane admissibility is a separate guard.
-    validate_rootfs_reference(_UploadRootfs(kind="upload"))  # does not raise
+    validate_rootfs_reference(_UploadRootfs(kind="upload", checksum_sha256="c"))  # does not raise
 
 
 def test_validate_rootfs_reference_accepts_local_at_tool_boundary() -> None:

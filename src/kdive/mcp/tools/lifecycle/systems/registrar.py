@@ -78,6 +78,14 @@ _LABEL_DESCRIPTION = (
     "printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle."
 )
 
+_INVESTIGATION_ID_DESCRIPTION = (
+    "Optional Investigation id to bind this System to. The investigation must be open or active "
+    "and in this System's own project. Binding scopes an uploaded rootfs the profile may "
+    "reference to that investigation and couples the System to its close. Write-once: once set "
+    "(here or at systems.define) it cannot be changed; a later provision must repeat the same id "
+    "or omit it. Omit for a System not tied to an investigation."
+)
+
 
 class _SystemsListPayload(ToolPayload):
     """Public payload for ``systems.list`` filters and pagination."""
@@ -180,6 +188,10 @@ def _register_systems_define(
             str | None,
             Field(description=_LABEL_DESCRIPTION),
         ] = None,
+        investigation_id: Annotated[
+            str | None,
+            Field(description=_INVESTIGATION_ID_DESCRIPTION),
+        ] = None,
     ) -> ToolResponse:
         """Create a System in 'defined' for a granted Allocation, opening a pre-provision
         rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
@@ -203,6 +215,7 @@ def _register_systems_define(
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
                 label=label,
+                investigation_id=investigation_id,
             ),
             required_role=Role.CONTRIBUTOR,
         )
@@ -231,6 +244,10 @@ def _register_systems_provision(
         label: Annotated[
             str | None,
             Field(description=_LABEL_DESCRIPTION),
+        ] = None,
+        investigation_id: Annotated[
+            str | None,
+            Field(description=_INVESTIGATION_ID_DESCRIPTION),
         ] = None,
     ) -> ToolResponse:
         """Mint a System for a granted Allocation and enqueue provision directly (no upload
@@ -261,6 +278,7 @@ def _register_systems_provision(
                 profile=dump_profile(profile),
                 idempotency_key=idempotency_key,
                 label=label,
+                investigation_id=investigation_id,
             ),
             required_role=Role.CONTRIBUTOR,
         )

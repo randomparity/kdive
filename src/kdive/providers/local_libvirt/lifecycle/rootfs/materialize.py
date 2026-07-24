@@ -23,11 +23,16 @@ from kdive.components.references import (
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import _UploadRootfs
 
+# Re-exported for provider consumers (the upload fetch); its canonical home — and the reconciler's
+# provider-neutral access — is ``kdive.providers.shared.runtime_paths`` (the provider-boundary
+# guard, ADR-0441 §6).
+from kdive.providers.shared.runtime_paths import staged_rootfs_path as staged_rootfs_path
+
 # Resolve a `catalog` reference (for a target arch) to a provider-readable local path. A staged-path
 # row resolves to its host path; an s3 row resolves DB row → object → cache (ADR-0092/0228).
 type CatalogFetch = Callable[[CatalogComponentRef, str], Path]
-# Download + checksum-verify a System-owned uploaded rootfs object to a provider-readable local
-# path (ADR-0434). Injected like ``CatalogFetch`` because the provider provision seam is
+# Download + checksum-verify an investigation-scoped uploaded rootfs object to a provider-readable
+# local path (ADR-0434/0441). Injected like ``CatalogFetch`` because the provider provision seam is
 # synchronous and owns no object store; the worker wires a concrete fetch.
 type UploadFetch = Callable[["RootfsUploadContext"], Path]
 type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _UploadRootfs
@@ -35,11 +40,18 @@ type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _Upload
 
 @dataclass(frozen=True, slots=True)
 class RootfsUploadContext:
-    """System-owned upload staging context for an uploaded rootfs."""
+    """Staging context for an investigation-scoped uploaded rootfs (ADR-0441).
+
+    Carries the provisioning System's id (for error attribution) and the profile's declared
+    ``checksum_sha256`` (the content address). The fetch resolves the System's own
+    ``investigation_id`` from the DB — the provision seam is connectionless, so investigation and
+    object-key resolution happen inside the fetch's short-lived sync connection, not here.
+    """
 
     tenant: str
     system_id: UUID
     upload_dir: Path
+    checksum_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +65,9 @@ class RootfsMaterializationContext:
     same-name multi-arch image resolves deterministically (ADR-0228); it is unused on the
     ``local``/``upload`` lanes.
 
-    ``upload_fetch`` downloads and checksum-verifies a System-owned uploaded rootfs object to a
-    local path (ADR-0434); it is ``None`` in lanes that never resolve an ``upload`` reference
+    ``upload_fetch`` downloads and checksum-verifies the investigation-scoped uploaded rootfs
+    object to a local path (ADR-0441); it is ``None`` in lanes that never resolve an ``upload``
+    reference
     (then an ``upload`` reference is a configuration error), mirroring ``catalog_fetch``.
     """
 
@@ -83,17 +96,8 @@ def materialize_rootfs_base(
     )
 
 
-def upload_rootfs_path(tenant: str, system_id: UUID | str, *, upload_dir: Path) -> Path:
-    """Return the local staging path for a System-owned uploaded rootfs object.
-
-    ``system_id`` accepts a ``str`` (like ``overlay_path`` / ``baseline_dir``) so a teardown
-    that only holds the domain name can reconstruct the path.
-    """
-    return upload_dir / f"{tenant}-systems-{system_id}-rootfs.qcow2"
-
-
 def _materialize_uploaded_rootfs(context: RootfsMaterializationContext) -> Path:
-    """Download + checksum-verify the System-owned uploaded rootfs to a local path (ADR-0434).
+    """Download + checksum-verify the investigation-scoped uploaded rootfs (ADR-0441).
 
     The download is injected (``context.upload_fetch``) so the synchronous provider seam stays
     connectionless; an unwired lane treats an ``upload`` reference as a configuration error.

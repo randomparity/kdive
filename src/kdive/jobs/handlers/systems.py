@@ -13,12 +13,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.registration import register_artifact_row
-from kdive.artifacts.storage import StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
-    ARTIFACTS,
     SNAPSHOTS,
     SYSTEMS,
     ObjectNotFound,
@@ -26,7 +22,6 @@ from kdive.db.repositories import (
     snapshot_by_name,
 )
 from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
@@ -49,7 +44,6 @@ from kdive.prereqs.system_bootstrap_key import (
     delete_system_bootstrap_key,
     ensure_system_bootstrap_key,
 )
-from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
@@ -144,40 +138,14 @@ async def open_billing_interval(conn: AsyncConnection, allocation_id: UUID) -> N
     )
 
 
-async def _commit_uploaded_rootfs(
-    conn: AsyncConnection,
-    system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore,
-) -> None:
-    """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
-    if not rootfs_upload_window_allowed(profile_policy, profile):
-        return
-    key = _uploaded_rootfs_key(system.id)
-    head = await asyncio.to_thread(artifact_store.head, key)
-    if head is None:
-        raise CategorizedError(
-            "upload-kind rootfs was never uploaded",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"system_id": str(system.id)},
-        )
-    stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "rootfs")
-    await ARTIFACTS.insert(
-        conn, register_artifact_row(stored, owner_kind="systems", owner_id=system.id)
-    )
-    await upload_manifest.delete_manifest(conn, "systems", system.id)
-
-
 async def _finalize_provision_ready(
     conn: AsyncConnection,
     job: Job,
     system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore,
 ) -> None:
-    await _commit_uploaded_rootfs(conn, system, profile, profile_policy, artifact_store)
+    # The investigation-scoped uploaded rootfs is committed at finalize
+    # (investigations.complete_rootfs_upload), before any System provisions (ADR-0441 §3), so
+    # provision only opens billing and audits the ready transition.
     await open_billing_interval(conn, system.allocation_id)
     await audit_transition(
         conn,
@@ -232,10 +200,7 @@ async def _commit_provision_result(
     conn: AsyncConnection,
     job: Job,
     system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
     domain_name: str,
-    artifact_store: ObjectStore,
 ) -> SystemState | None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
         current = await _locked_system_state(conn, system.id)
@@ -244,9 +209,7 @@ async def _commit_provision_result(
                 "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
                 (SystemState.READY.value, domain_name, system.id),
             )
-            await _finalize_provision_ready(
-                conn, job, system, profile, profile_policy, artifact_store
-            )
+            await _finalize_provision_ready(conn, job, system)
         return current
 
 
@@ -381,7 +344,6 @@ async def provision_handler(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry | None = None,
-    artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
@@ -403,18 +365,15 @@ async def provision_handler(
             )
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
-    artifact_store = artifact_store or object_store_from_env()
 
     async def _commit(
         conn: AsyncConnection,
         job: Job,
         system: System,
-        profile: ProvisioningProfile,
+        _profile: ProvisioningProfile,
         domain_name: str,
     ) -> SystemState | None:
-        return await _commit_provision_result(
-            conn, job, system, profile, runtime.profile_policy, domain_name, artifact_store
-        )
+        return await _commit_provision_result(conn, job, system, domain_name)
 
     return await _execute_system_lifecycle_call(
         conn,
@@ -700,41 +659,6 @@ async def _reclaim_sysrq_artifacts(
             await conn.execute(_DELETE_PART_ROWS_SQL, (system_id, _SYSRQ_DIAGNOSTIC_LIKE))
 
 
-_DELETE_ROOTFS_ROW_SQL: LiteralString = (
-    "DELETE FROM artifacts WHERE owner_kind = 'systems' AND owner_id = %s AND object_key = %s"
-)
-
-
-def _uploaded_rootfs_key(system_id: UUID) -> str:
-    # Committed under the local tenant (ADR-0048 §6, `_commit_uploaded_rootfs`).
-    return artifact_key("local", "systems", str(system_id), "rootfs")
-
-
-async def _delete_uploaded_rootfs_object(store: ObjectStore, system_id: UUID) -> None:
-    """Delete the System's uploaded rootfs object (best-effort) — ADR-0434 §4.
-
-    ``owner_kind='systems'`` objects are exempt from the #768 expiry reaper, so a torn-down
-    System's SENSITIVE uploaded rootfs must be reclaimed here. This byte-delete is best-effort (a
-    store fault must not block teardown, like the console/sysrq reclaim); the ``artifacts`` row —
-    the download handle — is deleted fail-loud in :func:`_delete_uploaded_rootfs_row`, so a store
-    fault leaves at most an unreferenced orphan, never a live download handle. A non-upload System
-    has no such object; the delete is a no-op.
-    """
-    await asyncio.to_thread(store.delete, _uploaded_rootfs_key(system_id))
-
-
-async def _delete_uploaded_rootfs_row(conn: AsyncConnection, system_id: UUID) -> None:
-    """Delete the uploaded rootfs ``artifacts`` row (fail-loud) so the download handle is revoked.
-
-    Anchored on the exact object key, so a non-upload System (no such row) is a no-op and an
-    at-least-once teardown redelivery is idempotent. Fail-loud like ``delete_system_bootstrap_key``
-    (a stale row after teardown would keep the SENSITIVE rootfs downloadable), so it runs outside
-    the best-effort reclaim block.
-    """
-    async with conn.transaction():
-        await conn.execute(_DELETE_ROOTFS_ROW_SQL, (system_id, _uploaded_rootfs_key(system_id)))
-
-
 async def _reclaim_snapshots(
     conn: AsyncConnection, snapshotter: Snapshotter | None, system_id: UUID, domain_name: str
 ) -> None:
@@ -798,10 +722,11 @@ async def teardown_handler(
     # SSH-reachable, so it is not swallowed by the best-effort try/except that guards the reclaim.
     async with conn.transaction():
         await delete_system_bootstrap_key(conn, system_id)
-    # Revoke the uploaded-rootfs download handle fail-loud (ADR-0434 §4), like the bootstrap key:
-    # a stale artifacts row would keep the SENSITIVE image downloadable after teardown. The object
-    # bytes are reclaimed best-effort below.
-    await _delete_uploaded_rootfs_row(conn, system_id)
+    # The investigation-scoped uploaded rootfs (ADR-0441) is a SHARED, investigation-owned base
+    # reused across Systems, so teardown no longer reclaims it — the object + staged file + row are
+    # reclaimed by the close-driven/TTL reconciler sweeps under the overlay-absence liveness gate
+    # (gc_investigation_uploaded_rootfs / gc_expired_investigation_rootfs). A per-System teardown
+    # delete would drop a base a sibling System still boots.
     # Host-filesystem reclaim (ADR-0385): capture_traffic pcaps are written to local disk by QEMU
     # under pcap_dir(system_id), not the object store, so they are removed here rather than through
     # the object-store _reclaim_* helpers. rmtree ignore_errors makes it best-effort on its own, so
@@ -813,16 +738,6 @@ async def teardown_handler(
     except Exception:  # noqa: BLE001 - reclaim is best-effort; teardown must still succeed
         _log.warning(
             "best-effort System-artifact reclaim for system %s failed",
-            system_id,
-            exc_info=True,
-        )
-    # Isolated from the console/sysrq reclaim above: a fault there must not skip reclaiming the
-    # SENSITIVE uploaded-rootfs object, which no #768 reaper would ever collect (ADR-0434 §4).
-    try:
-        await _delete_uploaded_rootfs_object(artifact_store, system_id)
-    except Exception:  # noqa: BLE001 - object reclaim is best-effort; the row was already revoked
-        _log.warning(
-            "best-effort uploaded-rootfs object reclaim for system %s failed",
             system_id,
             exc_info=True,
         )
@@ -844,7 +759,6 @@ def register_handlers(
             job,
             resolver=resolver,
             secret_registry=secret_registry,
-            artifact_store=artifact_store,
         ),
     )
     registry.register(

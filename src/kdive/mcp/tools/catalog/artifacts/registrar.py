@@ -54,7 +54,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_find(app, pool)
     _register_artifacts_fetch_raw(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
-    _register_artifacts_create_system_upload(app, pool, resolver)
+    _register_artifacts_create_investigation_upload(app, pool, resolver)
     _register_artifacts_expected_uploads(app)
     _register_artifacts_feature_config_requirements(app)
 
@@ -241,8 +241,8 @@ def _register_artifacts_create_run_upload(
         single object larger than the 5 GiB single-PUT size limit, not a way to beat the clock.
 
         Build artifacts are uploaded as-is: a transport `encoding` (gzip) is not accepted on this
-        lane and is rejected at declaration — it is a systems-only (rootfs) surface. See
-        `artifacts.create_system_upload`.
+        lane and is rejected at declaration — it is a rootfs-only surface. See
+        `artifacts.create_investigation_upload`.
 
         Read-back: uploaded build artifacts are not returned by `artifacts.list` (that lists a
         System's redacted artifacts). To confirm what the Run holds after `runs.complete_build`,
@@ -257,16 +257,18 @@ def _register_artifacts_create_run_upload(
         )
 
 
-def _register_artifacts_create_system_upload(
+def _register_artifacts_create_investigation_upload(
     app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
 ) -> None:
     @app.tool(
-        name="artifacts.create_system_upload",
+        name="artifacts.create_investigation_upload",
         annotations=_docmeta.mutating(),
         meta={"maturity": "implemented"},
     )
-    async def artifacts_create_system_upload(
-        system_id: Annotated[str, Field(description="The DEFINED System id.")],
+    async def artifacts_create_investigation_upload(
+        investigation_id: Annotated[
+            str, Field(description="The OPEN or ACTIVE Investigation id to upload a rootfs for.")
+        ],
         artifacts: Annotated[
             list[artifact_uploads.ArtifactDeclaration],
             Field(
@@ -282,8 +284,13 @@ def _register_artifacts_create_system_upload(
             ),
         ],
     ) -> ToolResponse:
-        """Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the
-        System's project.
+        """Mint a presigned PUT for an Investigation's uploaded rootfs. Requires contributor on
+        the Investigation's project.
+
+        The rootfs is owned by the Investigation and reusable across every System bound to it: one
+        upload, referenced by content checksum, provisions many Systems and is fetched to the host
+        at most once. Finalize with `investigations.complete_rootfs_upload`, which returns the
+        `checksum_sha256` handle you put in each System's `{kind: "upload"}` rootfs profile.
 
         The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
         send exactly those headers on the PUT and nothing else — an HTTP client that injects its
@@ -310,13 +317,12 @@ def _register_artifacts_create_system_upload(
         verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
         `uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
         encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
-        (compressed) bytes. Omit `encoding` to upload a qcow2 directly. Encoding is a rootfs-only
-        surface — `artifacts.create_run_upload` rejects it.
+        (compressed) bytes. Omit `encoding` to upload a qcow2 directly.
         """
-        return await artifact_uploads.create_system_upload(
+        return await artifact_uploads.create_investigation_upload(
             pool,
             current_context(),
-            system_id=system_id,
+            investigation_id=investigation_id,
             artifacts=artifacts,
             resolver=resolver,
         )
