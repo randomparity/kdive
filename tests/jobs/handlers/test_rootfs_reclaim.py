@@ -16,6 +16,8 @@ import base64
 import hashlib
 import json
 import os
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -25,9 +27,13 @@ import pytest
 
 from kdive.artifacts.content_address import rootfs_object_token
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind, JobState
-from kdive.jobs.handlers.artifacts.rootfs_reclaim import reclaim_investigation_rootfs_handler
+from kdive.jobs.handlers.artifacts import rootfs_reclaim
+from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
+    ArtifactObjectDeleter,
+    reclaim_investigation_rootfs_handler,
+)
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from tests.reconciler.conftest import connect
 
@@ -157,7 +163,7 @@ async def _run_handler(
     migrated_url: str,
     inv: UUID,
     artifact_ids: list[UUID],
-    store: _RecordingStore,
+    store: ArtifactObjectDeleter,
     rootfs_dir: Path,
     uploads: Path,
 ) -> str | None:
@@ -508,9 +514,13 @@ def test_marker_survives_a_partially_drained_investigation(
     asyncio.run(_run())
 
 
-def test_one_fault_does_not_starve_the_other_checksums(migrated_url: str, tmp_path: Path) -> None:
-    # A real fault on one checksum still lets the rest drain, then fails the job so the stuck
-    # reclaim is durable and visible instead of a repeating WARN line.
+def test_the_first_fault_stops_the_loop_and_fails_the_job(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # A refusing store is a store-wide condition and the delete budget is per-call, so pressing on
+    # through the worklist would multiply that budget by its length while the worker slot and the
+    # INVESTIGATION lock stay held. The loop stops at the first real fault; the untouched checksums
+    # keep their rows and are re-attempted by the next sweep, and the job fails so it is visible.
     inv = uuid4()
 
     async def _run() -> None:
@@ -520,7 +530,7 @@ def test_one_fault_does_not_starve_the_other_checksums(migrated_url: str, tmp_pa
             inv = await _seed_investigation(seed, state="closed", closed=True)
             faulting = await _seed_rootfs_row(seed, inv)
             token_y = rootfs_object_token(_CHECKSUM_Y)
-            ok = await _seed_rootfs_row(
+            untouched = await _seed_rootfs_row(
                 seed, inv, key=f"local/investigations/{inv}/rootfs-{token_y}"
             )
         finally:
@@ -529,12 +539,13 @@ def test_one_fault_does_not_starve_the_other_checksums(migrated_url: str, tmp_pa
         store = _RecordingStore(fail_on=_object_key(inv))
 
         with pytest.raises(CategorizedError):
-            await _run_handler(migrated_url, inv, [faulting, ok], store, rootfs_dir, uploads)
+            await _run_handler(migrated_url, inv, [faulting, untouched], store, rootfs_dir, uploads)
 
+        assert store.deleted == []  # the second checksum was never attempted
         check = await connect(migrated_url)
         try:
             assert await _row_exists(check, faulting)  # deferred before its row delete
-            assert not await _row_exists(check, ok)  # the healthy checksum still drained
+            assert await _row_exists(check, untouched)
             assert await _marker(check, inv) is not None
         finally:
             await check.close()
@@ -586,6 +597,57 @@ def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_
         check = await connect(migrated_url)
         try:
             assert await _row_exists(check, artifact_id)
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_hung_store_delete_is_bounded_and_defers_the_checksum(
+    migrated_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The delete runs inside the transaction holding the INVESTIGATION lock, and the TTL backstop
+    # reclaims live open/active investigations — so an unbounded store call would stall a bind, a
+    # close, or a runs.create. The budget must fire, the checksum must defer with its row kept, and
+    # the TimeoutError must surface as the handler's INFRASTRUCTURE_FAILURE rather than escaping.
+    monkeypatch.setattr(rootfs_reclaim, "_STORE_DELETE_TIMEOUT_S", 0.2)
+    released = threading.Event()
+    inv = uuid4()
+
+    class _HangingStore:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def delete(self, key: str) -> None:
+            released.wait(timeout=30)
+            self.deleted.append(key)
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", closed=False)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _HangingStore()
+
+        try:
+            started = time.monotonic()
+            with pytest.raises(CategorizedError) as excinfo:
+                await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+            assert time.monotonic() - started < 10  # bounded well inside the real 10 s budget
+            assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        finally:
+            # Release before the loop shuts its executor down, or asyncio.run waits out the thread.
+            released.set()
+
+        assert not staged.exists()  # the local base went first, as ordered
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)  # deferred before the row delete
         finally:
             await check.close()
 

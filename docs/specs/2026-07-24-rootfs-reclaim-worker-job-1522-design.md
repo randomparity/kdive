@@ -42,7 +42,11 @@ drop-and-recreates `jobs_kind_check` with the new value appended, following
 ```python
 class ReclaimInvestigationRootfsPayload(_PayloadBase):
     investigation_id: str          # UUID
-    artifact_ids: list[str]        # the due rows the reconciler selected; UUIDs, non-empty
+    artifact_ids: list[str]        # the due rows the reconciler selected; UUIDs
+
+# An EMPTY list is deliberate, not a degenerate case: a past-grace investigation with no rootfs
+# rows still gets a job, because the handler's drain tail is the only path that reaps a
+# crash-orphaned `*.partial` and clears the marker.
 ```
 
 The kind is internal/platform: absent from `CONTRIBUTOR_CANCELABLE_JOB_KINDS` (so `jobs.cancel`
@@ -51,10 +55,10 @@ requires operator, fails closed) and absent from `OPT_IN_DESTRUCTIVE_JOB_KINDS`.
 ### Reconciler side — `reconciler/cleanup/gc.py`
 
 `gc_investigation_uploaded_rootfs` → `sweep_investigation_rootfs_reclaim(conn, grace)`:
-selects investigations whose `rootfs_cleanup_pending_at` is older than `grace` **and** that still
-have at least one `owner_kind='investigations'`/`retention_class='rootfs'` row, and enqueues one
-reclaim job per investigation carrying every such row's id. Returns the number of investigations
-for which a job was ensured.
+selects investigations whose `rootfs_cleanup_pending_at` is older than `grace` — no row-existence
+condition — and enqueues one reclaim job per investigation carrying every
+`owner_kind='investigations'`/`retention_class='rootfs'` row id it has, which may be none. Returns
+the number of jobs actually admitted.
 
 `gc_expired_investigation_rootfs` → `sweep_expired_investigation_rootfs_reclaim(conn, retention)`:
 selects rows past `retention` whose investigation is `open`/`active`, groups them by investigation,

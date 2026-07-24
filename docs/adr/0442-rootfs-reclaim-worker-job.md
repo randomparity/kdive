@@ -149,10 +149,16 @@ delete" is retained. What changes is how a real fault is **surfaced**. In the re
 `WARN` line, which is what let #1522 run for 5+ passes as nothing but log noise.
 
 Now: a checksum whose gate pins it is skipped and the job **succeeds** (having reclaimed the rest).
-A checksum that hits a real unlink or store fault is skipped, the remaining checksums are still
-attempted, and the job then **fails** — surfacing in the `jobs` table and in the worker's failure
-metrics. A reclaim that cannot make progress is a SENSITIVE-data-retention problem and must be
-loud, not a log line.
+A checksum that hits a real unlink or store fault ends the job's loop, and the job **fails** —
+surfacing in the `jobs` table and in the worker's failure metrics. A reclaim that cannot make
+progress is a SENSITIVE-data-retention problem and must be loud, not a log line.
+
+The first fault stops the loop rather than pressing on through the remaining checksums, because
+the conditions that produce one are store-wide or tree-wide (a refusing store, a permission wall on
+the staging directory), and the object-delete budget below is a *per-call* budget. Attempting every
+remaining checksum would multiply that budget by the worklist length while the worker slot and the
+`INVESTIGATION` lock stay held — turning one degraded dependency into worker-pool saturation.
+Nothing is lost by stopping: the surviving checksums keep their rows and the next sweep re-issues.
 
 Note the reach of that signal precisely: `jobs.list`'s `investigation_id` filter joins `runs` on
 `payload->>'run_id'`, and a reclaim job carries no `run_id`, so the job is listable **by kind**
@@ -274,8 +280,7 @@ SQL↔enum tie `test_migrate.py` asserts).
   quiet investigations: the TTL backstop reclaims **live** `open`/`active` ones by design. The
   delete is therefore given an explicit wall-clock budget (`_STORE_DELETE_TIMEOUT_S`), so a
   degraded store bounds the lock hold instead of stalling a bind for the client's whole retry
-  budget; a timeout is treated as a real fault (defer the checksum, keep the row), and the request
-  landing late afterwards is harmless because the retry is 404-tolerant. The upload reaper
+  budget; a timeout is treated as a real fault (defer the checksum, keep the row). The upload reaper
   (`cleanup/uploads.py`) sets the precedent for holding this lock across store calls, though its
   `investigations` arm is gated to terminal owners, so it does not by itself justify the live case.
 - A split reconciler/libvirt-host topology gains working local-libvirt reclaim, which ADR-0441 §6
@@ -296,6 +301,19 @@ SQL↔enum tie `test_migrate.py` asserts).
 - `ReconcileConfig` loses two fields and the two repair metrics are renamed from `*_gc_count` to
   `*_reclaims_enqueued`, because they now count enqueues rather than reclaimed bases. Naming them
   for what they count keeps the reconcile report honest.
+
+**Accepted residual — a delete that times out but lands.** The budget cancels the *wait*, not the
+request: a `DELETE` that exceeded the budget may still be applied by the store afterwards. Because
+the timeout defers the checksum, its `artifacts` row is kept — and under the file-first order the
+staged base is already unlinked. That leaves a window in which the row resolves to neither copy, so
+a provision referencing that checksum fails at `fetch_uploaded_rootfs` (an absent staged file, then
+an absent object) rather than degrading. The window is bounded and self-healing: the next reclaim
+finds the unlink `ENOENT` and the delete a 404, both success, and drops the row — at most one
+backoff interval plus a sweep. It is also unreachable on the close-driven arm, where the
+investigation is closed and bind is refused, so only the TTL backstop's live `open`/`active`
+investigations are exposed. Closing it fully would mean re-probing the object after a timeout,
+which widens the handler's store port from `delete` to a read surface for a bounded, self-healing
+case; that trade is not worth making here.
 
 ## Considered & rejected
 

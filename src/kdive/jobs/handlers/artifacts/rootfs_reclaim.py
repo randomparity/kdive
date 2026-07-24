@@ -45,9 +45,10 @@ _log = logging.getLogger(__name__)
 #: Wall-clock budget for one object-store delete. The delete runs inside the transaction holding the
 #: ``INVESTIGATION`` advisory lock, and the TTL backstop reclaims **live** ``open``/``active``
 #: investigations, so an untimed store call could stall a bind, a close, or a ``runs.create`` for as
-#: long as the client's own retry budget. A timeout is treated like any other real fault (defer the
-#: checksum, keep the row): the request may still land, which is harmless because the retry is
-#: 404-tolerant.
+#: long as the client's own retry budget. A timeout is treated like any other real fault: defer the
+#: checksum and keep its row, so the row-last contract holds. The abandoned request may still land,
+#: leaving a row whose object *and* staged base are both gone until the next reclaim drains it — a
+#: bounded residual, recorded in ADR-0442, not a silently-benign case.
 _STORE_DELETE_TIMEOUT_S = 10.0
 
 #: The state values of the pre-overlay/re-materialize referencer states — condition (b) of the
@@ -268,20 +269,26 @@ async def reclaim_investigation_rootfs_handler(
     A checksum the liveness gate pins is skipped and the job still succeeds — pinning is the
     expected steady state for the whole grace window, and dead-lettering the per-investigation
     reclaim slot on it would disable reclaim exactly when it is needed. A **real** unlink or store
-    fault is different: it means SENSITIVE bytes are not being reclaimed, so the remaining
-    checksums are still attempted and the job then fails, surfacing durably in the ``jobs`` table
-    instead of as a log line that repeats every pass (#1522).
+    fault is different: it means SENSITIVE bytes are not being reclaimed, so the job fails,
+    surfacing durably in the ``jobs`` table instead of as a log line that repeats every pass
+    (#1522).
+
+    The first real fault **ends the loop** rather than attempting the remaining checksums. A store
+    that is refusing or timing out is a store-wide condition, and the object-delete budget is a
+    per-call one, so pressing on would burn that budget once per remaining checksum while the worker
+    slot — and the ``INVESTIGATION`` lock — stay held. Nothing is lost: the surviving checksums keep
+    their rows and are re-attempted by the next sweep, which is the retry loop.
 
     Returns the number of drained checksums as the job's ``result_ref``.
 
     Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` when any checksum hit a real unlink or
-            store fault.
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` when a checksum hit a real unlink or store
+            fault.
     """
     payload = load_payload(job, ReclaimInvestigationRootfsPayload)
     investigation_id = UUID(payload.investigation_id)
     reclaimed = 0
-    faults = 0
+    faulted = False
     for raw_artifact_id in payload.artifact_ids:
         outcome = await _reclaim_one_checksum(
             conn,
@@ -294,16 +301,17 @@ async def reclaim_investigation_rootfs_handler(
         if outcome is True:
             reclaimed += 1
         elif outcome is False:
-            faults += 1
+            faulted = True
+            break
     await _finish_drained_investigation(conn, investigation_id, uploads_dir=uploads_dir)
     if reclaimed:
         _log.info(
             "reclaimed %d uploaded rootfs base(s) for investigation %s", reclaimed, investigation_id
         )
-    if faults:
+    if faulted:
         raise CategorizedError(
-            f"{faults} uploaded rootfs base(s) of investigation {investigation_id} could not be "
-            "reclaimed; the staged base or its object survives and the artifacts row is retained",
+            f"reclaiming an uploaded rootfs base of investigation {investigation_id} failed; its "
+            "artifacts row is retained and the remaining bases are deferred to the next sweep",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
     return str(reclaimed)
