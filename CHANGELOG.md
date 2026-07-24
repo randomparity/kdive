@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add ADR-0435 for reclaiming failed-provision artifacts
 - ADR-0437 transport-encoding vs payload-format model
 - ADR-0440 remote-libvirt supplied rootfs staging (#1433)
+- Regenerate systems profile schema for base_image_source (#1433)
+- Drop ADR refs from RemoteLibvirtProfile schema description (#1433)
 
 ### Fixed
 
@@ -88,6 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject chunked rootfs upload for local-libvirt Systems
 - Fail closed on trailing data after the gzip member
 - Name an unsupported transport encoding instead of staging it
+- Reclaim a staged base volume on overlay-create failure (#1433)
 
 ### Build
 
