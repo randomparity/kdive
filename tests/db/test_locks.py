@@ -275,6 +275,9 @@ def test_session_lock_released_on_connection_loss(postgres_url: str) -> None:
         assert await leader.try_acquire() is True
         await a.close()  # simulate a dropped leader connection
         async with await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as b:
+            # Same reap-is-not-close race as the observer test below: Postgres frees the
+            # lock when a's backend exits, not when a.close() returns.
+            await wait_until_session_lock_released(b, CONSOLE_HOSTING_LEADER)
             standby = SessionAdvisoryLock(b, CONSOLE_HOSTING_LEADER)
             assert await standby.try_acquire() is True
             await standby.release()
