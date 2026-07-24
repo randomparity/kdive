@@ -303,12 +303,19 @@ a startup co-location gate:
   next pass — never read a missing root as "all overlays gone"). A reconciler that cannot see the host FS
   reclaims **nothing** (defers every pass) rather than unlinking bases under live guests — fail-safe — and a
   host that *gains* the dirs later reclaims without a restart (unlike a one-shot startup gate).
-- **Ensure-create.** `ROOTFS_DIR`/`UPLOADS_DIR` are created lazily on first provision, so the reconciler
-  **ensure-creates** them at startup (host-local, owned by this deployment) so a fresh host that has not yet
-  provisioned still reclaims.
-- **Topology.** For local-libvirt (single-host M0/M1) the reconciler is host-local, so reclaim runs; a split
-  reconciler/libvirt-host topology simply defers rootfs reclaim (consistent with `console_rotation`'s own
-  non-co-location tolerance) until the deferred remote lane (decision 8) designs remote reclaim.
+- **Directory existence is the co-location signal — the reconciler does NOT ensure-create.** The probe's
+  safety rests on `ROOTFS_DIR`/`UPLOADS_DIR` being **absent** on a reconciler that does not share the guests'
+  filesystem, so `os.stat` fails and the pass defers. The reconciler therefore must **not** `mkdir` these
+  roots at startup: a force-created *empty* dir on a non-co-located reconciler would make the probe read
+  "accessible", every overlay then stat as absent, and the sweep delete SENSITIVE bases still backing live
+  guests on the real host. The dirs are created lazily by the co-located provision path (`storage.py`), so a
+  host with anything to reclaim already has them; a pristine, never-provisioned host has no committed base to
+  reclaim, so deferring until its first provision creates the dirs is harmless.
+- **Topology.** For local-libvirt (single-host M0/M1) the reconciler is host-local, so its dirs exist once it
+  has provisioned and reclaim runs; a split reconciler/libvirt-host topology has no such dirs and simply
+  defers rootfs reclaim (consistent with `console_rotation`'s own non-co-location tolerance) until the
+  deferred remote lane (decision 8) designs remote reclaim. Local-libvirt reclaim therefore **requires** the
+  reconciler be co-located with the guest host — the fail-closed probe enforces this rather than assuming it.
 
 The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
 exact thing that holds the base open as a qcow2 backing file (ADR-0060) — no state value is a faithful

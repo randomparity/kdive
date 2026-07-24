@@ -116,18 +116,6 @@ def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: 
     return upload_dir / str(investigation_id) / f"{token}.qcow2"
 
 
-def ensure_rootfs_dirs() -> None:
-    """Ensure-create the host-local rootfs/overlay + uploads staging roots (ADR-0441 §6).
-
-    :data:`ROOTFS_DIR`/:data:`UPLOADS_DIR` are otherwise created lazily on the first provision, so
-    the reconciler ensure-creates them at startup — a fresh, not-yet-provisioned host must reclaim
-    too. Idempotent; a create fault surfaces to the caller (the reconciler startup logs it and the
-    per-pass fail-closed probe then defers reclaim rather than mass-deleting).
-    """
-    Path(ROOTFS_DIR).mkdir(parents=True, exist_ok=True)
-    Path(UPLOADS_DIR).mkdir(parents=True, exist_ok=True)
-
-
 def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
 

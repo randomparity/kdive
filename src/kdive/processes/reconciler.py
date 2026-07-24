@@ -104,16 +104,7 @@ async def run_reconciler_with_composition(
     upload_store: ObjectStore,
 ) -> None:
     from kdive.observability.console_telemetry import ConsoleTelemetry
-    from kdive.providers.shared.runtime_paths import ensure_rootfs_dirs
     from kdive.reconciler.loop import Reconciler
-
-    # Ensure-create the host-local rootfs staging roots (ADR-0441 §6): they are otherwise created
-    # lazily on the first provision, so a fresh host must still be able to reclaim. A create fault
-    # is logged, not fatal — the sweeps' per-pass fail-closed probe then defers reclaim.
-    try:
-        ensure_rootfs_dirs()
-    except OSError:
-        _log.warning("reconciler: could not ensure-create rootfs staging dirs", exc_info=True)
 
     console_hosting = await provider_composition.build_reconciler_console_hosting(
         console_telemetry=ConsoleTelemetry(
