@@ -130,11 +130,21 @@ The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
   re-homed from `create_system_upload` so the >5 GiB gzip-rootfs surface does not silently regress to an
   unadvertised field.
 - **`investigations.complete_rootfs_upload(investigation_id)`** — the explicit finalize (symmetric with
-  `runs.complete_build`): HEADs the object for its stored checksum, verifies it is present and
-  checksum-bearing, writes the `owner_kind='investigations'` `artifacts` row via **`INSERT … ON CONFLICT
-  DO NOTHING`** against a **UNIQUE index on `object_key`** (migration 0076) so two concurrent finalizes
-  (retries, or two agents) converge on **one** row rather than inserting duplicate rows for the same
-  content-addressed key, then re-SELECTs and returns the **`checksum_sha256` handle** the agent puts in
+  `runs.complete_build`). It runs **under the investigation lock** and requires the investigation
+  **OPEN/ACTIVE**: this serializes with `close_investigation` (which takes the same lock), so a finalize
+  cannot land a committed row on an already-closed investigation that neither sweep would collect (the
+  close-driven sweep keys on a since-cleared `rootfs_cleanup_pending_at`; the TTL backstop skips closed
+  investigations). A finalize that loses the race sees the terminal state and is **rejected**
+  (`configuration_error`), leaving the manifest for the re-scoped manifest reaper; a finalize that wins
+  commits the row while still OPEN, and a subsequent close sets `rootfs_cleanup_pending_at` so the row is
+  reclaimed. It HEADs the object for its stored checksum, **asserts the HEAD checksum equals the declared
+  checksum** the `object_key` was minted from (a mismatch — a store checksum-encoding surprise — fails
+  `configuration_error` at finalize rather than as a silent permanent resolution miss at every later
+  provision; single-PUT makes this an invariant, asserted defensively), writes the
+  `owner_kind='investigations'` `artifacts` row via **`INSERT … ON CONFLICT DO NOTHING`** against a
+  **UNIQUE index on `object_key`** (migration 0076) so two concurrent finalizes (retries, or two agents)
+  converge on **one** row rather than inserting duplicate rows for the same content-addressed key, then
+  re-SELECTs and returns the **`checksum_sha256` handle** the agent puts in
   each System's profile. The row also **persists the transport `encoding` + `uncompressed_size`** copied
   from the manifest entry: ADR-0438 keeps those only in the ephemeral `upload_manifests` JSONB, but finalize
   deletes the manifest and provision now resolves the durable row, so without this a gzip investigation
@@ -190,7 +200,11 @@ lock:
 - **Unique per-fetcher `.partial`** — each download writes a `<token>.<uuid>.partial` and `os.replace`s it
   onto the shared `<token>.qcow2` only after the SHA-256 + qcow2-magic verify. Two concurrent downloaders
   therefore **never** share a partial, so neither can corrupt the other regardless of the lock. This is
-  the correctness guarantee.
+  the correctness guarantee. The fetcher unlinks its own `.partial` in a `finally` on any verify/download
+  failure; a **crash-orphaned** `.partial` (a killed worker) is a SENSITIVE multi-GiB leak that no row
+  owns, so the reclaim sweep globs and unlinks stale `<token>.*.partial` under `rootfs-uploads/<inv>/`
+  **before** attempting the empty-dir removal (else a leftover partial keeps the dir non-empty and both
+  the partial and the dir persist forever — the #1501 orphan class, for temp files).
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's
@@ -243,18 +257,26 @@ backing-file hazard — a filesystem probe), **and** (b) it is **not** in a pre-
 non-terminal state — `defined`, `provisioning`, `reprovisioning`, or `restoring` — each of which can read
 or re-create against the base with the overlay momentarily absent (the ADR-0435 `provisioning`-exclusion
 hazard, generalized to every state whose handler re-materializes the base). When both hold, reclaim in a
-**pinned order that never strands the file**: delete the object (best-effort), then **unlink the staged
-base** under `rootfs-uploads/<inv>/` (a real unlink error defers the whole checksum, `drained=False`), and
-**only then** delete the `artifacts` row (fail-loud-in-txn, ADR-0234/0434). The row is the worklist anchor,
-so removing it **last** guarantees a failed unlink never orphans a SENSITIVE base file with no row for a
-future sweep to find. The object delete and the unlink are **idempotent** — an already-absent target
-(S3 404, filesystem `ENOENT`) counts as **success**, not a defer — so the complementary partial failure
-(unlink succeeds, then the row-delete txn rolls back) converges: the next pass finds object and file gone,
-treats both as done, and completes the row delete, rather than wedging forever on a missing-file "failure". Gate fails → skip
+**pinned order that never strands the file**: delete the object, then **unlink the staged base** under
+`rootfs-uploads/<inv>/`, and **only then** delete the `artifacts` row (fail-loud-in-txn, ADR-0234/0434).
+Both the object delete and the unlink have the **same fault contract**: an already-absent target (S3 404,
+filesystem `ENOENT`) is **success**; any **real** fault (a non-404 store error, a real unlink error)
+**defers the whole checksum** (`drained=False`, row kept) *before* the row delete — so a genuine
+object-store fault never lets the sweep continue on to drop the row while the SENSITIVE object survives
+(which would orphan it beyond any reaper, since the row is the only worklist/download handle).
+"Best-effort" here means "404-tolerant", **not** "continue past a real fault". The row is the worklist
+anchor, so removing it **last** guarantees a failed object-delete or unlink never orphans a SENSITIVE
+object/file with no row. Idempotency + defer-on-fault together make every partial failure converge: a
+next pass finds the already-done steps absent (success) and completes the row delete, rather than wedging. Gate fails → skip
 the checksum this pass (`drained=False`, retried next); remove the empty `rootfs-uploads/<inv>/` dir once
 drained. Condition (b) matters mainly for the TTL backstop, which fires on never-closed investigations with
 no close-time block; the close-driven sweep already sees no `defined`/`provisioning` System because
-default close blocks on them (decision 7).
+default close blocks on them (decision 7). Condition (b) is the one place the gate trusts *state* rather
+than the overlay probe, so its allowlist is a **named constant co-located with the `SystemState`
+definition**, guarded by a **structural CI test that fails when a new non-terminal state is added without
+being classified** as base-re-materializing (in the set) or not — so a future state that re-creates the
+base with its overlay momentarily absent cannot silently escape the gate and have its base unlinked under
+an about-to-open backing file.
 
 **Referencer enumeration.** A System is bound to an investigation by `investigation_id`, not to a
 checksum, and one investigation can own several bases (multi-arch) while a bound System may reference a
@@ -297,16 +319,16 @@ deadline.
 
 - **Default:** if any bound System is in a non-terminal state, close **fails** with a
   `configuration_error` listing them and refuses — the investigation stays OPEN/ACTIVE.
-- **`close(force=True)`:** **all-or-nothing.** First validate admin on **every** bound live System's
-  project; only if all pass, enqueue all teardown jobs and close (set both markers — `cleanup_pending_at`
-  for the build-artifact sweep, `rootfs_cleanup_pending_at` for the rootfs sweep, decision 6) in one
-  transaction. Any failure — a System the caller lacks admin on, or an enqueue error — aborts the whole
-  `force` with **zero** teardowns enqueued and the investigation unchanged, listing the offending System.
-  Enqueuing teardowns as the loop iterates and only then hitting a no-admin System would leave some
-  Systems reaped while nothing closed — a destructive side effect on a failing call, which the
-  validate-all-first order forecloses. `force` **requires admin on each bound System's project** because a
-  System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while `investigations.close` is
-  `_CONTRIBUTOR` — same tier, so `force` is not a contributor→admin escalation backdoor.
+- **`close(force=True)`:** **all-or-nothing.** `force` requires admin on the bound Systems' project. Every
+  bound System shares the investigation's project (the same-project binding invariant, decision 2), so this
+  is a **single per-project admin check** — either the caller has it (all pass) or not (all fail); there is
+  no per-System admin variance. The all-or-nothing order still matters for the **enqueue step**: validate
+  admin, then enqueue *all* teardown jobs and close (set both markers — `cleanup_pending_at` for the
+  build-artifact sweep, `rootfs_cleanup_pending_at` for the rootfs sweep, decision 6) in one transaction,
+  so an enqueue error on one of several teardowns aborts with **zero** enqueued and the investigation
+  unchanged, never leaving some Systems reaped while nothing closed. `force` is `_ADMIN` because a System
+  teardown is `_ADMIN` (`systems.teardown`, exposure.py) while `investigations.close` is `_CONTRIBUTOR` —
+  same tier, so `force` is not a contributor→admin escalation backdoor.
 
 The role tiers mean the same-project binding rule (decision 2) forecloses only the *cross-project*
 deadlock, not an intra-project one: a same-project **contributor** who opened the investigation can

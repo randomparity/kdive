@@ -71,14 +71,14 @@ deprecate"). Keep the whole branch green at each commit.
 - **Fits:** ADR-0441 §3 — the explicit commit that writes the durable row Systems reference.
 - **Files:** `src/kdive/mcp/tools/lifecycle/investigations/…` (new handler); `artifacts/registration.py`
   (write `owner_kind='investigations'`, `retention_class='rootfs'`); reuse the ADR-0434 §2 HEAD-verify.
-- **Do:** HEAD the object (`ChecksumMode=ENABLED`); reject missing/checksum-less (`configuration_error`);
-  write the row via **`INSERT … ON CONFLICT DO NOTHING`** against the Task 1.1 partial UNIQUE index on
-  `object_key`, **including `encoding`/`uncompressed_size` copied from the manifest entry** (so a
-  post-finalize gzip provision can recover them), then **re-SELECT** and return `data.checksum_sha256`
-  (canonical base64); delete the manifest. Concurrent finalizes converge on one row.
-- **Acceptance:** spec AC-4 (row written incl. encoding, manifest deleted, handle returned, idempotent
-  re-call **and under two concurrent calls → exactly one row**), AC-4c (gzip upload recoverable after
-  finalize).
+- **Do:** run **under the investigation lock**, require OPEN/ACTIVE (serialize with `close_investigation`;
+  terminal → `configuration_error`, leave manifest for the reaper); HEAD (`ChecksumMode=ENABLED`); reject
+  missing/checksum-less; **assert HEAD checksum == declared** (mismatch → `configuration_error`); write the
+  row via **`INSERT … ON CONFLICT DO NOTHING`** against the Task 1.1 partial UNIQUE index on `object_key`,
+  **including `encoding`/`uncompressed_size` from the manifest entry**, then **re-SELECT** and return
+  `data.checksum_sha256`; delete the manifest.
+- **Acceptance:** spec AC-4 (row incl. encoding, idempotent, concurrent → one row), AC-4c (gzip recoverable),
+  AC-4d (finalize-vs-close: no orphaned object either ordering).
 
 ### Task 2.3 — Remove the System-scoped upload path
 - **Fits:** ADR-0441 §3 — replace, not deprecate.
@@ -129,7 +129,7 @@ deprecate"). Keep the whole branch green at each commit.
   session-scoped `pg_advisory_lock`** keyed via `db.locks._session_lock_key(f"rootfs-fetch:{inv}:{token}")`
   (the **session** keyspace helper, salted apart from `_lock_key`; dedup — NOT `_lock_key`, NOT Python
   `hash()`; NOT `advisory_xact_lock`, which holds a txn open across the download) with a post-acquire `dest`
-  re-check.
+  re-check. Unlink the own `<token>.<uuid>.partial` in a `finally` on any failure.
 - **Acceptance:** spec AC-1 (one download for two Systems, sequential **and cross-process concurrent**),
   AC-2 (isolation), AC-4b (resolve-by-object_key + transcode), AC-4c (gzip stripped from row encoding).
 - **Watch:** `_lock_key` (blake2b, deterministic) not `hash()` — the cross-process AC-1 test must run two
@@ -155,9 +155,12 @@ deprecate"). Keep the whole branch green at each commit.
   a `systems.state` read), **and** (b) it is **not** `defined`/`provisioning`/`reprovisioning`/`restoring`
   (states that may read/re-materialize against the base with the overlay momentarily absent). Reclaim in
   **pinned order**: object (best-effort) → **unlink file** (failure defers, `drained=False`) → row
-  (fail-loud-in-txn, **last** — the worklist anchor). **Object-delete and unlink are idempotent** (S3 404 /
-  `ENOENT` = success, not a defer) so an unlink-then-row-delete-rollback re-runs to a clean drain. Gate
-  fails → skip the checksum; remove the empty `rootfs-uploads/<inv>/` dir when drained.
+  (fail-loud-in-txn, **last** — the worklist anchor). Object-delete + unlink share one fault contract: **404/`ENOENT`
+  = success**, any **real** fault **defers** the whole checksum (`drained=False`, row kept) *before* the row
+  delete (so "best-effort" ≠ "continue past a fault and drop the row"). Idempotency + defer-on-fault →
+  every partial failure reconverges. **Glob-unlink stale `<token>.*.partial`** before removing the empty
+  `rootfs-uploads/<inv>/` dir (crash-orphan cleanup). Condition-(b) state set = a **named constant beside
+  `SystemState`** + a **structural drift-guard test** (new non-terminal state must be classified).
 - **Referencer enumeration (per checksum X):** `systems WHERE investigation_id=<inv> AND state<>'torn_down'`,
   parse each `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}`
   (unparseable / no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X — so one
@@ -170,8 +173,9 @@ deprecate"). Keep the whole branch green at each commit.
   independence** — a drained build artifact nulling `cleanup_pending_at` does not starve the rootfs sweep),
   AC-8e (**pinned-order** — a forced `unlink` failure keeps the row + retries), AC-8f (**enumeration** — an
   unrelated bound live System referencing a different checksum/catalog does not pin X), AC-8g (**idempotent
-  reconverge** — object/file gone + row-delete-failed re-runs to a clean drain), AC-10 (residual committed
-  + stale-window object collected).
+  reconverge** — object/file gone + row-delete-failed re-runs to a clean drain; non-404 fault defers),
+  AC-8h (**crash-`.partial`** — stale `<token>.*.partial` swept before empty-dir removal), AC-10 (residual
+  committed + stale-window object collected).
 - **Watch:** gate on overlay-file **absence**, not `systems.state`. `SystemState.FAILED` is a terminal
   sink (no `→torn_down`) and is excluded from `repair_orphaned_systems`, so a state gate pins a `failed`
   System's base forever and defeats the TTL backstop. The AC-8 test must include a `failed` referencer and
@@ -201,13 +205,13 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/services/investigations/lifecycle.py` + `mcp/tools/lifecycle/investigations/lifecycle.py`
   (add `force: bool = False`); enumerate `systems WHERE investigation_id=<inv> AND state NOT IN terminal`.
 - **Do:** default ⇒ live present → `configuration_error` listing ids, refuse. force ⇒ **all-or-nothing**:
-  validate **admin on every** bound live System's project first (matching `systems.teardown`'s `_ADMIN` —
-  no contributor→admin escalation); only if all pass, enqueue all teardowns + close + set **both**
-  `cleanup_pending_at` **and** `rootfs_cleanup_pending_at` in one txn. Any failure (missing admin / enqueue
-  error) aborts with **zero** teardowns, listing the offending System. Any successful close sets both
-  markers. Never consider NULL-investigation Systems.
-- **Acceptance:** spec AC-5 (block+list), AC-6 (force enqueues teardown + closes; **atomic — a partial-admin
-  force enqueues zero teardowns**). RBAC: force teardown is
+  admin is a **single per-project check** (all bound Systems share the investigation's project — same-project
+  invariant — so no per-System variance); matching `systems.teardown`'s `_ADMIN` (no escalation). If admin
+  passes, enqueue all teardowns + close + set **both** `cleanup_pending_at` **and** `rootfs_cleanup_pending_at`
+  in one txn; an **enqueue error** aborts with **zero** teardowns, investigation unchanged. Any successful
+  close sets both markers. Never consider NULL-investigation Systems.
+- **Acceptance:** spec AC-5 (block+list), AC-6 (force enqueues teardown + closes; single-project admin
+  fails wholesale; **atomic — an enqueue error enqueues zero teardowns**). RBAC: force teardown is
   destructive — **admin** per System project (assert a same-project contributor cannot force-teardown a
   bound System — no escalation).
 - **Watch:** `investigations.close` is `_CONTRIBUTOR`, `systems.teardown` is `_ADMIN` (exposure.py). Force
