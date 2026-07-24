@@ -355,8 +355,8 @@ def _register_artifacts_create_investigation_upload(
 
         The rootfs is owned by the Investigation and reusable across every System bound to it: one
         upload, referenced by content checksum, provisions many Systems and is fetched to the host
-        at most once. Finalizing the upload returns the `checksum_sha256` handle you put in each
-        System's `{kind: "upload"}` rootfs profile.
+        at most once. Finalize with `investigations.complete_rootfs_upload`, which returns the
+        `checksum_sha256` handle you put in each System's `{kind: "upload"}` rootfs profile.
 
         The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
         send exactly those headers on the PUT and nothing else — an HTTP client that injects its

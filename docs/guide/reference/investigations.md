@@ -17,6 +17,27 @@ separate field from the description, and closing without a non-empty summary fai
 | `investigation_id` | string | yes | The Investigation to drive to closed. |
 | `summary` | string | yes | Required account of the investigation's work, recorded on the row at close. Must be non-empty; summarize what was found and the outcome. Distinct from the anytime-editable description; a blank summary is rejected. |
 
+## `investigations.complete_rootfs_upload`
+
+`implemented`
+
+Finalize an uploaded rootfs and return the `checksum_sha256` handle for profiles.
+
+Call this after PUTting the object minted by `artifacts.create_investigation_upload`. It
+verifies the stored object against the declared checksum and writes the durable record the
+rootfs is resolved from, then returns `data.checksum_sha256` — the value you put in each
+System's `{kind: "upload", checksum_sha256: ...}` rootfs profile. The upload must be
+finalized before any System referencing it provisions.
+
+The Investigation must be open or active; finalizing a closed Investigation is rejected.
+Requires contributor on the Investigation's project. A missing object, an object with no
+stored checksum, or a checksum that does not match the declaration is rejected with
+`configuration_error` so the mismatch surfaces here, not at a later provision.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `investigation_id` | string | yes | The Investigation whose uploaded rootfs to finalize. |
+
 ## `investigations.get`
 
 `implemented` · `read-only`

@@ -73,6 +73,7 @@
 | [`inventory.clear_override`](inventory.md#inventoryclear_override) | `implemented` |
 | [`inventory.list`](inventory.md#inventorylist) | `implemented` |
 | [`investigations.close`](investigations.md#investigationsclose) | `implemented` |
+| [`investigations.complete_rootfs_upload`](investigations.md#investigationscomplete_rootfs_upload) | `implemented` |
 | [`investigations.get`](investigations.md#investigationsget) | `implemented` |
 | [`investigations.link`](investigations.md#investigationslink) | `implemented` |
 | [`investigations.list`](investigations.md#investigationslist) | `implemented` |

@@ -168,6 +168,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "investigations.list": _VIEWER,
     "investigations.open": _CONTRIBUTOR,
     "investigations.close": _CONTRIBUTOR,
+    "investigations.complete_rootfs_upload": _CONTRIBUTOR,  # investigation-scoped rootfs (ADR-0441)
     "investigations.link": _CONTRIBUTOR,
     "investigations.unlink": _CONTRIBUTOR,
     "investigations.set": _CONTRIBUTOR,

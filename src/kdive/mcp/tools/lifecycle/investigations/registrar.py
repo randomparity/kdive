@@ -20,6 +20,9 @@ from kdive.mcp.tools.lifecycle.investigations.common import (
     ExternalRefInput,
     ExternalRefKey,
 )
+from kdive.mcp.tools.lifecycle.investigations.complete_rootfs_upload import (
+    complete_rootfs_upload,
+)
 from kdive.mcp.tools.lifecycle.investigations.lifecycle import (
     InvestigationOpenRequest,
     close_investigation,
@@ -60,6 +63,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     _register_investigations_open(app, pool)
     _register_investigations_get(app, pool)
     _register_investigations_close(app, pool)
+    _register_investigations_complete_rootfs_upload(app, pool)
     _register_investigations_link(app, pool)
     _register_investigations_unlink(app, pool)
     _register_investigations_set(app, pool)
@@ -154,6 +158,35 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
         separate field from the description, and closing without a non-empty summary fails.
         """
         return await close_investigation(pool, current_context(), investigation_id, summary)
+
+
+def _register_investigations_complete_rootfs_upload(
+    app: FastMCP, pool: AsyncConnectionPool
+) -> None:
+    @app.tool(
+        name="investigations.complete_rootfs_upload",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def investigations_complete_rootfs_upload(
+        investigation_id: Annotated[
+            str, Field(description="The Investigation whose uploaded rootfs to finalize.")
+        ],
+    ) -> ToolResponse:
+        """Finalize an uploaded rootfs and return the `checksum_sha256` handle for profiles.
+
+        Call this after PUTting the object minted by `artifacts.create_investigation_upload`. It
+        verifies the stored object against the declared checksum and writes the durable record the
+        rootfs is resolved from, then returns `data.checksum_sha256` — the value you put in each
+        System's `{kind: "upload", checksum_sha256: ...}` rootfs profile. The upload must be
+        finalized before any System referencing it provisions.
+
+        The Investigation must be open or active; finalizing a closed Investigation is rejected.
+        Requires contributor on the Investigation's project. A missing object, an object with no
+        stored checksum, or a checksum that does not match the declaration is rejected with
+        `configuration_error` so the mismatch surfaces here, not at a later provision.
+        """
+        return await complete_rootfs_upload(pool, current_context(), investigation_id)
 
 
 def _register_investigations_link(app: FastMCP, pool: AsyncConnectionPool) -> None:

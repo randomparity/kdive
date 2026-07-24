@@ -113,6 +113,9 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "inventory.clear_override": ("tests/mcp/ops/test_inventory_clear_override.py",),
     "inventory.list": ("tests/mcp/ops/test_inventory_list.py",),
     "investigations.close": ("tests/mcp/lifecycle/test_investigations_tools.py",),
+    "investigations.complete_rootfs_upload": (
+        "tests/mcp/lifecycle/test_complete_rootfs_upload_tool.py",
+    ),
     "investigations.get": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "investigations.link": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "investigations.list": ("tests/mcp/lifecycle/test_investigations_tools.py",),

@@ -201,6 +201,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     # investigations
     "investigations.open": frozenset({"investigation", "open", "create", "start"}),
     "investigations.close": frozenset({"investigation", "close", "finish", "end"}),
+    "investigations.complete_rootfs_upload": frozenset(
+        {"investigation", "rootfs", "upload", "finalize", "complete"}
+    ),
     "investigations.get": frozenset({"investigation", "get", "status", "fetch"}),
     "investigations.list": frozenset({"investigations", "list", "filter"}),
 }

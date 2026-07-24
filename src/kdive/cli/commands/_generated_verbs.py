@@ -2221,6 +2221,27 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
     ),
     GeneratedVerb(
         group="investigations",
+        sub="complete-rootfs-upload",
+        tool="investigations.complete_rootfs_upload",
+        read_only=False,
+        destructive=False,
+        help="Finalize an uploaded rootfs and return the `checksum_sha256` handle for profiles.",
+        unwrap_request=False,
+        flags=(
+            GeneratedFlag(
+                name="--investigation-id",
+                dest="investigation_id",
+                required=True,
+                help="The Investigation whose uploaded rootfs to finalize.",
+                arg_type="str",
+                action=None,
+                choices=(),
+            ),
+        ),
+        json_params=(),
+    ),
+    GeneratedVerb(
+        group="investigations",
         sub="get",
         tool="investigations.get",
         read_only=True,
