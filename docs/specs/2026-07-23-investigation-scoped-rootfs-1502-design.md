@@ -130,10 +130,11 @@ gzip-rootfs surface does not silently regress to an unadvertised field.
 - **Concurrent-fetch guards (layered — correctness never depends on the lock):**
   - **Unique per-fetcher `.partial`** (`<token>.<uuid>.partial`, `os.replace`d after verify) so two
     concurrent downloaders never share a partial — the correctness guarantee against corruption, lock or no.
-    The fetcher unlinks its own `.partial` in a `finally` on failure; a **crash-orphaned** `.partial` (a
-    killed worker) is a SENSITIVE leak no row owns, so the reclaim sweep globs+unlinks stale
-    `<token>.*.partial` under `rootfs-uploads/<inv>/` **before** the empty-dir removal (else it keeps the
-    dir non-empty forever).
+    The fetcher unlinks its own `.partial` in a `finally` on failure. A **crash-orphaned** `.partial` (a
+    killed worker) is collected on two paths: **opportunistically** by the next fetcher (which, under the
+    serializing lock, glob-unlinks other `<token>.*.partial` — no live sibling can exist), and as a
+    **backstop** by the reclaim sweep (glob before empty-dir removal). Bounded by the next fetch, not only
+    by full investigation reclaim.
   - **Deterministic session-scoped advisory lock** to avoid the redundant multi-GiB download ("written
     once"): `pg_advisory_lock` on the fetch's dedicated sync connection, held across check-and-download,
     keyed via the **session** keyspace helper `db.locks._session_lock_key(f"rootfs-fetch:{inv}:{token}")`
@@ -249,7 +250,7 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | Object missing / checksum-less at finalize | `configuration_error` (mirrors old `_commit_uploaded_rootfs`) |
 | HEAD checksum ≠ declared checksum at finalize | `configuration_error` now, not a silent resolution miss at every provision |
 | Finalize races an investigation close | under the investigation lock, requires OPEN/ACTIVE — lost race rejects (manifest reaped), won race commits while OPEN + close marks it for reclaim |
-| Crashed download leaves a `.partial` | fetcher's `finally` unlinks on clean failure; a crash-orphaned `<token>.*.partial` is swept before empty-dir removal — no stranded SENSITIVE temp bytes |
+| Crashed download leaves a `.partial` | `finally` unlinks on clean failure; a crash-orphan is glob-unlinked by the **next fetcher** (under the lock) and, as backstop, by the reclaim sweep — bounded by the next fetch, not the investigation's full life |
 | Non-404 store fault deleting the object in the sweep | defers the whole checksum (row kept) **before** the row delete — the object is never orphaned without its handle |
 | Reconciler not co-located / `ROOTFS_DIR` inaccessible | registration guard fails loudly; the probe **fails closed** (defers the pass) — reclaims nothing, never unlinks under a live guest |
 | Downloaded bytes fail SHA-256 or qcow2-magic | `infrastructure_failure` / `configuration_error` (ADR-0434 §2, ADR-0438) unchanged |

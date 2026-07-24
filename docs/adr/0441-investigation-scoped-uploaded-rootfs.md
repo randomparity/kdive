@@ -204,10 +204,12 @@ lock:
   onto the shared `<token>.qcow2` only after the SHA-256 + qcow2-magic verify. Two concurrent downloaders
   therefore **never** share a partial, so neither can corrupt the other regardless of the lock. This is
   the correctness guarantee. The fetcher unlinks its own `.partial` in a `finally` on any verify/download
-  failure; a **crash-orphaned** `.partial` (a killed worker) is a SENSITIVE multi-GiB leak that no row
-  owns, so the reclaim sweep globs and unlinks stale `<token>.*.partial` under `rootfs-uploads/<inv>/`
-  **before** attempting the empty-dir removal (else a leftover partial keeps the dir non-empty and both
-  the partial and the dir persist forever — the #1501 orphan class, for temp files).
+  failure. A **crash-orphaned** `.partial` (a killed worker) is a SENSITIVE multi-GiB leak that no row
+  owns, collected on **two** paths: opportunistically, a live fetcher — holding the lock, which serializes
+  downloads so no *live* sibling exists — glob-unlinks any other `<token>.*.partial` on the next fetch of
+  that base; and as a backstop, the reclaim sweep globs and unlinks stale `<token>.*.partial` under
+  `rootfs-uploads/<inv>/` **before** the empty-dir removal (else a leftover partial keeps the dir non-empty
+  forever). So a crash-orphan is bounded by the *next fetch*, not only by full investigation reclaim.
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's

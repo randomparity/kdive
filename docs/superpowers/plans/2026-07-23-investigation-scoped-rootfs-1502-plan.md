@@ -36,11 +36,18 @@ phase ordering:
   new path creates `owner_kind='investigations'` objects but the old teardown reclaim (still present until
   Task 4.2) only targets `owner_kind='systems'`, and the new sweeps don't exist until Phase 4 — so any
   `complete_rootfs_upload` on main in that window orphans a SENSITIVE multi-GiB object with **no
-  reclaimer**. Therefore Phases 2–5 merge atomically; Phase 1 (additive schema) may precede and Phase 6
-  (doc regen) may follow. Within that PR, order Phase 5 (the `rootfs_cleanup_pending_at` producer)
+  reclaimer**. Therefore Phases 2–5 merge atomically; Phase 1 (additive schema) may precede. Phase 6's
+  code-schema-derived doc regeneration (`just docs`/`rbac-matrix`/`doc-constants`/`cli-verbs`) is the **tail
+  commit of the same PR**, not a later merge — the `just ci` `*-check` gates read live tool schemas and red
+  the PR until regenerated. Within that PR, order Phase 5 (the `rootfs_cleanup_pending_at` producer)
   **before** Task 4.2 (the teardown-reclaim removal) so no intermediate commit removes reclaim before its
   replacement produces. **Invariant to assert:** no `owner_kind='investigations'` rootfs object can exist
   on main without a live reclaimer.
+- **Bisectability under no-squash.** The repo keeps individual commits (no squash) so `git bisect` can pin
+  a regression. Prefer **add-new-then-remove-old within a single commit** so each commit is individually
+  green (Task 2.3 does the tool swap this way); collapse an irreducible red window into **one** commit (the
+  whole upload-lane swap as a single commit) rather than a run of red commits, and where one is truly
+  unavoidable, state in the PR that those commits bisect as a unit.
 
 Phase 1 (schema) is the prerequisite for all. TDD throughout: write the failing test named in each task's
 acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate").
@@ -105,8 +112,10 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
   terminal → `configuration_error`, leave manifest for the reaper); HEAD (`ChecksumMode=ENABLED`); reject
   missing/checksum-less; **assert HEAD checksum == declared** (mismatch → `configuration_error`); write the
   row via **`INSERT … ON CONFLICT DO NOTHING`** against the Task 1.1 partial UNIQUE index on `object_key`,
-  **including `encoding`/`uncompressed_size` from the manifest entry**, then **re-SELECT** and return
-  `data.checksum_sha256`; delete the manifest.
+  **including `encoding`/`uncompressed_size` from the manifest entry**, then **re-SELECT by `object_key` to
+  confirm exactly one converged row** and return the declared `checksum_sha256` (the value in hand /
+  equivalently the `object_key` token decoded base64url→base64 — the `artifacts` table has **no** checksum
+  column); delete the manifest.
 - **Acceptance:** spec AC-4 (row incl. encoding, idempotent, concurrent → one row), AC-4c (gzip recoverable),
   **AC-4d reject branch only** (finalize on a terminal investigation rejects, manifest left for the reaper);
   the AC-4d *reclaim* branch (committed-then-reclaimed) is proved in Phase 4/5, since neither the sweep nor
@@ -173,7 +182,10 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
   session-scoped `pg_advisory_lock`** keyed via `db.locks._session_lock_key(f"rootfs-fetch:{inv}:{token}")`
   (the **session** keyspace helper, salted apart from `_lock_key`; dedup — NOT `_lock_key`, NOT Python
   `hash()`; NOT `advisory_xact_lock`, which holds a txn open across the download) with a post-acquire `dest`
-  re-check. Unlink the own `<token>.<uuid>.partial` in a `finally` on any failure.
+  re-check. Unlink the own `<token>.<uuid>.partial` in a `finally` on any failure. **Opportunistic
+  crash-orphan cleanup:** while holding the lock (which serializes downloads, so no *live* sibling exists),
+  glob-unlink any other `<token>.*.partial` — a killed worker's orphan — so it does not persist for the
+  investigation's whole life (the reclaim-sweep glob is the backstop, not the only cleanup).
 - **Acceptance:** spec AC-1 (one download for two Systems, sequential **and cross-process concurrent**),
   AC-2 (isolation), AC-4b (resolve-by-object_key + transcode), AC-4c (gzip stripped from row encoding).
 - **Watch / test harness:** the key must be `_session_lock_key(...)`, not `hash()` (per-process salted). A
@@ -235,8 +247,14 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
 - **Do:** close-driven selects by **`rootfs_cleanup_pending_at`** (its own marker — NOT `cleanup_pending_at`;
   clears only its own when drained); TTL selects committed `owner_kind='investigations'`,
   `retention_class='rootfs'` objects past retention on a never-closed investigation.
-- **Registration guard:** gate sweep registration on a startup check that `ROOTFS_DIR` + `UPLOADS_DIR` are
-  present/accessible (the reconciler is libvirt-host-local) — fail loudly, don't run a host-blind sweep.
+- **Registration guard (concrete semantics):** for local-libvirt the reconciler **is** libvirt-host-local
+  (single-host M0/M1 topology; a deploy-role invariant, declared alongside the other host deps). Startup
+  checks `ROOTFS_DIR` + `UPLOADS_DIR` are present/accessible: if so, register the sweeps; if not, **skip
+  registration and emit a prominent error log + a metric** (the reconciler keeps running its other repairs
+  — no availability regression), and reclaim of `owner_kind='investigations'` rootfs does not run on that
+  (mis-deployed / future-split) topology. Pin the chosen behavior (skip+alert, not crash) with a test so it
+  can't drift. A split reconciler/libvirt-host topology having no rootfs reclaimer is documented as out of
+  scope until a remote-reclaim design (the remote lane is deferred, decision 8).
 - **Acceptance:** AC-7 (object+row gone past grace), AC-8b (TTL reclaims a never-closed investigation),
   AC-8d (**marker independence** — a drained build artifact nulling `cleanup_pending_at` does not starve
   the rootfs sweep), AC-8i (registration guard fails loudly without host FS), AC-10 (residual committed +
@@ -287,16 +305,18 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
 
 ## Phase 6 — Surface, docs, and test sweep (lands last)
 
-### Task 6.1 — Generated-artifact regeneration (doc-only; code registration is in Phase 2)
-- **Note:** the code registration (`mcp/exposure.py`, `mcp/schema/tool_index.py`, `_BEHAVIOR_TESTS_BY_TOOL`,
-  registrars for the two new tools + removal of the old) already landed in **Task 2.3** to keep the guards
-  green at the Phase 2+3 boundary. Phase 6 regenerates only the *committed generated docs* that lag those
-  code changes.
-- **Files/commands:** `just rbac-matrix` (regenerate the role→tool visibility matrix doc), `just docs`
-  (regenerate the agent-facing tool reference), `just doc-constants` (tool count).
-- **Acceptance:** spec AC-11 (old tool gone from the tool index/exposure/RBAC matrix; the two new tools
-  present with the CONTRIBUTOR gate + the re-homed ADR-0439 encoding advertisement); `just ci` generated-doc
-  drift guards green.
+### Task 6.1 — Generated-artifact regeneration (tail commit of the Phases 2–5 PR, **not** a separate merge)
+- **Why not a later PR:** every code-schema-derived drift guard in `just ci` — `docs-check`,
+  `doc-constants-check`, `rbac-matrix-check`, **`cli-verbs-check`** — diffs committed artifacts against a
+  fresh generation from the **live** tool schemas, so changing the tool set (Task 2.3) reds all of them
+  until regenerated. The regen therefore lands in the **same atomic PR** (its tail commit), never deferred.
+  Task 2.3's "guards green" claim scopes only to the *registration* tests (`exposure`/`tool_index`/
+  behavior-map), not these generated-doc checks.
+- **Commands (all in the PR):** `just docs` (tool reference), `just rbac-matrix` (role→tool matrix),
+  `just doc-constants` (tool count), **`just cli-verbs`** (kdivectl verb descriptors — also gated,
+  previously omitted).
+- **Acceptance:** spec AC-11 (old tool gone, two new tools present with the CONTRIBUTOR gate + the re-homed
+  ADR-0439 encoding advertisement); **all four `*-check` gates green** in the same PR.
 
 ### Task 6.2 — Agent-facing docs
 - **Files:** `mcp/resources/_content/external-build-upload.md`, `toolsets-artifacts.md`, `agent-index.md`,
