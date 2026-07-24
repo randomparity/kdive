@@ -37,6 +37,14 @@ class Artifact(DomainModel):
     sensitivity: Sensitivity
     retention_class: str
     run_id: UUID | None = None
+    #: The transport encoding the uploaded bytes were stored under (e.g. `"gzip"`), or `None` for
+    #: identity encoding — the default for every artifact kind except an investigation-scoped
+    #: uploaded rootfs, which persists it at finalize (ADR-0441 §3, #1502).
+    encoding: str | None = None
+    #: The decoded size in bytes when `encoding` is set (`None` when `encoding` is `None`); the
+    #: durable home a post-finalize provision reads instead of the ephemeral upload manifest
+    #: (ADR-0441 §3, #1502).
+    uncompressed_size: int | None = None
 
 
 __all__ = ["Artifact", "Sensitivity"]

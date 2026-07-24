@@ -175,6 +175,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0072",
         "0074",
         "0075",
+        "0076",
     ]
     assert second == []
 
@@ -634,6 +635,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0072",
         "0074",
         "0075",
+        "0076",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -987,6 +989,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0072",
         "0074",
         "0075",
+        "0076",
     ]
 
 
@@ -1452,6 +1455,145 @@ def test_migration_0067_adds_system_accel(pg_conn: psycopg.Connection) -> None:
     # Nullable, no default: a System minted without a resolved accelerator records NULL (ADR-0339).
     nullable = _nullable(pg_conn, "systems")
     assert nullable.get("accel") == "YES"
+
+
+# Migration 0076 (ADR-0441, #1502): the advisory systems.investigation_id binding + the schema
+# foundation (rootfs_cleanup_pending_at, the artifacts partial UNIQUE index, encoding columns) for
+# investigation-scoped uploaded rootfs.
+
+
+def _seed_system(conn: psycopg.Connection, *, investigation_id: str | None = None) -> str:
+    """Insert a resource->allocation->system chain, optionally bound to an investigation."""
+    resource_id = _seed_resource_row(conn)
+    alloc = conn.execute(
+        "INSERT INTO allocations (resource_id, state, principal, project) "
+        "VALUES (%s, 'granted', 'alice', 'proj') RETURNING id",
+        (resource_id,),
+    ).fetchone()
+    assert alloc is not None
+    row = conn.execute(
+        "INSERT INTO systems (allocation_id, state, provisioning_profile, principal, project, "
+        "investigation_id) VALUES (%s, 'defined', '{}'::jsonb, 'alice', 'proj', %s) RETURNING id",
+        (alloc[0], investigation_id),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _seed_investigation(conn: psycopg.Connection) -> str:
+    row = conn.execute(
+        "INSERT INTO investigations (title, state, principal, project) "
+        "VALUES ('t', 'open', 'alice', 'proj') RETURNING id"
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_migration_0076_systems_investigation_id_is_nullable_and_indexed(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "systems")
+    assert cols.get("investigation_id") == "uuid"
+    assert _nullable(pg_conn, "systems").get("investigation_id") == "YES"
+    assert "investigation_id" in _indexed_columns(pg_conn, "systems")
+    # A NULL-investigation System (the classic allocation-only case) inserts unchanged.
+    system_id = _seed_system(pg_conn)
+    row = pg_conn.execute(
+        "SELECT investigation_id FROM systems WHERE id = %s", (system_id,)
+    ).fetchone()
+    assert row == (None,)
+
+
+def test_migration_0076_systems_investigation_id_accepts_bound_value(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    inv_id = _seed_investigation(pg_conn)
+    system_id = _seed_system(pg_conn, investigation_id=inv_id)
+    row = pg_conn.execute(
+        "SELECT investigation_id FROM systems WHERE id = %s", (system_id,)
+    ).fetchone()
+    assert row is not None and str(row[0]) == inv_id
+
+
+def test_migration_0076_systems_investigation_id_rejects_unknown_investigation(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        _seed_system(pg_conn, investigation_id="00000000-0000-0000-0000-000000000001")
+
+
+def test_migration_0076_investigations_rootfs_cleanup_pending_at_is_nullable(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "investigations")
+    assert cols.get("rootfs_cleanup_pending_at") == "timestamp with time zone"
+    assert _nullable(pg_conn, "investigations").get("rootfs_cleanup_pending_at") == "YES"
+    inv_id = _seed_investigation(pg_conn)
+    row = pg_conn.execute(
+        "SELECT rootfs_cleanup_pending_at FROM investigations WHERE id = %s", (inv_id,)
+    ).fetchone()
+    assert row == (None,)
+
+
+def test_migration_0076_artifacts_object_key_unique_only_for_investigations(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    inv_id = _seed_investigation(pg_conn)
+    pg_conn.execute(
+        "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+        "retention_class) VALUES ('investigations', %s, 'dup-key', 'e1', 'sensitive', 'rootfs')",
+        (inv_id,),
+    )
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        pg_conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('investigations', %s, 'dup-key', 'e2', 'sensitive', "
+            "'rootfs')",
+            (inv_id,),
+        )
+
+
+def test_migration_0076_artifacts_partial_index_ignores_other_owner_kinds(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    system_id = _seed_system(pg_conn)
+    # Two 'systems'-owned rows sharing an object_key are unaffected by the partial index.
+    for etag in ("e1", "e2"):
+        pg_conn.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('systems', %s, 'shared-key', %s, 'sensitive', 'rootfs')",
+            (system_id, etag),
+        )
+    count = pg_conn.execute(
+        "SELECT count(*) FROM artifacts WHERE object_key = 'shared-key'"
+    ).fetchone()
+    assert count == (2,)
+
+
+def test_migration_0076_artifacts_encoding_columns_are_nullable(
+    pg_conn: psycopg.Connection,
+) -> None:
+    migrate.apply_migrations(pg_conn)
+    cols = _columns(pg_conn, "artifacts")
+    assert cols.get("encoding") == "text"
+    assert cols.get("uncompressed_size") == "bigint"
+    nullable = _nullable(pg_conn, "artifacts")
+    assert nullable.get("encoding") == "YES"
+    assert nullable.get("uncompressed_size") == "YES"
+    system_id = _seed_system(pg_conn)
+    row = pg_conn.execute(
+        "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+        "retention_class) VALUES ('systems', %s, 'plain-key', 'e', 'sensitive', 'rootfs') "
+        "RETURNING encoding, uncompressed_size",
+        (system_id,),
+    ).fetchone()
+    assert row == (None, None)
 
 
 def _apply_through(conn: psycopg.Connection, last_version: str) -> None:
