@@ -82,6 +82,26 @@ a clean decode **and** a passing magic check, so `dest` is only ever a valid, ve
 The **identity** path is behaviorally unchanged: buffer the object, verify its sha256 against the
 stored checksum, and atomically stage it — plus the new magic check below.
 
+> **Amended (#1520).** The identity path no longer buffers. It reads the object in 4 MiB windows off
+> a single `get_artifact_stream` GET (ADR-0400), hashing and writing each chunk into the `.partial`
+> as it arrives, so peak memory is the chunk rather than the object — concurrent provisions of
+> distinct large identity rootfs no longer each spike a worker to the object size. `UploadObjectStore`
+> gains `get_artifact_stream` and **drops** the whole-object `get_artifact`, so neither staging path
+> can reach for it. Nothing else moves: the staged bytes, the sha256-then-magic verify order, the
+> unique `<token>.<uuid>.partial` + `os.replace` atomicity, and both gates' error categories are as
+> decided here. `get_range` was not reused for this — it would issue ~1280 GETs for a 5 GiB object
+> where one suffices; it stays for `strip_gzip_to_writer`'s `RangedReadStore` seam.
+>
+> This is a **trade, not a pure win**: the pressure moves from per-worker RAM onto staging disk.
+> The `.partial` now holds up to the 5 GiB single-PUT ceiling for the whole transfer, where the
+> buffered stage wrote it in one final call after verifying; and because the fetch lock is keyed
+> per-(investigation, checksum), N distinct objects stage concurrently and their occupancy overlaps.
+> `UPLOADS_DIR` is a sibling of `ROOTFS_DIR` under `/var/lib/kdive`, so on a default deployment that
+> is the same filesystem as every live System's overlay. A rejected object — a failed checksum, a
+> non-qcow2 base, or the manifest-reaped identity fallback above — is now written in full before it
+> is rejected, where before it consumed no disk at all. There is no free-space precheck on either
+> staging path; adding one (both paths already hold the size to check against) is #1525.
+
 ### 3. qcow2 magic check, scoped to the upload path
 
 After staging (both the gzip and identity paths), the fetch verifies the canonical base begins with
@@ -131,3 +151,5 @@ adds no cap change — the mechanism and value are already correct.
   which are already vetted, and would couple a rootfs-format concern to the generic overlay step.
 - **Stream the identity path too.** Deferred: the identity path keeps today's buffered stage (the
   issue requires it unchanged); a streaming identity stage is a separable optimization, not this gap.
+  > **Amended (#1520).** Done — taken up as the separable optimization this bullet anticipated. See
+  > the amendment in decision 2; no decision here is reversed.

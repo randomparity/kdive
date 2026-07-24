@@ -20,8 +20,9 @@ Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
 partial — the correctness guarantee. A **session-scoped** ``pg_advisory_lock`` (keyed via
 ``db.locks._session_lock_key``, held on this call's dedicated sync connection across the download)
-collapses the redundant multi-GiB download; while it is held — so no live sibling partial can
-exist — a crash-orphaned ``<token>.*.partial`` is glob-unlinked opportunistically.
+collapses the redundant multi-GiB download; while it is held — so a live sibling partial is not
+expected — a crash-orphaned ``<token>.*.partial`` is glob-unlinked opportunistically. A lock lost
+mid-transfer breaks that expectation; see :func:`_unlink_orphan_partials`.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -61,17 +62,26 @@ _OWNER_KIND = "investigations"
 # The qcow2 magic every canonical rootfs base must start with (bytes ``51 46 49 fb``); a base that
 # does not is rejected here rather than failing late and confusingly at ``qemu-img`` (ADR-0438).
 _QCOW2_MAGIC = b"QFI\xfb"
+# The identity path's per-read window: the staging loop hashes and writes one chunk at a time, so
+# peak memory is this constant rather than the object size (up to the 5 GiB single-PUT ceiling).
+# Matches the gzip path's ranged-read window in ``transport_encoding``.
+_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 class UploadObjectStore(Protocol):
     """The narrow object-store capability the upload fetch needs (an :class:`ObjectStore`).
 
-    ``get_range`` widens it to satisfy :class:`transport_encoding.RangedReadStore`, so a gzip upload
-    can be streamed-decompressed without a whole-object buffer.
+    Neither staging path buffers the whole object: ``get_artifact_stream`` (ADR-0400) backs the
+    identity path's chunked read, and ``get_range`` satisfies
+    :class:`transport_encoding.RangedReadStore` so a gzip upload can be streamed-decompressed. The
+    whole-object ``get_artifact`` is deliberately absent — a multi-GiB rootfs must never be
+    materialized as ``bytes`` in a worker.
     """
 
     def head(self, key: str) -> artifact_types.HeadResult | None: ...
-    def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact: ...
+    def get_artifact_stream(
+        self, key: str, etag: str | None
+    ) -> AbstractContextManager[artifact_types.StreamedArtifact]: ...
     def get_range(self, key: str, *, start: int, length: int) -> bytes: ...
 
 
@@ -82,11 +92,6 @@ class ResolvedRootfsObject:
     object_key: str
     encoding: str | None
     uncompressed_size: int | None
-
-
-def _sha256_b64(data: bytes) -> str:
-    """Return the base64-encoded SHA-256 of ``data`` (the object-store checksum format)."""
-    return base64.b64encode(hashlib.sha256(data).digest()).decode("ascii")
 
 
 def _fetch_lock_name(investigation_id: UUID, token: str) -> str:
@@ -219,9 +224,17 @@ def _resolve_object(
 def _unlink_orphan_partials(dest: Path) -> None:
     """Glob-unlink a crash-orphaned ``<token>.*.partial`` under the fetch lock (ADR-0441 §5).
 
-    Runs only while holding the fetch lock, which serializes downloads, so no *live* sibling partial
-    can exist — every match is a killed worker's SENSITIVE orphan, bounded by this next fetch rather
-    than by full investigation reclaim.
+    Runs only while holding the fetch lock, which serializes downloads, so a *live* sibling partial
+    is not expected — a match is normally a killed worker's SENSITIVE orphan, bounded by this next
+    fetch rather than by full investigation reclaim.
+
+    That premise holds only while the lock does. A lock lost mid-transfer (an idle-session timeout,
+    a recycled connection) lets this sweep unlink a *live* sibling's partial: that fetcher writes on
+    into the unlinked inode and fails at ``os.replace`` — a failed provision, never a corrupt
+    ``dest`` — while those blocks stay charged to ``df`` yet invisible to every path-matching tool,
+    so the disk pressure looks like a leak the sweeps missed. Bounding this glob away from live
+    partials is #1524; do not widen it (outside the lock, or over the whole uploads dir) on the
+    strength of the paragraph above.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
@@ -242,9 +255,11 @@ def stage_uploaded_rootfs(
     HEAD the object (absent → ``CONFIGURATION_ERROR``; no stored checksum →
     ``INFRASTRUCTURE_FAILURE``). When ``encoding`` is ``gzip`` the object is streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
-    downloaded and its SHA-256 verified. Either way the canonical base is qcow2-magic-validated and
-    written atomically (a ``<token>.<uuid>.partial`` temp + ``os.replace``) so ``dest`` is only ever
-    a verified base and two concurrent fetchers never share a partial.
+    streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
+    the canonical base is qcow2-magic-validated and written atomically (a ``<token>.<uuid>.partial``
+    temp + ``os.replace``) so ``dest`` is only ever a verified base and two concurrent fetchers
+    never share a partial. The partial is unlinked in a ``finally``, so no failure — typed or not —
+    leaves one behind.
     """
     head = store.head(object_key)
     if head is None:
@@ -291,13 +306,16 @@ def stage_uploaded_rootfs(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(system_id)},
             )
+        _require_qcow2_magic(partial, system_id=str(system_id))
         os.replace(partial, dest)
     except OSError as err:
-        _discard(partial)
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
-    except CategorizedError:  # a bomb, hash mismatch, or failed magic check discards the partial
+    finally:
+        # Any failure that unwinds this frame discards the SENSITIVE partial here, in the
+        # ``finally`` ADR-0441 §5 specifies (``os.replace`` consumed it on success, so this is then
+        # a no-op). A *killed* worker unwinds nothing — SIGTERM sets an asyncio stop Event rather
+        # than raising into this thread — so the sweeps remain the only collector for that case.
         _discard(partial)
-        raise
 
 
 def _stage_identity(
@@ -308,16 +326,32 @@ def _stage_identity(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stage an unencoded upload verbatim: verify the checksum, magic-check, write the partial."""
-    data = store.get_artifact(key, None).data
-    if _sha256_b64(data) != checksum:
+    """Stream an unencoded upload verbatim into the partial, verifying its SHA-256.
+
+    The object is read in ``_STREAM_CHUNK_BYTES`` windows off a single unconditional GET (``etag``
+    is ``None``, ADR-0054: the provision plane holds no client handle), each chunk hashed and
+    written as it arrives, so peak memory is the chunk rather than the object — a multi-GiB rootfs
+    no longer spikes the worker (#1520). A read may return fewer bytes than asked without being
+    end-of-stream (the store's body wrapper is a ``RawIOBase``); only a true empty read ends the
+    loop.
+
+    The checksum is verified here, before the caller's shared qcow2-magic gate, which is the order
+    ADR-0438 §3 and ADR-0441 §5 specify: a mismatch keeps ADR-0434 §2's ``INFRASTRUCTURE_FAILURE``
+    rather than being reported by whichever gate a corrupt object happens to trip first. (Whether
+    that category is the right one is unsettled — the gzip path raises ``CONFIGURATION_ERROR`` for
+    the byte-identical failure — and is tracked in #1523.)
+    """
+    hasher = hashlib.sha256()
+    with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
+        while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
+            hasher.update(chunk)
+            writer.write(chunk)
+    if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         raise CategorizedError(
             "uploaded rootfs object failed checksum verification",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    _require_qcow2_magic(data[:4], system_id=str(system_id))
-    partial.write_bytes(data)
 
 
 def _stage_gzip(
@@ -330,7 +364,7 @@ def _stage_gzip(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stream-gunzip a gzip transport object to the partial, bounded, hash- and magic-verified."""
+    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified."""
     if uncompressed_size is None:
         raise CategorizedError(
             "uploaded rootfs declared a gzip encoding without an uncompressed_size; re-declare the "
@@ -346,13 +380,18 @@ def _stage_gzip(
     )
     with partial.open("wb") as writer:
         strip_gzip_to_writer(store, request, writer)
-    with partial.open("rb") as reader:
-        _require_qcow2_magic(reader.read(4), system_id=str(system_id))
 
 
-def _require_qcow2_magic(first_bytes: bytes, *, system_id: str) -> None:
-    """Reject a canonical base that does not start with the qcow2 magic (ADR-0438)."""
-    if first_bytes[:4] != _QCOW2_MAGIC:
+def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
+    """Reject a staged base that does not start with the qcow2 magic (ADR-0438).
+
+    Reads the finished ``.partial``, so both codecs are gated by one mechanism over the canonical
+    bytes — each stager has already verified its own checksum, and a base too short to hold the
+    magic yields a short read that fails here rather than staging unchecked.
+    """
+    with staged.open("rb") as reader:
+        first_bytes = reader.read(len(_QCOW2_MAGIC))
+    if first_bytes != _QCOW2_MAGIC:
         raise CategorizedError(
             "staged rootfs is not a qcow2 image: the uploaded object (after any transport decode) "
             "does not start with the qcow2 magic; upload a qcow2 image",
