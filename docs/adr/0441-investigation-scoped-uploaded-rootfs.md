@@ -336,7 +336,20 @@ provision-failure reclaim of the (now shared) base (decision 5). #1501's *failed
 already closed by ADR-0435; what this removes is the residual **committed-object** exemption. The
 upload-manifest reaper's `systems` arm (ADR-0435's `{defined, failed}` relaxation) is **re-scoped to
 `investigations`**: it reaps a stale investigation upload window's uncommitted object + manifest past its
-deadline.
+deadline, gated on the investigation being **terminal** (`closed`/`abandoned`).
+
+**Accepted residual — uncommitted uploads on a never-closed investigation.** The reaper's terminal gate is
+deliberate: `complete_rootfs_upload` finalizes on any OPEN/ACTIVE investigation without re-checking the
+manifest deadline, so a slow-but-legitimate agent may finalize a past-deadline window — reaping an OPEN
+investigation's window would race that finalize and yank the object out from under it. The cost is that a
+PUT-but-never-finalized upload (an agent that crashes or abandons between the PUT and finalize) on an
+investigation that is **also never closed** has no reaper backstop and no committed `artifacts` row, so the
+committed-object TTL backstop (which enumerates rows) never sees it either — the SENSITIVE uncommitted object
+lingers in S3 until the investigation is eventually closed (which reaps it). This is bounded to the
+never-finalized-and-never-closed case and self-heals on close. Closing it fully (a deadline-governed reap of
+uncommitted objects independent of investigation state, plus a past-deadline-manifest observability signal)
+is a follow-up, since it trades against the slow-agent-finalize window above and is a behavioral-contract
+choice beyond this change's scope.
 
 ### 7. Investigation close will not leave its bound Systems running
 
