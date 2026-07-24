@@ -30,7 +30,9 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/db/schema/0076_systems_investigation_id.sql` (new); regenerate any schema
   snapshot/reference the repo checks in.
 - **Do:** `ALTER TABLE systems ADD COLUMN investigation_id uuid REFERENCES investigations (id);` (nullable,
-  no default). Add an index on `investigation_id` (the close-coupling and liveness queries filter by it).
+  no default); index it (close-coupling + liveness queries filter by it). **Also** `ALTER TABLE
+  investigations ADD COLUMN rootfs_cleanup_pending_at timestamptz;` — the dedicated rootfs reclaim marker
+  (Task 4.1; must not reuse `cleanup_pending_at`, which `gc_investigation_artifacts` owns/clears).
 - **Acceptance:** `just test` migration round-trip passes; `test_migrate.py` sees 0076 as the new head;
   a NULL-investigation System row inserts unchanged.
 - **Rollback:** drop-column (no data loss for NULL rows).
@@ -122,18 +124,23 @@ deprecate"). Keep the whole branch green at each commit.
   registration for both; a file-unlink port (local host FS); `config/core_settings.py`
   (`KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, reuse `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`) — and the
   config-docs regeneration (`just config-docs`).
-- **Do:** close-driven selects investigations past the grace window; TTL backstop selects committed
-  `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL on a
-  never-closed investigation. Both reclaim **per checksum** on a **two-condition gate**, both required for
-  every referencing bound System: (a) its per-System overlay file is **absent** (filesystem probe, not a
-  `systems.state` read), **and** (b) it is **not** `defined`/`provisioning` (pre-overlay states that may
-  still read/create against the base — the ADR-0435 `provisioning` exclusion; matters for the TTL
-  backstop). Reclaim object (best-effort) + row (fail-loud-in-txn) + staged file together. Gate fails →
-  skip the checksum (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
-- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present;
-  **a `failed` referencer whose overlay was reclaimed must drain** — not pinned forever), AC-8b (TTL
-  backstop reclaims a never-closed investigation), AC-10 (residual committed object + stale-window object
-  collected).
+- **Do:** close-driven selects investigations past the grace window **by `rootfs_cleanup_pending_at`** (its
+  **own** marker — NOT `cleanup_pending_at`, which `gc_investigation_artifacts` nulls when its runs
+  worklist drains); clears `rootfs_cleanup_pending_at` only when its own worklist drains. TTL backstop
+  selects committed `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL
+  on a never-closed investigation. Both reclaim **per checksum** on a **two-condition gate**, both required
+  for every referencing bound System: (a) its per-System overlay file is **absent** (filesystem probe, not
+  a `systems.state` read), **and** (b) it is **not** `defined`/`provisioning`/`reprovisioning`/`restoring`
+  (states that may read/re-materialize against the base with the overlay momentarily absent). Reclaim in
+  **pinned order**: object (best-effort) → **unlink file** (failure defers, `drained=False`) → row
+  (fail-loud-in-txn, **last** — the worklist anchor). Gate fails → skip the checksum; remove the empty
+  `rootfs-uploads/<inv>/` dir when drained.
+- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present; a
+  `failed` referencer whose overlay was reclaimed must drain), AC-8b (TTL reclaims a never-closed
+  investigation), AC-8c (defers while a referencer is `reprovisioning`/`restoring`), AC-8d (**marker
+  independence** — a drained build artifact nulling `cleanup_pending_at` does not starve the rootfs sweep),
+  AC-8e (**pinned-order** — a forced `unlink` failure keeps the row + retries), AC-10 (residual committed +
+  stale-window object collected).
 - **Watch:** gate on overlay-file **absence**, not `systems.state`. `SystemState.FAILED` is a terminal
   sink (no `→torn_down`) and is excluded from `repair_orphaned_systems`, so a state gate pins a `failed`
   System's base forever and defeats the TTL backstop. The AC-8 test must include a `failed` referencer and
@@ -164,8 +171,9 @@ deprecate"). Keep the whole branch green at each commit.
   (add `force: bool = False`); enumerate `systems WHERE investigation_id=<inv> AND state NOT IN terminal`.
 - **Do:** default ⇒ live present → `configuration_error` listing ids, refuse. force ⇒ per bound live
   System require **admin on that System's project** (matching `systems.teardown`'s `_ADMIN` gate — no
-  contributor→admin escalation via close; else fail listing it), enqueue teardown, then close + set
-  `cleanup_pending_at`. Never consider NULL-investigation Systems.
+  contributor→admin escalation via close; else fail listing it), enqueue teardown, then close + set **both**
+  `cleanup_pending_at` **and** `rootfs_cleanup_pending_at` (Task 4.1's dedicated marker). Any successful
+  close (default or force) sets both. Never consider NULL-investigation Systems.
 - **Acceptance:** spec AC-5 (block+list), AC-6 (force enqueues teardown + closes). RBAC: force teardown is
   destructive — **admin** per System project (assert a same-project contributor cannot force-teardown a
   bound System — no escalation).

@@ -79,7 +79,8 @@ the new sweep only ever sees `owner_kind='investigations'`, and no evidence is w
 ### 2. Bind a System to an investigation with a nullable `systems.investigation_id`
 
 Migration **0076** adds `investigation_id uuid REFERENCES investigations(id)` to `systems`, **nullable**
-— a classic allocation-only System keeps it NULL and is unaffected by everything below. `systems.define`
+— a classic allocation-only System keeps it NULL and is unaffected by everything below — and the
+dedicated `rootfs_cleanup_pending_at timestamptz` marker to `investigations` (decision 6). `systems.define`
 and `systems.provision` gain an **optional** `investigation_id`; an agent working in an investigation
 sets it. This is an *advisory* binding (a System belongs to an Allocation for capacity; the
 investigation link scopes the uploaded-rootfs trust boundary and the close coupling), not a second
@@ -171,23 +172,35 @@ Adopting only the close-driven half would let a never-closed investigation accum
 objects forever — a regression against ADR-0434, whose teardown reclaim fired regardless of close — so
 the TTL backstop is mandatory here too:
 
-- **`gc_investigation_uploaded_rootfs` (close-driven)** — investigations whose `cleanup_pending_at` is
-  older than `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`.
+- **`gc_investigation_uploaded_rootfs` (close-driven)** — investigations whose **`rootfs_cleanup_pending_at`**
+  (a **dedicated** marker migration 0076 adds, set at close alongside `cleanup_pending_at`) is older than
+  `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`. It does **not** reuse `cleanup_pending_at`: that marker is
+  owned by `gc_investigation_artifacts`, which clears it to NULL as soon as *its own* (`owner_kind='runs'`)
+  worklist drains — immediately, for an investigation with no build artifacts. Sharing it would let the
+  build sweep null the marker before the rootfs base's overlays finish draining, dropping the rootfs from
+  the close-driven worklist and leaving it to the far-slower TTL backstop — defeating close+grace, the
+  change's central goal. The rootfs sweep owns and clears `rootfs_cleanup_pending_at` itself, cleared only
+  when its own worklist drains.
 - **`gc_expired_investigation_rootfs` (TTL backstop)** — committed `owner_kind='investigations'`,
   `retention_class='rootfs'` objects older than `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS` whose
   investigation was **never** closed. (`retention_class` is only an S3-lifecycle label, not an enforced
   expiry — ADR-0234 Context — so the reaper enforces the wall.)
 
 Both are deferred, audited, drain-and-retry, and reclaim **per checksum**, with the object + row +
-staged file for one checksum reclaimed **together on a gate with two conditions, *both* required for
-every bound System that references the checksum**: (a) its per-System overlay file is **absent** on the
-host (the backing-file hazard — a filesystem probe), **and** (b) it is **not** in a pre-overlay
-non-terminal state (`defined`/`provisioning`), which could still create an overlay or read the staged
-base before one exists (the ADR-0435 `provisioning`-exclusion hazard). Gate holds → delete the object
-(best-effort) + row (fail-loud-in-txn, ADR-0234/0434) **and** unlink the staged base under
-`rootfs-uploads/<inv>/`. Gate fails → skip the whole checksum this pass (`drained=False`, retried next
-pass); remove the empty `rootfs-uploads/<inv>/` dir once drained. Condition (b) matters mainly for the
-TTL backstop, which fires on never-closed investigations with no close-time block; the close-driven sweep
+staged file for one checksum reclaimed **on a gate with two conditions, *both* required for every bound
+System that references the checksum**: (a) its per-System overlay file is **absent** on the host (the
+backing-file hazard — a filesystem probe), **and** (b) it is **not** in a pre-overlay or re-materializing
+non-terminal state — `defined`, `provisioning`, `reprovisioning`, or `restoring` — each of which can read
+or re-create against the base with the overlay momentarily absent (the ADR-0435 `provisioning`-exclusion
+hazard, generalized to every state whose handler re-materializes the base). When both hold, reclaim in a
+**pinned order that never strands the file**: delete the object (best-effort), then **unlink the staged
+base** under `rootfs-uploads/<inv>/` (treated like the best-effort object delete — an unlink failure
+defers the whole checksum, `drained=False`), and **only then** delete the `artifacts` row
+(fail-loud-in-txn, ADR-0234/0434). The row is the worklist anchor, so removing it **last** guarantees a
+failed unlink never orphans a SENSITIVE base file with no row for a future sweep to find. Gate fails → skip
+the checksum this pass (`drained=False`, retried next); remove the empty `rootfs-uploads/<inv>/` dir once
+drained. Condition (b) matters mainly for the TTL backstop, which fires on never-closed investigations with
+no close-time block; the close-driven sweep
 already sees no `defined`/`provisioning` System because default close blocks on them (decision 7).
 
 The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
@@ -218,8 +231,9 @@ deadline.
 
 - **Default:** if any bound System is in a non-terminal state, close **fails** with a
   `configuration_error` listing them and refuses — the investigation stays OPEN/ACTIVE.
-- **`close(force=True)`:** enqueue a teardown job for each bound live System, then close and set
-  `cleanup_pending_at`. Because a System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while
+- **`close(force=True)`:** enqueue a teardown job for each bound live System, then close and set both
+  markers (`cleanup_pending_at` for the build-artifact sweep, `rootfs_cleanup_pending_at` for the rootfs
+  sweep, decision 6). Because a System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while
   `investigations.close` is `_CONTRIBUTOR`, `force` **requires admin on each bound System's project** —
   the same tier `systems.teardown` demands, so `force` is not a contributor→admin escalation backdoor. A
   System the caller lacks admin on makes `force` fail listing it, rather than silently skipping.
@@ -257,7 +271,8 @@ parity waivers stay accurate.
   System can always re-materialize.
 - Cross-investigation isolation is **stronger and simpler to reason about**: the SQL resolution
   predicate (decision 4) is the boundary, backed by per-investigation staging (decision 5).
-- **New migration** (0076, `systems.investigation_id`), **new MCP surface**
+- **New migration** (0076, `systems.investigation_id` + `investigations.rootfs_cleanup_pending_at`),
+  **new MCP surface**
   (`artifacts.create_investigation_upload`, `investigations.complete_rootfs_upload`), **removed MCP
   surface** (`artifacts.create_system_upload`), a **new close parameter** (`force`) with a new refusal
   path, **two new reconciler sweeps**, and a **new setting** (`KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`,
@@ -276,6 +291,11 @@ parity waivers stay accurate.
   dedup, decision 4/5). An operator opening a fresh investigation per kernel version while reusing one
   debug rootfs pays per-investigation storage/bandwidth; a shared cross-investigation cache is rejected on
   the trust boundary.
+- **Residual — TTL-path TOCTOU is fail-closed.** On a never-closed (OPEN/ACTIVE) investigation, a System
+  bound with a checksum *after* the TTL sweep enumerated its referencers is unseen; if nothing else pins
+  the base, the sweep may reclaim it, and that System's later provision fails resolution with
+  `configuration_error` (re-upload needed). This is fail-closed — a spurious re-upload, never a boot on
+  stale bytes or corruption — and the retention TTL is days, so the window is narrow; not guarded further.
 - **Residual — advisory System→Investigation binding.** `systems.investigation_id` is nullable and not a
   capacity owner; a System still belongs to an Allocation. A profile referencing an uploaded rootfs
   requires the binding, but the column itself permits NULL, so the "upload ref ⇒ binding present"
