@@ -258,6 +258,32 @@ def _iso_utc(when: datetime) -> str:
     return when.astimezone(UTC).isoformat()
 
 
+def upload_expiry_contract(
+    stamp: upload_manifest.ManifestStamp, *, remint_tool: str
+) -> dict[str, JsonValue]:
+    """Render the agent-facing upload-deadline contract fields (#1336, ADR-0394).
+
+    One shape for both halves of the contract: the mint that advertises the deadline and the
+    finalize that enforces it (ADR-0444). Rendering both from here is what keeps the wall an
+    agent is told about identical to the wall it is later held to.
+
+    Args:
+        stamp: The manifest's reference clock and deadline, read from one statement.
+        remint_tool: The tool that replaces the manifest and resets the deadline.
+
+    Returns:
+        The ``server_time`` / ``manifest_deadline`` / ``on_expiry`` response-data fields.
+    """
+    return {
+        "server_time": _iso_utc(stamp.server_time),
+        "manifest_deadline": _iso_utc(stamp.deadline),
+        "on_expiry": {
+            "tool": remint_tool,
+            "effect": "re-mint replaces the manifest and resets the deadline",
+        },
+    }
+
+
 class _PresignStore(Protocol):
     def presign_put(self, request: PresignPutRequest) -> PresignedUpload: ...
 
@@ -785,13 +811,8 @@ async def _create_upload(
             "owner_kind": spec.owner_kind,
             "manifest_mode": "replace",
             "replaces_prior_manifest": True,
-            "server_time": _iso_utc(stamp.server_time),
-            "manifest_deadline": _iso_utc(stamp.deadline),
+            **upload_expiry_contract(stamp, remint_tool=_upload_tool_name(spec)),
             "upload_hint": _UPLOAD_HINT,
-            "on_expiry": {
-                "tool": _upload_tool_name(spec),
-                "effect": "re-mint replaces the manifest and resets the deadline",
-            },
         },
     )
 

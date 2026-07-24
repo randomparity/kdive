@@ -35,6 +35,11 @@ rootfs is resolved from, then returns `data.checksum_sha256` — the value you p
 System's `{kind: "upload", checksum_sha256: ...}` rootfs profile. The upload must be
 finalized before any System referencing it provisions.
 
+Finalize before the `manifest_deadline` that `artifacts.create_investigation_upload`
+returned: a later finalize is rejected with `reason: "upload_window_expired"` and the
+object is reclaimed, so re-mint the window with that tool and re-upload. The rejection
+echoes the deadline and the server clock it is measured on.
+
 The Investigation must be open or active; finalizing a closed Investigation is rejected.
 Requires contributor on the Investigation's project. A missing object, an object with no
 stored checksum, or a checksum that does not match the declaration is rejected with
