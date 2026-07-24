@@ -287,9 +287,18 @@ parses each `provisioning_profile`'s rootfs ref, and keeps only those whose ref 
 `{"kind":"upload","checksum_sha256": X}`; a profile that is unparseable, has no rootfs, or references a
 `catalog`/`local`/different-checksum rootfs is **not** a referencer of *X* and is skipped. For each real
 referencer it derives the overlay path from `overlay_path(system_id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`)
-and stats it for condition (a). Because the probe reads overlay files under `ROOTFS_DIR` and unlinks bases
-under `UPLOADS_DIR`, both sweeps are **local-libvirt-host-only** operations and require the reconciler to
-run co-located with that host's filesystem (as the existing overlay/base lifecycle already does).
+and stats it for condition (a). These sweeps add **host-filesystem probes to the reconciler**, which does
+none today (it touches only Postgres + the object store) — so co-location cannot be assumed, it must be
+**guarded and fail-closed**:
+
+- **Registration guard.** Sweep registration is gated on a startup check that `ROOTFS_DIR` and
+  `UPLOADS_DIR` are present and accessible (the reconciler is libvirt-host-local); if not, the sweeps do
+  not register and the check fails loudly rather than running a host-blind sweep.
+- **Fail-closed probe.** Condition (a) distinguishes *"`ROOTFS_DIR` accessible, this overlay file missing"*
+  (overlay gone → reclaimable) from *"`ROOTFS_DIR` itself absent/inaccessible"* (**defer the whole pass** —
+  never read a missing root as "all overlays gone"). A mis-deployed reconciler that cannot see the host FS
+  therefore reclaims **nothing**, rather than unlinking bases under live guests — the gate fails safe, not
+  open.
 
 The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
 exact thing that holds the base open as a qcow2 backing file (ADR-0060) — no state value is a faithful

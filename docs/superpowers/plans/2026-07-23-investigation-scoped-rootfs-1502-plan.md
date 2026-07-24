@@ -61,10 +61,12 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
 
 ### Task 1.2 — Domain record + repository
 - **Fits:** carry the new column into the domain layer.
-- **Files:** `src/kdive/domain/lifecycle/records.py` (`System.investigation_id: UUID | None = None`);
-  `src/kdive/db/repositories.py` (SYSTEMS read/write of the column).
-- **Acceptance:** a System persisted with an `investigation_id` round-trips; existing System tests pass
-  with the field defaulting to `None`.
+- **Files:** `src/kdive/domain/lifecycle/records.py` (`System.investigation_id: UUID | None = None`
+  **and** `Investigation.rootfs_cleanup_pending_at: datetime | None = None`, mirroring the sibling
+  `cleanup_pending_at`); `src/kdive/db/repositories.py` (SYSTEMS + INVESTIGATIONS read/write of the new
+  columns).
+- **Acceptance:** a System persisted with an `investigation_id` round-trips; an Investigation's
+  `rootfs_cleanup_pending_at` round-trips; existing tests pass with the fields defaulting to `None`.
 
 ---
 
@@ -95,7 +97,9 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
   **including `encoding`/`uncompressed_size` from the manifest entry**, then **re-SELECT** and return
   `data.checksum_sha256`; delete the manifest.
 - **Acceptance:** spec AC-4 (row incl. encoding, idempotent, concurrent → one row), AC-4c (gzip recoverable),
-  AC-4d (finalize-vs-close: no orphaned object either ordering).
+  **AC-4d reject branch only** (finalize on a terminal investigation rejects, manifest left for the reaper);
+  the AC-4d *reclaim* branch (committed-then-reclaimed) is proved in Phase 4/5, since neither the sweep nor
+  the close-driven marker exists at the Phase 2+3 boundary.
 
 ### Task 2.3 — Remove the System-scoped upload path
 - **Fits:** ADR-0441 §3 — replace, not deprecate.
@@ -186,9 +190,13 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
   `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}` (unparseable /
   no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X); per referencer stat
   `overlay_path(id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`) for condition (a) and check the 4.1a constant for
-  (b).
+  (b). **Fail-closed:** distinguish a missing overlay under a *present/accessible* `ROOTFS_DIR` (overlay
+  gone → reclaimable) from an *absent/inaccessible* `ROOTFS_DIR` (**defer the whole pass** — never read a
+  missing root as "all overlays gone"). The reconciler does no host-FS access today, so a mis-deployed
+  reconciler must reclaim nothing, not everything.
 - **Acceptance:** spec AC-8 (deferred while overlay present; a `failed` referencer whose overlay was
-  reclaimed drains), AC-8c (`reprovisioning`/`restoring` defer), AC-8f (unrelated System doesn't pin X).
+  reclaimed drains), AC-8c (`reprovisioning`/`restoring` defer), AC-8f (unrelated System doesn't pin X),
+  AC-8i (**fail-closed** — an inaccessible `ROOTFS_DIR` reclaims nothing).
 
 ### Task 4.1c — Per-checksum reclaim (pinned order + fault contract + `.partial` sweep)
 - **Fits:** ADR-0441 §6.
@@ -209,10 +217,13 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
 - **Do:** close-driven selects by **`rootfs_cleanup_pending_at`** (its own marker — NOT `cleanup_pending_at`;
   clears only its own when drained); TTL selects committed `owner_kind='investigations'`,
   `retention_class='rootfs'` objects past retention on a never-closed investigation.
+- **Registration guard:** gate sweep registration on a startup check that `ROOTFS_DIR` + `UPLOADS_DIR` are
+  present/accessible (the reconciler is libvirt-host-local) — fail loudly, don't run a host-blind sweep.
 - **Acceptance:** AC-7 (object+row gone past grace), AC-8b (TTL reclaims a never-closed investigation),
   AC-8d (**marker independence** — a drained build artifact nulling `cleanup_pending_at` does not starve
-  the rootfs sweep), AC-10 (residual committed + stale-window object collected). Reconciler is co-located
-  with the libvirt host FS (reads `ROOTFS_DIR`, unlinks `UPLOADS_DIR`).
+  the rootfs sweep), AC-8i (registration guard fails loudly without host FS), AC-10 (residual committed +
+  stale-window object collected), **AC-4d reclaim branch** (finalize-committed-then-close → reclaimed, no
+  orphan — the half Phase 2 cannot prove).
 
 ### Task 4.2 — Remove teardown + provision-failure rootfs reclaim; re-scope the manifest reaper
 - **Fits:** ADR-0441 §5/§6 — reclaim is now sweep-driven; the shared base is no individual provision's
