@@ -12,7 +12,11 @@
   about a *per-System-private* base that no longer exists (decisions 5–6 below). ADR-0434 §2 (read-side
   checksum verify), the [ADR-0438](0438-rootfs-transport-strip-streaming-fetch.md) qcow2-magic gate, §5
   (`upload` outside `accepted_component_sources`), and §6 (dead-guard removal) are **retained**;
-  ADR-0435's baseline/overlay provision-failure reclaim (per-System-private) is **retained**.
+  ADR-0435's baseline/overlay provision-failure reclaim (per-System-private) is **retained**. It also
+  **re-homes** [ADR-0439](0439-advertise-transport-encoding-upload-surface.md)'s transport-encoding
+  advertisement (the `json_schema_extra`/`Field`/docstring/worked-example + the per-owner declaration-item
+  schema with `accepts_encoding=True`) from the removed `create_system_upload` onto
+  `create_investigation_upload` — the surface moves owner kind, unchanged in shape.
 - **Depends on:** [ADR-0234](0234-external-build-default-and-contributor-role.md) (the
   investigation-close + grace reclaim model `gc_investigation_artifacts` this generalizes),
   [ADR-0048](0048-external-build-artifact-ingestion.md) (the agent→S3 upload transport and the
@@ -121,7 +125,10 @@ The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
 - **`artifacts.create_investigation_upload(investigation_id, [decl])`** — accepts when the investigation
   is OPEN/ACTIVE and the caller holds its project's CONTRIBUTOR role; mints the presigned single-PUT
   (chunking rejected, ADR-0436; gzip transport-encoding accepted and stripped, ADR-0438/0439), replaces
-  the investigation's manifest, and audits the grant.
+  the investigation's manifest, and audits the grant. It carries ADR-0439's encoding advertisement — the
+  `accepts_encoding=True` per-owner declaration-item schema plus the `Field`/docstring/worked-example —
+  re-homed from `create_system_upload` so the >5 GiB gzip-rootfs surface does not silently regress to an
+  unadvertised field.
 - **`investigations.complete_rootfs_upload(investigation_id)`** — the explicit finalize (symmetric with
   `runs.complete_build`): HEADs the object for its stored checksum, verifies it is present and
   checksum-bearing, writes the `owner_kind='investigations'` `artifacts` row via **`INSERT … ON CONFLICT
@@ -187,11 +194,13 @@ lock:
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's
-  deterministic `db.locks._lock_key(LockScope.INVESTIGATION, f"{investigation_id}:{token}")` — **not**
-  Python's `hash()`, which is per-process salted (`PYTHONHASHSEED`) and would derive different keys in
-  different worker processes, silently no-op the lock, and re-admit the double download. Session-scoped
-  (not `advisory_xact_lock`, which would hold a transaction open across the download and trip
-  `idle_in_transaction_session_timeout`). After acquiring, re-check for the verified `dest` (cache hit
+  **session** keyspace helper `db.locks._session_lock_key(f"rootfs-fetch:{investigation_id}:{token}")` —
+  the session keyspace is separately salted from the transaction-scope keyspace (`_lock_key`, used by
+  `advisory_xact_lock`) precisely so a long-held session lock never collides with a per-object xact op, so
+  a session-held lock must use it, not `_lock_key`. It is **not** Python's `hash()`, which is per-process
+  salted (`PYTHONHASHSEED`) and would derive different keys in different worker processes, silently no-op
+  the lock, and re-admit the double download. Session-scoped (not `advisory_xact_lock`, which would hold a
+  transaction open across the download and trip `idle_in_transaction_session_timeout`). After acquiring, re-check for the verified `dest` (cache hit
   populated while waiting). A lock lost mid-download degrades only to a redundant download, never
   corruption (the unique partial covers it).
 
@@ -235,10 +244,13 @@ non-terminal state — `defined`, `provisioning`, `reprovisioning`, or `restorin
 or re-create against the base with the overlay momentarily absent (the ADR-0435 `provisioning`-exclusion
 hazard, generalized to every state whose handler re-materializes the base). When both hold, reclaim in a
 **pinned order that never strands the file**: delete the object (best-effort), then **unlink the staged
-base** under `rootfs-uploads/<inv>/` (treated like the best-effort object delete — an unlink failure
-defers the whole checksum, `drained=False`), and **only then** delete the `artifacts` row
-(fail-loud-in-txn, ADR-0234/0434). The row is the worklist anchor, so removing it **last** guarantees a
-failed unlink never orphans a SENSITIVE base file with no row for a future sweep to find. Gate fails → skip
+base** under `rootfs-uploads/<inv>/` (a real unlink error defers the whole checksum, `drained=False`), and
+**only then** delete the `artifacts` row (fail-loud-in-txn, ADR-0234/0434). The row is the worklist anchor,
+so removing it **last** guarantees a failed unlink never orphans a SENSITIVE base file with no row for a
+future sweep to find. The object delete and the unlink are **idempotent** — an already-absent target
+(S3 404, filesystem `ENOENT`) counts as **success**, not a defer — so the complementary partial failure
+(unlink succeeds, then the row-delete txn rolls back) converges: the next pass finds object and file gone,
+treats both as done, and completes the row delete, rather than wedging forever on a missing-file "failure". Gate fails → skip
 the checksum this pass (`drained=False`, retried next); remove the empty `rootfs-uploads/<inv>/` dir once
 drained. Condition (b) matters mainly for the TTL backstop, which fires on never-closed investigations with
 no close-time block; the close-driven sweep already sees no `defined`/`provisioning` System because
@@ -285,12 +297,16 @@ deadline.
 
 - **Default:** if any bound System is in a non-terminal state, close **fails** with a
   `configuration_error` listing them and refuses — the investigation stays OPEN/ACTIVE.
-- **`close(force=True)`:** enqueue a teardown job for each bound live System, then close and set both
-  markers (`cleanup_pending_at` for the build-artifact sweep, `rootfs_cleanup_pending_at` for the rootfs
-  sweep, decision 6). Because a System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while
-  `investigations.close` is `_CONTRIBUTOR`, `force` **requires admin on each bound System's project** —
-  the same tier `systems.teardown` demands, so `force` is not a contributor→admin escalation backdoor. A
-  System the caller lacks admin on makes `force` fail listing it, rather than silently skipping.
+- **`close(force=True)`:** **all-or-nothing.** First validate admin on **every** bound live System's
+  project; only if all pass, enqueue all teardown jobs and close (set both markers — `cleanup_pending_at`
+  for the build-artifact sweep, `rootfs_cleanup_pending_at` for the rootfs sweep, decision 6) in one
+  transaction. Any failure — a System the caller lacks admin on, or an enqueue error — aborts the whole
+  `force` with **zero** teardowns enqueued and the investigation unchanged, listing the offending System.
+  Enqueuing teardowns as the loop iterates and only then hitting a no-admin System would leave some
+  Systems reaped while nothing closed — a destructive side effect on a failing call, which the
+  validate-all-first order forecloses. `force` **requires admin on each bound System's project** because a
+  System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while `investigations.close` is
+  `_CONTRIBUTOR` — same tier, so `force` is not a contributor→admin escalation backdoor.
 
 The role tiers mean the same-project binding rule (decision 2) forecloses only the *cross-project*
 deadlock, not an intra-project one: a same-project **contributor** who opened the investigation can

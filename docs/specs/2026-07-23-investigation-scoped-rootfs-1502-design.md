@@ -102,6 +102,10 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 **Removed (replace, not deprecate):** `artifacts.create_system_upload`, `_SYSTEM_UPLOAD`,
 `_commit_uploaded_rootfs`, `_system_accepts_upload`, `rootfs_upload_window_allowed`, and the
 `systems.define` System-scoped upload window. `SYSTEM_ARTIFACT_NAMES` carried only `rootfs`.
+**Re-homed, not lost:** ADR-0439's transport-encoding advertisement — the `accepts_encoding=True` per-owner
+declaration-item schema plus the `json_schema_extra`/`Field`/docstring/worked gzip example that lived on
+`create_system_upload` — moves onto `create_investigation_upload` unchanged in shape, so the >5 GiB
+gzip-rootfs surface does not silently regress to an unadvertised field.
 
 ### Reference + provision resolution (ADR-0441 §4/§5)
 
@@ -122,10 +126,12 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
     concurrent downloaders never share a partial — the correctness guarantee against corruption, lock or no.
   - **Deterministic session-scoped advisory lock** to avoid the redundant multi-GiB download ("written
     once"): `pg_advisory_lock` on the fetch's dedicated sync connection, held across check-and-download,
-    keyed via `db.locks._lock_key(LockScope.INVESTIGATION, f"{inv}:{token}")` — **not** Python `hash()`
-    (per-process salted → different keys across worker processes → silent no-op). Session-scoped (not
-    `advisory_xact_lock`, which holds a txn open across the download → idle-in-transaction timeout). Re-check
-    for the verified `dest` after acquiring (cache hit while waiting).
+    keyed via the **session** keyspace helper `db.locks._session_lock_key(f"rootfs-fetch:{inv}:{token}")`
+    (salted apart from the `_lock_key` xact keyspace so a long session lock never collides with a per-object
+    xact op) — **not** `_lock_key` (xact keyspace) and **not** Python `hash()` (per-process salted →
+    different keys across worker processes → silent no-op). Session-scoped (not `advisory_xact_lock`, which
+    holds a txn open across the download → idle-in-transaction timeout). Re-check for the verified `dest`
+    after acquiring (cache hit while waiting).
 - The fetch reads `encoding`/`uncompressed_size` from the **durable `artifacts` row** (not the deleted
   manifest) and strips gzip per ADR-0438. It opens its own short-lived sync connection to resolve the
   committed-object key + encoding.
@@ -156,11 +162,13 @@ blocks on non-terminal states). Overlay-file absence is the backing safety condi
 would let a `failed` System — terminal, never reaching `torn_down`, excluded from `repair_orphaned_systems`
 — pin the base forever and defeat the TTL backstop. Condition (b) reads only the listed non-terminal
 states, never terminal-ness, so it does not reintroduce the pin. Gate holds → reclaim in **pinned order**:
-delete the object (best-effort), **unlink** `rootfs-uploads/<inv>/<token>.qcow2` (an unlink failure defers
-the whole checksum, `drained=False` — treated like the best-effort object delete), and **only then** delete
-the row (fail-loud in txn). The row is the worklist anchor, so removing it **last** means a failed unlink
-never strands a SENSITIVE file with no row for a future sweep to find. Gate fails → skip the checksum
-(`drained=False`, retried). Remove the empty `rootfs-uploads/<inv>/` dir once drained.
+delete the object (best-effort), **unlink** `rootfs-uploads/<inv>/<token>.qcow2` (a real unlink error defers
+the whole checksum, `drained=False`), and **only then** delete the row (fail-loud in txn). The row is the
+worklist anchor, so removing it **last** means a failed unlink never strands a SENSITIVE file with no row.
+Object-delete and unlink are **idempotent** — an already-absent target (S3 404 / `ENOENT`) is **success**,
+not a defer — so the complementary partial failure (unlink succeeds, row-delete rolls back) converges next
+pass to the row delete instead of wedging forever on a missing-file "failure". Gate fails → skip the
+checksum (`drained=False`, retried). Remove the empty `rootfs-uploads/<inv>/` dir once drained.
 - **Referencer enumeration (per checksum X):** `systems WHERE investigation_id=<inv> AND state<>'torn_down'`,
   parse each `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}`; an
   unparseable / no-rootfs / catalog / local / different-checksum profile is **not** a referencer of X (so
@@ -184,12 +192,14 @@ failure. ADR-0435's baseline/overlay reclaim (per-System-private) stays. The upl
 
 - Enumerate bound live Systems: `systems WHERE investigation_id=<inv> AND state NOT IN (<terminal>)`.
 - **Default (force=False):** any live ⇒ `configuration_error` listing their ids; refuse (state unchanged).
-- **force=True:** for each bound live System, require **admin on that System's project** (matching the
-  `_ADMIN` gate on `systems.teardown`, so force is not a contributor→admin escalation via close; a System
-  the caller lacks admin on ⇒ fail listing it), enqueue its teardown job, then close and set **both**
-  markers (`cleanup_pending_at` + `rootfs_cleanup_pending_at`). Consequence: a same-project *contributor*
-  can neither default-close (live System blocks) nor force-close (needs admin) — a deliberate authz cost,
-  not a bug. Any successful close (default or force) sets both markers.
+- **force=True (all-or-nothing):** first validate **admin on every bound live System's project** (matching
+  the `_ADMIN` gate on `systems.teardown`, so force is not a contributor→admin escalation via close); only
+  if all pass, enqueue all teardown jobs and close in one transaction (set **both** markers,
+  `cleanup_pending_at` + `rootfs_cleanup_pending_at`). Any failure (a System lacking admin, or an enqueue
+  error) aborts with **zero** teardowns enqueued and the investigation unchanged, listing the offending
+  System — never a partial reap on a failing call. Consequence: a same-project *contributor* can neither
+  default-close (live System blocks) nor force-close (needs admin) — a deliberate authz cost, not a bug.
+  Any successful close (default or force) sets both markers.
 - NULL-investigation Systems are never considered.
 
 ## Agent-facing flow (happy path)
@@ -219,13 +229,14 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | Object missing / checksum-less at finalize | `configuration_error` (mirrors old `_commit_uploaded_rootfs`) |
 | Downloaded bytes fail SHA-256 or qcow2-magic | `infrastructure_failure` / `configuration_error` (ADR-0434 §2, ADR-0438) unchanged |
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
-| `close(force=True)`, caller lacks admin on a bound System's project | fail listing it; nothing torn down (force = `_ADMIN` per System, no escalation) |
+| `close(force=True)`, caller lacks admin on one of several bound Systems | **all-or-nothing**: validate all admin first → zero teardowns enqueued, investigation unchanged, offending System listed |
 | TTL backstop vs a `defined`/`provisioning` bound System (no overlay yet) | deferred by gate condition (b) — the base is not reclaimed under a pre-overlay referencer |
 | Store fault deleting object in sweep | best-effort skip, retried next pass (marker stays set) |
 | Base still backed by a referencing System's overlay file on the host | object + row + file all deferred on one gate, retried next pass |
 | `failed` bound System referencing the base | deferred **only while its overlay remains**; drains once ADR-0435 reclaims the overlay (a state gate would pin it forever) |
 | Bound System `reprovisioning`/`restoring` (overlay momentarily absent) | gate condition (b) defers — the base is not reclaimed mid-re-materialize |
 | Base-file `unlink` fails after object delete | pinned order defers the whole checksum (`drained=False`); the row is kept as the retry anchor, never orphaning the file |
+| Unlink succeeds, then row-delete rolls back | idempotent object-delete + unlink (404/`ENOENT`=success) → next pass converges to the row delete, no permanent wedge |
 | Build-artifact sweep nulls `cleanup_pending_at` before rootfs overlays drain | rootfs sweep keys on its **own** `rootfs_cleanup_pending_at`, unaffected — close+grace reclaim still fires |
 | System bound with a checksum after the TTL sweep enumerated (never-closed inv) | fail-closed: base may be reclaimed → later provision fails resolution (`configuration_error`, re-upload); no corruption |
 | Investigation never closed | TTL backstop `gc_expired_investigation_rootfs` reclaims past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, same overlay-absence gate |
@@ -253,8 +264,10 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    provisioned, is gunzipped from the row-persisted encoding and passes the qcow2-magic gate (asserts the
    base is a valid qcow2, not verbatim gzip bytes).
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
-6. **Close-force:** `close(force=True)` with **admin** on each bound System's project enqueues teardown
-   and closes; a same-project **contributor** is refused (no escalation via close — assert the admin gate).
+6. **Close-force (atomic):** `close(force=True)` with **admin** on each bound System's project enqueues
+   teardown and closes; a same-project **contributor** is refused (no escalation). With **several** bound
+   Systems where the caller lacks admin on one, assert **zero** teardowns are enqueued and the investigation
+   stays open (all-or-nothing — no partial reap).
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
 8. **Liveness guard (overlay-absence):** the sweep does **not** reclaim a base while a referencing
    System's overlay file is present; it reclaims once the overlay is gone. Critically, a **`failed`**
@@ -273,6 +286,8 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    `artifacts` row intact and the checksum retried next pass (no orphaned file with no row).
 8f. **Enumeration precision:** a bound live System referencing a *different* checksum (or a `catalog`
    rootfs) does **not** pin checksum X's base — X reclaims while that unrelated System stays live.
+8g. **Idempotent reconverge:** with the object deleted and file unlinked, a forced row-delete failure
+   re-runs to a clean drain (missing object/file counted as success, not a defer — no permanent wedge).
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)
@@ -280,8 +295,9 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
     sweep, and a stale investigation upload window's uncommitted object is reaped by the re-scoped
     manifest reaper. (The *failed-provision* orphan itself is ADR-0435's, unchanged here.)
 11. **Surface:** `artifacts.create_system_upload` is gone from the tool index/exposure/RBAC matrix;
-    `artifacts.create_investigation_upload` + `investigations.complete_rootfs_upload` are present with the
-    CONTRIBUTOR gate; migration 0076 round-trips.
+    `artifacts.create_investigation_upload` (advertising the re-homed ADR-0439 `accepts_encoding=True`
+    declaration schema + encoding `Field`/example) + `investigations.complete_rootfs_upload` are present
+    with the CONTRIBUTOR gate; migration 0076 round-trips.
 
 ## Rollout / rollback
 
