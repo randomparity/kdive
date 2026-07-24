@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from kdive.db.locks import (
     CONSOLE_HOSTING_LEADER,
@@ -18,6 +19,7 @@ from kdive.db.locks import (
     session_advisory_lock_held,
 )
 from tests.db_waits import wait_until_backend_waiting, wait_until_session_lock_released
+from tests.support.xdist_backend import with_database_name
 
 _KEY = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -265,8 +267,9 @@ def test_session_lock_single_holder(postgres_url: str) -> None:
 def test_session_lock_released_on_connection_loss(postgres_url: str) -> None:
     """Closing the holder's connection releases the lock so a standby can acquire it.
 
-    This is the split-brain hazard AC6 guards against: Postgres frees a session lock the
-    instant the holding backend disconnects, with no notice to the (now-dead) holder.
+    This is the split-brain hazard AC6 guards against: Postgres frees a session lock when the
+    holding backend exits, with no notice to the (now-dead) holder. The exit trails the
+    client-side close, so the standby waits for the release rather than assuming it landed.
     """
 
     async def _run() -> None:
@@ -335,7 +338,72 @@ def test_session_advisory_lock_held_released_on_holder_loss(postgres_url: str) -
             await holder_conn.close()  # a dead leader releases the lock with no notice
             # The release is Postgres reaping the holder's backend, which the client-side
             # close does not wait for, so the observer waits for the release instead of
-            # asserting it has already landed.
+            # asserting it has already landed. The post-condition is still asserted here so
+            # the test states it directly rather than delegating it to the wait helper.
             await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER)
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
 
     asyncio.run(_run())
+
+
+def test_wait_until_session_lock_released_raises_while_a_holder_lives(postgres_url: str) -> None:
+    """The wait is a real gate, not a delay: a lock that never frees fails the caller.
+
+    Guards the barrier the two holder-loss tests above delegate their timing to — a helper
+    that returned early would leave both of them passing vacuously.
+    """
+
+    async def _run() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as holder_conn,
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
+        ):
+            holder = SessionAdvisoryLock(holder_conn, CONSOLE_HOSTING_LEADER)
+            assert await holder.try_acquire() is True
+            with pytest.raises(AssertionError, match=CONSOLE_HOSTING_LEADER) as caught:
+                await wait_until_session_lock_released(
+                    observer, CONSOLE_HOSTING_LEADER, timeout_s=0.1
+                )
+            # The message must name the surviving holder, or a CI failure is undiagnosable.
+            assert str(holder_conn.info.backend_pid) in str(caught.value)
+            await holder.release()
+            # And it returns once the lock is genuinely free.
+            await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER, timeout_s=5)
+
+    asyncio.run(_run())
+
+
+def test_session_advisory_lock_held_ignores_a_holder_in_another_database(
+    postgres_url: str,
+) -> None:
+    """A holder of the same key in a *different* database is not a leader of this one.
+
+    Advisory locks are per-database — two backends in different databases of one cluster
+    take the same key without contending — but ``pg_locks`` is cluster-wide, so an
+    unscoped scan counts the other database's holder as a live leader here. That
+    mis-report is what the suite's own topology triggers: one shared Postgres container
+    with a database per xdist worker, several of which claim CONSOLE_HOSTING_LEADER.
+    """
+    other_db = f"kdive_test_other_db_{uuid4().hex[:12]}"
+    admin_url = with_database_name(postgres_url, "postgres")
+
+    async def _run() -> None:
+        async with (
+            await psycopg.AsyncConnection.connect(
+                with_database_name(postgres_url, other_db), autocommit=True
+            ) as elsewhere,
+            await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
+        ):
+            # Same key, other database: it acquires, proving the two never contend.
+            assert await SessionAdvisoryLock(elsewhere, CONSOLE_HOSTING_LEADER).try_acquire()
+            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
+
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(other_db)))
+    try:
+        asyncio.run(_run())
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(other_db))
+            )
