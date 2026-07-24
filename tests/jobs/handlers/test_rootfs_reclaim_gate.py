@@ -1,8 +1,10 @@
-"""The investigation-rootfs reclaim liveness gate (ADR-0441 §6, Task 4.1b).
+"""The investigation-rootfs reclaim liveness gate (ADR-0441 §6, now worker-side per ADR-0442).
 
 ``rootfs_base_reclaimable`` is reclaimable only when **no** referencing System pins the base:
 condition (a) a referencer's overlay file is present, or (b) a referencer is in a pre-overlay/
-re-materialize state. ``rootfs_dir_accessible`` is the per-pass fail-closed primitive (AC-8i).
+re-materialize state. The gate moved to the worker with the rest of the reclaim (#1522); its
+behavior is unchanged, and the ``rootfs_dir_accessible`` co-location probe it used to sit behind is
+gone — the worker that claims a local-libvirt job is the guest host by construction.
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ from uuid import UUID, uuid4
 import psycopg
 
 from kdive.artifacts.content_address import rootfs_object_token
+from kdive.jobs.handlers.artifacts.rootfs_reclaim import rootfs_base_reclaimable
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
-from kdive.reconciler.cleanup.gc import rootfs_base_reclaimable, rootfs_dir_accessible
 from tests.reconciler.conftest import connect
 
 
@@ -222,13 +224,3 @@ def test_torn_down_referencer_is_excluded(migrated_url: str, tmp_path: Path) -> 
     inv, sys_id = asyncio.run(_seed())
     _write_overlay(tmp_path, sys_id)  # even with an overlay, torn_down is not enumerated
     assert _reclaimable(migrated_url, inv, tmp_path)
-
-
-def test_rootfs_dir_accessible_fail_closed(tmp_path: Path) -> None:
-    assert not rootfs_dir_accessible(str(tmp_path / "does-not-exist"))
-    real = tmp_path / "rootfs"
-    real.mkdir()
-    assert rootfs_dir_accessible(str(real))
-    a_file = tmp_path / "afile"
-    a_file.write_bytes(b"x")
-    assert not rootfs_dir_accessible(str(a_file))  # exists but not a directory

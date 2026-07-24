@@ -2515,6 +2515,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                     "restore",
                     "delete_snapshot",
                     "capture_traffic",
+                    "reclaim_investigation_rootfs",
                 ),
             ),
             GeneratedFlag(

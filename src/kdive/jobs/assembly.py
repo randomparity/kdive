@@ -162,6 +162,15 @@ def _vmcore_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
     return _register
 
 
+def _rootfs_reclaim_handler_registrar(object_stores: ObjectStoreAssembly) -> HandlerRegistrar:
+    def _register(registry: HandlerRegistry) -> None:
+        from kdive.jobs.handlers.artifacts import rootfs_reclaim
+
+        rootfs_reclaim.register_handlers(registry, artifact_store=object_stores.store)
+
+    return _register
+
+
 def _register_diagnostics_handlers(registry: HandlerRegistry) -> None:
     from kdive.jobs.handlers import diagnostics as diagnostics_handler
 
@@ -214,5 +223,6 @@ def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRe
         _image_build_handler_registrar(
             resolver=assembly.resolver, object_stores=assembly.object_stores
         ),
+        _rootfs_reclaim_handler_registrar(assembly.object_stores),
         _register_diagnostics_handlers,
     )
