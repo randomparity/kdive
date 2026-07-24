@@ -7,7 +7,7 @@ import base64
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -120,6 +120,17 @@ async def _open_window(
     assert resp.status == "upload_ready"
     entry = upload_manifest.ManifestEntry("rootfs", _ROOTFS_SHA256, 4096)
     return artifact_key("local", "investigations", inv_id, investigation_rootfs_object_name(entry))
+
+
+async def _set_deadline(pool: AsyncConnectionPool, inv_id: str, offset: timedelta) -> None:
+    """Move the open window's deadline by an offset, on the DB clock the check reads."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "UPDATE upload_manifests SET deadline = now() + %s "
+            "WHERE owner_kind = 'investigations' AND owner_id = %s",
+            (offset, UUID(inv_id)),
+        )
+        assert cur.rowcount == 1
 
 
 async def _investigation_rootfs_rows(pool: AsyncConnectionPool) -> list[dict[str, Any]]:
@@ -285,6 +296,57 @@ def test_finalize_no_manifest_rejects(migrated_url: str) -> None:
     out = asyncio.run(_run())
     assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
     assert out.data["reason"] == "no_upload_manifest"
+    # A finalize arriving after the reaper collected the window lands here; point it at the
+    # same re-mint the expiry rejection names (ADR-0444 decision 1).
+    assert out.suggested_next_actions == ["artifacts.create_investigation_upload"]
+
+
+def test_finalize_rejects_past_deadline_window(migrated_url: str) -> None:
+    """AC-1: a past-deadline manifest is rejected with a self-correcting `upload_window_expired`
+    naming the deadline, the DB reference clock, and the re-mint tool (ADR-0444 decision 1). The
+    manifest is left for the reaper and nothing is committed."""
+
+    async def _run() -> tuple[ToolResponse, Any, list[dict[str, Any]], list[str]]:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool)
+            await _open_window(pool, inv_id)
+            await _set_deadline(pool, inv_id, timedelta(seconds=-1))
+            store = _HeadStore(_ROOTFS_SHA256)
+            out = await _finalize(pool, inv_id, store)
+            async with pool.connection() as conn:
+                manifest = await upload_manifest.get_manifest(conn, "investigations", UUID(inv_id))
+            return out, manifest, await _investigation_rootfs_rows(pool), store.keys
+
+    out, manifest, rows, head_keys = asyncio.run(_run())
+    assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert out.data["reason"] == "upload_window_expired"
+    assert out.suggested_next_actions == ["artifacts.create_investigation_upload"]
+    # The rejection states the wall, the clock it is measured on, and the recovery (#1336).
+    deadline, server_time = out.data["manifest_deadline"], out.data["server_time"]
+    assert isinstance(deadline, str) and isinstance(server_time, str)
+    assert deadline < server_time  # both ISO-8601 UTC, so lexicographic order is chronological
+    on_expiry = out.data["on_expiry"]
+    assert isinstance(on_expiry, dict)
+    assert on_expiry["tool"] == "artifacts.create_investigation_upload"
+    assert manifest is not None  # left for the reaper, not deleted by the rejection
+    assert rows == []  # nothing committed
+    assert head_keys == []  # rejected before the object HEAD
+
+
+def test_finalize_inside_deadline_still_succeeds(migrated_url: str) -> None:
+    # AC-2: the deadline check only rejects a lapsed window — a live one finalizes as before.
+    async def _run() -> tuple[ToolResponse, list[dict[str, Any]]]:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool)
+            await _open_window(pool, inv_id)
+            await _set_deadline(pool, inv_id, timedelta(hours=1))
+            out = await _finalize(pool, inv_id, _HeadStore(_ROOTFS_SHA256))
+            return out, await _investigation_rootfs_rows(pool)
+
+    out, rows = asyncio.run(_run())
+    assert out.status == "rootfs_upload_complete"
+    assert out.data["checksum_sha256"] == _ROOTFS_SHA256
+    assert len(rows) == 1
 
 
 def test_finalize_is_contributor_gated(migrated_url: str) -> None:

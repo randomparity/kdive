@@ -1,12 +1,12 @@
-"""Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, ADR-0441 §6, issue #11).
+"""Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, ADR-0444, issue #11).
 
 The reaper prefix-reaps uncommitted objects of a past-deadline manifest, then deletes the
 manifest row. For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
-finalized with leftover chunks (ADR-0104 §7); for ``investigations`` it reaps a stale upload
-window on a terminal (``closed``/``abandoned``) investigation (ADR-0441 §6), keeping an
-OPEN/ACTIVE investigation gated out. It exempts any object with a committed ``artifacts`` row,
-and the per-owner locked re-read declines a manifest whose deadline was renewed since the
-candidate select.
+finalized with leftover chunks (ADR-0104 §7); for ``investigations`` it sweeps on the deadline
+alone, in every investigation state (ADR-0444, superseding ADR-0441 §6's terminal-state gate —
+``complete_rootfs_upload`` now rejects a past-deadline finalize, so the reap races nothing
+legitimate). It exempts any object with a committed ``artifacts`` row, and the per-owner locked
+re-read declines a manifest whose deadline was renewed since the candidate select.
 
 The ``_repair_abandoned_uploads`` tests run the repair through a real non-autocommit
 ``AsyncConnectionPool`` via ``run_repair`` (mirroring ``test_loop.py``), so the
@@ -26,10 +26,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.uploads import ManifestEntry
-from kdive.db.locks import LockScope
 from kdive.domain.capacity.state import RunState
 from kdive.reconciler.cleanup.uploads import (
-    owner_reapable as _owner_reapable,
+    lock_scope_for as _lock_scope_for,
 )
 from kdive.reconciler.cleanup.uploads import (
     reap_one_owner as _reap_one_owner,
@@ -233,23 +232,48 @@ def test_succeeded_run_with_lingering_manifest_reaps_chunks_not_final(migrated_u
     asyncio.run(_run())
 
 
-def test_open_investigation_with_lingering_manifest_is_not_reaped(migrated_url: str) -> None:
-    """An OPEN investigation keeps its gate: a past-deadline manifest is not swept, because the
-    agent can still finalize (or re-open the window) — only a terminal investigation is reaped
-    (ADR-0441 §6)."""
+def test_reaps_past_deadline_uncommitted_manifest_on_open_investigation(migrated_url: str) -> None:
+    """AC-3 (ADR-0444 decision 2, superseding ADR-0441 §6): an OPEN investigation is no longer
+    excluded. Its past-deadline uncommitted object + manifest are reaped on the deadline alone —
+    a finalize arriving this late is rejected by `complete_rootfs_upload`, so nothing legitimate
+    is raced."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
             inv_id = await _seed_investigation(seed, state="open")
             prefix, request = _investigation_manifest(inv_id, timedelta(seconds=-1))
             await upload_manifest.replace_manifest(seed, request)
-        store = _FakeStore({prefix: [f"{prefix}rootfs"]})
+        store = _FakeStore({prefix: [f"{prefix}rootfs", f"{prefix}stray"]})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(pool, _reap(store))
-        assert count == 0
-        assert store.deleted == []  # open investigation's objects untouched
+        assert count == 1
+        assert sorted(store.deleted) == [f"{prefix}rootfs", f"{prefix}stray"]
         async with await connect(migrated_url) as check:
-            assert await upload_manifest.get_manifest(check, "investigations", inv_id) is not None
+            assert await upload_manifest.get_manifest(check, "investigations", inv_id) is None
+
+    asyncio.run(_run())
+
+
+def test_open_investigation_committed_object_is_exempt(migrated_url: str) -> None:
+    """AC-4: with the state gate gone, the per-key committed-object skip carries the whole safety
+    burden for an OPEN investigation — a finalized rootfs (with an `artifacts` row) is never
+    deleted, though its spent manifest still goes."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            inv_id = await _seed_investigation(seed, state="open")
+            prefix, request = _investigation_manifest(inv_id, timedelta(seconds=-1))
+            await _insert_artifact_row(
+                seed, owner_kind="investigations", owner_id=inv_id, object_key=f"{prefix}rootfs"
+            )
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}rootfs", f"{prefix}stray"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == [f"{prefix}stray"]  # committed object exempt, stray bytes go
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "investigations", inv_id) is None
 
     asyncio.run(_run())
 
@@ -299,14 +323,36 @@ def test_closed_investigation_committed_object_is_exempt(migrated_url: str) -> N
     asyncio.run(_run())
 
 
-def test_active_investigation_with_lingering_manifest_is_not_reaped(migrated_url: str) -> None:
-    """An ``active`` investigation is excluded (ADR-0441 §6): the finalize can still land under the
-    investigation lock, so a past-deadline manifest is not swept out from under it."""
+def test_reaps_past_deadline_uncommitted_manifest_on_active_investigation(
+    migrated_url: str,
+) -> None:
+    """AC-3, the ``active`` half: the reap keys on the deadline, not on investigation state, so an
+    in-flight investigation's lapsed upload window is collected too (ADR-0444 decision 2)."""
 
     async def _run() -> None:
         async with await connect(migrated_url) as seed:
             inv_id = await _seed_investigation(seed, state="active")
             prefix, request = _investigation_manifest(inv_id, timedelta(seconds=-1))
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}rootfs"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == [f"{prefix}rootfs"]
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "investigations", inv_id) is None
+
+    asyncio.run(_run())
+
+
+def test_open_investigation_within_deadline_is_not_reaped(migrated_url: str) -> None:
+    """AC-5, the investigations half: the deadline is the only gate, so a live window on an OPEN
+    investigation is still untouched — the reap did not become unconditional."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            inv_id = await _seed_investigation(seed, state="open")
+            prefix, request = _investigation_manifest(inv_id, timedelta(hours=1))
             await upload_manifest.replace_manifest(seed, request)
         store = _FakeStore({prefix: [f"{prefix}rootfs"]})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
@@ -327,23 +373,18 @@ def test_reap_one_owner_declines_renewed_manifest(migrated_url: str) -> None:
             prefix, request = _run_manifest(run_id, timedelta(hours=1))
             await upload_manifest.replace_manifest(conn, request)
             store = _FakeStore({prefix: [f"{prefix}kernel"]})
-            assert await _reap_one_owner(conn, store, "runs", run_id, LockScope.RUN) is False
+            assert await _reap_one_owner(conn, store, "runs", run_id) is False
             assert store.deleted == []
 
     asyncio.run(_run())
 
 
-def test_owner_reapable_rejects_unknown_owner_kind_before_sql(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with await connect(migrated_url) as conn:
-            system_id = await seed_system(conn)
-            try:
-                await _owner_reapable(
-                    conn, cast(upload_manifest.UploadOwnerKind, "allocations"), system_id
-                )
-            except ValueError as exc:
-                assert str(exc) == "unsupported upload owner kind: allocations"
-            else:
-                raise AssertionError("unknown owner kind should fail before SQL dispatch")
-
-    asyncio.run(_run())
+def test_lock_scope_rejects_unknown_owner_kind() -> None:
+    # AC-6: the state gate is gone, but its fail-loud arm survives on the lock-scope lookup — an
+    # unrecognized owner kind must never be locked under a guessed scope (ADR-0444 decision 2).
+    try:
+        _lock_scope_for(cast(upload_manifest.UploadOwnerKind, "allocations"))
+    except ValueError as exc:
+        assert str(exc) == "unsupported upload owner kind: allocations"
+    else:
+        raise AssertionError("unknown owner kind should fail loud, not resolve to a scope")

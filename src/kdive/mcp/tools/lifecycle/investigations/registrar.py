@@ -200,6 +200,12 @@ def _register_investigations_complete_rootfs_upload(
         System's `{kind: "upload", checksum_sha256: ...}` rootfs profile. The upload must be
         finalized before any System referencing it provisions.
 
+        Finalize before the `manifest_deadline` that `artifacts.create_investigation_upload`
+        returned: a later finalize is rejected with `reason: "upload_window_expired"`, echoing
+        the deadline and the server clock it is measured on. To recover, re-mint the window with
+        that tool and call this again — the object is addressed by its checksum, so re-upload
+        only if the retry reports `rootfs_not_uploaded` (the expired object was reclaimed).
+
         The Investigation must be open or active; finalizing a closed Investigation is rejected.
         Requires contributor on the Investigation's project. A missing object, an object with no
         stored checksum, or a checksum that does not match the declaration is rejected with

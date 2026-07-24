@@ -7,34 +7,19 @@ import logging
 from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
-from psycopg import AsyncConnection, sql
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts import upload_manifest
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.domain.capacity.state import InvestigationState, RunState
 
 _log = logging.getLogger(__name__)
 
-_UPLOAD_RUN_OWNER_KIND = upload_manifest.RUN_UPLOAD_OWNER
-_UPLOAD_INVESTIGATION_OWNER_KIND = upload_manifest.INVESTIGATION_UPLOAD_OWNER
-_UPLOAD_REAPABLE_STATES: dict[upload_manifest.UploadOwnerKind, tuple[str, ...]] = {
-    _UPLOAD_RUN_OWNER_KIND: (RunState.CREATED.value,),
-    # A terminal investigation (closed/abandoned) will never finalize its rootfs upload (finalize
-    # requires OPEN/ACTIVE under the investigation lock, ADR-0441 §3), so a past-deadline manifest's
-    # uncommitted object + manifest are reapable — a stale upload window. An OPEN/ACTIVE
-    # investigation is excluded: the agent can still finalize (or re-open the window), and the
-    # committed row, once written, is reclaimed by the rootfs sweeps, not this reaper.
-    _UPLOAD_INVESTIGATION_OWNER_KIND: (
-        InvestigationState.CLOSED.value,
-        InvestigationState.ABANDONED.value,
-    ),
-}
-_OWNER_REAPABLE_QUERIES: dict[upload_manifest.UploadOwnerKind, sql.SQL] = {
-    _UPLOAD_RUN_OWNER_KIND: sql.SQL("SELECT 1 FROM runs WHERE id = %s AND state = ANY(%s)"),
-    _UPLOAD_INVESTIGATION_OWNER_KIND: sql.SQL(
-        "SELECT 1 FROM investigations WHERE id = %s AND state = ANY(%s)"
-    ),
+# The owner kinds the reaper handles, and the advisory-lock scope each is reaped under. It is
+# also the candidate-select filter: the reaper can only reap what it can take the owner's lock on.
+_LOCK_SCOPES: dict[upload_manifest.UploadOwnerKind, LockScope] = {
+    upload_manifest.RUN_UPLOAD_OWNER: LockScope.RUN,
+    upload_manifest.INVESTIGATION_UPLOAD_OWNER: LockScope.INVESTIGATION,
 }
 
 
@@ -49,32 +34,26 @@ class UploadStore(Protocol):
 async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) -> int:
     """Reap a past-deadline manifest's uncommitted prefix objects, then the manifest.
 
-    For ``runs`` the obligation is "a Run manifest past its deadline", swept whether the Run is
-    pre-finalize (a true abandon) or finalized with incomplete chunk cleanup (the backstop for a
-    failed post-commit delete, ADR-0104 §7). The ``investigations`` branch reaps a stale
-    investigation upload window on a terminal (``closed``/``abandoned``) investigation (ADR-0441
-    §6), so an upload that will never finalize no longer strands its uncommitted object + manifest;
-    an OPEN/ACTIVE investigation stays gated out (it can still finalize).
+    The obligation is the same for both owner kinds: a manifest past its deadline. For ``runs``
+    that sweeps whether the Run is pre-finalize (a true abandon) or finalized with incomplete
+    chunk cleanup (the backstop for a failed post-commit delete, ADR-0104 §7). For
+    ``investigations`` it sweeps in every investigation state (ADR-0444, superseding ADR-0441 §6's
+    terminal-state gate): ``complete_rootfs_upload`` now rejects a past-deadline finalize, so a
+    lapsed window can no longer be finalized and reaping it races nothing legitimate. A
+    *finalized* rootfs stays safe on the per-key committed-object skip in
+    :func:`reap_one_owner`, not on the owner's state.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT m.owner_kind, m.owner_id FROM upload_manifests m "
-            "WHERE m.deadline < now() AND ("
-            "  m.owner_kind = %s "
-            "  OR (m.owner_kind = %s AND EXISTS ("
-            "     SELECT 1 FROM investigations i WHERE i.id = m.owner_id AND i.state = ANY(%s))))",
-            (
-                _UPLOAD_RUN_OWNER_KIND,
-                _UPLOAD_INVESTIGATION_OWNER_KIND,
-                list(_UPLOAD_REAPABLE_STATES[_UPLOAD_INVESTIGATION_OWNER_KIND]),
-            ),
+            "SELECT owner_kind, owner_id FROM upload_manifests "
+            "WHERE deadline < now() AND owner_kind = ANY(%s)",
+            (list(_LOCK_SCOPES),),
         )
         candidates = await cur.fetchall()
     reaped = 0
     for cand in candidates:
         owner_kind = cast(upload_manifest.UploadOwnerKind, cand["owner_kind"])
-        scope = LockScope.RUN if owner_kind == _UPLOAD_RUN_OWNER_KIND else LockScope.INVESTIGATION
-        if await reap_one_owner(conn, store, owner_kind, cand["owner_id"], scope):
+        if await reap_one_owner(conn, store, owner_kind, cand["owner_id"]):
             reaped += 1
     return reaped
 
@@ -84,10 +63,14 @@ async def reap_one_owner(
     store: UploadStore,
     owner_kind: upload_manifest.UploadOwnerKind,
     owner_id: UUID,
-    scope: LockScope,
 ) -> bool:
-    """Re-validate under the per-owner lock, then prefix-reap and delete the manifest."""
-    async with conn.transaction(), advisory_xact_lock(conn, scope, owner_id):
+    """Re-validate under the per-owner lock, then prefix-reap and delete the manifest.
+
+    The locked re-read is what declines a manifest whose deadline was renewed since the candidate
+    select, and the per-owner lock is the one a finalize also takes — so a reap and a finalize
+    serialize rather than overlapping, in either order.
+    """
+    async with conn.transaction(), advisory_xact_lock(conn, lock_scope_for(owner_kind), owner_id):
         async with conn.cursor(row_factory=dict_row) as cur:
             await cur.execute(
                 "SELECT prefix FROM upload_manifests "
@@ -96,13 +79,6 @@ async def reap_one_owner(
             )
             row = await cur.fetchone()
         if row is None:
-            return False
-        # The runs branch reaps a finalized Run's leftover chunks too (ADR-0104 §7); only the
-        # investigations branch re-checks its reapable-state gate (terminal investigation, ADR-0441)
-        # under lock.
-        if owner_kind == _UPLOAD_INVESTIGATION_OWNER_KIND and not await owner_reapable(
-            conn, owner_kind, owner_id
-        ):
             return False
         for key in await asyncio.to_thread(store.list_prefix, row["prefix"]):
             async with conn.cursor(row_factory=dict_row) as cur:
@@ -117,16 +93,13 @@ async def reap_one_owner(
     return True
 
 
-async def owner_reapable(
-    conn: AsyncConnection, owner_kind: upload_manifest.UploadOwnerKind, owner_id: UUID
-) -> bool:
-    """Report whether the owner is in a state whose past-deadline upload is reapable (ADR-0435)."""
-    query = _OWNER_REAPABLE_QUERIES.get(owner_kind)
-    if query is None:
+def lock_scope_for(owner_kind: upload_manifest.UploadOwnerKind) -> LockScope:
+    """Return the advisory-lock scope for an upload owner kind, failing loud on an unknown one.
+
+    An owner kind the reaper does not recognize must never be locked under a guessed scope — that
+    would take a lock no writer of that owner holds and reap under no mutual exclusion at all.
+    """
+    scope = _LOCK_SCOPES.get(owner_kind)
+    if scope is None:
         raise ValueError(f"unsupported upload owner kind: {owner_kind}")
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            query,
-            (owner_id, list(_UPLOAD_REAPABLE_STATES[owner_kind])),
-        )
-        return await cur.fetchone() is not None
+    return scope

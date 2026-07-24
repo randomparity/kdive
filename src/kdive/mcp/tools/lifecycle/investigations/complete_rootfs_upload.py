@@ -4,7 +4,11 @@ The explicit commit symmetric with ``runs.complete_build``: it verifies the PUT 
 writes the write-once ``owner_kind='investigations'`` ``artifacts`` row every referencing System
 resolves against, and deletes the upload manifest. It runs under the investigation lock so it
 serializes with ``close_investigation`` — a finalize that loses the race to a close sees the
-terminal state and is rejected, leaving the manifest for the re-scoped reaper.
+terminal state and is rejected, leaving the manifest for the reaper.
+
+It also enforces the manifest deadline the mint advertised (ADR-0444): a finalize past the
+window is rejected with a re-mint pointer rather than silently accepted, which is what lets the
+reaper collect a lapsed window on any investigation state without racing a legitimate finalize.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -32,7 +36,9 @@ from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     COMPLETE_INVESTIGATION_ROOTFS_TOOL,
+    CREATE_INVESTIGATION_UPLOAD_TOOL,
     investigation_rootfs_object_name,
+    upload_expiry_contract,
 )
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -114,9 +120,13 @@ async def _finalize_locked(
                 detail="investigation is not accepting a rootfs finalize; it is terminal",
                 data={"reason": "investigation_not_accepting_upload"},
             )
-        entry = await _rootfs_entry(conn, uid, raw_id)
-        if isinstance(entry, ToolResponse):
-            return entry
+        window = await _rootfs_window(conn, uid, raw_id)
+        if isinstance(window, ToolResponse):
+            return window
+        manifest, entry = window
+        expired = await _reject_if_expired(conn, manifest, raw_id)
+        if expired is not None:
+            return expired
         object_key = artifact_key(
             _TENANT, _OWNER_KIND, str(uid), investigation_rootfs_object_name(entry)
         )
@@ -141,16 +151,58 @@ async def _finalize_locked(
     )
 
 
-async def _rootfs_entry(
+async def _rootfs_window(
     conn: AsyncConnection, uid: UUID, raw_id: str
-) -> upload_manifest.ManifestEntry | ToolResponse:
+) -> tuple[upload_manifest.UploadManifest, upload_manifest.ManifestEntry] | ToolResponse:
+    """Return the open window and its ``rootfs`` entry; the manifest carries the deadline."""
     manifest = await upload_manifest.get_manifest(conn, _OWNER_KIND, uid)
     if manifest is None:
-        return _config_error(raw_id, data={"reason": "no_upload_manifest"})
+        return _no_manifest_error(raw_id)
     entry = next((e for e in manifest.entries if e.name == "rootfs"), None)
     if entry is None:
-        return _config_error(raw_id, data={"reason": "no_upload_manifest"})
-    return entry
+        return _no_manifest_error(raw_id)
+    return manifest, entry
+
+
+def _no_manifest_error(raw_id: str) -> ToolResponse:
+    """Reject a finalize with no open window, pointing at the mint that opens one.
+
+    This is also where a finalize that arrives *after* the reaper collected a lapsed window lands
+    (ADR-0444), so it carries the same recovery action as the expiry rejection below.
+    """
+    return ToolResponse.failure(
+        raw_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        suggested_next_actions=[CREATE_INVESTIGATION_UPLOAD_TOOL],
+        data={"reason": "no_upload_manifest"},
+    )
+
+
+async def _reject_if_expired(
+    conn: AsyncConnection, manifest: upload_manifest.UploadManifest, raw_id: str
+) -> ToolResponse | None:
+    """Reject a finalize past the manifest deadline; return ``None`` while the window is open.
+
+    The deadline is measured against the Postgres clock that stamped it and that the reaper
+    measures against (ADR-0444), so finalize and the reaper cannot reach opposite verdicts on the
+    same manifest. ``now()`` is the transaction's start, so a request that arrived inside the
+    window is never rejected for time it spent waiting on the investigation lock.
+    """
+    stamp = await upload_manifest.deadline_stamp(conn, manifest)
+    if stamp.deadline >= stamp.server_time:
+        return None
+    return ToolResponse.failure(
+        raw_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        # The object key is content-addressed, so a re-mint of the same declaration addresses the
+        # same object: re-uploading is needed only if the reaper already collected it (ADR-0441 §1).
+        detail="the rootfs upload window has expired; re-mint it and finalize again",
+        suggested_next_actions=[CREATE_INVESTIGATION_UPLOAD_TOOL],
+        data={
+            "reason": "upload_window_expired",
+            **upload_expiry_contract(stamp, remint_tool=CREATE_INVESTIGATION_UPLOAD_TOOL),
+        },
+    )
 
 
 def _verify_head(raw_id: str, head: HeadResult | None, declared: str) -> ToolResponse | None:
