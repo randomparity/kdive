@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.db.locks import LockScope, _lock_key
 from kdive.db.repositories import INVESTIGATIONS
 from kdive.domain.capacity.state import InvestigationState
 from kdive.domain.errors import ErrorCategory
@@ -214,3 +215,38 @@ def test_define_then_provision_matching_binding_is_allowed(migrated_url: str) ->
 
     result = asyncio.run(_run())
     assert isinstance(result, DefinedSystemAdmitted)
+
+
+def test_bind_serializes_with_concurrent_close(migrated_url: str) -> None:
+    # The bind's investigation-state read runs under the INVESTIGATION lock close_investigation
+    # holds, so a bind racing a close cannot leave a System bound to a just-closed investigation:
+    # the bind blocks on the lock, then — the close having won — is rejected as terminal.
+    async def _run() -> AdmissionResult:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            async with pool.connection() as conn:
+                inv_id = await _seed_investigation(conn)  # OPEN
+            # A separate connection simulates an in-progress close: hold the INVESTIGATION xact
+            # lock and mark the investigation closed, uncommitted (the lock releases at commit).
+            holder = await AsyncConnection.connect(migrated_url, autocommit=False)
+            try:
+                await holder.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (_lock_key(LockScope.INVESTIGATION, inv_id),),
+                )
+                await holder.execute(
+                    "UPDATE investigations SET state = 'closed' WHERE id = %s", (inv_id,)
+                )
+                bind = asyncio.create_task(
+                    _create(_admission(), pool, alloc_id, investigation_id=inv_id)
+                )
+                await asyncio.sleep(0.3)
+                assert not bind.done()  # blocked on the INVESTIGATION lock, not racing past it
+                await holder.commit()  # release the lock; the close is now durable
+            finally:
+                await holder.close()
+            return await bind
+
+    result = asyncio.run(_run())
+    assert isinstance(result, AdmissionFailure)  # bind rejected: investigation closed under lock
+    assert result.category is ErrorCategory.CONFIGURATION_ERROR

@@ -630,6 +630,13 @@ async def _validate_investigation_binding(
     missing or terminal investigation, or when it crosses the System's own (Allocation) project —
     the last keeps a SENSITIVE investigation-owned rootfs base inside one project's trust boundary.
 
+    The investigation-state read runs under the INVESTIGATION advisory lock ``close_investigation``
+    holds, so a bind and a concurrent close serialize: the close either sees this System as bound
+    (and blocks or force-reaps it) or wins the lock first and the bind is rejected as terminal. The
+    lock is held (transaction-scoped) until the admission transaction commits the System row, so it
+    covers the write, not only the read — closing the "System goes live under a closing
+    investigation" race (ADR-0441 §7).
+
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` naming the specific violation.
     """
@@ -645,24 +652,25 @@ async def _validate_investigation_binding(
             f"investigation binding is write-once and cannot be changed to {investigation_id}",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
-    investigation = await INVESTIGATIONS.get(conn, investigation_id)
-    if investigation is None:
-        raise CategorizedError(
-            f"investigation {investigation_id} does not exist",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if investigation.state not in _INVESTIGATION_NON_TERMINAL:
-        raise CategorizedError(
-            f"investigation {investigation_id} is {investigation.state.value}; a System can bind "
-            "only to an open or active investigation",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    if investigation.project != alloc.project:
-        raise CategorizedError(
-            f"investigation {investigation_id} does not belong to the System's project "
-            f"{alloc.project!r}; a System can bind only to an investigation in its own project",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
+    async with advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id):
+        investigation = await INVESTIGATIONS.get(conn, investigation_id)
+        if investigation is None:
+            raise CategorizedError(
+                f"investigation {investigation_id} does not exist",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        if investigation.state not in _INVESTIGATION_NON_TERMINAL:
+            raise CategorizedError(
+                f"investigation {investigation_id} is {investigation.state.value}; a System can "
+                "bind only to an open or active investigation",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+        if investigation.project != alloc.project:
+            raise CategorizedError(
+                f"investigation {investigation_id} does not belong to the System's project "
+                f"{alloc.project!r}; a System can bind only to an investigation in its own project",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
 
 
 async def _provision_create_response(
