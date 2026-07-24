@@ -99,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Finish the 0438 index row and 0441 lost-lock note
 - Record the RAM-to-disk trade in the #1520 note
 - Caveat the no-live-sibling-partial claim
+- Record the uploaded-rootfs manual proof
 
 ### Fixed
 
