@@ -118,7 +118,7 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
   `uploads.py`; remove `_commit_uploaded_rootfs`/`_finalize_provision_ready` rootfs-commit from
   `jobs/handlers/systems.py`; remove `rootfs_upload_window_allowed` from `profiles/provider_policy.py` +
   `providers/local_libvirt/profile_policy.py`; remove the `systems.define` upload-window opening.
-- **Second consumer (import-critical):** `mcp/tools/catalog/artifacts/expected_uploads.py` imports
+- **Second consumer (import-breaking):** `mcp/tools/catalog/artifacts/expected_uploads.py` imports
   `CREATE_SYSTEM_UPLOAD_TOOL` and builds a `'system'` discovery item (`_NEXT_ACTIONS`, `_SYSTEM_CONTRACTS`)
   — deleting the tool symbol **breaks its top-level import** (a hard `ImportError` reddening the app build,
   not a soft test failure). **Re-point** it to an `'investigations'` discovery item for
