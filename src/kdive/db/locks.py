@@ -9,9 +9,11 @@ no transaction is open to hold it.
 `SessionAdvisoryLock` is the **session-scoped** leadership claim the reconciler's
 console-collector hosting loop needs (ADR-0095): a `pg_advisory_lock` held on a
 dedicated long-lived connection that survives transaction boundaries and is released
-**by Postgres the instant the holding connection drops** — the property the
-single-leader split-brain guard relies on. Its key space is salted apart from the
-transaction-scoped scope-lock space so leadership never collides with a per-object op.
+**by Postgres when the holding backend exits** — the property the single-leader
+split-brain guard relies on. That release trails the holder's client-side connection
+close by a short interval rather than landing with it, so an observer can still see a
+dead leader's lock briefly. Its key space is salted apart from the transaction-scoped
+scope-lock space so leadership never collides with a per-object op.
 """
 
 from __future__ import annotations
@@ -137,17 +139,29 @@ async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
 
     Unlike :meth:`SessionAdvisoryLock.is_held` — which scopes to this connection's own backend
     pid — this scans ``pg_locks`` across all backends, so a worker can tell a live leader from a
-    dead one without contending for leadership itself. Postgres releases a session lock the
-    instant the holding connection drops, so ``False`` means no live holder is present (e.g. no
-    console-hosting leader is pumping). Only granted locks are counted: a would-be acquirer
-    blocked on ``pg_advisory_lock`` leaves an ungranted row that must not read as a live holder.
+    dead one without contending for leadership itself.
+
+    The scan is scoped to ``conn``'s **own database**. Advisory locks are per-database: two
+    backends in different databases of one cluster take the same key without contending, so a
+    holder elsewhere on the cluster is not a leader of *this* deployment and must not read as
+    one. ``pg_locks`` is cluster-wide and exposes every database's rows, so the filter is
+    required — without it a second kdive deployment (or, in the suite, a sibling xdist worker
+    on its own per-worker database) reports as a live leader here.
+
+    ``False`` therefore means no live holder in this database as of the probe. It is not an
+    instantaneous read of the holder's liveness: Postgres frees the lock when the holding
+    *backend* exits, which trails the holder's client-side connection close by a short interval
+    (measured up to ~96ms under a loaded backend), so a dead leader can still read as held for
+    that long. Only granted locks are counted: a would-be acquirer blocked on
+    ``pg_advisory_lock`` leaves an ungranted row that must not read as a live holder.
     """
     classid, objid = _advisory_lock_oids(_session_lock_key(name))
     async with conn.cursor() as cur:
         await cur.execute(
             "SELECT count(*) FROM pg_locks "
             "WHERE locktype = 'advisory' AND classid = %s AND objid = %s "
-            "  AND objsubid = 1 AND granted",
+            "  AND objsubid = 1 AND granted "
+            "  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             (classid, objid),
         )
         row = await cur.fetchone()
@@ -189,7 +203,8 @@ class SessionAdvisoryLock:
     Postgres detects, releasing the lock with no notice to the dead holder). That is
     precisely the leadership semantics the console-hosting loop needs (ADR-0095), and the
     split-brain hazard the hosting loop's lock-loss guard handles: a standby can acquire
-    the lock the instant the old leader's connection dies.
+    the lock as soon as the old leader's backend exits, which trails the connection dying
+    by a short interval rather than landing with it.
 
     The connection must be dedicated to leadership (outside the repair pool, ADR-0095):
     holding a pooled connection for the process life would pin the pool's only connection
