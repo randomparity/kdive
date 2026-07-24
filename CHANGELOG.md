@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Transport-strip gzip uploads + qcow2 format check (#1510)
 - Advertise transport-encoding upload surface (#1511)
 - Stage a supplied qcow2 as a System base image (#1433)
+- Add migration 0076 for investigation-scoped rootfs schema
+- Add create_investigation_upload rootfs window
+- Add complete_rootfs_upload finalize
+- Admit an optional investigation_id binding
+- Swap the upload lane to investigation-scoped resolution
+- Couple close with bound Systems + force teardown
+- Investigation-scoped uploaded-rootfs reclaim sweeps (#1502)
 
 ### Changed
 
@@ -40,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Capability gates, not identity gates
 - Simplify rootfs upload cleanups from /simplify pass
 - Extract shared staging-fault + partial-discard helpers
+- Simplify cleanups from /simplify review
 
 ### Documentation
 
@@ -63,6 +71,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0440 remote-libvirt supplied rootfs staging (#1433)
 - Regenerate systems profile schema for base_image_source (#1433)
 - Drop ADR refs from RemoteLibvirtProfile schema description (#1433)
+- Spec + ADR-0441 + plan for investigation-scoped rootfs (#1502)
+- Fix shared-base failure race + ADR-0435 interaction (#1502)
+- Same-project binding, dedup scope, no-backfill (#1502)
+- Add TTL backstop + torn_down-keyed liveness gate (#1502)
+- Gate base reclaim on overlay-absence, not torn_down (#1502)
+- Force=admin role, pre-overlay reclaim guard (#1502)
+- Condition reclaim claims, tighten reuse scope (#1502)
+- Fix marker collision, reprovision gap, reclaim order (#1502)
+- Buildability fixes — resolve-by-key, fetch lock, enumeration (#1502)
+- Persist encoding, deterministic fetch lock (#1502)
+- Re-home ADR-0439 surface, atomic force-close, idempotent unlink (#1502)
+- Close finalize-race, .partial orphan, defer-on-fault (#1502)
+- Fix plan phase ordering + decompose reclaim task (#1502)
+- Fail-closed reclaim probe on non-co-located reconciler (#1502)
+- Re-point expected_uploads, all-or-nothing 2-5 merge (#1502)
+- Reword import-critical to avoid doc-style flag (#1502)
+- Doc-regen in-PR, opportunistic .partial cleanup (#1502)
+- Per-pass reclaim degradation, default-close marker (#1502)
+- Document investigation upload flow; ratify ADR-0441
+- Record the uncommitted-upload never-closed residual
 
 ### Fixed
 
@@ -91,6 +119,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fail closed on trailing data after the gzip member
 - Name an unsupported transport encoding instead of staging it
 - Reclaim a staged base volume on overlay-create failure (#1433)
+- Gate TTL staging-dir sweep on zero remaining rootfs rows
+- Serialize investigation bind with close under the INVESTIGATION lock
+- Force-close refuses a reprovisioning bound System
+- Reject reprovision under a closed bound investigation
+- Drop reconciler ensure-create so the co-location probe fails closed
 
 ### Build
 
