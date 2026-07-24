@@ -342,8 +342,12 @@ def test_session_advisory_lock_held_released_on_holder_loss(postgres_url: str) -
             await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER)
             # Confirm through the lock manager rather than re-reading the pg_locks view the
             # wait already polled: a claimant can only take the lock if it is truly free, so
-            # this catches a probe that reports free while Postgres still holds it.
-            assert await SessionAdvisoryLock(observer, CONSOLE_HOSTING_LEADER).try_acquire()
+            # this catches a probe that reports free while Postgres still holds it. Released
+            # explicitly — leaving it to the observer's backend exit would hand the next test
+            # on this shared per-worker database the very reap lag this test is about.
+            claimant = SessionAdvisoryLock(observer, CONSOLE_HOSTING_LEADER)
+            assert await claimant.try_acquire() is True
+            await claimant.release()
 
     asyncio.run(_run())
 
@@ -367,7 +371,9 @@ def test_wait_until_session_lock_released_raises_while_a_holder_lives(postgres_u
                     observer, CONSOLE_HOSTING_LEADER, timeout_s=0.1
                 )
             # The message must name the surviving holder, or a CI failure is undiagnosable.
-            assert str(holder_conn.info.backend_pid) in str(caught.value)
+            # Anchored to the tuple's pid field: a bare substring match would also be
+            # satisfied by a sibling worker's pid or a digit run in its database name.
+            assert f"({holder_conn.info.backend_pid}, " in str(caught.value)
             await holder.release()
             # And it returns once the lock is genuinely free.
             await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER, timeout_s=5)
