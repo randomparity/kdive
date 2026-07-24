@@ -45,15 +45,27 @@ class _Ctx:
         self.message = type("M", (), {"name": tool, "arguments": {"project": "a"}})()
 
 
+_RECORDING_FAILURE = "usage recording failed"
+
+
 class _Capture(logging.Handler):
-    """Collect the records emitted on the logger it is attached to."""
+    """Collect the middleware's recording-failure warnings, tracebacks included.
+
+    ``_record`` logs its one warning with ``exc_info=True``, and the swallowed exception
+    is the whole diagnostic value — ``record.getMessage()`` alone yields only the tool
+    name. ``Formatter.format`` appends the traceback whenever ``exc_info`` is set, so it
+    is what preserves the cause. Only this module's recording-failure warning is
+    collected: an unrelated future warning on the same logger must not be reported as a
+    recording failure.
+    """
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
-        self.records: list[logging.LogRecord] = []
+        self.failures: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
+        if record.getMessage().startswith(_RECORDING_FAILURE):
+            self.failures.append(logging.Formatter().format(record))
 
 
 @contextlib.contextmanager
@@ -63,21 +75,24 @@ def _recording_must_not_fail() -> Iterator[None]:
     ``UsageTrackingMiddleware._record`` logs and swallows every failure so a bad
     recording can never fail the tool call. In a test that then asserts on the recorded
     row, a swallowed failure surfaces only as an empty result set — the bare
-    ``IndexError`` reported in #1527, which says nothing about the cause. Capture the
-    warning and re-raise it with its message instead.
+    ``IndexError`` reported in #1527, which says nothing about the cause. Re-raise the
+    captured warning, traceback and all, instead.
+
+    The check runs in the ``finally`` so a raising body cannot discard it; Python chains
+    the original exception onto the ``AssertionError`` as its context.
     """
     logger = logging.getLogger(UsageTrackingMiddleware.__module__)
     handler = _Capture()
     previous = logger.level
-    logger.setLevel(logging.WARNING)  # capture regardless of ambient log config
+    logger.setLevel(logging.WARNING)  # the logger's own level, not the global disable floor
     logger.addHandler(handler)
     try:
         yield
     finally:
         logger.removeHandler(handler)
         logger.setLevel(previous)
-    if handler.records:
-        raise AssertionError(f"usage recording failed: {handler.records[0].getMessage()}")
+        if handler.failures:
+            raise AssertionError(handler.failures[0])
 
 
 async def _open_warm_pool(url: str) -> AsyncConnectionPool:
@@ -223,16 +238,31 @@ def test_recording_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None
     assert result is not None  # the call result is unaffected by the recording failure
 
 
-def test_swallowed_recording_failure_is_named_not_a_bare_indexerror() -> None:
-    # The guard the row-asserting tests wrap their drive in must actually bite: a
-    # swallowed recording failure has to name its cause, not vanish (#1527).
-    with (
-        pytest.raises(AssertionError, match="usage recording failed: boom for tool x"),
-        _recording_must_not_fail(),
-    ):
-        logging.getLogger(UsageTrackingMiddleware.__module__).warning("boom for tool %s", "x")
+def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The guard the row-asserting tests wrap their drive in must actually bite, and must
+    # report *why* recording failed. "usage recording failed for tool jobs.get" alone is
+    # no more diagnostic than the IndexError it replaces (#1527), so drive a real
+    # swallowed failure and require the swallowed exception in the message.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool("postgresql://unused", open=False)  # never opened
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
+
+        async def ok(_c: Any) -> ToolResult:
+            envelope = ToolResponse.success("jobs.get", "ok")
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        with _recording_must_not_fail():
+            await mw.on_call_tool(_Ctx("jobs.get"), ok)
+
+    with pytest.raises(AssertionError, match="PoolClosed"):
+        asyncio.run(_run())
 
 
-def test_recording_guard_is_silent_when_nothing_fails() -> None:
+def test_recording_guard_ignores_unrelated_warnings() -> None:
+    # Only the recording-failure warning may trip the guard; anything else this module
+    # logs must not be misreported as a lost usage row.
     with _recording_must_not_fail():
-        logging.getLogger(UsageTrackingMiddleware.__module__).info("routine, not a failure")
+        logging.getLogger(UsageTrackingMiddleware.__module__).warning("slow write, not a failure")
