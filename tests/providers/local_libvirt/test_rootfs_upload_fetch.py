@@ -239,20 +239,20 @@ def test_stage_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
 def test_stage_identity_streams_without_buffering_the_whole_object(tmp_path: Path) -> None:
     # #1520: peak memory is bounded by the read chunk, not the object size. The store fake offers
     # no whole-object accessor at all, so a regression to ``get_artifact(...).data`` cannot even
-    # run. The payload size is a literal and the bound is asserted against it, not against
-    # _STREAM_CHUNK_BYTES -- comparing the constant to itself would hold for any chunk size,
-    # including one large enough to re-introduce the multi-GiB spike this test exists to prevent.
+    # run. The peak-read bound is asserted against a LITERAL, not against _STREAM_CHUNK_BYTES:
+    # comparing the observed read to the constant the code passes would hold for any chunk size,
+    # including one large enough to re-introduce the spike this test exists to prevent. The two
+    # bounds are deliberately independent -- the first pins the constant, the second pins what the
+    # staging loop actually asks for, so neither the constant nor the call site can drift alone.
     assert _STREAM_CHUNK_BYTES <= 16 * 1024 * 1024  # the ceiling the memory claim rests on
     payload = _QCOW2 + b"\xa5" * (20 * 1024 * 1024)
     store = _FakeStore(payload, checksum=_sha256_b64(payload))
 
     dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
-    # Compared by size + digest rather than `read_bytes() == payload`, which would hold a second
-    # full copy alongside the fake's -- a needless spike in the test asserting a memory bound.
-    assert dest.stat().st_size == len(payload)
-    assert _sha256_b64(dest.read_bytes()) == _sha256_b64(payload)
+    assert dest.read_bytes() == payload
     assert store.stream_calls == 1  # one GET, not a per-chunk ranged-read fan-out
+    assert store.readers[0].largest_read <= 16 * 1024 * 1024
     assert store.readers[0].largest_read < len(payload)  # never held the object in one buffer
 
 
