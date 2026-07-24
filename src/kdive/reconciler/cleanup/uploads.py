@@ -15,11 +15,11 @@ from kdive.db.locks import LockScope, advisory_xact_lock
 
 _log = logging.getLogger(__name__)
 
-_UPLOAD_RUN_OWNER_KIND = upload_manifest.RUN_UPLOAD_OWNER
-_UPLOAD_INVESTIGATION_OWNER_KIND = upload_manifest.INVESTIGATION_UPLOAD_OWNER
+# The owner kinds the reaper handles, and the advisory-lock scope each is reaped under. It is
+# also the candidate-select filter: the reaper can only reap what it can take the owner's lock on.
 _LOCK_SCOPES: dict[upload_manifest.UploadOwnerKind, LockScope] = {
-    _UPLOAD_RUN_OWNER_KIND: LockScope.RUN,
-    _UPLOAD_INVESTIGATION_OWNER_KIND: LockScope.INVESTIGATION,
+    upload_manifest.RUN_UPLOAD_OWNER: LockScope.RUN,
+    upload_manifest.INVESTIGATION_UPLOAD_OWNER: LockScope.INVESTIGATION,
 }
 
 
