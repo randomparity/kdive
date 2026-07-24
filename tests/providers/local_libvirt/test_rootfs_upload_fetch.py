@@ -120,19 +120,17 @@ class _FakeStore:
 
 
 class _FailingReader:
-    """A reader that serves ``fail_after`` bytes, then raises the store's typed transport fault."""
+    """A reader that serves ``fail_after`` bytes, then raises ``error`` mid-stream."""
 
-    def __init__(self, data: bytes, *, fail_after: int) -> None:
+    def __init__(self, data: bytes, *, fail_after: int, error: BaseException) -> None:
         self._data = data
         self._fail_after = fail_after
+        self._error = error
         self._offset = 0
 
     def read(self, size: int | None = None, /) -> bytes:
         if self._offset >= self._fail_after:
-            raise CategorizedError(
-                "get_object on 'k' failed: ConnectionClosedError",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            )
+            raise self._error
         want = self._fail_after - self._offset if size is None else min(size, self._fail_after)
         chunk = self._data[self._offset : self._offset + want]
         self._offset += len(chunk)
@@ -145,9 +143,13 @@ class _FailingReader:
 class _FailingStreamStore:
     """A store whose body read faults mid-stream, after the partial has bytes in it."""
 
-    def __init__(self, data: bytes, *, fail_after: int) -> None:
+    def __init__(self, data: bytes, *, fail_after: int, error: BaseException | None = None) -> None:
         self._data = data
         self._fail_after = fail_after
+        self._error = error or CategorizedError(
+            "get_object on 'k' failed: ConnectionClosedError",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
 
     def head(self, key: str) -> HeadResult:
         return HeadResult(
@@ -156,7 +158,7 @@ class _FailingStreamStore:
 
     @contextmanager
     def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
-        reader = _FailingReader(self._data, fail_after=self._fail_after)
+        reader = _FailingReader(self._data, fail_after=self._fail_after, error=self._error)
         try:
             yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
         finally:
@@ -211,9 +213,7 @@ def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
 
 
 def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
-    # A well-formed qcow2 whose bytes do not hash to the stored checksum: the format gate passes,
-    # so this isolates the checksum gate.
-    store = _FakeStore(_QCOW2, checksum=_sha256_b64(b"different-bytes"))
+    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -222,21 +222,21 @@ def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Pat
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
-def test_stage_non_qcow2_short_circuits_before_the_checksum_is_known(tmp_path: Path) -> None:
-    # #1520 precedence: the magic peek trips on the first chunk, before the whole object has been
-    # read, so an object that is both non-qcow2 AND checksum-mismatched reports the actionable
-    # format error. That is the point of the peek — a multi-GiB non-qcow2 upload is rejected after
-    # one chunk instead of after a full download.
-    payload = b"not-a-qcow2" + b"\xa5" * (_STREAM_CHUNK_BYTES * 2)
-    store = _FakeStore(payload, checksum=_sha256_b64(b"different-bytes"))
+def test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate(tmp_path: Path) -> None:
+    # Gate precedence (ADR-0438 §3, ADR-0441 §5): store-side corruption usually destroys the qcow2
+    # magic too, so gating on the unauthenticated first chunk would report a *terminal*
+    # CONFIGURATION_ERROR ("upload a qcow2 image", retryable=False in mcp/responses.py) for an
+    # operator-side fault the caller cannot fix. The checksum is compared first, so the object
+    # is fully drained and the failure stays a retryable INFRASTRUCTURE_FAILURE.
+    payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * (_STREAM_CHUNK_BYTES * 2)
+    store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"))
 
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
-    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "qcow2" in str(error.value)
-    # Bailed on the first chunk rather than draining the object to learn the checksum.
-    assert store.readers[0].bytes_served <= _STREAM_CHUNK_BYTES
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "checksum verification" in str(error.value)
+    assert store.readers[0].bytes_served == len(payload)  # hashed over the whole object
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
@@ -309,6 +309,20 @@ def test_stage_identity_transport_fault_leaves_no_partial(tmp_path: Path) -> Non
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_untyped_interrupt_still_leaves_no_partial(tmp_path: Path) -> None:
+    # The partial now exists for the whole multi-GiB download, not just the final write, so the
+    # discard must cover exceptions outside the store's typed taxonomy — a SIGTERM/interrupt landing
+    # on the worker mid-download would otherwise strand a SENSITIVE multi-GiB orphan until some
+    # later fetch of the same base happened to sweep it (ADR-0441 §5 specifies a `finally`).
+    store = _FailingStreamStore(_QCOW2 + b"\xa5" * 8192, fail_after=4096, error=KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 

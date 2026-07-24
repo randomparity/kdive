@@ -246,9 +246,11 @@ def stage_uploaded_rootfs(
     HEAD the object (absent → ``CONFIGURATION_ERROR``; no stored checksum →
     ``INFRASTRUCTURE_FAILURE``). When ``encoding`` is ``gzip`` the object is streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
-    downloaded and its SHA-256 verified. Either way the canonical base is qcow2-magic-validated and
-    written atomically (a ``<token>.<uuid>.partial`` temp + ``os.replace``) so ``dest`` is only ever
-    a verified base and two concurrent fetchers never share a partial.
+    streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
+    the canonical base is qcow2-magic-validated and written atomically (a ``<token>.<uuid>.partial``
+    temp + ``os.replace``) so ``dest`` is only ever a verified base and two concurrent fetchers
+    never share a partial. The partial is unlinked in a ``finally``, so no failure — typed or not —
+    leaves one behind.
     """
     head = store.head(object_key)
     if head is None:
@@ -297,11 +299,14 @@ def stage_uploaded_rootfs(
             )
         os.replace(partial, dest)
     except OSError as err:
-        _discard(partial)
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
-    except CategorizedError:  # a bomb, hash mismatch, or failed magic check discards the partial
+    finally:
+        # ``os.replace`` consumed the partial on success, so this is a no-op there. On *any*
+        # failure — a bomb, a hash mismatch, a failed magic check, an IO fault, or a SIGTERM
+        # landing on the worker mid-download — the SENSITIVE partial is unlinked here, in the
+        # ``finally`` ADR-0441 §5 specifies, rather than left as a multi-GiB orphan for the
+        # next fetch's opportunistic sweep (which only runs if that base is fetched again).
         _discard(partial)
-        raise
 
 
 def _stage_identity(
@@ -317,14 +322,19 @@ def _stage_identity(
     The object is read in ``_STREAM_CHUNK_BYTES`` windows off a single unconditional GET (``etag``
     is ``None``, ADR-0054: the provision plane holds no client handle), each chunk hashed and
     written as it arrives, so peak memory is the chunk rather than the object — a multi-GiB rootfs
-    no longer spikes the worker (#1520). The magic gate runs on the first four bytes as soon as they
-    have accumulated, which rejects a non-qcow2 upload after one chunk instead of after a full
-    download; consequently an object that is *both* non-qcow2 and checksum-mismatched now reports
-    the format error rather than the checksum one. Each gate keeps its own category: a mismatched
-    checksum is an ``INFRASTRUCTURE_FAILURE``, a non-qcow2 base a ``CONFIGURATION_ERROR``
-    (ADR-0438). The read may return short chunks (the store's body wrapper is a ``RawIOBase``), so
-    the magic prefix accumulates across chunks; an object too short to hold the magic fails the gate
-    rather than staging unchecked.
+    no longer spikes the worker (#1520).
+
+    Verification order is unchanged (ADR-0438 §3, ADR-0441 §5): the SHA-256 is compared **first**,
+    so an object whose bytes do not match the stored checksum stays a retryable
+    ``INFRASTRUCTURE_FAILURE``, and only authenticated bytes reach the qcow2-magic gate's terminal
+    ``CONFIGURATION_ERROR``. Gating on the unauthenticated first chunk would let store-side
+    corruption — whose first casualty is usually the magic itself — surface as a non-retryable "this
+    is not a qcow2, upload a qcow2" that blames the uploader for an operator-side fault.
+
+    The magic prefix is accumulated across chunks rather than sliced from the first, because the
+    store's body wrapper is a ``RawIOBase`` free to return a read shorter than requested; an object
+    too short to hold the magic keeps a short prefix and so fails the gate rather than staging
+    unchecked.
     """
     hasher = hashlib.sha256()
     prefix = b""
@@ -332,18 +342,14 @@ def _stage_identity(
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
             hasher.update(chunk)
             writer.write(chunk)
-            if len(prefix) < len(_QCOW2_MAGIC):
-                prefix += chunk[: len(_QCOW2_MAGIC) - len(prefix)]
-                if len(prefix) == len(_QCOW2_MAGIC):
-                    _require_qcow2_magic(prefix, system_id=str(system_id))
-    if len(prefix) < len(_QCOW2_MAGIC):  # the object ended before the magic: not a qcow2 either
-        _require_qcow2_magic(prefix, system_id=str(system_id))
+            prefix += chunk[: len(_QCOW2_MAGIC) - len(prefix)]
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         raise CategorizedError(
             "uploaded rootfs object failed checksum verification",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
+    _require_qcow2_magic(prefix, system_id=str(system_id))
 
 
 def _stage_gzip(
