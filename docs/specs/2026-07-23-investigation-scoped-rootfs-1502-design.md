@@ -101,15 +101,21 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 
 - Select investigations with `cleanup_pending_at < now() - grace`
   (`KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`).
-- Per investigation: delete each `owner_kind='investigations'`, `retention_class='rootfs'` object
-  (best-effort) + row (fail-loud in txn). Then unlink each staged base under `rootfs-uploads/<inv>/`,
-  **skipping** a base whose checksum is still referenced by a **non-terminal** System bound to the
-  investigation (liveness query); a skip leaves `cleanup_pending_at` set (`drained=False`) for the next
-  pass. Remove the now-empty `rootfs-uploads/<inv>/` dir when fully drained.
+- Per investigation, reclaim **per checksum**, with the object + row + staged file for one checksum on a
+  **single liveness gate** — *no non-terminal System bound to the investigation references that checksum*.
+  Gate holds → delete the `owner_kind='investigations'`, `retention_class='rootfs'` object (best-effort)
+  + row (fail-loud in txn) **and** unlink `rootfs-uploads/<inv>/<token>.qcow2`. Gate fails → skip the
+  whole checksum, leaving `cleanup_pending_at` set (`drained=False`) for the next pass. Remove the empty
+  `rootfs-uploads/<inv>/` dir once fully drained. Keeping object and file on one gate means a
+  reprovisioning / disk-fault-recovering System always finds the object present to re-download.
 - Registered in the reconciler loop beside `gc_investigation_artifacts`.
 
 **Removed:** the ADR-0434 §4 teardown rootfs reclaim (local file + S3 object + row) from the systems
-teardown handler.
+teardown handler, **and** ADR-0435 §1's provision-failure reclaim of the (now shared) base — the
+`uploaded_rootfs_exists`/`staged_pre` snapshot arm, which would delete a sibling's shared base on
+failure. ADR-0435's baseline/overlay reclaim (per-System-private) stays. The upload-manifest reaper's
+`systems` `{defined, failed}` arm (`reconciler/cleanup/uploads.py`) is **re-scoped to `investigations`**
+(reap a stale investigation upload window's uncommitted object + manifest past its deadline).
 
 ### Investigation close coupling (ADR-0441 §7)
 
@@ -151,7 +157,8 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
 | `close(force=True)`, a bound System the caller can't tear down | fail listing it; nothing torn down |
 | Store fault deleting object in sweep | best-effort skip, retried next pass (marker stays set) |
-| Base still backs a live overlay at sweep time | base unlink deferred (liveness guard), retried next pass |
+| Base still referenced by a non-terminal bound System at sweep time | object + row + file all deferred on one gate, retried next pass |
+| Provision of System A **fails** while sibling B reuses the same shared base | A's failure path does **not** unlink the shared base (ADR-0435 §1 arm superseded); B keeps a valid backing |
 | Second `complete_rootfs_upload` (row already written) | idempotent; returns the same `checksum_sha256` |
 | Cross-investigation read attempt (System in Y names Y-not-owned checksum) | resolution miss ⇒ `configuration_error`; no escape |
 
@@ -169,9 +176,13 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
 8. **Liveness guard:** the sweep does **not** unlink a base while a bound System's overlay backs it
    (simulated live reference); it unlinks once the reference is terminal.
-9. **#1501 dissolution:** a `failed` provision's staged base + committed object are collected by the
-   sweep (not stranded), replacing the ADR-0434 teardown reclaim.
-10. **Surface:** `artifacts.create_system_upload` is gone from the tool index/exposure/RBAC matrix;
+9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
+   downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
+   B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)
+10. **#1501 residual closed:** a `ready`-then-stranded System's committed object is collected by the
+    sweep, and a stale investigation upload window's uncommitted object is reaped by the re-scoped
+    manifest reaper. (The *failed-provision* orphan itself is ADR-0435's, unchanged here.)
+11. **Surface:** `artifacts.create_system_upload` is gone from the tool index/exposure/RBAC matrix;
     `artifacts.create_investigation_upload` + `investigations.complete_rootfs_upload` are present with the
     CONTRIBUTOR gate; migration 0076 round-trips.
 

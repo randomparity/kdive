@@ -116,19 +116,28 @@ deprecate"). Keep the whole branch green at each commit.
 - **Fits:** ADR-0441 §6.
 - **Files:** `src/kdive/reconciler/cleanup/gc.py` (new sweep modeled on `gc_investigation_artifacts`);
   reconciler loop registration; a file-unlink port (local host FS) with the liveness query.
-- **Do:** select investigations past `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`; delete
-  `owner_kind='investigations'` `retention_class='rootfs'` object (best-effort) + row (fail-loud-in-txn);
-  unlink each `rootfs-uploads/<inv>/` base **skipping** one whose checksum is still referenced by a
-  non-terminal bound System (leave marker set, `drained=False`); remove the empty dir when drained.
-- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (base not unlinked under a live overlay,
-  unlinked once terminal), AC-9 (`failed` provision's base+object collected, not stranded).
+- **Do:** select investigations past `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`; reclaim **per checksum**,
+  with the object (best-effort) + row (fail-loud-in-txn) + staged file on **one liveness gate** — no
+  non-terminal bound System references that checksum. Gate fails → skip the whole checksum, leave the
+  marker set (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
+- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (nothing reclaimed while a bound System
+  references the checksum; reclaimed once terminal), AC-10 (residual committed object + stale-window
+  object collected).
 
-### Task 4.2 — Remove teardown rootfs reclaim
-- **Fits:** ADR-0441 §6 — reclaim is now sweep-driven.
-- **Files:** `jobs/handlers/systems.py` (`_delete_uploaded_rootfs_object`/`_row` + their teardown calls);
-  `providers/local_libvirt/lifecycle/provisioning.py` (`remove_uploaded_rootfs_for_domain` teardown call).
-- **Acceptance:** teardown no longer deletes the base/object/row; the ADR-0434 teardown-reclaim tests are
-  replaced by the sweep tests. Verify no leak path is left uncovered (the sweep is the sole reclaimer).
+### Task 4.2 — Remove teardown + provision-failure rootfs reclaim; re-scope the manifest reaper
+- **Fits:** ADR-0441 §5/§6 — reclaim is now sweep-driven; the shared base is no individual provision's
+  to delete.
+- **Files:** `jobs/handlers/systems.py` (`_delete_uploaded_rootfs_object`/`_row` + teardown calls);
+  `providers/local_libvirt/lifecycle/provisioning.py` (`remove_uploaded_rootfs_for_domain` teardown call
+  **and** ADR-0435 §1's `uploaded_rootfs_exists`/`staged_pre` provision-failure unlink arm — keep the
+  baseline/overlay arms); `reconciler/cleanup/uploads.py` (re-scope the `systems` `{defined, failed}`
+  reaper arm to `investigations`).
+- **Acceptance:** teardown no longer deletes the base/object/row; a failing provision no longer unlinks
+  the shared base (spec AC-9); the ADR-0434 teardown-reclaim tests are replaced by the sweep tests; the
+  reaper reaps a stale investigation upload window. Verify the sweep + reaper are the sole reclaimers and
+  no leak path is uncovered.
+- **Watch:** Tasks 4.1 and 4.2 must land in one phase — removing reclaim without the sweep in place
+  would leak; removing the ADR-0435 arm without decision 5's rationale would look like a regression.
 
 ---
 

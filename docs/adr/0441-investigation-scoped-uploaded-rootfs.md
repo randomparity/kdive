@@ -4,11 +4,15 @@
 - **Date:** 2026-07-23
 - **Supersedes:** [ADR-0434](0434-local-libvirt-agent-uploaded-rootfs-staging.md) decisions §1
   (System-owned object + provision-time download by System key), §3 (per-System staging), and §4
-  (lease-scoped teardown reclaim); and the System-scoped rootfs *upload window* of
-  [ADR-0048](0048-external-build-artifact-ingestion.md) §5/§6 as it applies to rootfs. ADR-0434
-  §2 (read-side checksum verify), the [ADR-0438](0438-rootfs-transport-strip-streaming-fetch.md)
-  qcow2-magic gate, §5 (`upload` outside `accepted_component_sources`), and §6 (dead-guard
-  removal) are **retained**.
+  (lease-scoped teardown reclaim); the System-scoped rootfs *upload window* of
+  [ADR-0048](0048-external-build-artifact-ingestion.md) §5/§6 as it applies to rootfs; and
+  [ADR-0435](0435-reclaim-failed-provision-artifacts.md)'s uploaded-rootfs arms — its provision-failure
+  reclaim of the staged base (§1, the `uploaded_rootfs_exists`/`staged_pre` snapshot) and its
+  `systems`-owner manifest-reaper relaxation (§, the `{defined, failed}` gate) — both of which reason
+  about a *per-System-private* base that no longer exists (decisions 5–6 below). ADR-0434 §2 (read-side
+  checksum verify), the [ADR-0438](0438-rootfs-transport-strip-streaming-fetch.md) qcow2-magic gate, §5
+  (`upload` outside `accepted_component_sources`), and §6 (dead-guard removal) are **retained**;
+  ADR-0435's baseline/overlay provision-failure reclaim (per-System-private) is **retained**.
 - **Depends on:** [ADR-0234](0234-external-build-default-and-contributor-role.md) (the
   investigation-close + grace reclaim model `gc_investigation_artifacts` this generalizes),
   [ADR-0048](0048-external-build-artifact-ingestion.md) (the agent→S3 upload transport and the
@@ -27,9 +31,13 @@ costs #1502 targets:
 - **No reuse.** A custom debug rootfs an investigation wants to boot on several Systems (reproduce
   across kernels/arches, re-provision after a crash) must be **re-uploaded and re-staged per
   System**, paying the multi-GiB upload + download each time.
-- **Fragile reclaim.** Reclaim hinges on per-System teardown, so a System that never cleanly tears
-  down (a `failed` provision, #1501) strands the SENSITIVE blob: `owner_kind='systems'` objects are
-  exempt from every artifact-expiry reconciler, so nothing else collects it.
+- **Fragile reclaim.** Reclaim hinges on per-System teardown. ADR-0435 (#1501) already closed the
+  *failed-provision* leak — it reclaims the staged base and the uncommitted object when `provision()`
+  raises, and relaxed the manifest reaper to collect a `failed` upload System. What that does **not**
+  reach is a System that reaches `ready` and is then stranded without a clean teardown: its **committed**
+  `owner_kind='systems'` object is exempt from every artifact-expiry reconciler, so nothing collects it.
+  More fundamentally, the whole reclaim model is teardown-shaped, which is the wrong shape once one
+  object is meant to outlive any single System.
 
 The domain already has the right scope for "reusable across Systems within one debugging effort":
 **Investigation → Runs → Systems**. Build artifacts are already `owner_kind='runs'` and reclaimed on
@@ -127,26 +135,42 @@ ADR-0438 qcow2-magic gate are unchanged. A present verified file is **reused**, 
 downloaded **at most once per host per checksum** and shared by every System in the investigation —
 the reuse #1502 asks for. `.partial` + `os.replace` atomicity is unchanged.
 
+Because the base is now **shared and investigation-owned**, it is no longer "created by" the provision
+that happened to stage it: an individual provision's failure path (ADR-0435 §1) must **not** reclaim it,
+or a failing System A would delete the base a concurrently-provisioning or already-booted sibling B
+reuses. ADR-0435's `uploaded_rootfs_exists`/`staged_pre` snapshot arm is therefore superseded — the
+shared base is reclaimed **only** by the decision-6 sweep, under the liveness guard. ADR-0435's
+baseline/overlay reclaim (those artifacts stay per-System-private) is unchanged.
+
 ### 6. Reclaim on investigation close + grace, via a new sweep with a stateless liveness guard
 
 Reclaim moves from per-System teardown to a new reconciler sweep `gc_investigation_uploaded_rootfs`,
 modeled on `gc_investigation_artifacts` (ADR-0234: deferred, past a grace window, audited,
 drain-and-retry). It runs over investigations whose `cleanup_pending_at` is older than
-`KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS` and, for each:
+`KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`. For each investigation it reclaims **per checksum**, and the
+object + row + staged file for one checksum are reclaimed **together, gated on the same liveness
+predicate** — *no non-terminal System bound to the investigation still references that checksum*:
 
-- **Object + `artifacts` row** — deleted immediately (object best-effort, row fail-loud-in-txn, as in
-  ADR-0234/0434). Safe the moment the investigation is closable: a running guest reads the *host base
-  file*, never S3, after boot.
-- **Host staged base file(s)** — the per-investigation `rootfs-uploads/<inv>/` bases are unlinked, but
-  **guarded**: a base is skipped (leaving `cleanup_pending_at` set → retried next pass, the
-  `drained=False` idiom) while **any live System bound to the investigation still references its
-  checksum**. This is a point-in-time *liveness query*, not a persistent refcount — it has no
-  decrement-vs-new-reference race (a stale read only defers a delete one pass), and it makes the base
-  unlink safe against a guest that outlives close.
+- If the predicate holds (nothing live references it): delete the object (best-effort) + `artifacts` row
+  (fail-loud-in-txn, ADR-0234/0434) **and** unlink the staged base under `rootfs-uploads/<inv>/`.
+- If it does not: skip the whole checksum this pass, leaving `cleanup_pending_at` set (`drained=False`)
+  → retried next pass. Remove the empty `rootfs-uploads/<inv>/` dir once the investigation fully drains.
 
-The per-System teardown rootfs reclaim (ADR-0434 §4, both file and object+row) is **removed**. This
-also dissolves #1501's rootfs-orphan concern: a `failed` provision's staged base and committed object
-are now collected by the investigation-close sweep, not stranded on a teardown that never runs.
+The predicate is a point-in-time *liveness query*, not a persistent refcount — it has no
+decrement-vs-new-reference race (a stale read only defers a delete one pass). Keeping the object+row and
+the file on the **same** gate (rather than deleting the object immediately and deferring only the file)
+means a bound System that must still re-materialize — a reprovision, or a host base lost to a disk
+fault — always finds the object present to re-download: the base and its object never diverge in
+lifetime, so there is no window where a live-referenced System is left unable to re-stage.
+
+The per-System teardown rootfs reclaim (ADR-0434 §4, both file and object+row) is **removed**, and so is
+ADR-0435's provision-failure reclaim of the (now shared) base (decision 5). #1501's *failed-provision*
+orphan was already closed by ADR-0435; what this change removes is the residual **committed-object**
+exemption — a `ready`-then-stranded System's object is now investigation-owned and collected by this
+sweep, not left exempt from every reaper. The upload-manifest reaper's `systems` arm (ADR-0435's
+`{defined, failed}` relaxation) is **re-scoped to `investigations`**: it reaps a stale investigation
+upload window's uncommitted object + manifest past its deadline, keeping the abandon-before-finalize path
+covered under the new owner.
 
 ### 7. Investigation close will not leave its bound Systems running
 
@@ -177,8 +201,10 @@ parity waivers stay accurate.
 - One agent upload provisions **>1 System in the same investigation** with no re-upload, and the host
   base is fetched **at most once per host per checksum**. The #1502 acceptance criteria are met for
   local-libvirt.
-- Reclaim is **investigation-close-driven**, so a `failed` provision no longer strands the SENSITIVE
-  blob (#1501's rootfs concern dissolves), and no `owner_kind` is left exempt from every reaper.
+- Reclaim is **investigation-close-driven**, closing the residual #1501 exposure ADR-0435 did not
+  reach — a committed object on a `ready`-then-stranded System — so no `owner_kind` is left exempt from
+  every reaper. The object and its host base now share one lifetime and one liveness gate, so a
+  live-referenced System can always re-materialize.
 - Cross-investigation isolation is **stronger and simpler to reason about**: the SQL resolution
   predicate (decision 4) is the boundary, backed by per-investigation staging (decision 5).
 - **New migration** (0076, `systems.investigation_id`), **new MCP surface**
@@ -231,4 +257,12 @@ parity waivers stay accurate.
   a libvirt volume with no `owner_kind` row and a non-reconciler staging host; it is a separate design.
   Filed as a follow-up so remote and local re-converge deliberately, not by forcing an ill-fitting model
   now.
-- **Do nothing.** Rejected: the per-System model's re-upload cost and #1501 orphan are the exact motivation.
+- **Gate ADR-0435's per-call failure reclaim of the shared base on the liveness predicate (keep the
+  arm).** Rejected in favor of removing it outright (decision 5): an investigation-owned base is not a
+  provision's to reclaim at all, so a liveness-gated per-call unlink would duplicate the sweep's job and
+  add a second place the same shared object is deleted. Sweep-only reclaim keeps one owner of that
+  decision.
+- **Do nothing.** Rejected: the per-System model's re-upload cost is the primary motivation, and its
+  reclaim is teardown-shaped — the wrong shape for an object meant to outlive any single System. (ADR-0435
+  already fixed the *failed-provision* orphan; #1502 is about reuse and the residual committed-object
+  exemption, not that orphan.)
