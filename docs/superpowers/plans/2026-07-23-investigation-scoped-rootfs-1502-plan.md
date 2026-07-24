@@ -34,7 +34,9 @@ deprecate"). Keep the whole branch green at each commit.
   COLUMN rootfs_cleanup_pending_at timestamptz;` — the dedicated rootfs reclaim marker (Task 4.1; must not
   reuse `cleanup_pending_at`, which `gc_investigation_artifacts` owns/clears). `CREATE UNIQUE INDEX … ON
   artifacts (object_key) WHERE owner_kind='investigations';` — **partial** (never touches other owner
-  kinds), backing finalize idempotency (Task 2.2).
+  kinds), backing finalize idempotency (Task 2.2). `ALTER TABLE artifacts ADD COLUMN encoding text, ADD
+  COLUMN uncompressed_size bigint;` (nullable, absent ⇒ identity) — the durable transport-encoding a
+  post-finalize gzip provision reads (Task 2.2/3.3).
 - **Acceptance:** `just test` migration round-trip passes; `test_migrate.py` sees 0076 as the new head;
   a NULL-investigation System row inserts unchanged.
 - **Rollback:** drop-column (no data loss for NULL rows).
@@ -68,10 +70,12 @@ deprecate"). Keep the whole branch green at each commit.
   (write `owner_kind='investigations'`, `retention_class='rootfs'`); reuse the ADR-0434 §2 HEAD-verify.
 - **Do:** HEAD the object (`ChecksumMode=ENABLED`); reject missing/checksum-less (`configuration_error`);
   write the row via **`INSERT … ON CONFLICT DO NOTHING`** against the Task 1.1 partial UNIQUE index on
-  `object_key`, then **re-SELECT** the row and return `data.checksum_sha256` (canonical base64); delete the
-  manifest. Concurrent finalizes converge on one row.
-- **Acceptance:** spec AC-4 (row written, manifest deleted, handle returned, idempotent re-call **and under
-  two concurrent calls → exactly one row**).
+  `object_key`, **including `encoding`/`uncompressed_size` copied from the manifest entry** (so a
+  post-finalize gzip provision can recover them), then **re-SELECT** and return `data.checksum_sha256`
+  (canonical base64); delete the manifest. Concurrent finalizes converge on one row.
+- **Acceptance:** spec AC-4 (row written incl. encoding, manifest deleted, handle returned, idempotent
+  re-call **and under two concurrent calls → exactly one row**), AC-4c (gzip upload recoverable after
+  finalize).
 
 ### Task 2.3 — Remove the System-scoped upload path
 - **Fits:** ADR-0441 §3 — replace, not deprecate.
@@ -116,12 +120,16 @@ deprecate"). Keep the whole branch green at each commit.
   checksum column**; via the short-lived sync connection);
   `providers/local_libvirt/lifecycle/storage.py` (`UPLOADS_DIR` path → `rootfs-uploads/<inv>/<token>.qcow2`).
 - **Do:** miss ⇒ `configuration_error` naming the checksum; keep ADR-0434 §2 SHA-256 verify + ADR-0438
-  qcow2-magic gate; reuse a present verified file (cache hit). Take a **per-(investigation, checksum)
-  advisory lock** (over the fetch's sync connection) around check-and-download so concurrent sibling
-  provisions do not both write the shared `.partial` (a unique `.partial` suffix is the fallback).
-- **Acceptance:** spec AC-1 (reuse: one download for two Systems, **sequential and concurrent**), AC-2
-  (isolation: cross-investigation checksum → resolution miss, no file staged), AC-4b (resolve-by-object_key
-  + transcode round-trip).
+  qcow2-magic gate; read `encoding`/`uncompressed_size` **from the resolved row** (not the deleted
+  manifest) and strip gzip per ADR-0438; reuse a present verified file (cache hit). Concurrency: **unique
+  per-fetcher `<token>.<uuid>.partial`** (correctness — no shared partial) + a **deterministic
+  session-scoped `pg_advisory_lock`** keyed `_lock_key(LockScope.INVESTIGATION, f"{inv}:{token}")` (dedup —
+  NOT Python `hash()`; NOT `advisory_xact_lock`, which holds a txn open across the download) with a
+  post-acquire `dest` re-check.
+- **Acceptance:** spec AC-1 (one download for two Systems, sequential **and cross-process concurrent**),
+  AC-2 (isolation), AC-4b (resolve-by-object_key + transcode), AC-4c (gzip stripped from row encoding).
+- **Watch:** `_lock_key` (blake2b, deterministic) not `hash()` — the cross-process AC-1 test must run two
+  interpreters/processes, or it will pass on a broken `hash()`-keyed lock.
 
 ---
 

@@ -56,10 +56,11 @@ See ADR-0441 for rationale; this section is the buildable shape and the failure 
 
 - **Migration 0076:** `ALTER TABLE systems ADD COLUMN investigation_id uuid REFERENCES investigations(id)`
   (**nullable**); `ALTER TABLE investigations ADD COLUMN rootfs_cleanup_pending_at timestamptz` (the
-  dedicated rootfs reclaim marker); and a partial `CREATE UNIQUE INDEX … ON artifacts (object_key) WHERE
-  owner_kind='investigations'` (finalize idempotency; partial so it never touches other owner kinds).
-  `domain/lifecycle/records.py` `System` gains `investigation_id: UUID | None = None`; `Investigation`
-  gains `rootfs_cleanup_pending_at`.
+  dedicated rootfs reclaim marker); a partial `CREATE UNIQUE INDEX … ON artifacts (object_key) WHERE
+  owner_kind='investigations'` (finalize idempotency; partial so it never touches other owner kinds); and
+  nullable `artifacts.encoding text` + `artifacts.uncompressed_size bigint` (the durable transport-encoding
+  home, decision 3). `domain/lifecycle/records.py` `System` gains `investigation_id: UUID | None = None`;
+  `Investigation` gains `rootfs_cleanup_pending_at`.
 - `systems.define` / `systems.provision` gain optional `investigation_id`. Supplied ⇒ must name a
   non-terminal (OPEN/ACTIVE) investigation whose project **equals the System's own (Allocation)
   project** — cross-project binding is rejected (`configuration_error`). Same-project keeps the SENSITIVE
@@ -93,7 +94,10 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
    `artifacts(object_key) WHERE owner_kind='investigations'`, then re-SELECT and return
    `data.checksum_sha256` — the handle for profiles. The unique index makes two concurrent finalizes
    (retries/two agents) converge on **one** row (no duplicate rows for one content-addressed key);
-   idempotent by construction, and resolution expects exactly one row. Delete the manifest.
+   idempotent by construction, and resolution expects exactly one row. **The row also persists
+   `encoding` + `uncompressed_size`** (copied from the manifest entry) — ADR-0438 keeps those only in the
+   ephemeral manifest, which finalize deletes, so a post-finalize gzip provision would otherwise lose them.
+   Delete the manifest.
 
 **Removed (replace, not deprecate):** `artifacts.create_system_upload`, `_SYSTEM_UPLOAD`,
 `_commit_uploaded_rootfs`, `_system_accepts_upload`, `rootfs_upload_window_allowed`, and the
@@ -113,13 +117,18 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 - Stage to `rootfs-uploads/<investigation_id>/<token>.qcow2`, outside `allowed_roots`. Read-side SHA-256
   verify (ADR-0434 §2) and qcow2-magic gate (ADR-0438) unchanged. Present verified file reused → at most
   one download per host per (investigation, checksum).
-- **Concurrent-fetch guard:** because the staging path is now shared per-(investigation, checksum), the
-  fetch takes a **per-(investigation, checksum) advisory lock** (over its short-lived sync connection,
-  keyed on `hash(investigation_id, token)`) around check-and-download, so two sibling provisions do not
-  both write the same fixed `.partial` (corruption + double download). One downloads; the rest wait then
-  hit the cache. This is what makes "written once" hold under concurrent (not just sequential) provisions.
-- The connectionless sync fetch opens its own short-lived connection to resolve the committed-object key
-  (it no longer reads a per-System manifest; the row is durable post-finalize).
+- **Concurrent-fetch guards (layered — correctness never depends on the lock):**
+  - **Unique per-fetcher `.partial`** (`<token>.<uuid>.partial`, `os.replace`d after verify) so two
+    concurrent downloaders never share a partial — the correctness guarantee against corruption, lock or no.
+  - **Deterministic session-scoped advisory lock** to avoid the redundant multi-GiB download ("written
+    once"): `pg_advisory_lock` on the fetch's dedicated sync connection, held across check-and-download,
+    keyed via `db.locks._lock_key(LockScope.INVESTIGATION, f"{inv}:{token}")` — **not** Python `hash()`
+    (per-process salted → different keys across worker processes → silent no-op). Session-scoped (not
+    `advisory_xact_lock`, which holds a txn open across the download → idle-in-transaction timeout). Re-check
+    for the verified `dest` after acquiring (cache hit while waiting).
+- The fetch reads `encoding`/`uncompressed_size` from the **durable `artifacts` row** (not the deleted
+  manifest) and strips gzip per ADR-0438. It opens its own short-lived sync connection to resolve the
+  committed-object key + encoding.
 
 ### Reclaim sweep (ADR-0441 §6)
 
@@ -222,14 +231,16 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | Investigation never closed | TTL backstop `gc_expired_investigation_rootfs` reclaims past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, same overlay-absence gate |
 | Provision of System A **fails** while sibling B reuses the same shared base | A's failure path does **not** unlink the shared base (ADR-0435 §1 arm superseded); B keeps a valid backing |
 | Second `complete_rootfs_upload` (row already written) | idempotent; returns the same `checksum_sha256` |
+| Gzip investigation upload provisioned after finalize | encoding read from the durable row (persisted at finalize) → gunzipped → passes qcow2-magic gate |
+| Two worker **processes** fetch the same base concurrently | deterministic `_lock_key` serializes (not `hash()`); unique `.partial` guarantees no corruption even if the lock is lost |
 | Cross-investigation read attempt (System in Y names Y-not-owned checksum) | resolution miss ⇒ `configuration_error`; no escape |
 
 ## Acceptance criteria (become tests in `/build-tdd`)
 
-1. **Reuse (incl. concurrent):** two Systems bound to one investigation, same `checksum_sha256`, both
-   provision — sequentially **and concurrently** — with the host base written **once** (the
-   per-(investigation, checksum) fetch lock serializes; assert no second download and no `.partial`
-   corruption).
+1. **Reuse (incl. cross-process concurrent):** two Systems bound to one investigation, same
+   `checksum_sha256`, both provision — sequentially **and concurrently across two processes** — with the
+   host base written **once** (deterministic `_lock_key` serializes; assert no second download and no
+   `.partial` corruption; the cross-process case must fail against a `hash()`-keyed lock).
 2. **Isolation:** a System bound to investigation Y referencing a checksum owned only by investigation X
    fails resolution with `configuration_error`; no file under Y's staging dir is created.
 3. **Binding invariant:** `{"kind":"upload"}` rootfs with no `investigation_id` is rejected at admission.
@@ -238,6 +249,9 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    partial UNIQUE index converges them on one row — assert exactly one row).
 4b. **Resolution by object_key:** a profile ref resolves by the derived content-addressed `object_key`
    (no checksum column); the base64→base64url transcoding round-trips.
+4c. **Gzip after finalize:** an `encoding=gzip` investigation upload, finalized (manifest deleted), then
+   provisioned, is gunzipped from the row-persisted encoding and passes the qcow2-magic gate (asserts the
+   base is a valid qcow2, not verbatim gzip bytes).
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
 6. **Close-force:** `close(force=True)` with **admin** on each bound System's project enqueues teardown
    and closes; a same-project **contributor** is refused (no escalation via close — assert the admin gate).

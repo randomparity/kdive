@@ -80,9 +80,11 @@ the new sweep only ever sees `owner_kind='investigations'`, and no evidence is w
 
 Migration **0076** adds `investigation_id uuid REFERENCES investigations(id)` to `systems`, **nullable**
 — a classic allocation-only System keeps it NULL and is unaffected by everything below — the dedicated
-`rootfs_cleanup_pending_at timestamptz` marker to `investigations` (decision 6), and a **partial UNIQUE
-index** `artifacts (object_key) WHERE owner_kind = 'investigations'` (decision 3's finalize idempotency;
-partial so it never touches existing rows of other owner kinds). `systems.define`
+`rootfs_cleanup_pending_at timestamptz` marker to `investigations` (decision 6), a **partial UNIQUE index**
+`artifacts (object_key) WHERE owner_kind = 'investigations'` (decision 3's finalize idempotency; partial so
+it never touches existing rows of other owner kinds), and nullable `artifacts.encoding text` +
+`artifacts.uncompressed_size bigint` (decision 3, the durable home for the transport encoding a
+post-finalize provision needs). `systems.define`
 and `systems.provision` gain an **optional** `investigation_id`; an agent working in an investigation
 sets it. This is an *advisory* binding (a System belongs to an Allocation for capacity; the
 investigation link scopes the uploaded-rootfs trust boundary and the close coupling), not a second
@@ -126,9 +128,14 @@ The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
   DO NOTHING`** against a **UNIQUE index on `object_key`** (migration 0076) so two concurrent finalizes
   (retries, or two agents) converge on **one** row rather than inserting duplicate rows for the same
   content-addressed key, then re-SELECTs and returns the **`checksum_sha256` handle** the agent puts in
-  each System's profile. Idempotent by construction; deletes the manifest. This replaces the
-  provision-time `_commit_uploaded_rootfs`: the row now exists **before** any System provisions, because
-  multiple Systems reference it (and resolution — decision 4 — expects exactly one row).
+  each System's profile. The row also **persists the transport `encoding` + `uncompressed_size`** copied
+  from the manifest entry: ADR-0438 keeps those only in the ephemeral `upload_manifests` JSONB, but finalize
+  deletes the manifest and provision now resolves the durable row, so without this a gzip investigation
+  upload (the >5 GiB-canonical case ADR-0437/0438 serve) would lose its encoding and stage gzip bytes that
+  fail the qcow2-magic gate. Migration 0076 adds nullable `artifacts.encoding` + `uncompressed_size`
+  (absent ⇒ identity). Idempotent by construction; deletes the manifest. This replaces the provision-time
+  `_commit_uploaded_rootfs`: the row now exists **before** any System provisions, because multiple Systems
+  reference it (and resolution — decision 4 — expects exactly one row).
 
 The System-scoped upload path is **removed, not deprecated** (`artifacts.create_system_upload`, the
 `_SYSTEM_UPLOAD` spec, `_commit_uploaded_rootfs`, `_system_accepts_upload`, the
@@ -169,15 +176,27 @@ host: two investigations on one host that upload identical bytes each stage thei
 (decision 4) is chosen over cross-investigation dedup.
 
 Because the staging path is now **shared** (per-(investigation, checksum), not per-System), two sibling
-Systems provisioning concurrently — the explicit goal, run as parallel worker jobs — would both resolve
-the same `<token>.qcow2` and, finding no verified file, both download and write the same fixed
-`.partial`, corrupting it (caught by the SHA-256 verify, failing a provision) and downloading the
-multi-GiB object twice (violating "written once"). The fetch therefore takes a **per-(investigation,
-checksum) lock** around check-and-download — a Postgres advisory lock over the fetch's existing
-short-lived connection (ADR-0438), keyed on `hash(investigation_id, token)` — so exactly one downloader
-runs and the rest wait then hit the verified file as a cache hit. (`.partial` + `os.replace` is retained;
-the lock is what makes "downloaded once per host per (investigation, checksum)" hold under concurrency,
-not just sequentially.)
+Systems provisioning concurrently — the explicit goal, run as parallel worker **processes** — would both
+resolve the same `<token>.qcow2`. Two guards keep this safe, layered so correctness never depends on the
+lock:
+
+- **Unique per-fetcher `.partial`** — each download writes a `<token>.<uuid>.partial` and `os.replace`s it
+  onto the shared `<token>.qcow2` only after the SHA-256 + qcow2-magic verify. Two concurrent downloaders
+  therefore **never** share a partial, so neither can corrupt the other regardless of the lock. This is
+  the correctness guarantee.
+- **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
+  not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
+  connection, held across check-and-download and released after `os.replace`, keyed via the repo's
+  deterministic `db.locks._lock_key(LockScope.INVESTIGATION, f"{investigation_id}:{token}")` — **not**
+  Python's `hash()`, which is per-process salted (`PYTHONHASHSEED`) and would derive different keys in
+  different worker processes, silently no-op the lock, and re-admit the double download. Session-scoped
+  (not `advisory_xact_lock`, which would hold a transaction open across the download and trip
+  `idle_in_transaction_session_timeout`). After acquiring, re-check for the verified `dest` (cache hit
+  populated while waiting). A lock lost mid-download degrades only to a redundant download, never
+  corruption (the unique partial covers it).
+
+The fetch reads the object's `encoding`/`uncompressed_size` from the **durable `artifacts` row** (decision
+3), not the deleted manifest, and strips a gzip transport encoding exactly as ADR-0438 does.
 
 Because the base is now **shared and investigation-owned**, it is no longer "created by" the provision
 that happened to stage it: an individual provision's failure path (ADR-0435 §1) must **not** reclaim it,
