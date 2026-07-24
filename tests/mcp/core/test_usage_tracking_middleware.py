@@ -6,11 +6,9 @@ every denial path: the ``authorization_denied`` envelope ``DenialAuditMiddleware
 propagated ``AuthorizationError`` (``DestructiveOpDenied`` / non-member) that bubbles past
 it. A recording failure is swallowed — it never fails the call.
 
-Because that swallow is the middleware's contract, every test here drives it over a
-*warm* pool: ``_open_warm_pool`` establishes the connection before the middleware's
-1-second acquire budget starts, so a saturated machine cannot turn a slow first connect
-into a missing row (#1527). ``_recording_must_not_fail`` names the swallowed cause if it
-ever happens anyway, instead of leaving a bare ``IndexError`` on the row assertions.
+Because that swallow is the middleware's contract, every row-asserting test drives it
+over a warm pool and under a guard that names a swallowed failure — see
+``tests.mcp.usage_support`` for both, and for why (#1527).
 """
 
 from __future__ import annotations
@@ -18,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -32,6 +30,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.mcp.usage_support import open_warm_pool, recording_must_not_fail
 
 
 def _ctx() -> RequestContext:
@@ -43,72 +42,6 @@ def _ctx() -> RequestContext:
 class _Ctx:
     def __init__(self, tool: str) -> None:
         self.message = type("M", (), {"name": tool, "arguments": {"project": "a"}})()
-
-
-_RECORDING_FAILURE = "usage recording failed"
-
-
-class _Capture(logging.Handler):
-    """Collect the middleware's recording-failure warnings, tracebacks included.
-
-    ``_record`` logs its one warning with ``exc_info=True``, and the swallowed exception
-    is the whole diagnostic value — ``record.getMessage()`` alone yields only the tool
-    name. ``Formatter.format`` appends the traceback whenever ``exc_info`` is set, so it
-    is what preserves the cause. Only this module's recording-failure warning is
-    collected: an unrelated future warning on the same logger must not be reported as a
-    recording failure.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.WARNING)
-        self.failures: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if record.getMessage().startswith(_RECORDING_FAILURE):
-            self.failures.append(logging.Formatter().format(record))
-
-
-@contextlib.contextmanager
-def _recording_must_not_fail() -> Iterator[None]:
-    """Turn the middleware's swallowed recording failure into a named assertion.
-
-    ``UsageTrackingMiddleware._record`` logs and swallows every failure so a bad
-    recording can never fail the tool call. In a test that then asserts on the recorded
-    row, a swallowed failure surfaces only as an empty result set — the bare
-    ``IndexError`` reported in #1527, which says nothing about the cause. Re-raise the
-    captured warning, traceback and all, instead.
-
-    The check runs in the ``finally`` so a raising body cannot discard it; Python chains
-    the original exception onto the ``AssertionError`` as its context.
-    """
-    logger = logging.getLogger(UsageTrackingMiddleware.__module__)
-    handler = _Capture()
-    previous = logger.level
-    logger.setLevel(logging.WARNING)  # the logger's own level, not the global disable floor
-    logger.addHandler(handler)
-    try:
-        yield
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
-        if handler.failures:
-            raise AssertionError(handler.failures[0])
-
-
-async def _open_warm_pool(url: str) -> AsyncConnectionPool:
-    """A pool with its connection already established.
-
-    ``open()`` defaults to ``wait=False``, which returns before any connection exists and
-    leaves the first connect to a background task. The middleware then acquires with a
-    1-second budget (its production default), so on a machine saturated by the suite's
-    ``-n auto --dist worksteal`` run that first connect can exceed the budget, raise
-    ``PoolTimeout``, and be swallowed — leaving no row (#1527). Waiting here moves the
-    connect outside the budget, and makes a genuinely unreachable backend fail loudly at
-    open time rather than as a silently missing row.
-    """
-    pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
-    await pool.open(wait=True)
-    return pool
 
 
 def _drive(
@@ -124,9 +57,9 @@ def _drive(
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", cli_client_id)
 
     async def _run() -> list[tuple[Any, ...]]:
-        async with await _open_warm_pool(migrated_url) as pool:
+        async with await open_warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
-            with _recording_must_not_fail(), contextlib.suppress(Exception):
+            with recording_must_not_fail(), contextlib.suppress(Exception):
                 await mw.on_call_tool(_Ctx(tool), behavior)
             async with pool.connection() as conn:
                 cur = await conn.execute(
@@ -149,9 +82,9 @@ def test_args_digest_present_on_recorded_row(
         return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
     async def _run() -> str | None:
-        async with await _open_warm_pool(migrated_url) as pool:
+        async with await open_warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
-            with _recording_must_not_fail():
+            with recording_must_not_fail():
                 await mw.on_call_tool(_Ctx("jobs.get"), ok)
             async with pool.connection() as conn:
                 cur = await conn.execute("SELECT args_digest FROM tool_invocation")
@@ -254,7 +187,7 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
             envelope = ToolResponse.success("jobs.get", "ok")
             return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
-        with _recording_must_not_fail():
+        with recording_must_not_fail():
             await mw.on_call_tool(_Ctx("jobs.get"), ok)
 
     with pytest.raises(AssertionError, match="PoolClosed"):
@@ -264,5 +197,5 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
 def test_recording_guard_ignores_unrelated_warnings() -> None:
     # Only the recording-failure warning may trip the guard; anything else this module
     # logs must not be misreported as a lost usage row.
-    with _recording_must_not_fail():
+    with recording_must_not_fail():
         logging.getLogger(UsageTrackingMiddleware.__module__).warning("slow write, not a failure")
