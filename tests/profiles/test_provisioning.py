@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -15,8 +16,7 @@ from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provider_policy import (
     capture_method,
-    reject_rootfs_upload_without_window,
-    rootfs_upload_window_allowed,
+    require_investigation_binding_for_upload,
 )
 from kdive.profiles.provisioning import (
     FADUMP_MIN_MEMORY_MB,
@@ -113,7 +113,7 @@ def test_valid_fault_inject_profile_parses_and_dumps_alias() -> None:
     assert profile.provider.fault_inject.capture_method is CaptureMethod.HOST_DUMP
     assert profile.provider.kind is ResourceKind.FAULT_INJECT
     assert _FAULT_POLICY.destructive_opt_in(profile, JobKind.FORCE_CRASH) is True
-    assert rootfs_upload_window_allowed(_FAULT_POLICY, profile) is False
+    require_investigation_binding_for_upload(_FAULT_POLICY, profile, None)  # no upload rootfs
     assert dump_profile(profile)["provider"] == {
         "fault-inject": {
             "capture_method": "host_dump",
@@ -631,23 +631,23 @@ def test_kdump_profile_unaffected_by_fadump_default() -> None:
     assert capture_method(_LOCAL_POLICY, profile) is CaptureMethod.KDUMP
 
 
-def test_rootfs_upload_window_helpers_report_and_reject_upload_profiles() -> None:
+def test_require_investigation_binding_rejects_upload_without_binding() -> None:
     data = _valid()
-    data["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload"}
+    data["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload", "checksum_sha256": "c"}
     profile = ProvisioningProfile.parse(data)
 
-    assert rootfs_upload_window_allowed(_LOCAL_POLICY, profile) is True
+    # A bound investigation admits; a missing binding is a configuration_error (ADR-0441 §2).
+    require_investigation_binding_for_upload(_LOCAL_POLICY, profile, uuid4())
     with pytest.raises(CategorizedError) as exc:
-        reject_rootfs_upload_without_window(_LOCAL_POLICY, profile)
+        require_investigation_binding_for_upload(_LOCAL_POLICY, profile, None)
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert str(exc.value) == "upload-kind rootfs requires systems.define upload window"
+    assert "investigation_id" in str(exc.value)
 
 
-def test_rootfs_upload_window_helpers_allow_non_upload_profiles() -> None:
+def test_require_investigation_binding_allows_non_upload_profiles() -> None:
     profile = ProvisioningProfile.parse(_valid())
 
-    assert rootfs_upload_window_allowed(_LOCAL_POLICY, profile) is False
-    reject_rootfs_upload_without_window(_LOCAL_POLICY, profile)
+    require_investigation_binding_for_upload(_LOCAL_POLICY, profile, None)
 
 
 # --- ADR-0024 sizing reconciliation (#161) --------------------------------------------

@@ -1,6 +1,6 @@
 """The upload-declaration item input schema is discoverable (#567, ADR-0173).
 
-`artifacts.create_run_upload` / `create_system_upload` advertise the declaration item
+`artifacts.create_run_upload` / `create_investigation_upload` advertise the declaration item
 shape (required ``name``/``sha256``/``size_bytes``, optional ``chunks`` of per-chunk
 ``sha256``/``size_bytes``) on the ``artifacts`` parameter via ``json_schema_extra``,
 while keeping the runtime type a permissive ``Mapping`` so declarations still reach the
@@ -20,7 +20,7 @@ from kdive.mcp.tools.catalog.artifacts import registrar as artifacts_registrar
 from kdive.mcp.tools.catalog.artifacts.uploads import _REQUIRED_DECLARATION_FIELDS
 from kdive.providers.core.resolver import ProviderResolver
 
-_UPLOAD_TOOLS = ("artifacts.create_run_upload", "artifacts.create_system_upload")
+_UPLOAD_TOOLS = ("artifacts.create_run_upload", "artifacts.create_investigation_upload")
 
 
 def _artifacts_item_schema(tool_name: str) -> dict[str, Any]:
@@ -113,7 +113,7 @@ def test_run_tool_carries_single_put_and_chunked_examples() -> None:
 
 def test_system_tool_examples_are_single_put_identity_and_gzip() -> None:
     """Systems reject chunks (ADR-0436); the two examples are single-PUT identity + gzip (#1511)."""
-    examples = _artifacts_examples("artifacts.create_system_upload")
+    examples = _artifacts_examples("artifacts.create_investigation_upload")
     assert len(examples) == 2
     identity, gzipped = examples
     assert identity[0]["name"] == "rootfs"
@@ -135,7 +135,7 @@ def test_only_system_tool_advertises_transport_encoding_fields() -> None:
     non-identity encoding at declaration, so advertising it there would invite a guaranteed
     rejection. This binds the per-owner schema split.
     """
-    system_props = _artifacts_item_schema("artifacts.create_system_upload")["properties"]
+    system_props = _artifacts_item_schema("artifacts.create_investigation_upload")["properties"]
     assert system_props["encoding"]["enum"] == ["gzip", "identity"]
     assert system_props["uncompressed_size"]["type"] == "integer"
 
@@ -145,7 +145,7 @@ def test_only_system_tool_advertises_transport_encoding_fields() -> None:
 
 
 def test_system_tool_description_documents_encoding_constraints() -> None:
-    description = _tool_description("artifacts.create_system_upload").lower()
+    description = _tool_description("artifacts.create_investigation_upload").lower()
     assert "encoding" in description
     assert "gzip" in description
     assert "uncompressed_size" in description

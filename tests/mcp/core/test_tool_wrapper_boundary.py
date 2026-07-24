@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 import kdive.mcp.tools.debug.operations.breakpoints as debug_breakpoint_tools
+from kdive.artifacts.content_address import rootfs_object_token
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, INVESTIGATIONS, QUOTAS, RUNS, SYSTEMS
 from kdive.domain.accounting.records import Budget, Quota
@@ -43,7 +45,11 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
-from tests.mcp.systems_support import fault_inject_profile, granted_allocation, upload_profile
+from tests.mcp.systems_support import (
+    fault_inject_profile,
+    granted_allocation,
+    upload_profile,
+)
 from tests.providers.local_libvirt.fakes import FakeLibvirtConn
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -469,13 +475,24 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
     async def _run() -> tuple[ToolResponse, str]:
         async with _pool(migrated_url) as pool:
             allocation_id = await granted_allocation(pool)
+            inv_id = uuid4()
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO investigations (id, principal, project, title, state) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (inv_id, "alice", "proj", "t", "open"),
+                )
             monkeypatch.setattr(systems_tools, "current_context", _ctx)
             app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
             async with Client(app) as client:
                 defined = await _call_tool(
                     client,
                     "systems.define",
-                    {"allocation_id": allocation_id, "profile": upload_profile()},
+                    {
+                        "allocation_id": allocation_id,
+                        "profile": upload_profile(),
+                        "investigation_id": str(inv_id),
+                    },
                 )
                 # ADR-0147: an invalid `state` filter is now rejected at the input-schema
                 # layer (state is the SystemState enum), so the wire result is an error
@@ -489,10 +506,7 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
 
     defined, invalid_state_error = asyncio.run(_run())
     assert defined.status == "defined", defined
-    assert defined.suggested_next_actions == [
-        "artifacts.create_system_upload",
-        "systems.provision_defined",
-    ]
+    assert defined.suggested_next_actions == ["systems.provision_defined"]
     assert "Input should be" in invalid_state_error
     assert "ready" in invalid_state_error
 
@@ -500,42 +514,46 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
 def test_artifact_upload_wrapper_roundtrips_and_validates_through_fastmcp(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    checksum = base64.b64encode(bytes(range(32))).decode("ascii")
+    token = rootfs_object_token(checksum)
+
     async def _run() -> tuple[ToolResponse, ToolResponse, _UploadStore]:
         async with _pool(migrated_url) as pool:
-            allocation_id = await granted_allocation(pool)
+            inv_id = uuid4()
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "INSERT INTO investigations (id, principal, project, title, state) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (inv_id, "alice", "proj", "t", "open"),
+                )
             store = _UploadStore()
-            monkeypatch.setattr(systems_tools, "current_context", _ctx)
             monkeypatch.setattr(artifacts_tools, "current_context", _ctx)
             monkeypatch.setattr(artifact_upload_tools, "object_store_from_env", lambda: store)
             app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
             async with Client(app) as client:
-                defined = await _call_tool(
-                    client,
-                    "systems.define",
-                    {"allocation_id": allocation_id, "profile": upload_profile()},
-                )
                 upload = await _call_tool(
                     client,
-                    "artifacts.create_system_upload",
+                    "artifacts.create_investigation_upload",
                     {
-                        "system_id": defined.object_id,
-                        "artifacts": [{"name": "rootfs", "sha256": "checksum", "size_bytes": 10}],
+                        "investigation_id": str(inv_id),
+                        "artifacts": [{"name": "rootfs", "sha256": checksum, "size_bytes": 10}],
                     },
                 )
                 invalid = await _call_tool(
                     client,
-                    "artifacts.create_system_upload",
-                    {"system_id": defined.object_id, "artifacts": []},
+                    "artifacts.create_investigation_upload",
+                    {"investigation_id": str(inv_id), "artifacts": []},
                 )
         return upload, invalid, store
 
     upload, invalid, store = asyncio.run(_run())
     assert upload.status == "upload_ready", upload
-    assert upload.items[0].object_id.endswith("/rootfs")
+    # The object is content-addressed by the declared checksum: rootfs-<base64url token>.
+    assert upload.items[0].object_id.endswith(f"/rootfs-{token}")
     assert upload.items[0].refs["upload_url"].startswith("https://store/")
     assert invalid.status == "error"
     assert invalid.error_category == "configuration_error"
-    assert store.calls == [(upload.items[0].object_id, "checksum", 10)]
+    assert store.calls == [(upload.items[0].object_id, checksum, 10)]
 
 
 def test_real_build_app_tools_advertise_envelope_output_schema() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Protocol
+from uuid import UUID
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -50,17 +51,30 @@ def _parsed_profile(profile: ProvisioningProfile | Mapping[str, object]) -> Prov
     return ProvisioningProfile.parse(profile)
 
 
-def rootfs_upload_window_allowed(policy: ProfilePolicy, profile: ProvisioningProfile) -> bool:
-    rootfs = policy.rootfs_source(profile)
-    return rootfs is not None and rootfs.kind == "upload"
-
-
-def reject_rootfs_upload_without_window(
-    policy: ProfilePolicy, profile: ProvisioningProfile
+def require_investigation_binding_for_upload(
+    policy: ProfilePolicy, profile: ProvisioningProfile, investigation_id: UUID | None
 ) -> None:
-    if rootfs_upload_window_allowed(policy, profile):
+    """Require a bound investigation when the profile's rootfs is an ``upload`` (ADR-0441 §2).
+
+    An investigation-scoped uploaded rootfs is resolved by content checksum within the System's
+    own investigation, so a ``{"kind": "upload"}`` rootfs with no ``investigation_id`` is
+    unresolvable. Reject it at admission with an actionable ``configuration_error`` naming the
+    missing binding rather than letting it fail late at provision.
+
+    Args:
+        policy: The provider profile policy (to read the rootfs source).
+        profile: The parsed provisioning profile.
+        investigation_id: The System's effective investigation binding, or ``None``.
+
+    Raises:
+        CategorizedError: ``CONFIGURATION_ERROR`` when the rootfs is ``upload`` and
+            ``investigation_id`` is ``None``.
+    """
+    rootfs = policy.rootfs_source(profile)
+    if rootfs is not None and rootfs.kind == "upload" and investigation_id is None:
         raise CategorizedError(
-            "upload-kind rootfs requires systems.define upload window",
+            "upload-kind rootfs requires a bound investigation_id: pass investigation_id to "
+            "systems.define/provision so the uploaded base resolves within that investigation",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -114,8 +114,19 @@ async def _defined_system_via_define(url: str) -> UUID:
     """
     async with AsyncConnectionPool(url, min_size=1, max_size=2) as pool:
         alloc_id = await _granted_allocation(pool)
+        inv_id = uuid4()
+        async with pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (inv_id, "user-1", "proj", "t", "open"),
+            )
         resp = await _SYSTEM_PROVISION_HANDLERS.define_system(
-            pool, _ctx(), allocation_id=alloc_id, profile=_upload_profile()
+            pool,
+            _ctx(),
+            allocation_id=alloc_id,
+            profile=_upload_profile(),
+            investigation_id=str(inv_id),
         )
     return UUID(resp.object_id)
 

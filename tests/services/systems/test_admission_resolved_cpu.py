@@ -35,7 +35,9 @@ def _profile(provider: dict[str, Any], boot_method: str) -> ProvisioningProfile:
 
 
 def _local_profile() -> ProvisioningProfile:
-    return _profile({"local-libvirt": {"rootfs": {"kind": "upload"}}}, "direct-kernel")
+    return _profile(
+        {"local-libvirt": {"rootfs": {"kind": "upload", "checksum_sha256": "c"}}}, "direct-kernel"
+    )
 
 
 def _remote_profile() -> ProvisioningProfile:

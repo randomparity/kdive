@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -15,9 +15,6 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import ArtifactWriteRequest
-from kdive.artifacts.uploads import ManifestEntry
 from kdive.components.references import (
     ArtifactComponentRef,
     CatalogComponentRef,
@@ -26,7 +23,6 @@ from kdive.components.references import (
 )
 from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, InvestigationState, RunState, SystemState
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
@@ -49,7 +45,6 @@ from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.serialization import JsonValue
-from kdive.store.objectstore import ObjectStore, artifact_key
 from tests.mcp.systems_support import (
     SYSTEM_ADMIN_HANDLERS as _SYSTEM_ADMIN_HANDLERS,
 )
@@ -392,7 +387,7 @@ def test_define_with_label_echoes_on_systems_get(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(), alloc_id, _upload_profile(), label="defined-A")
+            resp = await _define(pool, _ctx(), alloc_id, _profile(), label="defined-A")
             assert resp.status == "defined"
             get_resp = await get_system(pool, _ctx(), resp.object_id, resolver=_provider_resolver())
         assert get_resp.data["label"] == "defined-A"
@@ -1194,15 +1189,6 @@ def test_provision_handler_concurrent_same_job_ready_does_not_tear_down(migrated
     asyncio.run(_run())
 
 
-# --- upload-rootfs artifacts commit (ADR-0048 §6) ------------------------------------------
-#
-# These drive provision_handler with a directly-seeded PROVISIONING upload profile to unit-
-# test the worker-side provisioning->ready commit in isolation. The full lane is reachable
-# end-to-end via systems.define + artifacts.create_system_upload + systems.provision_defined
-# (#111); see
-# tests/integration/test_systems_define_upload_provision.py for that reachability proof.
-
-
 async def _seed_system_with_profile(
     pool: AsyncConnectionPool, alloc_id: str, state: SystemState, profile: dict[str, Any]
 ) -> str:
@@ -1221,111 +1207,6 @@ async def _seed_system_with_profile(
             ),
         )
     return str(system.id)
-
-
-def test_provision_handler_commits_uploaded_rootfs_artifact(
-    migrated_url: str, minio_store: ObjectStore
-) -> None:
-    # An upload-kind rootfs whose object is present: the provisioning->ready transition
-    # writes one systems-owned write-once artifacts row and deletes the upload manifest
-    # (so the reaper exempts the object).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system_with_profile(
-                pool, alloc_id, SystemState.PROVISIONING, _upload_profile()
-            )
-            key = artifact_key("local", "systems", sys_id, "rootfs")
-            minio_store.put_artifact(
-                ArtifactWriteRequest(
-                    tenant="local",
-                    owner_kind="systems",
-                    owner_id=sys_id,
-                    name="rootfs",
-                    data=b"rootfs-image-bytes",
-                    sensitivity=Sensitivity.SENSITIVE,
-                    retention_class="rootfs",
-                )
-            )
-            async with pool.connection() as conn:
-                await upload_manifest.replace_manifest(
-                    conn,
-                    upload_manifest.UploadManifestReplaceRequest(
-                        owner_kind="systems",
-                        owner_id=UUID(sys_id),
-                        prefix=f"local/systems/{sys_id}/",
-                        entries=[ManifestEntry("rootfs", "sha256:x", 18)],
-                        ttl=timedelta(hours=1),
-                    ),
-                )
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            async with pool.connection() as conn:
-                await systems_handlers.provision_handler(
-                    conn,
-                    job,
-                    resolver=_provider_resolver(provisioner=_FakeProvisioning()),
-                    artifact_store=minio_store,
-                )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT owner_kind, object_key, sensitivity, retention_class "
-                    "FROM artifacts WHERE owner_id = %s",
-                    (sys_id,),
-                )
-                art_rows = await cur.fetchall()
-            async with pool.connection() as conn:
-                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
-        assert sys_row is not None and sys_row["state"] == "ready"
-        assert len(art_rows) == 1  # exactly one write-once row
-        assert art_rows[0]["owner_kind"] == "systems"
-        assert art_rows[0]["object_key"] == key
-        assert art_rows[0]["sensitivity"] == "sensitive"
-        assert art_rows[0]["retention_class"] == "rootfs"
-        assert manifest is None  # the upload manifest was deleted (reaper exempts the object)
-
-    asyncio.run(_run())
-
-
-def test_provision_handler_absent_uploaded_rootfs_fails_config_error(
-    migrated_url: str, minio_store: ObjectStore
-) -> None:
-    # An upload-kind rootfs whose object was never uploaded: the commit raises
-    # configuration_error inside the ready transition, which rolls back — the System stays
-    # provisioning (a retry re-checks) and no artifacts row is written.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system_with_profile(
-                pool, alloc_id, SystemState.PROVISIONING, _upload_profile()
-            )
-            job = await _enqueue_provision(pool, sys_id, alloc_id)
-            prov = _FakeProvisioning()
-            async with pool.connection() as conn:
-                with pytest.raises(CategorizedError) as caught:
-                    await systems_handlers.provision_handler(
-                        conn,
-                        job,
-                        resolver=_provider_resolver(provisioner=prov),
-                        artifact_store=minio_store,
-                    )
-            assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
-            # The System rolls back to provisioning (not terminal), so the terminal-teardown
-            # compensation deliberately does NOT fire — the started domain is left in place for
-            # an idempotent retry.
-            assert prov.torn_down == []
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM artifacts WHERE owner_id = %s", (sys_id,)
-                )
-                art_n = await cur.fetchone()
-        assert sys_row is not None and sys_row["state"] == "provisioning"  # rolled back
-        assert art_n is not None and art_n["n"] == 0
-
-    asyncio.run(_run())
 
 
 # --- systems.teardown tool + handler -------------------------------------------------------
@@ -2136,9 +2017,9 @@ def test_register_handlers_binds_provision_teardown_and_reprovision() -> None:
     assert registry.get(JobKind.REPROVISION) is not None
 
 
-def test_reprovision_rejects_upload_rootfs(migrated_url: str) -> None:
-    # A ready System has no upload window; an upload-kind reprovision is a fail-fast
-    # configuration_error (#111).
+def test_reprovision_rejects_unbound_upload_rootfs(migrated_url: str) -> None:
+    # A ready System with no investigation binding cannot reprovision to an upload rootfs: the
+    # binding invariant fails fast with a configuration_error (ADR-0441 §2).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -2163,12 +2044,9 @@ def test_define_inserts_defined_system_and_activates_allocation(migrated_url: st
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(), alloc_id, _upload_profile())
+            resp = await _define(pool, _ctx(), alloc_id, _profile())
             assert resp.status == "defined"
-            assert resp.suggested_next_actions == [
-                "artifacts.create_system_upload",
-                "systems.provision_defined",
-            ]
+            assert resp.suggested_next_actions == ["systems.provision_defined"]
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT state, allocation_id FROM systems")
                 sys_row = await cur.fetchone()
@@ -2191,8 +2069,8 @@ def test_define_is_idempotent(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            first = await _define(pool, _ctx(), alloc_id, _upload_profile())
-            second = await _define(pool, _ctx(), alloc_id, _upload_profile())
+            first = await _define(pool, _ctx(), alloc_id, _profile())
+            second = await _define(pool, _ctx(), alloc_id, _profile())
             assert first.object_id == second.object_id
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
@@ -2211,7 +2089,7 @@ def test_define_non_granted_allocation_is_config_error(migrated_url: str) -> Non
             alloc_id = await _granted_allocation(pool)
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
-            resp = await _define(pool, _ctx(), alloc_id, _upload_profile())
+            resp = await _define(pool, _ctx(), alloc_id, _profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["current_status"] == "releasing"
@@ -2224,7 +2102,7 @@ def test_define_existing_non_defined_system_is_config_error(migrated_url: str) -
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await _define(pool, _ctx(), alloc_id, _upload_profile())
+            resp = await _define(pool, _ctx(), alloc_id, _profile())
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute("SELECT count(*) AS n FROM systems")
                 sys_n = await cur.fetchone()
@@ -2240,7 +2118,7 @@ def test_define_over_quota_is_quota_exceeded(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool, systems_quota=0)
-            resp = await _define(pool, _ctx(), alloc_id, _upload_profile())
+            resp = await _define(pool, _ctx(), alloc_id, _profile())
         assert resp.status == "error"
         assert resp.error_category == "quota_exceeded"
 
@@ -2252,7 +2130,7 @@ def test_define_requires_operator(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             with pytest.raises(AuthorizationError):
-                await _define(pool, _ctx(role=None), alloc_id, _upload_profile())
+                await _define(pool, _ctx(role=None), alloc_id, _profile())
 
     asyncio.run(_run())
 
@@ -2283,7 +2161,7 @@ def test_define_foreign_allocation_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(projects=("other",)), alloc_id, _upload_profile())
+            resp = await _define(pool, _ctx(projects=("other",)), alloc_id, _profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
@@ -2349,7 +2227,7 @@ def test_provision_defined_admits_defined_system(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _upload_profile())).object_id
+            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
             resp = await _provision_defined(pool, _ctx(), sys_id)
             assert resp.status == "queued"
             assert resp.data["system_id"] == sys_id
@@ -2388,7 +2266,7 @@ def test_provision_defined_refuses_released_allocation(migrated_url: str) -> Non
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _upload_profile())).object_id
+            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
@@ -2541,7 +2419,10 @@ def test_provision_defined_viewer_denied_before_provider_rootfs_validation(
     assert calls == []
 
 
-def test_provision_create_lane_rejects_upload(migrated_url: str) -> None:
+def test_provision_create_lane_rejects_unbound_upload(migrated_url: str) -> None:
+    # An upload-rootfs provision with no investigation binding fails fast at admission (ADR-0441
+    # §2): the base resolves by content checksum within an investigation, so a missing binding is
+    # a configuration_error, never a late provision failure — and no System is inserted.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
@@ -2553,6 +2434,7 @@ def test_provision_create_lane_rejects_upload(migrated_url: str) -> None:
                 sys_n = await cur.fetchone()
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
+        assert "investigation_id" in (resp.detail or "")
         assert sys_n is not None and sys_n["n"] == 0  # fail fast, no System inserted
 
     asyncio.run(_run())
@@ -2562,7 +2444,7 @@ def test_provision_create_lane_refuses_defined_system(migrated_url: str) -> None
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _upload_profile())).object_id
+            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
             resp = await _provision(pool, _ctx(), alloc_id, _profile())
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -2607,7 +2489,7 @@ def test_teardown_handler_drives_defined_system_to_torn_down(migrated_url: str) 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _upload_profile())).object_id
+            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
             job = await _enqueue_teardown(pool, sys_id)
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
@@ -2631,7 +2513,7 @@ def test_reconciler_gc_tears_down_defined_orphan(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _upload_profile())).object_id
+            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)

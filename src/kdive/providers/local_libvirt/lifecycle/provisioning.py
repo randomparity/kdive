@@ -635,13 +635,17 @@ class LocalLibvirtProvisioning:
         self, rootfs: RootfsSource, system_id: UUID, arch: str = "x86_64"
     ) -> str:
         rootfs = _materializable_rootfs(rootfs)
+        # The upload context carries the profile's content checksum; it is consumed only on the
+        # upload lane (a non-upload rootfs never reads it). Investigation resolution happens in the
+        # connectionless fetch (ADR-0441 §4).
+        checksum = rootfs.checksum_sha256 if isinstance(rootfs, _UploadRootfs) else ""
         return str(
             materialize_rootfs_base(
                 rootfs,
                 context=RootfsMaterializationContext(
                     allowed_roots=self._allowed_roots,
                     arch=arch,
-                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR)),
+                    upload=RootfsUploadContext("local", system_id, Path(UPLOADS_DIR), checksum),
                     catalog_fetch=self._catalog_fetch,
                     upload_fetch=self._upload_fetch,
                 ),

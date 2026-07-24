@@ -170,9 +170,13 @@ def test_validate_rootfs_for_provider_skips_upload_rootfs() -> None:
         raise AssertionError("upload-kind rootfs is system-owned and not provider-validated")
 
     asyncio.run(
-        validate_rootfs_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, fail_on_call)
+        validate_rootfs_for_provider(
+            _profile({"kind": "upload", "checksum_sha256": "c"}), _LOCAL_POLICY, fail_on_call
+        )
     )
-    validate_profile_for_provider(_profile({"kind": "upload"}), _LOCAL_POLICY, _capabilities())
+    validate_profile_for_provider(
+        _profile({"kind": "upload", "checksum_sha256": "c"}), _LOCAL_POLICY, _capabilities()
+    )
 
 
 def _profile_with_ops(destructive_ops: list[str]) -> ProvisioningProfile:

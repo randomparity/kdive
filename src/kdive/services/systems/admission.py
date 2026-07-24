@@ -43,7 +43,10 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
 from kdive.jobs.payloads import SystemPayload
-from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
+from kdive.profiles.provider_policy import (
+    ProfilePolicy,
+    require_investigation_binding_for_upload,
+)
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
     dump_profile,
@@ -458,6 +461,14 @@ class SystemAdmission:
                 stored = _stored_profile_for(request.profile, alloc)
                 await _validate_investigation_binding(
                     conn, alloc, existing, request.investigation_id
+                )
+                # The effective binding is the supplied one, else the write-once value a prior
+                # define recorded; an upload-rootfs profile requires it to resolve (ADR-0441 §2).
+                effective_investigation = request.investigation_id or (
+                    existing.investigation_id if existing is not None else None
+                )
+                require_investigation_binding_for_upload(
+                    self.profile_policy, stored, effective_investigation
                 )
             except CategorizedError as exc:
                 return _failure_from_error(alloc.id, exc)
@@ -1035,7 +1046,6 @@ async def _insert_provisioning_system(
     investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     try:
-        reject_rootfs_upload_without_window(profile_policy, profile)
         # Validate arch + resolve host bindings before the granted->active flip (ADR-0339/0368): a
         # mis-arch rejection writes no System and leaves the allocation granted (all-or-nothing).
         accel, resolved_cpu = await _resolve_new_system_bindings(

@@ -102,16 +102,25 @@ class _ProfileBase(BaseModel):
 
 
 class _UploadRootfs(_ProfileBase):
-    # A System-owned uploaded qcow2; opened by systems.define + artifacts.create_system_upload and
-    # committed at provisioning->ready (ADR-0048 §5). local/artifact/catalog are alternatives.
+    # An investigation-scoped uploaded qcow2, content-addressed by ``checksum_sha256`` (ADR-0441).
+    # One upload provisions many Systems bound to the same investigation; the base is fetched to
+    # the host at most once per (investigation, checksum). local/artifact/catalog are alternatives.
     kind: Literal["upload"]
+    checksum_sha256: NonEmptyStr = Field(
+        description=(
+            "Content checksum handle of an investigation-scoped uploaded rootfs, as returned by "
+            "investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System "
+            "must be bound to the investigation that owns this upload; provisioning resolves the "
+            "base by this checksum within that investigation."
+        )
+    )
 
 
 type RootfsSource = Annotated[
     LocalComponentRef | ArtifactComponentRef | CatalogComponentRef | _UploadRootfs,
     Field(discriminator="kind"),
 ]
-"""A discriminated rootfs source (ADR-0065); ``upload`` remains System-owned."""
+"""A discriminated rootfs source (ADR-0065); ``upload`` is investigation-scoped (ADR-0441)."""
 
 
 # Provenance: ADR-0049 Decision 3.
@@ -163,9 +172,9 @@ class LibvirtProfile(_ProfileBase):
     ``rootfs`` is the discriminated rootfs source keyed by ``kind`` —
     ``local`` (an allowlisted provider-local file), ``artifact`` (parsed for the shared
     component contract but currently rejected by local-libvirt materialization),
-    ``catalog`` (a curated image by name), or ``upload`` (a System-owned uploaded
-    object); the resolver maps supported references to the libvirt-readable disk path
-    at provisioning. ``crashkernel`` is an
+    ``catalog`` (a curated image by name), or ``upload`` (an investigation-scoped
+    uploaded object referenced by ``checksum_sha256``); the resolver maps
+    supported references to the libvirt-readable disk path at provisioning. ``crashkernel`` is an
     optional opaque non-empty token (the kdump prerequisite — the booted kernel is the
     arbiter of its grammar); ``None`` when the System is not provisioned for kdump.
     ``baseline_kernel`` is an optional hint naming the baseline kernel to boot when the

@@ -26,8 +26,8 @@ from kdive.profiles.provisioning import _UploadRootfs
 # Resolve a `catalog` reference (for a target arch) to a provider-readable local path. A staged-path
 # row resolves to its host path; an s3 row resolves DB row → object → cache (ADR-0092/0228).
 type CatalogFetch = Callable[[CatalogComponentRef, str], Path]
-# Download + checksum-verify a System-owned uploaded rootfs object to a provider-readable local
-# path (ADR-0434). Injected like ``CatalogFetch`` because the provider provision seam is
+# Download + checksum-verify an investigation-scoped uploaded rootfs object to a provider-readable
+# local path (ADR-0434/0441). Injected like ``CatalogFetch`` because the provider provision seam is
 # synchronous and owns no object store; the worker wires a concrete fetch.
 type UploadFetch = Callable[["RootfsUploadContext"], Path]
 type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _UploadRootfs
@@ -35,11 +35,18 @@ type MaterializableRootfsRef = LocalComponentRef | CatalogComponentRef | _Upload
 
 @dataclass(frozen=True, slots=True)
 class RootfsUploadContext:
-    """System-owned upload staging context for an uploaded rootfs."""
+    """Staging context for an investigation-scoped uploaded rootfs (ADR-0441).
+
+    Carries the provisioning System's id (for error attribution) and the profile's declared
+    ``checksum_sha256`` (the content address). The fetch resolves the System's own
+    ``investigation_id`` from the DB — the provision seam is connectionless, so investigation and
+    object-key resolution happen inside the fetch's short-lived sync connection, not here.
+    """
 
     tenant: str
     system_id: UUID
     upload_dir: Path
+    checksum_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,12 +91,24 @@ def materialize_rootfs_base(
 
 
 def upload_rootfs_path(tenant: str, system_id: UUID | str, *, upload_dir: Path) -> Path:
-    """Return the local staging path for a System-owned uploaded rootfs object.
+    """Return the legacy per-System staging path for an uploaded rootfs object.
 
-    ``system_id`` accepts a ``str`` (like ``overlay_path`` / ``baseline_dir``) so a teardown
-    that only holds the domain name can reconstruct the path.
+    Retained only for the per-System teardown/failure reclaim helpers (removed with ADR-0441's
+    reclaim rewrite); the live investigation-scoped staging path is :func:`staged_rootfs_path`.
+    ``system_id`` accepts a ``str`` so a teardown that only holds the domain name can reconstruct
+    the path.
     """
     return upload_dir / f"{tenant}-systems-{system_id}-rootfs.qcow2"
+
+
+def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: Path) -> Path:
+    """Return the investigation-scoped, content-addressed staging path (ADR-0441 §5).
+
+    The base is staged at ``<upload_dir>/<investigation_id>/<token>.qcow2`` — per-investigation
+    (isolation) and content-addressed by ``token`` (dedup across Systems sharing one checksum), so
+    every System in the investigation resolves the same file and it is fetched at most once.
+    """
+    return upload_dir / str(investigation_id) / f"{token}.qcow2"
 
 
 def _materialize_uploaded_rootfs(context: RootfsMaterializationContext) -> Path:

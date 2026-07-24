@@ -32,7 +32,7 @@ _TARGET_TOOLS = {
     "systems.reprovision",
     "runs.create",
     "artifacts.create_run_upload",
-    "artifacts.create_system_upload",
+    "artifacts.create_investigation_upload",
     "investigations.link",
     "investigations.unlink",
 }

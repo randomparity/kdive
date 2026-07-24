@@ -27,8 +27,8 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
     FEATURE_CONFIG_REQUIREMENTS_TOOL,
 )
 from kdive.mcp.tools.catalog.artifacts.uploads import (
+    CREATE_INVESTIGATION_UPLOAD_TOOL,
     CREATE_RUN_UPLOAD_TOOL,
-    CREATE_SYSTEM_UPLOAD_TOOL,
 )
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -43,7 +43,7 @@ def test_expected_uploads_projects_both_owner_vocabularies() -> None:
     resp = expected_uploads()
     assert resp.status == "ok"
     items = _items(resp)
-    assert set(items) == {"run", "system"}
+    assert set(items) == {"run", "investigations"}
 
     run = items["run"]
     assert run["owner_kind"] == "run"
@@ -53,12 +53,12 @@ def test_expected_uploads_projects_both_owner_vocabularies() -> None:
     # upload validator does not accept, nor omit one it does.
     assert set(run["contracts"]) == set(run["accepted_names"])
 
-    system = items["system"]
-    assert system["owner_kind"] == "system"
-    assert system["accepted_names"] == sorted(SYSTEM_ARTIFACT_NAMES)
-    assert system["create_tool"] == CREATE_SYSTEM_UPLOAD_TOOL
-    assert system["accepted_names"] == ["rootfs"]
-    assert set(system["contracts"]) == set(system["accepted_names"])
+    investigations = items["investigations"]
+    assert investigations["owner_kind"] == "investigations"
+    assert investigations["accepted_names"] == sorted(SYSTEM_ARTIFACT_NAMES)
+    assert investigations["create_tool"] == CREATE_INVESTIGATION_UPLOAD_TOOL
+    assert investigations["accepted_names"] == ["rootfs"]
+    assert set(investigations["contracts"]) == set(investigations["accepted_names"])
 
 
 def test_run_item_states_the_unified_provider_neutral_contract() -> None:
@@ -94,21 +94,21 @@ def test_run_item_states_the_unified_provider_neutral_contract() -> None:
     assert "advisory" in notes  # ...but a boot-config advisory is emitted
 
 
-def test_system_rootfs_contract_is_minimal() -> None:
-    system = _items(expected_uploads())["system"]
-    rootfs = system["contracts"]["rootfs"]
+def test_investigation_rootfs_contract_is_minimal() -> None:
+    investigations = _items(expected_uploads())["investigations"]
+    rootfs = investigations["contracts"]["rootfs"]
     assert rootfs["requirement"] == "required"
     assert rootfs["format"]["container"] == "filesystem image"
-    # The combined-tar discoverability fields are run-only; the system item omits them.
-    assert "provider_neutral" not in system
-    assert "doc" not in system
+    # The combined-tar discoverability fields are run-only; the investigations item omits them.
+    assert "provider_neutral" not in investigations
+    assert "doc" not in investigations
 
 
 def test_expected_uploads_items_carry_ok_status() -> None:
     resp = expected_uploads()
     by_id = {item.object_id: item for item in resp.items}
     assert by_id["run"].status == "ok"
-    assert by_id["system"].status == "ok"
+    assert by_id["investigations"].status == "ok"
 
 
 def test_expected_uploads_chains_to_the_create_tools() -> None:
@@ -116,7 +116,7 @@ def test_expected_uploads_chains_to_the_create_tools() -> None:
     assert resp.suggested_next_actions == [
         FEATURE_CONFIG_REQUIREMENTS_TOOL,
         CREATE_RUN_UPLOAD_TOOL,
-        CREATE_SYSTEM_UPLOAD_TOOL,
+        CREATE_INVESTIGATION_UPLOAD_TOOL,
     ]
 
 

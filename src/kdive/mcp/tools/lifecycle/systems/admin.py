@@ -35,7 +35,10 @@ from kdive.mcp.tools._idempotency import (
     resolve_envelope_replay,
     validate_idempotency_key,
 )
-from kdive.profiles.provider_policy import ProfilePolicy, reject_rootfs_upload_without_window
+from kdive.profiles.provider_policy import (
+    ProfilePolicy,
+    require_investigation_binding_for_upload,
+)
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile, profile_digest
 from kdive.profiles.types import ProvisioningProfileInput
 from kdive.security import audit
@@ -79,7 +82,6 @@ class SystemAdminHandlers:
         try:
             parsed = ProvisioningProfile.parse(profile)
             validate_profile_for_provider(parsed, self.profile_policy, self.component_sources)
-            reject_rootfs_upload_without_window(self.profile_policy, parsed)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(system_id, exc)
         if idempotency_key is not None:
@@ -162,6 +164,13 @@ async def _reprovision_in_lock(
     # System is iterating, not administering. Enforced in-handler (the handler-direct path
     # bypasses the registrar gate), mirroring control.power.
     require_role(ctx, system.project, Role.CONTRIBUTOR)
+    try:
+        # An upload-rootfs reprovision resolves the base within the System's investigation, so the
+        # System must already carry a write-once binding (ADR-0441 §2); reject a missing one here
+        # rather than let the worker fetch fail late.
+        require_investigation_binding_for_upload(profile_policy, profile, system.investigation_id)
+    except CategorizedError as exc:
+        return ToolResponse.failure_from_error(str(system_id), exc)
     digest = profile_digest(profile)
     dedup_key = f"{system_id}:reprovision:{digest}"
     if system.state is SystemState.REPROVISIONING:

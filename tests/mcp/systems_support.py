@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -119,7 +120,11 @@ def fault_inject_profile() -> dict[str, Any]:
 
 def upload_profile() -> dict[str, Any]:
     profile = provisioning_profile()
-    profile["provider"]["local-libvirt"]["rootfs"] = {"kind": "upload"}
+    profile["provider"]["local-libvirt"]["rootfs"] = {
+        "kind": "upload",
+        # A valid base64 SHA-256 (32 zero bytes); the content address the fetch resolves against.
+        "checksum_sha256": base64.b64encode(bytes(32)).decode("ascii"),
+    }
     return profile
 
 

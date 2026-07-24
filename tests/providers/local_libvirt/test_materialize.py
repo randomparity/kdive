@@ -121,9 +121,9 @@ def test_materialize_uploaded_rootfs_delegates_to_injected_fetch(tmp_path: Path)
         seen.append(upload)
         return staged
 
-    upload = RootfsUploadContext("local", system_id, tmp_path)
+    upload = RootfsUploadContext("local", system_id, tmp_path, "c")
     result = materialize_rootfs_base(
-        _UploadRootfs(kind="upload"),
+        _UploadRootfs(kind="upload", checksum_sha256="c"),
         context=RootfsMaterializationContext(
             allowed_roots=[tmp_path], upload=upload, upload_fetch=_fetch
         ),
@@ -136,10 +136,10 @@ def test_materialize_uploaded_rootfs_delegates_to_injected_fetch(tmp_path: Path)
 def test_materialize_uploaded_rootfs_unwired_lane_is_config_error(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as error:
         materialize_rootfs_base(
-            _UploadRootfs(kind="upload"),
+            _UploadRootfs(kind="upload", checksum_sha256="c"),
             context=RootfsMaterializationContext(
                 allowed_roots=[tmp_path],
-                upload=RootfsUploadContext("local", uuid4(), tmp_path),
+                upload=RootfsUploadContext("local", uuid4(), tmp_path, "c"),
             ),
         )
 
@@ -150,7 +150,7 @@ def test_materialize_uploaded_rootfs_unwired_lane_is_config_error(tmp_path: Path
 def test_materialize_uploaded_rootfs_requires_system_context(tmp_path: Path) -> None:
     with pytest.raises(CategorizedError) as error:
         materialize_rootfs_base(
-            _UploadRootfs(kind="upload"),
+            _UploadRootfs(kind="upload", checksum_sha256="c"),
             context=RootfsMaterializationContext(allowed_roots=[tmp_path]),
         )
 

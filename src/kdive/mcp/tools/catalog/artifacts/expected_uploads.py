@@ -27,8 +27,8 @@ from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
     FEATURE_CONFIG_REQUIREMENTS_TOOL,
 )
 from kdive.mcp.tools.catalog.artifacts.uploads import (
+    CREATE_INVESTIGATION_UPLOAD_TOOL,
     CREATE_RUN_UPLOAD_TOOL,
-    CREATE_SYSTEM_UPLOAD_TOOL,
 )
 from kdive.serialization import JsonValue
 
@@ -48,17 +48,18 @@ EXTERNAL_BUILD_UPLOAD_DOC = "resource://kdive/docs/operating/external-build-uplo
 _NEXT_ACTIONS = [
     FEATURE_CONFIG_REQUIREMENTS_TOOL,
     CREATE_RUN_UPLOAD_TOOL,
-    CREATE_SYSTEM_UPLOAD_TOOL,
+    CREATE_INVESTIGATION_UPLOAD_TOOL,
 ]
 
-# The system (rootfs) upload contract. rootfs is not the combined-tar validator's concern and
-# enforces no magic at this seam, so its contract is minimal — but it is surfaced in the same
+# The investigation (rootfs) upload contract. rootfs is not the combined-tar validator's concern
+# and enforces no magic at this seam, so its contract is minimal — but it is surfaced in the same
 # structure so a black-box client reads one shape across owner kinds.
-_SYSTEM_CONTRACTS: Mapping[str, ArtifactContract] = {
+_INVESTIGATION_CONTRACTS: Mapping[str, ArtifactContract] = {
     "rootfs": ArtifactContract(
         name="rootfs",
         requirement="required",
-        summary="Root filesystem image for a DEFINED System's upload window.",
+        summary="Root filesystem image for an Investigation's upload window (reusable across "
+        "its bound Systems).",
         format=FormatContract(container="filesystem image"),
     ),
 }
@@ -99,9 +100,10 @@ def expected_uploads() -> ToolResponse:
 
     Returns:
         A :class:`ToolResponse` collection with one item per upload owner-kind (``run``,
-        ``system``); each item's ``data`` carries ``owner_kind``, ``accepted_names`` (sorted), the
-        literal ``create_tool`` name, and a per-name ``contracts`` map. The ``run`` item also adds
-        ``provider_neutral`` (the format is one shape across providers) and ``doc`` (the recipe).
+        ``investigations``); each item's ``data`` carries ``owner_kind``, ``accepted_names``
+        (sorted), the literal ``create_tool`` name, and a per-name ``contracts`` map. The ``run``
+        item also adds ``provider_neutral`` (the format is one shape across providers) and ``doc``
+        (the recipe).
     """
     items = [
         _owner_item(
@@ -113,10 +115,10 @@ def expected_uploads() -> ToolResponse:
             doc=EXTERNAL_BUILD_UPLOAD_DOC,
         ),
         _owner_item(
-            "system",
+            "investigations",
             SYSTEM_ARTIFACT_NAMES,
-            CREATE_SYSTEM_UPLOAD_TOOL,
-            _SYSTEM_CONTRACTS,
+            CREATE_INVESTIGATION_UPLOAD_TOOL,
+            _INVESTIGATION_CONTRACTS,
             provider_neutral=False,
             doc=None,
         ),

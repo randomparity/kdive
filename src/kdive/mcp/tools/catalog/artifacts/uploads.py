@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -17,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.read_model import RUN_ARTIFACT_NAMES, SYSTEM_ARTIFACT_NAMES
 from kdive.artifacts.storage import PresignedUpload, PresignPutRequest
 from kdive.artifacts.transport_encoding import (
@@ -36,16 +35,14 @@ from kdive.artifacts.uploads import (
 from kdive.build_artifacts.validation import EFFECTIVE_CONFIG_MAX_BYTES
 from kdive.config.core_settings import MAX_UPLOAD_BYTES, UPLOAD_TTL_SECONDS
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import INVESTIGATIONS, RUNS, SYSTEMS
-from kdive.domain.capacity.state import InvestigationState, RunState, SystemState
+from kdive.db.repositories import INVESTIGATIONS, RUNS
+from kdive.domain.capacity.state import InvestigationState, RunState
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError
 from kdive.log import bind_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.profiles.provider_policy import rootfs_upload_window_allowed
-from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
@@ -65,7 +62,6 @@ _TENANT = "local"
 # ``artifacts.expected_uploads`` discovery tool (ADR-0166) projects the same sets the
 # validator below enforces — the advertisement can never drift from the accepted names.
 CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
-CREATE_SYSTEM_UPLOAD_TOOL = "artifacts.create_system_upload"
 CREATE_INVESTIGATION_UPLOAD_TOOL = "artifacts.create_investigation_upload"
 COMPLETE_INVESTIGATION_ROOTFS_TOOL = "investigations.complete_rootfs_upload"
 _RETENTION_CLASS = "build"
@@ -230,41 +226,14 @@ def _entry_name(entry: ManifestEntry) -> str:
     return entry.name
 
 
-def rootfs_object_token(sha256_b64: str) -> str:
-    """Return the unpadded base64url token for a canonical-base64 SHA-256 checksum.
-
-    The investigation-scoped uploaded rootfs is content-addressed: the object name embeds this
-    token so one checksum maps to exactly one key. base64url is path/key-safe (no ``/``), and the
-    mapping is total and reversible against the canonical base64 the object store stores.
-
-    Args:
-        sha256_b64: The declared checksum as canonical (padded) base64 of a 32-byte digest.
-
-    Returns:
-        The unpadded base64url rendering of the same digest.
-
-    Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` if ``sha256_b64`` is not valid base64 of a
-            32-byte digest — rejected at mint rather than minting an un-resolvable key.
-    """
-    try:
-        raw = base64.b64decode(sha256_b64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise CategorizedError(
-            "rootfs checksum_sha256 is not valid base64",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        ) from exc
-    if len(raw) != 32:
-        raise CategorizedError(
-            "rootfs checksum_sha256 must be a base64-encoded SHA-256 (32 bytes)",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-        )
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
 def investigation_rootfs_object_name(entry: ManifestEntry) -> str:
-    """The content-addressed object name (``rootfs-<token>``) for an investigation upload."""
-    return f"rootfs-{rootfs_object_token(entry.sha256)}"
+    """The content-addressed object name (``rootfs-<token>``) for an investigation upload.
+
+    Derives the object name from the declared checksum via the shared
+    :func:`kdive.artifacts.content_address` derivation the provider fetch also resolves against,
+    so finalize commits and a System resolves the same key.
+    """
+    return rootfs_object_name(rootfs_object_token(entry.sha256))
 
 
 def _upload_ttl() -> timedelta:
@@ -645,29 +614,11 @@ async def _run_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
     return row["project"] if row else None
 
 
-async def _system_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT project FROM systems WHERE id = %s", (owner_id,))
-        row = await cur.fetchone()
-    return row["project"] if row else None
-
-
 async def _run_accepts_upload(
     conn: AsyncConnection, owner_id: UUID, _resolver: ProviderResolver
 ) -> bool:
     run = await RUNS.get(conn, owner_id)
     return run is not None and run.state is RunState.CREATED
-
-
-async def _system_accepts_upload(
-    conn: AsyncConnection, owner_id: UUID, resolver: ProviderResolver
-) -> bool:
-    system = await SYSTEMS.get(conn, owner_id)
-    if system is None or system.state is not SystemState.DEFINED:
-        return False
-    parsed = ProvisioningProfile.parse(system.provisioning_profile)
-    runtime = await resolver.runtime_for_system(conn, owner_id)
-    return rootfs_upload_window_allowed(runtime.profile_policy, parsed)
 
 
 async def _investigation_project(conn: AsyncConnection, owner_id: UUID) -> str | None:
@@ -707,19 +658,6 @@ _RUN_UPLOAD = _UploadOwnerSpec(
     accepts_upload=_run_accepts_upload,
     accepts_encoding=False,  # no decompressing consumer for build artifacts (ADR-0437)
     uncompressed_cap=_RUN_UNCOMPRESSED_CAP,
-)
-_SYSTEM_UPLOAD = _UploadOwnerSpec(
-    owner_kind=upload_manifest.SYSTEM_UPLOAD_OWNER,
-    required_role=Role.CONTRIBUTOR,
-    lock_scope=LockScope.SYSTEM,
-    allowed_names=SYSTEM_ARTIFACT_NAMES,
-    next_action="systems.provision_defined",
-    audit_object_kind="systems",
-    project=_system_project,
-    accepts_upload=_system_accepts_upload,
-    allow_chunks=False,  # #743 install verifies plain SHA-256; a composite can't (ADR-0436)
-    accepts_encoding=True,  # rootfs consumer strips gzip on download (Sub 2, #1510; ADR-0437)
-    uncompressed_cap=_SYSTEM_UNCOMPRESSED_CAP,
 )
 _INVESTIGATION_UPLOAD = _UploadOwnerSpec(
     owner_kind=upload_manifest.INVESTIGATION_UPLOAD_OWNER,
@@ -880,9 +818,7 @@ def _upload_response(
 def _upload_tool_name(spec: _UploadOwnerSpec) -> str:
     if spec.owner_kind == upload_manifest.RUN_UPLOAD_OWNER:
         return CREATE_RUN_UPLOAD_TOOL
-    if spec.owner_kind == upload_manifest.INVESTIGATION_UPLOAD_OWNER:
-        return CREATE_INVESTIGATION_UPLOAD_TOOL
-    return CREATE_SYSTEM_UPLOAD_TOOL
+    return CREATE_INVESTIGATION_UPLOAD_TOOL
 
 
 async def create_run_upload(
@@ -900,27 +836,6 @@ async def create_run_upload(
         ctx,
         spec=_RUN_UPLOAD,
         owner_id=run_id,
-        artifacts=artifacts,
-        resolver=resolver,
-        store=store,
-    )
-
-
-async def create_system_upload(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    system_id: str,
-    artifacts: Sequence[ArtifactDeclaration],
-    resolver: ProviderResolver,
-    store: _PresignStore | None = None,
-) -> ToolResponse:
-    """Mint presigned PUTs for a DEFINED System's uploaded rootfs."""
-    return await _create_upload(
-        pool,
-        ctx,
-        spec=_SYSTEM_UPLOAD,
-        owner_id=system_id,
         artifacts=artifacts,
         resolver=resolver,
         store=store,

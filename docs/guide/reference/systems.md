@@ -89,6 +89,7 @@ contributor on the Allocation's project.
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
@@ -245,6 +246,7 @@ pick one of those or an allocation on a host that offers the arch you need.
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)
@@ -323,6 +325,7 @@ destructive_ops opt-in).
         - `name` (`string`, required)
       - _variant object(kind=upload):_
         - `kind` (``=upload``, required)
+        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
     - `crashkernel` (`string (nullable)`, optional)
     - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
     - `destructive_ops` (`array<string>`, optional)

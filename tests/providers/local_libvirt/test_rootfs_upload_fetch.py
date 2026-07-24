@@ -1,29 +1,40 @@
-"""Uploaded-rootfs provision-time fetch (ADR-0434, ADR-0438)."""
+"""Investigation-scoped uploaded-rootfs provision-time fetch (ADR-0441, ADR-0434, ADR-0438)."""
 
 from __future__ import annotations
 
 import base64
 import gzip
 import hashlib
+import multiprocessing as mp
 from pathlib import Path
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
+import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
+from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.storage import FetchedArtifact, HeadResult
+from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsUploadContext,
-    upload_rootfs_path,
+    staged_rootfs_path,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    _fetch_lock_name,
     fetch_uploaded_rootfs,
+    stage_uploaded_rootfs,
 )
 from kdive.store.objectstore import artifact_key
 
 # A minimal canonical qcow2 base: the magic followed by arbitrary body bytes.
 _QCOW2 = b"QFI\xfb" + b"canonical-qcow2-body"
+# A valid canonical base64 SHA-256 (32 bytes); the profile's content-address handle.
+_CHECKSUM = base64.b64encode(bytes(range(32))).decode("ascii")
+_TOKEN = rootfs_object_token(_CHECKSUM)
 
 
 def _sha256_b64(data: bytes) -> str:
@@ -55,188 +66,397 @@ class _FakeStore:
         return self._data[start : start + length]
 
 
-def _upload(tmp_path: Path):  # noqa: ANN202 - test helper
-    return RootfsUploadContext("local", uuid4(), tmp_path)
+def _dest(tmp_path: Path) -> Path:
+    return tmp_path / f"{_TOKEN}.qcow2"
 
 
-def _dest(upload: RootfsUploadContext, tmp_path: Path) -> Path:
-    return upload_rootfs_path("local", upload.system_id, upload_dir=tmp_path)
+def _stage(store: _FakeStore, tmp_path: Path, **kw: Any) -> Path:
+    dest = _dest(tmp_path)
+    stage_uploaded_rootfs(
+        store,
+        object_key="local/investigations/inv/rootfs-token",
+        dest=dest,
+        system_id=uuid4(),
+        **kw,
+    )
+    return dest
 
 
-# --- identity path (unchanged behavior + new magic check) ---------------------------------------
+# --- stage_uploaded_rootfs: identity path (checksum + qcow2-magic + unique partial) --------------
 
 
-def test_fetch_downloads_and_stages_verified_bytes(tmp_path: Path) -> None:
+def test_stage_downloads_and_stages_verified_bytes(tmp_path: Path) -> None:
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-    upload = _upload(tmp_path)
-
-    result = fetch_uploaded_rootfs(store, upload)
-
-    assert result == _dest(upload, tmp_path)
-    assert result.read_bytes() == _QCOW2
-    assert not result.with_suffix(".qcow2.partial").exists()
+    dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+    assert dest.read_bytes() == _QCOW2
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []  # unique partial cleaned up
 
 
-def test_fetch_missing_object_is_config_error(tmp_path: Path) -> None:
+def test_stage_missing_object_is_config_error(tmp_path: Path) -> None:
     store = _FakeStore(None, checksum=None)
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, _upload(tmp_path))
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "never uploaded" in str(error.value)
     assert store.get_calls == 0
 
 
-def test_fetch_object_without_checksum_is_rejected(tmp_path: Path) -> None:
+def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
     store = _FakeStore(b"x", checksum=None)
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, _upload(tmp_path))
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "no stored checksum" in str(error.value)
     assert store.get_calls == 0
 
 
-def test_fetch_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
+def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
     store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
-    upload = _upload(tmp_path)
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "checksum verification" in str(error.value)
-    dest = _dest(upload, tmp_path)
-    assert not dest.exists()
-    assert not dest.with_suffix(".qcow2.partial").exists()
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
-def test_fetch_non_qcow2_identity_is_config_error_and_stages_nothing(tmp_path: Path) -> None:
+def test_stage_non_qcow2_identity_is_config_error_and_stages_nothing(tmp_path: Path) -> None:
     data = b"not-a-qcow2-image"  # correct checksum but wrong format
     store = _FakeStore(data, checksum=_sha256_b64(data))
-    upload = _upload(tmp_path)
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "qcow2" in str(error.value)
-    assert not _dest(upload, tmp_path).exists()
+    assert not _dest(tmp_path).exists()
 
 
-def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> None:
-    upload = _upload(tmp_path)
-    dest = _dest(upload, tmp_path)
-    dest.write_bytes(b"already-verified")
+def test_stage_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-
-    result = fetch_uploaded_rootfs(store, upload)
-
-    assert result == dest
-    assert result.read_bytes() == b"already-verified"
-    assert store.head_calls == 0
-    assert store.get_calls == 0
+    dest = _stage(store, tmp_path, encoding="identity", uncompressed_size=None)
+    assert dest.read_bytes() == _QCOW2
+    assert store.range_calls == 0
 
 
-def test_fetch_object_key_is_system_rootfs(tmp_path: Path) -> None:
-    # Sanity: the fetch resolves the deterministic System-owned rootfs key.
+def test_stage_unsupported_encoding_is_config_error(tmp_path: Path) -> None:
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-    upload = _upload(tmp_path)
-    fetch_uploaded_rootfs(store, upload)
-    assert artifact_key("local", "systems", str(upload.system_id), "rootfs")
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="zstd", uncompressed_size=999)
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "unsupported transport encoding" in str(error.value)
+    assert store.get_calls == 0 and store.range_calls == 0
+    assert not _dest(tmp_path).exists()
 
 
-# --- gzip transport-strip path (ADR-0438) -------------------------------------------------------
+# --- stage_uploaded_rootfs: gzip transport-strip path (ADR-0438) --------------------------------
 
 
-def test_fetch_gzip_streams_decompressed_qcow2(tmp_path: Path) -> None:
+def test_stage_gzip_streams_decompressed_qcow2(tmp_path: Path) -> None:
     canonical = _QCOW2 + b"x" * 4096
     compressed = gzip.compress(canonical)
     store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
-    upload = _upload(tmp_path)
-
-    result = fetch_uploaded_rootfs(store, upload, encoding="gzip", uncompressed_size=len(canonical))
-
-    assert result == _dest(upload, tmp_path)
-    assert result.read_bytes() == canonical
-    assert not result.with_suffix(".qcow2.partial").exists()
-    # Streamed via ranged reads, not a whole-object buffer.
-    assert store.get_calls == 0
-    assert store.range_calls >= 1
+    dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+    assert dest.read_bytes() == canonical
+    assert store.get_calls == 0 and store.range_calls >= 1  # streamed, not whole-object buffered
 
 
-def test_fetch_gzip_bomb_is_rejected_and_stages_nothing(tmp_path: Path) -> None:
+def test_stage_gzip_bomb_is_rejected_and_stages_nothing(tmp_path: Path) -> None:
     canonical = _QCOW2 + b"y" * 8192
     compressed = gzip.compress(canonical)
     store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
-    upload = _upload(tmp_path)
-
     with pytest.raises(CategorizedError) as error:
-        # Declare a smaller uncompressed_size than the real output → bomb guard trips.
-        fetch_uploaded_rootfs(store, upload, encoding="gzip", uncompressed_size=64)
-
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=64)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
-    dest = _dest(upload, tmp_path)
-    assert not dest.exists()
-    assert not dest.with_suffix(".qcow2.partial").exists()
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
-def test_fetch_gzip_non_qcow2_canonical_is_rejected(tmp_path: Path) -> None:
+def test_stage_gzip_non_qcow2_canonical_is_rejected(tmp_path: Path) -> None:
     canonical = b"decodes-fine-but-not-a-qcow2"
     compressed = gzip.compress(canonical)
     store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
-    upload = _upload(tmp_path)
-
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload, encoding="gzip", uncompressed_size=len(canonical))
-
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "qcow2" in str(error.value)
-    dest = _dest(upload, tmp_path)
-    assert not dest.exists()
-    assert not dest.with_suffix(".qcow2.partial").exists()
+    assert not _dest(tmp_path).exists()
 
 
-def test_fetch_gzip_transport_checksum_mismatch_is_rejected(tmp_path: Path) -> None:
-    canonical = _QCOW2 + b"z" * 128
-    compressed = gzip.compress(canonical)
-    store = _FakeStore(compressed, checksum=_sha256_b64(b"a-different-object"))
-    upload = _upload(tmp_path)
-
-    with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload, encoding="gzip", uncompressed_size=len(canonical))
-
-    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert not _dest(upload, tmp_path).exists()
-
-
-def test_fetch_gzip_without_uncompressed_size_is_config_error(tmp_path: Path) -> None:
+def test_stage_gzip_without_uncompressed_size_is_config_error(tmp_path: Path) -> None:
     compressed = gzip.compress(_QCOW2)
     store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
-    upload = _upload(tmp_path)
-
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload, encoding="gzip", uncompressed_size=None)
-
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "uncompressed_size" in str(error.value)
 
 
-def test_fetch_identity_sentinel_stages_verbatim(tmp_path: Path) -> None:
-    # The explicit "identity" sentinel behaves exactly like an absent encoding.
+# --- fetch_uploaded_rootfs resolution + lock (fake sync connection, no DB) -----------------------
+
+
+class _FakeCursor:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+        self._last: str | None = None
+        self._row: tuple[object, ...] | None = None
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        if "FROM systems" in sql:
+            self._row = (
+                None if self._conn.investigation_id is None else (self._conn.investigation_id,)
+            )
+        elif "FROM artifacts" in sql:
+            queried_key = params[2]
+            self._conn.queried_object_keys.append(str(queried_key))
+            self._row = (
+                (self._conn.encoding, self._conn.uncompressed_size)
+                if queried_key == self._conn.owned_object_key
+                else None
+            )
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._row
+
+
+class _FakeConn:
+    """A minimal sync connection: seeds the two SELECT rows and records advisory-lock keys."""
+
+    def __init__(
+        self,
+        *,
+        investigation_id: UUID | None,
+        owned_object_key: str | None = None,
+        encoding: str | None = None,
+        uncompressed_size: int | None = None,
+    ) -> None:
+        self.investigation_id = investigation_id
+        self.owned_object_key = owned_object_key
+        self.encoding = encoding
+        self.uncompressed_size = uncompressed_size
+        self.queried_object_keys: list[str] = []
+        self.lock_keys: list[int] = []
+        self.unlock_keys: list[int] = []
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self)
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        if "pg_advisory_lock" in sql:
+            self.lock_keys.append(int(params[0]))
+        elif "pg_advisory_unlock" in sql:
+            self.unlock_keys.append(int(params[0]))
+
+
+def _upload(tmp_path: Path, system_id: UUID | None = None) -> RootfsUploadContext:
+    return RootfsUploadContext("local", system_id or uuid4(), tmp_path, _CHECKSUM)
+
+
+def _owned_key(inv: UUID) -> str:
+    return artifact_key("local", "investigations", str(inv), rootfs_object_name(_TOKEN))
+
+
+def test_fetch_resolves_by_content_addressed_object_key(tmp_path: Path) -> None:
+    # AC-4b: the profile's base64 checksum transcodes to the base64url token and the derived
+    # object_key resolves within the System's own investigation; the base stages once.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     upload = _upload(tmp_path)
 
-    result = fetch_uploaded_rootfs(store, upload, encoding="identity")
+    result = fetch_uploaded_rootfs(conn, store, upload)  # ty: ignore[invalid-argument-type]
 
+    assert result == staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
     assert result.read_bytes() == _QCOW2
-    assert store.range_calls == 0
+    # Resolved by the derived key (base64->base64url transcode is the single canonical mapping).
+    assert conn.queried_object_keys == [_owned_key(inv)]
+    assert _TOKEN != _CHECKSUM  # a real transcode happened
 
 
-def test_fetch_unsupported_encoding_is_config_error(tmp_path: Path) -> None:
-    # Defence in depth: a codec the declaration validator would reject is named, not staged as-is.
+def test_fetch_unowned_checksum_is_isolation_config_error(tmp_path: Path) -> None:
+    # AC-2: a System bound to investigation Y naming a checksum only investigation X owns misses
+    # (owner_id predicate is the boundary) and stages nothing.
+    inv_y = uuid4()
+    conn = _FakeConn(investigation_id=inv_y, owned_object_key="a-different-owned-key")
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-    upload = _upload(tmp_path)
 
     with pytest.raises(CategorizedError) as error:
-        fetch_uploaded_rootfs(store, upload, encoding="zstd", uncompressed_size=999)
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
-    assert "unsupported transport encoding" in str(error.value)
-    assert store.get_calls == 0
-    assert store.range_calls == 0
-    assert not _dest(upload, tmp_path).exists()
+    assert _CHECKSUM in str(error.value.details)
+    assert store.head_calls == 0
+    assert not staged_rootfs_path(inv_y, _TOKEN, upload_dir=tmp_path).exists()
+
+
+def test_fetch_unbound_system_is_config_error(tmp_path: Path) -> None:
+    conn = _FakeConn(investigation_id=None)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    with pytest.raises(CategorizedError) as error:
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "investigation" in str(error.value)
+
+
+def test_fetch_reads_gzip_encoding_from_the_resolved_row(tmp_path: Path) -> None:
+    # AC-4c: the encoding is read from the durable artifacts row (finalize deleted the manifest);
+    # a gzip row is gunzipped and the staged base is a valid qcow2, not verbatim gzip bytes.
+    inv = uuid4()
+    canonical = _QCOW2 + b"z" * 2048
+    compressed = gzip.compress(canonical)
+    conn = _FakeConn(
+        investigation_id=inv,
+        owned_object_key=_owned_key(inv),
+        encoding="gzip",
+        uncompressed_size=len(canonical),
+    )
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == canonical
+    assert result.read_bytes()[:4] == b"QFI\xfb"
+
+
+def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> None:
+    # AC-1 (sequential): a present verified base is a cache hit; the store is never read again.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"already-verified")
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result == dest and result.read_bytes() == b"already-verified"
+    assert store.head_calls == 0 and store.get_calls == 0
+    assert conn.lock_keys == []  # the pre-lock cache hit never even took the lock
+
+
+def test_fetch_uses_deterministic_session_lock_key_not_hash(tmp_path: Path) -> None:
+    # Lock-key guard (REQUIRED): the fetch serializes on the SESSION advisory keyspace derived from
+    # a stable per-(investigation, token) name — NOT Python hash() (per-process salted, which would
+    # silently no-op the lock across worker processes and re-admit the double download).
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    expected = _session_lock_key(f"rootfs-fetch:{inv}:{_TOKEN}")
+    assert _fetch_lock_name(inv, _TOKEN) == f"rootfs-fetch:{inv}:{_TOKEN}"
+    assert conn.lock_keys == [expected]
+    assert conn.unlock_keys == [expected]  # released after os.replace, before returning
+    assert expected != (hash(f"rootfs-fetch:{inv}:{_TOKEN}") & 0x7FFF_FFFF_FFFF_FFFF)
+
+
+def test_fetch_unlinks_crash_orphan_partials_under_the_lock(tmp_path: Path) -> None:
+    # ADR-0441 §5: a killed worker's <token>.*.partial is glob-unlinked opportunistically on the
+    # next fetch (under the serializing lock, so no live sibling partial can exist).
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked")
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert not orphan.exists()
+    assert dest.read_bytes() == _QCOW2
+
+
+# --- cross-process AC-1: two interpreters race the real advisory lock, one download --------------
+
+
+class _CountingStore:
+    """A real-store stand-in whose downloads append to a shared on-disk counter (cross-process)."""
+
+    def __init__(self, data: bytes, counter: Path) -> None:
+        self._data = data
+        self._counter = counter
+
+    def head(self, key: str) -> HeadResult:
+        return HeadResult(
+            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+        )
+
+    def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
+        with self._counter.open("a") as fh:
+            fh.write("1\n")
+        return FetchedArtifact(self._data, Sensitivity.SENSITIVE, "rootfs")
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        return self._data[start : start + length]
+
+
+def _fetch_child(
+    url: str, upload_dir: str, system_id: str, checksum: str, counter: str, barrier: Any
+) -> None:  # pragma: no cover - runs in a child process
+    store = _CountingStore(_QCOW2, Path(counter))
+    upload = RootfsUploadContext("local", UUID(system_id), Path(upload_dir), checksum)
+    barrier.wait(timeout=30)  # both children reach the fetch together, racing for the lock
+    with psycopg.connect(url, autocommit=True) as conn:
+        fetch_uploaded_rootfs(conn, store, upload)
+
+
+async def _seed_bound_systems(url: str, inv: UUID, sys_a: UUID, sys_b: UUID, key: str) -> None:
+    from tests.mcp.systems_support import granted_allocation, pool
+
+    async with pool(url) as conn_pool:
+        alloc = await granted_allocation(conn_pool, cap=4)
+        async with conn_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO investigations (id, principal, project, title, state) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (inv, "p", "proj", "t", "open"),
+            )
+            for sid in (sys_a, sys_b):
+                await conn.execute(
+                    "INSERT INTO systems (id, allocation_id, state, provisioning_profile, "
+                    "principal, project, investigation_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (sid, alloc, "provisioning", Jsonb({"kind": "upload"}), "p", "proj", inv),
+                )
+            await conn.execute(
+                "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+                "retention_class) VALUES ('investigations', %s, %s, 'e', 'sensitive', 'rootfs')",
+                (inv, key),
+            )
+
+
+def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> None:
+    # AC-1 (cross-process, the deterministic-lock proof): two interpreters sharing the DATABASE_URL
+    # and staging dir race for the base; the session advisory lock serializes them so exactly ONE
+    # downloads and the second is a cache hit. This fails against a hash()-keyed lock (each process
+    # would derive a different key, no serialization, two downloads).
+    import asyncio
+
+    inv, sys_a, sys_b = uuid4(), uuid4(), uuid4()
+    key = artifact_key("local", "investigations", str(inv), rootfs_object_name(_TOKEN))
+    asyncio.run(_seed_bound_systems(migrated_url, inv, sys_a, sys_b, key))
+
+    counter = tmp_path / "downloads.log"
+    counter.write_text("")
+    ctx = mp.get_context("spawn")
+    barrier = ctx.Barrier(2)
+    procs = [
+        ctx.Process(
+            target=_fetch_child,
+            args=(migrated_url, str(tmp_path), str(sid), _CHECKSUM, str(counter), barrier),
+        )
+        for sid in (sys_a, sys_b)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0
+
+    assert counter.read_text().count("1") == 1  # exactly one download served both Systems
+    assert staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path).read_bytes() == _QCOW2

@@ -13,12 +13,8 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
-from kdive.artifacts import upload_manifest
-from kdive.artifacts.registration import register_artifact_row
-from kdive.artifacts.storage import StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import (
-    ARTIFACTS,
     SNAPSHOTS,
     SYSTEMS,
     ObjectNotFound,
@@ -26,7 +22,6 @@ from kdive.db.repositories import (
     snapshot_by_name,
 )
 from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
-from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import System
@@ -49,7 +44,6 @@ from kdive.prereqs.system_bootstrap_key import (
     delete_system_bootstrap_key,
     ensure_system_bootstrap_key,
 )
-from kdive.profiles.provider_policy import ProfilePolicy, rootfs_upload_window_allowed
 from kdive.profiles.provisioning import ProvisioningProfile, profile_digest
 from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.providers.core.resolver import ProviderResolver
@@ -144,40 +138,14 @@ async def open_billing_interval(conn: AsyncConnection, allocation_id: UUID) -> N
     )
 
 
-async def _commit_uploaded_rootfs(
-    conn: AsyncConnection,
-    system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore,
-) -> None:
-    """Commit the write-once artifacts row for an 'upload'-kind rootfs (ADR-0048 §6)."""
-    if not rootfs_upload_window_allowed(profile_policy, profile):
-        return
-    key = _uploaded_rootfs_key(system.id)
-    head = await asyncio.to_thread(artifact_store.head, key)
-    if head is None:
-        raise CategorizedError(
-            "upload-kind rootfs was never uploaded",
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            details={"system_id": str(system.id)},
-        )
-    stored = StoredArtifact(key, head.etag, Sensitivity.SENSITIVE, "rootfs")
-    await ARTIFACTS.insert(
-        conn, register_artifact_row(stored, owner_kind="systems", owner_id=system.id)
-    )
-    await upload_manifest.delete_manifest(conn, "systems", system.id)
-
-
 async def _finalize_provision_ready(
     conn: AsyncConnection,
     job: Job,
     system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    artifact_store: ObjectStore,
 ) -> None:
-    await _commit_uploaded_rootfs(conn, system, profile, profile_policy, artifact_store)
+    # The investigation-scoped uploaded rootfs is committed at finalize
+    # (investigations.complete_rootfs_upload), before any System provisions (ADR-0441 §3), so
+    # provision only opens billing and audits the ready transition.
     await open_billing_interval(conn, system.allocation_id)
     await audit_transition(
         conn,
@@ -232,10 +200,7 @@ async def _commit_provision_result(
     conn: AsyncConnection,
     job: Job,
     system: System,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
     domain_name: str,
-    artifact_store: ObjectStore,
 ) -> SystemState | None:
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.SYSTEM, system.id):
         current = await _locked_system_state(conn, system.id)
@@ -244,9 +209,7 @@ async def _commit_provision_result(
                 "UPDATE systems SET state = %s, domain_name = %s WHERE id = %s",
                 (SystemState.READY.value, domain_name, system.id),
             )
-            await _finalize_provision_ready(
-                conn, job, system, profile, profile_policy, artifact_store
-            )
+            await _finalize_provision_ready(conn, job, system)
         return current
 
 
@@ -381,7 +344,6 @@ async def provision_handler(
     *,
     resolver: ProviderResolver,
     secret_registry: SecretRegistry | None = None,
-    artifact_store: ObjectStore | None = None,
 ) -> str | None:
     """Define+start the tagged domain and drive the System ``provisioning -> ready``."""
     system_id = UUID(load_payload(job, SystemPayload).system_id)
@@ -403,18 +365,15 @@ async def provision_handler(
             )
         return str(system_id)
     secret_registry = secret_registry or SecretRegistry()
-    artifact_store = artifact_store or object_store_from_env()
 
     async def _commit(
         conn: AsyncConnection,
         job: Job,
         system: System,
-        profile: ProvisioningProfile,
+        _profile: ProvisioningProfile,
         domain_name: str,
     ) -> SystemState | None:
-        return await _commit_provision_result(
-            conn, job, system, profile, runtime.profile_policy, domain_name, artifact_store
-        )
+        return await _commit_provision_result(conn, job, system, domain_name)
 
     return await _execute_system_lifecycle_call(
         conn,
@@ -706,7 +665,9 @@ _DELETE_ROOTFS_ROW_SQL: LiteralString = (
 
 
 def _uploaded_rootfs_key(system_id: UUID) -> str:
-    # Committed under the local tenant (ADR-0048 §6, `_commit_uploaded_rootfs`).
+    # The legacy System-scoped uploaded-rootfs object key; only the teardown reclaim below still
+    # references it (the investigation-scoped commit path never writes this key). ADR-0441 removes
+    # the reclaim in a follow-up commit once the sweep replaces it.
     return artifact_key("local", "systems", str(system_id), "rootfs")
 
 
@@ -844,7 +805,6 @@ def register_handlers(
             job,
             resolver=resolver,
             secret_registry=secret_registry,
-            artifact_store=artifact_store,
         ),
     )
     registry.register(

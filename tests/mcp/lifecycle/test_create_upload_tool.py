@@ -30,10 +30,7 @@ from kdive.domain.lifecycle.records import Allocation, Investigation, Run, Syste
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
-from kdive.mcp.tools.catalog.artifacts.uploads import (
-    ArtifactDeclaration,
-    create_system_upload,
-)
+from kdive.mcp.tools.catalog.artifacts.uploads import ArtifactDeclaration
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     create_run_upload as _create_run_upload,
 )
@@ -343,29 +340,6 @@ def test_create_run_upload_states_full_deadline_contract(migrated_url: str) -> N
     assert expires_at < manifest_deadline
 
 
-def test_create_system_upload_names_its_own_remint_tool(migrated_url: str) -> None:
-    async def _run() -> ToolResponse:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            return await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=_FakeStore(),
-            )
-
-    responses = asyncio.run(_run())
-    assert responses.data["on_expiry"] == {
-        "tool": "artifacts.create_system_upload",
-        "effect": "re-mint replaces the manifest and resets the deadline",
-    }
-    _iso(responses.data["server_time"])
-    _iso(responses.data["manifest_deadline"])
-    _iso(responses.items[0].data["expires_at"])
-
-
 def _assert_upload_hint(hint: Any) -> None:
     # #1338 / ADR-0395: the collection response carries a data.upload_hint that names both
     # presigned-PUT footguns so a tool-schema-only agent sees them without the resource doc:
@@ -389,23 +363,6 @@ def test_create_run_upload_response_carries_extra_header_footgun_hint(migrated_u
                 _ctx(),
                 run_id=run_id,
                 artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
-                store=_FakeStore(),
-            )
-
-    responses = asyncio.run(_run())
-    _assert_upload_hint(responses.data["upload_hint"])
-
-
-def test_create_system_upload_response_carries_extra_header_footgun_hint(migrated_url: str) -> None:
-    async def _run() -> ToolResponse:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            return await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
                 store=_FakeStore(),
             )
 
@@ -476,52 +433,6 @@ def test_create_run_upload_writes_audit_row(migrated_url: str) -> None:
         assert project == "proj"
         assert transition == "create_upload"
         assert digest == args_digest({"owner_id": run_id, "artifacts": ["kernel", "vmlinux"]})
-
-    asyncio.run(_run())
-
-
-def test_create_system_upload_writes_audit_row(migrated_url: str) -> None:
-    # The operator-gated system-upload half is the cross-principal action that most needs a
-    # trail. object_kind names the owner table (systems), tool distinguishes the two upload tools.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            # Seed via raw insert (not the audited systems.define tool) so the only audit row on
-            # this system is the one create_system_upload writes.
-            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="upload")
-            await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=_FakeStore(),
-            )
-            rows = await _audit_rows(pool, sys_id)
-        assert len(rows) == 1
-        assert rows[0][1] == "artifacts.create_system_upload"
-        assert rows[0][2] == "systems"
-        assert rows[0][5] == "create_upload"
-        assert rows[0][6] == args_digest({"owner_id": sys_id, "artifacts": ["rootfs"]})
-
-    asyncio.run(_run())
-
-
-def test_create_upload_rejected_owner_writes_no_audit_row(migrated_url: str) -> None:
-    # An owner not accepting uploads returns before replace_manifest — no manifest, no row.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="local")
-            out = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=_FakeStore(),
-            )
-            rows = await _audit_rows(pool, sys_id)
-        assert out.data["reason"] == "owner_not_accepting_upload"
-        assert rows == []
 
     asyncio.run(_run())
 
@@ -687,26 +598,6 @@ def test_create_upload_missing_key_names_the_field(migrated_url: str) -> None:
     assert out.data["reason"] == "bad_artifact_declaration"
     assert out.data["field"] == "sha256"
     assert out.detail is not None
-
-
-def test_system_upload_unaccepted_name_lists_rootfs_only(migrated_url: str) -> None:
-    async def _run() -> ToolResponse:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            return await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=_FakeStore(),
-            )
-
-    out = asyncio.run(_run())
-    assert out.data["reason"] == "bad_artifact_declaration"
-    assert out.data["field"] == "name"
-    assert out.data["value"] == "kernel"
-    assert out.data["accepted_names"] == ["rootfs"]  # each owner advertises its own set
 
 
 def test_create_upload_rejects_missing_artifact_key_before_minting(migrated_url: str) -> None:
@@ -898,193 +789,6 @@ def test_create_run_upload_admits_contributor_denies_viewer(migrated_url: str) -
             async with pool.connection() as conn:
                 manifest = await upload_manifest.get_manifest(conn, "runs", UUID(run_id))
             assert manifest is not None
-
-    asyncio.run(_run())
-
-
-def test_create_system_upload_is_contributor(migrated_url: str) -> None:
-    # ADR-0326: the system-upload half of the shared seam is contributor leaseholder control (the
-    # define lane feeds provision). A contributor succeeds; a viewer is denied.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            responses = await create_system_upload(
-                pool,
-                _ctx(role=Role.CONTRIBUTOR),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=_FakeStore(),
-            )
-            assert [r.object_id for r in responses.items] == [f"local/systems/{sys_id}/rootfs"]
-            with pytest.raises(AuthorizationError):
-                await create_system_upload(
-                    pool,
-                    _ctx(role=Role.VIEWER),
-                    system_id=sys_id,
-                    artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                    resolver=provider_resolver(),
-                    store=_FakeStore(),
-                )
-
-    asyncio.run(_run())
-
-
-def test_create_upload_for_defined_system_mints_rootfs_and_persists(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            store = _FakeStore()
-            responses = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=store,
-            )
-            items = responses.items
-            assert [r.object_id for r in items] == [f"local/systems/{sys_id}/rootfs"]
-            assert items[0].suggested_next_actions == ["systems.provision_defined"]
-            assert {c[0] for c in store.calls} == {f"local/systems/{sys_id}/rootfs"}
-            async with pool.connection() as conn:
-                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
-            assert manifest is not None
-            assert {e.name for e in manifest.entries} == {"rootfs"}
-
-    asyncio.run(_run())
-
-
-def test_create_system_upload_rejects_chunked_rootfs(migrated_url: str) -> None:
-    # #1503 / ADR-0436: the System rootfs install path (#743) verifies plain sha256(body) ==
-    # head.checksum_sha256, which a reassembled multipart object's composite checksum can never
-    # satisfy. So a chunked rootfs declaration is rejected AT DECLARATION with a clear message —
-    # never accepted-then-failed at provision with "upload-kind rootfs was never uploaded".
-    _5gib = 5 * 1024 * 1024 * 1024
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            store = _FakeStore()
-            out = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[
-                    {
-                        "name": "rootfs",
-                        "sha256": "whole",
-                        "size_bytes": _5gib + 100,
-                        "chunks": [
-                            {"sha256": "c0", "size_bytes": _5gib},
-                            {"sha256": "c1", "size_bytes": 100},
-                        ],
-                    },
-                ],
-                resolver=provider_resolver(),
-                store=store,
-            )
-            async with pool.connection() as conn:
-                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
-        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert out.data["reason"] == "chunking_not_supported"
-        assert out.detail is not None and "single PUT" in out.detail
-        assert store.calls == []  # rejected before minting any part URL
-        assert manifest is None  # nothing persisted
-
-    asyncio.run(_run())
-
-
-def test_create_system_upload_rejects_rootfs_over_5gib(migrated_url: str) -> None:
-    # Boundary (#1503 AC): a single-PUT rootfs over the 5 GiB single-object cap is rejected up
-    # front — the pre-existing size guard, kept covered for the System owner.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            store = _FakeStore()
-            five_gib = 5 * 1024 * 1024 * 1024
-            out = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": five_gib + 1}],
-                resolver=provider_resolver(),
-                store=store,
-            )
-        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert out.data["reason"] == "size_out_of_range"
-        assert store.calls == []
-
-    asyncio.run(_run())
-
-
-def test_create_system_upload_resolves_provider_runtime_once(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            resolver = provider_resolver()
-            original = resolver.runtime_for_system
-            calls: list[UUID] = []
-
-            async def _counting_runtime_for_system(conn: Any, system_id: UUID) -> Any:
-                calls.append(system_id)
-                return await original(conn, system_id)
-
-            monkeypatch.setattr(resolver, "runtime_for_system", _counting_runtime_for_system)
-            responses = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=resolver,
-                store=_FakeStore(),
-            )
-
-        assert responses.status == "upload_ready"
-        assert calls == [UUID(sys_id)]
-
-    asyncio.run(_run())
-
-
-def test_create_upload_rejects_non_upload_kind_defined_system(migrated_url: str) -> None:
-    # A DEFINED System whose stored profile is local-kind cannot open an upload window —
-    # else the object would be minted, never committed, and orphaned past the reaper (#111).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _seed_system(pool, state=SystemState.DEFINED, rootfs_kind="local")
-            store = _FakeStore()
-            responses = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "rootfs", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=store,
-            )
-        assert responses.error_category == "configuration_error"
-        assert responses.data["reason"] == "owner_not_accepting_upload"
-        assert store.calls == []  # no PUT minted
-
-    asyncio.run(_run())
-
-
-def test_create_upload_rejects_non_rootfs_name_for_system(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            store = _FakeStore()
-            out = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[{"name": "kernel", "sha256": "aaa", "size_bytes": 100}],
-                resolver=provider_resolver(),
-                store=store,
-            )
-        assert out.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert store.calls == []
 
     asyncio.run(_run())
 
@@ -1339,9 +1043,9 @@ def test_chunked_effective_config_rejected() -> None:
 # --- Transport-encoding declaration validation (ADR-0437) -------------------------------
 
 from kdive.mcp.tools.catalog.artifacts.uploads import (  # noqa: E402
+    _INVESTIGATION_UPLOAD,
     _RUN_UPLOAD,
     _SYSTEM_UNCOMPRESSED_CAP,
-    _SYSTEM_UPLOAD,
 )
 
 _ENC_CAP = 8 * 1024 * 1024 * 1024  # a per-owner canonical-object cap for these unit cases
@@ -1444,45 +1148,9 @@ def test_uncompressed_size_without_encoding_rejected() -> None:
 def test_owner_specs_wire_encoding_capability() -> None:
     # First cut (ADR-0437): systems accepts a transport encoding (rootfs consumer, #1510); runs
     # has no decompressing consumer and rejects it.
-    assert _SYSTEM_UPLOAD.accepts_encoding is True
-    assert _SYSTEM_UPLOAD.uncompressed_cap == _SYSTEM_UNCOMPRESSED_CAP
+    assert _INVESTIGATION_UPLOAD.accepts_encoding is True
+    assert _INVESTIGATION_UPLOAD.uncompressed_cap == _SYSTEM_UNCOMPRESSED_CAP
     assert _RUN_UPLOAD.accepts_encoding is False
-
-
-def test_create_system_upload_accepts_gzip_encoding_and_persists(migrated_url: str) -> None:
-    # End-to-end: a gzip rootfs whose canonical size exceeds 5 GiB but whose compressed object is a
-    # single PUT <= 5 GiB is accepted, signs the compressed bytes, and round-trips the two fields.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id = await _defined_system_via_tool(pool)
-            store = _FakeStore()
-            responses = await create_system_upload(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-                artifacts=[
-                    {
-                        "name": "rootfs",
-                        "sha256": "aaa",
-                        "size_bytes": 4096,
-                        "encoding": "gzip",
-                        "uncompressed_size": 6 * 1024 * 1024 * 1024,
-                    }
-                ],
-                resolver=provider_resolver(),
-                store=store,
-            )
-            async with pool.connection() as conn:
-                manifest = await upload_manifest.get_manifest(conn, "systems", UUID(sys_id))
-        assert responses.status == "upload_ready"
-        # The signed/stored bytes are the compressed transport object, not the canonical size.
-        assert store.calls == [(f"local/systems/{sys_id}/rootfs", "aaa", 4096)]
-        assert manifest is not None
-        rootfs = manifest.entries[0]
-        assert rootfs.encoding == "gzip"
-        assert rootfs.uncompressed_size == 6 * 1024 * 1024 * 1024
-
-    asyncio.run(_run())
 
 
 def test_create_run_upload_rejects_encoding(migrated_url: str) -> None:

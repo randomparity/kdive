@@ -1931,7 +1931,7 @@ def test_provision_failure_still_closes_connection() -> None:
 
 
 def _upload_profile() -> ProvisioningProfile:
-    return _profile(rootfs={"kind": "upload"})
+    return _profile(rootfs={"kind": "upload", "checksum_sha256": "c"})
 
 
 def _staged_upload_path() -> str:
@@ -2248,7 +2248,7 @@ def test_provision_upload_rootfs_stages_via_injected_fetch() -> None:
         free_port=lambda: next(_FREE_PORTS),
         extract_baseline_kernel=_fake_extract,
     )
-    prov.provision(_SYS, _profile(rootfs={"kind": "upload"}))
+    prov.provision(_SYS, _profile(rootfs={"kind": "upload", "checksum_sha256": "c"}))
 
     assert len(seen) == 1 and seen[0].system_id == _SYS
     assert seen[0].upload_dir == Path(provisioning_module.UPLOADS_DIR)
@@ -2268,7 +2268,7 @@ def test_validate_rootfs_ref_upload_defers_to_provision() -> None:
         return Path("/never")
 
     prov = LocalLibvirtProvisioning(connect=lambda: _ProvConn(), upload_fetch=_fetch)
-    prov.validate_rootfs_ref(_UploadRootfs(kind="upload"))  # does not raise
+    prov.validate_rootfs_ref(_UploadRootfs(kind="upload", checksum_sha256="c"))  # does not raise
 
     assert called is False
 

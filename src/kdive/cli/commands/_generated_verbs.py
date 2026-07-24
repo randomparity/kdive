@@ -488,27 +488,6 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
     ),
     GeneratedVerb(
         group="artifacts",
-        sub="create-system-upload",
-        tool="artifacts.create_system_upload",
-        read_only=False,
-        destructive=False,
-        help="Mint a presigned PUT for a DEFINED System's rootfs. Requires contributor on the",
-        unwrap_request=False,
-        flags=(
-            GeneratedFlag(
-                name="--system-id",
-                dest="system_id",
-                required=True,
-                help="The DEFINED System id.",
-                arg_type="str",
-                action=None,
-                choices=(),
-            ),
-        ),
-        json_params=("artifacts",),
-    ),
-    GeneratedVerb(
-        group="artifacts",
         sub="expected-uploads",
         tool="artifacts.expected_uploads",
         read_only=True,

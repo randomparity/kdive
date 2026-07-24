@@ -201,7 +201,7 @@ _CONTRIBUTOR_LOOP = frozenset(
         "systems.provision",
         "systems.provision_defined",
         "systems.reprovision",
-        "artifacts.create_system_upload",
+        "artifacts.create_investigation_upload",
     }
 )
 
@@ -242,7 +242,7 @@ def test_both_upload_kinds_are_contributor() -> None:
     assert required_scopes("artifacts.create_run_upload") == frozenset(
         {ExposureScope.PROJECT_CONTRIBUTOR}
     )
-    assert required_scopes("artifacts.create_system_upload") == frozenset(
+    assert required_scopes("artifacts.create_investigation_upload") == frozenset(
         {ExposureScope.PROJECT_CONTRIBUTOR}
     )
 
