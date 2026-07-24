@@ -16,8 +16,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 
 from kdive.domain.operations.jobs import JobKind
+from kdive.reconciler.cleanup import gc
 from kdive.reconciler.cleanup.gc import (
     sweep_expired_investigation_rootfs_reclaim,
     sweep_investigation_rootfs_reclaim,
@@ -76,12 +78,20 @@ async def _seed_rootfs_object(
 
 async def _reclaim_jobs(conn: psycopg.AsyncConnection, inv: UUID) -> list[dict[str, Any]]:
     cur = await conn.execute(
-        "SELECT id, state, payload, dedup_key FROM jobs WHERE kind = %s "
+        "SELECT id, state, payload, dedup_key, created_at, max_attempts FROM jobs "
+        "WHERE kind = %s "
         "AND payload->>'investigation_id' = %s",
         (JobKind.RECLAIM_INVESTIGATION_ROOTFS.value, str(inv)),
     )
     return [
-        {"id": row[0], "state": row[1], "payload": row[2], "dedup_key": row[3]}
+        {
+            "id": row[0],
+            "state": row[1],
+            "payload": row[2],
+            "dedup_key": row[3],
+            "created_at": row[4],
+            "max_attempts": row[5],
+        }
         for row in await cur.fetchall()
     ]
 
@@ -114,6 +124,8 @@ def test_close_driven_enqueues_the_due_rows_past_grace(migrated_url: str) -> Non
             assert len(jobs) == 1
             assert jobs[0]["payload"]["artifact_ids"] == [str(artifact_id)]
             assert jobs[0]["dedup_key"] == f"rootfs-reclaim:{inv}"
+            # The sweep is the retry loop, so an in-job retry of a permission wall buys nothing.
+            assert jobs[0]["max_attempts"] == 1
             assert await _marker(conn, inv) is not None  # the worker clears it, not the sweep
         finally:
             await conn.close()
@@ -184,35 +196,129 @@ def test_marker_independence_from_build_sweep(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_repeat_passes_reuse_the_one_reclaim_slot(migrated_url: str) -> None:
-    # ADR-0442 §6: a stable dedup key holds exactly one job row per investigation. A second pass
-    # while the job is queued is a no-op; a pass after it reached a terminal state recycles the
-    # SAME row back to queued with the fresh payload, rather than piling up a row every ~30 s.
+def test_repeat_passes_hold_one_reclaim_slot(migrated_url: str) -> None:
+    # ADR-0442 §6: while the job is in flight the sweep is a no-op — one row, same job.
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
             inv = await _seed_investigation(
                 seed, state="closed", rootfs_marker_age=timedelta(days=2)
             )
-            first = await _seed_rootfs_object(seed, inv)
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            first = await _reclaim_jobs(conn, inv)
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+            second = await _reclaim_jobs(conn, inv)
+            assert len(second) == 1
+            assert second[0]["id"] == first[0]["id"]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_settled_job_holds_its_slot_through_the_backoff(migrated_url: str) -> None:
+    # A settled reclaim is not re-issued for ROOTFS_RECLAIM_RETRY_BACKOFF, so a faulting reclaim
+    # retries on the order of minutes instead of twice a minute — and its failed row stays
+    # inspectable for that window rather than being replaced within one pass.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
         finally:
             await seed.close()
         conn = await connect(migrated_url)
         try:
             await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
-            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
-            jobs = await _reclaim_jobs(conn, inv)
-            assert len(jobs) == 1  # in-flight dedup
-            job_id = jobs[0]["id"]
-
-            await conn.execute("UPDATE jobs SET state = 'succeeded' WHERE id = %s", (job_id,))
-            second = await _seed_rootfs_object(conn, inv, token="c2Vjb25kLXRva2Vu")
-            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            await conn.execute(
+                "UPDATE jobs SET state = 'failed', error_category = 'infrastructure_failure' "
+                "WHERE id = %s",
+                (job_id,),
+            )
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
             jobs = await _reclaim_jobs(conn, inv)
             assert len(jobs) == 1
-            assert jobs[0]["id"] == job_id  # the same slot, recycled
+            assert jobs[0]["id"] == job_id
+            assert jobs[0]["state"] == "failed"  # the failure record survives the pass
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_settled_job_past_the_backoff_is_reissued_with_a_fresh_created_at(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `dequeue` claims by ORDER BY created_at, so re-issuing in place (queue's recycle_terminal)
+    # would keep the original timestamp and let a repeatedly-failing background reclaim
+    # head-of-line-block every job enqueued after it. The sweep drops the settled row and inserts
+    # a fresh one, carrying this pass's due set.
+    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            first_row = await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            before = (await _reclaim_jobs(conn, inv))[0]
+            await conn.execute("UPDATE jobs SET state = 'failed' WHERE id = %s", (before["id"],))
+            second_row = await _seed_rootfs_object(conn, inv, token="c2Vjb25kLXRva2Vu")
+
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1  # still exactly one slot, not a row per pass
+            after = jobs[0]
+            assert after["id"] != before["id"]
+            assert after["created_at"] > before["created_at"]  # re-dated, so it cannot preempt
+            assert after["state"] == "queued"
+            assert set(after["payload"]["artifact_ids"]) == {str(first_row), str(second_row)}
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_canceled_job_does_not_wedge_the_slot(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The slot is reconciler-owned: an operator cancel stops the current attempt but must not
+    # silently disable reclaim for the investigation forever (ADR-0442 §6 — cancel is advisory).
+    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            await conn.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (job_id,))
+
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
             assert jobs[0]["state"] == "queued"
-            assert set(jobs[0]["payload"]["artifact_ids"]) == {str(first), str(second)}
         finally:
             await conn.close()
 

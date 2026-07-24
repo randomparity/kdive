@@ -46,6 +46,12 @@ DEFAULT_INVESTIGATION_CLEANUP_GRACE = timedelta(days=1)
 DEFAULT_BUILD_ARTIFACT_RETENTION = timedelta(days=30)
 DEFAULT_INVESTIGATION_ROOTFS_RETENTION = timedelta(days=30)
 
+#: How long a settled rootfs reclaim job holds its per-investigation slot before the sweeps re-issue
+#: it (ADR-0442 §6). The sweeps run every ~30 s but reclaim is grace/TTL-governed in days, so a
+#: faulting reclaim retrying every few minutes converges just as fast while keeping the failed row
+#: inspectable and keeping a permission wall from becoming a retry storm against the object store.
+ROOTFS_RECLAIM_RETRY_BACKOFF = timedelta(minutes=5)
+
 #: Run-owned artifact retention classes the build-artifact sweeps reclaim (ADR-0234 §4, #768): the
 #: uploaded combined kernel tar / vmlinux / initrd (``build``) and an internally-built run kernel
 #: (``kernel-build``). Deliberately excludes ``build-log`` (run-owned build evidence, ADR-0238) and
@@ -276,8 +282,8 @@ async def sweep_investigation_rootfs_reclaim(conn: AsyncConnection, grace: timed
                     (investigation_id,),
                 )
             continue
-        await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids)
-        enqueued += 1
+        if await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+            enqueued += 1
     if enqueued:
         _log.info("reconciler: enqueued %d closed-investigation rootfs reclaim job(s)", enqueued)
     return enqueued
@@ -302,11 +308,13 @@ async def sweep_expired_investigation_rootfs_reclaim(
     for artifact_id, investigation_id, project in rows:
         _project, ids = due.setdefault(investigation_id, (str(project), []))
         ids.append(artifact_id)
+    enqueued = 0
     for investigation_id, (project, artifact_ids) in due.items():
-        await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids)
-    if due:
-        _log.info("reconciler: enqueued %d past-TTL rootfs reclaim job(s)", len(due))
-    return len(due)
+        if await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+            enqueued += 1
+    if enqueued:
+        _log.info("reconciler: enqueued %d past-TTL rootfs reclaim job(s)", enqueued)
+    return enqueued
 
 
 async def _investigation_rootfs_artifact_ids(
@@ -320,16 +328,36 @@ async def _investigation_rootfs_artifact_ids(
 
 async def _enqueue_rootfs_reclaim(
     conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
-) -> None:
-    """Ensure the one reclaim job for ``investigation_id``, recycling a terminal attempt.
+) -> bool:
+    """Issue the one reclaim job for ``investigation_id``; return whether one was admitted.
 
-    The dedup key is **stable** per investigation (ADR-0442 §6), so the sweeps hold exactly one job
-    row per investigation forever instead of one per ~30 s pass. A ``queued``/``running`` job is
-    left untouched (in-flight dedup with no separate pre-check); a ``succeeded``/``failed`` one is
-    reset to a fresh attempt carrying this pass's due set. ``recycle_canceled`` is on because the
-    slot is reconciler-owned: a canceled job wedged in it would silently disable reclaim for the
-    investigation forever, which is the failure mode #1522 exists to remove.
+    The dedup key is **stable** per investigation (ADR-0442 §6), so the sweeps hold at most one job
+    row per investigation instead of one per ~30 s pass. Admission is gated here rather than left to
+    ``queue``'s ``recycle_terminal``, for two reasons the sweep cadence makes load-bearing:
+
+    - A recycle resets state in place and leaves ``created_at`` alone, but ``dequeue`` orders by
+      ``created_at``, so a repeatedly-recycled background job would sort ahead of every job enqueued
+      after it and head-of-line-block interactive work. Deleting the settled row and inserting a
+      fresh one re-dates the reclaim to the pass that decided it is due.
+    - A settled job is left alone until :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` has passed, so a
+      reclaim that keeps faulting retries on the order of minutes rather than twice a minute — and
+      its ``failed`` row stays inspectable for that window instead of being reset within 30 s.
+
+    A ``queued``/``running`` job is left untouched (in-flight dedup). ``max_attempts=1`` because an
+    in-job retry of a permission wall or a dead store buys nothing the next pass does not: the sweep
+    is the retry loop.
     """
+    dedup_key = f"rootfs-reclaim:{investigation_id}"
+    async with conn.transaction(), conn.cursor() as cur:
+        await cur.execute(
+            "SELECT state FROM jobs WHERE dedup_key = %s "
+            "AND (state NOT IN ('succeeded', 'failed', 'canceled') "
+            "     OR updated_at > now() - %s) FOR UPDATE",
+            (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+        )
+        if await cur.fetchone() is not None:
+            return False
+        await cur.execute("DELETE FROM jobs WHERE dedup_key = %s", (dedup_key,))
     await queue.enqueue(
         conn,
         JobKind.RECLAIM_INVESTIGATION_ROOTFS,
@@ -342,10 +370,10 @@ async def _enqueue_rootfs_reclaim(
             "agent_session": None,
             "project": project,
         },
-        f"rootfs-reclaim:{investigation_id}",
-        recycle_terminal=True,
-        recycle_canceled=True,
+        dedup_key,
+        max_attempts=1,
     )
+    return True
 
 
 async def _now_epoch(conn: AsyncConnection) -> float:

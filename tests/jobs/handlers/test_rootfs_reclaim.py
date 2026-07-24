@@ -24,6 +24,7 @@ import psycopg
 import pytest
 
 from kdive.artifacts.content_address import rootfs_object_token
+from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.errors import CategorizedError
 from kdive.domain.operations.jobs import Job, JobKind, JobState
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import reclaim_investigation_rootfs_handler
@@ -500,6 +501,56 @@ def test_one_fault_does_not_starve_the_other_checksums(migrated_url: str, tmp_pa
             assert await _row_exists(check, faulting)  # deferred before its row delete
             assert not await _row_exists(check, ok)  # the healthy checksum still drained
             assert await _marker(check, inv) is not None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_investigation_lock_serializes_a_concurrent_bind(migrated_url: str, tmp_path: Path) -> None:
+    # ADR-0442 §3: the handler holds the INVESTIGATION lock that System bind holds transaction-
+    # scoped until its row commits, so a bind racing the gate cannot slip a live referencer in
+    # between the gate read and the unlink. Without the lock the handler would run to completion
+    # while the bind is still uncommitted and unlink a base the new System is about to back onto.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+
+        binder = await connect(migrated_url)
+        handler: asyncio.Task[str | None] | None = None
+        try:
+            async with (
+                binder.transaction(),
+                advisory_xact_lock(binder, LockScope.INVESTIGATION, inv),
+            ):
+                # The bind's System row is inserted but NOT yet committed, and its lock is held.
+                await _seed_system(binder, inv, "provisioning", _upload_profile())
+                handler = asyncio.create_task(
+                    _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+                )
+                await asyncio.sleep(0.3)
+                assert not handler.done()  # blocked on the lock the binder holds
+                assert staged.exists()
+        finally:
+            await binder.close()
+
+        assert await asyncio.wait_for(handler, timeout=10) == "0"
+        # The handler resumed only after the bind committed, so it saw the pre-overlay referencer.
+        assert staged.exists()
+        assert store.deleted == []
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)
         finally:
             await check.close()
 

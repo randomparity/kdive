@@ -61,8 +61,13 @@ selects rows past `retention` whose investigation is `open`/`active`, groups the
 and enqueues one job per investigation carrying that investigation's past-retention row ids.
 
 Both take no `store`, no `rootfs_dir`, and no `uploads_dir`. Enqueue uses the stable dedup key
-`rootfs-reclaim:<investigation_id>` with `recycle_terminal=True, recycle_canceled=True`, and the
-`SYSTEM_RECONCILER_PRINCIPAL` authorizing tuple with the investigation's `project`.
+`rootfs-reclaim:<investigation_id>` and the `SYSTEM_RECONCILER_PRINCIPAL` authorizing tuple with the
+investigation's `project`. Admission is gated in the sweep rather than by `queue`'s
+`recycle_terminal`: an in-flight job is left alone, a settled one holds its slot until
+`ROOTFS_RECLAIM_RETRY_BACKOFF` (5 min) has passed, and past that it is deleted and re-inserted so
+`created_at` is re-dated (`dequeue` orders by `created_at`, so an in-place recycle would let a
+faulting background reclaim head-of-line-block interactive work). `max_attempts=1` — the sweep is
+the retry loop.
 
 An investigation whose marker is past grace but which has **no** rootfs rows left is not a reclaim
 candidate — its marker is cleared by whichever job drained its last row. A marker set on an
@@ -145,8 +150,12 @@ two `_RepairCatalogEntry` metric names become `investigation_rootfs_reclaims_enq
 - **AC-11** — A partially-pinned investigation keeps its marker and its staging dir, and an
   in-flight `<token>.<uuid>.partial` is not clobbered.
 - **AC-12** — Both sweeps enqueue on the stable per-investigation dedup key: a second pass while a
-  job is `queued`/`running` does not create a second row; a pass after the job reached a terminal
-  state recycles the same row with the fresh payload.
+  job is `queued`/`running` does not create a second row; a settled job holds its slot through the
+  backoff (its `failed` record survives); past the backoff it is replaced by a fresh row with a
+  later `created_at` and this pass's due set, and a `canceled` job does not wedge the slot.
+- **AC-15** — The handler blocks on the `INVESTIGATION` lock while a bind holds it uncommitted, and
+  then observes the newly-bound pre-overlay referencer as a pin. Verified to fail with the lock
+  removed.
 - **AC-13** — The TTL sweep enqueues only past-retention rows, and only for `open`/`active`
   investigations.
 - **AC-14** — Migration 0078 admits the new kind and the enum↔constraint tie holds.

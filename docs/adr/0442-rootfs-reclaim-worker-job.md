@@ -159,22 +159,37 @@ make progress is a SENSITIVE-data-retention problem and must be loud, not a log 
 The sweeps run every ~30 s. Enqueuing a fresh job per pass would grow the `jobs` table without
 bound (≈2 880 rows/day for one stuck investigation) and would stack duplicate reclaims.
 
-Each enqueue therefore uses a **stable `dedup_key`** — `rootfs-reclaim:<investigation_id>` — with
-`recycle_terminal=True` and `recycle_canceled=True`. The result is exactly **one** reclaim job row
-per investigation, ever:
+Each enqueue therefore uses a **stable `dedup_key`** — `rootfs-reclaim:<investigation_id>` — so the
+sweeps hold at most **one** reclaim job row per investigation. Admission is gated in the sweep
+rather than delegated to `queue.enqueue`'s `recycle_terminal`, because two properties of that
+recycle are wrong at sweep cadence:
 
-- A `queued`/`running` job is left untouched and the enqueue is a no-op — in-flight dedup with no
-  separate pre-check query.
-- A `succeeded` or `failed` job is reset in place to a fresh `queued` attempt with the **new**
-  payload, so the next pass's due-set replaces the stale one. This is the ledger-driven re-issue
-  `recycle_terminal` was built for: a sweep is inherently repeating, and a succeeded reclaim of a
-  partially-pinned investigation must be re-attempted once the pins clear.
-- `recycle_canceled=True` is deliberate and is the one place this diverges from the install/boot
-  lane's no-resurrection-of-canceled rule. The slot is reconciler-owned rather than agent-owned;
-  an operator cancel stops the current attempt, but leaving a `canceled` row wedged in a stable
-  per-investigation slot would silently disable reclaim for that investigation forever — the exact
-  failure mode this ADR exists to remove. The kind is absent from
-  `CONTRIBUTOR_CANCELABLE_JOB_KINDS`, so only an operator can cancel it at all.
+- **Ordering.** `dequeue` claims by `ORDER BY created_at`, and the recycle resets state in place
+  without touching `created_at`. A job recycled every pass would keep its original timestamp
+  forever and therefore sort ahead of every job enqueued after it — a permanently faulting
+  background reclaim would head-of-line-block provisioning and every other interactive job. The
+  sweep instead deletes the settled row and inserts a fresh one, re-dating the reclaim to the pass
+  that decided it is due. Nothing references `jobs.id`, so the delete is free of fallout.
+- **Retry rate.** A recycle every pass means a faulting reclaim re-runs twice a minute, each
+  attempt holding the `INVESTIGATION` lock across object-store deletes. A settled job therefore
+  keeps its slot until `ROOTFS_RECLAIM_RETRY_BACKOFF` (5 minutes) has elapsed. Reclaim is
+  grace/TTL-governed in days, so a few minutes of backoff costs nothing and converges just as
+  fast. `max_attempts` is `1` for the same reason: an in-job retry of a permission wall or a dead
+  store buys nothing the next sweep does not — the sweep *is* the retry loop.
+
+A `queued`/`running` job is left untouched, which is the in-flight dedup. A `canceled` job is
+treated as settled like any other terminal state, so an operator `jobs.cancel` on this kind stops
+the current attempt but does **not** stop reclaim: the next sweep past the backoff re-issues it.
+That is deliberate — the slot is reconciler-owned, and a `canceled` row wedged in a stable
+per-investigation slot would silently disable reclaim for that investigation forever, which is the
+failure mode this ADR exists to remove. But it means cancel on this kind is **advisory**, worth
+roughly one backoff interval, and nothing should be built on it as a stop. The kind is absent from
+`CONTRIBUTOR_CANCELABLE_JOB_KINDS`, so only an operator can cancel it at all.
+
+Preserving the failure record trades against the same backoff. A `failed` reclaim row survives for
+at least one backoff interval before the next sweep replaces it, so it is inspectable through
+`jobs.list` for minutes rather than seconds — but it is not a permanent audit trail, and the
+per-fault `WARN` naming the object key remains the durable record.
 
 The two worklists cannot collide on that shared key: the close-driven sweep selects investigations
 with `rootfs_cleanup_pending_at` set (set only at close), and the TTL sweep pins
@@ -227,8 +242,10 @@ SQL↔enum tie `test_migrate.py` asserts).
   where it was completely non-functional. Both sweeps are fixed by the same change.
 - The reconciler is DB/S3-only again. The one exception ADR-0441 introduced is gone, and the
   invariant is worth stating because it is what makes the reconciler safe to run anywhere.
-- Reclaim gains a durable, inspectable record. A stuck reclaim is a `failed` job with a category
-  and a failure context, visible through `jobs.list`, instead of a `WARN` line in a log file.
+- A stuck reclaim becomes a `failed` job with a category and a failure context, visible through
+  `jobs.list`, rather than only a `WARN` line. The row is replaced by the next re-issue past the
+  backoff, so it is a bounded-window signal, not a permanent audit trail; the per-fault log line
+  naming the object key remains the durable record.
 - A reclaim now costs one job round-trip of latency after the sweep observes it is due. Reclaim is
   a grace/TTL-governed background activity measured in days, so a sub-minute delay is immaterial.
 - The `INVESTIGATION` advisory lock is held across an S3 delete per checksum. `close_investigation`,
@@ -239,10 +256,17 @@ SQL↔enum tie `test_migrate.py` asserts).
   explicitly deferred.
 - A multi-worker-host local-libvirt deployment would route a reclaim job to a host that may not
   hold the staged base. That host's overlay probes read "absent", so the gate would not pin, and it
-  would `ENOENT` its way to deleting the object and row while another host kept the file. This is
-  **not** a new exposure: the same deployment already cannot provision correctly, because
-  `provision` stages the base on whichever worker claims it. Local-libvirt remains single-host per
-  ADR-0441 §8; the remote lane (#1433/ADR-0440) is per-System-lease and unaffected.
+  would `ENOENT` its way to deleting the object and row while another host kept the file. Stated
+  plainly: in that topology the new model **fails open** where the deleted probe failed closed.
+  That is an accepted consequence of the trade, not an oversight — the probe's fail-closed behavior
+  was itself unreliable (it read directory existence, which #1502's `/challenge` iteration 5 showed
+  is not co-location, and #1522 showed is not writability), and the same deployment already cannot
+  provision correctly, because `provision` stages the base on whichever worker claims it. Reclaim
+  is therefore exactly as host-assuming as the staging it reverses, and no more. Local-libvirt
+  remains single-host per ADR-0441 §8; the remote lane (#1433/ADR-0440) is per-System-lease and
+  unaffected. Pinning the reclaim to the staging host (a dedicated dispatch lane, or recording the
+  staging worker on the row at fetch time) is the shape a future multi-host local lane would need,
+  and is deferred with that lane rather than built speculatively now.
 - `ReconcileConfig` loses two fields and the two repair metrics are renamed from `*_gc_count` to
   `*_reclaims_enqueued`, because they now count enqueues rather than reclaimed bases. Naming them
   for what they count keeps the reconcile report honest.
