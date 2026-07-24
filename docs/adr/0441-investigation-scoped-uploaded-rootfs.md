@@ -292,18 +292,23 @@ parses each `provisioning_profile`'s rootfs ref, and keeps only those whose ref 
 `{"kind":"upload","checksum_sha256": X}`; a profile that is unparseable, has no rootfs, or references a
 `catalog`/`local`/different-checksum rootfs is **not** a referencer of *X* and is skipped. For each real
 referencer it derives the overlay path from `overlay_path(system_id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`)
-and stats it for condition (a). These sweeps add **host-filesystem probes to the reconciler**, which does
-none today (it touches only Postgres + the object store) — so co-location cannot be assumed, it must be
-**guarded and fail-closed**:
+and stats it for condition (a). These sweeps read host files from the reconciler, which **already** does
+host-FS access — `console_rotation` `os.stat`s each System's console log, deliberately built to tolerate a
+**non-co-located** reconciler by degrading gracefully **per pass**. The rootfs sweeps reuse that model, not
+a startup co-location gate:
 
-- **Registration guard.** Sweep registration is gated on a startup check that `ROOTFS_DIR` and
-  `UPLOADS_DIR` are present and accessible (the reconciler is libvirt-host-local); if not, the sweeps do
-  not register and the check fails loudly rather than running a host-blind sweep.
-- **Fail-closed probe.** Condition (a) distinguishes *"`ROOTFS_DIR` accessible, this overlay file missing"*
-  (overlay gone → reclaimable) from *"`ROOTFS_DIR` itself absent/inaccessible"* (**defer the whole pass** —
-  never read a missing root as "all overlays gone"). A mis-deployed reconciler that cannot see the host FS
-  therefore reclaims **nothing**, rather than unlinking bases under live guests — the gate fails safe, not
-  open.
+- **Per-pass, fail-closed probe (no startup registration gate).** Each pass checks `ROOTFS_DIR`/`UPLOADS_DIR`
+  accessibility. Condition (a) distinguishes *"`ROOTFS_DIR` accessible, this overlay file missing"* (overlay
+  gone → reclaimable) from *"`ROOTFS_DIR` itself absent/inaccessible"* (**defer the whole pass**, retried
+  next pass — never read a missing root as "all overlays gone"). A reconciler that cannot see the host FS
+  reclaims **nothing** (defers every pass) rather than unlinking bases under live guests — fail-safe — and a
+  host that *gains* the dirs later reclaims without a restart (unlike a one-shot startup gate).
+- **Ensure-create.** `ROOTFS_DIR`/`UPLOADS_DIR` are created lazily on first provision, so the reconciler
+  **ensure-creates** them at startup (host-local, owned by this deployment) so a fresh host that has not yet
+  provisioned still reclaims.
+- **Topology.** For local-libvirt (single-host M0/M1) the reconciler is host-local, so reclaim runs; a split
+  reconciler/libvirt-host topology simply defers rootfs reclaim (consistent with `console_rotation`'s own
+  non-co-location tolerance) until the deferred remote lane (decision 8) designs remote reclaim.
 
 The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
 exact thing that holds the base open as a qcow2 backing file (ADR-0060) — no state value is a faithful

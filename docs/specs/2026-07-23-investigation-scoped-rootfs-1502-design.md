@@ -187,13 +187,16 @@ checksum (`drained=False`, retried). Remove the empty `rootfs-uploads/<inv>/` di
   unparseable / no-rootfs / catalog / local / different-checksum profile is **not** a referencer of X (so
   one unrelated live System never pins X). For each real referencer, derive `overlay_path(system_id)` =
   `<ROOTFS_DIR>/<id>-overlay.qcow2` and stat it for condition (a).
-- **Reconciler filesystem access (guarded, fail-closed):** the probe reads overlays under `ROOTFS_DIR`
-  and unlinks bases under `UPLOADS_DIR` — the reconciler does **no** host-FS access today, so co-location
-  is **guarded**, not assumed: sweep registration is gated on a startup check that both dirs are
-  present/accessible (fails loudly otherwise). The probe **fails closed** — a missing overlay under a
-  *present* `ROOTFS_DIR` is "overlay gone" (reclaimable), but an *absent/inaccessible* `ROOTFS_DIR` **defers
-  the whole pass** (never "all overlays gone → reclaim everything"), so a host-blind reconciler reclaims
-  nothing rather than unlinking bases under live guests.
+- **Reconciler filesystem access (per-pass, fail-closed):** the probe reads overlays under `ROOTFS_DIR`
+  and unlinks bases under `UPLOADS_DIR`. The reconciler **already** does host-FS access (`console_rotation`
+  `os.stat`s console logs and tolerates non-co-location per-pass), so the rootfs sweeps reuse that model —
+  **no startup registration gate**. Each pass **fails closed**: a missing overlay under a *present*
+  `ROOTFS_DIR` is "overlay gone" (reclaimable), but an *absent/inaccessible* `ROOTFS_DIR` **defers the whole
+  pass** (retried next pass — never "all overlays gone"), so a host-blind reconciler reclaims nothing rather
+  than unlinking under live guests, and a host that gains the dirs later reclaims without a restart. The
+  reconciler **ensure-creates** the (lazily-created) dirs at startup so a fresh, not-yet-provisioned host
+  still reclaims. Local-libvirt is host-local (reclaim runs); a split topology defers until remote reclaim
+  is designed (decision 8).
 - **Condition-(b) drift guard:** the pre-overlay/re-materialize state set is a **named constant** beside
   the `SystemState` definition, with a **structural CI test** that fails when a new non-terminal state is
   added without being classified — so a future base-re-materializing state can't silently escape the gate.
@@ -252,7 +255,7 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | Finalize races an investigation close | under the investigation lock, requires OPEN/ACTIVE — lost race rejects (manifest reaped), won race commits while OPEN + close marks it for reclaim |
 | Crashed download leaves a `.partial` | `finally` unlinks on clean failure; a crash-orphan is glob-unlinked by the **next fetcher** (under the lock) and, as backstop, by the reclaim sweep — bounded by the next fetch, not the investigation's full life |
 | Non-404 store fault deleting the object in the sweep | defers the whole checksum (row kept) **before** the row delete — the object is never orphaned without its handle |
-| Reconciler not co-located / `ROOTFS_DIR` inaccessible | registration guard fails loudly; the probe **fails closed** (defers the pass) — reclaims nothing, never unlinks under a live guest |
+| Reconciler not co-located / `ROOTFS_DIR` inaccessible | probe **fails closed per-pass** (defers, retries next pass) — reclaims nothing, never unlinks under a live guest; recovers when the dir becomes accessible |
 | Downloaded bytes fail SHA-256 or qcow2-magic | `infrastructure_failure` / `configuration_error` (ADR-0434 §2, ADR-0438) unchanged |
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
 | `close(force=True)`, caller lacks admin on one of several bound Systems | **all-or-nothing**: validate all admin first → zero teardowns enqueued, investigation unchanged, offending System listed |
@@ -297,6 +300,9 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    project enqueues teardown and closes; a same-project **contributor** is refused (no escalation, admin
    fails wholesale). For the atomicity path, inject an **enqueue error** on one of several teardowns and
    assert **zero** teardowns are enqueued and the investigation stays open (all-or-nothing — no partial reap).
+6b. **Default-close marker:** the tidy path — tear down each bound System individually, then **default**
+   `close` (no force) — sets `rootfs_cleanup_pending_at` in the shared `_close_locked` path, and the
+   close-driven sweep subsequently reclaims (not only the force path; else the object waits for the slow TTL).
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
 8. **Liveness guard (overlay-absence):** the sweep does **not** reclaim a base while a referencing
    System's overlay file is present; it reclaims once the overlay is gone. Critically, a **`failed`**
@@ -320,9 +326,9 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
    non-404 object-store fault instead **defers** (row kept), retried next pass.
 8h. **Crashed-download `.partial`:** a stale `<token>.*.partial` left by a killed fetch is swept
    (glob-unlinked) before empty-dir removal — not stranded.
-8i. **Fail-closed probe:** a sweep run with an inaccessible `ROOTFS_DIR` reclaims **nothing** (defers the
-   pass), never treating a missing root as "all overlays absent"; and sweep registration fails loudly when
-   the reconciler cannot see `ROOTFS_DIR`/`UPLOADS_DIR`.
+8i. **Fail-closed per-pass probe:** a sweep pass with an inaccessible `ROOTFS_DIR` reclaims **nothing**
+   (defers), never treating a missing root as "all overlays absent"; a later pass, once the dir is
+   accessible, reclaims (no restart needed); the reconciler ensure-creates the dirs at startup.
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)

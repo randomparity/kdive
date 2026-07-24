@@ -21,9 +21,12 @@ phase ordering:
   3.3) and required-`checksum_sha256` ref shape (Task 3.1) exist, and the new tools' exposure/tool_index/
   RBAC/behavior-map registration must land **with** the tools (Phase 2), not deferred to Phase 6. So
   Task 2.3 **also deletes the old ADR-0434 upload-provision tests and the old tool's exposure/tool_index/
-  RBAC/behavior-map entries in the same commit**, and Phase 6's Task 6.1 covers only the *doc*
-  regeneration (RBAC-matrix doc, agent-index) — not tool registration. Green holds at the Phase 2+3 PR
-  boundary, not between Task 2.3 and Task 3.3.
+  RBAC/behavior-map entries in the same commit**, and Phase 6's Task 6.1 doc regeneration is this PR's tail
+  commit — not a separate merge. **Concrete commit grouping (prescriptive):** the upload-lane swap — Task
+  2.3 (removal + `expected_uploads` re-point + surface registration) **+** Task 3.1 (profile ref shape)
+  **+** Task 3.3 (resolution) — lands as **one commit**, its combined failing tests written first, so that
+  commit is individually green and bisectable. Tasks 2.1, 2.2, and each Phase 4/5 subtask remain their own
+  green commits.
 - **Phase 4's reclaim removal must not land without Phase 5.** Phase 5 is the **sole producer** of the
   `rootfs_cleanup_pending_at` marker the Phase 4 close-driven sweep consumes; the existing `_close_locked`
   sets only `cleanup_pending_at`. Until Phase 5 lands, the close-driven sweep is inert end-to-end, and
@@ -44,10 +47,10 @@ phase ordering:
   replacement produces. **Invariant to assert:** no `owner_kind='investigations'` rootfs object can exist
   on main without a live reclaimer.
 - **Bisectability under no-squash.** The repo keeps individual commits (no squash) so `git bisect` can pin
-  a regression. Prefer **add-new-then-remove-old within a single commit** so each commit is individually
-  green (Task 2.3 does the tool swap this way); collapse an irreducible red window into **one** commit (the
-  whole upload-lane swap as a single commit) rather than a run of red commits, and where one is truly
-  unavoidable, state in the PR that those commits bisect as a unit.
+  a regression. The prescriptive grouping above keeps **every** commit individually green: the irreducible
+  red window (removal-before-replacement) is collapsed into the single upload-lane-swap commit, and every
+  other task is its own green commit. No run of red commits lands on main, so bisect never hits a
+  non-building commit.
 
 Phase 1 (schema) is the prerequisite for all. TDD throughout: write the failing test named in each task's
 acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate").
@@ -220,10 +223,12 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
   `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}` (unparseable /
   no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X); per referencer stat
   `overlay_path(id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`) for condition (a) and check the 4.1a constant for
-  (b). **Fail-closed:** distinguish a missing overlay under a *present/accessible* `ROOTFS_DIR` (overlay
-  gone → reclaimable) from an *absent/inaccessible* `ROOTFS_DIR` (**defer the whole pass** — never read a
-  missing root as "all overlays gone"). The reconciler does no host-FS access today, so a mis-deployed
-  reconciler must reclaim nothing, not everything.
+  (b). **Fail-closed, per-pass:** distinguish a missing overlay under a *present/accessible* `ROOTFS_DIR`
+  (overlay gone → reclaimable) from an *absent/inaccessible* `ROOTFS_DIR` (**defer the whole pass**, retried
+  next pass — never read a missing root as "all overlays gone"). Reuse the **existing** reconciler host-FS
+  pattern: `reconciler/repairs/console_rotation.py` already `os.stat`s host files and degrades gracefully
+  per-pass on a stat failure (it explicitly tolerates a non-co-located reconciler) — model the probe on
+  that, **not** a novel startup gate.
 - **Acceptance:** spec AC-8 (deferred while overlay present; a `failed` referencer whose overlay was
   reclaimed drains), AC-8c (`reprovisioning`/`restoring` defer), AC-8f (unrelated System doesn't pin X),
   AC-8i (**fail-closed** — an inaccessible `ROOTFS_DIR` reclaims nothing).
@@ -247,17 +252,18 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
 - **Do:** close-driven selects by **`rootfs_cleanup_pending_at`** (its own marker — NOT `cleanup_pending_at`;
   clears only its own when drained); TTL selects committed `owner_kind='investigations'`,
   `retention_class='rootfs'` objects past retention on a never-closed investigation.
-- **Registration guard (concrete semantics):** for local-libvirt the reconciler **is** libvirt-host-local
-  (single-host M0/M1 topology; a deploy-role invariant, declared alongside the other host deps). Startup
-  checks `ROOTFS_DIR` + `UPLOADS_DIR` are present/accessible: if so, register the sweeps; if not, **skip
-  registration and emit a prominent error log + a metric** (the reconciler keeps running its other repairs
-  — no availability regression), and reclaim of `owner_kind='investigations'` rootfs does not run on that
-  (mis-deployed / future-split) topology. Pin the chosen behavior (skip+alert, not crash) with a test so it
-  can't drift. A split reconciler/libvirt-host topology having no rootfs reclaimer is documented as out of
-  scope until a remote-reclaim design (the remote lane is deferred, decision 8).
+- **No startup registration gate — per-pass degradation + ensure-create.** The sweeps register
+  unconditionally and degrade **per pass** (Task 4.1b): an inaccessible `ROOTFS_DIR` defers the pass, so a
+  host that gains the dir later reclaims without a restart (a startup one-shot gate would silently disable
+  reclaim forever on a fresh host, since `ROOTFS_DIR`/`UPLOADS_DIR` are created lazily on first provision —
+  `storage.py` `mkdir(parents=True, exist_ok=True)`, no startup mkdir). The reconciler **ensure-creates**
+  `ROOTFS_DIR`/`UPLOADS_DIR` at startup (host-local, this deployment's) so a fresh not-yet-provisioned host
+  still reclaims. Local-libvirt is host-local (single-host M0/M1); a split topology defers rootfs reclaim
+  (consistent with `console_rotation`'s non-co-location tolerance) until the deferred remote lane
+  (decision 8) designs remote reclaim.
 - **Acceptance:** AC-7 (object+row gone past grace), AC-8b (TTL reclaims a never-closed investigation),
   AC-8d (**marker independence** — a drained build artifact nulling `cleanup_pending_at` does not starve
-  the rootfs sweep), AC-8i (registration guard fails loudly without host FS), AC-10 (residual committed +
+  the rootfs sweep), AC-8i (per-pass fail-closed defer; recovers when the dir becomes accessible), AC-10 (residual committed +
   stale-window object collected), **AC-4d reclaim branch** (finalize-committed-then-close → reclaimed, no
   orphan — the half Phase 2 cannot prove).
 
@@ -284,16 +290,22 @@ is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, 
 
 ### Task 5.1 — `close_investigation(force)` bound-System coupling
 - **Fits:** ADR-0441 §7.
-- **Files:** `src/kdive/services/investigations/lifecycle.py` + `mcp/tools/lifecycle/investigations/lifecycle.py`
-  (add `force: bool = False`); enumerate `systems WHERE investigation_id=<inv> AND state NOT IN terminal`.
-- **Do:** default ⇒ live present → `configuration_error` listing ids, refuse. force ⇒ **all-or-nothing**:
-  admin is a **single per-project check** (all bound Systems share the investigation's project — same-project
-  invariant — so no per-System variance); matching `systems.teardown`'s `_ADMIN` (no escalation). If admin
-  passes, enqueue all teardowns + close + set **both** `cleanup_pending_at` **and** `rootfs_cleanup_pending_at`
-  in one txn; an **enqueue error** aborts with **zero** teardowns, investigation unchanged. Any successful
-  close sets both markers. Never consider NULL-investigation Systems.
+- **Files:** `src/kdive/services/investigations/lifecycle.py` (`_close_locked` — the **shared** path both
+  default and force use — sets `rootfs_cleanup_pending_at` **alongside** the existing `cleanup_pending_at`,
+  so the marker is written on *every* successful close, not only the force branch) +
+  `mcp/tools/lifecycle/investigations/lifecycle.py` (add `force: bool = False`); enumerate
+  `systems WHERE investigation_id=<inv> AND state NOT IN terminal`.
+- **Do:** default ⇒ live present → `configuration_error` listing ids, refuse; **no live → close and set
+  both markers in `_close_locked`** (the tidy operator path: tear down each System, then default-close).
+  force ⇒ **all-or-nothing**: admin is a **single per-project check** (all bound Systems share the
+  investigation's project — same-project invariant — so no per-System variance); matching
+  `systems.teardown`'s `_ADMIN` (no escalation). If admin passes, enqueue all teardowns + close in one txn;
+  an **enqueue error** aborts with **zero** teardowns, investigation unchanged. Never consider
+  NULL-investigation Systems.
 - **Acceptance:** spec AC-5 (block+list), AC-6 (force enqueues teardown + closes; single-project admin
-  fails wholesale; **atomic — an enqueue error enqueues zero teardowns**). RBAC: force teardown is
+  fails wholesale; **atomic — an enqueue error enqueues zero teardowns**), **AC-6b (default close of an
+  investigation whose bound Systems are already `torn_down` sets `rootfs_cleanup_pending_at` and the
+  close-driven sweep subsequently reclaims** — not just the force path). RBAC: force teardown is
   destructive — **admin** per System project (assert a same-project contributor cannot force-teardown a
   bound System — no escalation).
 - **Watch:** `investigations.close` is `_CONTRIBUTOR`, `systems.teardown` is `_ADMIN` (exposure.py). Force
