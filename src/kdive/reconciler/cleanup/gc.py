@@ -4,55 +4,36 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import stat
-from contextlib import suppress
 from datetime import timedelta
-from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.content_address import rootfs_object_token
-from kdive.domain.capacity.state import (
-    ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES,
-    SystemState,
-)
-from kdive.domain.errors import CategorizedError
+from kdive.domain.operations.jobs import JobKind
+from kdive.jobs import queue
+from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload
 from kdive.providers.infra.console_hosting import CollectorRegistry
 from kdive.providers.infra.reaping import DumpVolumeReaper
-from kdive.providers.shared.runtime_paths import overlay_name, staged_rootfs_path
-from kdive.reconciler.repairs.allocations import has_active_capture_job
+from kdive.reconciler.repairs.allocations import SYSTEM_RECONCILER_PRINCIPAL, has_active_capture_job
 from kdive.reconciler.repairs.systems import gone_system_state_values
 
 _log = logging.getLogger(__name__)
 
-#: The state values of the pre-overlay/re-materialize referencer states — condition (b) of the
-#: investigation-rootfs reclaim gate (ADR-0441 §6). A referencer in one of these pins the base even
-#: with its overlay file momentarily absent.
-_PRE_OVERLAY_STATE_VALUES: frozenset[str] = frozenset(
-    s.value for s in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
-)
-
-_ROOTFS_REFERENCERS_SQL = (
-    "SELECT id, state, provisioning_profile FROM systems "
-    "WHERE investigation_id = %s AND state <> %s"
-)
-
 _CLOSE_DRIVEN_INV_SQL = (
-    "SELECT id FROM investigations "
+    "SELECT id, project FROM investigations "
     "WHERE rootfs_cleanup_pending_at IS NOT NULL AND rootfs_cleanup_pending_at < now() - %s"
 )
 _INV_ROOTFS_OBJECTS_SQL = (
-    "SELECT id, object_key FROM artifacts "
+    "SELECT id FROM artifacts "
     "WHERE owner_kind = 'investigations' AND retention_class = 'rootfs' AND owner_id = %s"
 )
 #: TTL backstop scope: committed investigation-rootfs objects past retention on a **never-closed**
 #: investigation (``open``/``active`` — a closed one is the close-driven sweep's job, keyed on the
-#: since-cleared marker; ADR-0441 §6).
+#: since-cleared marker; ADR-0441 §6). The state predicate also keeps this worklist disjoint from
+#: the close-driven one, so the two never contend for the shared per-investigation dedup key.
 _TTL_ROOTFS_OBJECTS_SQL = (
-    "SELECT a.id, a.object_key, a.owner_id FROM artifacts a "
+    "SELECT a.id, a.owner_id, i.project FROM artifacts a "
     "JOIN investigations i ON i.id = a.owner_id "
     "WHERE a.owner_kind = 'investigations' AND a.retention_class = 'rootfs' "
     "AND a.created_at < now() - %s AND i.state IN ('open', 'active')"
@@ -64,6 +45,12 @@ DEFAULT_REPORT_ARTIFACT_RETENTION = timedelta(days=7)
 DEFAULT_INVESTIGATION_CLEANUP_GRACE = timedelta(days=1)
 DEFAULT_BUILD_ARTIFACT_RETENTION = timedelta(days=30)
 DEFAULT_INVESTIGATION_ROOTFS_RETENTION = timedelta(days=30)
+
+#: How long a settled rootfs reclaim job holds its per-investigation slot before the sweeps re-issue
+#: it (ADR-0442 §6). The sweeps run every ~30 s but reclaim is grace/TTL-governed in days, so a
+#: faulting reclaim retrying every few minutes converges just as fast while keeping the failed row
+#: inspectable and keeping a permission wall from becoming a retry storm against the object store.
+ROOTFS_RECLAIM_RETRY_BACKOFF = timedelta(minutes=5)
 
 #: Run-owned artifact retention classes the build-artifact sweeps reclaim (ADR-0234 §4, #768): the
 #: uploaded combined kernel tar / vmlinux / initrd (``build``) and an internally-built run kernel
@@ -269,303 +256,148 @@ async def reap_orphaned_dump_volumes(
     return reaped
 
 
-def rootfs_dir_accessible(rootfs_dir: str) -> bool:
-    """Per-pass fail-closed probe: whether a staging/overlay root directory is accessible.
+async def sweep_investigation_rootfs_reclaim(conn: AsyncConnection, grace: timedelta) -> int:
+    """Enqueue a rootfs reclaim job per closed investigation past ``grace`` (ADR-0442 §1, #1522).
 
-    Models :func:`console_rotation._boot_id`'s degradation (ADR-0441 §6, AC-8i): any ``os.stat``
-    failure — absent, unreadable, or a non-co-located reconciler — degrades to ``False`` so the
-    caller defers the **whole** pass rather than reading a missing root as "all overlays gone" and
-    mass-deleting live SENSITIVE bases. A path that exists but is not a directory is also unsafe.
+    DB-only: selects investigations by the **dedicated** ``rootfs_cleanup_pending_at`` marker (never
+    the build sweep's ``cleanup_pending_at``, so a drained build artifact cannot starve this), reads
+    their committed ``owner_kind='investigations'``/``retention_class='rootfs'`` rows, and hands the
+    worklist to the worker. It touches neither the host filesystem nor the object store — the whole
+    reclaim, including the liveness gate, runs on the worker that created the staging tree.
+
+    A marker past grace with **no** rootfs rows left still gets a job, carrying an empty worklist:
+    the handler falls straight through to its drain tail, which sweeps the staging directory (a
+    crash-orphaned SENSITIVE ``*.partial`` no row owns) and clears the marker. Short-circuiting that
+    here would either strand the orphan or put a filesystem write back in the reconciler, and it
+    would split one drain rule into two. Returns the number of reclaim jobs ensured this pass.
     """
-    try:
-        return stat.S_ISDIR(os.stat(rootfs_dir).st_mode)
-    except OSError:
-        return False
-
-
-def _overlay_pins_base(system_id: object, *, rootfs_dir: str) -> bool:
-    """Condition (a): whether ``system_id``'s per-System overlay file pins the base (ADR-0441 §6).
-
-    Called only under an already-accessible ``rootfs_dir`` (the per-pass gate ran first), so a
-    definite ``FileNotFoundError`` reads as "overlay genuinely gone" (not a pin). Any **other**
-    stat fault is fail-closed — treated as present (a pin) — so a transient probe error defers the
-    checksum rather than unlinking a base under a possibly-live overlay.
-    """
-    overlay = os.path.join(rootfs_dir, overlay_name(str(system_id)))
-    try:
-        os.stat(overlay)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _references_token(profile: object, token: str) -> bool:
-    """Whether a stored ``provisioning_profile`` references the upload rootfs of ``token``.
-
-    Parses the raw JSON rootfs ref (ADR-0441 §6): only ``{"kind":"upload","checksum_sha256": C}``
-    whose ``C`` transcodes to ``token`` is a referencer. An unparseable profile, one with no rootfs,
-    or a ``catalog``/``local``/different-checksum ref is **not** a referencer of ``token`` — so one
-    unrelated live System never pins this base.
-    """
-    if not isinstance(profile, dict):
-        return False
-    provider = profile.get("provider")
-    section = provider.get("local-libvirt") if isinstance(provider, dict) else None
-    rootfs = section.get("rootfs") if isinstance(section, dict) else None
-    if not isinstance(rootfs, dict) or rootfs.get("kind") != "upload":
-        return False
-    checksum = rootfs.get("checksum_sha256")
-    if not isinstance(checksum, str):
-        return False
-    try:
-        return rootfs_object_token(checksum) == token
-    except CategorizedError:
-        return False
-
-
-async def rootfs_base_reclaimable(
-    conn: AsyncConnection, investigation_id: UUID, token: str, *, rootfs_dir: str
-) -> bool:
-    """Whether checksum ``token``'s base can be reclaimed: **no** referencing System pins it.
-
-    Enumerates ``systems WHERE investigation_id=<inv> AND state <> 'torn_down'``, keeps only the
-    real referencers of ``token`` (:func:`_references_token`), and pins the base if **any** of them
-    is either in a pre-overlay/re-materialize state (condition (b)) or has its overlay file present
-    (condition (a), :func:`_overlay_pins_base`). Reclaimable only when none pin (ADR-0441 §6).
-
-    Assumes ``rootfs_dir`` is accessible — the caller runs the per-pass
-    :func:`rootfs_dir_accessible` fail-closed gate first and defers the whole pass otherwise.
-    """
-    async with conn.cursor() as cur:
-        await cur.execute(_ROOTFS_REFERENCERS_SQL, (investigation_id, SystemState.TORN_DOWN.value))
-        rows = await cur.fetchall()
-    for system_id, state, profile in rows:
-        if not _references_token(profile, token):
-            continue
-        if state in _PRE_OVERLAY_STATE_VALUES:
-            return False
-        if _overlay_pins_base(system_id, rootfs_dir=rootfs_dir):
-            return False
-    return True
-
-
-def _rootfs_token_from_key(object_key: str) -> str:
-    """Extract the content-address token from a ``rootfs-<token>`` investigation object key."""
-    return object_key.rsplit("/", 1)[-1].removeprefix("rootfs-")
-
-
-def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) -> None:
-    """Unlink the staged base for ``(investigation, token)``; ``ENOENT`` is the achieved post-state.
-
-    Any **other** ``OSError`` propagates so the caller defers the whole checksum before deleting the
-    row (ADR-0441 §6): the base file must never be stranded without its ``artifacts`` handle.
-    """
-    dest = staged_rootfs_path(investigation_id, token, upload_dir=Path(uploads_dir))
-    try:
-        dest.unlink()
-    except FileNotFoundError:
-        return
-
-
-def _sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) -> None:
-    """Glob-unlink stale ``*.partial`` then remove the now-empty per-investigation staging dir.
-
-    Best-effort (ADR-0441 §5): a crash-orphaned ``<token>.*.partial`` no row owns is unlinked here
-    as the backstop to the live fetcher's opportunistic cleanup, **before** the empty-dir removal
-    (else a leftover partial keeps the dir non-empty forever). A dir still holding a base (a
-    deferred checksum) is left in place — ``rmdir`` only removes an empty dir.
-    """
-    inv_dir = Path(uploads_dir) / str(investigation_id)
-    with suppress(OSError):
-        for partial in inv_dir.glob("*.partial"):
-            partial.unlink(missing_ok=True)
-    with suppress(OSError):
-        inv_dir.rmdir()
-
-
-async def _reclaim_rootfs_checksum(
-    conn: AsyncConnection,
-    store: ArtifactObjectDeleter,
-    *,
-    artifact_id: UUID,
-    object_key: str,
-    token: str,
-    investigation_id: UUID,
-    uploads_dir: str,
-) -> bool:
-    """Reclaim one checksum's object + staged file + row in the pinned order (ADR-0441 §6).
-
-    Order: delete the object, unlink the staged base, then delete the ``artifacts`` row **last**
-    (fail-loud in txn — the worklist anchor). Both the object delete (idempotent on a 404) and the
-    unlink (``ENOENT`` = success) share one fault contract: any **real** fault defers the whole
-    checksum (``False``, row kept) *before* the row delete, so a genuine fault never drops the row
-    while the SENSITIVE object/file survives. Returns ``True`` when the checksum drained. ``token``
-    is the caller's already-derived content-address token (not re-derived from ``object_key``).
-    """
-    try:
-        await asyncio.to_thread(store.delete, object_key)
-    except Exception:  # noqa: BLE001 - a real store fault defers before the row delete
-        _log.warning(
-            "reconciler: deleting investigation rootfs object %s failed; defer + retry next pass",
-            object_key,
-            exc_info=True,
-        )
-        return False
-    try:
-        await asyncio.to_thread(_unlink_staged_base, uploads_dir, investigation_id, token)
-    except OSError:
-        _log.warning(
-            "reconciler: unlinking staged rootfs base for %s failed; defer + retry next pass",
-            object_key,
-            exc_info=True,
-        )
-        return False
-    async with conn.transaction(), conn.cursor() as cur:
-        await cur.execute("DELETE FROM artifacts WHERE id = %s", (artifact_id,))
-    return True
-
-
-async def _reclaim_object_if_reclaimable(
-    conn: AsyncConnection,
-    store: ArtifactObjectDeleter,
-    *,
-    artifact_id: UUID,
-    object_key: str,
-    investigation_id: UUID,
-    rootfs_dir: str,
-    uploads_dir: str,
-) -> bool:
-    """Reclaim one committed rootfs object iff the liveness gate permits; else defer (ADR-0441 §6).
-
-    Returns ``True`` only when the checksum fully drained (object + staged file + row gone). A gate
-    that pins the base, or a fault mid-reclaim, returns ``False`` so the caller keeps the marker set
-    and retries next pass.
-    """
-    token = _rootfs_token_from_key(object_key)
-    if not await rootfs_base_reclaimable(conn, investigation_id, token, rootfs_dir=rootfs_dir):
-        return False
-    return await _reclaim_rootfs_checksum(
-        conn,
-        store,
-        artifact_id=artifact_id,
-        object_key=object_key,
-        token=token,
-        investigation_id=investigation_id,
-        uploads_dir=uploads_dir,
-    )
-
-
-async def gc_investigation_uploaded_rootfs(
-    conn: AsyncConnection,
-    store: ArtifactObjectDeleter,
-    grace: timedelta,
-    *,
-    rootfs_dir: str,
-    uploads_dir: str,
-) -> int:
-    """Reclaim closed investigations' uploaded rootfs bases past ``grace`` (close-driven, ADR-0441).
-
-    Selects investigations by the **dedicated** ``rootfs_cleanup_pending_at`` marker (never the
-    build sweep's ``cleanup_pending_at``, so a drained build artifact cannot starve this). For each,
-    reclaims every committed ``owner_kind='investigations'``/``retention_class='rootfs'`` object
-    whose checksum passes the overlay-absence gate, then — only when **all** its rootfs objects
-    drained — sweeps the staging dir and clears its own marker. Fails **closed** per pass: an
-    inaccessible ``rootfs_dir``/``uploads_dir`` reclaims nothing (defers), never unlinking a base
-    under a live guest.
-    """
-    if not (rootfs_dir_accessible(rootfs_dir) and rootfs_dir_accessible(uploads_dir)):
-        return 0
     async with conn.cursor() as cur:
         await cur.execute(_CLOSE_DRIVEN_INV_SQL, (grace,))
-        investigation_ids = [row[0] for row in await cur.fetchall()]
-    deleted = 0
-    for investigation_id in investigation_ids:
-        async with conn.cursor() as cur:
-            await cur.execute(_INV_ROOTFS_OBJECTS_SQL, (investigation_id,))
-            candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
-        drained = True
-        for artifact_id, object_key in candidates:
-            if await _reclaim_object_if_reclaimable(
-                conn,
-                store,
-                artifact_id=artifact_id,
-                object_key=object_key,
-                investigation_id=investigation_id,
-                rootfs_dir=rootfs_dir,
-                uploads_dir=uploads_dir,
-            ):
-                deleted += 1
-            else:
-                drained = False
-        if drained:
-            await asyncio.to_thread(_sweep_investigation_staging_dir, uploads_dir, investigation_id)
-            async with conn.transaction(), conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE investigations SET rootfs_cleanup_pending_at = NULL WHERE id = %s",
-                    (investigation_id,),
-                )
-    if deleted:
-        _log.info("reconciler: GC'd %d closed-investigation uploaded rootfs base(s)", deleted)
-    return deleted
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    enqueued = 0
+    for investigation_id, project in candidates:
+        artifact_ids = await _investigation_rootfs_artifact_ids(conn, investigation_id)
+        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+            enqueued += 1
+    if enqueued:
+        _log.info("reconciler: enqueued %d closed-investigation rootfs reclaim job(s)", enqueued)
+    return enqueued
 
 
-async def gc_expired_investigation_rootfs(
-    conn: AsyncConnection,
-    store: ArtifactObjectDeleter,
-    retention: timedelta,
-    *,
-    rootfs_dir: str,
-    uploads_dir: str,
+async def sweep_expired_investigation_rootfs_reclaim(
+    conn: AsyncConnection, retention: timedelta
 ) -> int:
-    """Reclaim never-closed investigations' uploaded rootfs bases past ``retention`` (TTL backstop).
+    """Enqueue a reclaim job per never-closed investigation past ``retention`` (TTL backstop).
 
     The mandatory backstop (ADR-0441 §6): a never-closed investigation would otherwise accumulate
-    SENSITIVE bases forever. Same overlay-absence gate and pinned reclaim as the close-driven sweep,
-    but gated on ``artifacts.created_at`` and scoped to ``open``/``active`` investigations. Fails
-    closed per pass on an inaccessible root.
+    SENSITIVE bases forever. Gated on ``artifacts.created_at`` and scoped to ``open``/``active``
+    investigations, so its worklist is disjoint from the close-driven sweep's (a closed
+    investigation is in neither state) and the two never contend for the shared per-investigation
+    dedup key. Only the past-retention rows are handed over, keeping the TTL policy here rather than
+    duplicating it into the worker. Returns the number of reclaim jobs ensured this pass.
     """
-    if not (rootfs_dir_accessible(rootfs_dir) and rootfs_dir_accessible(uploads_dir)):
-        return 0
     async with conn.cursor() as cur:
         await cur.execute(_TTL_ROOTFS_OBJECTS_SQL, (retention,))
-        candidates = [(row[0], str(row[1]), row[2]) for row in await cur.fetchall()]
-    deleted = 0
-    touched: set[UUID] = set()
-    for artifact_id, object_key, investigation_id in candidates:
-        touched.add(investigation_id)
-        if await _reclaim_object_if_reclaimable(
-            conn,
-            store,
-            artifact_id=artifact_id,
-            object_key=object_key,
-            investigation_id=investigation_id,
-            rootfs_dir=rootfs_dir,
-            uploads_dir=uploads_dir,
-        ):
-            deleted += 1
-    for investigation_id in touched:
-        if not await _investigation_has_rootfs_objects(conn, investigation_id):
-            await asyncio.to_thread(_sweep_investigation_staging_dir, uploads_dir, investigation_id)
-    if deleted:
-        _log.info("reconciler: GC'd %d uploaded rootfs base(s) past TTL", deleted)
-    return deleted
+        rows = await cur.fetchall()
+    due: dict[UUID, tuple[str, list[UUID]]] = {}
+    for artifact_id, investigation_id, project in rows:
+        _project, ids = due.setdefault(investigation_id, (str(project), []))
+        ids.append(artifact_id)
+    enqueued = 0
+    for investigation_id, (project, artifact_ids) in due.items():
+        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids):
+            enqueued += 1
+    if enqueued:
+        _log.info("reconciler: enqueued %d past-TTL rootfs reclaim job(s)", enqueued)
+    return enqueued
 
 
-async def _investigation_has_rootfs_objects(conn: AsyncConnection, investigation_id: UUID) -> bool:
-    """Return ``True`` while any committed uploaded-rootfs object row remains for the investigation.
-
-    Gates the TTL staging-dir sweep (glob-unlink ``*.partial`` + rmdir): a live provider fetch
-    resolves against a committed row before it writes ``<token>.<uuid>.partial``, so a remaining row
-    means a download may be in flight and its partial must not be clobbered. Only when **no** rootfs
-    row remains — every past-TTL base drained and no not-yet-TTL base still in use — is a stray
-    ``*.partial`` necessarily a crash orphan, matching the close-driven sweep's ``if drained`` guard
-    (ADR-0441 §5/§6).
-    """
+async def _investigation_rootfs_artifact_ids(
+    conn: AsyncConnection, investigation_id: UUID
+) -> list[UUID]:
+    """Every committed uploaded-rootfs artifact id of ``investigation_id``."""
     async with conn.cursor() as cur:
         await cur.execute(_INV_ROOTFS_OBJECTS_SQL, (investigation_id,))
-        return await cur.fetchone() is not None
+        return [row[0] for row in await cur.fetchall()]
+
+
+async def _try_enqueue_rootfs_reclaim(
+    conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
+) -> bool:
+    """Issue one investigation's reclaim job, logging and skipping a fault rather than aborting.
+
+    Matches the neighbouring sweeps' "one failure must not starve the rest" contract: a fault on one
+    investigation leaves its worklist untouched (the marker stays set, the rows stay) and the pass
+    continues with the next.
+    """
+    try:
+        return await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids)
+    except Exception:  # noqa: BLE001 - one enqueue failure must not starve the rest
+        _log.warning(
+            "reconciler: enqueuing the rootfs reclaim for investigation %s failed; retry next pass",
+            investigation_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def _enqueue_rootfs_reclaim(
+    conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
+) -> bool:
+    """Issue the one reclaim job for ``investigation_id``; return whether one was admitted.
+
+    The dedup key is **stable** per investigation (ADR-0442 §6), so the sweeps hold at most one job
+    row per investigation instead of one per ~30 s pass. Admission is gated here rather than left to
+    ``queue``'s ``recycle_terminal``, for two reasons the sweep cadence makes load-bearing:
+
+    - A recycle resets state in place and leaves ``created_at`` alone, but ``dequeue`` orders by
+      ``created_at``, so a repeatedly-recycled background job would sort ahead of every job enqueued
+      after it and head-of-line-block interactive work. Deleting the settled row and inserting a
+      fresh one re-dates the reclaim to the pass that decided it is due.
+    - A settled job is left alone until :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` has passed, so a
+      reclaim that keeps faulting retries on the order of minutes rather than twice a minute — and
+      its ``failed`` row stays inspectable for that window instead of being reset within 30 s.
+
+    The delete and the insert share one transaction, so a fault between them cannot leave the
+    investigation with neither a failure record nor a queued reclaim. A ``queued``/``running`` job
+    is left untouched (in-flight dedup). ``max_attempts=1`` because an in-job retry of a permission
+    wall or a dead store buys nothing the next pass does not: the sweep is the retry loop.
+    """
+    dedup_key = f"rootfs-reclaim:{investigation_id}"
+    async with conn.transaction():
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT state FROM jobs WHERE dedup_key = %s "
+                "AND (state NOT IN ('succeeded', 'failed', 'canceled') "
+                "     OR updated_at > now() - %s) FOR UPDATE",
+                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+            )
+            if await cur.fetchone() is not None:
+                return False
+            # The predicate rides the DELETE too, not just the fast-path SELECT above: a SELECT
+            # that matches nothing locks nothing, so two concurrent passes could both reach here —
+            # and an unconditional delete would then drop the job the other just admitted.
+            await cur.execute(
+                "DELETE FROM jobs WHERE dedup_key = %s "
+                "AND state IN ('succeeded', 'failed', 'canceled') AND updated_at <= now() - %s",
+                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+            )
+        await queue.enqueue(
+            conn,
+            JobKind.RECLAIM_INVESTIGATION_ROOTFS,
+            ReclaimInvestigationRootfsPayload(
+                investigation_id=str(investigation_id),
+                artifact_ids=[str(a) for a in artifact_ids],
+            ),
+            {
+                "principal": SYSTEM_RECONCILER_PRINCIPAL,
+                "agent_session": None,
+                "project": project,
+            },
+            dedup_key,
+            max_attempts=1,
+        )
+    return True
 
 
 async def _now_epoch(conn: AsyncConnection) -> float:

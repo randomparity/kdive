@@ -317,6 +317,33 @@ class DiagnosticsWorkerCheckPayload(_PayloadBase):
     provider: str
 
 
+class ReclaimInvestigationRootfsPayload(_PayloadBase):
+    """The due rootfs rows one investigation's reclaim job must attempt (ADR-0442, #1522).
+
+    ``artifact_ids`` is the worklist the reconciler sweep selected — every committed rootfs row for
+    a closed investigation past grace, or only the past-retention rows for the TTL backstop. Passing
+    the selected ids keeps the grace/TTL policy in the reconciler, where its configuration lives,
+    instead of duplicating it into the worker; the handler re-reads each row under the investigation
+    lock, so an id whose row already drained is a no-op rather than a fault.
+    """
+
+    investigation_id: str
+    artifact_ids: list[str]
+
+    @field_validator("investigation_id")
+    @classmethod
+    def _valid_investigation_id(cls, value: str) -> str:
+        UUID(value)
+        return value
+
+    @field_validator("artifact_ids")
+    @classmethod
+    def _valid_artifact_ids(cls, value: list[str]) -> list[str]:
+        for artifact_id in value:
+            UUID(artifact_id)
+        return value
+
+
 type _ActivePayloadModel = (
     type[SystemPayload]
     | type[ReprovisionPayload]
@@ -334,6 +361,7 @@ type _ActivePayloadModel = (
     | type[CaptureVmcorePayload]
     | type[ImageBuildPayload]
     | type[DiagnosticsWorkerCheckPayload]
+    | type[ReclaimInvestigationRootfsPayload]
 )
 type ActivePayloadModel = (
     SystemPayload
@@ -352,6 +380,7 @@ type ActivePayloadModel = (
     | CaptureVmcorePayload
     | ImageBuildPayload
     | DiagnosticsWorkerCheckPayload
+    | ReclaimInvestigationRootfsPayload
 )
 type PayloadModel = ActivePayloadModel
 
@@ -375,6 +404,7 @@ _ACTIVE_PAYLOAD_MODELS: dict[JobKind, _ActivePayloadModel] = {
     JobKind.AUTHORIZE_SSH_KEY: AuthorizeSshKeyPayload,
     JobKind.CHECK_SSH_REACHABLE: CheckSshReachablePayload,
     JobKind.CONSOLE_ROTATE: ConsoleRotatePayload,
+    JobKind.RECLAIM_INVESTIGATION_ROOTFS: ReclaimInvestigationRootfsPayload,
 }
 _HISTORICAL_RUN_PAYLOAD_MODELS: dict[JobKind, type[RunPayload]] = {
     JobKind.BUILD: BuildPayload,

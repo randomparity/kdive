@@ -340,6 +340,10 @@ def test_job_kind_covers_the_async_tool_surface() -> None:
         # control.capture_traffic enqueues this to run a bounded QEMU filter-dump on a ready
         # local-libvirt guest's netdev and store a Run-owned SENSITIVE pcap (ADR-0385, #1258).
         "capture_traffic",
+        # Server-internal (not agent-facing): the reconciler's two rootfs sweeps enqueue this per
+        # investigation so the worker that created the staging tree performs the reclaim's
+        # filesystem half, which the reconciler's user may not be able to (ADR-0442, #1522).
+        "reclaim_investigation_rootfs",
     }
 
 

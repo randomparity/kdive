@@ -43,6 +43,10 @@ class JobKind(StrEnum):
     # Host-side network traffic capture (ADR-0385): async because a filter-dump runs for a bounded
     # window and stores a Run-owned pcap; contributor-cancelable so a stray capture can be stopped.
     CAPTURE_TRAFFIC = "capture_traffic"
+    # Investigation-rootfs reclaim (ADR-0442): the reconciler enqueues, the worker unlinks. The
+    # staged base lives in a tree the worker created and may not be writable by the reconciler's
+    # user, so the filesystem half of the reclaim runs where the file was made.
+    RECLAIM_INVESTIGATION_ROOTFS = "reclaim_investigation_rootfs"
 
 
 RETIRED_JOB_KINDS: frozenset[JobKind] = frozenset({JobKind.BUILD, JobKind.BUILD_INSTALL_BOOT})
@@ -89,7 +93,8 @@ Retired server-build kinds are intentionally absent: historical rows remain read
 active handler is registered for ``build`` or ``build_install_boot``.
 ``jobs.cancel`` requires operator for every other kind: the destructive kinds
 (``teardown``/``force_crash``) and the platform/internal kinds
-(image_build/diagnostics_worker_check/console_rotate). The gate fails closed — a kind absent
+(image_build/diagnostics_worker_check/console_rotate/reclaim_investigation_rootfs). The gate fails
+closed — a kind absent
 here requires operator — so a newly added privileged kind is never silently
 contributor-cancellable.
 """

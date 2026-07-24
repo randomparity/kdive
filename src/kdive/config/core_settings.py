@@ -293,10 +293,12 @@ INVESTIGATION_ROOTFS_RETENTION_DAYS = Setting(
     group="reports",
     processes=_STORE_USERS,
     help=(
-        "Age in days after which the reconciler `gc_expired_investigation_rootfs` sweep reclaims "
-        "an investigation-scoped uploaded rootfs base (object + staged file + row) on an "
-        "investigation that never closed — the TTL backstop to the close+grace reclaim, both "
-        "gated on per-System overlay-file absence. ADR-0441 §6."
+        "Age in days after which the reconciler's TTL rootfs sweep enqueues a "
+        "`reclaim_investigation_rootfs` worker job, which reclaims an investigation-scoped "
+        "uploaded rootfs base (staged file + object + row) on an investigation that never "
+        "closed — the TTL backstop to the close+grace reclaim, both gated on per-System "
+        "overlay-file absence. The reconciler only enqueues; the worker that created the "
+        "staging tree performs the reclaim. ADR-0441 §6, ADR-0442."
     ),
     suggest="an integer number of days, e.g. 30",
 )

@@ -1,55 +1,37 @@
-"""The two investigation-rootfs reclaim sweeps (ADR-0441 §6, Task 4.1d).
+"""The two investigation-rootfs reclaim sweeps, now enqueue-only (ADR-0442, #1522).
 
-``gc_investigation_uploaded_rootfs`` (close-driven, keyed on ``rootfs_cleanup_pending_at``) and
-``gc_expired_investigation_rootfs`` (TTL backstop) reclaim a committed rootfs object + staged base +
-row on the overlay-absence liveness gate, fail closed per pass, and are independent of the build
-sweep's marker.
+``sweep_investigation_rootfs_reclaim`` (close-driven, keyed on ``rootfs_cleanup_pending_at``) and
+``sweep_expired_investigation_rootfs_reclaim`` (TTL backstop) hand the reclaim worklist to a worker
+job instead of doing it themselves: the reconciler may run as a different user than the worker that
+created the root-owned staging tree, so a reconciler-side unlink fails after the object is already
+gone. These cover that the sweeps touch neither the filesystem nor the object store, the disjoint
+worklists, and the stable per-investigation dedup slot.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import json
 from datetime import timedelta
-from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 
-from kdive.artifacts.content_address import rootfs_object_token
-from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
+from kdive.domain.operations.jobs import JobKind
+from kdive.reconciler.cleanup import gc
 from kdive.reconciler.cleanup.gc import (
-    gc_expired_investigation_rootfs,
-    gc_investigation_uploaded_rootfs,
+    sweep_expired_investigation_rootfs_reclaim,
+    sweep_investigation_rootfs_reclaim,
 )
+from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.reconciler.conftest import connect
 
-_CHECKSUM = base64.b64encode(hashlib.sha256(b"rootfs").digest()).decode("ascii")
-_TOKEN = rootfs_object_token(_CHECKSUM)
+_TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
 
 
-class _RecordingStore:
-    def __init__(self) -> None:
-        self.deleted: list[str] = []
-
-    def delete(self, key: str) -> None:
-        self.deleted.append(key)
-
-
-def _object_key(inv: UUID) -> str:
-    return f"local/investigations/{inv}/rootfs-{_TOKEN}"
-
-
-def _upload_profile() -> str:
-    return json.dumps(
-        {
-            "provider": {
-                "local-libvirt": {"rootfs": {"kind": "upload", "checksum_sha256": _CHECKSUM}}
-            }
-        }
-    )
+def _object_key(inv: UUID, token: str = _TOKEN) -> str:
+    return f"local/investigations/{inv}/rootfs-{token}"
 
 
 async def _seed_investigation(
@@ -71,62 +53,48 @@ async def _seed_investigation(
     return inv_id
 
 
-async def _seed_allocation(conn: psycopg.AsyncConnection) -> UUID:
-    resource_id, alloc_id = uuid4(), uuid4()
-    await conn.execute(
-        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
-        "VALUES (%s, 'local-libvirt', 'p', 'c', 'available', 'qemu:///system')",
-        (resource_id,),
-    )
-    await conn.execute(
-        "INSERT INTO allocations (id, resource_id, state, principal, project) "
-        "VALUES (%s, %s, 'active', 'p', 'proj')",
-        (alloc_id, resource_id),
-    )
-    return alloc_id
-
-
-async def _seed_system(conn: psycopg.AsyncConnection, inv: UUID, state: str) -> UUID:
-    alloc = await _seed_allocation(conn)
-    system_id = uuid4()
-    await conn.execute(
-        "INSERT INTO systems (id, allocation_id, investigation_id, state, provisioning_profile, "
-        "principal, project) VALUES (%s, %s, %s, %s, %s::jsonb, 'p', 'proj')",
-        (system_id, alloc, inv, state, _upload_profile()),
-    )
-    return system_id
-
-
 async def _seed_rootfs_object(
-    conn: psycopg.AsyncConnection, inv: UUID, *, created_age: timedelta | None = None
+    conn: psycopg.AsyncConnection,
+    inv: UUID,
+    *,
+    created_age: timedelta | None = None,
+    token: str = _TOKEN,
 ) -> UUID:
     artifact_id = uuid4()
     if created_age is None:
         await conn.execute(
             "INSERT INTO artifacts (id, owner_kind, owner_id, object_key, etag, sensitivity, "
             "retention_class) VALUES (%s, 'investigations', %s, %s, 'e', 'redacted', 'rootfs')",
-            (artifact_id, inv, _object_key(inv)),
+            (artifact_id, inv, _object_key(inv, token)),
         )
     else:
         await conn.execute(
             "INSERT INTO artifacts (id, owner_kind, owner_id, object_key, etag, sensitivity, "
             "retention_class, created_at) VALUES (%s, 'investigations', %s, %s, 'e', 'redacted', "
             "'rootfs', now() - %s)",
-            (artifact_id, inv, _object_key(inv), created_age),
+            (artifact_id, inv, _object_key(inv, token), created_age),
         )
     return artifact_id
 
 
-def _stage(uploads_dir: Path, inv: UUID) -> Path:
-    staged = uploads_dir / str(inv) / f"{_TOKEN}.qcow2"
-    staged.parent.mkdir(parents=True)
-    staged.write_bytes(b"base")
-    return staged
-
-
-async def _row_exists(conn: psycopg.AsyncConnection, artifact_id: UUID) -> bool:
-    cur = await conn.execute("SELECT 1 FROM artifacts WHERE id = %s", (artifact_id,))
-    return await cur.fetchone() is not None
+async def _reclaim_jobs(conn: psycopg.AsyncConnection, inv: UUID) -> list[dict[str, Any]]:
+    cur = await conn.execute(
+        "SELECT id, state, payload, dedup_key, created_at, max_attempts FROM jobs "
+        "WHERE kind = %s "
+        "AND payload->>'investigation_id' = %s",
+        (JobKind.RECLAIM_INVESTIGATION_ROOTFS.value, str(inv)),
+    )
+    return [
+        {
+            "id": row[0],
+            "state": row[1],
+            "payload": row[2],
+            "dedup_key": row[3],
+            "created_at": row[4],
+            "max_attempts": row[5],
+        }
+        for row in await cur.fetchall()
+    ]
 
 
 async def _marker(conn: psycopg.AsyncConnection, inv: UUID) -> object:
@@ -138,282 +106,316 @@ async def _marker(conn: psycopg.AsyncConnection, inv: UUID) -> object:
     return row[0]
 
 
-def test_close_driven_reclaims_object_row_and_file_past_grace(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    # AC-7 / AC-4d reclaim branch: a finalize-committed-then-closed investigation past grace, whose
-    # bound System is torn_down (overlay gone), reclaims with no orphan.
-    inv = uuid4()
-
+def test_close_driven_enqueues_the_due_rows_past_grace(migrated_url: str) -> None:
+    # The sweep's whole job is now to hand the worklist over: one job, carrying every committed
+    # rootfs row of the investigation, on the stable per-investigation dedup key.
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv2 = await _seed_investigation(
+            inv = await _seed_investigation(
                 seed, state="closed", rootfs_marker_age=timedelta(days=2)
             )
-            artifact_id = await _seed_rootfs_object(seed, inv2)
-            await _seed_system(seed, inv2, "torn_down")
-            nonlocal inv
-            inv = inv2
+            artifact_id = await _seed_rootfs_object(seed, inv)
         finally:
             await seed.close()
-        rootfs_dir = tmp_path / "rootfs"
-        rootfs_dir.mkdir()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        staged = _stage(uploads, inv)
-        store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
-            deleted = await gc_investigation_uploaded_rootfs(
-                conn,
-                store,
-                timedelta(days=1),
-                rootfs_dir=str(rootfs_dir),
-                uploads_dir=str(uploads),
-            )
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == [str(artifact_id)]
+            assert jobs[0]["dedup_key"] == f"rootfs-reclaim:{inv}"
+            # The sweep is the retry loop, so an in-job retry of a permission wall buys nothing.
+            assert jobs[0]["max_attempts"] == 1
+            assert await _marker(conn, inv) is not None  # the worker clears it, not the sweep
         finally:
             await conn.close()
-        assert deleted == 1
-        assert store.deleted == [_object_key(inv)]
-        assert not staged.exists()
-        assert not (uploads / str(inv)).exists()  # empty staging dir removed
-        check = await connect(migrated_url)
-        try:
-            assert not await _row_exists(check, artifact_id)
-            assert await _marker(check, inv) is None  # own marker cleared after drain
-        finally:
-            await check.close()
 
     asyncio.run(_run())
 
 
-def test_deferred_while_overlay_present_then_drains(migrated_url: str, tmp_path: Path) -> None:
-    # AC-8: a LIVE bound System with an actual overlay file on disk pins the base — the sweep must
-    # NOT reclaim (a naive "delete if past grace" regresses here). Drains once the overlay is gone.
-    inv = uuid4()
-    sys_id = uuid4()
-
+def test_close_driven_skips_an_investigation_inside_grace(migrated_url: str) -> None:
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            nonlocal inv, sys_id
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(hours=1)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_close_driven_enqueues_an_empty_worklist_rather_than_short_circuiting(
+    migrated_url: str,
+) -> None:
+    # A marker past grace with no rootfs rows still gets a job, carrying an empty worklist. The
+    # handler's drain tail sweeps the staging dir (a crash-orphaned SENSITIVE *.partial no row owns)
+    # and clears the marker. Short-circuiting here would strand the orphan or put a filesystem write
+    # back in the reconciler, and would split one drain rule into two.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == []
+            assert await _marker(conn, inv) is not None  # the handler clears it, not the sweep
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_marker_independence_from_build_sweep(migrated_url: str) -> None:
+    # AC-8d, preserved: cleanup_pending_at NULL (the build sweep drained it) but
+    # rootfs_cleanup_pending_at set — the rootfs sweep still fires, keyed on its OWN marker.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
             inv = await _seed_investigation(
                 seed, state="closed", rootfs_marker_age=timedelta(days=2)
             )
             await _seed_rootfs_object(seed, inv)
-            sys_id = await _seed_system(seed, inv, "ready")
         finally:
             await seed.close()
-        rootfs_dir = tmp_path / "rootfs"
-        rootfs_dir.mkdir()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        _stage(uploads, inv)
-        overlay = rootfs_dir / overlay_name(str(sys_id))
-        overlay.write_bytes(b"overlay")  # LIVE backing file
-        store = _RecordingStore()
-
-        async def _sweep() -> int:
-            conn = await connect(migrated_url)
-            try:
-                return await gc_investigation_uploaded_rootfs(
-                    conn,
-                    store,
-                    timedelta(days=1),
-                    rootfs_dir=str(rootfs_dir),
-                    uploads_dir=str(uploads),
-                )
-            finally:
-                await conn.close()
-
-        assert await _sweep() == 0  # overlay present -> deferred
-        assert store.deleted == []
-        check = await connect(migrated_url)
+        conn = await connect(migrated_url)
         try:
-            assert await _marker(check, inv) is not None  # marker retained
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
         finally:
-            await check.close()
-
-        overlay.unlink()  # teardown reclaimed the overlay
-        assert await _sweep() == 1  # now drains
+            await conn.close()
 
     asyncio.run(_run())
 
 
-def test_ttl_backstop_reclaims_never_closed(migrated_url: str, tmp_path: Path) -> None:
-    # AC-8b: a never-closed (open) investigation's committed object past retention is reclaimed by
-    # the TTL sweep on the same gate.
-    inv = uuid4()
+def test_repeat_passes_hold_one_reclaim_slot(migrated_url: str) -> None:
+    # ADR-0442 §6: while the job is in flight the sweep is a no-op — one row, same job.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            first = await _reclaim_jobs(conn, inv)
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+            second = await _reclaim_jobs(conn, inv)
+            assert len(second) == 1
+            assert second[0]["id"] == first[0]["id"]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_settled_job_holds_its_slot_through_the_backoff(migrated_url: str) -> None:
+    # A settled reclaim is not re-issued for ROOTFS_RECLAIM_RETRY_BACKOFF, so a faulting reclaim
+    # retries on the order of minutes instead of twice a minute — and its failed row stays
+    # inspectable for that window rather than being replaced within one pass.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            await conn.execute(
+                "UPDATE jobs SET state = 'failed', error_category = 'infrastructure_failure' "
+                "WHERE id = %s",
+                (job_id,),
+            )
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["id"] == job_id
+            assert jobs[0]["state"] == "failed"  # the failure record survives the pass
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_settled_job_past_the_backoff_is_reissued_with_a_fresh_created_at(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `dequeue` claims by ORDER BY created_at, so re-issuing in place (queue's recycle_terminal)
+    # would keep the original timestamp and let a repeatedly-failing background reclaim
+    # head-of-line-block every job enqueued after it. The sweep drops the settled row and inserts
+    # a fresh one, carrying this pass's due set.
+    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
 
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            nonlocal inv
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            first_row = await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            before = (await _reclaim_jobs(conn, inv))[0]
+            await conn.execute("UPDATE jobs SET state = 'failed' WHERE id = %s", (before["id"],))
+            second_row = await _seed_rootfs_object(conn, inv, token="c2Vjb25kLXRva2Vu")
+
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1  # still exactly one slot, not a row per pass
+            after = jobs[0]
+            assert after["id"] != before["id"]
+            assert after["created_at"] > before["created_at"]  # re-dated, so it cannot preempt
+            assert after["state"] == "queued"
+            assert set(after["payload"]["artifact_ids"]) == {str(first_row), str(second_row)}
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_a_canceled_job_does_not_wedge_the_slot(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The slot is reconciler-owned: an operator cancel stops the current attempt but must not
+    # silently disable reclaim for the investigation forever (ADR-0442 §6 — cancel is advisory).
+    monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_rootfs_object(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            await conn.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (job_id,))
+
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["state"] == "queued"
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_ttl_backstop_enqueues_only_past_retention_rows(migrated_url: str) -> None:
+    # AC-8b/AC-13: a never-closed (open) investigation's past-retention object is handed over; a
+    # fresh one in the same investigation is not, so the TTL policy stays in the reconciler.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
             inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            expired = await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
+            await _seed_rootfs_object(seed, inv, token="ZnJlc2gtdG9rZW4")  # inside retention
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == [str(expired)]
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_ttl_backstop_skips_a_closed_investigation(migrated_url: str) -> None:
+    # The two worklists are disjoint by construction, so they never contend for the shared slot:
+    # a closed investigation is the close-driven sweep's, and is in neither `open` nor `active`.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
             await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
         finally:
             await seed.close()
-        rootfs_dir = tmp_path / "rootfs"
-        rootfs_dir.mkdir()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        _stage(uploads, inv)
-        store = _RecordingStore()
         conn = await connect(migrated_url)
         try:
-            deleted = await gc_expired_investigation_rootfs(
-                conn,
-                store,
-                timedelta(days=30),
-                rootfs_dir=str(rootfs_dir),
-                uploads_dir=str(uploads),
-            )
+            assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
         finally:
             await conn.close()
-        assert deleted == 1
-        assert store.deleted == [_object_key(inv)]
 
     asyncio.run(_run())
 
 
-def test_ttl_leaves_live_partial_of_pinned_object(migrated_url: str, tmp_path: Path) -> None:
-    # A past-TTL object PINNED by a live System (overlay present) is not reclaimed; the TTL sweep
-    # must NOT glob-unlink a concurrent fetcher's in-flight <token>.<uuid>.partial while a rootfs
-    # row still exists (else it clobbers the re-provision #1502's reuse targets, persistently).
-    inv = uuid4()
-    sys_id = uuid4()
-
-    async def _run() -> None:
-        seed = await connect(migrated_url)
-        try:
-            nonlocal inv, sys_id
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
-            await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
-            sys_id = await _seed_system(seed, inv, "ready")
-        finally:
-            await seed.close()
-        rootfs_dir = tmp_path / "rootfs"
-        rootfs_dir.mkdir()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        _stage(uploads, inv)
-        overlay = rootfs_dir / overlay_name(str(sys_id))
-        overlay.write_bytes(b"overlay")  # LIVE backing file pins the base (condition (a))
-        live_partial = uploads / str(inv) / f"{_TOKEN}.{uuid4()}.partial"
-        live_partial.write_bytes(b"in-flight download")
-        store = _RecordingStore()
-        conn = await connect(migrated_url)
-        try:
-            deleted = await gc_expired_investigation_rootfs(
-                conn,
-                store,
-                timedelta(days=30),
-                rootfs_dir=str(rootfs_dir),
-                uploads_dir=str(uploads),
-            )
-        finally:
-            await conn.close()
-        assert deleted == 0  # pinned by the live overlay
-        assert store.deleted == []
-        assert live_partial.exists()  # the in-flight download was NOT clobbered
-        check = await connect(migrated_url)
-        try:
-            cur = await check.execute(
-                "SELECT 1 FROM artifacts WHERE owner_kind = 'investigations' AND owner_id = %s",
-                (inv,),
-            )
-            assert await cur.fetchone() is not None  # row retained (still referenced)
-        finally:
-            await check.close()
-
-    asyncio.run(_run())
-
-
-def test_marker_independence_from_build_sweep(migrated_url: str, tmp_path: Path) -> None:
-    # AC-8d: cleanup_pending_at NULL (build sweep drained it) but rootfs_cleanup_pending_at set —
-    # the rootfs sweep still fires, keyed on its OWN marker.
-    inv = uuid4()
-
-    async def _run() -> None:
-        seed = await connect(migrated_url)
-        try:
-            nonlocal inv
-            inv = await _seed_investigation(
-                seed, state="closed", rootfs_marker_age=timedelta(days=2)
-            )
-            # cleanup_pending_at stays NULL (never set / already cleared by the build sweep).
-            await _seed_rootfs_object(seed, inv)
-        finally:
-            await seed.close()
-        rootfs_dir = tmp_path / "rootfs"
-        rootfs_dir.mkdir()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        _stage(uploads, inv)
-        store = _RecordingStore()
-        conn = await connect(migrated_url)
-        try:
-            deleted = await gc_investigation_uploaded_rootfs(
-                conn,
-                store,
-                timedelta(days=1),
-                rootfs_dir=str(rootfs_dir),
-                uploads_dir=str(uploads),
-            )
-        finally:
-            await conn.close()
-        assert deleted == 1
-
-    asyncio.run(_run())
-
-
-def test_fail_closed_when_rootfs_dir_inaccessible_then_recovers(
-    migrated_url: str, tmp_path: Path
+def test_a_dead_worker_recovers_via_the_abandoned_jobs_repair(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # AC-8i: an inaccessible rootfs_dir reclaims nothing (defers the whole pass), never reading a
-    # missing root as "all overlays gone"; a later pass with an accessible dir reclaims (no reboot).
-    inv = uuid4()
-
+    # A worker that dies mid-reclaim leaves the job `running` with a lapsed lease, and the sweep's
+    # admission gate treats `running` as in flight — so recovery is not the sweep's own doing. It
+    # runs through `repair_abandoned_jobs`, which dead-letters the zombie (attempt >= max_attempts,
+    # which max_attempts=1 makes true on the first claim); only then does the sweep re-issue. This
+    # reddens if that coupling is ever broken.
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            nonlocal inv
             inv = await _seed_investigation(
                 seed, state="closed", rootfs_marker_age=timedelta(days=2)
             )
             await _seed_rootfs_object(seed, inv)
         finally:
             await seed.close()
-        uploads = tmp_path / "uploads"
-        uploads.mkdir()
-        _stage(uploads, inv)
-        missing = tmp_path / "gone-rootfs"  # never created
-        store = _RecordingStore()
-
-        async def _sweep(rootfs_dir: Path) -> int:
-            conn = await connect(migrated_url)
-            try:
-                return await gc_investigation_uploaded_rootfs(
-                    conn,
-                    store,
-                    timedelta(days=1),
-                    rootfs_dir=str(rootfs_dir),
-                    uploads_dir=str(uploads),
-                )
-            finally:
-                await conn.close()
-
-        assert await _sweep(missing) == 0  # fail-closed: reclaims nothing
-        assert store.deleted == []
-        check = await connect(migrated_url)
+        conn = await connect(migrated_url)
         try:
-            assert await _marker(check, inv) is not None
-        finally:
-            await check.close()
+            await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1))
+            job_id = (await _reclaim_jobs(conn, inv))[0]["id"]
+            # A worker claimed it, then the process died: running, lease lapsed, attempt spent.
+            await conn.execute(
+                "UPDATE jobs SET state = 'running', worker_id = 'dead-worker', attempt = 1, "
+                "lease_expires_at = now() - interval '1 hour' WHERE id = %s",
+                (job_id,),
+            )
 
-        real = tmp_path / "rootfs"
-        real.mkdir()
-        assert await _sweep(real) == 1  # recovers once the dir is accessible
+            monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+            # Without the abandoned-jobs repair the slot stays wedged: `running` is in flight.
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+
+            assert await repair_abandoned_jobs(conn) == 1
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["state"] == "queued"
+            assert jobs[0]["id"] != job_id  # a fresh, re-dated row
+        finally:
+            await conn.close()
 
     asyncio.run(_run())
