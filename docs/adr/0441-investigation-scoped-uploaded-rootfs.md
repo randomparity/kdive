@@ -157,7 +157,10 @@ The rootfs upload is decoupled from any System. A new `_UploadOwnerSpec` for
 The System-scoped upload path is **removed, not deprecated** (`artifacts.create_system_upload`, the
 `_SYSTEM_UPLOAD` spec, `_commit_uploaded_rootfs`, `_system_accepts_upload`, the
 `rootfs_upload_window_allowed` policy hook, and the `systems.define` upload window). `SYSTEM_ARTIFACT_NAMES`
-accepted only `rootfs`, so nothing else rode that lane.
+accepted only `rootfs`, so nothing else rode that lane. Two other modules consume the removed symbols and
+are updated in the same change: the `artifacts.expected_uploads` discovery tool's `'system'` rootfs item
+is **re-pointed** to an `'investigations'` item for `create_investigation_upload` (not deleted — else the
+new upload path has no discovery surface), and `SYSTEM_ARTIFACT_NAMES` (`read_model`) is retired/re-owned.
 
 ### 4. Reference by checksum; resolve only within the System's own investigation
 

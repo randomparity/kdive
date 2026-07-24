@@ -31,6 +31,17 @@ phase ordering:
   never Phase 4's reclaim removal alone (else close+grace silently does nothing and only the TTL backstop
   reclaims). Phase 4's AC-7/AC-8 unit tests seed the marker directly.
 
+- **All-or-nothing merge: Phases 2–5 land as one PR (or a stacked PR merged to main together).** There is
+  **no leak-free proper prefix** once `create_system_upload` is removed: after a Phase 2+3-only merge, the
+  new path creates `owner_kind='investigations'` objects but the old teardown reclaim (still present until
+  Task 4.2) only targets `owner_kind='systems'`, and the new sweeps don't exist until Phase 4 — so any
+  `complete_rootfs_upload` on main in that window orphans a SENSITIVE multi-GiB object with **no
+  reclaimer**. Therefore Phases 2–5 merge atomically; Phase 1 (additive schema) may precede and Phase 6
+  (doc regen) may follow. Within that PR, order Phase 5 (the `rootfs_cleanup_pending_at` producer)
+  **before** Task 4.2 (the teardown-reclaim removal) so no intermediate commit removes reclaim before its
+  replacement produces. **Invariant to assert:** no `owner_kind='investigations'` rootfs object can exist
+  on main without a live reclaimer.
+
 Phase 1 (schema) is the prerequisite for all. TDD throughout: write the failing test named in each task's
 acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate").
 
@@ -107,14 +118,21 @@ acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate
   `uploads.py`; remove `_commit_uploaded_rootfs`/`_finalize_provision_ready` rootfs-commit from
   `jobs/handlers/systems.py`; remove `rootfs_upload_window_allowed` from `profiles/provider_policy.py` +
   `providers/local_libvirt/profile_policy.py`; remove the `systems.define` upload-window opening.
+- **Second consumer (import-critical):** `mcp/tools/catalog/artifacts/expected_uploads.py` imports
+  `CREATE_SYSTEM_UPLOAD_TOOL` and builds a `'system'` discovery item (`_NEXT_ACTIONS`, `_SYSTEM_CONTRACTS`)
+  — deleting the tool symbol **breaks its top-level import** (a hard `ImportError` reddening the app build,
+  not a soft test failure). **Re-point** it to an `'investigations'` discovery item for
+  `create_investigation_upload` in the same commit (else the new upload path has no discovery surface — a
+  phantom-feature regression). Confirm whether `SYSTEM_ARTIFACT_NAMES` (`artifacts/read_model.py`) is
+  retired or re-owned.
 - **Also (same commit, for green):** delete the old ADR-0434 upload-provision tests and remove the old
   tool's `mcp/exposure.py` + `mcp/schema/tool_index.py` + RBAC-matrix + `_BEHAVIOR_TESTS_BY_TOOL` entries,
-  and **register the two new tools** in those same maps — so the exposure/behavior-map/RBAC guards are
-  green at the Phase 2+3 PR boundary. Phase 6 (Task 6.1) does only *doc* regeneration, not registration.
-- **Acceptance:** grep shows no residual references; guards green with the new tools registered and the old
-  gone.
-- **Watch:** `SYSTEM_ARTIFACT_NAMES` carried only `rootfs`; confirm no other system-upload consumer. This
-  task lands in the **same PR** as Phase 3 (Tasks 3.1/3.3) — the atomic upload-lane swap (see Shape).
+  and **register the two new tools** in those same maps — so the guards are green at the Phase 2+3 PR
+  boundary. Phase 6 (Task 6.1) does only *doc* regeneration, not registration.
+- **Acceptance:** `rg CREATE_SYSTEM_UPLOAD_TOOL` and `rg SYSTEM_ARTIFACT_NAMES` across `src/` show no
+  residual references; the app **imports** and guards are green with the new tools registered/discoverable
+  and the old gone.
+- **Watch:** lands in the **same PR** as Phase 3 (Tasks 3.1/3.3) — the atomic upload-lane swap (see Shape).
 
 ---
 
