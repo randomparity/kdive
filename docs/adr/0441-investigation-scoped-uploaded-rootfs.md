@@ -223,6 +223,15 @@ lock:
   populated while waiting). A lock lost mid-download degrades only to a redundant download, never
   corruption (the unique partial covers it).
 
+  > **Amended (#1520).** The "redundant download" consequence understates the worst case now that
+  > both staging paths stream. A dropped session lock (an idle-timeout or recycled connection during
+  > a multi-GiB transfer) lets a sibling acquire the lock and run the opportunistic sweep, which
+  > glob-unlinks the first fetcher's *live* partial — that fetcher then writes into an unlinked fd
+  > and fails at `os.replace`, so the degradation is a **failed provision**, not only a redundant
+  > download. Correctness is unaffected: no partial is ever shared and `dest` is never an unverified
+  > base. The window was the gzip path's alone; #1520 extends it to identity, and bounding the sweep
+  > away from live partials is tracked in #1524.
+
 The fetch reads the object's `encoding`/`uncompressed_size` from the **durable `artifacts` row** (decision
 3), not the deleted manifest, and strips a gzip transport encoding exactly as ADR-0438 does.
 
