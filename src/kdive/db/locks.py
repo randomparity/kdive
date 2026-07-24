@@ -150,10 +150,11 @@ async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
 
     ``False`` therefore means no live holder in this database as of the probe. It is not an
     instantaneous read of the holder's liveness: Postgres frees the lock when the holding
-    *backend* exits, which trails the holder's client-side connection close by a short interval
-    (measured up to ~96ms under a loaded backend), so a dead leader can still read as held for
-    that long. Only granted locks are counted: a would-be acquirer blocked on
-    ``pg_advisory_lock`` leaves an ungranted row that must not read as a live holder.
+    *backend* exits, which trails the holder's client-side connection close, so a dead leader
+    can still read as held for a while afterwards. That lag has no guaranteed upper bound —
+    do not size a timeout off an observed value. Only granted locks are counted: a would-be
+    acquirer blocked on ``pg_advisory_lock`` leaves an ungranted row that must not read as a
+    live holder.
     """
     classid, objid = _advisory_lock_oids(_session_lock_key(name))
     async with conn.cursor() as cur:
