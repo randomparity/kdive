@@ -20,8 +20,9 @@ Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
 partial — the correctness guarantee. A **session-scoped** ``pg_advisory_lock`` (keyed via
 ``db.locks._session_lock_key``, held on this call's dedicated sync connection across the download)
-collapses the redundant multi-GiB download; while it is held — so no live sibling partial can
-exist — a crash-orphaned ``<token>.*.partial`` is glob-unlinked opportunistically.
+collapses the redundant multi-GiB download; while it is held — so a live sibling partial is not
+expected — a crash-orphaned ``<token>.*.partial`` is glob-unlinked opportunistically. A lock lost
+mid-transfer breaks that expectation; see :func:`_unlink_orphan_partials`.
 """
 
 from __future__ import annotations
@@ -223,9 +224,16 @@ def _resolve_object(
 def _unlink_orphan_partials(dest: Path) -> None:
     """Glob-unlink a crash-orphaned ``<token>.*.partial`` under the fetch lock (ADR-0441 §5).
 
-    Runs only while holding the fetch lock, which serializes downloads, so no *live* sibling partial
-    can exist — every match is a killed worker's SENSITIVE orphan, bounded by this next fetch rather
-    than by full investigation reclaim.
+    Runs only while holding the fetch lock, which serializes downloads, so a *live* sibling partial
+    is not expected — a match is normally a killed worker's SENSITIVE orphan, bounded by this next
+    fetch rather than by full investigation reclaim.
+
+    That premise holds only while the lock does. A session lock lost mid-transfer (an idle-session
+    timeout or a recycled connection across a multi-GiB download) lets this sweep unlink a live
+    sibling's partial; that fetcher writes on into the unlinked inode and fails at ``os.replace``,
+    so the cost is a failed provision, never a corrupt ``dest``. Bounding the sweep away from live
+    partials is #1524 — do not widen this glob (outside the lock, or over the whole uploads dir)
+    on the strength of the paragraph above.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
