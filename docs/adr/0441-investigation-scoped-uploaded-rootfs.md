@@ -1,6 +1,6 @@
 # ADR 0441 — Investigation-scoped agent-uploaded rootfs: reusable across Systems, reclaimed on investigation close
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-23
 - **Supersedes:** [ADR-0434](0434-local-libvirt-agent-uploaded-rootfs-staging.md) decisions §1
   (System-owned object + provision-time download by System key), §3 (per-System staging), and §4
