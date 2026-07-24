@@ -150,14 +150,33 @@ def _register_investigations_close(app: FastMCP, pool: AsyncConnectionPool) -> N
                 ),
             ),
         ],
+        force: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "Default false: the close is refused (and lists them) if any System bound to "
+                    "this Investigation is still live, so tear those Systems down first. Set true "
+                    "to tear the bound Systems down and then close in one step; that teardown is "
+                    "admin-only, so force requires admin on the project (a plain close does not)."
+                ),
+            ),
+        ] = False,
     ) -> ToolResponse:
         """Close an investigation. Requires a summary of the work, persisted on close.
 
         The summary is the terminal account of what the investigation found and concluded; it is
         recorded on the Investigation and readable afterward via `investigations.get`. It is a
         separate field from the description, and closing without a non-empty summary fails.
+
+        If any System bound to this Investigation is still live, a default close is refused and
+        lists the blocking Systems. Tear those Systems down first, then close; or pass
+        `force=true` to tear them down and close together — the forced teardown is admin-only, so
+        `force` requires admin on the project.
         """
-        return await close_investigation(pool, current_context(), investigation_id, summary)
+        return await close_investigation(
+            pool, current_context(), investigation_id, summary, force=force
+        )
 
 
 def _register_investigations_complete_rootfs_upload(

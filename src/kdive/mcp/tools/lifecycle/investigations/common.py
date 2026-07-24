@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason
+from kdive.mcp.tools._common import authz_denied as _authz_denied
 from kdive.mcp.tools._common import config_error as _config_error
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
 from kdive.mcp.tools._common import not_found as _not_found
@@ -21,10 +22,13 @@ def investigation_error_response(exc: InvestigationServiceError) -> ToolResponse
     """Map a transport-neutral Investigation service error to the MCP envelope."""
     if exc.reason is InvestigationErrorReason.NOT_FOUND:
         return _not_found(exc.object_id)
+    if exc.reason is InvestigationErrorReason.FORCE_REQUIRES_ADMIN:
+        return _authz_denied(exc.object_id, ["admin_role"])
     if exc.reason is InvestigationErrorReason.NON_MUTABLE:
         return _config_error(exc.object_id, detail=exc.detail, data=exc.data)
     if exc.reason in {
         InvestigationErrorReason.ABANDONED,
+        InvestigationErrorReason.BOUND_SYSTEMS_LIVE,
         InvestigationErrorReason.ILLEGAL_STATE,
     }:
         return _config_error(exc.object_id, detail=exc.detail, data=exc.data)

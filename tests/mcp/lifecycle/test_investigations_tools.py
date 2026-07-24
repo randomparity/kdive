@@ -15,7 +15,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.capacity.state import InvestigationState
+from kdive.domain.capacity.state import InvestigationState, SystemState
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.investigations import registrar as inv_registered_tools
@@ -99,6 +99,26 @@ def test_close_wrapper_contract_states_summary_is_required() -> None:
     summary_field = (schema["properties"]["summary"].get("description") or "").lower()
     assert "required" in summary_field
     assert "non-empty" in summary_field or "blank" in summary_field
+
+
+def test_close_wrapper_contract_describes_force_refusal() -> None:
+    """The agent-facing close surface documents the force refusal + admin contract."""
+    app = FastMCP("investigations-close-force-docs")
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    inv_registered_tools.register(app, pool)
+
+    tools = {tool.name: tool for tool in cast(list[FunctionTool], asyncio.run(app.list_tools()))}
+    close = tools["investigations.close"]
+    description = (close.description or "").lower()
+    assert "bound" in description and "force" in description
+
+    schema = close.parameters
+    assert "force" in schema["properties"]
+    force_field = (schema["properties"]["force"].get("description") or "").lower()
+    assert "admin" in force_field
+    assert "tear" in force_field or "teardown" in force_field
+    # No ADR references leak into the agent-facing schema (issue #880).
+    assert "adr" not in description and "adr" not in force_field
 
 
 def test_open_mints_investigation_and_audits(migrated_url: str) -> None:
@@ -341,6 +361,207 @@ def test_close_stamps_cleanup_pending_at_once(migrated_url: str) -> None:
                 second = await cur.fetchone()
         assert first is not None and first["cleanup_pending_at"] is not None
         assert second is not None and second["cleanup_pending_at"] == first["cleanup_pending_at"]
+
+    asyncio.run(_run())
+
+
+async def _seed_bound_system(pool: AsyncConnectionPool, inv_id: str, state: SystemState) -> UUID:
+    """Insert a System bound to ``inv_id`` in ``state`` (with its own Resource+Allocation)."""
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
+    from kdive.domain.capacity.state import AllocationState, ResourceStatus
+    from kdive.domain.catalog.resources import Resource, ResourceKind
+    from kdive.domain.lifecycle.records import Allocation, System
+
+    dt = datetime(2026, 1, 1, tzinfo=UTC)
+    async with pool.connection() as conn:
+        res = await RESOURCES.insert(
+            conn,
+            Resource(
+                id=uuid4(),
+                created_at=dt,
+                updated_at=dt,
+                kind=ResourceKind.LOCAL_LIBVIRT,
+                pool="local-libvirt",
+                cost_class="local",
+                status=ResourceStatus.AVAILABLE,
+                host_uri="qemu:///system",
+            ),
+        )
+        alloc = await ALLOCATIONS.insert(
+            conn,
+            Allocation(
+                id=uuid4(),
+                created_at=dt,
+                updated_at=dt,
+                principal="user-1",
+                project="proj",
+                resource_id=res.id,
+                state=AllocationState.GRANTED,
+            ),
+        )
+        system = await SYSTEMS.insert(
+            conn,
+            System(
+                id=uuid4(),
+                created_at=dt,
+                updated_at=dt,
+                principal="user-1",
+                project="proj",
+                allocation_id=alloc.id,
+                state=state,
+                provisioning_profile={},
+                investigation_id=UUID(inv_id),
+            ),
+        )
+    return system.id
+
+
+async def _inv_markers(pool: AsyncConnectionPool, inv_id: str) -> dict[str, object]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT state, cleanup_pending_at, rootfs_cleanup_pending_at "
+            "FROM investigations WHERE id = %s",
+            (inv_id,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return row
+
+
+async def _teardown_dedup_keys(pool: AsyncConnectionPool) -> list[str]:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT dedup_key FROM jobs WHERE kind = 'teardown' ORDER BY dedup_key")
+        rows = await cur.fetchall()
+    return [r["dedup_key"] for r in rows]
+
+
+def test_close_default_blocks_on_bound_live_system(migrated_url: str) -> None:
+    """AC-5: a default close is refused, listing the live bound System; no marker is set."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            sid = await _seed_bound_system(pool, inv_id, SystemState.READY)
+            resp = await close_investigation(pool, _ctx(), inv_id, _SUMMARY)
+            assert resp.status == "error"
+            assert resp.error_category == "configuration_error"
+            assert str(sid) in cast("list[str]", resp.data["blocking_systems"])
+            assert resp.detail is not None and str(sid) in resp.detail
+            markers = await _inv_markers(pool, inv_id)
+            # Refused: the investigation stays open and neither marker is stamped.
+            assert markers["state"] == "open"
+            assert markers["cleanup_pending_at"] is None
+            assert markers["rootfs_cleanup_pending_at"] is None
+            assert await _teardown_dedup_keys(pool) == []
+
+    asyncio.run(_run())
+
+
+def test_close_ignores_null_investigation_and_terminal_systems(migrated_url: str) -> None:
+    """AC-5 boundary: a torn_down/failed bound System and a NULL-inv System never block."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            await _seed_bound_system(pool, inv_id, SystemState.TORN_DOWN)
+            await _seed_bound_system(pool, inv_id, SystemState.FAILED)
+            resp = await close_investigation(pool, _ctx(), inv_id, _SUMMARY)
+            assert resp.status == "closed"
+            assert await _teardown_dedup_keys(pool) == []
+
+    asyncio.run(_run())
+
+
+def test_close_force_tears_down_bound_systems_and_closes(migrated_url: str) -> None:
+    """AC-6: force with admin enqueues one teardown per live System, closes, marks both."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            a = await _seed_bound_system(pool, inv_id, SystemState.READY)
+            b = await _seed_bound_system(pool, inv_id, SystemState.PROVISIONING)
+            resp = await close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            assert resp.status == "closed"
+            keys = await _teardown_dedup_keys(pool)
+            assert keys == sorted([f"{a}:teardown", f"{b}:teardown"])
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["state"] == "closed"
+            assert markers["cleanup_pending_at"] is not None
+            assert markers["rootfs_cleanup_pending_at"] is not None
+
+    asyncio.run(_run())
+
+
+def test_close_force_contributor_is_denied_no_escalation(migrated_url: str) -> None:
+    """AC-6 RBAC: a same-project contributor cannot force-teardown; nothing changes."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            await _seed_bound_system(pool, inv_id, SystemState.READY)
+            resp = await close_investigation(
+                pool, _ctx(Role.CONTRIBUTOR), inv_id, _SUMMARY, force=True
+            )
+            assert resp.status == "error"
+            assert resp.error_category == "authorization_denied"
+            assert "admin_role" in cast("list[str]", resp.data["missing_checks"])
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["state"] == "open"
+            assert markers["rootfs_cleanup_pending_at"] is None
+            assert await _teardown_dedup_keys(pool) == []
+
+    asyncio.run(_run())
+
+
+def test_close_force_enqueue_error_is_atomic(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-6 atomicity: an enqueue error on one of several teardowns enqueues zero + no close."""
+    from kdive.jobs import queue as job_queue
+
+    calls = {"n": 0}
+    real_enqueue = job_queue.enqueue
+
+    async def _flaky_enqueue(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("simulated enqueue failure")
+        return await real_enqueue(*args, **kwargs)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            await _seed_bound_system(pool, inv_id, SystemState.READY)
+            await _seed_bound_system(pool, inv_id, SystemState.PROVISIONING)
+            monkeypatch.setattr(job_queue, "enqueue", _flaky_enqueue)
+            with pytest.raises(RuntimeError, match="simulated enqueue failure"):
+                await close_investigation(pool, _ctx(Role.ADMIN), inv_id, _SUMMARY, force=True)
+            # All-or-nothing: the first (successful) enqueue rolled back with the whole txn.
+            assert await _teardown_dedup_keys(pool) == []
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["state"] == "open"
+            assert markers["cleanup_pending_at"] is None
+            assert markers["rootfs_cleanup_pending_at"] is None
+
+    asyncio.run(_run())
+
+
+def test_close_default_marks_rootfs_when_systems_already_torn_down(migrated_url: str) -> None:
+    """AC-6b: the tidy path — default close of an all-torn-down inv sets the rootfs marker."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, InvestigationState.OPEN)
+            await _seed_bound_system(pool, inv_id, SystemState.TORN_DOWN)
+            resp = await close_investigation(pool, _ctx(), inv_id, _SUMMARY)
+            assert resp.status == "closed"
+            markers = await _inv_markers(pool, inv_id)
+            assert markers["rootfs_cleanup_pending_at"] is not None
+            assert markers["cleanup_pending_at"] is not None
+            assert await _teardown_dedup_keys(pool) == []
 
     asyncio.run(_run())
 
