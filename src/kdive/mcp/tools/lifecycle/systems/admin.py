@@ -13,8 +13,13 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.components.validation import ComponentSourceCapabilities
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
-from kdive.domain.capacity.state import IllegalTransition, RunState, SystemState
+from kdive.db.repositories import ALLOCATIONS, INVESTIGATIONS, RESOURCES, SYSTEMS
+from kdive.domain.capacity.state import (
+    IllegalTransition,
+    InvestigationState,
+    RunState,
+    SystemState,
+)
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import CategorizedError
 from kdive.domain.lifecycle.records import System
@@ -52,6 +57,7 @@ from kdive.services.systems.validation import (
 )
 
 _NON_TERMINAL_RUN = frozenset({RunState.CREATED, RunState.RUNNING})
+_TERMINAL_INVESTIGATION = frozenset({InvestigationState.CLOSED, InvestigationState.ABANDONED})
 _TEARDOWN = JobKind.TEARDOWN
 # Idempotency-store kinds (the registered tool names); ADR-0193.
 _REPROVISION_KIND = "systems.reprovision"
@@ -171,6 +177,17 @@ async def _reprovision_in_lock(
         require_investigation_binding_for_upload(profile_policy, profile, system.investigation_id)
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(str(system_id), exc)
+    if system.investigation_id is not None:
+        # A reprovision re-materializes the base under the System's investigation, so it must not
+        # begin under a closed/abandoned one (ADR-0441 §7). Take the INVESTIGATION lock
+        # close_investigation holds so a reprovision and a close serialize: the close sees this
+        # System (and blocks or force-reaps it), or this read sees the close and rejects. The xact
+        # lock is held to commit, covering the ready->reprovisioning transition, not only the read.
+        async with advisory_xact_lock(conn, LockScope.INVESTIGATION, system.investigation_id):
+            investigation = await INVESTIGATIONS.get(conn, system.investigation_id)
+        if investigation is None or investigation.state in _TERMINAL_INVESTIGATION:
+            state = investigation.state.value if investigation is not None else "missing"
+            return _config_error(str(system_id), data={"investigation_state": state})
     digest = profile_digest(profile)
     dedup_key = f"{system_id}:reprovision:{digest}"
     if system.state is SystemState.REPROVISIONING:

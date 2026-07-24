@@ -1503,6 +1503,42 @@ def test_reprovision_transitions_ready_to_reprovisioning_and_enqueues_job(
     asyncio.run(_run())
 
 
+def test_reprovision_rejected_when_bound_investigation_closed(migrated_url: str) -> None:
+    # A reprovision must not re-materialize a base under a closed investigation (ADR-0441 §7): a
+    # System bound to a terminal investigation is rejected, not moved ready->reprovisioning. This
+    # closes the force-close-then-reprovision race from the reprovision side.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _scoped_active_allocation(pool)
+            sys_id = await _seed_ready_system(pool, alloc_id)
+            async with pool.connection() as conn:
+                inv = await INVESTIGATIONS.insert(
+                    conn,
+                    Investigation(
+                        id=uuid4(),
+                        created_at=_DT,
+                        updated_at=_DT,
+                        principal="user-1",
+                        project="proj",
+                        title="t",
+                        state=InvestigationState.CLOSED,
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE systems SET investigation_id = %s WHERE id = %s", (inv.id, sys_id)
+                )
+            new_profile = _active_allocation_profile()
+            new_profile["vcpu"] = 8
+            resp = await _reprovision(pool, _ctx(), sys_id, new_profile)
+            assert resp.status == "error"
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
+                row = await cur.fetchone()
+        assert row is not None and row["state"] == "ready"  # unchanged: not reprovisioning
+
+    asyncio.run(_run())
+
+
 def test_reprovision_with_unselectable_cpu_pin_is_config_error(migrated_url: str) -> None:
     # A reprovision carrying a cpu.model the bound host does not advertise in selectable_cpus is
     # rejected pre-mutation (ADR-0369), leaving the System READY — never a reprovisioning->failed
