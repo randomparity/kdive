@@ -29,6 +29,42 @@ def _remote_profile(**section_overrides: Any) -> ProvisioningProfile:
     )
 
 
+def test_rootfs_source_none_for_operator_staged_volume() -> None:
+    # ADR-0440: an operator-staged base_image_volume System has no rootfs component source, so the
+    # component-source gate short-circuits (its pre-#1433 behavior).
+    policy = RemoteLibvirtProfilePolicy()
+    assert policy.rootfs_source(_remote_profile()) is None
+
+
+def test_rootfs_source_returns_supplied_base_image_source() -> None:
+    # ADR-0440 (#1433): a supplied base_image_source surfaces as the ROOTFS component source ref,
+    # activating reject_unsupported_component_source at admission.
+    policy = RemoteLibvirtProfilePolicy()
+    profile = ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "x86_64",
+            "vcpu": 4,
+            "memory_mb": 4096,
+            "disk_gb": 20,
+            "boot_method": "disk-image",
+            "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+            "provider": {
+                "remote-libvirt": {
+                    "base_image_source": {
+                        "kind": "local",
+                        "path": "/var/lib/kdive/rootfs/fedora-44.qcow2",
+                    }
+                }
+            },
+        }
+    )
+    source = policy.rootfs_source(profile)
+    assert source is not None
+    assert source.kind == "local"
+    assert source.path == "/var/lib/kdive/rootfs/fedora-44.qcow2"
+
+
 def test_host_dump_defaults_off() -> None:
     policy = RemoteLibvirtProfilePolicy()
     assert policy.host_dump_provisioned(_remote_profile()) is False

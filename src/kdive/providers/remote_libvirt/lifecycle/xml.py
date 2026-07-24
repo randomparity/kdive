@@ -43,6 +43,15 @@ def overlay_volume_name(system_id: UUID | str) -> str:
     return f"kdive-{system_id}-overlay.qcow2"
 
 
+def supplied_base_volume_name(system_id: UUID | str) -> str:
+    """The per-System base volume name a supplied qcow2 is staged into (ADR-0440, #1433).
+
+    System-scoped so a supplied base never collides with an operator-staged volume or another
+    System's base, and is reclaimable with the lease.
+    """
+    return f"kdive-{system_id}-base.qcow2"
+
+
 def render_volume_xml(name: str, *, capacity_bytes: int, backing_path: str) -> str:
     """Render the overlay volume XML: qcow2, backed by the base image volume."""
     volume = ET.Element("volume")

@@ -29,6 +29,11 @@ _log = logging.getLogger(__name__)
 #: The libvirt ``sendAll`` source callback: ``(stream, nbytes, opaque) -> bytes``.
 StreamSource = Callable[[object, int, object], bytes]
 
+#: The qcow2 magic every staged base volume must start with (bytes ``51 46 49 fb``); a file that
+#: does not is rejected before create+stream rather than landing an invalid volume that fails late
+#: and confusingly at boot (ADR-0440, matching local ADR-0434/0438).
+_QCOW2_MAGIC = b"QFI\xfb"
+
 
 class _UploadStream(Protocol):
     def sendAll(self, handler: StreamSource, opaque: object) -> None: ...  # noqa: N802
@@ -65,6 +70,30 @@ def render_base_volume_xml(name: str, *, capacity_bytes: int) -> str:
     target = ET.SubElement(volume, "target")
     ET.SubElement(target, "format", type="qcow2")
     return ET.tostring(volume, encoding="unicode")
+
+
+def _require_qcow2_magic(qcow2_path: Path) -> None:
+    """Reject a supplied base image that does not start with the qcow2 magic (ADR-0440).
+
+    Reads only the first four bytes. A format-invalid file is a caller error, so it raises
+    ``CONFIGURATION_ERROR`` — not the ``INFRASTRUCTURE_FAILURE`` reserved for libvirt faults.
+    """
+    try:
+        with qcow2_path.open("rb") as handle:
+            head = handle.read(4)
+    except OSError as exc:
+        raise CategorizedError(
+            f"could not read the supplied base image at {str(qcow2_path)!r}",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(qcow2_path)},
+        ) from exc
+    if head != _QCOW2_MAGIC:
+        raise CategorizedError(
+            "the supplied base image is not a qcow2 file (its bytes do not start with the qcow2 "
+            "magic); stage a qcow2 image",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details={"path": str(qcow2_path)},
+        )
 
 
 def _infra(operation: str, **details: str) -> CategorizedError:
@@ -111,6 +140,7 @@ def upload_qcow2_volume(
     else:
         _log.info("volume %s already staged in pool %s; skipping upload", volume_name, pool_name)
         return
+    _require_qcow2_magic(qcow2_path)
     try:
         volume = pool.createXML(render_base_volume_xml(volume_name, capacity_bytes=capacity))
     except libvirt.libvirtError as exc:

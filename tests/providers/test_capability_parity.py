@@ -24,9 +24,14 @@ from kdive.providers.assembly.composition import build_local_runtime, build_remo
 from kdive.providers.core.runtime import ProviderRuntime, ProviderSupport
 from kdive.security.secrets.secret_registry import SecretRegistry
 
-_ROOTFS_SOURCE_WAIVER = (
-    "remote rootfs is fixed by the operator-staged base image; a supplied rootfs source is "
-    "deferred to #1433 pending local supplied-rootfs #743 (parity-lockstep, maintainer decision)."
+# Remote now accepts a supplied ROOTFS from the worker-host `local` source kind (ADR-0440, #1433),
+# so that gap is closed and unwaived. It deliberately does NOT accept `catalog`: a remote catalog
+# image is the operator-staged base_image_volume the provider references by name, so a catalog
+# component source would be a download-then-re-upload duplicate of a volume already on the host.
+_ROOTFS_CATALOG_WAIVER = (
+    "remote ROOTFS accepts a supplied `local` qcow2 (ADR-0440, #1433) but not `catalog`: a remote "
+    "catalog image is the operator-staged base_image_volume referenced by name, so a catalog "
+    "source would download-then-re-upload it to the host it already lives on."
 )
 
 # Capability keys local-libvirt advertises that remote-libvirt deliberately does not, each mapped to
@@ -43,15 +48,15 @@ _WAIVERS: dict[str, str] = {
         "disk (ADR-0289); remote injects over the guest agent from its own provisioner (ADR-0291)."
     ),
     "port:rootfs.validator": (
-        "RemoteLibvirtProfilePolicy.rootfs_source returns None unconditionally, so a rootfs "
-        "validator is unreachable. " + _ROOTFS_SOURCE_WAIVER
+        "remote validates a supplied `local` base image at staging time (allowlist + qcow2 magic, "
+        "ADR-0440), like local's `upload` kind (ADR-0434) — not at admission; admission checks the "
+        "source kind. So remote wires no admission-time rootfs validator."
     ),
     "support.capture_methods:fadump": (
         "FADUMP is a POWER-only (pseries firmware-assisted) mechanism, resolved only for a ppc64le "
         "System that also carries a crashkernel reservation (ADR-0349)."
     ),
-    "support.component_sources.rootfs:catalog": _ROOTFS_SOURCE_WAIVER,
-    "support.component_sources.rootfs:local": _ROOTFS_SOURCE_WAIVER,
+    "support.component_sources.rootfs:catalog": _ROOTFS_CATALOG_WAIVER,
     "support.component_sources.initrd:local": (
         "an initrd component source is future work on both providers, tracked by the parity epic "
         "(#1423); local declares it first."

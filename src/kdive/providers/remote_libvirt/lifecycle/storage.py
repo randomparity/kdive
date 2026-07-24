@@ -164,6 +164,21 @@ def cleanup_overlay_if_created(pool: Pool, overlay: PreparedOverlay) -> None:
         _log.warning("failed to remove overlay volume %s after failed provision", overlay.name)
 
 
+def cleanup_created_volume(pool: Pool, name: str, *, created: bool) -> None:
+    """Best-effort reclaim a base volume this attempt staged; never a pre-existing one (ADR-0440).
+
+    Mirrors :func:`cleanup_overlay_if_created`: an operator-staged base (or a base a prior attempt
+    already staged and this one reused) has ``created=False`` and is left in place; a libvirt fault
+    is swallowed so a reclaim never masks the original provisioning error.
+    """
+    if not created:
+        return
+    try:
+        pool.storageVolLookupByName(name).delete()
+    except libvirt.libvirtError:
+        _log.warning("failed to remove staged base volume %s after failed provision", name)
+
+
 def delete_volume(conn: StorageConn, pool_name: str, volume_name: str) -> None:
     """Delete an overlay volume; absent pool/volume are achieved post-states."""
     try:

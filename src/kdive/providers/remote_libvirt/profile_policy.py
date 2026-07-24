@@ -11,7 +11,10 @@ class RemoteLibvirtProfilePolicy:
     """Behavior decisions owned by the remote-libvirt profile section."""
 
     def rootfs_source(self, profile: ProvisioningProfile) -> RootfsSource | None:
-        return None
+        # A supplied worker-host qcow2 (ADR-0440, #1433) activates the component-source gate; an
+        # operator-staged `base_image_volume` System has no source ref and returns None (the gate
+        # short-circuits, as it did for every remote System before #1433).
+        return profile.provider.remote_libvirt.base_image_source
 
     def drgn_live_seeds_bootstrap_key(self, profile: ProvisioningProfile) -> bool:
         # Remote has and uses a per-System bootstrap key at introspect.run, but opens its drgn-live

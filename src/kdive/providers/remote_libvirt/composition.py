@@ -12,6 +12,7 @@ from kdive.components.references import (
     CONFIG_COMPONENT,
     KERNEL_COMPONENT,
     PATCH_COMPONENT,
+    ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
     ComponentKind,
     ComponentSourceKind,
@@ -98,16 +99,19 @@ RunningSystemsFactory = Callable[[AsyncConnectionPool], RunningSystems]
 
 def _component_sources() -> ComponentSourceCapabilities:
     # Remote-libvirt accepts catalog/local kernel config inputs, local patch artifacts, and a
-    # worker-host-local supplied KERNEL and VMLINUX (ADR-0430, #1432) — the same `local` source
-    # kind local accepts. `local` is a worker-host absolute path (LocalComponentRef), not an agent
-    # upload: `component-upload` stays unaccepted for every kind. The target iterates kernels on top
-    # of the operator-staged disk-image base OS, and the install plane already pulls + installs a
-    # vmlinuz+modules bundle into the deterministic `kdive` grub slot (ADR-0078/0081) whether the
-    # bundle was built or supplied, so accepting these needs no install-path change; provenance is
-    # the recorded component source kind (local vs the built artifact). No rootfs/initrd source is
-    # accepted here: the rootfs is fixed by the operator-staged base image, and initrd is future
-    # work in the parity epic (#1423).
+    # worker-host-local supplied KERNEL and VMLINUX (ADR-0430, #1432) and a supplied ROOTFS base
+    # image (ADR-0440, #1433) — the same `local` source kind local accepts. `local` is a
+    # worker-host absolute path (LocalComponentRef), not an agent upload: `component-upload` stays
+    # unaccepted for every kind. The target iterates kernels on the disk-image base OS, and the
+    # install plane pulls + installs a vmlinuz+modules bundle into the deterministic `kdive` grub
+    # slot (ADR-0078/0081) whether the bundle was built or supplied, so accepting these needs no
+    # install-path change; provenance is the recorded component source kind (local vs the built
+    # artifact). ROOTFS accepts only `local` (a supplied qcow2 staged onto the pool), NOT `catalog`:
+    # a remote catalog image is the host-staged volume `base_image_volume` already names, so a
+    # catalog source would download-then-re-upload it to the host it lives on (ADR-0440). initrd is
+    # future work in the parity epic (#1423).
     accepted: dict[ComponentKind, frozenset[ComponentSourceKind]] = {
+        ROOTFS_COMPONENT: frozenset({"local"}),
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
         KERNEL_COMPONENT: frozenset({"local"}),
         PATCH_COMPONENT: frozenset({"local"}),

@@ -17,6 +17,7 @@ from kdive.components.references import (
     CONFIG_COMPONENT,
     KERNEL_COMPONENT,
     PATCH_COMPONENT,
+    ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
 )
 from kdive.domain.capture import CaptureMethod
@@ -1141,4 +1142,6 @@ def test_remote_runtime_accepts_local_and_catalog_config_and_local_patch_sources
     assert accepted.get(PATCH_COMPONENT) == frozenset({"local"})
     assert accepted.get(KERNEL_COMPONENT) == frozenset({"local"})
     assert accepted.get(VMLINUX_COMPONENT) == frozenset({"local"})
+    # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind.
+    assert accepted.get(ROOTFS_COMPONENT) == frozenset({"local"})
     assert runtime.support.component_sources.provider == ResourceKind.REMOTE_LIBVIRT.value
