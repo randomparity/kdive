@@ -114,13 +114,16 @@ TTL-backstop pair (`gc_investigation_artifacts` + `gc_expired_build_artifacts`):
   never-closed investigation, so bases do not accumulate unbounded. (`retention_class` is only an
   S3-lifecycle label, not an enforced TTL — ADR-0234 — hence the reaper.)
 
-Both reclaim **per checksum**, with the object + row + staged file on a **single liveness gate** — *no
-bound System that references that checksum still has its per-System overlay present on the host* (a
-filesystem probe, **not** a `systems.state` read). Overlay-file absence is the true safety condition (the
-overlay is what holds the base open as a qcow2 backing file); keying on state would let a `failed` System
-— terminal, never reaching `torn_down`, excluded from `repair_orphaned_systems` — pin the base forever
-and defeat the TTL backstop. Keying on overlay-absence drains a `failed` System the moment ADR-0435's
-failure reclaim removes its overlay. Gate holds → delete the object (best-effort) + row (fail-loud in txn)
+Both reclaim **per checksum** on a gate with **two conditions**, both required for every bound System
+referencing the checksum: (a) its per-System overlay file is **absent** on the host (backing hazard — a
+filesystem probe, **not** a `systems.state` read), and (b) it is **not** in a pre-overlay non-terminal
+state (`defined`/`provisioning`) that could still read/create against the base (ADR-0435's
+`provisioning`-exclusion hazard; matters mainly for the TTL backstop, since default close already blocks
+on those states). Overlay-file absence is the backing safety condition; keying *it* on state would let a
+`failed` System — terminal, never reaching `torn_down`, excluded from `repair_orphaned_systems` — pin the
+base forever and defeat the TTL backstop. Overlay-absence drains a `failed` System the moment ADR-0435's
+failure reclaim removes its overlay; condition (b) reads only the pre-overlay states, never terminal-ness,
+so it does not reintroduce the pin. Gate holds → delete the object (best-effort) + row (fail-loud in txn)
 **and** unlink `rootfs-uploads/<inv>/<token>.qcow2`. Gate fails → skip the checksum (`drained=False`,
 retried next pass). Remove the empty `rootfs-uploads/<inv>/` dir once drained. Keeping object and file on
 one gate means a reprovisioning / disk-fault-recovering System always finds the object present to
@@ -140,9 +143,11 @@ failure. ADR-0435's baseline/overlay reclaim (per-System-private) stays. The upl
 
 - Enumerate bound live Systems: `systems WHERE investigation_id=<inv> AND state NOT IN (<terminal>)`.
 - **Default (force=False):** any live ⇒ `configuration_error` listing their ids; refuse (state unchanged).
-- **force=True:** for each bound live System, require the caller's role on that System's project (a
-  System the caller cannot tear down ⇒ fail listing it), enqueue its teardown job, then close and set
-  `cleanup_pending_at`.
+- **force=True:** for each bound live System, require **admin on that System's project** (matching the
+  `_ADMIN` gate on `systems.teardown`, so force is not a contributor→admin escalation via close; a System
+  the caller lacks admin on ⇒ fail listing it), enqueue its teardown job, then close and set
+  `cleanup_pending_at`. Consequence: a same-project *contributor* can neither default-close (live System
+  blocks) nor force-close (needs admin) — a deliberate authz cost, not a bug.
 - NULL-investigation Systems are never considered.
 
 ## Agent-facing flow (happy path)
@@ -172,7 +177,8 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | Object missing / checksum-less at finalize | `configuration_error` (mirrors old `_commit_uploaded_rootfs`) |
 | Downloaded bytes fail SHA-256 or qcow2-magic | `infrastructure_failure` / `configuration_error` (ADR-0434 §2, ADR-0438) unchanged |
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
-| `close(force=True)`, a bound System the caller can't tear down | fail listing it; nothing torn down |
+| `close(force=True)`, caller lacks admin on a bound System's project | fail listing it; nothing torn down (force = `_ADMIN` per System, no escalation) |
+| TTL backstop vs a `defined`/`provisioning` bound System (no overlay yet) | deferred by gate condition (b) — the base is not reclaimed under a pre-overlay referencer |
 | Store fault deleting object in sweep | best-effort skip, retried next pass (marker stays set) |
 | Base still backed by a referencing System's overlay file on the host | object + row + file all deferred on one gate, retried next pass |
 | `failed` bound System referencing the base | deferred **only while its overlay remains**; drains once ADR-0435 reclaims the overlay (a state gate would pin it forever) |
@@ -191,15 +197,19 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 4. **Finalize:** `complete_rootfs_upload` writes the `owner_kind='investigations'` row, deletes the
    manifest, returns the checksum handle; is idempotent on re-call.
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
-6. **Close-force:** `close(force=True)` enqueues teardown for each bound live System and closes.
+6. **Close-force:** `close(force=True)` with **admin** on each bound System's project enqueues teardown
+   and closes; a same-project **contributor** is refused (no escalation via close — assert the admin gate).
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
 8. **Liveness guard (overlay-absence):** the sweep does **not** reclaim a base while a referencing
    System's overlay file is present; it reclaims once the overlay is gone. Critically, a **`failed`**
    referencer whose overlay has been reclaimed **must eventually drain** (assert drainage — a state-keyed
    gate that defers a `failed` System forever is the regression this test forbids).
 8b. **TTL backstop:** a never-closed investigation's committed rootfs object is reclaimed by
-   `gc_expired_investigation_rootfs` past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, on the same
-   overlay-absence gate (so it is not defeated by a stuck `failed` System).
+   `gc_expired_investigation_rootfs` past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, on the same gate
+   (so it is not defeated by a stuck `failed` System).
+8c. **Pre-overlay guard:** the TTL backstop does **not** reclaim a base while a bound `defined`/`provisioning`
+   System (no overlay yet) references its checksum (gate condition (b)); it reclaims once that System is
+   terminal-with-overlay-gone or has provisioned+torn-down.
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)

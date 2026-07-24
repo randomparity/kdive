@@ -124,10 +124,12 @@ deprecate"). Keep the whole branch green at each commit.
   config-docs regeneration (`just config-docs`).
 - **Do:** close-driven selects investigations past the grace window; TTL backstop selects committed
   `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL on a
-  never-closed investigation. Both reclaim **per checksum**, with the object (best-effort) + row
-  (fail-loud-in-txn) + staged file on **one liveness gate**: *no referencing bound System's per-System
-  overlay file is present on the host* (a filesystem probe, not a `systems.state` read). Gate fails → skip
-  the checksum (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
+  never-closed investigation. Both reclaim **per checksum** on a **two-condition gate**, both required for
+  every referencing bound System: (a) its per-System overlay file is **absent** (filesystem probe, not a
+  `systems.state` read), **and** (b) it is **not** `defined`/`provisioning` (pre-overlay states that may
+  still read/create against the base — the ADR-0435 `provisioning` exclusion; matters for the TTL
+  backstop). Reclaim object (best-effort) + row (fail-loud-in-txn) + staged file together. Gate fails →
+  skip the checksum (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
 - **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present;
   **a `failed` referencer whose overlay was reclaimed must drain** — not pinned forever), AC-8b (TTL
   backstop reclaims a never-closed investigation), AC-10 (residual committed object + stale-window object
@@ -161,10 +163,14 @@ deprecate"). Keep the whole branch green at each commit.
 - **Files:** `src/kdive/services/investigations/lifecycle.py` + `mcp/tools/lifecycle/investigations/lifecycle.py`
   (add `force: bool = False`); enumerate `systems WHERE investigation_id=<inv> AND state NOT IN terminal`.
 - **Do:** default ⇒ live present → `configuration_error` listing ids, refuse. force ⇒ per bound live
-  System require the caller's project role (else fail listing it), enqueue teardown, then close + set
+  System require **admin on that System's project** (matching `systems.teardown`'s `_ADMIN` gate — no
+  contributor→admin escalation via close; else fail listing it), enqueue teardown, then close + set
   `cleanup_pending_at`. Never consider NULL-investigation Systems.
 - **Acceptance:** spec AC-5 (block+list), AC-6 (force enqueues teardown + closes). RBAC: force teardown is
-  destructive — gated per System project.
+  destructive — **admin** per System project (assert a same-project contributor cannot force-teardown a
+  bound System — no escalation).
+- **Watch:** `investigations.close` is `_CONTRIBUTOR`, `systems.teardown` is `_ADMIN` (exposure.py). Force
+  must not become a contributor-driven teardown; the per-System admin check is the escalation guard.
 - **Surface:** update the `investigations.close` wrapper docstring + `Field` for the new `force` param and
   the new refusal contract (wrapper docstring is the agent-facing contract, AGENTS.md).
 

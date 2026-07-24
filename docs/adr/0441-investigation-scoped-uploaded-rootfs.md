@@ -87,8 +87,11 @@ Binding is validated at define/provision: a supplied `investigation_id` must nam
 non-terminal state (OPEN/ACTIVE) whose project **equals the System's own (Allocation) project** — a
 cross-project binding is rejected at admission. This same-project rule does double duty: it keeps a
 SENSITIVE, investigation-owned base within one project's trust boundary (no P-inv object backing a
-P-sys guest), and it forecloses the `close(force)` deadlock decision 7 would otherwise admit (a closer
-holding the investigation's project but not the System's could neither close nor force-close). A
+P-sys guest), and it forecloses the *cross-project* `close(force)` deadlock decision 7 would otherwise
+admit (a closer holding the investigation's project but not the System's). It does **not** remove the
+intra-project role-tier constraint — `force` still needs admin on the System's project (decision 7) — so
+a same-project *contributor* may still need an admin to force-close; that is a deliberate authz choice,
+not a deadlock the binding was meant to erase. A
 profile that references an uploaded rootfs (decision 4) **requires** a bound `investigation_id`; the two
 are validated together at admission (a `{"kind":"upload"}` rootfs with no investigation binding is a
 `configuration_error` naming the missing binding, never a late provision failure).
@@ -174,26 +177,30 @@ the TTL backstop is mandatory here too:
   expiry — ADR-0234 Context — so the reaper enforces the wall.)
 
 Both are deferred, audited, drain-and-retry, and reclaim **per checksum**, with the object + row +
-staged file for one checksum reclaimed **together on the same liveness gate**: *no bound System that
-references that checksum still has its per-System overlay present on the host* — a filesystem probe of
-each referencing System's overlay path, **not** a `systems.state` read. Gate holds → delete the object
+staged file for one checksum reclaimed **together on a gate with two conditions, *both* required for
+every bound System that references the checksum**: (a) its per-System overlay file is **absent** on the
+host (the backing-file hazard — a filesystem probe), **and** (b) it is **not** in a pre-overlay
+non-terminal state (`defined`/`provisioning`), which could still create an overlay or read the staged
+base before one exists (the ADR-0435 `provisioning`-exclusion hazard). Gate holds → delete the object
 (best-effort) + row (fail-loud-in-txn, ADR-0234/0434) **and** unlink the staged base under
 `rootfs-uploads/<inv>/`. Gate fails → skip the whole checksum this pass (`drained=False`, retried next
-pass); remove the empty `rootfs-uploads/<inv>/` dir once drained.
+pass); remove the empty `rootfs-uploads/<inv>/` dir once drained. Condition (b) matters mainly for the
+TTL backstop, which fires on never-closed investigations with no close-time block; the close-driven sweep
+already sees no `defined`/`provisioning` System because default close blocks on them (decision 7).
 
-The gate keys on **overlay-file absence, not System state**, because the overlay file *is* the exact
-thing that holds the base open as a qcow2 backing file (ADR-0060) — so its absence is the precise,
-sufficient safety condition, and no state value is a faithful proxy for it. In particular a `failed`
-System is terminal but per ADR-0435 can never run teardown (`failed -> torn_down` is not a legal edge)
-and is excluded from the reconciler's orphan teardown (`repair_orphaned_systems` treats `failed` as
-terminal), so its row persists indefinitely; keying on state would let a single `failed` System pin the
-SENSITIVE base **forever**, defeating even the TTL backstop. Keying on overlay-absence instead lets the
-base drain the moment ADR-0435's provision-failure reclaim removes the `failed` System's overlay,
-regardless of its stuck state — while still deferring safely whenever any overlay actually remains (the
-genuinely stuck case an operator must resolve, surfaced as an un-drained marker). The gate is a
-point-in-time probe, not a persistent refcount (a stale read only defers one pass); keeping the object+row
-and file on one gate means a bound System that must re-materialize (reprovision, or a host base lost to a
-disk fault) always finds the object present to re-download.
+The **backing** hazard keys on overlay-file absence, **not** System state, because the overlay *is* the
+exact thing that holds the base open as a qcow2 backing file (ADR-0060) — no state value is a faithful
+proxy. In particular a `failed` System is terminal but per ADR-0435 can never run teardown
+(`failed -> torn_down` is not a legal edge) and is excluded from the reconciler's orphan teardown
+(`repair_orphaned_systems` treats `failed` as terminal), so its row persists indefinitely; keying the
+backing hazard on state would let a single `failed` System pin the SENSITIVE base **forever**, defeating
+even the TTL backstop. Overlay-absence lets the base drain the moment ADR-0435's provision-failure
+reclaim removes the `failed` System's overlay. The narrow state read in condition (b) is only the
+pre-overlay *read* window (`defined`/`provisioning`), never terminal-ness — so it does not reintroduce
+the failed-System pin. The gate is a point-in-time probe, not a persistent refcount (a stale read only
+defers one pass); keeping the object+row and file on one gate means a bound System that must
+re-materialize (reprovision, or a host base lost to a disk fault) always finds the object present to
+re-download.
 
 The per-System teardown rootfs reclaim (ADR-0434 §4) is **removed**, and so is ADR-0435's
 provision-failure reclaim of the (now shared) base (decision 5). #1501's *failed-provision* orphan was
@@ -209,14 +216,21 @@ deadline.
 
 - **Default:** if any bound System is in a non-terminal state, close **fails** with a
   `configuration_error` listing them and refuses — the investigation stays OPEN/ACTIVE.
-- **`close(force=True)`:** enqueue a teardown job for each bound live System (each gated on the caller
-  holding that System's project role — a System the caller cannot tear down makes force fail listing
-  it, rather than silently skipping), then close and set `cleanup_pending_at`.
+- **`close(force=True)`:** enqueue a teardown job for each bound live System, then close and set
+  `cleanup_pending_at`. Because a System teardown is `_ADMIN` (`systems.teardown`, exposure.py) while
+  `investigations.close` is `_CONTRIBUTOR`, `force` **requires admin on each bound System's project** —
+  the same tier `systems.teardown` demands, so `force` is not a contributor→admin escalation backdoor. A
+  System the caller lacks admin on makes `force` fail listing it, rather than silently skipping.
 
-Force teardown is async, so a just-force-closed investigation may briefly carry `cleanup_pending_at`
-while teardowns drain; the decision-6 liveness guard is what keeps the base-file reclaim safe across
-that window (and across a stuck teardown). The two mechanisms compose: close removes the *root cause*
-(Systems outliving close), the guard is the *safety net*.
+The role tiers mean the same-project binding rule (decision 2) forecloses only the *cross-project*
+deadlock, not an intra-project one: a same-project **contributor** who opened the investigation can
+neither default-close it (a live bound System blocks) nor `force`-close it (force needs admin), and must
+have an admin `force`-close or tear the Systems down first. This is the deliberate cost of keeping
+force-teardown at its existing destructive-op tier rather than lowering it through the close path; it is
+not a new escalation. Force teardown is async, so a just-force-closed investigation may briefly carry
+`cleanup_pending_at` while teardowns drain; the decision-6 overlay-absence gate keeps base reclaim safe
+across that window. The two mechanisms compose: close removes the *root cause* (Systems outliving close),
+the gate is the *safety net*.
 
 ### 8. Remote-libvirt (#1433/ADR-0440) stays per-System-lease for now
 
@@ -277,6 +291,14 @@ parity waivers stay accurate.
   `gc_investigation_artifacts` join reclaims on *that Run's* investigation close — fine when it is the
   same investigation, but the semantics lie. `owner_id = investigation_id` makes the owner equal to the
   sharing scope and removes the join.
+- **Own at Allocation scope (the link the System already carries).** A System is created against an
+  Allocation, so allocation ownership needs no migration, no `investigation_id` column, and no write-once
+  binding — the cheapest scope on paper. Rejected: it is too narrow for the reuse #1502 targets. Reuse
+  deliberately spans allocations — reproducing across arches or kernels uses different allocations (and
+  often different hosts), and an Investigation is precisely the domain object that groups Runs/Systems
+  *across* allocations. An allocation-scoped base could not be shared by the multi-arch/multi-kernel
+  Systems the feature exists to serve, so the migration + write-once binding buys the scope that matches
+  the sharing pattern.
 - **Keep `owner_kind='systems'` and add a shared content-addressed host cache only.** Rejected: it
   delivers download reuse but not *object* reuse (still one committed object per System), keeps the
   teardown-only reclaim and the #1501 orphan, and a cross-System shared cache would break ADR-0434's
