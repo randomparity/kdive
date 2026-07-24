@@ -28,9 +28,11 @@ the whole lifecycle to **one System's lease**: the object is committed `owner_ki
 base is staged per-System, and both are reclaimed only at that System's teardown. That has two
 costs #1502 targets:
 
-- **No reuse.** A custom debug rootfs an investigation wants to boot on several Systems (reproduce
-  across kernels/arches, re-provision after a crash) must be **re-uploaded and re-staged per
-  System**, paying the multi-GiB upload + download each time.
+- **No reuse.** A custom debug rootfs an investigation wants to boot on several Systems — the same
+  same-arch rootfs across multiple kernels, or a re-provision after a crash, grouped by investigation and
+  potentially across allocations on the host — must be **re-uploaded and re-staged per System**, paying
+  the multi-GiB upload + download each time. (A different-arch rootfs is different bytes and a separate
+  upload, so cross-arch is outside single-upload reuse; cross-host is remote, decision 8.)
 - **Fragile reclaim.** Reclaim hinges on per-System teardown. ADR-0435 (#1501) already closed the
   *failed-provision* leak — it reclaims the staged base and the uncommitted object when `provision()`
   raises, and relaxed the manifest reaper to collect a `failed` upload System. What that does **not**
@@ -246,10 +248,13 @@ parity waivers stay accurate.
   base is fetched **at most once per host per (investigation, checksum)**. The #1502 acceptance criteria
   are met for local-libvirt.
 - Reclaim is **investigation-close-driven with a TTL backstop**, closing the residual #1501 exposure
-  ADR-0435 did not reach — a committed object on a `ready`-then-stranded System — and preventing a
-  never-closed investigation from accumulating objects (the ADR-0234 pairing). No `owner_kind` is left
-  exempt from every reaper. The object and its host base share one lifetime and one liveness gate, so a
-  live-referenced System can always re-materialize.
+  ADR-0435 did not reach — a committed object on a `ready`-then-stranded System. Both sweeps are
+  overlay-gated, so retention is bounded **provided overlay files drain** (the common path: teardown or
+  ADR-0435's reclaim removes them). The one exception is an overlay that neither could remove
+  (ADR-0435's unlink is best-effort) on a never-closed investigation: it pins its SENSITIVE object until
+  an operator drains the marker (see the residual). Outside that case no `owner_kind` is left exempt from
+  a reaper. The object and its host base share one lifetime and one liveness gate, so a live-referenced
+  System can always re-materialize.
 - Cross-investigation isolation is **stronger and simpler to reason about**: the SQL resolution
   predicate (decision 4) is the boundary, backed by per-investigation staging (decision 5).
 - **New migration** (0076, `systems.investigation_id`), **new MCP surface**
@@ -283,6 +288,9 @@ parity waivers stay accurate.
   ADR-0435 could remove (e.g. a `failed` System whose overlay reclaim itself failed), the base is deferred
   — correctly, since deleting it under a present overlay would corrupt it — and both sweeps surface it as
   an un-drained marker for an operator, the same way a stuck `gc_investigation_artifacts` marker does.
+  So the TTL backstop bounds SENSITIVE-object retention only when overlays drain; a permanently-orphaned
+  overlay retains its object indefinitely. That is a reasonable thing to **alert** on (implementation may
+  add a metric on the un-drained marker) rather than leave silent.
 
 ## Considered & rejected
 
@@ -293,12 +301,13 @@ parity waivers stay accurate.
   sharing scope and removes the join.
 - **Own at Allocation scope (the link the System already carries).** A System is created against an
   Allocation, so allocation ownership needs no migration, no `investigation_id` column, and no write-once
-  binding — the cheapest scope on paper. Rejected: it is too narrow for the reuse #1502 targets. Reuse
-  deliberately spans allocations — reproducing across arches or kernels uses different allocations (and
-  often different hosts), and an Investigation is precisely the domain object that groups Runs/Systems
-  *across* allocations. An allocation-scoped base could not be shared by the multi-arch/multi-kernel
-  Systems the feature exists to serve, so the migration + write-once binding buys the scope that matches
-  the sharing pattern.
+  binding — the cheapest scope on paper. Rejected: it is too narrow for the reuse #1502 targets. The
+  in-scope reuse (same-arch rootfs across multiple kernels, or a re-provision after a crash) can span
+  **more than one allocation** — a crash-and-re-provision or a fresh System is a new Allocation — and an
+  Investigation is precisely the domain object that groups Runs/Systems *across* allocations. An
+  allocation-scoped base could not be shared by those cross-allocation Systems, so the migration +
+  write-once binding buys the scope that matches the sharing pattern. (The rejection rests on the
+  cross-allocation grouping, not on cross-host or cross-arch reuse — both outside this scope.)
 - **Keep `owner_kind='systems'` and add a shared content-addressed host cache only.** Rejected: it
   delivers download reuse but not *object* reuse (still one committed object per System), keeps the
   teardown-only reclaim and the #1501 orphan, and a cross-System shared cache would break ADR-0434's
@@ -340,11 +349,13 @@ parity waivers stay accurate.
 - **Fix only the #1501 residual leak, defer reuse (minimal path).** A cheaper change closes just the
   committed-object exemption — give the systems-owned rootfs object a TTL, or add an `owner_kind='systems'`
   rootfs arm to the existing artifact-expiry reaper — with no migration, no removed MCP surface, and no
-  profile-ref break. Rejected as the framing for *this* issue: #1502 is the **reuse** issue (its title),
-  and reuse genuinely needs an owner scope above the System — the *object*, not just the download, must be
-  shared, which the minimal path does not deliver. The leak is an incidental beneficiary, not the driver.
-  The reaper arm stays a valid standalone option if reuse is ever descoped; it is listed here so the
-  coupling is a deliberate choice, not an unweighed default.
+  profile-ref break. It is honest to record that this **fully satisfies the reclaim-completeness half** of
+  the Context (the teardown-shaped reclaim leak), so that half does *not* by itself justify the larger
+  blast radius. Rejected because it cannot deliver the **other** half — reuse — which genuinely needs an
+  owner scope above the System: the *object*, not just the download, must be shared across Systems, and no
+  reaper tweak provides that. The coupling of the migration + removed MCP surface + profile-ref break to
+  the reuse goal is therefore a deliberate, visible trade: they are the cost of reuse, not of the leak fix.
+  The reaper arm stays a valid standalone option if reuse is ever descoped.
 - **Do nothing.** Rejected: the per-System model's re-upload cost is the primary motivation, and its
   reclaim is teardown-shaped — the wrong shape for an object meant to outlive any single System. (ADR-0435
   already fixed the *failed-provision* orphan; #1502 is about reuse and the residual committed-object
