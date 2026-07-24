@@ -91,6 +91,16 @@ stored checksum, and atomically stage it — plus the new magic check below.
 > unique `<token>.<uuid>.partial` + `os.replace` atomicity, and both gates' error categories are as
 > decided here. `get_range` was not reused for this — it would issue ~1280 GETs for a 5 GiB object
 > where one suffices; it stays for `strip_gzip_to_writer`'s `RangedReadStore` seam.
+>
+> This is a **trade, not a pure win**: the pressure moves from per-worker RAM onto staging disk.
+> The `.partial` now holds up to the 5 GiB single-PUT ceiling for the whole transfer, where the
+> buffered stage wrote it in one final call after verifying; and because the fetch lock is keyed
+> per-(investigation, checksum), N distinct objects stage concurrently and their occupancy overlaps.
+> `UPLOADS_DIR` is a sibling of `ROOTFS_DIR` under `/var/lib/kdive`, so on a default deployment that
+> is the same filesystem as every live System's overlay. A rejected object — a failed checksum, a
+> non-qcow2 base, or the manifest-reaped identity fallback above — is now written in full before it
+> is rejected, where before it consumed no disk at all. There is no free-space precheck on either
+> staging path; adding one (both paths already hold the size to check against) is #1525.
 
 ### 3. qcow2 magic check, scoped to the upload path
 
