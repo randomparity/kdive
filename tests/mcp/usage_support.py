@@ -5,7 +5,7 @@ swallows every failure, so best-effort usage recording can never fail a tool cal
 (ADR-0148). A test that then asserts on the recorded row inherits both halves of that
 contract: it must not let the acquire budget expire, and it must say so when one does.
 
-Use :func:`open_warm_pool` for the pool and wrap the drive in
+Use :func:`warm_pool` for the pool and wrap the drive in
 :func:`recording_must_not_fail` (#1527). ``DenialAuditMiddleware`` needs neither — it
 acquires with the pool's 30-second default, so its ``audit_log`` rows are not on this
 knife edge.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -62,11 +62,12 @@ def recording_must_not_fail() -> Iterator[None]:
     previous = logger.level
     logger.setLevel(logging.WARNING)  # the logger's own level, not the global disable floor
     logger.addHandler(handler)
-    # `logging.disable` is a process-global floor `setLevel` cannot lift, and the suite
-    # treats it as mutable (tests/conftest.py snapshots it). Without this check a raised
-    # floor would silently disarm the guard and #1527 would revert to a bare IndexError.
-    assert logger.isEnabledFor(logging.WARNING), "recording-failure guard is disarmed"
     try:
+        # `logging.disable` is a process-global floor `setLevel` cannot lift, and the
+        # suite treats it as mutable (tests/conftest.py snapshots it). Without this check
+        # a raised floor would silently disarm the guard and #1527 would revert to a bare
+        # IndexError. Inside the `try` so the disarm path still restores the logger.
+        assert logger.isEnabledFor(logging.WARNING), "recording-failure guard is disarmed"
         yield
     finally:
         logger.removeHandler(handler)
@@ -75,8 +76,9 @@ def recording_must_not_fail() -> Iterator[None]:
             raise AssertionError("\n\n".join(handler.failures))
 
 
-async def open_warm_pool(url: str) -> AsyncConnectionPool:
-    """A pool with its connection already established.
+@contextlib.asynccontextmanager
+async def warm_pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
+    """A pool whose connection is established before the caller gets it.
 
     ``open()`` defaults to ``wait=False``, which returns before any connection exists and
     leaves the first connect to a background task. The middleware then acquires with a
@@ -85,7 +87,13 @@ async def open_warm_pool(url: str) -> AsyncConnectionPool:
     ``PoolTimeout``, and be swallowed — leaving no row (#1527). Waiting here moves the
     connect outside the budget, and makes a genuinely unreachable backend fail loudly at
     open time rather than as a silently missing row.
+
+    A context manager rather than a plain factory so closure is structural: a caller
+    cannot hold an open pool — and its background workers — without closing it.
     """
     pool = AsyncConnectionPool(url, min_size=1, max_size=2, open=False)
     await pool.open(wait=True)
-    return pool
+    try:
+        yield pool
+    finally:
+        await pool.close()

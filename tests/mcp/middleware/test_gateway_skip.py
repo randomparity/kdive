@@ -31,7 +31,7 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.usage_support import open_warm_pool, recording_must_not_fail
+from tests.mcp.usage_support import recording_must_not_fail, warm_pool
 
 # ============================================================
 # Shared helpers
@@ -330,7 +330,7 @@ def test_invoke_writes_one_usage_row_keyed_to_inner(
     inner_ok = ToolResponse.success("session.whoami", "ok")
 
     async def _run() -> list[tuple[Any, ...]]:
-        async with await open_warm_pool(migrated_url) as pool:
+        async with warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
 
             inner_ctx = _Ctx("session.whoami")
@@ -368,7 +368,7 @@ def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
     denial = _role_denied()
 
     async def _run() -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
-        async with await open_warm_pool(migrated_url) as pool:
+        async with warm_pool(migrated_url) as pool:
             usage_mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             denial_mw = DenialAuditMiddleware(pool, agent_session=lambda: "sess-1")
 

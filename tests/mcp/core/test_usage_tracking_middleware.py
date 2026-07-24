@@ -30,7 +30,7 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.usage_support import open_warm_pool, recording_must_not_fail
+from tests.mcp.usage_support import recording_must_not_fail, warm_pool
 
 
 def _ctx() -> RequestContext:
@@ -57,7 +57,7 @@ def _drive(
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", cli_client_id)
 
     async def _run() -> list[tuple[Any, ...]]:
-        async with await open_warm_pool(migrated_url) as pool:
+        async with warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             with recording_must_not_fail(), contextlib.suppress(Exception):
                 await mw.on_call_tool(_Ctx(tool), behavior)
@@ -82,7 +82,7 @@ def test_args_digest_present_on_recorded_row(
         return ToolResult(structured_content=envelope.model_dump(mode="json"))
 
     async def _run() -> str | None:
-        async with await open_warm_pool(migrated_url) as pool:
+        async with warm_pool(migrated_url) as pool:
             mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
             with recording_must_not_fail():
                 await mw.on_call_tool(_Ctx("jobs.get"), ok)
@@ -192,6 +192,18 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(AssertionError, match="PoolClosed"):
         asyncio.run(_run())
+
+
+def test_warm_pool_has_a_connection_before_the_caller_acquires(migrated_url: str) -> None:
+    # This is the whole of the #1527 fix: the connect must land *outside* the
+    # middleware's 1-second acquire budget. Pin it directly — every other test here
+    # passes just as well over a cold pool on an idle machine, so without this one a
+    # refactor back to the psycopg default would reopen the flake silently.
+    async def _run() -> int:
+        async with warm_pool(migrated_url) as pool:
+            return pool.get_stats()["pool_available"]
+
+    assert asyncio.run(_run()) >= 1  # 0 if the pool were opened with wait=False
 
 
 def test_recording_guard_ignores_unrelated_warnings() -> None:
