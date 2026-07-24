@@ -758,6 +758,44 @@ def test_valid_remote_profile_parses() -> None:
     assert section.crashkernel == "256M"
 
 
+def test_remote_profile_parses_with_supplied_base_image_source() -> None:
+    # ADR-0440 (#1433): base_image_source (a supplied worker-host qcow2) is an alternative to
+    # base_image_volume; a profile carrying only it parses and exposes the LocalComponentRef.
+    raw = _valid_remote()
+    del raw["provider"]["remote-libvirt"]["base_image_volume"]
+    raw["provider"]["remote-libvirt"]["base_image_source"] = {
+        "kind": "local",
+        "path": "/var/lib/kdive/rootfs/fedora-44.qcow2",
+        "sha256": "sha256:" + "a" * 64,
+    }
+    section = ProvisioningProfile.parse(raw).provider.remote_libvirt
+    assert section.base_image_volume is None
+    assert section.base_image_source is not None
+    assert section.base_image_source.path == "/var/lib/kdive/rootfs/fedora-44.qcow2"
+
+
+def test_remote_profile_rejects_neither_base_image() -> None:
+    # ADR-0440: a remote section with neither base_image_volume nor base_image_source has no base
+    # image and is a configuration error.
+    raw = _valid_remote()
+    del raw["provider"]["remote-libvirt"]["base_image_volume"]
+    with pytest.raises(CategorizedError) as caught:
+        ProvisioningProfile.parse(raw)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+def test_remote_profile_rejects_both_base_image_volume_and_source() -> None:
+    # ADR-0440: naming both an operator-staged volume and a supplied source is an ambiguous base.
+    raw = _valid_remote()
+    raw["provider"]["remote-libvirt"]["base_image_source"] = {
+        "kind": "local",
+        "path": "/var/lib/kdive/rootfs/fedora-44.qcow2",
+    }
+    with pytest.raises(CategorizedError) as caught:
+        ProvisioningProfile.parse(raw)
+    assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
 def test_disk_image_profile_parses_without_kernel_source_ref() -> None:
     # #472: a disk-image (remote-libvirt) provision boots the base image's own kernel and never
     # reads kernel_source_ref, so it is optional on this lane — the VM-only flow must not be forced

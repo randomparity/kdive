@@ -20,11 +20,14 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from typing import Protocol
+from pathlib import Path
+from typing import Protocol, cast
 from uuid import UUID
 
 import libvirt
 
+from kdive.components.local_paths import validate_local_component_path
+from kdive.components.references import LocalComponentRef
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.profiles.provisioning import (
     ProvisioningProfile,
@@ -46,12 +49,19 @@ from kdive.providers.remote_libvirt.lifecycle.gdb import (
     used_ssh_ports,
 )
 from kdive.providers.remote_libvirt.lifecycle.readiness import Monotonic, Sleep, wait_for_agent
+from kdive.providers.remote_libvirt.lifecycle.rootfs.volume_upload import (
+    VolumeUploadConn,
+    upload_qcow2_volume,
+)
 from kdive.providers.remote_libvirt.lifecycle.storage import (
     Pool,
+    VolumeStaging,
+    cleanup_created_volume,
     cleanup_overlay_if_created,
     delete_volume,
     ensure_overlay,
     lookup_pool,
+    lookup_volume_staged,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     KDIVE_METADATA_NS,
@@ -60,6 +70,7 @@ from kdive.providers.remote_libvirt.lifecycle.xml import (
     recorded_gdb_port,
     render_domain_xml,
     render_volume_xml,
+    supplied_base_volume_name,
 )
 from kdive.providers.remote_libvirt.lifecycle.xml import (
     disk_pool_strict as _disk_pool_strict,
@@ -87,6 +98,15 @@ _log = logging.getLogger(__name__)
 _START_ATTEMPTS = 3
 _AGENT_TIMEOUT_S = 180.0
 _AGENT_POLL_S = 2.0
+
+# The worker-host roots a supplied `base_image_source` qcow2 must live under (ADR-0440). A supplied
+# base image is a worker-host absolute path the operator/agent placed under kdive's rootfs tree; the
+# containment check keeps a supplied ref from naming an arbitrary host file to stream over TLS.
+_SUPPLIED_ROOTFS_ROOTS = (Path("/var/lib/kdive/rootfs"),)
+
+#: The volume-staging seam: stream a local qcow2 into a pool volume (default the real primitive).
+#: Injected so provisioning orchestration is unit-tested without a real libvirt upload stream.
+StageBaseVolume = Callable[[VolumeUploadConn, str, str, Path], None]
 
 
 class _Domain(Protocol):
@@ -159,6 +179,8 @@ class RemoteLibvirtProvisioning:
         agent_timeout_s: float = _AGENT_TIMEOUT_S,
         agent_poll_s: float = _AGENT_POLL_S,
         bootstrap_injector: _BootstrapInjector | None = None,
+        allowed_roots: tuple[Path, ...] = _SUPPLIED_ROOTFS_ROOTS,
+        stage_base_volume: StageBaseVolume = upload_qcow2_volume,
     ) -> None:
         self._connections = connections or remote_libvirt_connections(
             secret_registry=secret_registry,
@@ -170,6 +192,8 @@ class RemoteLibvirtProvisioning:
         self._agent_timeout_s = agent_timeout_s
         self._agent_poll_s = agent_poll_s
         self._bootstrap_injector = bootstrap_injector or RemoteBootstrapKeyInjector()
+        self._allowed_roots = allowed_roots
+        self._stage_base_volume = stage_base_volume
 
     def provision(
         self,
@@ -218,7 +242,8 @@ class RemoteLibvirtProvisioning:
         domain_name = domain_name_for(system_id)
         with self._connection(config) as conn:
             pool = lookup_pool(conn, config.storage_pool)
-            overlay = ensure_overlay(pool, section.base_image_volume, system_id)
+            base_volume, base_created = self._resolve_base_volume(conn, section, system_id, config)
+            overlay = ensure_overlay(pool, base_volume, system_id)
             try:
                 self._define_and_start(
                     conn,
@@ -231,6 +256,7 @@ class RemoteLibvirtProvisioning:
                 )
             except CategorizedError:
                 cleanup_overlay_if_created(pool, overlay)
+                cleanup_created_volume(pool, base_volume, created=base_created)
                 raise
             # Agent-gate failures deliberately leave the domain (and its overlay) in
             # place: the running/exited domain is the diagnosable artifact, and a
@@ -272,12 +298,15 @@ class RemoteLibvirtProvisioning:
         )
 
     def teardown(self, domain_name: str) -> None:
-        """Destroy+undefine the domain and delete its overlay volume; idempotent.
+        """Destroy+undefine the domain; delete its overlay and any supplied base volume; idempotent.
 
         The overlay's pool is read from the domain XML while the domain exists (the
         record travels with the domain), falling back to the configured pool when it
         is already gone — pool-config drift cannot silently strand the overlay
-        (ADR-0080 §4). Absent domain/volume/pool are achieved post-states.
+        (ADR-0080 §4). A supplied-source System's per-System base volume
+        ``kdive-<id>-base.qcow2`` (ADR-0440) is reclaimed with the lease; this is a no-op for an
+        operator-staged System, whose operator-owned ``base_image_volume`` is never that name and
+        so is never touched. Absent domain/volume/pool are achieved post-states.
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` on any libvirt error other
@@ -285,10 +314,14 @@ class RemoteLibvirtProvisioning:
                 operator config; ``TRANSPORT_FAILURE`` when the TLS connect fails.
         """
         config = self._connections.config()
-        overlay_name = overlay_volume_name(domain_name.removeprefix(DOMAIN_PREFIX))
+        system_id_str = domain_name.removeprefix(DOMAIN_PREFIX)
+        overlay_name = overlay_volume_name(system_id_str)
+        base_name = supplied_base_volume_name(system_id_str)
         with self._connection(config) as conn:
             recorded_pool = self._teardown_domain(conn, domain_name)
-            delete_volume(conn, recorded_pool or config.storage_pool, overlay_name)
+            pool_name = recorded_pool or config.storage_pool
+            delete_volume(conn, pool_name, overlay_name)
+            delete_volume(conn, pool_name, base_name)
 
     def read_resolved_cpu(self, system_id: UUID) -> dict[str, JsonValue] | None:
         """Remote keeps the ADR-0368 mint-time ``host_cpu`` snapshot — no live read (ADR-0369)."""
@@ -297,6 +330,58 @@ class RemoteLibvirtProvisioning:
 
     def _connection(self, config: RemoteLibvirtConfig):  # noqa: ANN202 - contextmanager passthrough
         return self._connections.connection(config)
+
+    def _resolve_base_volume(
+        self,
+        conn: _ProvisionConn,
+        section: RemoteLibvirtProfile,
+        system_id: UUID,
+        config: RemoteLibvirtConfig,
+    ) -> tuple[str, bool]:
+        """Resolve the base volume backing the System's overlay (ADR-0080/0440).
+
+        Operator-staged path (``base_image_volume``): return the named volume, ``created=False``
+        (this call stages nothing). Supplied path (``base_image_source``): validate the worker-host
+        qcow2 and stream it into a per-System base volume over the open TLS connection, returning
+        ``(name, created)`` — ``created`` reflecting whether **this** call staged it, so a failed
+        provision reclaims only a base it uploaded (ADR-0435). Staging is idempotent: a base a prior
+        attempt already staged is reused (the upload primitive skips a present volume).
+
+        Raises:
+            CategorizedError: ``CONFIGURATION_ERROR`` for a supplied path outside the provider
+                allowed roots, absent, unreadable, sha256-mismatched, or not a qcow2;
+                ``INFRASTRUCTURE_FAILURE`` for a libvirt fault during the stage.
+        """
+        source = section.base_image_source
+        if source is None:
+            volume = section.base_image_volume
+            if volume is None:  # unreachable: the exactly-one validator (ADR-0440) guarantees one
+                raise CategorizedError(
+                    "remote-libvirt profile has neither base_image_volume nor base_image_source",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                )
+            return volume, False
+        return self._stage_supplied_base(conn, source, system_id, config)
+
+    def _stage_supplied_base(
+        self,
+        conn: _ProvisionConn,
+        source: LocalComponentRef,
+        system_id: UUID,
+        config: RemoteLibvirtConfig,
+    ) -> tuple[str, bool]:
+        """Validate + stage a supplied worker-host qcow2 as a per-System base volume (ADR-0440)."""
+        path = validate_local_component_path(
+            source.path, allowed_roots=self._allowed_roots, sha256=source.sha256
+        )
+        base_volume = supplied_base_volume_name(system_id)
+        created = (
+            lookup_volume_staged(conn, config.storage_pool, base_volume) is not VolumeStaging.STAGED
+        )
+        self._stage_base_volume(
+            cast("VolumeUploadConn", conn), config.storage_pool, base_volume, path
+        )
+        return base_volume, created
 
     @staticmethod
     def _remote_section(profile: ProvisioningProfile) -> RemoteLibvirtProfile:

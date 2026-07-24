@@ -13,8 +13,10 @@ from kdive.components.references import (
     CONFIG_COMPONENT,
     KERNEL_COMPONENT,
     PATCH_COMPONENT,
+    ROOTFS_COMPONENT,
     VMLINUX_COMPONENT,
     ArtifactComponentRef,
+    CatalogComponentRef,
     LocalComponentRef,
 )
 from kdive.components.validation import reject_unsupported_component_source
@@ -241,6 +243,9 @@ def test_component_sources_map_directly() -> None:
     caps = composition._component_sources()
     assert caps.provider == ResourceKind.REMOTE_LIBVIRT.value
     assert caps.accepted_component_sources == {
+        # ADR-0440 (#1433): a supplied ROOTFS base image from the worker-host `local` source kind;
+        # NOT `catalog` (that role is the operator-staged base_image_volume) and NOT `upload`.
+        ROOTFS_COMPONENT: frozenset({"local"}),
         CONFIG_COMPONENT: frozenset({"catalog", "local"}),
         KERNEL_COMPONENT: frozenset({"local"}),
         PATCH_COMPONENT: frozenset({"local"}),
@@ -255,6 +260,29 @@ def test_remote_accepts_supplied_kernel_and_vmlinux_from_local_source() -> None:
     local_ref = LocalComponentRef(kind="local", path="/var/lib/kdive/kernel/vmlinuz-6.9")
     for kind in (KERNEL_COMPONENT, VMLINUX_COMPONENT):
         reject_unsupported_component_source(caps, component_kind=kind, ref=local_ref)
+
+
+def test_remote_accepts_supplied_rootfs_from_local_source() -> None:
+    # ADR-0440 (#1433): a worker-host-local supplied ROOTFS base image is accepted; the reject-path
+    # helper returns without raising for the `local` source kind.
+    caps = composition._component_sources()
+    assert caps.accepted_component_sources[ROOTFS_COMPONENT] == frozenset({"local"})
+    local_ref = LocalComponentRef(kind="local", path="/var/lib/kdive/rootfs/fedora-44.qcow2")
+    reject_unsupported_component_source(caps, component_kind=ROOTFS_COMPONENT, ref=local_ref)
+
+
+def test_remote_rejects_catalog_and_upload_rootfs_sources() -> None:
+    # ADR-0440 (#1433): ROOTFS accepts only `local`. A `catalog` ref (the operator-staged
+    # base_image_volume's role) is rejected; component-upload/artifact stay unaccepted too.
+    caps = composition._component_sources()
+    catalog_ref = CatalogComponentRef(kind="catalog", provider="remote-libvirt", name="fedora-44")
+    artifact_ref = ArtifactComponentRef(kind="artifact", artifact_id=uuid4())
+    for ref, kind_name in ((catalog_ref, "catalog"), (artifact_ref, "artifact")):
+        with pytest.raises(CategorizedError) as caught:
+            reject_unsupported_component_source(caps, component_kind=ROOTFS_COMPONENT, ref=ref)
+        assert caught.value.category is ErrorCategory.CONFIGURATION_ERROR
+        assert caught.value.details["source_kind"] == kind_name
+        assert caught.value.details["accepted_source_kinds"] == ["local"]
 
 
 def test_remote_rejects_component_upload_and_artifact_kernel_vmlinux_sources() -> None:

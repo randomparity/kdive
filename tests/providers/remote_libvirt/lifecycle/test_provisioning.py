@@ -1308,6 +1308,167 @@ def test_teardown_other_libvirt_error_is_infrastructure_failure(tmp_path: Path) 
     assert excinfo.value.__cause__ is not None
 
 
+# --- supplied base image staging (ADR-0440, #1433) ------------------------------------------
+
+
+def _remote_profile_supplied(path: str, **section_overrides: Any) -> ProvisioningProfile:
+    """A remote profile whose base image is a supplied worker-host qcow2 (base_image_source)."""
+    section: dict[str, Any] = {
+        "base_image_source": {"kind": "local", "path": path},
+        "crashkernel": "256M",
+        **section_overrides,
+    }
+    return ProvisioningProfile.parse(
+        {
+            "schema_version": 1,
+            "arch": "x86_64",
+            "vcpu": 4,
+            "memory_mb": 4096,
+            "disk_gb": 20,
+            "boot_method": "disk-image",
+            "kernel_source_ref": "git+https://git.kernel.org/pub/scm/linux.git#v6.9",
+            "provider": {"remote-libvirt": section},
+        }
+    )
+
+
+class _RecordingStage:
+    """A fake volume-upload seam: records calls and idempotently stages the base in the pool."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Path]] = []
+
+    def __call__(self, conn: Any, pool_name: str, volume_name: str, qcow2: Path) -> None:
+        self.calls.append((pool_name, volume_name, qcow2))
+        pool = conn.pools[pool_name]
+        if volume_name not in pool.volumes:  # idempotent, like upload_qcow2_volume
+            pool.volumes[volume_name] = FakeVolume(volume_name, pool=pool)
+
+
+def _supplied_qcow2(tmp_path: Path) -> Path:
+    path = tmp_path / "supplied.qcow2"
+    path.write_bytes(b"QFI\xfb" + b"body")  # qcow2 magic (the real stage would gate on it)
+    return path
+
+
+_BASE_NAME = f"kdive-{SYSTEM_ID}-base.qcow2"
+
+
+def test_provision_stages_supplied_base_and_backs_overlay(tmp_path: Path) -> None:
+    conn = FakeProvisionConn()  # empty pool: the supplied base is staged, not operator-provided
+    qcow2 = _supplied_qcow2(tmp_path)
+    stage = _RecordingStage()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path,), stage_base_volume=stage
+    )
+
+    name = provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    assert name == DOMAIN_NAME
+    # The supplied qcow2 was staged into the per-System base volume over the open connection.
+    assert stage.calls == [("default", _BASE_NAME, qcow2.resolve())]
+    assert _BASE_NAME in conn.pools["default"].volumes
+    # The overlay was created backing onto the staged base (not the operator base_image_volume).
+    [overlay_xml] = conn.pools["default"].created_xml
+    assert f"/pool/{_BASE_NAME}" in overlay_xml
+    assert conn.domains[DOMAIN_NAME].active
+
+
+def test_provision_operator_staged_base_stages_nothing(tmp_path: Path) -> None:
+    # The operator-staged base_image_volume path never invokes the upload seam.
+    conn = _conn_with_base()
+    stage = _RecordingStage()
+    provisioner, _ = _provisioner(conn, tmp_path, stage_base_volume=stage)
+
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+
+    assert stage.calls == []
+
+
+def test_provision_supplied_base_reclaimed_on_start_failure(tmp_path: Path) -> None:
+    conn = FakeProvisionConn()
+    conn.create_results = [libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)] * 3
+    qcow2 = _supplied_qcow2(tmp_path)
+    stage = _RecordingStage()
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path,), stage_base_volume=stage
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    assert excinfo.value.category is ErrorCategory.PROVISIONING_FAILURE
+    # Both the overlay and the base volume this attempt staged are reclaimed.
+    assert overlay_volume_name(SYSTEM_ID) not in conn.pools["default"].volumes
+    assert _BASE_NAME not in conn.pools["default"].volumes
+    assert _BASE_NAME in conn.pools["default"].deleted
+
+
+def test_provision_reuses_already_staged_supplied_base_and_does_not_reclaim(tmp_path: Path) -> None:
+    # A base a prior attempt already staged is reused (created=False), so a later start failure
+    # does NOT reclaim it — only a base THIS call staged is removed (ADR-0435).
+    conn = FakeProvisionConn()
+    pool = conn.pools["default"]
+    pool.volumes[_BASE_NAME] = FakeVolume(_BASE_NAME, pool=pool)
+    conn.create_results = [libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)] * 3
+    qcow2 = _supplied_qcow2(tmp_path)
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path,), stage_base_volume=_RecordingStage()
+    )
+
+    with pytest.raises(CategorizedError):
+        provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    assert _BASE_NAME in pool.volumes  # pre-existing base is preserved
+    assert _BASE_NAME not in pool.deleted
+
+
+def test_provision_rejects_supplied_base_outside_allowed_roots(tmp_path: Path) -> None:
+    conn = FakeProvisionConn()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    qcow2 = _supplied_qcow2(outside)
+    stage = _RecordingStage()
+    # allowed_roots deliberately excludes the file's directory.
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path / "roots",), stage_base_volume=stage
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert stage.calls == []  # rejected before staging
+    assert conn.defined_xml == []  # no domain defined
+
+
+def test_teardown_deletes_supplied_base_volume(tmp_path: Path) -> None:
+    conn = FakeProvisionConn()
+    qcow2 = _supplied_qcow2(tmp_path)
+    provisioner, _ = _provisioner(
+        conn, tmp_path, allowed_roots=(tmp_path,), stage_base_volume=_RecordingStage()
+    )
+    provisioner.provision(SYSTEM_ID, _remote_profile_supplied(str(qcow2)))
+
+    provisioner.teardown(DOMAIN_NAME)
+
+    # Both the per-System overlay and the supplied base volume are reclaimed with the lease.
+    assert overlay_volume_name(SYSTEM_ID) not in conn.pools["default"].volumes
+    assert _BASE_NAME not in conn.pools["default"].volumes
+
+
+def test_teardown_operator_staged_leaves_base_image_volume(tmp_path: Path) -> None:
+    # Teardown's supplied-base reclaim is a no-op for an operator-staged System: the per-System
+    # kdive-<id>-base.qcow2 never existed, and the operator's base_image_volume is untouched.
+    conn = _conn_with_base()
+    provisioner, _ = _provisioner(conn, tmp_path)
+    provisioner.provision(SYSTEM_ID, _remote_profile())
+
+    provisioner.teardown(DOMAIN_NAME)
+
+    assert _BASE_VOLUME in conn.pools["default"].volumes
+
+
 def test_reprovision_wipes_then_provisions(tmp_path: Path) -> None:
     conn = _conn_with_base()
     provisioner, _ = _provisioner(conn, tmp_path)

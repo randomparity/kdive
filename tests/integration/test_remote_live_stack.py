@@ -186,6 +186,7 @@ def test_remote_provision_default_references_the_built_image_not_a_placeholder(
     monkeypatch.delenv(_BASE_IMAGE_ENV, raising=False)
     profile = ProvisioningProfile.parse(_remote_provision_profile())
     default_volume = profile.provider.remote_libvirt.base_image_volume
+    assert default_volume is not None  # this operator-staged profile names a base_image_volume
     assert default_volume != "kdive-base.qcow2", "the placeholder volume literal is removed"
     assert _REMOTE_BASE_IMAGE_NAME in default_volume
 

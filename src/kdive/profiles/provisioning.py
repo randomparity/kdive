@@ -212,15 +212,26 @@ class FaultInjectProfile(_ProfileBase):
     capture_method: CaptureMethod = CaptureMethod.CONSOLE
 
 
-# Provenance: ADR-0080; image-content obligations ADR-0078/0079; destructive opt-in ADR-0028 §2;
-# gdbstub port ADR-0079/0080; host_dump opt-in ADR-0426/0094.
+# Provenance: ADR-0080; image-content obligations ADR-0078/0079; supplied rootfs ADR-0440 (#1433);
+# destructive opt-in ADR-0028 §2; gdbstub port ADR-0079/0080; host_dump opt-in ADR-0426/0094.
 class RemoteLibvirtProfile(_ProfileBase):
     """The ``remote-libvirt`` provider section.
 
-    ``base_image_volume`` names the **operator-staged** qcow2 volume on the remote
-    host's storage pool carrying the base OS (with qemu-guest-agent enabled, drgn,
-    and matching vmlinux/debuginfo — image-content obligations the operator owns);
-    provisioning verifies the volume exists, not its contents.
+    The base image is named **one** of two ways (exactly one is required, ADR-0440):
+
+    - ``base_image_volume`` names an **operator-staged** qcow2 volume already present on the
+      remote host's storage pool; provisioning references it by name and verifies it exists.
+    - ``base_image_source`` supplies a worker-host ``local`` qcow2 (a ``LocalComponentRef``,
+      the same ``local`` source kind remote accepts for kernel/vmlinux, ADR-0430) which
+      provisioning stages onto the pool per-System via the volume-upload primitive (ADR-0336).
+
+    Either way the base image carries the **image-content obligations the supplier owns**: the
+    base OS with qemu-guest-agent enabled, drgn, and matching vmlinux/debuginfo. Provisioning
+    verifies the volume exists and — for a supplied qcow2 — that its bytes start with the qcow2
+    magic; it does **not** verify these deeper obligations, which are not introspectable from a
+    volume lookup (ADR-0080). A base image missing them provisions successfully and then fails
+    later at guest-agent contact, install, or debug (ADR-0440).
+
     ``crashkernel`` mirrors the local section (the kdump prerequisite token; the
     booted kernel is the arbiter of its grammar). ``destructive_ops`` is the
     deny-by-default opt-in factor for ``force_crash`` (not ``control.power`` or
@@ -231,15 +242,32 @@ class RemoteLibvirtProfile(_ProfileBase):
     ``debug.preserve_on_crash`` (per-profile, off by default) but not its mechanism:
     remote takes the dump on demand from a halted System, so this flag adds no
     provisioning-time device — unlike local's pvpanic + ``<on_crash>preserve</on_crash>``.
-    There is no rootfs, SSH credential, or gdbstub flag: the base image is the rootfs,
-    in-guest access rides the guest-agent seam, and the gdbstub is unconditionally
-    enabled with a per-System port the provisioning plane allocates.
+    There is no SSH credential or gdbstub flag: in-guest access rides the guest-agent
+    seam, and the gdbstub is unconditionally enabled with a per-System port the
+    provisioning plane allocates.
     """
 
-    base_image_volume: NonEmptyStr
+    base_image_volume: NonEmptyStr | None = None
+    base_image_source: LocalComponentRef | None = None
     crashkernel: CrashkernelToken | None = None
     destructive_ops: list[NonEmptyStr] = Field(default_factory=list)
     host_dump: bool = False
+
+    @model_validator(mode="after")
+    def _require_exactly_one_base_image(self) -> RemoteLibvirtProfile:
+        """Require exactly one of ``base_image_volume`` / ``base_image_source`` (ADR-0440).
+
+        The two are alternatives: an operator-staged volume named by ``base_image_volume``, or a
+        supplied worker-host qcow2 in ``base_image_source`` that provisioning stages. Neither is a
+        System with no base image; both is an ambiguous source — both are configuration errors.
+        """
+        present = [self.base_image_volume is not None, self.base_image_source is not None]
+        if sum(present) != 1:
+            raise ValueError(
+                "remote-libvirt requires exactly one of base_image_volume "
+                "(an operator-staged volume name) or base_image_source (a supplied local qcow2)"
+            )
+        return self
 
 
 # Provenance: ADR-0024 decision 1.

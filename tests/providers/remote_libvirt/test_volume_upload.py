@@ -103,7 +103,11 @@ class _FakeConn:
         return self._stream
 
 
-def _qcow2(tmp_path: Path, data: bytes = b"qcow2-bytes") -> Path:
+# A minimal qcow2: the magic (bytes 51 46 49 fb) plus a body the fake stream drains verbatim.
+_QCOW2_MAGIC = b"QFI\xfb"
+
+
+def _qcow2(tmp_path: Path, data: bytes = _QCOW2_MAGIC + b"body") -> Path:
     path = tmp_path / "img.qcow2"
     path.write_bytes(data)
     return path
@@ -114,15 +118,32 @@ def test_upload_streams_bytes_and_finishes(tmp_path: Path) -> None:
     volume, stream = _FakeVolume(), _FakeStream()
     pool = _FakePool(volume)
     conn = _FakeConn(pool, stream)
-    qcow2 = _qcow2(tmp_path, b"CONFIG-QCOW2")
+    body = _QCOW2_MAGIC + b"CONFIG-QCOW2"
+    qcow2 = _qcow2(tmp_path, body)
 
     upload_qcow2_volume(conn, "images", "fedora-44.qcow2", qcow2)
 
     assert pool.created_xml is not None and "fedora-44.qcow2" in pool.created_xml
-    assert volume.upload_args == (0, len(b"CONFIG-QCOW2"), 0)
-    assert stream.sent == b"CONFIG-QCOW2"
+    assert volume.upload_args == (0, len(body), 0)
+    assert stream.sent == body
     assert stream.finished
     assert not volume.deleted
+
+
+def test_upload_rejects_non_qcow2_file(tmp_path: Path) -> None:
+    """A file without the qcow2 magic is a configuration error; no volume is created."""
+    volume, stream = _FakeVolume(), _FakeStream()
+    pool = _FakePool(volume)
+    conn = _FakeConn(pool, stream)
+    not_qcow2 = tmp_path / "img.qcow2"
+    not_qcow2.write_bytes(b"not-a-qcow2-header")
+
+    with pytest.raises(CategorizedError) as exc:
+        upload_qcow2_volume(conn, "images", "v", not_qcow2)
+
+    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert pool.created_xml is None  # nothing created for a bad file
+    assert not stream.finished
 
 
 def test_upload_skips_when_volume_already_staged(tmp_path: Path) -> None:
