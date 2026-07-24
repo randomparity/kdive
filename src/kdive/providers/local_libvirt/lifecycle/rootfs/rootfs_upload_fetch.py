@@ -228,16 +228,13 @@ def _unlink_orphan_partials(dest: Path) -> None:
     is not expected — a match is normally a killed worker's SENSITIVE orphan, bounded by this next
     fetch rather than by full investigation reclaim.
 
-    That premise holds only while the lock does. A session lock lost mid-transfer (an idle-session
-    timeout or a recycled connection across a multi-GiB download) lets this sweep unlink a live
-    sibling's partial; that fetcher writes on into the unlinked inode and fails at ``os.replace``,
-    so the cost is a failed provision, never a corrupt ``dest``. It is not only a failed provision,
-    though: the unlinked inode's blocks stay allocated until that worker exits, so for the rest of
-    the transfer they are charged to the filesystem (``df``) while belonging to no path — invisible
-    to ``du``, to this glob, and to the reclaim sweep, which both match on paths. Disk pressure
-    during a re-provision storm can therefore look like a leak the sweeps should have caught.
-    Bounding the sweep away from live partials is #1524 — do not widen this glob (outside the lock,
-    or over the whole uploads dir) on the strength of the paragraph above.
+    That premise holds only while the lock does. A lock lost mid-transfer (an idle-session timeout,
+    a recycled connection) lets this sweep unlink a *live* sibling's partial: that fetcher writes on
+    into the unlinked inode and fails at ``os.replace`` — a failed provision, never a corrupt
+    ``dest`` — while those blocks stay charged to ``df`` yet invisible to every path-matching tool,
+    so the disk pressure looks like a leak the sweeps missed. Bounding this glob away from live
+    partials is #1524; do not widen it (outside the lock, or over the whole uploads dir) on the
+    strength of the paragraph above.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
@@ -309,18 +306,15 @@ def stage_uploaded_rootfs(
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={"system_id": str(system_id)},
             )
+        _require_qcow2_magic(partial, system_id=str(system_id))
         os.replace(partial, dest)
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
     finally:
-        # ``os.replace`` consumed the partial on success, so this is a no-op there. On any
-        # failure that *unwinds this frame* — a bomb, a hash mismatch, a failed magic check, an
-        # IO fault, or anything outside the store's typed taxonomy — the SENSITIVE partial is
-        # unlinked here, in the ``finally`` ADR-0441 §5 specifies. A **killed** worker unwinds
-        # nothing (SIGTERM sets an asyncio stop Event, it does not raise into this thread; SIGKILL
-        # raises nothing at all), so its partial is still collected only by
-        # ``_unlink_orphan_partials`` and the reclaim sweep — both stay load-bearing, and more so
-        # now that the identity partial spans the whole download rather than one final write.
+        # Any failure that unwinds this frame discards the SENSITIVE partial here, in the
+        # ``finally`` ADR-0441 §5 specifies (``os.replace`` consumed it on success, so this is then
+        # a no-op). A *killed* worker unwinds nothing — SIGTERM sets an asyncio stop Event rather
+        # than raising into this thread — so the sweeps remain the only collector for that case.
         _discard(partial)
 
 
@@ -332,45 +326,32 @@ def _stage_identity(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stage an unencoded upload verbatim, streaming it chunk-by-chunk into the partial.
+    """Stream an unencoded upload verbatim into the partial, verifying its SHA-256.
 
     The object is read in ``_STREAM_CHUNK_BYTES`` windows off a single unconditional GET (``etag``
     is ``None``, ADR-0054: the provision plane holds no client handle), each chunk hashed and
     written as it arrives, so peak memory is the chunk rather than the object — a multi-GiB rootfs
-    no longer spikes the worker (#1520).
+    no longer spikes the worker (#1520). A read may return fewer bytes than asked without being
+    end-of-stream (the store's body wrapper is a ``RawIOBase``); only a true empty read ends the
+    loop.
 
-    Verification order is unchanged (ADR-0438 §3, ADR-0441 §5): the SHA-256 is compared **first**,
-    keeping ADR-0434 §2's ``INFRASTRUCTURE_FAILURE`` for a mismatch, and only bytes that match the
-    stored checksum reach the qcow2-magic gate's ``CONFIGURATION_ERROR``. Gating on the
-    unauthenticated first chunk instead would silently reassign the categories: store-side
-    corruption usually destroys the magic too, so a mismatch would surface as "this is not a qcow2,
-    upload a qcow2" — a different gate, a different category, and remediation advice aimed at the
-    wrong actor. (Whether that gate *should* be retryable is a separate, unsettled question: the
-    gzip path raises ``CONFIGURATION_ERROR`` for the byte-identical failure. Tracked in #1523; this
-    function keeps the category ADR-0434 §2 decided.)
-
-    The magic prefix is accumulated across chunks rather than sliced from the first, because the
-    store's body wrapper is a ``RawIOBase`` free to return a read shorter than requested; an object
-    too short to hold the magic keeps a short prefix and so fails the gate rather than staging
-    unchecked. :func:`_stage_gzip` instead reopens the finished partial to read its first four
-    bytes — not a different policy, just the consequence of delegating its write loop to
-    ``strip_gzip_to_writer``, which never surfaces the decompressed prefix. This path owns its loop
-    and already holds those bytes, so it checks them in memory rather than paying a reopen.
+    The checksum is verified here, before the caller's shared qcow2-magic gate, which is the order
+    ADR-0438 §3 and ADR-0441 §5 specify: a mismatch keeps ADR-0434 §2's ``INFRASTRUCTURE_FAILURE``
+    rather than being reported by whichever gate a corrupt object happens to trip first. (Whether
+    that category is the right one is unsettled — the gzip path raises ``CONFIGURATION_ERROR`` for
+    the byte-identical failure — and is tracked in #1523.)
     """
     hasher = hashlib.sha256()
-    prefix = b""
     with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
             hasher.update(chunk)
             writer.write(chunk)
-            prefix += chunk[: len(_QCOW2_MAGIC) - len(prefix)]
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         raise CategorizedError(
             "uploaded rootfs object failed checksum verification",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
-    _require_qcow2_magic(prefix, system_id=str(system_id))
 
 
 def _stage_gzip(
@@ -383,7 +364,7 @@ def _stage_gzip(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stream-gunzip a gzip transport object to the partial, bounded, hash- and magic-verified."""
+    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified."""
     if uncompressed_size is None:
         raise CategorizedError(
             "uploaded rootfs declared a gzip encoding without an uncompressed_size; re-declare the "
@@ -399,13 +380,18 @@ def _stage_gzip(
     )
     with partial.open("wb") as writer:
         strip_gzip_to_writer(store, request, writer)
-    with partial.open("rb") as reader:
-        _require_qcow2_magic(reader.read(4), system_id=str(system_id))
 
 
-def _require_qcow2_magic(first_bytes: bytes, *, system_id: str) -> None:
-    """Reject a canonical base that does not start with the qcow2 magic (ADR-0438)."""
-    if first_bytes[:4] != _QCOW2_MAGIC:
+def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
+    """Reject a staged base that does not start with the qcow2 magic (ADR-0438).
+
+    Reads the finished ``.partial``, so both codecs are gated by one mechanism over the canonical
+    bytes — each stager has already verified its own checksum, and a base too short to hold the
+    magic yields a short read that fails here rather than staging unchecked.
+    """
+    with staged.open("rb") as reader:
+        first_bytes = reader.read(len(_QCOW2_MAGIC))
+    if first_bytes != _QCOW2_MAGIC:
         raise CategorizedError(
             "staged rootfs is not a qcow2 image: the uploaded object (after any transport decode) "
             "does not start with the qcow2 magic; upload a qcow2 image",

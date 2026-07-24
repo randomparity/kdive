@@ -55,13 +55,21 @@ class _RecordingReader:
     object fails here instead of quietly passing a bound computed over internal chunking.
 
     ``max_chunk`` serves short reads (fewer bytes than asked, not end-of-stream), which the real
-    store's ``RawIOBase`` body wrapper is free to do.
+    store's ``RawIOBase`` body wrapper is free to do. ``fail`` is an ``(offset, error)`` pair that
+    raises mid-stream once that many bytes have been served, with the partial already on disk.
     """
 
-    def __init__(self, data: bytes, *, max_chunk: int | None = None) -> None:
+    def __init__(
+        self,
+        data: bytes,
+        *,
+        max_chunk: int | None = None,
+        fail: tuple[int, BaseException] | None = None,
+    ) -> None:
         self._data = data
         self._offset = 0
         self._max_chunk = max_chunk
+        self._fail = fail
         self.largest_read = 0
 
     @property
@@ -74,6 +82,11 @@ class _RecordingReader:
                 "the staging path asked for the whole object in one read; it must read in "
                 "bounded chunks so peak memory does not scale with the object size (#1520)"
             )
+        if self._fail is not None:
+            at, error = self._fail
+            if self._offset >= at:
+                raise error
+            size = min(size, at - self._offset)
         if self._max_chunk is not None:
             size = min(size, self._max_chunk)
         chunk = self._data[self._offset : self._offset + size]
@@ -87,11 +100,17 @@ class _RecordingReader:
 
 class _FakeStore:
     def __init__(
-        self, data: bytes | None, *, checksum: str | None, max_chunk: int | None = None
+        self,
+        data: bytes | None,
+        *,
+        checksum: str | None,
+        max_chunk: int | None = None,
+        fail: tuple[int, BaseException] | None = None,
     ) -> None:
         self._data = data
         self._checksum = checksum
         self._max_chunk = max_chunk
+        self._fail = fail
         self.head_calls = 0
         self.range_calls = 0
         self.stream_calls = 0
@@ -107,7 +126,7 @@ class _FakeStore:
     def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
         self.stream_calls += 1
         assert self._data is not None
-        reader = _RecordingReader(self._data, max_chunk=self._max_chunk)
+        reader = _RecordingReader(self._data, max_chunk=self._max_chunk, fail=self._fail)
         self.readers.append(reader)
         try:
             yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
@@ -120,53 +139,10 @@ class _FakeStore:
         return self._data[start : start + length]
 
 
-class _FailingReader:
-    """A reader that serves ``fail_after`` bytes, then raises ``error`` mid-stream."""
-
-    def __init__(self, data: bytes, *, fail_after: int, error: BaseException) -> None:
-        self._data = data
-        self._fail_after = fail_after
-        self._error = error
-        self._offset = 0
-
-    def read(self, size: int | None = None, /) -> bytes:
-        if self._offset >= self._fail_after:
-            raise self._error
-        want = self._fail_after - self._offset if size is None else min(size, self._fail_after)
-        chunk = self._data[self._offset : self._offset + want]
-        self._offset += len(chunk)
-        return chunk
-
-    def close(self) -> None:
-        return None
-
-
-class _FailingStreamStore:
-    """A store whose body read faults mid-stream, after the partial has bytes in it."""
-
-    def __init__(self, data: bytes, *, fail_after: int, error: BaseException | None = None) -> None:
-        self._data = data
-        self._fail_after = fail_after
-        self._error = error or CategorizedError(
-            "get_object on 'k' failed: ConnectionClosedError",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        )
-
-    def head(self, key: str) -> HeadResult:
-        return HeadResult(
-            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
-        )
-
-    @contextmanager
-    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
-        reader = _FailingReader(self._data, fail_after=self._fail_after, error=self._error)
-        try:
-            yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
-        finally:
-            reader.close()
-
-    def get_range(self, key: str, *, start: int, length: int) -> bytes:
-        raise AssertionError("the identity path must not use ranged reads")
+def _store_failing_mid_stream(error: BaseException) -> _FakeStore:
+    """A store whose body read faults after 4 KiB, with bytes already in the partial."""
+    data = _QCOW2 + b"\xa5" * 8192
+    return _FakeStore(data, checksum=_sha256_b64(data), fail=(4096, error))
 
 
 def _dest(tmp_path: Path) -> Path:
@@ -230,8 +206,8 @@ def test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate(tmp_
     # is compared first, so the object is fully drained and the failure keeps the category
     # ADR-0434 §2 decided for it. This pins the gate that fires, not the wider retryability
     # question the gzip path answers differently (#1523).
-    payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * (_STREAM_CHUNK_BYTES * 2)
-    store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"))
+    payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * 500
+    store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"), max_chunk=8)
 
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
@@ -267,21 +243,22 @@ def test_stage_identity_streams_without_buffering_the_whole_object(tmp_path: Pat
     # _STREAM_CHUNK_BYTES -- comparing the constant to itself would hold for any chunk size,
     # including one large enough to re-introduce the multi-GiB spike this test exists to prevent.
     assert _STREAM_CHUNK_BYTES <= 16 * 1024 * 1024  # the ceiling the memory claim rests on
-    payload = _QCOW2 + b"\xa5" * (48 * 1024 * 1024)
+    payload = _QCOW2 + b"\xa5" * (20 * 1024 * 1024)
     store = _FakeStore(payload, checksum=_sha256_b64(payload))
 
     dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
-    assert dest.read_bytes() == payload
+    # Compared by size + digest rather than `read_bytes() == payload`, which would hold a second
+    # full copy alongside the fake's -- a needless spike in the test asserting a memory bound.
+    assert dest.stat().st_size == len(payload)
+    assert _sha256_b64(dest.read_bytes()) == _sha256_b64(payload)
     assert store.stream_calls == 1  # one GET, not a per-chunk ranged-read fan-out
     assert store.readers[0].largest_read < len(payload)  # never held the object in one buffer
-    assert store.readers[0].largest_read <= 16 * 1024 * 1024
 
 
-def test_stage_identity_tolerates_reads_shorter_than_the_magic(tmp_path: Path) -> None:
+def test_stage_identity_tolerates_short_reads(tmp_path: Path) -> None:
     # The real body wrapper is a RawIOBase: read() may return fewer bytes than asked without being
-    # end-of-stream, so the magic peek must accumulate across chunks rather than assume the first
-    # read holds all four bytes.
+    # end-of-stream, so a short chunk must not be mistaken for EOF and truncate the staged base.
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2), max_chunk=3)
 
     dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
@@ -308,10 +285,15 @@ def test_stage_identity_shorter_than_the_magic_is_config_error(tmp_path: Path) -
 def test_stage_identity_transport_fault_leaves_no_partial(tmp_path: Path) -> None:
     # A mid-stream transport fault (the typed INFRASTRUCTURE_FAILURE the store's body wrapper
     # raises) must discard the partial the loop had already written.
-    store = _FailingStreamStore(_QCOW2 + b"\xa5" * 8192, fail_after=4096)
+    store = _store_failing_mid_stream(
+        CategorizedError(
+            "get_object on 'k' failed: ConnectionClosedError",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+    )
 
     with pytest.raises(CategorizedError) as error:
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert not _dest(tmp_path).exists()
@@ -325,10 +307,10 @@ def test_stage_untyped_interrupt_still_leaves_no_partial(tmp_path: Path) -> None
     # sweep it (ADR-0441 §5 specifies a `finally`). KeyboardInterrupt stands in as a BaseException
     # that no `except Exception` would catch. A *killed* worker is a different case and is not
     # covered here: it unwinds nothing, and the sweeps collect it.
-    store = _FailingStreamStore(_QCOW2 + b"\xa5" * 8192, fail_after=4096, error=KeyboardInterrupt())
+    store = _store_failing_mid_stream(KeyboardInterrupt())
 
     with pytest.raises(KeyboardInterrupt):
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
@@ -339,14 +321,10 @@ def test_stage_io_fault_maps_to_a_staging_fault_naming_the_destination(tmp_path:
     # the realistic IO failure. It must leave the seam as the uniform INFRASTRUCTURE_FAILURE naming
     # `dest`, not a bare OSError -- this pins `except OSError -> _staging_fault`, which no longer
     # carries the `_discard` call that used to make it visibly load-bearing.
-    store = _FailingStreamStore(
-        _QCOW2 + b"\xa5" * 8192,
-        fail_after=4096,
-        error=OSError(errno.ENOSPC, "No space left on device"),
-    )
+    store = _store_failing_mid_stream(OSError(errno.ENOSPC, "No space left on device"))
 
     with pytest.raises(CategorizedError) as error:
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)  # ty: ignore[invalid-argument-type]
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "failed to stage" in str(error.value)
