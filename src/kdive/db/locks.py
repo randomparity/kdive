@@ -141,7 +141,8 @@ async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
     pid — this scans ``pg_locks`` across all backends, so a worker can tell a live leader from a
     dead one without contending for leadership itself.
 
-    The scan is scoped to ``conn``'s **own database**. Advisory locks are per-database: two
+    The scan is scoped to ``conn``'s **own database** (#1532; ADR-0429 introduced this probe
+    as cross-*backend* and did not consider the cluster). Advisory locks are per-database: two
     backends in different databases of one cluster take the same key without contending, so a
     holder elsewhere on the cluster is not a leader of *this* deployment and must not read as
     one. ``pg_locks`` is cluster-wide and exposes every database's rows, so the filter is
