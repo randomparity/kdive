@@ -17,6 +17,7 @@
 | [`allocations.renew`](allocations.md#allocationsrenew) | `implemented` |
 | [`allocations.request`](allocations.md#allocationsrequest) | `implemented` |
 | [`allocations.wait`](allocations.md#allocationswait) | `implemented` |
+| [`artifacts.create_investigation_upload`](artifacts.md#artifactscreate_investigation_upload) | `implemented` |
 | [`artifacts.create_run_upload`](artifacts.md#artifactscreate_run_upload) | `implemented` |
 | [`artifacts.create_system_upload`](artifacts.md#artifactscreate_system_upload) | `implemented` |
 | [`artifacts.expected_uploads`](artifacts.md#artifactsexpected_uploads) | `implemented` |

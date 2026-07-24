@@ -446,6 +446,27 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
     ),
     GeneratedVerb(
         group="artifacts",
+        sub="create-investigation-upload",
+        tool="artifacts.create_investigation_upload",
+        read_only=False,
+        destructive=False,
+        help="Mint a presigned PUT for an Investigation's uploaded rootfs. Requires contributor on",
+        unwrap_request=False,
+        flags=(
+            GeneratedFlag(
+                name="--investigation-id",
+                dest="investigation_id",
+                required=True,
+                help="The OPEN or ACTIVE Investigation id to upload a rootfs for.",
+                arg_type="str",
+                action=None,
+                choices=(),
+            ),
+        ),
+        json_params=("artifacts",),
+    ),
+    GeneratedVerb(
+        group="artifacts",
         sub="create-run-upload",
         tool="artifacts.create_run_upload",
         read_only=False,

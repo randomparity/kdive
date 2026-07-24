@@ -111,6 +111,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "artifacts.fetch_raw": _CONTRIBUTOR,  # raw vmcore/vmlinux egress, ADR-0243
     "artifacts.create_run_upload": _CONTRIBUTOR,
     "artifacts.create_system_upload": _CONTRIBUTOR,  # define-lane leaseholder control (ADR-0326)
+    "artifacts.create_investigation_upload": _CONTRIBUTOR,  # investigation-scoped rootfs (ADR-0441)
     # audit (dual: project admin or platform auditor)
     "audit.query": frozenset({ExposureScope.PROJECT_ADMIN, ExposureScope.PLATFORM_AUDITOR}),
     # control

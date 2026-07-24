@@ -55,6 +55,9 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "allocations.wait": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "artifacts.create_run_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
     "artifacts.create_system_upload": ("tests/mcp/lifecycle/test_create_upload_tool.py",),
+    "artifacts.create_investigation_upload": (
+        "tests/mcp/lifecycle/test_investigation_upload_tool.py",
+    ),
     "artifacts.expected_uploads": ("tests/mcp/catalog/test_expected_uploads_tool.py",),
     "artifacts.feature_config_requirements": (
         "tests/mcp/catalog/test_feature_config_requirements_tool.py",

@@ -55,6 +55,7 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_fetch_raw(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_system_upload(app, pool, resolver)
+    _register_artifacts_create_investigation_upload(app, pool, resolver)
     _register_artifacts_expected_uploads(app)
     _register_artifacts_feature_config_requirements(app)
 
@@ -317,6 +318,77 @@ def _register_artifacts_create_system_upload(
             pool,
             current_context(),
             system_id=system_id,
+            artifacts=artifacts,
+            resolver=resolver,
+        )
+
+
+def _register_artifacts_create_investigation_upload(
+    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
+) -> None:
+    @app.tool(
+        name="artifacts.create_investigation_upload",
+        annotations=_docmeta.mutating(),
+        meta={"maturity": "implemented"},
+    )
+    async def artifacts_create_investigation_upload(
+        investigation_id: Annotated[
+            str, Field(description="The OPEN or ACTIVE Investigation id to upload a rootfs for.")
+        ],
+        artifacts: Annotated[
+            list[artifact_uploads.ArtifactDeclaration],
+            Field(
+                description=(
+                    "Declared rootfs artifact: [{name, sha256 (base64), size_bytes}]. Single PUT "
+                    "only (no chunks). To upload a qcow2 larger than the 5 GiB single-PUT limit, "
+                    "gzip it and add encoding='gzip' + uncompressed_size (canonical qcow2 size)."
+                ),
+                json_schema_extra=_declaration_schema_extra(
+                    artifact_uploads.SYSTEM_DECLARATION_EXAMPLES,
+                    item_schema=artifact_uploads.SYSTEM_UPLOAD_DECLARATION_ITEM_SCHEMA,
+                ),
+            ),
+        ],
+    ) -> ToolResponse:
+        """Mint a presigned PUT for an Investigation's uploaded rootfs. Requires contributor on
+        the Investigation's project.
+
+        The rootfs is owned by the Investigation and reusable across every System bound to it: one
+        upload, referenced by content checksum, provisions many Systems and is fetched to the host
+        at most once. Finalizing the upload returns the `checksum_sha256` handle you put in each
+        System's `{kind: "upload"}` rootfs profile.
+
+        The upload item returns `refs.upload_url` plus `data.required_headers`; the client must
+        send exactly those headers on the PUT and nothing else — an HTTP client that injects its
+        own header (e.g. a default `Content-Type`) invalidates the signature and the PUT fails
+        with `403 SignatureDoesNotMatch`. The presigned PUT also binds the object's
+        `x-amz-checksum-sha256`; a direct `put_object` that skips it stores the bytes without
+        that integrity check, so upload through the signed URL. `data.upload_hint` restates the
+        header footgun.
+
+        Deadlines: start each PUT before that item's `data.expires_at` (an ISO-8601 UTC
+        instant); a transfer already in flight is not interrupted at expiry. `data.server_time`
+        is the reference clock — compute remaining time as a deadline minus `server_time`, not
+        from a wall clock you do not have. `data.expires_at` (the presigned-URL window) can be
+        earlier than `data.manifest_deadline`, which is when the reaper reclaims the whole
+        upload if it is not finalized. If a window lapses, re-call this tool to reset the
+        deadline (`manifest_mode: "replace"`); see `data.on_expiry`. Re-minting resets the deadline
+        but is not a way to beat the clock, and neither is chunking — the rootfs must be a single
+        PUT (gzip a large qcow2 instead; see below).
+
+        Large rootfs (transport encoding): the rootfs must be a single PUT — chunked upload is
+        rejected. To upload a qcow2 whose size exceeds the 5 GiB single-PUT limit, gzip it and
+        declare `encoding: "gzip"` with `uncompressed_size` set to the canonical (decompressed)
+        qcow2 size in bytes. kdive strips the gzip on download, streaming and bomb-bounded, then
+        verifies the qcow2 magic before it backs the guest. Constraints: gzip is the only encoding;
+        `uncompressed_size` is required with it and is bounded by the 50 GiB canonical-object cap;
+        encoding cannot be combined with chunks; `sha256`/`size_bytes` describe the uploaded
+        (compressed) bytes. Omit `encoding` to upload a qcow2 directly.
+        """
+        return await artifact_uploads.create_investigation_upload(
+            pool,
+            current_context(),
+            investigation_id=investigation_id,
             artifacts=artifacts,
             resolver=resolver,
         )

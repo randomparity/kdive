@@ -186,6 +186,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "artifacts.fetch_raw": frozenset({"raw", "fetch", "vmcore", "vmlinux", "download"}),
     "artifacts.create_run_upload": frozenset({"upload", "artifact", "run", "create", "external"}),
     "artifacts.create_system_upload": frozenset({"upload", "artifact", "system", "create"}),
+    "artifacts.create_investigation_upload": frozenset(
+        {"upload", "artifact", "investigation", "rootfs", "create"}
+    ),
     "artifacts.expected_uploads": frozenset({"expected", "uploads", "contract", "external"}),
     # systems
     "systems.get": frozenset({"system", "get", "status", "fetch"}),

@@ -22,6 +22,8 @@ read each tool's own description.
   kernel `CONFIG_*` it needs, so you can build them in before uploading.
 - `artifacts.create_run_upload` — mint presigned PUTs for a run's build artifacts.
 - `artifacts.create_system_upload` — mint presigned PUTs for a system's artifacts.
+- `artifacts.create_investigation_upload` — mint a presigned PUT for an investigation-scoped
+  rootfs, reusable across every system bound to that investigation.
 
 ## Uploading a large rootfs (gzip transport encoding)
 
