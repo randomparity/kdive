@@ -338,10 +338,12 @@ def test_session_advisory_lock_held_released_on_holder_loss(postgres_url: str) -
             await holder_conn.close()  # a dead leader releases the lock with no notice
             # The release is Postgres reaping the holder's backend, which the client-side
             # close does not wait for, so the observer waits for the release instead of
-            # asserting it has already landed. The post-condition is still asserted here so
-            # the test states it directly rather than delegating it to the wait helper.
+            # asserting it has already landed.
             await wait_until_session_lock_released(observer, CONSOLE_HOSTING_LEADER)
-            assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
+            # Confirm through the lock manager rather than re-reading the pg_locks view the
+            # wait already polled: a claimant can only take the lock if it is truly free, so
+            # this catches a probe that reports free while Postgres still holds it.
+            assert await SessionAdvisoryLock(observer, CONSOLE_HOSTING_LEADER).try_acquire()
 
     asyncio.run(_run())
 

@@ -70,8 +70,8 @@ async def wait_until_session_lock_released(
         if time.monotonic() >= deadline:
             holders = await _session_lock_holders(observer, name)
             raise AssertionError(
-                f"session advisory lock {name!r} was still held {timeout_s}s after the "
-                f"holder was lost; holders (pid, database, state): {holders}"
+                f"session advisory lock {name!r} still held after {timeout_s}s; "
+                f"holders (pid, database, state): {holders}"
             )
         await asyncio.sleep(0.02)
 
