@@ -12,14 +12,27 @@
 
 ## Shape
 
-Six ordered phases. Phases 1→4 are the data-model → upload → provision → reclaim spine and are strictly
-ordered (each depends on the prior). Phase 5 (close coupling) depends only on Phase 1's column. Phase 6
-(surface/docs/tests-sweep) lands last. TDD throughout: write the failing test named in each task's
-acceptance criteria first.
+Six phases. **Green boundary is the *phase*, not every intra-phase commit** — a re-scope that removes the
+old upload path cannot leave the tree green after a partial swap. Two coupling constraints override naive
+phase ordering:
 
-Because this is a **re-scope that removes** the System-scoped upload path, the removals and additions
-must land together per phase — do not leave both paths live (no dual-format shim; "replace, not
-deprecate"). Keep the whole branch green at each commit.
+- **The upload-lane swap is atomic (Phases 2 + 3 land as one PR).** Removing the System-scoped upload path
+  (Task 2.3) leaves a `{"kind":"upload"}` System unprovisionable until the replacement resolution (Task
+  3.3) and required-`checksum_sha256` ref shape (Task 3.1) exist, and the new tools' exposure/tool_index/
+  RBAC/behavior-map registration must land **with** the tools (Phase 2), not deferred to Phase 6. So
+  Task 2.3 **also deletes the old ADR-0434 upload-provision tests and the old tool's exposure/tool_index/
+  RBAC/behavior-map entries in the same commit**, and Phase 6's Task 6.1 covers only the *doc*
+  regeneration (RBAC-matrix doc, agent-index) — not tool registration. Green holds at the Phase 2+3 PR
+  boundary, not between Task 2.3 and Task 3.3.
+- **Phase 4's reclaim removal must not land without Phase 5.** Phase 5 is the **sole producer** of the
+  `rootfs_cleanup_pending_at` marker the Phase 4 close-driven sweep consumes; the existing `_close_locked`
+  sets only `cleanup_pending_at`. Until Phase 5 lands, the close-driven sweep is inert end-to-end, and
+  Task 4.2 removes the teardown + ADR-0435 reclaim — so Phases 4 and 5 land together (or Phase 5 first),
+  never Phase 4's reclaim removal alone (else close+grace silently does nothing and only the TTL backstop
+  reclaims). Phase 4's AC-7/AC-8 unit tests seed the marker directly.
+
+Phase 1 (schema) is the prerequisite for all. TDD throughout: write the failing test named in each task's
+acceptance criteria first. No dual-format shim (pre-1.0, "replace, not deprecate").
 
 ---
 
@@ -39,7 +52,11 @@ deprecate"). Keep the whole branch green at each commit.
   post-finalize gzip provision reads (Task 2.2/3.3).
 - **Acceptance:** `just test` migration round-trip passes; `test_migrate.py` sees 0076 as the new head;
   a NULL-investigation System row inserts unchanged.
-- **Rollback:** drop-column (no data loss for NULL rows).
+- **Rollback:** 0076 creates five objects (two `systems`/`investigations` columns, the partial UNIQUE
+  index, `artifacts.encoding` + `uncompressed_size`). It is **forward-only** (pre-1.0, consistent with the
+  "No backfill" stance): a clean drop is safe only on a DB with **no** `owner_kind='investigations'` rootfs
+  rows; once finalize has committed such rows, dropping the columns/index loses transport-encoding data +
+  the idempotency guard and orphans staged bases, so there is no supported down-migration then.
 - **Convention:** forward-only `NNNN_*.sql`; monotonic; `test_migrate.py` may hardcode the migration list.
 
 ### Task 1.2 — Domain record + repository
@@ -86,9 +103,14 @@ deprecate"). Keep the whole branch green at each commit.
   `uploads.py`; remove `_commit_uploaded_rootfs`/`_finalize_provision_ready` rootfs-commit from
   `jobs/handlers/systems.py`; remove `rootfs_upload_window_allowed` from `profiles/provider_policy.py` +
   `providers/local_libvirt/profile_policy.py`; remove the `systems.define` upload-window opening.
-- **Acceptance:** grep shows no residual references; the removed tool is gone from `mcp/exposure.py`,
-  `mcp/schema/tool_index.py`, and the RBAC matrix (Phase 6 sweeps the doc/test fallout).
-- **Watch:** `SYSTEM_ARTIFACT_NAMES` carried only `rootfs`; confirm no other system-upload consumer.
+- **Also (same commit, for green):** delete the old ADR-0434 upload-provision tests and remove the old
+  tool's `mcp/exposure.py` + `mcp/schema/tool_index.py` + RBAC-matrix + `_BEHAVIOR_TESTS_BY_TOOL` entries,
+  and **register the two new tools** in those same maps — so the exposure/behavior-map/RBAC guards are
+  green at the Phase 2+3 PR boundary. Phase 6 (Task 6.1) does only *doc* regeneration, not registration.
+- **Acceptance:** grep shows no residual references; guards green with the new tools registered and the old
+  gone.
+- **Watch:** `SYSTEM_ARTIFACT_NAMES` carried only `rootfs`; confirm no other system-upload consumer. This
+  task lands in the **same PR** as Phase 3 (Tasks 3.1/3.3) — the atomic upload-lane swap (see Shape).
 
 ---
 
@@ -132,54 +154,65 @@ deprecate"). Keep the whole branch green at each commit.
   re-check. Unlink the own `<token>.<uuid>.partial` in a `finally` on any failure.
 - **Acceptance:** spec AC-1 (one download for two Systems, sequential **and cross-process concurrent**),
   AC-2 (isolation), AC-4b (resolve-by-object_key + transcode), AC-4c (gzip stripped from row encoding).
-- **Watch:** `_lock_key` (blake2b, deterministic) not `hash()` — the cross-process AC-1 test must run two
-  interpreters/processes, or it will pass on a broken `hash()`-keyed lock.
+- **Watch / test harness:** the key must be `_session_lock_key(...)`, not `hash()` (per-process salted). A
+  same-process threaded test shares the hash seed and would **pass against the bug**, so the primary guard
+  is a cheap **deterministic-key assertion** (the lock key the fetch computes equals
+  `_session_lock_key("rootfs-fetch:<inv>:<token>")`, not `hash(...)`) that any unit test can check. The
+  full cross-process AC-1 test (two interpreters sharing the per-worker `DATABASE_URL` + `UPLOADS_DIR`/
+  `ROOTFS_DIR`, race-synced via a parent-held barrier, asserting one download) is the integration proof;
+  spell out that shared-env wiring in the test or it defaults to an ineffective same-process form.
 
 ---
 
 ## Phase 4 — Reclaim on investigation close + grace
 
-### Task 4.1 — Two reclaim sweeps (close-driven + TTL backstop)
-- **Fits:** ADR-0441 §6 — mirror ADR-0234's `gc_investigation_artifacts` + `gc_expired_build_artifacts` pair.
-- **Files:** `src/kdive/reconciler/cleanup/gc.py` (`gc_investigation_uploaded_rootfs` +
-  `gc_expired_investigation_rootfs`, sharing the per-checksum reclaim + liveness helper); reconciler loop
-  registration for both; a file-unlink port (local host FS); `config/core_settings.py`
-  (`KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, reuse `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`) — and the
-  config-docs regeneration (`just config-docs`).
-- **Do:** close-driven selects investigations past the grace window **by `rootfs_cleanup_pending_at`** (its
-  **own** marker — NOT `cleanup_pending_at`, which `gc_investigation_artifacts` nulls when its runs
-  worklist drains); clears `rootfs_cleanup_pending_at` only when its own worklist drains. TTL backstop
-  selects committed `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL
-  on a never-closed investigation. Both reclaim **per checksum** on a **two-condition gate**, both required
-  for every referencing bound System: (a) its per-System overlay file is **absent** (filesystem probe, not
-  a `systems.state` read), **and** (b) it is **not** `defined`/`provisioning`/`reprovisioning`/`restoring`
-  (states that may read/re-materialize against the base with the overlay momentarily absent). Reclaim in
-  **pinned order**: object (best-effort) → **unlink file** (failure defers, `drained=False`) → row
-  (fail-loud-in-txn, **last** — the worklist anchor). Object-delete + unlink share one fault contract: **404/`ENOENT`
-  = success**, any **real** fault **defers** the whole checksum (`drained=False`, row kept) *before* the row
-  delete (so "best-effort" ≠ "continue past a fault and drop the row"). Idempotency + defer-on-fault →
-  every partial failure reconverges. **Glob-unlink stale `<token>.*.partial`** before removing the empty
-  `rootfs-uploads/<inv>/` dir (crash-orphan cleanup). Condition-(b) state set = a **named constant beside
-  `SystemState`** + a **structural drift-guard test** (new non-terminal state must be classified).
-- **Referencer enumeration (per checksum X):** `systems WHERE investigation_id=<inv> AND state<>'torn_down'`,
-  parse each `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}`
-  (unparseable / no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X — so one
-  unrelated live System never pins X); for each, derive `overlay_path(system_id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`)
-  and stat it. The probe reads `ROOTFS_DIR` and unlinks under `UPLOADS_DIR` — **both** local-host-only, so
-  assert the reconciler runs co-located with the libvirt host filesystem.
-- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while an overlay is present; a
-  `failed` referencer whose overlay was reclaimed must drain), AC-8b (TTL reclaims a never-closed
-  investigation), AC-8c (defers while a referencer is `reprovisioning`/`restoring`), AC-8d (**marker
-  independence** — a drained build artifact nulling `cleanup_pending_at` does not starve the rootfs sweep),
-  AC-8e (**pinned-order** — a forced `unlink` failure keeps the row + retries), AC-8f (**enumeration** — an
-  unrelated bound live System referencing a different checksum/catalog does not pin X), AC-8g (**idempotent
-  reconverge** — object/file gone + row-delete-failed re-runs to a clean drain; non-404 fault defers),
-  AC-8h (**crash-`.partial`** — stale `<token>.*.partial` swept before empty-dir removal), AC-10 (residual
-  committed + stale-window object collected).
-- **Watch:** gate on overlay-file **absence**, not `systems.state`. `SystemState.FAILED` is a terminal
-  sink (no `→torn_down`) and is excluded from `repair_orphaned_systems`, so a state gate pins a `failed`
-  System's base forever and defeats the TTL backstop. The AC-8 test must include a `failed` referencer and
-  assert eventual drainage.
+Task 4.1 is decomposed into four independently testable commits (4.1a–4.1d), each with its own failing
+test first. **Global watch:** gate on overlay-file **absence**, not `systems.state` — `SystemState.FAILED`
+is a terminal sink (no `→torn_down`) excluded from `repair_orphaned_systems`, so a state gate pins a
+`failed` System's base forever and defeats the TTL backstop.
+
+### Task 4.1a — Condition-(b) state constant + drift guard
+- **Fits:** ADR-0441 §6 (the one place the gate trusts state).
+- **Files:** `domain/capacity/state.py` (a named constant beside `SystemState` listing the pre-overlay/
+  re-materialize non-terminal states: `defined`, `provisioning`, `reprovisioning`, `restoring`); a
+  structural test.
+- **Acceptance:** the drift-guard test **reddens** when a new non-terminal `SystemState` is added without
+  being classified in/out of the constant.
+
+### Task 4.1b — Referencer enumeration + two-condition liveness gate helper
+- **Fits:** ADR-0441 §6.
+- **Files:** `reconciler/cleanup/gc.py` (pure helper, unit-tested without the reconciler loop).
+- **Do:** for checksum X, `systems WHERE investigation_id=<inv> AND state<>'torn_down'`, parse each
+  `provisioning_profile` rootfs ref, keep only `{"kind":"upload","checksum_sha256":X}` (unparseable /
+  no-rootfs / catalog / local / different-checksum ⇒ **not** a referencer of X); per referencer stat
+  `overlay_path(id)` (`<ROOTFS_DIR>/<id>-overlay.qcow2`) for condition (a) and check the 4.1a constant for
+  (b).
+- **Acceptance:** spec AC-8 (deferred while overlay present; a `failed` referencer whose overlay was
+  reclaimed drains), AC-8c (`reprovisioning`/`restoring` defer), AC-8f (unrelated System doesn't pin X).
+
+### Task 4.1c — Per-checksum reclaim (pinned order + fault contract + `.partial` sweep)
+- **Fits:** ADR-0441 §6.
+- **Files:** `gc.py` (shared per-checksum reclaim helper); a file-unlink port (local host FS).
+- **Do:** pinned order object → **unlink** → row (fail-loud-in-txn, **last** — the worklist anchor). One
+  fault contract for object-delete + unlink: **404/`ENOENT` = success**, any **real** fault **defers** the
+  whole checksum (`drained=False`, row kept) *before* the row delete. Glob-unlink stale `<token>.*.partial`
+  before the empty-dir removal.
+- **Acceptance:** AC-8e (unlink-fail keeps row + retries), AC-8g (idempotent reconverge; non-404 defers),
+  AC-8h (crash-`.partial` swept).
+
+### Task 4.1d — The two sweep entry points + registration + config
+- **Fits:** ADR-0441 §6 — mirror ADR-0234's `gc_investigation_artifacts` + `gc_expired_build_artifacts`.
+- **Files:** `gc.py` (`gc_investigation_uploaded_rootfs` close-driven + `gc_expired_investigation_rootfs`
+  TTL, both calling 4.1b's gate + 4.1c's reclaim); reconciler loop registration; `config/core_settings.py`
+  (`KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`; reuse `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`) + `just
+  config-docs`.
+- **Do:** close-driven selects by **`rootfs_cleanup_pending_at`** (its own marker — NOT `cleanup_pending_at`;
+  clears only its own when drained); TTL selects committed `owner_kind='investigations'`,
+  `retention_class='rootfs'` objects past retention on a never-closed investigation.
+- **Acceptance:** AC-7 (object+row gone past grace), AC-8b (TTL reclaims a never-closed investigation),
+  AC-8d (**marker independence** — a drained build artifact nulling `cleanup_pending_at` does not starve
+  the rootfs sweep), AC-10 (residual committed + stale-window object collected). Reconciler is co-located
+  with the libvirt host FS (reads `ROOTFS_DIR`, unlinks `UPLOADS_DIR`).
 
 ### Task 4.2 — Remove teardown + provision-failure rootfs reclaim; re-scope the manifest reaper
 - **Fits:** ADR-0441 §5/§6 — reclaim is now sweep-driven; the shared base is no individual provision's
@@ -193,8 +226,10 @@ deprecate"). Keep the whole branch green at each commit.
   the shared base (spec AC-9); the ADR-0434 teardown-reclaim tests are replaced by the sweep tests; the
   reaper reaps a stale investigation upload window. Verify the sweep + reaper are the sole reclaimers and
   no leak path is uncovered.
-- **Watch:** Tasks 4.1 and 4.2 must land in one phase — removing reclaim without the sweep in place
-  would leak; removing the ADR-0435 arm without decision 5's rationale would look like a regression.
+- **Watch:** Tasks 4.1 and 4.2 land in one phase — removing reclaim without the sweep would leak; removing
+  the ADR-0435 arm without decision 5's rationale looks like a regression. **And Phase 4 must land with (or
+  after) Phase 5** — Phase 5 is the sole producer of `rootfs_cleanup_pending_at`, so removing the teardown
+  reclaim here before the close producer exists leaves close+grace inert (only the TTL backstop reclaims).
 
 ---
 
@@ -223,12 +258,16 @@ deprecate"). Keep the whole branch green at each commit.
 
 ## Phase 6 — Surface, docs, and test sweep (lands last)
 
-### Task 6.1 — MCP surface reconciliation
-- **Files:** `mcp/exposure.py`, `mcp/schema/tool_index.py`, RBAC matrix, `_BEHAVIOR_TESTS_BY_TOOL`,
-  registrars for the two new tools and the removed one.
-- **Acceptance:** spec AC-10 (old tool gone, two new tools present with CONTRIBUTOR gate); exposure/RBAC
-  guards green. (Adding/removing an MCP tool trips exposure + behavior-test-map + RBAC-matrix — expect all
-  three.)
+### Task 6.1 — Generated-artifact regeneration (doc-only; code registration is in Phase 2)
+- **Note:** the code registration (`mcp/exposure.py`, `mcp/schema/tool_index.py`, `_BEHAVIOR_TESTS_BY_TOOL`,
+  registrars for the two new tools + removal of the old) already landed in **Task 2.3** to keep the guards
+  green at the Phase 2+3 boundary. Phase 6 regenerates only the *committed generated docs* that lag those
+  code changes.
+- **Files/commands:** `just rbac-matrix` (regenerate the role→tool visibility matrix doc), `just docs`
+  (regenerate the agent-facing tool reference), `just doc-constants` (tool count).
+- **Acceptance:** spec AC-11 (old tool gone from the tool index/exposure/RBAC matrix; the two new tools
+  present with the CONTRIBUTOR gate + the re-homed ADR-0439 encoding advertisement); `just ci` generated-doc
+  drift guards green.
 
 ### Task 6.2 — Agent-facing docs
 - **Files:** `mcp/resources/_content/external-build-upload.md`, `toolsets-artifacts.md`, `agent-index.md`,
