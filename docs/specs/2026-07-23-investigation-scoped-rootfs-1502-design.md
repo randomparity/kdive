@@ -100,19 +100,26 @@ New investigation `_UploadOwnerSpec` reusing `_create_upload` + `upload_manifest
 
 ### Reclaim sweep (ADR-0441 §6)
 
-`gc_investigation_uploaded_rootfs(conn, store, files, grace)` in `reconciler/cleanup/gc.py`, modeled on
-`gc_investigation_artifacts`:
+**Two** sweeps in `reconciler/cleanup/gc.py`, mirroring ADR-0234's close-driven +
+TTL-backstop pair (`gc_investigation_artifacts` + `gc_expired_build_artifacts`):
 
-- Select investigations with `cleanup_pending_at < now() - grace`
-  (`KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`).
-- Per investigation, reclaim **per checksum**, with the object + row + staged file for one checksum on a
-  **single liveness gate** — *no non-terminal System bound to the investigation references that checksum*.
-  Gate holds → delete the `owner_kind='investigations'`, `retention_class='rootfs'` object (best-effort)
-  + row (fail-loud in txn) **and** unlink `rootfs-uploads/<inv>/<token>.qcow2`. Gate fails → skip the
-  whole checksum, leaving `cleanup_pending_at` set (`drained=False`) for the next pass. Remove the empty
-  `rootfs-uploads/<inv>/` dir once fully drained. Keeping object and file on one gate means a
-  reprovisioning / disk-fault-recovering System always finds the object present to re-download.
-- Registered in the reconciler loop beside `gc_investigation_artifacts`.
+- **`gc_investigation_uploaded_rootfs` (close-driven)** — investigations with
+  `cleanup_pending_at < now() - grace` (`KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`).
+- **`gc_expired_investigation_rootfs` (TTL backstop)** — committed `owner_kind='investigations'`,
+  `retention_class='rootfs'` objects older than `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS` on a
+  never-closed investigation, so bases do not accumulate unbounded. (`retention_class` is only an
+  S3-lifecycle label, not an enforced TTL — ADR-0234 — hence the reaper.)
+
+Both reclaim **per checksum**, with the object + row + staged file on a **single liveness gate** —
+*every System bound to the investigation that references that checksum is `torn_down`* (keys on
+`torn_down`, **not** "terminal": only `torn_down` guarantees the overlay is gone; a `failed` System may
+retain a live overlay and per ADR-0435 never runs teardown, so it is treated as **not drainable** —
+deferred, never deleted-under). Gate holds → delete the object (best-effort) + row (fail-loud in txn)
+**and** unlink `rootfs-uploads/<inv>/<token>.qcow2`. Gate fails → skip the checksum (`drained=False`,
+retried next pass). Remove the empty `rootfs-uploads/<inv>/` dir once drained. Keeping object and file on
+one gate means a reprovisioning / disk-fault-recovering System always finds the object present to
+re-download.
+- Both registered in the reconciler loop beside `gc_investigation_artifacts`.
 
 **Removed:** the ADR-0434 §4 teardown rootfs reclaim (local file + S3 object + row) from the systems
 teardown handler, **and** ADR-0435 §1's provision-failure reclaim of the (now shared) base — the
@@ -161,7 +168,8 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 | `close` with bound live Systems, no force | `configuration_error` listing them; investigation not closed |
 | `close(force=True)`, a bound System the caller can't tear down | fail listing it; nothing torn down |
 | Store fault deleting object in sweep | best-effort skip, retried next pass (marker stays set) |
-| Base still referenced by a non-terminal bound System at sweep time | object + row + file all deferred on one gate, retried next pass |
+| Base referenced by a bound System not yet `torn_down` (incl. a `failed` one) | object + row + file all deferred on one gate, retried next pass |
+| Investigation never closed | TTL backstop `gc_expired_investigation_rootfs` reclaims past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, same gate |
 | Provision of System A **fails** while sibling B reuses the same shared base | A's failure path does **not** unlink the shared base (ADR-0435 §1 arm superseded); B keeps a valid backing |
 | Second `complete_rootfs_upload` (row already written) | idempotent; returns the same `checksum_sha256` |
 | Cross-investigation read attempt (System in Y names Y-not-owned checksum) | resolution miss ⇒ `configuration_error`; no escape |
@@ -178,8 +186,11 @@ reconciler gc_investigation_uploaded_rootfs  → object+row deleted; bases unlin
 5. **Close-block:** `close` with a bound live System errors and lists it; the investigation stays open.
 6. **Close-force:** `close(force=True)` enqueues teardown for each bound live System and closes.
 7. **Sweep-reclaim:** past grace, the sweep deletes the object + row; asserts the row is gone.
-8. **Liveness guard:** the sweep does **not** unlink a base while a bound System's overlay backs it
-   (simulated live reference); it unlinks once the reference is terminal.
+8. **Liveness guard (`torn_down`-keyed):** the sweep does **not** unlink a base while a bound System
+   referencing it is not `torn_down` — including a **`failed`** one (assert a `failed` referencer defers);
+   it unlinks once every referencer is `torn_down`.
+8b. **TTL backstop:** a never-closed investigation's committed rootfs object is reclaimed by
+   `gc_expired_investigation_rootfs` past `KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, on the same gate.
 9. **Shared-base failure safety:** with Systems A and B provisioning from the same checksum, a
    downstream failure in A's provision does **not** unlink the shared base (ADR-0435 §1 arm superseded);
    B's overlay keeps a valid backing. (The negative test must fail against the un-superseded arm.)

@@ -113,17 +113,24 @@ deprecate"). Keep the whole branch green at each commit.
 
 ## Phase 4 — Reclaim on investigation close + grace
 
-### Task 4.1 — New sweep `gc_investigation_uploaded_rootfs`
-- **Fits:** ADR-0441 §6.
-- **Files:** `src/kdive/reconciler/cleanup/gc.py` (new sweep modeled on `gc_investigation_artifacts`);
-  reconciler loop registration; a file-unlink port (local host FS) with the liveness query.
-- **Do:** select investigations past `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`; reclaim **per checksum**,
-  with the object (best-effort) + row (fail-loud-in-txn) + staged file on **one liveness gate** — no
-  non-terminal bound System references that checksum. Gate fails → skip the whole checksum, leave the
-  marker set (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
-- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (nothing reclaimed while a bound System
-  references the checksum; reclaimed once terminal), AC-10 (residual committed object + stale-window
-  object collected).
+### Task 4.1 — Two reclaim sweeps (close-driven + TTL backstop)
+- **Fits:** ADR-0441 §6 — mirror ADR-0234's `gc_investigation_artifacts` + `gc_expired_build_artifacts` pair.
+- **Files:** `src/kdive/reconciler/cleanup/gc.py` (`gc_investigation_uploaded_rootfs` +
+  `gc_expired_investigation_rootfs`, sharing the per-checksum reclaim + liveness helper); reconciler loop
+  registration for both; a file-unlink port (local host FS); `config/core_settings.py`
+  (`KDIVE_INVESTIGATION_ROOTFS_RETENTION_DAYS`, reuse `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS`) — and the
+  config-docs regeneration (`just config-docs`).
+- **Do:** close-driven selects investigations past the grace window; TTL backstop selects committed
+  `owner_kind='investigations'` `retention_class='rootfs'` objects past the retention TTL on a
+  never-closed investigation. Both reclaim **per checksum**, with the object (best-effort) + row
+  (fail-loud-in-txn) + staged file on **one liveness gate**: every bound System referencing the checksum
+  is **`torn_down`** (a `failed` referencer is *not* drainable — defer). Gate fails → skip the checksum
+  (`drained=False`); remove the empty `rootfs-uploads/<inv>/` dir when drained.
+- **Acceptance:** spec AC-7 (object+row gone past grace), AC-8 (deferred while any referencer — incl. a
+  `failed` one — is not `torn_down`), AC-8b (TTL backstop reclaims a never-closed investigation), AC-10
+  (residual committed object + stale-window object collected).
+- **Watch:** the gate keys on `torn_down` specifically, not "terminal" — a `failed` System is terminal but
+  may still hold the base open; the AC-8 test must include a `failed` referencer.
 
 ### Task 4.2 — Remove teardown + provision-failure rootfs reclaim; re-scope the manifest reaper
 - **Fits:** ADR-0441 §5/§6 — reclaim is now sweep-driven; the shared base is no individual provision's
