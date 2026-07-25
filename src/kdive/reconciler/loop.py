@@ -538,10 +538,12 @@ def _image_publish_grace() -> timedelta:
 def _upload_orphan_grace() -> timedelta:
     """Resolve the upload-orphan grace from config (ADR-0455 §8); the operator's brake.
 
-    Resolved per pass, not once at ``ReconcileConfig`` construction, because the brake exists for
-    an operator who has just found the sweep removing live bytes — one that needed a reconciler
-    restart to take effect would be no better than the redeploy it replaced. ``require`` rather
-    than ``get``: the setting declares a default, so there is no unset case to fall back for.
+    A **restart** engages it, not a redeploy: ``Registry.load`` snapshots ``KDIVE_*`` once at the
+    bootstrap in ``__main__``, so this reads the same frozen value on every pass, and an outside
+    operator cannot mutate a running process's environment anyway. Resolving here rather than at
+    ``ReconcileConfig`` construction keeps both threshold terms in one place and out of the
+    provider-shaped config object; it does not make the brake live. ``require`` rather than
+    ``get``: the setting declares a default, so there is no unset case to fall back for.
     """
     return timedelta(seconds=config.require(UPLOAD_ORPHAN_GRACE))
 
@@ -549,9 +551,10 @@ def _upload_orphan_grace() -> timedelta:
 def _upload_window_ttl() -> timedelta:
     """Resolve the upload-window TTL the orphan grace is stacked on top of (ADR-0455 §2).
 
-    Read per pass rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
+    Read from config rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
     postpones every reap by the same amount, and an orphan grace that did not move with it would
-    let the sweep reclaim a window's bytes in the very pass that reaped them.
+    let the sweep reclaim a window's bytes in the very pass that reaped them. Like the grace, the
+    value is a process-start snapshot; a change engages on restart.
     """
     return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
 

@@ -540,6 +540,19 @@ def test_both_threshold_terms_are_declared_for_both_processes_that_sweep() -> No
     assert UPLOAD_ORPHAN_GRACE.default == "86400"
 
 
+def test_a_negative_orphan_grace_is_rejected_at_parse_rather_than_at_the_first_delete() -> None:
+    """A negative grace inverts the brake: it moves the cutoff into the *future*.
+
+    ``now() - grace`` with a negative grace makes every rowless object under both roots older than
+    the threshold, including one whose PUT landed seconds ago, and the per-key re-read cannot catch
+    it because it re-evaluates the same inverted predicate. This is the only brake on a repair that
+    deletes irreversibly, so a sign error has to fail at ``config validate``, not at the delete.
+    """
+    assert UPLOAD_ORPHAN_GRACE.parse("0") == 0
+    with pytest.raises(ValueError, match="must be >= 0"):
+        UPLOAD_ORPHAN_GRACE.parse("-86400")
+
+
 def test_the_reclaim_threshold_stacks_the_orphan_grace_on_the_upload_ttl(
     migrated_url: str,
 ) -> None:
@@ -784,6 +797,35 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
         # The stuck root spent its own budget; the investigations root still got swept.
         assert store.deleted == [rootfs]
         assert f"{MAX_RECLAIMS_PER_ROOT} object(s); 1 were reclaimed" in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_the_mtime_re_read_takes_the_exact_key_not_a_sibling_it_prefixes(
+    migrated_url: str,
+) -> None:
+    """The re-read LISTs the candidate key as a *prefix*, so its siblings come back with it.
+
+    A chunked window's parts are ``<base>.partNNNN``, and a row-first reap that failed partway
+    leaves the base and its parts rowless together — so this shape is the sweep's own subject
+    matter, not a curiosity. If the re-read took any listing rather than the exact match, a young
+    part would lend its mtime to an old base (protecting bytes that should drain) or an old base
+    would lend its mtime to a young part (deleting a PUT that just landed). Only the exact key's
+    own mtime may decide.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        base = f"{prefix}vmcore"
+        part = f"{base}.part0001"
+        store = _FakeUploadStore({base: _GRACE * 2, part: timedelta(seconds=0)})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 1
+        # The old base drained on its own mtime; the freshly written part kept its grace.
+        assert store.deleted == [base]
+        assert store.present == {part}
 
     asyncio.run(_run())
 

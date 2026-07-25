@@ -359,9 +359,17 @@ async def _with_current_mtime(
 ) -> UploadOrphanCandidate | None:
     """Re-read ``candidate``'s store mtime, or ``None`` if the object is no longer there.
 
-    Listing the exact key as a prefix is an exact re-read without a second store method: a LIST
-    scoped to the full key returns that object (alongside any key it prefixes, which is filtered
-    out here).
+    Listing the exact key as a prefix is an exact re-read without a second store method: the LIST
+    is scoped to the full key, and the exact-match filter below is what makes it exact, because the
+    listing also carries every key this one prefixes.
+
+    Those siblings are not hypothetical and the filter is not a formality: a chunked window's parts
+    are ``<base>.partNNNN`` (ADR-0104 §1), so re-reading a leaked **base** key enumerates all of its
+    parts — which is exactly the shape a row-first reap that failed partway leaves behind. The
+    filter keeps that correct; it does not keep it O(1), because
+    ``list_prefix_with_mtime`` paginates the prefix to exhaustion, so this costs one round trip per
+    1000 siblings rather than the single one the §6 cost model assumes. Only base keys pay it — a
+    part key prefixes nothing — and #1575 tracks making the re-read exact in one round trip.
     """
     listings = await asyncio.to_thread(store.list_prefix_with_mtime, candidate.key)
     for listing in listings:

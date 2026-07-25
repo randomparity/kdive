@@ -64,6 +64,14 @@ def _positive_float(raw: str) -> float:
     return value
 
 
+def _nonnegative_int(raw: str) -> int:
+    """Parse a grace window, rejecting a negative that would invert it into an immediate delete."""
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"must be >= 0, got {value}")
+    return value
+
+
 def _always(env: Mapping[str, str]) -> bool:
     return True
 
@@ -204,7 +212,12 @@ UPLOAD_TTL_SECONDS = Setting(
 )
 UPLOAD_ORPHAN_GRACE = Setting(
     name="KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS",
-    parse=_int,
+    # Not ``_int``: this is the only brake on a repair that deletes irreversibly, and a negative
+    # value moves the cutoff into the future, making every rowless object under both roots
+    # reclaimable on the next pass — including one whose PUT landed seconds ago. The per-key
+    # re-read cannot catch it, because it re-evaluates the same inverted predicate. Rejecting it
+    # in the parser puts the failure at `config validate` instead of at the first delete.
+    parse=_nonnegative_int,
     default="86400",
     group="upload",
     processes=_UPLOAD_RECLAIM_READERS,
@@ -213,9 +226,10 @@ UPLOAD_ORPHAN_GRACE = Setting(
         "the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and "
         "applied on top of KDIVE_UPLOAD_TTL_SECONDS, so an object is reclaimed only well after "
         "the window it could have belonged to was reaped. Raise it to stall the sweep — on the "
-        "server as well as the reconciler, since ops.reconcile_now runs the sweep too."
+        "server as well as the reconciler, since ops.reconcile_now runs the sweep too. Takes "
+        "effect when the process restarts; config is snapshotted at startup."
     ),
-    suggest="an integer number of seconds, e.g. 86400",
+    suggest="a non-negative integer number of seconds, e.g. 86400",
 )
 MAX_UPLOAD_BYTES = Setting(
     name="KDIVE_MAX_UPLOAD_BYTES",

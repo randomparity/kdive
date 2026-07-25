@@ -115,8 +115,12 @@ re-PUT both land at a deterministic, reusable key name minutes before `finalize_
 commits. For the length of that PUT the object has **no row to protect it** and its mtime is the
 only fence — so re-checking the *listed* mtime would find it stale, and the sweep would delete
 bytes that had just been written and leave `finalize_capture` committing rows against an object
-that no longer exists. The re-read is one LIST scoped to the exact key, paid only for keys actually
-being deleted.
+that no longer exists. The re-read is a LIST scoped to the exact key, paid only for keys actually
+being deleted, and an exact-match filter over the result — which is what makes it exact, because a
+LIST on a key also returns every key that key prefixes. For a chunked window's **base** key those
+siblings are its `<base>.partNNNN` parts (ADR-0104 §1), and a row-first reap that failed partway
+leaves base and parts rowless together, so that re-read costs a round trip per 1000 parts rather
+than the one this section's cost model assumes. Correct, not O(1); #1575 tracks making it both.
 
 The residual it leaves is narrow and stated rather than implied: a PUT that lands between that
 re-read and the `delete_object` is deleted. That is a single re-read→delete gap, for a key that has
@@ -171,6 +175,8 @@ So the failed key is logged and skipped, the count travels to the end of the pas
 raises once — `repair_abandoned_uploads`' shape, adopted for a different reason than the reaper has
 for it. The reaper *must* tolerate because its row delete has already committed and there is nothing
 to retry; this sweep commits nothing and could safely abort, but abort is what turns one stuck
+object into a permanent leak.
+
 A root has three failure sites, and all three are skipped and counted rather than allowed to end the
 pass. Besides the per-key delete, a failing `list_prefix_with_mtime` and a failing bulk classify each
 end **that root** immediately — with no listing there is no candidate set to be partial about, with
@@ -254,8 +260,15 @@ The threshold's two terms are both real settings resolved per pass —
 reconciler runs the sweep on its loop and the server runs a full `reconcile_once` on demand via
 `ops.reconcile_now`, so a brake an operator raises on only one of them leaves the other deleting at
 the default — which for an irreversible delete is the brake failing exactly when it is reached for.
-Per pass matters as much as configurable does: a brake that needed a reconciler restart to engage
-would be no better than the redeploy it replaces.
+
+The brake engages on a **restart**, and the record says so rather than implying otherwise.
+`Registry.load` snapshots `KDIVE_*` once at the process bootstrap, so resolving the two terms per
+pass reads the same frozen values forever; and no operator can mutate a running process's
+environment from outside it, so no resolution strategy inside this repair could have bought a live
+brake. Resolving them here rather than at `ReconcileConfig` construction is still worth it — both
+terms live in one place, declared, validated and documented, instead of as provider-shaped defaults
+— but a restart is the price, and it is a far cheaper one than the image rebuild and redeploy a
+hard-coded constant would demand.
 48h at the defaults sits far above every legitimate rowless interval under these roots, and the
 asymmetry is chosen: an extra day of leak is a cost bug, a deleted live object is a correctness bug.
 

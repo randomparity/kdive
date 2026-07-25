@@ -110,7 +110,13 @@ detect a one-sided rollout. The cost if that happens is a forced re-upload, not 
 `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` is a real setting, mirroring the sibling image sweep's
 `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS`, rather than a bare `ReconcileConfig` default. This repair
 deletes irreversibly from a prefix that also holds non-upload objects, so an operator who finds it
-removing live bytes needs a brake that is not a redeploy.
+removing live bytes needs a brake reachable without an image rebuild.
+
+That brake engages on a **restart**, not mid-run. `Registry.load` snapshots `KDIVE_*` once at the
+process bootstrap, so resolving the terms per pass reads the same frozen values forever — and an
+operator cannot mutate a running process's environment from outside it regardless, so no resolution
+strategy here could have made it live. The value of resolving them in one place is that both terms
+are declared, validated by `config validate`, and documented in the generated reference.
 
 Both terms therefore declare `server` **and** `reconciler`. The reconciler runs this repair on its
 loop, but it is an unconditional catalog entry, and `ops.reconcile_now` runs a full `reconcile_once`
