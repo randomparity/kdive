@@ -111,11 +111,24 @@ code.
 
 The `_prepare` check is therefore the fail-fast — it keeps a lapsed window from being read at all,
 and it is what produces the self-correcting `upload_window_expired` payload — and the locked
-identity re-read is the guard that makes the commit safe.
+identity re-read is what closes the completed-reap and the reap-then-re-mint races. It is not a
+total safety guarantee; the next paragraph says what it does not cover.
 
-**A pre-existing residual, recorded not fixed.** Because the chunked path holds the `RUN` lock for
-the whole request and `reap_one_owner` is awaited serially inside `repair_abandoned_uploads`, one
-slow multi-GiB chunked finalize stalls the entire upload-reaper sweep — for every owner, runs and
+**Residual — a *partially* completed reap is invisible to this guard.** `reap_one_owner` deletes S3
+objects one key at a time inside its transaction and issues `DELETE FROM upload_manifests` only
+afterwards. S3 deletes are not transactional and `reap_one_owner` catches nothing, so a transient
+object-store error unwinds the transaction: the already-deleted objects stay deleted while the
+manifest row is restored with a byte-identical `deadline`. Both of this guard's signals then read
+"nothing happened", and a finalize commits against partially-deleted bytes. Probability is low — it
+needs a finalize still validating past its deadline, a sweep landing in that stretch, *and* a delete
+failure — but the outcome is a `succeeded` Run with a dangling `kernel_ref`. Closing it means
+reordering the reaper to commit the row deletion before touching objects (the file→object→row
+rationale ADR-0442 applied to rootfs reclaim), which is a reconciler change affecting the
+investigation lane too. Out of scope here; recorded for a follow-up.
+
+**A second pre-existing residual.** Because the chunked path holds the `RUN` lock for the whole
+request and `reap_one_owner` is awaited serially inside `repair_abandoned_uploads`, one slow
+multi-GiB chunked finalize stalls the entire upload-reaper sweep — for every owner, runs and
 investigations alike. That predates this change and is not touched here; it belongs to the
 reconciler and wants its own issue.
 
@@ -196,8 +209,9 @@ reach never depended on finalize's blindness. No metric, for the same reason ADR
   intended rejection. Two such raises already existed, both untested; the new locked re-read is a
   third. The class is now `@dataclass(slots=True, eq=False)` — unfreezing alone would have set
   `__hash__ = None` and given it value equality, which an exception should not have.
-- **A recorded, unfixed residual** — unbounded deadline extension by repeated failing chunked
-  finalizes (decision 4).
+- **Three recorded, unfixed residuals** — a partially-completed reap the identity guard cannot
+  see and the serial-sweep stall (both decision 2, both reconciler-side), and unbounded deadline
+  extension by repeated failing chunked finalizes (decision 4).
 
 ## Considered & rejected
 

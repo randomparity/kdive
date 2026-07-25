@@ -32,8 +32,9 @@ full contract" invariant says a limit handed to an agent must be real. This is t
 3. The comparison uses the **Postgres** clock — the same `now()` that stamped the deadline and that
    the reaper measures against. No Python-side `datetime.now()`.
 4. Both run finalize paths (chunked and non-chunked) emit one rejection shape for one condition.
-   The enforcement is atomic with the commit, so a window the reaper collects mid-finalize cannot
-   still produce a `succeeded` Run.
+   A window the reaper *completely* collects, or that a concurrent re-mint replaces, cannot still
+   produce a `succeeded` Run. (A partially-completed reap remains invisible — ADR-0448 §2's first
+   residual.)
 5. The chunked path's in-window behavior — refresh the deadline, then reassemble — is unchanged.
 6. The agent-facing wrapper docstring states the new rejection (FastMCP serializes only the
    `@app.tool` wrapper docstring).
@@ -94,10 +95,12 @@ No parallel rendering, and the layering stays one-directional.
 
 ### The chunked path
 
-`_reassemble_chunked_artifacts`'s `refresh_deadline`-returned-`False` branch collapses to a single
+`_reassemble_chunked_artifacts`'s declined-`refresh_deadline` branch collapses to a single
 `no_upload_manifest` raise. Both `now()` reads are in the same transaction, so the refresh predicate
 cannot flip on time after the check passed; a declined refresh means the row was reaped in between.
-Its old bare `upload_window_expired` raise is removed rather than enriched — it could not fire.
+Its old bare `upload_window_expired` raise is removed rather than enriched — it could not fire. That
+precondition is now stated on `refresh_deadline` itself, since its `None` is otherwise ambiguous
+between "row gone" and "already expired".
 
 The refresh itself is **not** changed. See ADR-0448 §4 for why, and for the follow-up it recommends.
 
@@ -147,4 +150,6 @@ Rewritten: the two existing expired-chunk tests assert the enriched payload rath
 - No change to the reaper. The `runs` branch already reaps on the deadline alone for every Run
   state (ADR-0104 §7); nothing about its reach depended on finalize's blindness.
 - No metric. The reaper logs each reaped owner; a counter here would be speculative surface.
-- No change to `refresh_deadline`'s semantics (ADR-0448 §4).
+- No change to what the chunked refresh *does* (ADR-0448 §4). Its return type changes from
+  `bool` to `datetime | None` so the caller can carry the stamped deadline as the window's
+  identity; it has one caller.
