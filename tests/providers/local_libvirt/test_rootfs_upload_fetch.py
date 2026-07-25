@@ -504,6 +504,12 @@ def test_stage_precheck_requires_headroom_beyond_the_base_itself(
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert store.stream_calls == 0
+    # This is also the seam of the attribution predicate, and the only test standing exactly on it:
+    # at free == base the base fits (exactly), so it is the floor that is breached. Relaxing the
+    # `<` to `<=` would otherwise change no assertion in the module while telling an operator "the
+    # base does not fit at all" about a base that fits, and stamping that into failure_context.
+    assert error.value.details["reason"] == "floor_breached"
+    assert "the base itself fits; it is the floor that would be breached" in str(error.value)
 
 
 def test_stage_precheck_says_which_of_the_two_conditions_refused_the_stage(
