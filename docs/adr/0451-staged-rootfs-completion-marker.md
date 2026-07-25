@@ -145,10 +145,13 @@ re-downloads and re-rejects for as long as it lives — trading a bounded orphan
 re-download loop, which is the wrong direction and the same trade ADR-0443 decision 2 refuses one
 function over.
 
-The case is reachable only when a sibling died between its `os.replace` and its marker write, a
-sub-millisecond window. The cost when it fires is ADR-0443 §2's already-accepted residue — the
-superseded inode survives with zero links until the holding guest exits — paid once, after which the
-base is marked and reused normally.
+**The branch is not rare.** Beside the died-mid-publish sibling — a sub-millisecond window — it is
+the *deterministic* first re-provision of every base staged before this change: present,
+magic-passing, marker-less, so the re-stage `os.replace`s over it. The cost is ADR-0443 §2's
+already-accepted residue, the superseded inode surviving with zero links while some QEMU holds it
+open as a backing file, and this change escalates it from a rare race to one occurrence per
+(investigation, token) whose base a running guest holds. That is recorded in Consequences with the
+free-space cost that accompanies it, rather than glossed as a race.
 
 The probe's `except OSError: return False` polarity is untouched. An unreadable marker answers
 "publish", which can only remove work; it can never add a failure to a download that already
@@ -208,6 +211,25 @@ that is better than implying the ordering solves it.
   concede that its magic gate re-validates that population only *partially*. The cost is bounded — it
   is once per base, not per System, and only for investigations still open across the upgrade — and
   the re-stage is the self-healing ADR-0443 predicted for this design.
+- **The upgrade re-stage costs peak double the staging space for each base it replaces, and can be
+  refused outright on a tight volume.** The old base still occupies the staging filesystem while the
+  new `<token>.<uuid>.partial` is written beside it, and `_require_staging_free_space` (ADR-0450)
+  demands `base_bytes` plus a 1 GiB floor of `f_bavail` before the first byte. A volume provisioned
+  for one copy of a large base therefore *refuses* the upgrade re-stage with an
+  `INFRASTRUCTURE_FAILURE` — which ADR-0450 records as burning all three `DEFAULT_MAX_ATTEMPTS` in
+  milliseconds and dead-lettering the provision, so it is re-issued rather than picked up later.
+  Operators should confirm the staging volume holds two copies of the largest live base before
+  deploying this, or close the affected investigations first. The peak is per concurrent re-stage,
+  not per investigation: the fetch lock is per-(investigation, checksum), so Systems in *different*
+  investigations can hit it simultaneously, exactly as ADR-0450 §"what this does not cover" states.
+- **One orphaned inode per replaced base whose guest is still running.** The `os.replace` of decision
+  4's upgrade path drops the last link to the old base, which survives with zero links until every
+  QEMU holding it as a backing file exits — charged to `df`, matching no path, and so unreachable by
+  ADR-0442's path-based `_unlink_staged_base` and drain-tail sweep. This is ADR-0443 §2's accepted
+  residue, escalated from a rare lost-lock race to once per (investigation, token) at upgrade.
+  Bounded by the holding guest's lifetime, and content-addressing means the bytes are equivalent, so
+  it is a capacity fault rather than a correctness one. Adopting the marker-less base in place would
+  avoid it and is rejected below.
 - **Post-publish corruption is still only magic-gated.** A base tail-damaged by a dying disk *after* a
   durable publish passes both halves of the gate, because the marker witnesses completion rather than
   integrity. Closing that needs a checksum re-verify on the hot path, which ADR-0443 §3 declines for
@@ -235,6 +257,21 @@ that is better than implying the ordering solves it.
 - The doomed-fetcher publish race (ADR-0452 §6) now covers the marker as well as the base: a fetcher
   whose partial an earlier pass skipped can publish both after its own reclaim, and the deferred pass
   collects both. Same bound, same fix — **#1558**.
+- **Rolling back leaks one staging directory per investigation, and the remedy is one command.** The
+  reverse of the compatibility problem decision 6 solves: a release without
+  `_unlink_completion_markers` has only the `*.partial` and `*.qcow2` globs, so every `<token>.ready`
+  written while this was deployed is invisible to it. Its `rmdir` then fails `ENOTEMPTY` with
+  `held=False` on every ordinary drain — logging ADR-0452 §7's unexplained-survivor WARNING, which is
+  precisely the line an operator must not be trained to ignore — while the caller clears
+  `rootfs_cleanup_pending_at` regardless, retiring the last collector. Before or after rolling back,
+  run `find <uploads_dir> -name '*.ready' -delete` (default `/var/lib/kdive/rootfs-uploads`). Stated
+  here rather than left for an operator to derive from a WARNING that names the wrong cause.
+- A rejected base's WARNING now names **which** gate rejected it, because the marker gave the gate
+  three reasons that mean opposite things: a failed format gate says the durability bug fired or the
+  base was corrupted by other means, while a missing marker on the first provision after an upgrade
+  is expected and needs no action. Reporting the second as the first would make the upgrade emit a
+  false durability alarm for every good pre-marker base — the defect ADR-0445's follow-up commits
+  removed one gate over, by keying the log on the gate rather than on the category.
 - No schema, no migration, no config setting, no new dependency, no MCP/RBAC surface, no new module.
   Not an AI surface.
 
@@ -244,6 +281,14 @@ that is better than implying the ordering solves it.
   of ADR-0443's rejected option. Rejected in decision 3: it trades the crash residue for the
   post-publish-corruption residue instead of closing one and keeping the net for the other, and the
   probe it would remove costs a 4-byte read on a path that opens the file for `qemu-img` anyway.
+- **Adopt a marker-less but magic-passing base in place — write a marker for it rather than
+  re-staging.** It would erase both upgrade costs above: no re-download, no inode swap, no doubled
+  staging peak. Rejected, and it is the most tempting wrong answer here. A marker-less base is
+  exactly the file nothing can distinguish between "staged fine by code that predates this" and
+  "torn by the crash #1539 is about" — ADR-0443 §3 establishes that the second is the *expected*
+  survivor for a large base and that no cheap probe separates them. Marking such a base complete
+  would assert precisely the fact that cannot be checked, and would do it silently, for the whole
+  population the change exists to clean. The one-time re-stage is the cost of not asserting it.
 - **Name the marker so it falls inside an existing glob** (`<token>.ready.qcow2`, or reusing
   `*.partial`). Rejected. It would drag the marker into `_unlink_unowned_base`, whose `WARNING` means
   "a base outlived its `artifacts` row" and should never fire, and into `unlink_partial_if_unheld`,

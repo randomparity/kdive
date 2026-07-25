@@ -184,7 +184,7 @@ def fetch_uploaded_rootfs(
     """Resolve + stage the investigation-scoped uploaded rootfs to a verified local path.
 
     Resolves the object by content address within the System's own investigation, reuses a present
-    staged file that re-passes :func:`_reusable_staged_base`, and otherwise downloads it once under
+    staged file that :func:`_staged_base_rejection` accepts, and otherwise downloads it once under
     a session advisory lock. The re-check runs on both sides of the lock, so neither the fetcher
     that finds a torn base nor the one that queues behind a sibling can be handed one (ADR-0443).
 
@@ -200,25 +200,29 @@ def fetch_uploaded_rootfs(
     investigation_id = _resolve_investigation(conn, upload.system_id)
     resolved = _resolve_object(conn, investigation_id, token, upload)
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
-    if _reusable_staged_base(dest, system_id=upload.system_id):
+    rejection = _staged_base_rejection(dest, system_id=upload.system_id)
+    if rejection is None:
         return dest
-    # The signal this change exists to produce. A base that is present but does not re-pass the
-    # format gate is the durability bug firing (or a base corrupted by some other means), and it is
-    # otherwise invisible: the re-stage below succeeds, so no error is ever raised and the only
-    # symptom is a provision that took a multi-GiB download longer than it should have.
+    # The signal this change exists to produce. A rejected base is otherwise invisible: the re-stage
+    # below succeeds, so no error is ever raised and the only symptom is a provision that took a
+    # multi-GiB download longer than it should have. The line names **which** gate rejected it,
+    # because the two mean opposite things to an operator — a failed format gate is the durability
+    # bug firing or a base corrupted by some other means, while a missing marker is the expected
+    # one-time cost of upgrading past ADR-0451 and needs no action at all.
     stale_on_arrival = dest.exists()
     if stale_on_arrival:
         _log.warning(
-            "staged rootfs base at %s did not re-pass the qcow2 format gate; re-staging it "
-            "(investigation=%s system=%s)",
+            "staged rootfs base at %s %s; re-staging it (investigation=%s system=%s)",
             dest,
+            _REJECTION_PROSE[rejection],
             investigation_id,
             upload.system_id,
         )
     lock_key = _session_lock_key(_fetch_lock_name(investigation_id, token))
     conn.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
     try:
-        if _reusable_staged_base(dest, system_id=upload.system_id):
+        rejection = _staged_base_rejection(dest, system_id=upload.system_id)
+        if rejection is None:
             return dest  # a sibling fetcher finished while we waited on the lock
         if dest.exists() and not stale_on_arrival:
             # Gated on ``stale_on_arrival`` because nothing between the two checks repairs ``dest``:
@@ -227,9 +231,10 @@ def fetch_uploaded_rootfs(
             # we waited* — a sibling just published a base that does not verify, which is a
             # materially louder condition than finding a stale one on arrival.
             _log.warning(
-                "a sibling published a staged rootfs base at %s that does not re-pass the qcow2 "
-                "format gate; re-staging it (investigation=%s system=%s)",
+                "a sibling published a staged rootfs base at %s that %s; re-staging it "
+                "(investigation=%s system=%s)",
                 dest,
+                _REJECTION_PROSE[rejection],
                 investigation_id,
                 upload.system_id,
             )
@@ -915,15 +920,35 @@ def _starts_with_qcow2_magic(staged: Path) -> bool:
     """Whether ``staged``'s first bytes are the qcow2 magic; a file too short to hold it is not.
 
     The single implementation of the format probe, shared by the staging gate below and the reuse
-    gate in :func:`_reusable_staged_base` so the two can never drift apart. ``OSError`` propagates
+    gate in :func:`_staged_base_rejection` so the two can never drift apart. ``OSError`` propagates
     — each caller decides what an unreadable file means for it.
     """
     with staged.open("rb") as reader:
         return reader.read(len(_QCOW2_MAGIC)) == _QCOW2_MAGIC
 
 
-def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
-    """Whether a present staged base may back an overlay without being fetched again (#1526).
+#: Why a present staged base may not be reused, as a slug the call sites render into their WARNING.
+#: A bare bool was enough while the gate had one reason; ADR-0451 gave it three, and they mean
+#: *opposite* things to an operator — a failed format gate says the durability bug fired or the base
+#: was corrupted by some other means, while a missing marker on an otherwise perfect base is the
+#: expected one-time cost of upgrading and needs no action. Reporting the second as the first is the
+#: same defect the two commits before this branch fixed one gate over (the checksum mismatch
+#: keyed on the category rather than on the gate), so it is keyed on the gate here too.
+_NOT_A_REGULAR_FILE = "not_a_regular_file"
+_NO_COMPLETION_MARKER = "no_completion_marker"
+_FAILED_FORMAT_GATE = "failed_format_gate"
+_REJECTION_PROSE = {
+    _NOT_A_REGULAR_FILE: "is not a regular file",
+    _NO_COMPLETION_MARKER: (
+        "has no completion marker, so nothing attests that its stage ever finished durably — "
+        "expected once per base when upgrading past ADR-0451, and otherwise a crash mid-stage"
+    ),
+    _FAILED_FORMAT_GATE: "did not re-pass the qcow2 format gate",
+}
+
+
+def _staged_base_rejection(dest: Path, *, system_id: UUID) -> str | None:
+    """Why a present staged base may not back an overlay, or ``None`` when it may (#1526, #1539).
 
     The reuse fast path used to treat *any* present ``dest`` as authoritative (a bare
     ``dest.is_file()``), which bypassed every verification gate exactly when the file was most
@@ -972,17 +997,29 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     swallowed every ``OSError`` alike: treating those as a cache miss would swap a good multi-GiB
     base out from under any guest holding it (see the residue in ADR-0443 §2) and re-download it on
     every provision, silently, for as long as the fault lasts.
+
+    Returns:
+        ``None`` when the base may be reused, or one of :data:`_REJECTION_PROSE`'s slugs naming the
+        gate that rejected it. Which gate is not diagnostic colour: on the first provision after an
+        upgrade **every** base in the tree is rejected for a missing marker, and reporting that as a
+        format-gate failure would tell an operator the durability bug had fired on a base that is
+        perfectly intact.
     """
     try:
         if not stat.S_ISREG(dest.stat().st_mode):
-            return False
+            return _NOT_A_REGULAR_FILE
         if not _completion_marker_present(dest, system_id=system_id):
-            return False
-        return _starts_with_qcow2_magic(dest)
+            return _NO_COMPLETION_MARKER
+        if not _starts_with_qcow2_magic(dest):
+            return _FAILED_FORMAT_GATE
     except FileNotFoundError, NotADirectoryError, IsADirectoryError:
-        return False
+        # An absent base, or an absent parent. The call sites gate their WARNING on
+        # ``dest.exists()``, so this slug is never rendered for it — the ordinary cache miss stays
+        # silent, which is what keeps the log line meaning "something was there and was rejected".
+        return _NOT_A_REGULAR_FILE
     except OSError as err:
         raise _unreadable_base_fault(dest, err, system_id=str(system_id), probed=dest) from err
+    return None
 
 
 def _completion_marker_present(dest: Path, *, system_id: UUID) -> bool:
@@ -992,7 +1029,7 @@ def _completion_marker_present(dest: Path, *, system_id: UUID) -> bool:
     the path that actually failed: an operator sent to inspect the multi-GiB base when it was the
     zero-byte marker beside it that could not be ``stat``\\ ed has been given the wrong file.
 
-    The taxonomy is otherwise :func:`_reusable_staged_base`'s, for its reasons. An absent marker
+    The taxonomy is otherwise :func:`_staged_base_rejection`'s, for its reasons. An absent marker
     (or an absent parent) means *there is no completed stage at this path* and is a cache miss; a
     marker that cannot be ``stat``\\ ed at all is the ADR-0442 uid asymmetry or a transient ``EIO``,
     and answering that as a cache miss would produce the silent, perpetual, fetch-lock-serialized
@@ -1011,8 +1048,8 @@ def _completion_marker_present(dest: Path, *, system_id: UUID) -> bool:
 def _sibling_already_published(dest: Path) -> bool:
     """Whether ``dest`` already holds a good base, checked just before this fetcher would publish.
 
-    Deliberately **not** :func:`_reusable_staged_base`, despite asking the same question of the same
-    file. That one raises on an unreadable ``dest`` because returning ``False`` there would trigger
+    Deliberately **not** :func:`_staged_base_rejection`, despite asking the same question of the
+    same file. That one raises on an unreadable ``dest`` because a cache miss there would trigger
     a silent, perpetual multi-GiB re-download. Here the polarity is reversed: a ``False`` costs one
     ``os.replace`` — the behavior before this guard existed, and one that *repairs* an unreadable
     ``dest``, since a rename needs permission on the directory rather than on the file. So every
@@ -1030,9 +1067,23 @@ def _sibling_already_published(dest: Path) -> bool:
     **The completion marker is required here too** (ADR-0451 §4). Under the reuse gate a marker-less
     base is one every future fetch will *reject*, so skipping the publish on one would hand the
     investigation a base that is re-downloaded and re-rejected for as long as it lives — trading a
-    bounded orphan inode for an unbounded re-download loop, which is the wrong direction. That is
-    reachable only when a sibling died between its ``os.replace`` and its marker write, and
-    publishing is what completes the base instead of stranding it.
+    bounded orphan inode for an unbounded re-download loop, which is the wrong direction.
+
+    **That branch is not rare, and it must not be described as if it were.** Beside the
+    died-mid-publish sibling it is also the *deterministic* first re-provision of every base staged
+    before ADR-0451: such a base is present and magic-passing and has no marker, so the re-stage
+    ``os.replace``\\ s over it. ADR-0443 §2 already accepts the residue that follows — the
+    superseded inode survives with zero links while some QEMU holds it open as a backing file,
+    charged to ``df`` and matching no path — but accepted it as a rare race, and the upgrade turns
+    it into one
+    occurrence per (investigation, token) whose base a running guest holds. Bounded by that guest's
+    lifetime and recorded in ADR-0451's Consequences with the free-space cost that accompanies it;
+    do not re-derive it as a sub-millisecond window.
+
+    Adopting the marker-less base instead — writing a marker for it rather than re-staging — would
+    avoid both costs and is rejected in ADR-0451, because a marker-less base is exactly the file
+    nothing can distinguish between "staged fine by older code" and "torn by the crash #1539 is
+    about". Marking it complete would be asserting the very thing that cannot be checked.
     """
     try:
         return (

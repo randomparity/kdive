@@ -1275,9 +1275,9 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     # contract is that such a base never reaches the caller: it is re-fetched from the object store
     # and replaced, not returned.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(content)
+    # Published WITH a marker, so what is under test is still the magic gate: a marker-less base is
+    # rejected one gate earlier and these shapes would never reach the probe they are named for.
+    dest = _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), content)
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
@@ -1290,10 +1290,13 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
     # The rejection is the one event this change exists to detect, and the re-stage succeeds, so a
     # log line is the ONLY signal it ever fired. Without it the fix is unmeasurable in production.
-    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
         "staged rootfs base at" in message and str(dest) in message for message in warnings
     ), f"{name}: rejected the base silently"
+    # And it names the gate that actually rejected it, so the operator is not sent to look for a
+    # missing marker on a base whose stage plainly finished.
+    assert any("qcow2 format gate" in message for message in warnings), f"{name}: {warnings}"
     # And it must NOT claim a concurrent sibling. Nothing between the pre-lock and post-lock checks
     # repairs `dest`, so an ungated post-lock warning would fire on every ordinary stale-base
     # rejection -- attributing the commonest case to a racing fetcher that never existed, and
@@ -1566,7 +1569,9 @@ def test_fetch_rejects_the_crash_torn_base_that_appeared_during_the_lock_wait(
     assert store.stream_calls == 1
 
 
-def test_fetch_restages_a_pre_marker_base_even_though_its_magic_is_intact(tmp_path: Path) -> None:
+def test_fetch_restages_a_pre_marker_base_even_though_its_magic_is_intact(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     # The upgrade population, stated as behaviour rather than left as a surprise: every base staged
     # before this change carries no marker, so each surviving (investigation, token) pays ONE full
     # re-download. That is the cost of the fix, not a bug -- a pre-marker base cannot be shown
@@ -1576,12 +1581,31 @@ def test_fetch_restages_a_pre_marker_base_even_though_its_magic_is_intact(tmp_pa
     dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
     dest.parent.mkdir(parents=True)
     dest.write_bytes(_QCOW2)  # a perfectly good pre-#1539 base
+    pre_marker_inode = dest.stat().st_ino
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
-    assert fetch_uploaded_rootfs(conn, store, _upload(tmp_path)) == dest  # ty: ignore[invalid-argument-type]
+    with caplog.at_level(logging.WARNING):
+        assert fetch_uploaded_rootfs(conn, store, _upload(tmp_path)) == dest  # ty: ignore[invalid-argument-type]
+
     assert store.stream_calls == 1  # re-staged once ...
     assert staged_rootfs_marker_path(dest).is_file()
+    # Pinned, not incidental: the re-stage REPLACES the inode, so any QEMU holding the old base as a
+    # backing file keeps that inode alive with zero links until it exits (ADR-0443 §2's residue,
+    # escalated by ADR-0451 from a rare race to once per base at upgrade). Nothing else in the suite
+    # observes it, and a reader of `_sibling_already_published` could reasonably assume the
+    # magic-passing base was adopted rather than superseded.
+    assert dest.stat().st_ino != pre_marker_inode
+    # And the WARNING must say the marker was missing, NOT that the format gate failed. On upgrade
+    # every base in the tree takes this path, so a message keyed on the wrong gate turns the
+    # one-time cost into a fleet-wide "the durability bug fired" alarm about intact bases -- the
+    # defect the two commits before this branch removed one gate over.
+    rejections = [
+        r.getMessage() for r in caplog.records if "staged rootfs base at" in r.getMessage()
+    ]
+    assert rejections, caplog.text
+    assert all("completion marker" in message for message in rejections), rejections
+    assert not any("qcow2 format gate" in message for message in rejections), rejections
 
     second = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     assert fetch_uploaded_rootfs(conn, second, _upload(tmp_path)) == dest  # ty: ignore[invalid-argument-type]
