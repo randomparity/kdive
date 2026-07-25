@@ -1,7 +1,9 @@
-"""Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, ADR-0444, issue #11).
+"""Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, ADR-0444, ADR-0453, #11).
 
-The reaper prefix-reaps uncommitted objects of a past-deadline manifest, then deletes the
-manifest row. For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
+The reaper commits the manifest-row delete of a past-deadline window under the owner's advisory
+lock, then sweeps the window's uncommitted objects holding neither lock nor connection — row
+first, so a failing sweep can never restore a window over deleted bytes (ADR-0453,
+issue #1552). For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
 finalized with leftover chunks (ADR-0104 §7); for ``investigations`` it sweeps on the deadline
 alone, in every investigation state (ADR-0444, superseding ADR-0441 §6's terminal-state gate —
 ``complete_rootfs_upload`` now rejects a past-deadline finalize, so the reap races nothing
@@ -17,16 +19,21 @@ separate autocommit ``connect`` connections.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from datetime import timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
+from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.reconciler.cleanup.uploads import ReapOutcome
 from kdive.reconciler.cleanup.uploads import (
     lock_scope_for as _lock_scope_for,
 )
@@ -49,6 +56,85 @@ class _FakeStore:
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)
+
+
+class _FailingStore(_FakeStore):
+    """A store whose ``delete`` raises for the named keys, as a real store outage would.
+
+    ``ObjectStore.delete`` wraps every ``BotoCoreError``/``ClientError`` in a
+    ``CategorizedError``, so that is the exception a mid-sweep failure actually presents.
+    """
+
+    def __init__(
+        self,
+        objects: dict[str, list[str]],
+        *,
+        fail_keys: set[str] | None = None,
+        fail_list_prefixes: set[str] | None = None,
+    ) -> None:
+        super().__init__(objects)
+        self._fail_keys = fail_keys or set()
+        self._fail_list_prefixes = fail_list_prefixes or set()
+        self.attempted: list[str] = []
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        if prefix in self._fail_list_prefixes:
+            raise CategorizedError(
+                f"list_objects_v2 failed for {prefix}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        return super().list_prefix(prefix)
+
+    def delete(self, key: str) -> None:
+        self.attempted.append(key)
+        if key in self._fail_keys:
+            raise CategorizedError(
+                f"delete_object failed for {key}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        super().delete(key)
+
+
+class _HookedStore(_FakeStore):
+    """A store that runs ``before_delete`` from inside its own ``delete``.
+
+    The hook lands in the gap phase 2 leaves open: after the manifest-row delete has committed and
+    the owner lock has been released, before the object is actually gone. It runs on the
+    ``asyncio.to_thread`` worker, so a sync ``psycopg`` connection opened there observes only
+    committed state — which is what lets these tests assert *ordering* rather than end state.
+
+    ``once`` fires it before the first delete only; otherwise before every one.
+    """
+
+    def __init__(
+        self,
+        objects: dict[str, list[str]],
+        *,
+        before_delete: Callable[[], None],
+        once: bool = False,
+    ) -> None:
+        super().__init__(objects)
+        self._before_delete = before_delete
+        self._once = once
+        self._fired = False
+
+    def delete(self, key: str) -> None:
+        if not (self._once and self._fired):
+            self._fired = True
+            self._before_delete()
+        super().delete(key)
+
+
+def _manifest_is_gone(
+    url: str, owner_kind: upload_manifest.UploadOwnerKind, owner_id: UUID
+) -> Callable[[], bool]:
+    """Return a probe reporting whether the owner's manifest row has *committed* away yet."""
+
+    def _probe() -> bool:
+        with psycopg.connect(url, autocommit=True) as conn:
+            return upload_manifest.get_manifest_sync(conn, owner_kind, owner_id) is None
+
+    return _probe
 
 
 async def _insert_artifact_row(
@@ -104,13 +190,19 @@ def _investigation_manifest(
     return prefix, request
 
 
+async def _seed_expired_run(url: str) -> tuple[UUID, str]:
+    """Seed a CREATED Run with a past-deadline upload manifest; return its id and window prefix."""
+    async with await connect(url) as seed:
+        system_id = await seed_system(seed)
+        run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+        prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+        await upload_manifest.replace_manifest(seed, request)
+    return run_id, prefix
+
+
 def test_reaps_uncommitted_objects_past_deadline_for_created_run(migrated_url: str) -> None:
     async def _run() -> None:
-        async with await connect(migrated_url) as seed:
-            system_id = await seed_system(seed)
-            run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
-            prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
-            await upload_manifest.replace_manifest(seed, request)
+        run_id, prefix = await _seed_expired_run(migrated_url)
         store = _FakeStore({prefix: [f"{prefix}kernel", f"{prefix}stray"]})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             count = await run_repair(pool, _reap(store))
@@ -373,8 +465,378 @@ def test_reap_one_owner_declines_renewed_manifest(migrated_url: str) -> None:
             prefix, request = _run_manifest(run_id, timedelta(hours=1))
             await upload_manifest.replace_manifest(conn, request)
             store = _FakeStore({prefix: [f"{prefix}kernel"]})
-            assert await _reap_one_owner(conn, store, "runs", run_id) is False
+            outcome = await _reap_one_owner(conn, store, "runs", run_id)
+            assert outcome == ReapOutcome(reaped=False, attempted=0, undeleted=0)
             assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_mid_sweep_delete_failure_still_removes_the_manifest_row(migrated_url: str) -> None:
+    """#1552 / ADR-0453 §1: the row delete commits *before* the objects are swept, so a delete
+    that fails partway through can no longer restore a window over deleted bytes.
+
+    Under the old object-first order this exact scenario rolled the transaction back, leaving an
+    ``upload_manifests`` row byte-identical to the one finalize validated — same prefix, same
+    deadline — over an object that was already gone. ``_require_unreaped_window`` compares deadline
+    *identity* and a rollback re-stamps nothing, so the runs single-PUT finalize would sail past it
+    and register ``artifacts`` rows against deleted keys.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        keys = [f"{prefix}a", f"{prefix}b", f"{prefix}c"]
+        store = _FailingStore({prefix: keys}, fail_keys={f"{prefix}b"})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError):  # reported once the pass is complete
+                await run_repair(pool, _reap(store))
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+        # AC-4: one bad key strands neither the keys before it nor the keys after it.
+        assert store.attempted == keys
+        assert store.deleted == [f"{prefix}a", f"{prefix}c"]
+
+    asyncio.run(_run())
+
+
+def test_a_totally_failed_sweep_is_reported_as_a_failed_pass(migrated_url: str) -> None:
+    """ADR-0453 §3: a store rejecting every delete must not read as healthy repair work.
+
+    ``_run_repair_plan`` increments the ADR-0190 group-E error counter only for a repair that
+    *raises*; a repair that returns normally has its count added to `kdive.reconciler.repairs` and
+    emits no error. Swallowing the sweep failures outright would therefore make the one condition
+    that leaks bytes permanently the best-looking pass on the dashboard. The pass forfeits its
+    reaped count to say so — the count is a gauge, the error is the alert, and the rows are
+    durably deleted either way.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FailingStore({prefix: [f"{prefix}a"]}, fail_keys={f"{prefix}a"})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _reap(store))
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert "1 object(s) across 1 reaped owner(s)" in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_a_clean_sweep_returns_the_reaped_count_and_does_not_raise(migrated_url: str) -> None:
+    """The counterweight: the end-of-pass raise is conditional on a real failure.
+
+    Without this, the previous test would be satisfied by a reaper that raised unconditionally.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FailingStore({prefix: [f"{prefix}a"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _reap(store)) == 1
+        assert store.deleted == [f"{prefix}a"]
+
+    asyncio.run(_run())
+
+
+def test_a_key_that_gains_an_artifacts_row_after_the_claim_is_still_deleted(
+    migrated_url: str,
+) -> None:
+    """Pins ADR-0453's second residual (#1557) as *known* behaviour rather than a claim.
+
+    The exemption is decided in phase 1 and phase 2 re-reads nothing, so a key that acquires a
+    committed ``artifacts`` row between the two — which the reaped window's own finalizes cannot
+    do, but a re-mint, a `control.capture_traffic` retry, or a vmcore finalize can, because
+    ``local/runs/<id>/`` is the Run's *owner* prefix and phase 2 holds no `RUN` lock — has its
+    object deleted anyway, leaving the row dangling.
+
+    This test exists so the residual has a reproducer and so the day it is closed, it fails
+    loudly rather than passing silently.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        pcap_key = f"{prefix}pcap-late"
+
+        def _commit_the_row_mid_sweep() -> None:
+            # Stands in for the concurrent writer taking the RUN lock phase 2 no longer holds.
+            with psycopg.connect(migrated_url, autocommit=True) as writer:
+                writer.execute(
+                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, "
+                    "    sensitivity, retention_class) VALUES (%s, %s, %s, %s, %s, %s)",
+                    ("runs", run_id, pcap_key, "etag-1", "sensitive", "pcap"),
+                )
+
+        store = _HookedStore(
+            {prefix: [pcap_key]}, before_delete=_commit_the_row_mid_sweep, once=True
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _reap(store)) == 1
+        assert store.deleted == [pcap_key]  # the disclosed residual: row committed, object gone
+        async with await connect(migrated_url) as check:
+            row = await (
+                await check.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (pcap_key,))
+            ).fetchone()
+        assert row is not None
+
+    asyncio.run(_run())
+
+
+def test_undeleted_objects_are_reported_at_error(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0453 §3 and §Consequences: the leaked bytes must be *reported*, not just tolerated.
+
+    Nothing in this tree sweeps the upload prefix — `gc_expired_build_artifacts` is row-driven
+    over `artifacts` and the `images/` orphan scan is a different prefix — so once the manifest
+    row is gone this log is the only trace the objects were ever there.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FailingStore(
+            {prefix: [f"{prefix}a", f"{prefix}b"]}, fail_keys={f"{prefix}a", f"{prefix}b"}
+        )
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                with pytest.raises(CategorizedError):
+                    await run_repair(pool, _reap(store))
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(warnings) == 2  # one per failed key, naming the key
+        logged = [r.getMessage() for r in warnings]
+        assert [k for k in (f"{prefix}a", f"{prefix}b") if any(k in m for m in logged)] == [
+            f"{prefix}a",
+            f"{prefix}b",
+        ]
+        assert len(errors) == 1  # one summary, naming the counts and the owner
+        assert f"left 2 of 2 object(s) for owner runs/{run_id}" in errors[0].getMessage()
+
+    asyncio.run(_run())
+
+
+def test_the_prefix_is_logged_before_the_sweep_starts(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0453 §3: the prefix and the key count must be on the record *before* the first delete.
+
+    An abort that never reaches the sweep's own reporting — cancellation at shutdown, a process
+    kill — leaves this as the only record of when the claim happened and how much it doomed.
+    Asserted by snapshotting the log from inside the first delete, so moving the call after the
+    sweep fails this test rather than passing it.
+    """
+    seen_at_first_delete: list[str] = []
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        keys = [f"{prefix}a", f"{prefix}b"]
+
+        def _snapshot_the_log() -> None:
+            seen_at_first_delete.extend(r.getMessage() for r in caplog.records)
+
+        store = _HookedStore({prefix: keys}, before_delete=_snapshot_the_log, once=True)
+        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.uploads"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _reap(store)) == 1
+        assert store.deleted == keys
+        claimed = [m for m in seen_at_first_delete if "claimed; sweeping" in m]
+        assert len(claimed) == 1  # already logged when the first delete ran
+        assert prefix in claimed[0]
+        assert "2 object(s)" in claimed[0]
+
+    asyncio.run(_run())
+
+
+def test_a_failing_list_prefix_aborts_the_pass_without_deleting_the_row(
+    migrated_url: str,
+) -> None:
+    """A store outage during phase 1 is benign, and this pins that it stays benign.
+
+    ``ObjectStore.list_prefix`` raises ``CategorizedError`` on any client or transport fault, and
+    phase 1 does not catch it — so the pass ends and later candidates are dropped. That asymmetry
+    with the sweep's per-key tolerance (ADR-0453 §3) is deliberate: phase 1 aborts *before* the
+    row delete commits, so the transaction rolls back with nothing deleted and the next 30-second
+    pass retries the same candidates. Nothing is lost, which is precisely what is not true once
+    the row delete has committed.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FailingStore({prefix: [f"{prefix}kernel"]}, fail_list_prefixes={prefix})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError):  # not silently absorbed
+                await run_repair(pool, _reap(store))
+        assert store.attempted == []
+        async with await connect(migrated_url) as check:
+            # The window survives intact: nothing was deleted, so the retry loses nothing.
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is not None
+
+    asyncio.run(_run())
+
+
+def test_successful_sweep_logs_no_failure_summary(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ERROR summary is conditional on a failure, not emitted on every reap."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({prefix: [f"{prefix}a"]})
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _reap(store)) == 1
+        assert caplog.records == []
+
+    asyncio.run(_run())
+
+
+def test_mid_sweep_delete_failure_does_not_abandon_later_owners(migrated_url: str) -> None:
+    """AC-4, the cross-owner half: one bad key must not cost a later owner its reap.
+
+    ``repair_abandoned_uploads`` has no per-candidate ``try``, so a raise out of the object sweep
+    would drop every later candidate on the floor for one unrelated object-store hiccup. Each
+    owner here loses one key of two, which is a bad key rather than a refusing store — so the pass
+    walks every candidate and only then reports.
+    """
+
+    async def _run() -> None:
+        prefixes: list[str] = []
+        run_ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(2):
+                system_id = await seed_system(seed)
+                run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+                prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+                await upload_manifest.replace_manifest(seed, request)
+                prefixes.append(prefix)
+                run_ids.append(run_id)
+        objects = {p: [f"{p}kernel", f"{p}stray"] for p in prefixes}
+        store = _FailingStore(objects, fail_keys={f"{p}kernel" for p in prefixes})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _reap(store))
+        # Both owners reaped despite a failed key each; the report names both, none left unclaimed.
+        assert "2 object(s) across 2 reaped owner(s)" in str(caught.value)
+        assert "Left 0 candidate(s) unclaimed" in str(caught.value)
+        assert sorted(store.deleted) == sorted(f"{p}stray" for p in prefixes)
+        async with await connect(migrated_url) as check:
+            for run_id in run_ids:
+                assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_a_wholly_refused_sweep_stops_the_pass_claiming_more_owners(migrated_url: str) -> None:
+    """ADR-0453 §3, the brake: a store that lists but refuses every delete must not orphan the
+    whole backlog in one pass.
+
+    One bad key is a bad key; a whole owner's sweep failing is the signature of a condition that
+    will fail the next owner too — a bucket policy without ``s3:DeleteObject``, an endpoint
+    rejecting DELETE. The candidate select is unbounded, and every candidate claimed under that
+    fault costs an irreversible row delete over bytes nothing reclaims (#1556), so the pass stops.
+    A failing ``list_prefix`` already ended the pass for the same reason; this makes the
+    delete-side treatment consistent rather than the opposite.
+
+    Order-independent: every owner's delete fails, so whichever the scan yields first is the one
+    that gets reaped, and exactly one must survive.
+    """
+
+    async def _run() -> None:
+        prefixes: list[str] = []
+        run_ids: list[UUID] = []
+        async with await connect(migrated_url) as seed:
+            for _ in range(3):
+                system_id = await seed_system(seed)
+                run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+                prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+                await upload_manifest.replace_manifest(seed, request)
+                prefixes.append(prefix)
+                run_ids.append(run_id)
+        objects = {p: [f"{p}kernel"] for p in prefixes}
+        store = _FailingStore(objects, fail_keys={f"{p}kernel" for p in prefixes})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _reap(store))
+        assert "1 object(s) across 1 reaped owner(s)" in str(caught.value)
+        assert "Left 2 candidate(s) unclaimed" in str(caught.value)
+        assert len(store.attempted) == 1  # the brake tripped after the first owner
+        async with await connect(migrated_url) as check:
+            surviving = [
+                r
+                for r in run_ids
+                if await upload_manifest.get_manifest(check, "runs", r) is not None
+            ]
+        assert len(surviving) == 2  # two windows kept for the next pass, bytes and rows intact
+
+    asyncio.run(_run())
+
+
+def test_manifest_row_is_already_committed_gone_when_the_first_object_is_deleted(
+    migrated_url: str,
+) -> None:
+    """AC-1: the ordering itself, observed rather than inferred from the end state.
+
+    Both orders leave no row once the reap returns, so the end state cannot tell them apart. This
+    probes from inside the delete callback on a separate connection, which sees only committed
+    state — under the old order it saw the row still present.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        keys = [f"{prefix}a", f"{prefix}b"]
+        probe = _manifest_is_gone(migrated_url, "runs", run_id)
+        gone_at_each_delete: list[bool] = []
+        store = _HookedStore(
+            {prefix: keys}, before_delete=lambda: gone_at_each_delete.append(probe())
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == keys
+        assert gone_at_each_delete == [True, True]
+
+    asyncio.run(_run())
+
+
+def test_all_committed_objects_reaps_row_without_any_delete(migrated_url: str) -> None:
+    """The empty doomed set: every listed key holds an ``artifacts`` row, so the set-valued
+    exemption query leaves nothing to sweep and the sweep phase issues no delete at all."""
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id, run_state=RunState.SUCCEEDED)
+            prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+            for name in ("kernel", "initrd"):
+                await _insert_artifact_row(
+                    seed, owner_kind="runs", owner_id=run_id, object_key=f"{prefix}{name}"
+                )
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FailingStore(
+            {prefix: [f"{prefix}kernel", f"{prefix}initrd"]},
+            fail_keys={f"{prefix}kernel", f"{prefix}initrd"},
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.attempted == []  # exempt keys are never even attempted
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_reap_with_no_objects_under_the_prefix_still_removes_the_row(migrated_url: str) -> None:
+    """An empty prefix listing: nothing to sweep, but the abandoned window is still collected."""
+
+    async def _run() -> None:
+        run_id, _prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            count = await run_repair(pool, _reap(store))
+        assert count == 1
+        assert store.deleted == []
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
 
     asyncio.run(_run())
 
