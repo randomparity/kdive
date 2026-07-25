@@ -53,3 +53,15 @@ reports its own error rather than being killed by the probe. If you lower those 
 values, keep the first probe later than the wait or the kubelet will kill a container that
 is merely starting slowly. The aux endpoints (`/livez`, `/readyz`, `/metrics`) come up
 after the pool opens, so they are unavailable for that window.
+
+### Watching for dropped usage rows
+
+The server records one `tool_invocation` row per tool call on a best-effort basis: if the
+write cannot get a database connection within its one-second budget, the row is dropped so
+the call itself is never delayed or failed. `/metrics` on the server's aux port counts those
+drops as `kdive_mcp_usage_recording_failures`.
+
+A steady zero is the expected reading. A non-zero rate means usage data is incomplete, and
+the usual cause is the server pool having to open a fresh connection inside that one-second
+budget under concurrency. That counter is the signal to size the server's pool against —
+raise its minimum connections if the rate is material to you, rather than guessing.

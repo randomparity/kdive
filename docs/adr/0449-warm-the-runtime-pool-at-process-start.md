@@ -44,11 +44,21 @@ of frequent loss.
 
 ## Decision
 
-### 1. `run_process_runtime` opens the pool with `wait=True` and a 10-second budget
+### 1. `run_process_runtime` establishes one connection at startup, within a 10-second budget
 
-`await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_SECONDS)`. The first connect now
-completes at startup, outside any caller's acquire budget, and `body` is never handed a
-pool with zero connections. On a healthy stack this costs a few milliseconds.
+`open_pool_or_fail` opens the pool and then takes a single connection under
+`POOL_OPEN_TIMEOUT_SECONDS`. The first connect now completes at startup, outside any
+caller's acquire budget, and `body` is never handed a pool with zero connections. On a
+healthy stack this costs a few milliseconds.
+
+**One connection, not `open(wait=True)`.** `wait()` returns only once the pool holds
+`min_size` connections, and the worker's pool is `min_size=2`. Waiting for that would make
+the worker hard-fail whenever Postgres is *reachable but at `max_connections`* — a state it
+previously started and drained jobs in — and every crash-loop restart would re-attempt
+connections against the already-saturated server, amplifying the failure. The defect is a
+pool with **zero** connections; one connection removes it, and the pool's background tasks
+still fill to `min_size` as capacity frees up, exactly as before. Partial availability is
+therefore not converted into an outage.
 
 This changes startup semantics for all three processes: **a database that cannot be reached
 within the budget now ends the process** (`psycopg_pool.PoolTimeout`) instead of starting a
@@ -60,7 +70,7 @@ state with no value that merely defers the error to a confusing place.
 It is also the supervision contract this repo already documented. ADR-0114 §4 ships
 `Restart=on-failure` with `RestartSec=5` precisely so "a process that starts before its
 backend is reachable retries rather than failing terminally." The retry loop lives in the
-supervisor, not inside the process; `wait=True` is what puts the failure where the
+supervisor, not inside the process; warming at startup is what puts the failure where the
 supervisor can act on it. `psycopg_pool`'s own documentation for `wait()` frames the choice
 the same way: use it "if you prefer your program to terminate in case the environment is not
 configured properly, rather than trying to stay up the hardest it can."
@@ -76,8 +86,9 @@ configured properly, rather than trying to stay up the hardest it can."
   `failureThreshold` defaults to 3 — so probes at t=5, 15, 25 kill the container at t≈25s.
   The aux listener does not start until the pool is open, so a longer budget would mean the
   kubelet killing the container mid-open with a probe failure that cannot explain itself.
-  At 10s the process raises `PoolTimeout` and exits on its own terms, with the cause in its
-  logs, before the second probe.
+  At 10s the process fails on its own terms, with the cause in its logs, before the second
+  probe. Sizing this up means budgeting against that 25s *minus* everything the process does
+  before the open — interpreter start, imports, `config.validate`, `init_telemetry`.
 
 The open moves *inside* `run_process_runtime`'s `try`, so a failed open still runs the
 teardown: `secret_registry.clear()` and `pool.close()`. (`wait()` closes the pool itself on
@@ -101,9 +112,8 @@ alert on, or distinguish from any other crash is not an acceptable one. The mess
 
 ### 3. Count swallowed usage-recording failures
 
-`UsageTrackingMiddleware._record` increments a
-`kdive_mcp_usage_recording_failures` counter, labelled by `tool`, alongside the WARNING it
-already logs. ADR-0148's swallow is unchanged; what changes is that the resulting data loss
+`UsageTrackingMiddleware._record` increments a `kdive_mcp_usage_recording_failures` counter
+after the WARNING it already logs. ADR-0148's swallow is unchanged; what changes is that the resulting data loss
 is now countable at `/metrics` rather than only greppable in a log stream.
 
 This matters beyond the startup case decision 1 removes: the saturated-pool drop ADR-0148
@@ -114,12 +124,25 @@ complete. The counter is the smallest thing that makes the accepted loss measura
 The instrument is named and scoped like `mcp/middleware/exposure.py`'s
 `kdive_mcp_tool_exposure_fail_open` / `kdive_mcp_provider_schema_projection_failures` — its
 nearest precedent, and the same category of signal (a path that degraded silently by
-design). Like those, it is deliberately **not** added to the Grafana dashboard catalog:
+design) — including carrying **no attributes**. The obvious label would be the tool name,
+but that is the raw name off the client's `tools/call`: FastMCP resolves the tool *inside*
+`call_next`, so an unknown one reaches the `except` branch with arbitrary content, and the
+SDK enforces no cardinality limit. Labelling would let a single authenticated client grow
+the metric store without bound precisely while recording is already failing. The tool name
+is in the WARNING beside the increment, and in `tool_invocation.tool` for calls that land.
+
+The increment runs *after* the log and inside `contextlib.suppress(Exception)`. ADR-0148's
+swallow is unconditional, so the instrument observing a failure must not be able to become
+the thing that fails the call — nor to cost the operator the diagnostic as well as the count.
+
+Like the exposure counters, it is deliberately **not** added to the Grafana dashboard catalog:
 `tests/deploy/grafana_catalog.py` walks a fixed list of telemetry modules and
 `test_grafana_dashboard.py` asserts exact equality between the catalog and the dashboard's
 referenced series, so cataloguing it would require a dashboard panel. It is scrapeable from
 the aux `/metrics` endpoint either way; a panel is a follow-up, not a precondition for
-making the drop visible.
+making the drop visible. `operating/kubernetes.md` names the series, what a non-zero rate
+means, and that it is the signal to size the server pool against — without which the
+data-driven follow-up promised below could not actually be run.
 
 ## Consequences
 
@@ -129,8 +152,8 @@ making the drop visible.
 - **A residual remains, and it is not one ADR-0148 weighed either: pool growth.**
   `psycopg_pool` charges a growth connect to the acquiring client, not to a background task
   (`getconn` queues the caller and waits inside the caller's own timeout while
-  `_maybe_grow_pool` schedules the connect), and `open(wait=True)` warms exactly `min_size`.
-  The server builds its pool at the `create_pool` default `min_size=1`, so the second
+  `_maybe_grow_pool` schedules the connect), and the startup warm-up establishes one
+  connection. The server's pool is `create_pool`'s `min_size=1` default, so the second
   concurrent tool call — and any call arriving after psycopg's idle shrink has taken the
   pool back toward `min_size` — can still wait on a cold connect inside the middleware's
   1-second budget and lose its row. This is the same "pool has not finished connecting"
@@ -156,8 +179,13 @@ making the drop visible.
   declared no `restart:` policy on `server`/`worker`/`reconciler`. `depends_on` protects only
   the first `up`; every later recreate during a backend outage would have left the container
   `Exited (1)` permanently, where before this change it came up and recovered on its own. The
-  three services gain `restart: unless-stopped`, guarded by a test, and
+  every long-running service gains `restart: unless-stopped`, guarded by a test, and
   `operating/docker-compose.md` gains the same startup paragraph the other two surfaces got.
+  The backends (`postgres`, `minio`, `oidc`) are policed alongside the app tier, not just it:
+  policing only the app services would make a host reboot *worse* than no policy at all,
+  since they would come back and crash-loop forever against backends that stayed stopped —
+  reading as transient while permanently unable to progress. The `migrate` and `minio-init`
+  one-shots stay unpoliced by design.
 - `/livez`, `/readyz`, and `/metrics` are unavailable for up to 10 seconds longer at
   startup, because the aux listener starts after the pool opens. Sized to stay inside the
   chart's `initialDelaySeconds: 5` plus one probe period, as above.
@@ -183,8 +211,8 @@ making the drop visible.
 - **Make only the *first* acquire tolerant and keep the steady-state budget.** Achieves the
   same end as decision 1 with strictly more machinery — per-instance first-call state in a
   middleware that is otherwise stateless, and a warm-up window whose boundary is fuzzy.
-  `wait=True` removes the condition instead of tolerating it, in one line, for every
-  consumer of the pool rather than this one middleware.
+  Warming at startup removes the condition instead of tolerating it, for every consumer of
+  the pool rather than this one middleware.
 - **Leave `wait=False` and record the accepted risk against ADR-0148** (the issue's second
   option). Rejected: the risk ADR-0148 accepted was a *contention* trade-off with a real
   benefit on the other side of it. A zero-connection pool has no such upside — nothing is
@@ -197,6 +225,7 @@ making the drop visible.
   restructures the runtime's startup and teardown ordering — a materially larger change than
   the defect warrants, on a path where the 10-second budget already keeps the health surface
   inside the probe's `initialDelaySeconds`.
-- **`wait=True` with `psycopg_pool`'s 30-second default timeout.** Rejected on the liveness
-  arithmetic above: 30s is past the kubelet's t≈25s kill, so the failure would surface as a
-  killed container rather than a logged `PoolTimeout`.
+- **`open(wait=True)` at `psycopg_pool`'s 30-second default timeout.** Rejected twice over:
+  30s is past the kubelet's t≈25s kill, so the failure would surface as a killed container
+  rather than a logged cause; and `wait()` blocks on the full `min_size`, the
+  partial-availability hazard decision 1 rejects.
