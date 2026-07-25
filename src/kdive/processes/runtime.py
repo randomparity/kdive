@@ -34,6 +34,15 @@ HEARTBEAT_STALE_SECONDS = 10.0
 # imports, `config.validate`, and `init_telemetry` — none of which this constant covers.
 POOL_OPEN_TIMEOUT_SECONDS = 10.0
 
+# How long teardown waits for the pool's background workers, overriding psycopg_pool's 5s
+# default. This sits on the *failure* path too: the startup error is raised inside the
+# runtime's `try`, so this close runs before the error reaches `__main__` and becomes an
+# operator-visible ERROR record. A worker blocked mid-connect never dequeues its stop
+# request — the shape a dropped-packet backend produces, where libpq waits on the OS TCP
+# timeout — so the default would add 5s to every time-to-diagnostic and to every crash-loop
+# cycle. One second keeps the worst case at ~11s, inside the 25s liveness budget above.
+POOL_CLOSE_TIMEOUT_SECONDS = 1.0
+
 type ProbeBuilder = Callable[[AsyncConnectionPool], HealthProbe]
 type ProcessBody = Callable[[AsyncConnectionPool, Heartbeat, HealthProbe], Awaitable[None]]
 
@@ -69,7 +78,7 @@ async def run_process_runtime(
     finally:
         await cancel(*tasks)
         secret_registry.clear()
-        await pool.close()
+        await pool.close(timeout=POOL_CLOSE_TIMEOUT_SECONDS)
 
 
 async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
@@ -104,9 +113,15 @@ async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
         async with pool.connection(timeout=POOL_OPEN_TIMEOUT_SECONDS):
             pass
     except PoolTimeout as exc:
+        # Deliberately not "the database is down". `psycopg_pool` absorbs every connect-side
+        # error into its retry loop and re-raises its own `PoolTimeout` `from None`, so an
+        # unreachable host, a wrong password, and a missing database are indistinguishable
+        # here — the real `FATAL: ...` survives only as a `psycopg.pool` WARNING. The message
+        # is the one lever left, so it names all three rather than asserting the one that
+        # would send an operator down the wrong path.
         raise CategorizedError(
-            f"database unreachable: no connection within {POOL_OPEN_TIMEOUT_SECONDS:.0f}s "
-            f"of process start",
+            f"no database connection within {POOL_OPEN_TIMEOUT_SECONDS:.0f}s of process "
+            f"start: Postgres unreachable, or the credentials or database name are wrong",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={
                 "timeout_seconds": POOL_OPEN_TIMEOUT_SECONDS,
@@ -114,8 +129,9 @@ async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
                 # The conninfo carries a password; `database_url()` is not echoed here and
                 # the redactor covers the rest.
                 "suggest": (
-                    "check that Postgres is reachable and that "
-                    f"{DATABASE_URL.name} is correct, then restart"
+                    f"check that Postgres is reachable and that {DATABASE_URL.name} names "
+                    "the right host, database, and credentials; the preceding "
+                    "psycopg.pool warning carries the server's own error"
                 ),
             },
         ) from exc

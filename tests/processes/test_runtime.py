@@ -23,6 +23,10 @@ _UNREACHABLE_DB = "postgresql://kdive@127.0.0.1:1/kdive?connect_timeout=1"
 # (`KDIVE_REQUIRE_DOCKER` is set in CI, not locally) and would leave the decision unguarded.
 _WARM_OPEN = ["open", f"acquire(timeout={runtime.POOL_OPEN_TIMEOUT_SECONDS})"]
 
+# Teardown overrides psycopg_pool's 5s default so a worker stuck mid-connect cannot add it
+# to every time-to-diagnostic on the fail-fast path, nor to every crash-loop cycle.
+_CLOSE = f"close(timeout={runtime.POOL_CLOSE_TIMEOUT_SECONDS})"
+
 
 class FakePool:
     def __init__(self) -> None:
@@ -38,8 +42,8 @@ class FakePool:
         self.events.append(f"acquire(timeout={timeout})")
         yield object()
 
-    async def close(self) -> None:
-        self.events.append("close")
+    async def close(self, timeout: float = 5.0) -> None:
+        self.events.append(f"close(timeout={timeout})")
 
 
 class FakeSecretRegistry:
@@ -175,7 +179,11 @@ def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
             )
 
         assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-        assert "database unreachable" in str(caught.value)
+        # Names all three causes, not just reachability: psycopg re-raises `from None`, so
+        # a wrong password is indistinguishable from an outage at this seam.
+        assert "Postgres unreachable, or the credentials or database name are wrong" in str(
+            caught.value
+        )
         assert caught.value.details["variable"] == DATABASE_URL.name
         # The cause is chained, so the underlying timeout stays in the operator's traceback.
         assert isinstance(caught.value.__cause__, PoolTimeout)
@@ -228,7 +236,7 @@ def test_runtime_starts_on_one_connection_not_the_pools_min_size(
         )
 
         assert started, "a pool short of min_size but able to serve one connection must start"
-        assert pool.events == [*_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, _CLOSE]
 
     asyncio.run(run())
 
@@ -260,7 +268,7 @@ def test_runtime_success_closes_clears_and_cancels_aux_task(
             body=body,
         )
 
-        assert pool.events == [*_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, _CLOSE]
         assert registry.cleared
         assert harness.cancelled
 
@@ -292,7 +300,7 @@ def test_runtime_exception_still_closes_clears_cancels_and_reraises(
                 body=body,
             )
 
-        assert pool.events == [*_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, _CLOSE]
         assert registry.cleared
         assert harness.cancelled
 
@@ -339,7 +347,7 @@ def test_runtime_tick_heartbeat_starts_and_cancels_heartbeat_task(
 
         assert harness.cancelled
         assert heartbeat_cancelled
-        assert pool.events == [*_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, _CLOSE]
         assert registry.cleared
 
     asyncio.run(run())
