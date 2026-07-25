@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gate the qcow2 magic once over the staged partial
 - Measure the deadline off the fetched manifest
 - Fold the owner-kind aliases into the scope map
+- Provision the second database via the conftest helpers
 
 ### Documentation
 
@@ -148,6 +149,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Warm the usage-tracking pool before the acquire budget
 - Surface the swallowed cause, not just the tool name
 - Apply the warm pool to every usage-row assertion
+- Scope the session lock probe to the current database
 
 ### Build
 
