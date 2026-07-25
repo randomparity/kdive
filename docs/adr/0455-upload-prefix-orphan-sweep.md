@@ -172,6 +172,8 @@ to retry; this sweep commits nothing and could safely abort, but abort is what t
 object into a permanent leak. A failing `list_prefix_with_mtime` still ends the pass immediately:
 without a listing there is no candidate set to be partial about — but it ends it *through the same
 count-logging path*, because by the second root the first may already have deleted irreversibly.
+That path catches every abort, not only a store one: a dropped pool connection out of the classify
+and cancellation at shutdown arrive the same way and cost the same record.
 
 Raising forfeits the pass's reclaimed count: `_run_repair_plan` records a count only for a repair
 that *returns*, so a pass that deleted 500 objects and then hit one object-lock hold reports zero on
@@ -229,7 +231,10 @@ line would trade a real authority bound for a cosmetic one.
 The threshold's two terms are both real settings resolved per pass —
 `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` and `KDIVE_UPLOAD_TTL_SECONDS`, 86400s each — rather than
 `ReconcileConfig` defaults in the shape `build_artifact_retention` and `dump_volume_grace` use.
-§Consequences records why that exception is taken. Per pass matters as much as configurable does: a
+§Consequences records why that exception is taken. Both declare **`server` and `reconciler`**: the
+reconciler runs the sweep on its loop and the server runs a full `reconcile_once` on demand via
+`ops.reconcile_now`, so a brake an operator raises on only one of them leaves the other deleting at
+the default — which for an irreversible delete is the brake failing exactly when it is reached for. Per pass matters as much as configurable does: a
 brake that needed a reconciler restart to engage would be no better than the redeploy it replaces.
 48h at the defaults sits far above every legitimate rowless interval under these roots, and the
 asymmetry is chosen: an extra day of leak is a cost bug, a deleted live object is a correctness bug.

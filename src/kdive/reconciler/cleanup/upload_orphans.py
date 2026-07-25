@@ -138,9 +138,11 @@ async def repair_leaked_upload_objects(
     try:
         for root in UPLOAD_ORPHAN_ROOTS:
             await _sweep_root(conn, store, root, grace, tally)
-    except CategorizedError:
-        # A listing fault aborts the pass, and by the second root the first may already have
-        # deleted irreversibly. Put the counts on the record before the exception carries them off.
+    except BaseException:  # noqa: BLE001 - logged and re-raised, never swallowed
+        # Any abort — a listing fault, a dropped pool connection out of the classify, cancellation
+        # at shutdown — can arrive after this pass has already deleted irreversibly, and
+        # ``_run_repair_plan`` records no count for a repair that raises. Put the counts on the
+        # record before the exception carries them off (ADR-0455 §5).
         tally.log()
         raise
     return tally.reported()

@@ -522,17 +522,18 @@ def test_the_swept_roots_cover_both_upload_owner_kinds() -> None:
     assert UPLOAD_ORPHAN_ROOTS == ("local/runs/", "local/investigations/")
 
 
-def test_both_threshold_terms_are_reconciler_readable_settings() -> None:
-    """ADR-0455 §2/§8: the stacked threshold only tracks the operator's TTL if the reconciler is
-    told to read it, and the grace is only a brake if the reconciler is told to read that.
+def test_both_threshold_terms_are_declared_for_both_processes_that_sweep() -> None:
+    """ADR-0455 §2/§8: the threshold only tracks the operator's values where it is told to read.
 
     ``processes`` does not gate ``Registry.get``, but it does gate ``config validate`` and the
     generated operator reference — which is what an operator provisions each process's environment
-    from. A TTL the reconciler is not told about is a TTL it silently defaults away from.
+    from. Both terms must name **both** processes: the reconciler runs the sweep on its loop, and
+    the server runs a full ``reconcile_once`` on demand via ``ops.reconcile_now``, so a brake
+    declared for only one of them lets the other keep deleting at the default.
     """
-    assert "reconciler" in UPLOAD_TTL_SECONDS.processes
-    assert "server" in UPLOAD_TTL_SECONDS.processes  # the mint side still needs it
-    assert UPLOAD_ORPHAN_GRACE.processes == frozenset({"reconciler"})
+    both = frozenset({"server", "reconciler"})
+    assert both <= UPLOAD_TTL_SECONDS.processes
+    assert both <= UPLOAD_ORPHAN_GRACE.processes
     # Both declare a default, which is why the resolvers use `require` and carry no unset branch.
     assert UPLOAD_TTL_SECONDS.default == "86400"
     assert UPLOAD_ORPHAN_GRACE.default == "86400"

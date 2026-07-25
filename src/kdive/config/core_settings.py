@@ -21,14 +21,15 @@ _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
-# The upload window's TTL is set by the server that mints it and read by the reconciler that
-# reclaims against it (ADR-0455 §2). ``processes`` does not gate resolution — ``Registry.get``
-# reads the environment regardless — so declaring it here buys two things: ``config validate
-# reconciler`` checks a malformed value at startup instead of raising from inside a repair every
-# pass, and the generated operator reference tells whoever provisions the reconciler's environment
-# that it needs this variable. The skew it guards against is deployment-side, not code-side.
-_MINT_AND_RECLAIM = frozenset({"server", "reconciler"})
-_RECONCILER = frozenset({"reconciler"})
+# The upload-orphan sweep's two knobs are read by both processes (ADR-0455 §2, §8): the reconciler
+# runs the sweep on its loop, and the server runs a full `reconcile_once` on demand via
+# `ops.reconcile_now` — so a brake set on only one of them still lets the other delete. The TTL is
+# additionally *set* by the server at mint time and merely read by the reconciler. ``processes``
+# does not gate resolution — ``Registry.get`` reads the environment regardless — so declaring both
+# here buys two things: ``config validate`` checks a malformed value at startup instead of raising
+# from inside a repair on every pass, and the generated operator reference tells whoever provisions
+# each process's environment that it needs these variables.
+_UPLOAD_RECLAIM_READERS = frozenset({"server", "reconciler"})
 # Processes that read the on-disk provider fixture catalog: the worker/reconciler build paths
 # plus the server's fixtures.validate read (ADR-0120).
 _CATALOG_READERS = frozenset({"server", "worker", "reconciler"})
@@ -194,11 +195,10 @@ UPLOAD_TTL_SECONDS = Setting(
     parse=_int,
     default="86400",
     group="upload",
-    # Read by the reconciler as well as the minting server (see _MINT_AND_RECLAIM): the orphan
-    # sweep's reclaim threshold is stacked on top of it (ADR-0455 §2), so a reconciler provisioned
-    # without this variable falls back to the default and reclaims a window's bytes in the pass
-    # that reaped them.
-    processes=_MINT_AND_RECLAIM,
+    # Read by the reconciler as well as *set* by the minting server: the orphan sweep's reclaim
+    # threshold is stacked on top of it (ADR-0455 §2), so a reconciler provisioned without this
+    # variable falls back to the default and reclaims a window's bytes in the pass that reaped them.
+    processes=_UPLOAD_RECLAIM_READERS,
     help="Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455).",
     suggest="an integer number of seconds, e.g. 86400",
 )
@@ -207,12 +207,13 @@ UPLOAD_ORPHAN_GRACE = Setting(
     parse=_int,
     default="86400",
     group="upload",
-    processes=_RECONCILER,
+    processes=_UPLOAD_RECLAIM_READERS,
     help=(
         "Grace window in seconds protecting an unreferenced object under an upload prefix from "
         "the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and "
         "applied on top of KDIVE_UPLOAD_TTL_SECONDS, so an object is reclaimed only well after "
-        "the window it could have belonged to was reaped. Raise it to stall the sweep."
+        "the window it could have belonged to was reaped. Raise it to stall the sweep — on the "
+        "server as well as the reconciler, since ops.reconcile_now runs the sweep too."
     ),
     suggest="an integer number of seconds, e.g. 86400",
 )
