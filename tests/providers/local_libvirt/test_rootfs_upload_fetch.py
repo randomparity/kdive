@@ -29,6 +29,7 @@ from kdive.artifacts.storage import HeadResult, StreamedArtifact
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.rootfs import rootfs_upload_fetch
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsUploadContext,
     staged_rootfs_path,
@@ -1301,5 +1302,171 @@ def test_stage_fails_loud_when_its_partial_is_unlinked_in_the_create_lock_window
             _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "concurrent orphan sweep" in str(error.value)  # same message as the other window
     assert store.stream_calls == 0  # failed before spending the download
     assert not _dest(tmp_path).exists()
+
+
+def test_sweep_warns_when_it_skips_a_partial_a_live_sibling_holds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The skip is correct and also the only externally visible symptom of the lost session lock: its
+    # other consequence is a redundant multi-GiB download that reads as ordinary slowness. Silent,
+    # the condition this change exists to survive would be undiagnosable.
+    dest = _dest(tmp_path)
+    with caplog.at_level(logging.WARNING), _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+
+    assert live.exists()
+    assert any(
+        str(live) in r.getMessage() and "still holds it" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    ), caplog.text
+
+
+def test_sweep_warns_and_skips_a_candidate_it_cannot_open(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A narrowing of the unconditional unlink this replaces, which needed only write+execute on the
+    # DIRECTORY and no permission on the file -- so a partial that can be unlinked but not opened
+    # was collected before and is not now. It is deliberate (a partial this process cannot open is
+    # one it cannot show is dead, and unlinking it blind is the bug being fixed) and it must be
+    # loud, because an ENOLCK-style filesystem would otherwise retire the sweep in total silence.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.unreadable.partial"
+    orphan.write_bytes(b"leaked")
+    real_open = os.open
+
+    def denying_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == orphan:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "open", denying_open)
+        _unlink_orphan_partials(dest)
+
+    assert orphan.exists()  # left for the reclaim backstop, not unlinked unchecked
+    assert any("could not open the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_stage_fails_loud_when_a_sweep_holds_the_lock_across_the_create_window(
+    tmp_path: Path,
+) -> None:
+    # The second create-then-lock interleaving. If the sweep is still holding its own lock when the
+    # writer tries, the writer gets EWOULDBLOCK before the st_nlink check can run -- which would
+    # otherwise surface as "failed to stage ...: Resource temporarily unavailable" and point an
+    # operator at the object store over a purely local race. Both interleavings must name the sweep.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_open = os.open
+    held: list[int] = []
+
+    def racing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path).endswith(".partial") and flags & os.O_CREAT:
+            rival = real_open(path, os.O_RDONLY)  # the sweep, mid-unlink, still holding its lock
+            fcntl.flock(rival, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(rival)
+        return fd
+
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "open", racing_open)
+            with pytest.raises(CategorizedError) as error:
+                _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+    finally:
+        for fd in held:
+            os.close(fd)
+
+    assert held, "the test never took the rival lock, so the window was not exercised"
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "concurrent orphan sweep" in str(error.value)
+    assert store.stream_calls == 0  # failed before spending the download
+
+
+def test_the_partial_stays_locked_after_the_stagers_writer_closes(tmp_path: Path) -> None:
+    # The guard is correct only because fcntl.flock is BSD flock(2), whose lock belongs to the open
+    # file DESCRIPTION and so survives the stager's own "wb" handle being closed underneath it.
+    # POSIX record locks (fcntl.lockf / F_SETLK) drop a process's locks when ANY descriptor on the
+    # file closes, so a swap to the "more portable" API would silently unprotect exactly the
+    # verify-and-publish window -- and every other test here would still pass. This one sweeps in
+    # that window, after the stager returned and before the publish.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    swept: list[list[Path]] = []
+    real_require = rootfs_upload_fetch._require_qcow2_magic
+
+    def sweeping_require(staged: Path, *, system_id: str) -> None:
+        _unlink_orphan_partials(dest)  # a sibling sweeps between the writer close and the publish
+        swept.append(list(dest.parent.glob(f"{_TOKEN}.*.partial")))
+        real_require(staged, system_id=system_id)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(rootfs_upload_fetch, "_require_qcow2_magic", sweeping_require)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert swept and swept[0], "the sweep unlinked the partial after the stager closed its writer"
+    assert dest.read_bytes() == _QCOW2
+
+
+def test_stage_keeps_a_base_a_sibling_published_during_the_download(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The far end of the same lost-lock scenario. Now that the losing fetcher survives its sweep, it
+    # reaches the publish -- and the sibling that held the lock has by then normally published dest
+    # and had a guest's overlay created against it. The bytes are identical (content-addressed), so
+    # replacing it is not corruption; it would orphan an inode of up to the 50 GiB cap behind that
+    # guest's open descriptor, re-creating the invisible-blocks symptom this change removes.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(_QCOW2)
+    published_inode = dest.stat().st_ino
+
+    with caplog.at_level(logging.WARNING):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.stat().st_ino == published_inode, "the sibling's published base was replaced"
+    assert dest.read_bytes() == _QCOW2
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []  # our copy discarded
+    assert any("a sibling published" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None:
+    # The complement, and the reason the guard is a format probe rather than a bare exists(): a
+    # present dest that does not pass the qcow2 gate is not a base worth keeping, so the freshly
+    # verified download must still publish over it (ADR-0443's torn-base shape).
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(b"\x00" * len(_QCOW2))
+    torn_inode = dest.stat().st_ino
+
+    _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert dest.stat().st_ino != torn_inode
+
+
+def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path: Path) -> None:
+    # Polarity is the opposite of _reusable_staged_base's, which raises on an unreadable dest to
+    # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS an
+    # unreadable dest, a rename needing permission on the directory rather than on the file -- so an
+    # OSError must never turn a download that already succeeded into a failure.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(_QCOW2)
+    real_stat = Path.stat
+
+    def faulting_stat(self: Path, **kwargs: Any) -> Any:
+        if self == dest:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_stat(self, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "stat", faulting_stat)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []

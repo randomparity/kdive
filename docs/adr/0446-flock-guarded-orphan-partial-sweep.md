@@ -64,8 +64,10 @@ than inferred from a database lock held by a connection that may already be gone
 safety no longer depends on the fetch lock at all, which is the point: the fetch lock keeps its one
 real job (collapsing the redundant download) and stops carrying a correctness burden it cannot bear.
 
-The partial names are already per-attempt unique (`uuid4().hex`), so the lock is uncontended by
-construction. It is a liveness marker, not a mutex, and it introduces no new serialization.
+Two *writers* never contend, because the partial names are already per-attempt unique
+(`uuid4().hex`) — so this is a liveness marker, not a mutex, and it introduces no new serialization
+between fetchers. The one contender that does exist is a sibling's sweep, in the creation window
+§3 covers.
 
 **Process death is the reason this beats every timing-based alternative.** The kernel releases an
 `flock` when the holding descriptor is closed, including on process exit — normal, `SIGKILL`, or a
@@ -92,13 +94,69 @@ and locking under a name the sweep glob does not match and renaming into place �
 window for a `.partial.tmp` orphan no sweep collects, i.e. reintroduces the leak this whole
 mechanism exists to bound.
 
-Instead the writer reads `os.fstat(fd).st_nlink` immediately after acquiring the lock. Zero means
-the partial was unlinked in the window, and the fetcher raises instead of streaming gigabytes into
-an inode no path reaches. Reaching it requires a lost session lock *and* an interleave between two
-adjacent syscalls with no I/O between them; what it buys is that the residue is a named,
-attributable failure rather than the invisible-blocks leak the current code produces.
+The window has **two** interleavings and they end the same way. If the sweep already unlinked and
+closed, the writer's `flock` succeeds and `os.fstat(fd).st_nlink` is zero. If the sweep still holds
+its own lock, the writer's `flock` raises `EWOULDBLOCK` — and the sweep's very next syscall unlinks
+the file, so retrying would win a lock on a file that is about to disappear. Both therefore raise
+one attributable `ENOENT` naming the sweep, rather than streaming gigabytes into an inode no path
+reaches (the first) or surfacing a bare `EWOULDBLOCK` that `_staging_fault` would render as "failed
+to stage", pointing an operator at the object store over a purely local race (the second).
 
-### 4. The sweep's `open` is `O_RDONLY | O_NONBLOCK`
+Reaching either requires a lost session lock *and* an interleave between two adjacent syscalls with
+no I/O between them; what it buys is that the residue is a named, attributable failure rather than
+the invisible-blocks leak the current code produces.
+
+### 4. Every skip is logged, and the narrowing in reach is stated rather than claimed away
+
+`_unlink_if_unheld` has three outcomes and they are materially different, so none of them is a bare
+`return`.
+
+*Held* (`EWOULDBLOCK`) is the correct action and also the **only** externally visible symptom of
+the lost session lock: its other consequence is a redundant multi-GiB download that reads as
+ordinary slowness. It gets a `WARNING`, for the reason ADR-0443 §4 logs a rejected base — the
+operation succeeds, so the log line is the only evidence it ever fired.
+
+*Cannot evaluate* — any other `OSError` from the `open` or the `flock` — is a real **narrowing** of
+the unconditional `unlink` this replaces, and the honest statement is that reach is not entirely
+unchanged. `unlink` needs write and execute on the *directory* and no permission on the file at
+all; `open` needs to read the file. So a partial written under a uid asymmetry of the shape
+ADR-0442 documents in this same subsystem, or one met with `EMFILE` under descriptor exhaustion
+(likeliest exactly when many stagings are in flight), or any partial on a filesystem that answers
+`ENOLCK`, was collected before and is not collected now. Those are left to the reclaim backstop
+rather than unlinked blind, because a partial this process cannot open is one it cannot show is
+dead, and unlinking it anyway is the bug being fixed. The `WARNING` is what keeps the narrowing
+from being silent — without it an `ENOLCK` filesystem would retire the opportunistic sweep
+altogether and nothing would say so.
+
+*Absent* is the achieved post-state, not a fault: the reclaim-side backstop sweeps the same
+directory.
+
+### 5. A base a sibling already published is not superseded
+
+Letting the losing fetcher survive its sweep means it now *reaches* the publish, and the sibling
+that held the lock has by then normally finished, published `dest`, and had a per-System overlay
+created against it. An unconditional `os.replace` would swap that inode out from under a running
+guest. The bytes are identical — the base is content-addressed and checksum-verified — so this is
+not corruption and not a wrong-image risk. The cost is that ADR-0443 §2's accepted residue
+("superseding a base a guest holds open orphans the old inode until it exits") becomes reachable on
+a brand-new trigger, for a base of up to the 50 GiB canonical cap, pinned by an open descriptor and
+unreachable by every path-matching tool — which is the same invisible-blocks symptom this ADR's
+Context cites as the harm being removed, re-created at the far end of the same scenario.
+
+So the publish is skipped when `dest` already holds a base that passes the qcow2 gate. It is
+unreachable on the ordinary path (the caller checked `dest` twice under the fetch lock and found
+nothing), costs one O(1) probe after a download that already took minutes, and gets its own
+`WARNING`.
+
+The probe is deliberately **not** `_reusable_staged_base`, despite asking the same question of the
+same file. That one raises on an unreadable `dest`, because answering "not reusable" there would
+trigger a silent perpetual multi-GiB re-download. Here the polarity is reversed: answering
+"publish" costs one `os.replace`, which is the behavior before this guard existed and which
+*repairs* an unreadable `dest` — a rename needs permission on the directory, not on the file. Every
+`OSError` therefore answers "publish", so the guard can only ever remove work and can never add a
+failure to a download that already succeeded.
+
+### 6. The sweep's `open` is `O_RDONLY | O_NONBLOCK`
 
 `O_NONBLOCK` is a no-op on a regular file and is there for the same reason ADR-0443 §2 checks
 `S_ISREG` before opening `dest`: opening a FIFO for reading blocks until a writer appears, and this
@@ -111,9 +169,22 @@ hang that it did not have before.
 
 - A live sibling's partial survives a sweep run by a fetcher that acquired the fetch lock after
   losing it — the acceptance criterion. The degradation from a lost session lock returns to
-  ADR-0441 §5's originally stated one: a redundant download, never a failed provision.
-- Crash-orphan collection is unchanged in reach and latency. It is still bounded by the next fetch
-  of that base rather than by full investigation reclaim.
+  ADR-0441 §5's originally stated one: a redundant download, never a failed provision. The
+  redundant copy is then discarded rather than published (§5), so the sibling's base keeps its
+  inode.
+- Crash-orphan collection is unchanged in **latency** — still bounded by the next fetch of that base
+  rather than by full investigation reclaim — and slightly narrowed in **reach**: a partial this
+  process cannot `open` is no longer unlinked, where the previous unconditional `unlink` needed only
+  directory permissions. §4 has the cases and the `WARNING` that makes each one visible; the reclaim
+  backstop still collects them.
+- **`fcntl.flock` is BSD `flock(2)` and that is load-bearing.** Its lock belongs to the open file
+  *description*, so it survives each stager's own `partial.open("wb")` handle, the format gate's
+  `"rb"` handle, and `_fsync_path`'s third descriptor being opened and closed on the same inode
+  underneath it. POSIX record locks (`fcntl.lockf` / `F_SETLK`) drop a process's locks when *any*
+  descriptor on the file closes, so swapping to them for a "more portable" API would silently
+  unprotect the entire verify-and-publish window. A test sweeps in exactly that window — after the
+  stager returns, before the publish — so the swap reddens instead of passing, which is the failure
+  mode #1383's dead ELF-magic guard is the local precedent for.
 - One extra file descriptor is held per in-flight staging operation, and two syscalls are added per
   swept candidate. Both are negligible against a multi-GiB download.
 - **A hung-but-live fetcher's partial is not collected**, and that is correct rather than a

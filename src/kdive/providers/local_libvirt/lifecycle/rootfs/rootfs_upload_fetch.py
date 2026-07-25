@@ -302,27 +302,66 @@ def _unlink_orphan_partials(dest: Path) -> None:
 
 
 def _unlink_if_unheld(orphan: Path) -> None:
-    """Unlink ``orphan`` only if no live fetcher holds its ``flock``; any ``OSError`` is a skip.
+    """Unlink ``orphan`` unless a live fetcher holds its ``flock``; every skip is logged.
+
+    Three outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
+
+    *Held.* ``EWOULDBLOCK`` means a sibling is still writing this partial — which, by this change's
+    own reasoning, can only happen because this fetcher holds a fetch lock that a still-downloading
+    process believes it holds. The skip is the correct action and also the **only** externally
+    visible symptom of that lost session lock: its other consequence is a redundant multi-GiB
+    download that reads as ordinary slowness. It is logged for the same reason ADR-0443 §4 logs a
+    rejected base — the operation succeeds, so the log line is the only evidence it ever fired.
+
+    *Cannot evaluate.* Any other ``OSError`` — ``EACCES`` under a uid asymmetry of the shape
+    ADR-0442 documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest
+    exactly when many stagings are in flight), ``ENOLCK`` where the filesystem cannot lock at all —
+    is a **narrowing** of the unconditional ``unlink`` this replaces, which needed only write and
+    execute on the *directory* and no permission on the file. Those orphans are left to the reclaim
+    backstop rather than unlinked blind, because a partial this process cannot even open is one it
+    cannot show is dead, and unlinking it anyway is the bug being fixed. ``WARNING``, because
+    ``ENOLCK`` would otherwise silently retire the opportunistic sweep altogether.
+
+    *Absent.* A candidate that vanishes between the glob and the ``open`` is the achieved
+    post-state, not a fault — the reclaim-side backstop sweeps the same directory.
 
     ``O_NONBLOCK`` is a no-op on a regular file and is there for the reason ADR-0443 §2 checks
     ``S_ISREG`` before opening ``dest``: opening a FIFO for reading blocks until a writer appears,
     and this sweep runs *holding* the fetch advisory lock, so a hang would wedge every sibling
     System on that (investigation, checksum). Nothing in kdive creates a non-regular file at a
     ``.partial`` path — this must simply not acquire a way to hang that it did not have before.
-
-    A candidate that vanishes between the glob and the ``open`` is the achieved post-state, not a
-    fault (the reclaim-side backstop sweeps the same directory), and a candidate that cannot be
-    opened at all is left for that backstop rather than failing a provision over a leak.
     """
     try:
         fd = os.open(orphan, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
+    except FileNotFoundError:
+        return
+    except OSError as err:
+        _log.warning(
+            "could not open the staging partial %s to test whether a live fetcher holds it (%s); "
+            "leaving it for the investigation-reclaim sweep rather than unlinking it unchecked",
+            orphan,
+            err.strerror,
+        )
         return
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return  # a live sibling is still writing this one
+        except BlockingIOError:
+            _log.warning(
+                "skipping the staging partial %s: a live fetcher still holds it, so this fetcher "
+                "acquired the rootfs fetch lock while a sibling was still downloading — its "
+                "Postgres session was lost mid-transfer, and this download is redundant",
+                orphan,
+            )
+            return
+        except OSError as err:
+            _log.warning(
+                "could not test whether a live fetcher holds the staging partial %s (%s); leaving "
+                "it for the investigation-reclaim sweep rather than unlinking it unchecked",
+                orphan,
+                err.strerror,
+            )
+            return
         orphan.unlink(missing_ok=True)
     finally:
         os.close(fd)
@@ -332,10 +371,19 @@ def _unlink_if_unheld(orphan: Path) -> None:
 def _flocked_partial(partial: Path) -> Iterator[None]:
     """Create this fetcher's partial and hold an exclusive ``flock`` on it while it stages.
 
-    The liveness marker :func:`_unlink_orphan_partials` reads. It is uncontended by construction —
-    partial names carry a ``uuid4``, so no two fetchers ever name the same file — and the descriptor
-    is held across the download, the verify, and :func:`_durable_replace`, which is exactly the
-    window in which a sweep must not touch the file.
+    The liveness marker :func:`_unlink_orphan_partials` reads. Two *writers* never contend, because
+    partial names carry a ``uuid4``, so no two fetchers ever name the same file; the only contender
+    is a sibling's sweep, handled below. The descriptor is held across the download, the verify, and
+    :func:`_durable_replace`, which is exactly the window in which a sweep must not touch the file.
+
+    ``fcntl.flock`` is BSD ``flock(2)`` and that is load-bearing: the lock belongs to the open file
+    **description**, so it survives each stager's separate ``partial.open("wb")`` handle,
+    :func:`_require_qcow2_magic`'s ``"rb"`` handle, and :func:`_fsync_path`'s third descriptor all
+    being opened and closed on the same inode underneath it. POSIX record locks
+    (``fcntl.lockf`` / ``F_SETLK``) have the opposite rule — closing *any* descriptor on the file
+    drops the process's locks — so swapping to them in the name of a "more portable" API would
+    silently unprotect the whole verify-and-publish window. ``test_the_partial_stays_locked_after
+    _the_stagers_writer_closes`` fails if that swap is ever made.
 
     The mode is ``0o666`` so umask application matches the ``partial.open("wb")`` this fronts, byte
     for byte. That is load-bearing rather than tidy: ``os.replace`` carries the partial's mode onto
@@ -344,28 +392,39 @@ def _flocked_partial(partial: Path) -> Iterator[None]:
     unreadable to the hypervisor. ``O_EXCL`` because a file already sitting at a ``uuid4`` path is
     not something to write through silently.
 
-    ``open`` and ``flock`` are two syscalls, so a sweeper can in principle unlink the partial
-    between them. The ``st_nlink`` check closes that residue the only way that does not reintroduce
-    an uncollectable orphan (ADR-0446 §3): rather than streaming gigabytes into an inode no path
-    reaches, the fetcher raises, and the caller's ``except OSError`` renders it as the staging fault
-    it is.
+    ``open`` and ``flock`` are two syscalls, so a sibling's sweep can win the gap between them
+    (ADR-0446 §3). It has two interleavings and they end the same way: if the sweep already unlinked
+    and closed, this ``flock`` succeeds and ``st_nlink`` is zero; if the sweep still holds its own
+    lock, this ``flock`` raises ``EWOULDBLOCK`` and the sweep is about to unlink. Retrying the
+    second buys nothing — the sweep's very next syscall removes the file the retry would win — so
+    both raise one attributable error instead, rather than a bare ``EWOULDBLOCK`` that
+    :func:`_staging_fault` would render as "failed to stage", pointing an operator at the object
+    store over a local race.
 
     Raises:
-        OSError: ``ENOENT`` if the partial was unlinked between its creation and the lock.
+        OSError: ``ENOENT`` if a concurrent orphan sweep won the create-then-lock window.
     """
     fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as err:
+            raise _swept_partial_error(partial) from err
         if os.fstat(fd).st_nlink == 0:
-            raise OSError(
-                errno.ENOENT,
-                "the staging partial was unlinked between its creation and its lock; a concurrent "
-                "orphan sweep won the window",
-                str(partial),
-            )
+            raise _swept_partial_error(partial)
         yield
     finally:
         os.close(fd)
+
+
+def _swept_partial_error(partial: Path) -> OSError:
+    """The ``ENOENT`` for a partial a concurrent sweep took in the create-then-lock window."""
+    return OSError(
+        errno.ENOENT,
+        "a concurrent orphan sweep took the staging partial between its creation and its lock; "
+        "retry the provision",
+        str(partial),
+    )
 
 
 def stage_uploaded_rootfs(
@@ -389,6 +448,10 @@ def stage_uploaded_rootfs(
     two concurrent fetchers never share a partial. The partial is held under an exclusive ``flock``
     for its whole life (ADR-0446), so a sibling's orphan sweep cannot unlink it mid-download. It is
     unlinked in a ``finally``, so no failure — typed or not — leaves one behind.
+
+    The publish is skipped when a sibling already published the same content-addressed base while
+    this download ran (:func:`_sibling_already_published`), so a fetcher that lost the fetch lock
+    mid-transfer does not swap the inode out from under a guest already booting off it.
     """
     head = store.head(object_key)
     if head is None:
@@ -437,6 +500,21 @@ def stage_uploaded_rootfs(
                     details={"system_id": str(system_id)},
                 )
             _require_qcow2_magic(partial, system_id=str(system_id))
+            if _sibling_already_published(dest):
+                # Only reachable on the lost-session-lock path: the caller checked ``dest`` twice
+                # under the fetch lock and found nothing, so a base appearing during the download
+                # means a sibling held the lock and finished first. Its ``dest`` is the same
+                # content-addressed, checksum-verified bytes as ours, and it may already back a
+                # running guest's overlay — replacing it would orphan an inode of up to the 50 GiB
+                # cap behind that guest's open descriptor for as long as it lives (ADR-0446 §5).
+                _log.warning(
+                    "a sibling published the staged rootfs base at %s while this fetcher was "
+                    "downloading it; keeping the published base and discarding this copy "
+                    "(system=%s) — the fetch lock was lost mid-transfer",
+                    dest,
+                    system_id,
+                )
+                return
             _durable_replace(partial, dest)
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
@@ -575,6 +653,23 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
         return False
     except OSError as err:
         raise _unreadable_base_fault(dest, err, system_id=str(system_id)) from err
+
+
+def _sibling_already_published(dest: Path) -> bool:
+    """Whether ``dest`` already holds a good base, checked just before this fetcher would publish.
+
+    Deliberately **not** :func:`_reusable_staged_base`, despite asking the same question of the same
+    file. That one raises on an unreadable ``dest`` because returning ``False`` there would trigger
+    a silent, perpetual multi-GiB re-download. Here the polarity is reversed: a ``False`` costs one
+    ``os.replace`` — the behavior before this guard existed, and one that *repairs* an unreadable
+    ``dest``, since a rename needs permission on the directory rather than on the file. So every
+    ``OSError`` is answered "publish", and this can only ever remove work, never add a failure to a
+    download that already succeeded.
+    """
+    try:
+        return stat.S_ISREG(dest.stat().st_mode) and _starts_with_qcow2_magic(dest)
+    except OSError:
+        return False
 
 
 def _unreadable_base_fault(dest: Path, err: OSError, *, system_id: str) -> CategorizedError:

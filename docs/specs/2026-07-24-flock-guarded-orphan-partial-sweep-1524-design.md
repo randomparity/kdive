@@ -82,11 +82,27 @@ unlinks strictly between them would still destroy a live partial. Closing it ful
 staged rename through a name the sweep glob does not match, which trades the window for an
 uncollectable `.partial.tmp` orphan.
 
-Instead the writer checks `os.fstat(fd).st_nlink` immediately after acquiring the lock. Zero means
-its partial was unlinked in that window, and it raises rather than streaming gigabytes into an
-inode no path reaches. That converts the residue from the silent invisible-blocks leak the current
-code produces into a loud, attributable failure, and it requires a lost session lock *and* a
-sub-millisecond interleave to reach at all.
+Instead both interleavings raise one attributable `ENOENT` naming the sweep. If the sweeper already
+unlinked and closed, the writer's `flock` succeeds and `os.fstat(fd).st_nlink` is zero. If the
+sweeper still holds its own lock, the writer's `flock` raises `EWOULDBLOCK` — and retrying would win
+a lock on a file the sweeper's very next syscall removes, so it does not retry. That converts the
+residue from the silent invisible-blocks leak the current code produces into a loud, attributable
+failure, and it requires a lost session lock *and* a sub-millisecond interleave to reach at all.
+
+## Two consequences the review surfaced
+
+**Reach narrows slightly, and is logged rather than claimed away.** `unlink` needed write and
+execute on the *directory* and no permission on the file; `open` needs to read the file. So an
+`EACCES`/`EMFILE`/`ENOLCK` candidate now falls to the reclaim backstop instead of being unlinked
+blind — deliberate, since a partial this process cannot open is one it cannot show is dead. Every
+skip emits a `WARNING`, so an `ENOLCK` filesystem cannot silently retire the sweep.
+
+**The losing fetcher now reaches its publish**, where before it died at `os.replace`. The sibling
+that held the lock has by then normally published `dest` and had a guest's overlay created against
+it, so an unconditional `os.replace` would orphan that inode behind the guest's open descriptor —
+the very symptom this change removes, re-created at the far end of the same scenario. The publish is
+therefore skipped when `dest` already passes the qcow2 gate. That probe swallows every `OSError`
+(the opposite of `_reusable_staged_base`, whose polarity is reversed) so it can only remove work.
 
 ## Tests (TDD)
 
@@ -97,14 +113,22 @@ Red against the current code first:
    lock, the sweeper acquired it anyway.
 2. The full `fetch_uploaded_rootfs` path with a live sibling partial present — the sweep is called
    from under the fetch lock, so the guard has to hold at the call site, not only in isolation.
+3. A fetcher's own partial is locked while it stages, proven by a sweep from the main thread failing
+   to remove it mid-download, with the staging thread stalled inside the body read.
+4. The partial is **still** locked after the stager closes its own writer — a sweep between the
+   stager returning and the publish. This is the one that reddens if `flock` is ever swapped for
+   `lockf`, whose lock dies with any descriptor close; verified by making that mutation.
+5. Both create-then-lock interleavings raise a fault naming the sweep and spend no download.
+6. A base a sibling published during the download keeps its inode; our copy is discarded.
+7. A held candidate and an unopenable candidate each emit their `WARNING`.
 
 Green-only (they pass before and after, and pin behavior the fix must not regress):
 
-3. An unlocked crash orphan is still unlinked.
-4. A partial whose lock holder has **exited** is unlinked — spawned as a real child process so the
-   kernel, not the test, releases the lock.
-5. A fetcher's own partial is locked while it stages, proven by a sweep from a second thread
-   failing to remove it mid-download.
-6. `st_nlink == 0` after acquiring the guard raises a staging fault and attempts no download.
-7. Mixed directory: locked and unlocked partials side by side, only the unlocked one goes.
-8. A sweep whose candidate vanishes between the glob and the open is a no-op, not an error.
+8. An unlocked crash orphan is still unlinked.
+9. A partial whose lock holder has **exited** is unlinked — spawned as a real child process so the
+   kernel, not the test, releases the lock. The same test asserts it is *not* collected while that
+   process lives.
+10. Mixed directory: locked and unlocked partials side by side, only the unlocked one goes.
+11. A sweep whose candidate vanishes between the glob and the open is a no-op, not an error.
+12. A torn `dest` is still published over, and an unreadable `dest` is published over rather than
+    failing the completed download.
