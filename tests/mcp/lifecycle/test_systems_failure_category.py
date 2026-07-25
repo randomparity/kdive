@@ -176,9 +176,12 @@ def test_failed_system_next_actions_name_registered_tools() -> None:
     assert all(name in _REGISTERED_TOOLS for name in FAILED_SYSTEM_NEXT_ACTIONS)
 
 
-def test_failed_system_suppresses_the_job_surface_for_a_no_leak_category() -> None:
-    # ADR-0123: `data` extras bypass `ToolResponse.failure`'s own suppression, so the
-    # job-derived surface is gated on the same no-leak rule.
+def test_failed_system_does_not_forward_a_no_leak_category_as_its_own_verdict() -> None:
+    # `not_found` is a reserved envelope-level meaning: `systems.get` returns it for a System
+    # that is absent or invisible. Echoing a job's `not_found` onto a System the caller just
+    # read would say "this object is gone" in an envelope carrying that object's whole record.
+    # Reachable: a `restore` binding a System whose Resource row vanished dead-letters
+    # `not_found` without touching System state, and the reconciler then fails the System.
     job = _failed_job(
         ErrorCategory.NOT_FOUND,
         {"failure_message": "secret-host-name leaked here"},
@@ -186,10 +189,21 @@ def test_failed_system_suppresses_the_job_surface_for_a_no_leak_category() -> No
 
     resp = system_envelope(_system(), failing_job=job)
 
-    assert resp.error_category == "not_found"
-    assert resp.detail == "not found"
+    assert resp.error_category == "infrastructure_failure"
+    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
     assert "failing_job_id" not in resp.data
     assert "secret-host-name" not in str(resp.model_dump())
+
+
+def test_failed_system_does_not_forward_authorization_denied_either() -> None:
+    # The other no-leak category, for the same reason.
+    job = _failed_job(ErrorCategory.AUTHORIZATION_DENIED, {"failure_message": "secret-project"})
+
+    resp = system_envelope(_system(), failing_job=job)
+
+    assert resp.error_category == "infrastructure_failure"
+    assert "failing_job_id" not in resp.data
+    assert "secret-project" not in str(resp.model_dump())
 
 
 def test_non_failed_system_ignores_a_supplied_job() -> None:
@@ -351,6 +365,73 @@ def test_latest_failed_job_for_system_ignores_a_non_failed_job(migrated_url: str
                     {"principal": "user-1", "agent_session": "s", "project": "proj"},
                     "dk-queued",
                 )
+                found = await queue.latest_failed_job_for_system(conn, system_id)
+        assert found is None
+
+    asyncio.run(_run())
+
+
+def test_latest_failed_job_for_system_does_not_skip_over_a_newer_canceled_job(
+    migrated_url: str,
+) -> None:
+    # A canceled `restore` satisfies `repair_stalled_restoring_systems`' "no restore job
+    # queued/running" predicate, so the System reaches `failed` with nothing to attribute. If
+    # the query filtered to `failed` and took the newest match, it would skip over the cancel to
+    # a stale earlier provision failure and report it as authoritative — worse than the default,
+    # because it looks certain.
+    async def _run() -> None:
+        async with _pool(migrated_url) as conn_pool:
+            alloc_id = await _granted_allocation(conn_pool)
+            system_id = await _seed_system(conn_pool, alloc_id, SystemState.FAILED)
+            await _dead_letter(
+                conn_pool,
+                kind=JobKind.PROVISION,
+                system_id=system_id,
+                dedup_key="dk-stale",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+            async with conn_pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.RESTORE,
+                    _payload_for(JobKind.RESTORE, system_id),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    "dk-restore",
+                )
+                await conn.execute("UPDATE jobs SET state = 'canceled' WHERE id = %s", (job.id,))
+                found = await queue.latest_failed_job_for_system(conn, system_id)
+        assert found is None
+
+    asyncio.run(_run())
+
+
+def test_latest_failed_job_for_system_does_not_skip_over_a_newer_success(
+    migrated_url: str,
+) -> None:
+    # Same rule the other way: if the last system-lifecycle job to finish succeeded, an older
+    # failure is not the explanation for anything.
+    async def _run() -> None:
+        async with _pool(migrated_url) as conn_pool:
+            alloc_id = await _granted_allocation(conn_pool)
+            system_id = await _seed_system(conn_pool, alloc_id, SystemState.FAILED)
+            await _dead_letter(
+                conn_pool,
+                kind=JobKind.PROVISION,
+                system_id=system_id,
+                dedup_key="dk-stale",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+            async with conn_pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.REPROVISION,
+                    _payload_for(JobKind.REPROVISION, system_id),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    "dk-reprovision",
+                )
+                claimed = await queue.dequeue(conn, "w1")
+                assert claimed is not None
+                assert await queue.complete(conn, claimed.id, "w1", None) is not None
                 found = await queue.latest_failed_job_for_system(conn, system_id)
         assert found is None
 

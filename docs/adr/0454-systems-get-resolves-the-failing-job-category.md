@@ -72,11 +72,41 @@ become `SYSTEM_FAILING_JOB_KINDS`, declared beside the existing `JobKind` sets i
 `domain/operations/jobs.py` so the set sits with the enum it constrains rather than in the read
 path that consumes it.
 
-Matching on `state = 'failed'` is matching exactly the row that carries the answer, not a
-convenience: `queue.fail` writes `error_category` **only** on the dead-letter branch — a requeue
-clears `failure_context` and leaves `error_category` NULL — and both job-backed writers set
+`error_category` is written **only** on `queue.fail`'s dead-letter branch — a requeue clears
+`failure_context` and leaves the category NULL — and both job-backed writers set
 `exc.terminal = True` immediately after recording the System failure, precisely so a retry cannot
-mask it. The correlated job therefore dead-letters on its first attempt with its category intact.
+mask it. A `failed` row is therefore exactly the row that carries an answer.
+
+The query nevertheless does **not** filter to `failed` and take the newest match. It takes the
+newest job in *any* terminal state (`succeeded`/`failed`/`canceled`) and attributes it only if
+that state is `failed`. Filtering first would skip *over* a newer terminal job to reach a stale
+older failure, and that is reachable: `restore` is contributor-cancelable, and cancelling one
+satisfies `repair_stalled_restoring_systems`' "no restore job queued/running" predicate, so the
+System is driven to `failed` with nothing to attribute — while an older failed `provision` row can
+survive from a lifecycle the System went on to recover from (a non-`CategorizedError` escaping the
+handler dead-letters the job without touching System state). Reporting that older row would be
+strictly worse than the default it replaces, because it carries a confident category, a confident
+message, and a `failing_job_id`. "The last system-lifecycle job to finish did not fail, so I have
+no attribution" is the honest answer, and it is the default's second real branch.
+
+### 2a. A no-leak category is not forwarded as the System's own verdict
+
+`not_found` and `authorization_denied` are reserved *envelope-level* meanings here (ADR-0097):
+`systems.get` itself returns `not_found` for a System that is absent or invisible. Forwarding a
+job's `not_found` onto a System the caller just read successfully would tell an agent the object
+is gone in the same envelope that carries the object's whole record — and `error_category` is the
+one field this whole change exists to make trustworthy.
+
+It is reachable: `restore_handler` binds its snapshotter *before* its `try`, and the resolver
+raises `NOT_FOUND` when the System's Resource row is missing. That escape never reaches
+`_record_system_failure`, so the job dead-letters `not_found` while the System stays `restoring`,
+and the reconciler then resolves it to `failed`.
+
+Such a job explains nothing the System surface may repeat, so it is dropped whole: the category
+degrades to the default, the reason to the generic constant, and `failing_job_id` is withheld
+(ADR-0123 already withheld the `detail`; forwarding the bare category was the one misleading thing
+left). The job stays readable via `jobs.list`. This subsumes the earlier gate, which asked only
+"may I show the job's extras?" and never "is this category coherent as the System's own verdict?".
 
 ### 3. The reason is derived from the resolved detail, not from the presence of a job
 
@@ -162,11 +192,13 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
   filed as a follow-up.
 - Correlation is a query, not a stored foreign key, so it is best-effort in two further ways: a
   `systems.get` landing between the System's commit and `queue.fail` reads the no-job default for
-  that window; and if a second matching-kind job for the same System were ever to dead-letter
-  after the one that failed it, the newer row would win. The latter is not reachable today —
-  `SystemState.FAILED` is terminal, with no outbound transitions — but it is a property of the
-  query, not an invariant the code enforces. There is no jobs retention sweep, so a row's
-  disappearance is not among the residuals.
+  that window; and the correlation is *positional* — the newest terminal system-lifecycle job —
+  rather than a recorded link. §2's terminal-state rule closes the reachable mis-attribution (a
+  newer cancel or success no longer lets a stale older failure through), but it remains an
+  ordering argument over `created_at`, not an invariant the code enforces; a recorded
+  `failing_job_id` on `systems` is what would make it one, and that needs the migration §1
+  declines. There is no jobs retention sweep, so a row's disappearance is not among the
+  residuals.
 - `systems.list` keeps the flattened category (§4).
 - No schema, no migration, no config, no new dependency. No MCP tool schema, RBAC, or exposure
   change: the tool's arguments are untouched and only the failure envelope's contents differ.
@@ -188,4 +220,7 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
   scoped to avoid; recorded as a follow-up so the cost is priced rather than hidden (§1).
 - **Suppress `lease_expired` and report the default category instead.** Rejected as *less*
   truthful: the job row genuinely says the lease expired. The derived detail explains what that
-  means for the System without overwriting what the row records (§3).
+  means for the System without overwriting what the row records (§3). This is the opposite call
+  from §2a's, and deliberately so: `lease_expired` is an accurate statement about the System's
+  fate, while `not_found` is an envelope-level claim about the System's *existence* that the read
+  path has already disproved.

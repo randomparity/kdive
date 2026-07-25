@@ -166,22 +166,33 @@ def _failed_system_envelope(
     fallback on ``failing_job is None`` would leave that path a bare category, which is the
     surface #1550 set out to remove.
 
-    The job-derived surface (``detail``, ``failing_job_id``) is suppressed entirely for a
-    no-leak category (ADR-0123): ``ToolResponse.failure`` already suppresses ``detail``, but the
-    ``data`` extra bypasses that seam, so it is gated here on the same rule.
-    ``suppressed_detail(category, None) is not None`` is true exactly for a suppressed category
-    (it returns the fixed constant even when ``raw`` is ``None``). The structured
-    ``failure_detail_*`` keys are deliberately left on ``jobs.get`` rather than duplicated here;
-    ``failing_job_id`` is the pointer to them.
+    A no-leak category (ADR-0123) is **not** forwarded at all. ``not_found`` and
+    ``authorization_denied`` are reserved envelope-level meanings here — ``systems.get`` returns
+    ``not_found`` for a System that is absent or invisible — so echoing a job's ``not_found``
+    onto a System the caller just read successfully would tell an agent the object is gone while
+    the same envelope carries its whole record. That is reachable: a `restore` job binding a
+    System whose Resource row vanished dead-letters ``not_found`` without touching System state,
+    and the reconciler then resolves the System to ``failed``. Such a job explains nothing the
+    System surface may repeat, so it degrades to the default category and the generic reason,
+    and its ``detail`` and ``failing_job_id`` are withheld — the job itself is still readable via
+    ``jobs.list``. ``suppressed_detail(category, None) is not None`` is true exactly for a
+    suppressed category (it returns the fixed constant even when ``raw`` is ``None``).
+
+    The structured ``failure_detail_*`` keys are deliberately left on ``jobs.get`` rather than
+    duplicated here; ``failing_job_id`` is the pointer to them.
     """
-    category = (failing_job.error_category if failing_job else None) or (
-        ErrorCategory.INFRASTRUCTURE_FAILURE
-    )
+    job_category = failing_job.error_category if failing_job else None
+    # A no-leak category is a statement the System envelope may not repeat (see above), so it is
+    # dropped rather than forwarded; the job is then not cited either.
+    if job_category is not None and suppressed_detail(job_category, None) is not None:
+        job_category = None
+        failing_job = None
+    category = job_category or ErrorCategory.INFRASTRUCTURE_FAILURE
     failure_data: dict[str, JsonValue] = {"current_status": system.state.value, **data}
     detail = failing_job.failure_context.get("failure_message") if failing_job else None
     if not detail:
         detail = _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
-    if failing_job is not None and suppressed_detail(category, None) is None:
+    if failing_job is not None:
         failure_data["failing_job_id"] = str(failing_job.id)
     return ToolResponse.failure(
         str(system.id),
@@ -273,8 +284,9 @@ async def get_system(
                 supports_snapshots = None
                 supports_traffic_capture = None
             # The `systems` table carries no failure category, so a `failed` System's real
-            # reason is recovered from the job that failed it (ADR-0454). One indexed lookup,
-            # on the `failed` branch only — every other state pays nothing.
+            # reason is recovered from the job that failed it (ADR-0454). One extra query — a
+            # sequential scan of `jobs`, which carries no index supporting it (ADR-0454 §1) —
+            # on the `failed` branch only; every other state pays nothing.
             failing_job = (
                 await queue.latest_failed_job_for_system(conn, system.id)
                 if system.state is SystemState.FAILED

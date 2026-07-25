@@ -437,6 +437,12 @@ async def latest_succeeded_job_for_system(
     return Job.model_validate(row) if row is not None else None
 
 
+_TERMINAL_JOB_STATES: frozenset[JobState] = frozenset(
+    {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED}
+)
+"""Job states a job never leaves — the states from which a job explains a System's outcome."""
+
+
 async def latest_failed_job_for_system(conn: AsyncConnection, system_id: UUID) -> Job | None:
     """Return the job that most recently failed ``system_id``, or ``None`` (ADR-0454).
 
@@ -447,34 +453,44 @@ async def latest_failed_job_for_system(conn: AsyncConnection, system_id: UUID) -
     - ``kind = ANY(SYSTEM_FAILING_JOB_KINDS)`` — only the kinds whose handlers actually write
       ``SystemState.FAILED``. A System also accumulates failed jobs of kinds that never touch
       its state, and the newest failed job of *any* kind answers a different question.
-    - ``state = failed`` — :func:`fail` writes ``error_category`` only on the dead-letter
-      branch (a requeue clears ``failure_context`` and leaves the category NULL), so this is
-      matching exactly the row that carries the answer. Both writers set ``exc.terminal`` so
-      the correlated job dead-letters on its first attempt.
+    - **The newest job in a terminal state, attributed only if that state is ``failed``.** The
+      query deliberately does *not* filter to ``failed`` and take the newest match: that skips
+      *over* a newer ``canceled`` or ``succeeded`` job to reach a stale older failure. A
+      canceled ``restore`` is the concrete case — cancelling one satisfies
+      ``repair_stalled_restoring_systems``' "no restore job queued/running" predicate, so the
+      System reaches ``failed`` with nothing to attribute, and a skip-over would report an
+      unrelated earlier provision failure as authoritative. If the last system-lifecycle job to
+      finish did not fail, this returns ``None`` and the caller applies its default.
+
+    ``error_category`` is written only on :func:`fail`'s dead-letter branch (a requeue clears
+    ``failure_context`` and leaves the category NULL), so a ``failed`` row is exactly the row
+    that carries an answer.
 
     Matches on ``payload->>'system_id'``, the join key
     :func:`latest_succeeded_job_for_system` and ``jobs.list`` already use. Newest first by
-    ``(created_at, id)``.
+    ``(created_at, id)`` — enqueue order, not completion order, which is the same order for the
+    serialized system-lifecycle kinds and is kept forward-moving by the ADR-0447 recycle.
 
     Args:
         conn: The connection to read on.
         system_id: The System whose failure is being attributed.
 
     Returns:
-        The newest dead-lettered system-failing job, or ``None`` when none exists — the
-        reconciler-orphan case, where the caller applies its own default.
+        The newest system-lifecycle job for the System when it dead-lettered, else ``None``.
     """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT * FROM jobs WHERE kind = ANY(%s::text[]) AND payload->>'system_id' = %s "
-            "AND state = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            "AND state = ANY(%s::text[]) ORDER BY created_at DESC, id DESC LIMIT 1",
             (
                 sorted(kind.value for kind in SYSTEM_FAILING_JOB_KINDS),
                 str(system_id),
-                JobState.FAILED.value,
+                sorted(state.value for state in _TERMINAL_JOB_STATES),
             ),
         )
         row = await cur.fetchone()
+        if row is not None and row["state"] != JobState.FAILED.value:
+            return None
     return Job.model_validate(row) if row is not None else None
 
 
