@@ -166,16 +166,20 @@ in its own short transaction so no snapshot is pinned across the blocking store 
 cheaper *per object* than `repair_leaked_images`, which issues a query per listed object every pass
 — but the comparison does not carry, because `images/` is bounded by the image catalog while
 `local/runs/` grows for the life of the deployment. Two costs are therefore accepted here and filed
-rather than argued away: the sweep materializes each root's whole listing (paging it needs a
-paginating store API), and the `artifacts.object_key` anti-join has no usable index, because the
-only one is partial on `owner_kind = 'investigations'` (migration 0076), so the `local/runs/` root
-forces a table scan per classify.
+rather than argued away: the sweep materializes each root's whole listing (**#1569** — paging it
+needs a paginating store API), and the `artifacts.object_key` anti-join has no usable index
+(**#1570**), because the only one is partial on `owner_kind = 'investigations'` (migration 0076), so
+the `local/runs/` root forces a table scan per classify.
 
 ## Non-goals
 
 - **#1557** — the race where the *reaper's* phase-2 sweep deletes a re-minted or concurrently
   re-written object. That is a guard inside `_sweep_uncommitted_objects`, a different function. This
   change publishes `reclaimable_upload_keys` as the reusable per-key predicate that guard can call.
+- **#1574** — the residual of this sweep's own per-key re-check: a PUT landing between the store
+  mtime re-read and the `delete_object` is still destroyed. Closing it needs a fence the writer and
+  the sweeper share (a conditional delete, or the owner-scoped lock #1557 needs anyway), not another
+  unsynchronised re-check. The re-read closes the wide window; this is the round-trip remainder.
 - A bucket lifecycle rule (option 2 in the issue): outside the tree, untestable here, and it would
   expire live windows unless tuned above `UPLOAD_TTL_SECONDS`.
 - Any change to the reaper, the finalizes, the schema, or the MCP surface.

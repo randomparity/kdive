@@ -124,7 +124,9 @@ been rowless, manifest-less, and unwritten for the whole threshold. It does **no
 re-mint to reach — the vmcore keys are deterministic per `(run, method)` and involve no upload
 window at all, so a capture retried more than a threshold after an attempt that PUT the core and
 died before `finalize_capture` is the cheapest way in. Saying "a re-mint has to interleave" would
-make the residual sound rarer than it is.
+make the residual sound rarer than it is. It is filed as **#1574** rather than left unowned — a
+disclosed correctness residual with no tracking issue is indistinguishable from an unnoticed one,
+and #1574 is the sibling of #1557, which is this same race on the reaper's side.
 
 Bulk-then-recheck is also the cost decision, and the honest version of it is not "cheaper than the
 precedent". Steady state with no leak is one LIST and one query per root per pass; the per-key round
@@ -134,7 +136,7 @@ does not carry, because `images/` is bounded by the image catalog while `local/r
 life of the deployment (a vmcore per crashing run, pcaps, chunk parts). This sweep materializes each
 root's whole listing and passes it as one array-valued parameter, so both scale linearly with a
 bucket that never shrinks, every 30 seconds. It is adequate at the scale this repair is being
-shipped into and it is not adequate forever; paging the sweep is filed as a follow-up rather than
+shipped into and it is not adequate forever; paging the sweep is filed as **#1569** rather than
 asserted away here. Each query does run in its own short transaction, so no snapshot is pinned
 across the blocking LISTs and deletes — but the repair seam still holds one of the `max_size=10`
 pool's slots checked out for the whole sweep, which is #1554's to restructure, not a property this
@@ -281,9 +283,9 @@ ever mints into them, the rest because they are other tenants' or other sweeps' 
 'investigations'` (migration 0076) — so the `local/runs/` root, the larger and faster-growing of the
 two, forces Postgres to scan `artifacts` once per classify. That is a repeating scan of a table that
 grows with every run, on every pass, in steady state with zero leak. "No migration" is therefore a
-true statement about this diff and a misleading one about its cost; the index is filed as a
-follow-up. It is deliberately not taken here: the sweep is correct without it, and a schema change
-belongs in a change whose subject is the schema.
+true statement about this diff and a misleading one about its cost; the index is filed as **#1570**.
+It is deliberately not taken here: the sweep is correct without it, and a schema change belongs in a
+change whose subject is the schema. The listing side of the same cost is **#1569**.
 
 No schema, no migration, no MCP or RBAC surface, no change to either finalize path, and no change to
 the reaper. One new setting, `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` — an exception to the
