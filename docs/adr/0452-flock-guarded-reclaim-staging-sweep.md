@@ -128,6 +128,32 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
    failing silently once the directory really is empty. #1559 keeps the general case, where a base
    is orphaned while *other* rootfs rows remain.
 
+   "Unowned" is scoped to what the precondition actually establishes, and not one word further. No
+   overlay that *predates* the drain can be backed by such a base. It says nothing about one created
+   *after* the row was reclaimed, which this gate newly makes reachable: the doomed fetcher whose
+   partial an earlier pass skipped can publish the base and its provision can go on to create a
+   per-System overlay against it, which a later pass unlinks underneath. Bounded — that System is
+   already terminal and the reconciler reaps its domain — and recorded rather than written down as a
+   construction-level invariant, because it is conditional and #1558 removes the condition.
+
+7. **No step of the sweep is silent, including the directory walk itself.** `Path.glob` returns an
+   empty iterator for a directory it cannot *enumerate* rather than raising, so an unreadable
+   staging tree produces exactly the same result as an empty one — and the caller then clears
+   `rootfs_cleanup_pending_at`, retiring every collector this investigation has for a tree that may
+   hold SENSITIVE bytes up to the 50 GiB canonical cap. On `main` the walk's `suppress` decided only
+   whether an `rmdir` succeeded; here the walk's completeness is what the returned flag and a
+   durable DB write are computed from, so it becomes load-bearing.
+
+   Both walks log a `WARNING` on an `OSError`, and the `rmdir` — the only step that can tell
+   "drained" from "unreadable" — logs one whenever the directory survives for a reason this pass has
+   not already reported. `ENOTEMPTY` under a held partial is expected and stays quiet; `ENOENT` is
+   the achieved post-state for an investigation that never staged anything. The marker is still
+   cleared on it, because decision 5's argument that a permanent fault must not pin the marker
+   applies to a permanently unreadable directory exactly as to an unopenable partial. What changes
+   is that an operator gets a line. The triggers are this subsystem's own: the worker/staging-user
+   uid asymmetry ADR-0442 documents and #1522 was bitten by, a mode change on the staging tree,
+   `EIO`, a stale NFS handle.
+
 ## Consequences
 
 - A live fetcher's partial survives the reclaim sweep. Both partial-unlinking paths in the tree are
@@ -182,9 +208,17 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
   **#1565** carries it. Overloading `rootfs_cleanup_pending_at` onto an open investigation would fix
   it in one line and is deliberately not done: that column is durable, record-model-visible state
   meaning "this investigation was closed and its rootfs is being reclaimed".
+- **A base can be unlinked under an overlay the doomed provision created after its own reclaim.**
+  Decision 6's scope note, restated as a consequence because it is the one case the precondition
+  does not cover. If the unlink lands before domain start the provision dies at libvirt with a
+  missing-backing-file error; if after, the inode stays charged to `df` behind QEMU's descriptor —
+  the diagnosis-hostile shape ADR-0446 removes for partials. Bounded by the System already being
+  terminal, and closed outright by #1558.
 - No schema, no migration, no config setting, no new dependency, no MCP/RBAC surface. Not an AI
   surface. `#1539` adds a sidecar completion marker to this same directory and this pass keeps the
-  shape it needs: a second, non-`flock`ed glob added to the same function.
+  shape it needs: a second glob added to the same function. Note that a sidecar matching neither
+  `*.partial` nor `*.qcow2` makes the `rmdir` fail on every drained investigation — decision 7 is
+  what keeps that from being silent, but #1539 must sweep its own marker rather than rely on it.
 
 ## Considered & rejected
 

@@ -256,3 +256,50 @@ def test_sweep_of_an_absent_staging_dir_reports_nothing_live(tmp_path: Path) -> 
     # An investigation that never staged anything: the glob finds nothing, the rmdir raises ENOENT
     # into the suppress, and the marker must still clear.
     assert sweep_investigation_staging_dir(str(tmp_path), uuid4()) is False
+
+
+def test_a_held_partial_does_not_suppress_the_unowned_base_collection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The two new outcomes in one pass, which is the combination an obvious refactor breaks: an
+    # early `if held: return True` before the base loop reads as "the directory is not drained, so
+    # stop" and would silently reintroduce the permanent SENSITIVE leak ADR-0452 §6 closes, for any
+    # base published between the two globs. The base is unowned whether or not someone is writing a
+    # different partial, and unlinking it costs the live writer nothing -- it publishes anyway.
+    inv, inv_dir = _inv_dir(tmp_path)
+    base = inv_dir / f"{_TOKEN}.qcow2"
+    base.write_bytes(b"published after its own row was reclaimed")
+
+    with caplog.at_level(logging.WARNING), _held_partial(inv_dir) as live:
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert live.exists()
+
+    assert not base.exists()
+    assert inv_dir.exists()  # the held partial still keeps the dir, so the marker is retained
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory regardless")
+def test_a_staging_dir_the_sweep_cannot_read_is_named_rather_than_read_as_drained(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Path.glob returns an empty iterator for a directory it cannot enumerate rather than raising,
+    # so an unreadable staging tree yields the same False as an empty one -- and the caller then
+    # clears rootfs_cleanup_pending_at and retires every collector this investigation has. The rmdir
+    # is the only step that can tell the two apart, so it must not be silent.
+    inv, inv_dir = _inv_dir(tmp_path)
+    orphan = inv_dir / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"uncollected")
+    base = inv_dir / f"{_TOKEN}.qcow2"
+    base.write_bytes(b"uncollected")
+    inv_dir.chmod(0o000)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+    finally:
+        inv_dir.chmod(0o700)
+
+    assert orphan.exists()  # nothing was collected ...
+    assert base.exists()
+    assert any("survived its investigation's drain" in r.getMessage() for r in caplog.records), (
+        caplog.text  # ... and the pass said so
+    )

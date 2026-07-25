@@ -157,6 +157,22 @@ drains — so a hit is evidence of the publish-after-reclaim above, which is why
 rather than a silent unlink. The retained marker makes it converge: the deferred pass is the one
 that collects what the live writer published.
 
+"Unowned" covers exactly what the precondition establishes: no overlay that *predates* the drain can
+be backed by such a base. An overlay the doomed provision creates *after* its row was reclaimed is
+not covered, and the base may be unlinked underneath it — bounded by that System already being
+terminal, and closed by #1558.
+
+### No step of the sweep is silent
+
+`Path.glob` returns an empty iterator for a directory it cannot enumerate rather than raising, so an
+unreadable staging tree yields the same result as an empty one — and the caller then clears the drain
+marker and retires every collector this investigation has. On `main` that walk's `suppress` decided
+only whether an `rmdir` succeeded; here its completeness feeds the returned flag and a durable DB
+write. Both walks log an `OSError`, and the `rmdir` — the only step that can tell "drained" from
+"unreadable" — logs whenever the directory survives for a reason this pass has not already reported.
+`ENOTEMPTY` under a held partial is expected and stays quiet; `ENOENT` is the achieved post-state.
+The marker still clears, for the reason a permanently unopenable partial does not pin it.
+
 ## What this does not fix
 
 - **The `flock` guard is best-effort, because `_flocked_partial` degrades.** On a filesystem that
@@ -193,6 +209,8 @@ that collects what the live writer published.
 | R2 | A partial whose holder process is `SIGKILL`ed is collected on the next sweep with no timeout |
 | R3 | The staging dir is removed once it drains, including a base left behind after the drain, which is collected and `WARNING`-logged |
 | R3 | An unowned base that cannot be unlinked warns and does not raise into the handler |
+| R6 | A staging directory the sweep cannot enumerate is reported, not read as drained |
+| R1+R3 | A held partial and an unowned base in the same pass: the partial survives, the base is still collected |
 | R5 | A live-held skip retains `rootfs_cleanup_pending_at`; a drained sweep clears it |
 | R5 | An *unopenable* partial (no `flock` held) clears the marker, so a permanent fault cannot pin it forever |
 | R2 | On a filesystem that cannot `flock` at all, the reclaim sweep still collects and still clears the marker, while the fetch-side sweep still skips |
