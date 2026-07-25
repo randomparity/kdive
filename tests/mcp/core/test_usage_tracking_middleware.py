@@ -23,6 +23,7 @@ import pytest
 from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.middleware.usage as usage_mod
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
@@ -192,6 +193,56 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(AssertionError, match="PoolClosed"):
         asyncio.run(_run())
+
+
+def test_swallowed_recording_failure_increments_the_drop_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0148 keeps the swallow, ADR-0449 makes it countable: a dropped row is only
+    # observable to an operator through a WARNING in the log stream today, which is
+    # invisible to anything scraping /metrics. Assert the counter fires with the tool
+    # label the warning already carries.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+    drops: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        usage_mod._RECORDING_FAILURES,
+        "add",
+        lambda amount, labels: drops.append((amount, labels)),
+    )
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool("postgresql://unused", open=False)  # never opened
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
+
+        async def ok(_c: Any) -> ToolResult:
+            envelope = ToolResponse.success("jobs.get", "ok")
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        await mw.on_call_tool(_Ctx("jobs.get"), ok)
+
+    asyncio.run(_run())
+    assert drops == [(1, {"tool": "jobs.get"})]
+
+
+def test_successful_recording_leaves_the_drop_counter_alone(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The counter must mean "a row was lost", not "a call happened" — otherwise an alert on
+    # it fires constantly and stops being read.
+    drops: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        usage_mod._RECORDING_FAILURES,
+        "add",
+        lambda amount, labels: drops.append((amount, labels)),
+    )
+
+    async def ok(_c: Any) -> ToolResult:
+        envelope = ToolResponse.success("jobs.get", "ok")
+        return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+    assert _drive(migrated_url, "jobs.get", ok, monkeypatch) == [("jobs.get", "ok", "alice", "a")]
+    assert drops == []
 
 
 def test_warm_pool_has_a_connection_before_the_caller_acquires(migrated_url: str) -> None:

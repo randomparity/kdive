@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastmcp.server.middleware import Middleware
+from opentelemetry import metrics
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
@@ -23,6 +24,15 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.usage import UsageEvent, digest_args, record_usage
 
 _log = logging.getLogger(__name__)
+
+# ADR-0148 keeps the swallow — best-effort recording must never fail a tool call — but a
+# swallowed write is a *lost row*, and a WARNING is invisible to anything scraping /metrics.
+# Counting it makes the loss rate a signal an operator can alert on (ADR-0449). Named and
+# scoped like the exposure middleware's fail-open counters, its nearest precedent.
+_RECORDING_FAILURES = metrics.get_meter("kdive.mcp").create_counter(
+    "kdive_mcp_usage_recording_failures",
+    description="tool_invocation rows dropped by best-effort usage recording (ADR-0148)",
+)
 
 
 def _call_arguments(context: Any) -> Mapping[str, object] | None:
@@ -118,4 +128,5 @@ class UsageTrackingMiddleware(Middleware):
             ):
                 await record_usage(conn, event)
         except Exception:
+            _RECORDING_FAILURES.add(1, {"tool": tool})
             _log.warning("usage recording failed for tool %s", tool, exc_info=True)
