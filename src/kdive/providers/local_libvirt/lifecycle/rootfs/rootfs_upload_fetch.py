@@ -15,6 +15,11 @@ read from that durable ``artifacts`` row (finalize deletes the manifest), and a 
 streamed-decompressed to the staged base; an identity upload stages verbatim. Either way the
 canonical base is qcow2-magic-validated before it backs an overlay.
 
+Durability (ADR-0443): the partial is ``fsync``\\ ed before the ``os.replace`` publishes it and the
+staging directory ``fsync``\\ ed after, so a host crash cannot leave a durable rename over
+non-durable data; and the reuse fast path re-applies the qcow2-magic gate rather than trusting a
+present file, so a base torn by a crash that predates this cannot back an overlay.
+
 Concurrency (ADR-0441 §5): the shared per-(investigation, checksum) staging path means two sibling
 Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>.partial`` and
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
@@ -30,10 +35,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-from contextlib import AbstractContextManager, suppress
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import IO, Protocol
 from uuid import UUID, uuid4
 
 import psycopg
@@ -112,8 +118,9 @@ def rootfs_upload_fetch_from_env() -> UploadFetch:
     investigation and the committed object (the provision seam runs in a thread and owns no async
     pool; the catalog fetch, ADR-0228, opens its own sync connection the same way). Autocommit so
     the session advisory lock held across the multi-GiB download never keeps a transaction open (an
-    ``advisory_xact_lock`` would trip ``idle_in_transaction_session_timeout``). A present verified
-    staged file is reused. S3 is a required backend (ADR-0337).
+    ``advisory_xact_lock`` would trip ``idle_in_transaction_session_timeout``). A present staged
+    file is reused once it re-passes the format gate (ADR-0443). S3 is a required backend
+    (ADR-0337).
     """
 
     def _fetch(upload: RootfsUploadContext) -> Path:
@@ -132,7 +139,9 @@ def fetch_uploaded_rootfs(
     """Resolve + stage the investigation-scoped uploaded rootfs to a verified local path.
 
     Resolves the object by content address within the System's own investigation, reuses a present
-    verified staged file, and otherwise downloads it once under a session advisory lock.
+    staged file that re-passes :func:`_reusable_staged_base`, and otherwise downloads it once under
+    a session advisory lock. The re-check runs on both sides of the lock, so neither the fetcher
+    that finds a torn base nor the one that queues behind a sibling can be handed one (ADR-0443).
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` when the System has no investigation binding, the
@@ -144,12 +153,12 @@ def fetch_uploaded_rootfs(
     investigation_id = _resolve_investigation(conn, upload.system_id)
     resolved = _resolve_object(conn, investigation_id, token, upload)
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
-    if dest.is_file():
+    if _reusable_staged_base(dest):
         return dest
     lock_key = _session_lock_key(_fetch_lock_name(investigation_id, token))
     conn.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
     try:
-        if dest.is_file():  # a sibling fetcher finished while we waited on the lock
+        if _reusable_staged_base(dest):  # a sibling fetcher finished while we waited on the lock
             return dest
         _unlink_orphan_partials(dest)
         stage_uploaded_rootfs(
@@ -256,10 +265,11 @@ def stage_uploaded_rootfs(
     ``INFRASTRUCTURE_FAILURE``). When ``encoding`` is ``gzip`` the object is streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
     streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
-    the canonical base is qcow2-magic-validated and written atomically (a ``<token>.<uuid>.partial``
-    temp + ``os.replace``) so ``dest`` is only ever a verified base and two concurrent fetchers
-    never share a partial. The partial is unlinked in a ``finally``, so no failure — typed or not —
-    leaves one behind.
+    the canonical base is qcow2-magic-validated and written atomically **and durably** (a
+    ``<token>.<uuid>.partial`` temp, ``fsync``\\ ed, then ``os.replace``\\ d and the directory
+    ``fsync``\\ ed — ADR-0443) so ``dest`` is only ever a verified base, survives a host crash, and
+    two concurrent fetchers never share a partial. The partial is unlinked in a ``finally``, so no
+    failure — typed or not — leaves one behind.
     """
     head = store.head(object_key)
     if head is None:
@@ -307,7 +317,7 @@ def stage_uploaded_rootfs(
                 details={"system_id": str(system_id)},
             )
         _require_qcow2_magic(partial, system_id=str(system_id))
-        os.replace(partial, dest)
+        _durable_replace(partial, dest)
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
     finally:
@@ -342,16 +352,22 @@ def _stage_identity(
     the byte-identical failure — and is tracked in #1523.)
     """
     hasher = hashlib.sha256()
-    with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
+    with (
+        store.get_artifact_stream(key, None) as fetched,
+        _durable_partial_writer(partial) as writer,
+    ):
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
             hasher.update(chunk)
             writer.write(chunk)
-    if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
-        raise CategorizedError(
-            "uploaded rootfs object failed checksum verification",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-            details={"system_id": str(system_id)},
-        )
+        # Inside the writer context deliberately: raising here skips the ``fsync``
+        # ``_durable_partial_writer`` does after the ``yield``, so a partial the ``finally`` is
+        # about to unlink never costs a full flush of a multi-GiB base (ADR-0443).
+        if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
+            raise CategorizedError(
+                "uploaded rootfs object failed checksum verification",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details={"system_id": str(system_id)},
+            )
 
 
 def _stage_gzip(
@@ -378,8 +394,87 @@ def _stage_gzip(
         expected_sha256=checksum,
         uncompressed_size=uncompressed_size,
     )
-    with partial.open("wb") as writer:
+    with _durable_partial_writer(partial) as writer:
         strip_gzip_to_writer(store, request, writer)
+
+
+def _starts_with_qcow2_magic(staged: Path) -> bool:
+    """Whether ``staged``'s first bytes are the qcow2 magic; a file too short to hold it is not.
+
+    The single implementation of the format probe, shared by the staging gate below and the reuse
+    gate in :func:`_reusable_staged_base` so the two can never drift apart. ``OSError`` propagates
+    — each caller decides what an unreadable file means for it.
+    """
+    with staged.open("rb") as reader:
+        return reader.read(len(_QCOW2_MAGIC)) == _QCOW2_MAGIC
+
+
+def _reusable_staged_base(dest: Path) -> bool:
+    """Whether a present staged base may back an overlay without being fetched again (#1526).
+
+    The reuse fast path used to treat *any* present ``dest`` as authoritative (a bare
+    ``dest.is_file()``), which bypassed every verification gate exactly when the file was most
+    suspect: a base torn by a crash mid-stage is full-length and unverified, and under ADR-0441 §5
+    content-addressed reuse it would then silently back every System in the investigation until
+    close — with the checksum machinery skipped *because* the file existed.
+
+    The re-check is the qcow2-magic probe the staging path already applies. It is O(1), so it stays
+    affordable on the per-System provision hot path, and it catches the zeroed-head, truncated,
+    empty, and garbage shapes a torn or half-written base takes. It is deliberately **not** a
+    checksum re-verify — that is O(filesize) against a base of tens of GiB, on every guest start,
+    which would undo the point of staging once per investigation. It is also deliberately not a
+    size comparison: ``artifacts.uncompressed_size`` is an upper *bound* rather than an exact size
+    (``strip_gzip_to_writer`` caps output at it and accepts less) and is NULL on the identity path,
+    so an equality gate would false-reject a good base and re-download it on every provision.
+
+    A base corrupted only in its interior therefore still passes here. That residue is why the
+    write side syncs (:func:`_durable_partial_writer`) rather than relying on this gate: the sync
+    removes the crash window that produces such a base, and this gate is the net for one staged by
+    code that predates it, or corrupted by some other means.
+
+    Any ``OSError`` — an absent file, an unreadable one, a directory in its place — reads as not
+    reusable, so this subsumes the ``dest.is_file()`` test it replaces.
+    """
+    try:
+        return _starts_with_qcow2_magic(dest)
+    except OSError:
+        return False
+
+
+@contextmanager
+def _durable_partial_writer(partial: Path) -> Iterator[IO[bytes]]:
+    """Open the staging partial and force its bytes onto the disk before the handle closes.
+
+    ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
+    or power loss: on a default ext4 mount the rename can become durable while the data blocks
+    behind it are not, leaving a full-length ``dest`` of zeros or stale blocks (#1526). Syncing here
+    — the shape ``inventory/writeback.py`` already uses — makes the canonical bytes durable before
+    :func:`_durable_replace` publishes them.
+
+    The sync is inside the ``with`` and after the ``yield``, so a stager that raises skips it: a
+    partial about to be discarded in ``stage_uploaded_rootfs``'s ``finally`` never pays for a
+    full flush of a multi-GiB base it will never publish.
+    """
+    with partial.open("wb") as writer:
+        yield writer
+        writer.flush()
+        os.fsync(writer.fileno())
+
+
+def _durable_replace(partial: Path, dest: Path) -> None:
+    """Publish the synced partial onto ``dest``, then sync the directory holding the rename.
+
+    Without the directory sync the *rename* can be lost on a crash even though the data behind it
+    survived. That alone is benign — an absent ``dest`` is re-staged — but the same directory entry
+    carries the partial's unlink, so a lost rename can resurrect the partial as an orphan. Both
+    halves are made durable together, at the cost of one metadata sync per staged base.
+    """
+    os.replace(partial, dest)
+    directory = os.open(dest.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
@@ -389,9 +484,7 @@ def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
     bytes — each stager has already verified its own checksum, and a base too short to hold the
     magic yields a short read that fails here rather than staging unchecked.
     """
-    with staged.open("rb") as reader:
-        first_bytes = reader.read(len(_QCOW2_MAGIC))
-    if first_bytes != _QCOW2_MAGIC:
+    if not _starts_with_qcow2_magic(staged):
         raise CategorizedError(
             "staged rootfs is not a qcow2 image: the uploaded object (after any transport decode) "
             "does not start with the qcow2 magic; upload a qcow2 image",
