@@ -205,14 +205,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the convergence's real reach and add system_id
 - Log the checksum mismatch the category no longer isolates
 - Key the mismatch log on the gate, not the category
-- Commit the upload manifest-row delete before its objects
-- Record the upload reap's prefix before the sweep starts
-- Report a failed upload sweep as a failed pass
-- Stop the upload pass when a whole owner's sweep is refused
+- Report the failing job's category on a failed System
+- Derive a reason and a recovery for a failed System
+- Stop a job's no-leak or stale verdict speaking for the System
+- Keep systems.list from claiming a reason it never checked
 - Flock-gate the reclaim-side staging sweep
 - Decide the lock-less degrade per sweep, not by default
 - Collect the unowned base the gate lets a fetcher publish
 - Make no step of the staging sweep silent
+- Commit the upload manifest-row delete before its objects
+- Record the upload reap's prefix before the sweep starts
+- Report a failed upload sweep as a failed pass
+- Stop the upload pass when a whole owner's sweep is refused
 
 ### Build
 
