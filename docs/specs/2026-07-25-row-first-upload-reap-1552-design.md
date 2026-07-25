@@ -57,8 +57,9 @@ deadline while a reap fails partway — narrow, but reachable.
 3. A failure partway through the object sweep leaves **no** `upload_manifests` row for that owner —
    the reap is durable regardless of what the object store does.
 4. A failed object **delete** does not abort the sweep of the remaining keys, and does not abort
-   the reap of other owners in the same pass. This does not extend to phase 1: a failing
-   `list_prefix` still ends the pass, deliberately — see Design, "Failure handling".
+   the reap of other owners in the same pass. It is still *reported*, once the pass is complete, so
+   the repair's existing group-E error signal survives the change. This does not extend to phase 1:
+   a failing `list_prefix` ends the pass immediately, deliberately — see Design, "Failure handling".
 5. Object deletion holds neither the owner advisory lock nor a database transaction.
 6. The window's prefix is recorded before the first object is deleted, so an abort that skips the
    sweep's own reporting still leaves the leaked bytes a derivable handle.
@@ -81,21 +82,39 @@ per-owner advisory lock and does every decision that needs the database:
 
 It returns the surviving keys — the *doomed* set — and the transaction commits on exit.
 
-**Phase 2 — `_sweep_uncommitted_objects`** takes only the store and that key list. No connection,
-no transaction, no lock. It deletes each key, catching `CategorizedError` per key so one failure
-does not strand the rest.
+**Phase 2 — `_sweep_uncommitted_objects`** takes only the store and that key list. No connection
+argument, no transaction, no lock. It deletes each key, catching `CategorizedError` per key so one
+failure does not strand the rest, and returns how many it could not delete. (`_run_repair_plan`
+still keeps a pooled connection checked out around the whole pass, so the phase is connection-free
+in its signature, not in the call stack — see "Shape for #1554".)
 
-### Why the committed-object verdict cannot go stale across the split
+### How far the committed-object verdict holds across the split
 
-The concern with computing the exemption in phase 1 and acting on it in phase 2 is that a key
-could acquire an `artifacts` row in between, after which deleting it would be exactly the
-corruption this issue is about. It cannot, for this window: the only writer that inserts an
-`artifacts` row against these keys is the owner's finalize, and both finalizes require the
-manifest row that phase 1 just deleted. `_require_unreaped_window` rejects with
-`no_upload_manifest`; `complete_rootfs_upload` rejects for a missing manifest. **The committed row
-delete is itself the barrier.** That is the property that makes row-first correct rather than
-merely differently-ordered, and it is only available in this direction — object-first has no
-barrier at all.
+The concern with computing the exemption in phase 1 and acting on it in phase 2 is that a key could
+acquire an `artifacts` row in between, after which deleting it would be exactly the corruption this
+issue is about. **The committed row delete is itself the barrier** against the reaped window's own
+finalizes: both require the manifest row phase 1 just deleted, so neither can run for it —
+`_require_unreaped_window` rejects with `no_upload_manifest`, `complete_rootfs_upload` rejects for a
+missing manifest. That is the property that makes row-first correct rather than merely
+differently-ordered, and it is only available in this direction: object-first has no barrier at all,
+because the state authorizing the deletes is not durable until the row delete commits.
+
+It does **not** extend to every writer that can reach these keys, and the design does not pretend
+otherwise. Phase 2 holds no owner lock, where the old order held the `RUN`/`INVESTIGATION` lock
+across the per-key check *and* its delete. Three writers get in:
+
+- a **re-mint**, which creates a new manifest row and so a new window over the same
+  owner-addressed key names;
+- **`control.capture_traffic`**, whose `pcap-<job_id>` object lives under this same *owner* prefix
+  (`local/runs/<id>/`, from `owner_prefix` — the manifest prefix is not an upload-only namespace)
+  and is doomed by phase 1 whenever an earlier attempt's PUT survived a rolled-back transaction; a
+  retry re-PUTs the key and commits the row. Newly exposed;
+- **the vmcore rows**, whose objects the provider PUTs outside any lock long before
+  `finalize_capture` inserts them. Pre-existing, not widened, but disclosed because an unqualified
+  barrier claim would have denied it.
+
+All three are residual 2 (#1557), and `test_a_key_that_gains_an_artifacts_row_after_the_claim_is_
+still_deleted` pins the behaviour so the residual has a reproducer.
 
 ### One set-valued query instead of a query per key
 
@@ -106,13 +125,23 @@ which matters now that phase 1 is the only part holding the lock.
 ### Failure handling
 
 A failed `store.delete` is logged at WARNING with the key, and the loop continues. After the loop,
-a non-zero failure count is logged at ERROR naming the owner and the counts. Raising instead would
+a non-zero failure count is logged at ERROR naming the owner and the counts. Raising *there* would
 be worse on every axis: the row is already durably gone, so the owner *is* reaped and there is
 nothing to retry; and `repair_abandoned_uploads` has no per-candidate `try`, so a raise would also
 abandon every later owner in the pass over one bad key. `CategorizedError` is caught specifically —
 the category the store wraps `BotoCoreError`/`ClientError` in — matching
 `_cleanup_chunks_and_manifest`'s precedent, so a programming error still crashes and
 `CancelledError` (a `BaseException`) still propagates.
+
+Swallowing it *entirely* would degrade an existing signal, so the counts travel up as
+`ReapOutcome.undeleted` and `repair_abandoned_uploads` raises once, **after** every candidate has
+been reaped. `_run_repair_plan` puts only a raising repair into `failures`, and `failures` is the
+sole input to the ADR-0190 group-E error counter — so without the end-of-pass raise, a store
+rejecting every delete would add N to `kdive.reconciler.repairs` and zero to `kdive.errors`, making
+the one condition that leaks bytes permanently the healthiest-looking pass on the dashboard, and
+leaving #1556's backlog unmeasurable. The pass forfeits its reaped count in exchange: the count is
+a gauge, the error is the alert, and the rows are durably deleted either way. Raising after the
+loop rather than inside it keeps requirement 4 true at the same time.
 
 Those two logs only cover what phase 2 can observe. The abort modes in Problem above — cancellation
 at shutdown, a lost connection, a process kill — unwind past both, and by then the row that held
@@ -134,9 +163,15 @@ the blast radius is this one repair's pass. Tolerance is bought only where a ret
 
 #1554 lands a concurrent sweep in this function. The split it needs is the one drawn here: a short
 locked transaction that decides, and a phase that touches only the object store — parallelizable
-without holding a lock or a pooled connection across the fan-out. Its author should read residual 2
-first: phase 2 deletes its key list unconditionally, so anything that lengthens or fans out that
-phase widens #1557. `_sweep_uncommitted_objects`' docstring says so at the site.
+without holding a lock.
+
+Two caveats it must not inherit as guarantees. First, the phase is **not** free of a pooled
+connection: `_run_repair_plan` holds `pool.connection()` around the whole `repair_abandoned_uploads`
+call, so the connection left the signature, not the call stack, and on a degraded store it now sits
+idle for the length of the sweep. A fan-out pins it for the widest branch; making it genuinely
+connection-free means restructuring the driver. Second, phase 2 deletes its key list
+unconditionally, so anything that lengthens or fans out that phase widens #1557.
+`_sweep_uncommitted_objects`' docstring says both at the site.
 
 ## Alternatives considered
 
@@ -178,18 +213,15 @@ Both are recorded in ADR-0453 §Consequences and filed.
    that prefix. `reap_one_owner` logs the prefix at INFO before the sweep starts — the last instant
    it is derivable from anything — so every abort mode leaves a recoverable handle, but a log line
    is not a reclaim path.
-2. **The re-mint window — [#1557](https://github.com/randomparity/kdive/issues/1557).** Phase 2 no
-   longer holds the owner lock, so a re-mint can now interleave between the row-delete commit and
-   the object deletes. Upload keys are owner-addressed, so a re-minted window reuses the same key
-   names, and the sweep — which deletes the phase-1 key list unconditionally, re-reading nothing —
-   would remove the new window's bytes. The trigger is one re-minted PUT landing on a key before
-   the sweep reaches that key's delete; the finalize may commit arbitrarily later and still be
-   corrupted, since `_require_unreaped_window` compares the *new* window's deadline against the one
-   that finalize validated and they match. This puts the **investigations** lane in scope too:
-   Problem claim 2 above holds only for the original defect, because that lane's finalize
-   serialised against a reap only while the reap held the `INVESTIGATION` lock, and phase 2 does
-   not. A re-mint is the documented recovery from a reap, so this sits on the recovery path;
-   reaching it needs a sweep slow enough for an agent to re-mint and re-upload into it.
+2. **The unlocked sweep's races — [#1557](https://github.com/randomparity/kdive/issues/1557).**
+   Phase 2 holds no owner lock and re-reads nothing, so any writer that can put an object at a
+   doomed key, or commit an `artifacts` row for one, wins a race the old order made impossible.
+   Three do: a **re-mint** (owner-addressed keys, so the new window reuses the names — and this
+   puts the **investigations** lane in scope too, since Problem claim 2 holds only for the original
+   defect); **`control.capture_traffic`**'s orphan-then-retry pcap, newly exposed; and the
+   **vmcore** rows, pre-existing and not widened. See "How far the committed-object verdict holds"
+   for each. A re-mint is the documented recovery from a reap, so that arm sits on the recovery
+   path; reaching any of them needs a sweep slow enough to be raced.
 
 ## Test plan
 
@@ -212,5 +244,10 @@ New tests in `tests/reconciler/test_upload_reaper.py`, all against real Postgres
   sequence rather than by mere presence.
 - **A failing `list_prefix` aborts the pass and deletes nothing**, pinning the deliberate asymmetry
   above: no delete is attempted and the manifest row survives intact for the retry.
+- **A totally failed sweep reports as a failed pass**, with an `INFRASTRUCTURE_FAILURE`
+  `CategorizedError` naming the object and owner counts — and a companion test that a clean sweep
+  returns the reaped count and does not raise, so the signal is conditional.
+- **A key that gains an `artifacts` row after the claim is still deleted**, pinning residual 2 as
+  known behaviour with a reproducer rather than leaving it a prose claim.
 - Existing reaper tests carry forward unchanged; they already pin the exemption, the renewed-window
   decline, and the fail-loud unknown owner kind.

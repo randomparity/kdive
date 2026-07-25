@@ -62,30 +62,54 @@ deletes each key.
 The committed-object exemption is unchanged in effect and is now computed with one set-valued
 `object_key = ANY(%s)` query instead of one query per key, which also shortens the locked phase.
 
-### 2. The committed row delete is the barrier that keeps phase 1's verdict valid
+### 2. The committed row delete is the barrier against the reaped window's own finalizes
 
-Computing the exemption before the split is safe **for the reaped window** because no key can
-acquire an `artifacts` row for it after phase 1 commits: the only writers that insert one against
-these keys are the two finalizes, and both require the manifest row phase 1 just deleted —
+Computing the exemption before the split is safe **against the two finalizes** because neither can
+run for the reaped window once phase 1 commits: both require the manifest row phase 1 just deleted —
 `_require_unreaped_window` rejects with `no_upload_manifest`, `complete_rootfs_upload` rejects for a
 missing manifest. This is the substance of the decision, not merely a different order: object-first
 has no such barrier available, because the state that authorizes the deletes is only durable once
 the row delete commits.
 
-The barrier is not unconditional, and this ADR does not claim it is. A **re-mint** creates a new
-manifest row, which lifts the barrier for the window it opens; because upload keys are
-owner-addressed, that new window reuses these same key names and its finalize can commit `artifacts`
-rows against them. That is residual 2 in §Consequences, filed as #1557.
+The barrier reaches exactly that far, and this ADR states its limits rather than asserting it is
+absolute. Two classes of writer sit outside it, both because phase 2 no longer holds the owner lock
+that used to span the check and the delete:
 
-### 3. A failed key does not strand the rest, and does not raise
+- a **re-mint** creates a *new* manifest row, lifting the barrier for the window it opens; upload
+  keys are owner-addressed, so that window reuses these same key names;
+- `local/runs/<id>/` is the Run's **owner** prefix, not an upload-only namespace, and phase 1 dooms
+  everything `list_prefix` returns under it. Other run-scoped writers put objects there and commit
+  `artifacts` rows for them under no manifest at all — `control.capture_traffic`'s
+  `pcap-<job_id>`, whose PUT and row insert share one `RUN`-locked transaction, and the vmcore
+  rows, whose objects are PUT by the provider well before `finalize_capture` inserts them.
+
+`capture_traffic` is **newly** exposed: its orphan-then-retry path (a prior attempt whose PUT
+survived a rolled-back transaction, re-PUT under the same key on retry) could not interleave while
+the reaper held the `RUN` lock across the per-key check and delete. The vmcore exposure predates
+this change, since its object already existed rowless outside any lock. Both are residual 2 in
+§Consequences, filed as #1557, and `test_a_key_that_gains_an_artifacts_row_after_the_claim_is_
+still_deleted` pins the behaviour so the residual has a reproducer.
+
+### 3. A failed key strands nothing, and the pass reports it at the end
 
 Phase 2 catches `CategorizedError` per key, logs it at WARNING with the key, and continues; a
-non-zero failure count is then logged once at ERROR naming the owner and the counts. Raising would
-be worse on every axis: the row is already durably gone, so the owner *is* reaped and there is
+non-zero failure count is then logged once at ERROR naming the owner and the counts. Raising *there*
+would be worse on every axis: the row is already durably gone, so the owner *is* reaped and there is
 nothing to retry, and `repair_abandoned_uploads` has no per-candidate `try`, so one bad key would
 abandon every later owner in the pass. `CategorizedError` is caught specifically — the category the
 store wraps `BotoCoreError`/`ClientError` in, matching `_cleanup_chunks_and_manifest`'s precedent —
 so a programming error still crashes and `CancelledError` still propagates.
+
+Swallowing it *entirely*, however, would silently degrade an existing signal, so the counts travel
+up as `ReapOutcome.undeleted` and `repair_abandoned_uploads` raises once, **after** every candidate
+has been reaped. `_run_repair_plan` puts only a repair that raises into `failures`, and `failures`
+is the sole input to the ADR-0190 group-E error counter — so without the end-of-pass raise, a store
+rejecting every delete would add N to `kdive.reconciler.repairs` and zero to `kdive.errors`, making
+the one condition that leaks bytes permanently the healthiest-looking pass on the dashboard, and
+leaving #1556's backlog unmeasurable. The pass forfeits its reaped count to say so, which is the
+right way round: the count is a gauge, the error is the alert, and the rows are durably deleted
+either way. Raising after the loop rather than inside it is what keeps requirement "one bad key
+costs no other owner its reap" true at the same time.
 
 Those two logs only cover the failure modes phase 2 can *observe*. The abort modes this ADR's
 Context names as motivating — cancellation at shutdown, a lost connection, a process kill — unwind
@@ -115,34 +139,51 @@ a storage-cost bug that is invisible until someone looks at the bucket — accep
 dangling `kernel_ref` on a `succeeded` Run is not recoverable by any later sweep and leaked bytes
 are.
 
-**Phase 2 no longer excludes a re-mint, on either lane.** Object deletion outside the owner lock
-means a re-mint can now interleave between the row-delete commit and the object deletes; upload keys
-are owner-addressed (`local/runs/<id>/<name>`), so a re-minted window reuses the same key names and
-the sweep — which deletes the phase-1 key list unconditionally, re-reading nothing — would remove
-the new window's bytes. The trigger is just that: **one re-minted PUT landing on a key before the
-sweep reaches that key's `delete_object`.** The finalize may commit arbitrarily later and still be
-corrupted, because `_require_unreaped_window` compares the *new* window's deadline against the one
-that finalize itself validated, and they match. It is the same corruption class this ADR removes,
-and it is narrower only in the sense that the old defect needed nothing more than a finalize
-straddling the deadline. It is not exotic: a re-mint is the *documented recovery* from a reap
-(ADR-0448), so it is on the recovery path, not off it. In practice the sweep is a handful of
-`delete_object` calls and completes long before an agent can re-mint and re-upload, so reaching it
-needs a stalled or degraded store — but that is exactly the condition this change exists for.
+**Phase 2 no longer serializes against the writers that can commit a row at a doomed key.** The
+sweep deletes the phase-1 key list unconditionally, re-reading nothing, and it holds no owner lock
+while it does — so any writer that can put an object at one of those keys, or commit an `artifacts`
+row for one, wins a race the old order made impossible by holding the `RUN` lock across the per-key
+check and its delete. Three writers qualify (§Decision 2 names them at the site):
 
-This also **puts the investigations lane in scope**, which the Context excused for the *original*
-defect and cannot excuse here: `complete_rootfs_upload`'s single-transaction `INVESTIGATION`-locked
-finalize serialised against a reap only while the reap held that lock, and phase 2 does not.
+- A **re-mint**. Upload keys are owner-addressed, so a re-minted window reuses the same key names.
+  The trigger is one re-minted PUT landing on a key before the sweep reaches that key's
+  `delete_object`; the finalize may commit arbitrarily later and still be corrupted, because
+  `_require_unreaped_window` compares the *new* window's deadline against the one that finalize
+  itself validated, and they match. It is not exotic — a re-mint is the *documented recovery* from
+  a reap (ADR-0448), so this sits on the recovery path, not off it.
+- **`control.capture_traffic`.** `local/runs/<id>/` is the owner prefix, so its `pcap-<job_id>`
+  object is doomed by phase 1 whenever it exists rowless — which happens when an earlier attempt's
+  PUT survived a rolled-back transaction. The retry re-PUTs the same key and commits the row; if
+  that lands during phase 2, the row outlives its object. **Newly** exposed by this change.
+- **The vmcore rows.** The provider PUTs `local/runs/<id>/<name>` outside any lock, well before
+  `finalize_capture` inserts the rows. This exposure predates this change (the object was already
+  rowless outside the lock) and is not widened by it, but the barrier claim would have denied it,
+  so it is disclosed here rather than left implied.
 
-Filed as **#1557**, with the options costed there rather than guessed at here. None is free:
-re-reading `upload_manifests` once before the sweep is one indexed query but sits *before* the
-delete loop, which is the exposed interval; a per-key re-check (`repair_leaked_images`' precedent)
-shrinks the window to one check→delete gap but returns a query per key and a database connection to
-the phase #1554 wants free of both; a store-mtime grace (also `repair_leaked_images`' precedent)
-closes it outright but needs a prefix-parameterised sibling of `list_image_objects` and permanently
-leaks any object whose presigned PUT began before the deadline and completed after it — a routine
-path, not a rare one, traded against a rare corruption. An identity-conditioned delete does not
-close it at all: `Last-Modified` has one-second granularity and a byte-identical re-upload carries
-the same etag.
+This also **puts the investigations lane in scope** for the re-mint case, which the Context excused
+for the *original* defect and cannot excuse here: `complete_rootfs_upload`'s single-transaction
+`INVESTIGATION`-locked finalize serialised against a reap only while the reap held that lock, and
+phase 2 does not.
+
+In practice the sweep is a handful of `delete_object` calls and finishes well inside any of these
+windows, so reaching it needs a stalled or degraded store — which is exactly the condition this
+change exists for.
+
+All three are filed as **#1557**, with the options costed there rather than guessed at here — one
+issue rather than three, because the per-key re-check that closes any of them closes all of them.
+None is free: re-reading `upload_manifests` once before the sweep is one indexed query but sits
+*before* the delete loop, which is the exposed interval, and does nothing for the two non-manifest
+writers; a per-key re-check (`repair_leaked_images`' precedent) shrinks the window to one
+check→delete gap for all three but returns a query per key and a database connection to the phase
+#1554 wants free of both; a store-mtime grace (also `repair_leaked_images`' precedent) closes them
+outright but needs a prefix-parameterised sibling of `list_image_objects` and permanently leaks any
+object whose presigned PUT began before the deadline and completed after it — a routine path, not a
+rare one, traded against a rare corruption. Narrowing the doomed set to the manifest's own declared
+entries and their `chunk_key` derivatives would exclude the pcap and vmcore keys entirely, but it
+also retires the prefix sweep's stray-object backstop (ADR-0048 §6, ADR-0104 §7), which is a
+decision for #1557, not a side effect of a reorder. An identity-conditioned delete does not close
+anything: `Last-Modified` has one-second granularity and a byte-identical re-upload carries the same
+etag.
 
 `repair_abandoned_uploads` still has no per-candidate `try`, so **any** fault during one owner's
 phase 1 ends the pass — `CategorizedError` included, and a failing `store.list_prefix` is the most
@@ -152,8 +193,15 @@ phase 1 aborts before the row delete commits, so the next 30-second pass re-read
 candidates with no objects deleted.
 
 The two-phase split is also the shape #1554's concurrent sweep needs: a short locked transaction
-that decides, and a phase touching only the object store, fannable out without holding a lock or a
-pooled connection.
+that decides, and a phase touching only the object store, fannable out without holding a lock. It
+is **not** yet free of a pooled connection, and #1554 should not read it as such: the connection
+left `_sweep_uncommitted_objects`' signature, not the call stack, and `_run_repair_plan` keeps
+`pool.connection()` checked out around the whole `repair_abandoned_uploads` call — so on a degraded
+store one pooled connection now sits idle for the length of the sweep, and a fan-out would pin it
+for the length of the widest branch. Making that real means restructuring the driver, which is
+#1554's to do.
 
-No schema, no migration, no config setting, no MCP or RBAC surface, no metric, and no change to
-either finalize path. Not an AI surface.
+No schema, no migration, no config setting, no MCP or RBAC surface, and no change to either
+finalize path. No **new** metric — but the ADR-0190 group-E error counter's meaning for this repair
+is preserved deliberately rather than by accident, via §Decision 3's end-of-pass raise; without it
+this change would have silently retired that signal. Not an AI surface.
