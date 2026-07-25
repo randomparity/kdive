@@ -121,8 +121,15 @@ class CompleteBuildHandlers:
         except CompleteBuildExpiredWindowError as exc:
             return _expired_window_error(run_id, exc)
         except CompleteBuildConfigurationError as exc:
-            if exc.data.get("reason") == "no_upload_manifest":
-                return _no_manifest_error(run_id)
+            recovery = _WINDOW_GONE_DETAIL.get(str(exc.data.get("reason")))
+            if recovery is not None:
+                return ToolResponse.failure(
+                    run_id,
+                    ErrorCategory.CONFIGURATION_ERROR,
+                    detail=recovery,
+                    suggested_next_actions=[CREATE_RUN_UPLOAD_TOOL],
+                    data=exc.data,
+                )
             return _config_error(run_id, data=exc.data)
         except CompleteBuildValidationError as exc:
             return ToolResponse.failure_from_error(
@@ -172,21 +179,16 @@ def _expired_window_error(run_id: str, exc: CompleteBuildExpiredWindowError) -> 
     )
 
 
-def _no_manifest_error(run_id: str) -> ToolResponse:
-    """Reject a finalize with no open window, pointing at the mint that opens one (ADR-0448).
-
-    This is where a finalize that arrives *after* the reaper collected a lapsed window lands —
-    the more common post-expiry outcome, since the reaper's candidate predicate is the same
-    `deadline < now()` the expiry rejection fires on. It therefore carries the same recovery
-    action as that rejection, so every "your window is gone" path routes to one call.
-    """
-    return ToolResponse.failure(
-        run_id,
-        ErrorCategory.CONFIGURATION_ERROR,
-        detail="this Run has no open upload window; mint one and upload before finalizing",
-        suggested_next_actions=[CREATE_RUN_UPLOAD_TOOL],
-        data={"reason": "no_upload_manifest"},
-    )
+_WINDOW_GONE_DETAIL = {
+    # Every "the window you were finalizing is not there any more" rejection routes to the one
+    # call that re-opens one (ADR-0448). `no_upload_manifest` is the *more common* post-expiry
+    # landing — the reaper fires on the same `deadline < now()` the expiry rejection does — so
+    # leaving it bare, as it was, stranded the majority case.
+    "no_upload_manifest": "this Run has no open upload window; mint one and upload before "
+    "finalizing",
+    "upload_window_replaced": "the upload window this finalize validated was replaced by a "
+    "re-mint; upload against the current window and finalize again",
+}
 
 
 def _complete_envelope(

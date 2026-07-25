@@ -267,6 +267,55 @@ def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
     asyncio.run(_run())
 
 
+def test_complete_build_finalizer_declines_when_the_window_is_reminted_mid_validation(
+    migrated_url: str,
+) -> None:
+    """Presence is not identity: a reap plus a re-mint must not commit the validated window.
+
+    The object keys are owner-addressed and identical across re-mints, so nothing downstream
+    would notice the swap — the commit would register rows carrying the deleted objects' etags.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+
+            def reap_and_remint_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
+                with psycopg.connect(migrated_url, autocommit=True) as other:
+                    other.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                    other.execute(
+                        "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, "
+                        "deadline) VALUES ('runs', %s, %s, %s, now() + interval '1 hour')",
+                        (
+                            run_id,
+                            f"local/runs/{run_id}/",
+                            Jsonb([{"name": "kernel", "sha256": "c", "size_bytes": 1}]),
+                        ),
+                    )
+                return FakeValidator(_output(run_id))(*args, **kwargs)
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=reap_and_remint_then_validate),
+            )
+            run = await _run_by_id(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+            remint_kept = await _manifest_present(pool, run_id)
+
+        assert error.data == {"reason": "upload_window_replaced"}
+        assert run.state is RunState.CREATED
+        assert artifact_rows == []
+        assert remint_kept  # the agent's fresh window is not deleted out from under it
+
+    asyncio.run(_run())
+
+
 def test_complete_build_finalizer_declines_chunked_reassembly_of_a_reaped_window(
     migrated_url: str,
 ) -> None:

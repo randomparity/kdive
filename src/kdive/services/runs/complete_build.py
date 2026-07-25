@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
@@ -73,14 +73,16 @@ class CompleteBuildValidation(Protocol):
 type ObjectStoreFactory = Callable[[], ExternalBuildStore]
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, eq=False)
 class CompleteBuildConfigurationError(Exception):
     """Caller-correctable configuration rejection data for the MCP envelope.
 
     Deliberately not ``frozen``, unlike its siblings: this is the only one of these raised from
     inside ``advisory_xact_lock``, and ``contextlib`` assigns ``__traceback__`` on an exception
     it re-raises out of an async context manager — which a frozen dataclass rejects with
-    ``FrozenInstanceError``, masking the real rejection.
+    ``FrozenInstanceError``, masking the real rejection. ``eq=False`` keeps the identity-based
+    ``__eq__``/``__hash__`` an exception is expected to have: unfreezing alone would have made
+    ``dataclasses`` set ``__hash__ = None`` and compare two distinct rejections equal by value.
     """
 
     data: dict[str, JsonValue]
@@ -171,8 +173,9 @@ class CompleteBuildFinalizer:
         build_id: str | None,
         arch: str,
     ) -> _ExternalBuildFinalization:
+        window_deadline = prepared.manifest_row.deadline
         if prepared.store is not None:
-            await _reassemble_chunked_artifacts(
+            window_deadline = await _reassemble_chunked_artifacts(
                 conn, uid, run_id, prepared.manifest_row, prepared.store
             )
 
@@ -196,6 +199,7 @@ class CompleteBuildFinalizer:
             entries=prepared.manifest_row.entries,
             prefix=prepared.manifest_row.prefix,
             chunked=prepared.has_chunks,
+            window_deadline=window_deadline,
         )
 
     def _validate_complete_build(
@@ -235,6 +239,12 @@ class _ExternalBuildFinalization:
     entries: Sequence[ManifestEntry]
     prefix: str
     chunked: bool
+    window_deadline: datetime
+    """The deadline of the manifest these artifacts were validated against — the window's identity.
+
+    A manifest row carrying a different deadline at commit time is one a concurrent re-mint
+    replaced, not the one this finalize read (ADR-0448 §2).
+    """
 
 
 async def _require_open_window(
@@ -251,15 +261,21 @@ async def _require_open_window(
     ``now()`` is ``transaction_timestamp()`` and the whole request runs inside one transaction, so
     this is a verdict on the request's *arrival*: a finalize that arrived inside the window is not
     rejected for the time it then spends reading a multi-GiB payload. Arrival is not sufficient on
-    its own — the reaper can collect the window during that read — so the authoritative guard is
-    ``_finalize_external_build``'s re-read of the manifest under the ``RUN`` lock, and this check
-    is the fail-fast that keeps a lapsed window from being read at all.
+    its own — on the single-PUT path nothing is locked while that payload is read, so the reaper
+    can collect the window meanwhile — which is why ``_finalize_external_build`` re-reads the
+    manifest under the ``RUN`` lock before committing. This check is the fail-fast that keeps a
+    lapsed window from being read at all, and the one that produces the self-correcting payload.
 
     Raises:
         CompleteBuildExpiredWindowError: The window closed before this finalize arrived.
     """
     stamp = await upload_manifest.deadline_stamp(conn, manifest_row)
     if stamp.deadline < stamp.server_time:
+        _log.info(
+            "runs.complete_build rejected: upload window expired (deadline %s, server_time %s)",
+            stamp.deadline,
+            stamp.server_time,
+        )
         raise CompleteBuildExpiredWindowError(stamp)
 
 
@@ -269,11 +285,19 @@ async def _reassemble_chunked_artifacts(
     run_id: str,
     manifest_row: upload_manifest.UploadManifest,
     store: ExternalBuildStore,
-) -> None:
+) -> datetime:
+    """Extend the window, reassemble the chunked artifacts, and return the extended deadline.
+
+    The ``RUN`` lock taken here is transaction-scoped and this ``conn.transaction()`` is a
+    savepoint (the request's transaction is already open), so ``RELEASE SAVEPOINT`` does *not*
+    drop it: the lock is held for the rest of the request. That is deliberate — it is what keeps
+    the reaper off the chunk objects for the whole reassembly — and it is why the unlocked stretch
+    ``_require_unreaped_window`` guards exists only on the single-PUT path.
+    """
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
         refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, ttl)
-    if not refreshed:
+    if refreshed is None:
         # `_require_open_window` passed on this transaction's clock, and `now()` is
         # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
         # a declined refresh here means the row is gone, reaped between the two reads.
@@ -285,6 +309,7 @@ async def _reassemble_chunked_artifacts(
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
+    return refreshed
 
 
 async def _reassemble_artifacts(
@@ -352,7 +377,7 @@ async def _finalize_external_build(
             return await _existing_build_result(conn, run.id) or result
         if state is not RunState.CREATED:
             raise CompleteBuildConfigurationError({"current_status": state.value})
-        await _require_unreaped_window(conn, run.id)
+        await _require_unreaped_window(conn, run.id, finalization.window_deadline)
         await _insert_artifact_rows(conn, run.id, finalization)
         await _record_build_step(conn, run.id, result)
         await _mark_run_succeeded(conn, run.id, finalization.output)
@@ -370,24 +395,40 @@ async def _finalize_external_build(
     return result
 
 
-async def _require_unreaped_window(conn: AsyncConnection, run_id: UUID) -> None:
-    """Refuse to commit against a window the reaper collected mid-finalize (ADR-0448).
+async def _require_unreaped_window(
+    conn: AsyncConnection, run_id: UUID, expected_deadline: datetime
+) -> None:
+    """Refuse to commit unless the validated window is still the one on the row (ADR-0448 §2).
 
-    ``_require_open_window`` judges the request's arrival, but validation between the two reads
-    is an unlocked stretch long enough for the 30-second upload reaper to take this same ``RUN``
-    lock, delete every still-uncommitted object under the Run's prefix, and drop the manifest.
-    Committing after that would register ``artifacts`` rows against keys that no longer exist and
-    mark the Run ``succeeded``. Re-reading the manifest here — inside the lock, immediately before
-    the writes — is what actually serializes the two, in both orders: a finalize that wins the
-    lock deletes the manifest and the reaper then finds no row, and a reaper that wins is seen
-    here. The deadline is deliberately not re-compared: ``now()`` is frozen for this transaction,
-    so the arrival verdict ``_require_open_window`` reached is the one that stands.
+    ``_require_open_window`` judges the request's arrival. On the **single-PUT** path nothing is
+    locked between that check and the commit, and reading the payload takes long enough for the
+    30-second upload reaper to take this same ``RUN`` lock, delete every still-uncommitted object
+    under the Run's prefix, and drop the manifest. (The chunked path holds the ``RUN`` lock from
+    ``_reassemble_chunked_artifacts`` onward, so no reaper or re-mint can interleave there; this
+    check simply re-asserts an invariant that path already has.)
+
+    Presence alone is not enough. A reap followed by a re-mint leaves *a* manifest row, and the
+    run object keys are owner-addressed, so nothing downstream would notice the swap — the commit
+    would register ``artifacts`` rows carrying the deleted objects' etags and mark the Run
+    ``succeeded`` with a dangling ``kernel_ref``. The deadline of the window that was validated is
+    therefore the identity compared here: it is stamped from ``now()`` on every re-mint, so a
+    different value is a different window.
 
     Raises:
-        CompleteBuildConfigurationError: The window is gone; the caller must re-mint.
+        CompleteBuildConfigurationError: The window was reaped or replaced; the caller must
+            re-mint and finalize against the window it actually uploaded to.
     """
-    if await upload_manifest.get_manifest(conn, "runs", run_id) is None:
+    current = await upload_manifest.get_manifest(conn, "runs", run_id)
+    if current is None:
+        _log.info(
+            "runs.complete_build rejected: upload window reaped mid-finalize (run %s)", run_id
+        )
         raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
+    if current.deadline != expected_deadline:
+        _log.info(
+            "runs.complete_build rejected: upload window replaced mid-finalize (run %s)", run_id
+        )
+        raise CompleteBuildConfigurationError({"reason": "upload_window_replaced"})
 
 
 async def _insert_artifact_rows(
