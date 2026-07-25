@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 from typing import cast
 
 import pytest
 
 from kdive.__main__ import build_parser
 from kdive.observability.facade import Telemetry
+from kdive.processes.runtime import (
+    POOL_CLOSE_TIMEOUT_SECONDS,
+    POOL_OPEN_TIMEOUT_SECONDS,
+)
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def _warm_open() -> list[str]:
+    """The warm-up the runtime must perform: open, then take one connection (ADR-0449)."""
+    return ["open", f"acquire(timeout={POOL_OPEN_TIMEOUT_SECONDS})"]
+
+
+def _close() -> str:
+    """Teardown, at the bounded timeout that keeps a stuck worker off the fail-fast path."""
+    return f"close(timeout={POOL_CLOSE_TIMEOUT_SECONDS})"
 
 
 def test_reconciler_subcommand_parses() -> None:
@@ -52,11 +68,19 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     discovery_release = asyncio.Event()
 
     class _FakePool:
-        async def open(self) -> None:
-            events.append("open")
+        # Mirrors the `AsyncConnectionPool` surface the runtime uses. Record the warm-up,
+        # not just the open: the runtime must establish one connection at start (ADR-0449),
+        # and a fake that discards that lets a revert to the cold default pass.
+        async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+            events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
 
-        async def close(self) -> None:
-            events.append("close")
+        @contextlib.asynccontextmanager
+        async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+            events.append(f"acquire(timeout={timeout})")
+            yield object()
+
+        async def close(self, timeout: float = 5.0) -> None:
+            events.append(f"close(timeout={timeout})")
 
     monkeypatch.setattr("kdive.processes.reconciler.create_pool", lambda **kw: _FakePool())
     monkeypatch.setattr(
@@ -128,8 +152,8 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
 
     asyncio.run(__main__._run_reconciler(expected_registry, _fake_telemetry()))
 
-    assert events[0] == "open"
-    assert events[-1] == "close"
+    assert events[:2] == _warm_open()
+    assert events[-1] == _close()
     assert "discover-end" in events
     assert events.index("run") < events.index("discover-end")
     assert constructed["reaper"] is expected_reaper

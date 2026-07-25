@@ -23,6 +23,7 @@ import pytest
 from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
+import kdive.mcp.middleware.usage as usage_mod
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
@@ -31,6 +32,10 @@ from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.usage_support import recording_must_not_fail, warm_pool
+
+# A loopback port nothing listens on: connects are refused immediately, so an opened pool
+# retries and the acquire exhausts its budget rather than hanging on an unroutable address.
+_UNREACHABLE_DB = "postgresql://kdive@127.0.0.1:1/kdive?connect_timeout=1"
 
 
 def _ctx() -> RequestContext:
@@ -192,6 +197,128 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(AssertionError, match="PoolClosed"):
         asyncio.run(_run())
+
+
+def test_swallowed_recording_failure_increments_the_drop_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0148 keeps the swallow, ADR-0449 makes it countable: a dropped row is only
+    # observable to an operator through a WARNING in the log stream today, which is
+    # invisible to anything scraping /metrics.
+    #
+    # An *open* pool against an unreachable backend, not the never-opened pool the tests
+    # above use: that one raises PoolClosed, whereas the condition #1535 is about — and the
+    # one the `pool_timeout` label has to isolate — is an open pool that cannot hand out a
+    # connection inside the acquire budget.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+    drops: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        usage_mod._RECORDING_FAILURES,
+        "add",
+        lambda amount, labels: drops.append((amount, labels)),
+    )
+
+    async def _run() -> None:
+        pool = AsyncConnectionPool(_UNREACHABLE_DB, min_size=1, open=False)
+        await pool.open()  # cold by default: no connection exists to hand out
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
+
+        async def ok(_c: Any) -> ToolResult:
+            envelope = ToolResponse.success("jobs.get", "ok")
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        try:
+            await mw.on_call_tool(_Ctx("jobs.get"), ok)
+        finally:
+            await pool.close(timeout=1.0)
+
+    asyncio.run(_run())
+    # `pool_timeout` specifically: the whole point of the label is that a pool that could not
+    # hand out a connection — the loss mode ADR-0449 defers pool sizing to — is separable from
+    # a SQL or schema failure, which argues for something else entirely.
+    assert drops == [(1, {"reason": "pool_timeout"})]
+
+
+def test_a_non_pool_recording_failure_counts_as_other(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other half of the label's job. `_record`'s except clause wraps the whole body, so a
+    # failure that is *not* the pool failing to hand out a connection must not read as
+    # evidence for a pool-sizing change — that is the decision ADR-0449 defers to this series.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+    drops: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        usage_mod._RECORDING_FAILURES,
+        "add",
+        lambda amount, labels: drops.append((amount, labels)),
+    )
+
+    def _broken_insert(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError('relation "tool_invocation" does not exist')
+
+    monkeypatch.setattr(usage_mod, "record_usage", _broken_insert)
+
+    async def _run() -> None:
+        async with warm_pool(migrated_url) as pool:
+            mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry())
+
+            async def ok(_c: Any) -> ToolResult:
+                envelope = ToolResponse.success("jobs.get", "ok")
+                return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+            await mw.on_call_tool(_Ctx("jobs.get"), ok)
+
+    asyncio.run(_run())
+    assert drops == [(1, {"reason": "other"})]
+
+
+def test_a_failing_drop_counter_still_cannot_fail_the_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0148's swallow is unconditional, so the instrument added to observe it must not
+    # outrank the failure it observes: a raising `add()` must not escape `_record` and fail
+    # a call the swallow exists to protect.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+
+    def _broken(_amount: int, _labels: dict[str, str]) -> None:
+        raise RuntimeError("meter provider is broken")
+
+    monkeypatch.setattr(usage_mod._RECORDING_FAILURES, "add", _broken)
+
+    async def _run() -> Any:
+        pool = AsyncConnectionPool("postgresql://unused", open=False)  # never opened
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
+
+        async def ok(_c: Any) -> ToolResult:
+            envelope = ToolResponse.success("jobs.get", "ok")
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        return await mw.on_call_tool(_Ctx("jobs.get"), ok)
+
+    assert asyncio.run(_run()) is not None
+
+
+def test_successful_recording_leaves_the_drop_counter_alone(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The counter must mean "a row was lost", not "a call happened" — otherwise an alert on
+    # it fires constantly and stops being read.
+    drops: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        usage_mod._RECORDING_FAILURES,
+        "add",
+        lambda amount, labels: drops.append((amount, labels)),
+    )
+
+    async def ok(_c: Any) -> ToolResult:
+        envelope = ToolResponse.success("jobs.get", "ok")
+        return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+    assert _drive(migrated_url, "jobs.get", ok, monkeypatch) == [("jobs.get", "ok", "alice", "a")]
+    assert drops == []
 
 
 def test_warm_pool_has_a_connection_before_the_caller_acquires(migrated_url: str) -> None:
