@@ -72,23 +72,28 @@ class CompleteBuildValidation(Protocol):
 
 type ObjectStoreFactory = Callable[[], ExternalBuildStore]
 
+NO_UPLOAD_MANIFEST = "no_upload_manifest"
+"""No upload window is recorded for this Run — never minted, or already reaped."""
+
+UPLOAD_WINDOW_REPLACED = "upload_window_replaced"
+"""A re-mint replaced the window this finalize validated (ADR-0448 §2)."""
+
+# Every exception below is `eq=False` and unfrozen, deliberately. `contextlib` assigns
+# `__traceback__` to an exception it re-raises out of an async context manager, so a *frozen*
+# dataclass exception raised anywhere inside `advisory_xact_lock` dies with `FrozenInstanceError`
+# instead of the rejection it carries — a trap that already cost this module two silently broken
+# raise sites. `eq=False` restores the identity `__eq__`/`__hash__` an exception should have;
+# unfreezing alone would set `__hash__ = None` and make two distinct rejections compare equal.
+
 
 @dataclass(slots=True, eq=False)
 class CompleteBuildConfigurationError(Exception):
-    """Caller-correctable configuration rejection data for the MCP envelope.
-
-    Deliberately not ``frozen``, unlike its siblings: this is the only one of these raised from
-    inside ``advisory_xact_lock``, and ``contextlib`` assigns ``__traceback__`` on an exception
-    it re-raises out of an async context manager — which a frozen dataclass rejects with
-    ``FrozenInstanceError``, masking the real rejection. ``eq=False`` keeps the identity-based
-    ``__eq__``/``__hash__`` an exception is expected to have: unfreezing alone would have made
-    ``dataclasses`` set ``__hash__ = None`` and compare two distinct rejections equal by value.
-    """
+    """Caller-correctable configuration rejection data for the MCP envelope."""
 
     data: dict[str, JsonValue]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, eq=False)
 class CompleteBuildExpiredWindowError(Exception):
     """The Run's upload window lapsed before this finalize arrived (ADR-0448).
 
@@ -100,14 +105,14 @@ class CompleteBuildExpiredWindowError(Exception):
     stamp: upload_manifest.ManifestStamp
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, eq=False)
 class CompleteBuildValidationError(Exception):
     """External upload validation rejected the artifact set."""
 
     error: CategorizedError
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, eq=False)
 class _CompleteBuildAlreadyRecorded(Exception):
     result: BuildStepResult
 
@@ -150,7 +155,7 @@ class CompleteBuildFinalizer:
 
         manifest_row = await upload_manifest.get_manifest(conn, "runs", run.id)
         if manifest_row is None:
-            raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
+            raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
         await _require_open_window(conn, run.id, manifest_row)
         has_chunks = any(entry.chunks is not None for entry in manifest_row.entries)
         keys = {entry.name: f"{manifest_row.prefix}{entry.name}" for entry in manifest_row.entries}
@@ -303,7 +308,7 @@ async def _reassemble_chunked_artifacts(
         # `_require_open_window` passed on this transaction's clock, and `now()` is
         # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
         # a declined refresh here means the row is gone, reaped between the two reads.
-        raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
+        raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
     try:
         await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
@@ -425,12 +430,12 @@ async def _require_unreaped_window(
         _log.info(
             "runs.complete_build rejected: upload window reaped mid-finalize (run %s)", run_id
         )
-        raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
+        raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
     if current.deadline != expected_deadline:
         _log.info(
             "runs.complete_build rejected: upload window replaced mid-finalize (run %s)", run_id
         )
-        raise CompleteBuildConfigurationError({"reason": "upload_window_replaced"})
+        raise CompleteBuildConfigurationError({"reason": UPLOAD_WINDOW_REPLACED})
 
 
 async def _insert_artifact_rows(
@@ -517,6 +522,8 @@ async def _cleanup_chunks_and_manifest(
 
 
 __all__ = [
+    "NO_UPLOAD_MANIFEST",
+    "UPLOAD_WINDOW_REPLACED",
     "CompleteBuildConfigurationError",
     "CompleteBuildExpiredWindowError",
     "CompleteBuildFinalizer",

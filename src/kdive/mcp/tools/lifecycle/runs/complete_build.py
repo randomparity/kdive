@@ -28,6 +28,8 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
 from kdive.services.runs.complete_build import (
+    NO_UPLOAD_MANIFEST,
+    UPLOAD_WINDOW_REPLACED,
     CompleteBuildConfigurationError,
     CompleteBuildExpiredWindowError,
     CompleteBuildFinalizer,
@@ -183,10 +185,11 @@ _WINDOW_GONE_DETAIL = {
     # Every "the window you were finalizing is not there any more" rejection routes to the one
     # call that re-opens one (ADR-0448). `no_upload_manifest` is the *more common* post-expiry
     # landing — the reaper fires on the same `deadline < now()` the expiry rejection does — so
-    # leaving it bare, as it was, stranded the majority case.
-    "no_upload_manifest": "this Run has no open upload window; mint one and upload before "
-    "finalizing",
-    "upload_window_replaced": "the upload window this finalize validated was replaced by a "
+    # leaving it bare, as it was, stranded the majority case. Keyed off the service's own
+    # constants: a rename there is then an import error here, not a silent downgrade to a bare
+    # `configuration_error`.
+    NO_UPLOAD_MANIFEST: "this Run has no open upload window; mint one and upload before finalizing",
+    UPLOAD_WINDOW_REPLACED: "the upload window this finalize validated was replaced by a "
     "re-mint; upload against the current window and finalize again",
 }
 

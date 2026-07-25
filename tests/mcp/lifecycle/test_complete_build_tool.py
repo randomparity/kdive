@@ -675,6 +675,8 @@ def test_complete_build_writes_effective_config_artifact(
 from collections.abc import Sequence  # noqa: E402
 from datetime import UTC, datetime, timedelta  # noqa: E402
 
+import psycopg  # noqa: E402
+
 from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
 from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
 
@@ -850,6 +852,41 @@ def test_complete_build_missing_manifest_points_at_the_mint(migrated_url: str) -
         assert resp.data["reason"] == "no_upload_manifest"
         assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
         assert resp.detail is not None
+
+    asyncio.run(_run())
+
+
+def test_complete_build_replaced_window_points_at_the_mint(migrated_url: str) -> None:
+    """A re-mint that lands mid-finalize is rejected through the envelope, not just the service."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+
+            def remint_then_validate(*args: Any, **kwargs: Any):
+                with psycopg.connect(migrated_url, autocommit=True) as other:
+                    other.execute(
+                        "UPDATE upload_manifests SET deadline = now() + interval '2 hours' "
+                        "WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))(
+                    *args, **kwargs
+                )
+
+            resp = await CompleteBuildHandlers(
+                validate_complete_build=remint_then_validate
+            ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
+            keys = await _artifact_keys(pool, run_id)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "upload_window_replaced"
+        assert resp.detail
+        assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
+        assert keys == set()
+        assert run is not None and run.state is RunState.CREATED
 
     asyncio.run(_run())
 
