@@ -81,7 +81,7 @@ open).
 
 The gate distinguishes "no usable base" from "cannot look" (R7). `FileNotFoundError`,
 `NotADirectoryError`, and `IsADirectoryError` — the set `is_file()` answered `False` for — return
-`False`; every other `OSError` raises `_staging_fault`. `is_file()` was a `stat` needing only
+`False`; every other `OSError` raises `_unreadable_base_fault`. `is_file()` was a `stat` needing only
 traverse permission, while the probe `open`s the file, so `EACCES`/`EMFILE`/`EIO` are newly
 reachable and none of them means the base is corrupt.
 
@@ -101,6 +101,14 @@ staged, so the message names a present-but-unreadable file rather than a failed 
 
 The magic read is a 4-byte read (R4) and is exactly what the staging path already asserted about
 the same bytes, so it cannot false-reject a base this code produced (R5).
+
+**What the gate does and does not catch.** It catches truncation, an empty file, garbage written over
+the path, and a whole-file-zeroed base. It does *not* catch damage past the first four bytes — and
+because the rename follows the completed write, a multi-GiB base's dirty residue at crash time is
+its tail, so the head-intact/tail-torn base is the expected crash survivor and passes. The reuse
+gate is therefore a partial re-validation of bases staged before this change, not a crash-torn-base
+detector; the `fsync` is what closes the crash case going forward. ADR-0443 §3 states this in full
+and #1539 tracks the sidecar completion marker that would close the residue.
 
 Two alternatives are ruled out by the data rather than by preference:
 

@@ -111,7 +111,8 @@ the base — `EACCES` under a worker/staging-user asymmetry of the shape ADR-044
 same subsystem, `EMFILE` under descriptor exhaustion, a transient `EIO`. `_reusable_staged_base`
 therefore returns `False` only for the errors that mean *there is no usable base at this path*
 (`FileNotFoundError`, `NotADirectoryError`, `IsADirectoryError` — the set `is_file()` answered
-`False` for) and raises everything else through `_staging_fault` as an `INFRASTRUCTURE_FAILURE`.
+`False` for) and raises everything else through `_unreadable_base_fault` (its own message, for the
+reason decision 4 gives) as an `INFRASTRUCTURE_FAILURE`.
 Swallowing those as a cache miss would be strictly worse than the code being fixed: the fault is
 persistent, so every provision in the investigation would serialize on the fetch lock and
 re-download a multi-GiB base, forever, with no error and no log.
@@ -147,10 +148,27 @@ nothing. Size is therefore not a weaker option to be traded off; it is not an op
 directly negates ADR-0441's decision to stage once per investigation.
 
 What magic-only buys, precisely: it catches a zeroed head, a truncation below four bytes, an empty
-file, and a garbage document written over the path. What it does not catch: corruption confined to
-the interior of a base whose first four bytes survived. Delayed allocation makes the zeroed-head
-case the common one — a rename that beat its data typically beat *all* of it — but the residue is
-real and is stated here rather than papered over.
+file, and a garbage document written over the path. What it does not catch: damage confined to
+anything past the first four bytes.
+
+**That residue is larger than it looks, and it is stated here rather than papered over.** The rename
+is not concurrent with the write — the stagers stream the whole object through a buffered writer and
+close it, and only then does the magic gate run and the rename happen. A multi-GiB download takes
+minutes, over which `dirty_background_ratio` and `dirty_expire_centisecs` force continuous writeback
+and `dirty_ratio` throttles a writer that outruns it, so by rename time most of the file is already
+allocated and on disk. What is still dirty is the **tail**. The expected crash-torn survivor of a
+large base is therefore head-intact and tail-zeroed — which starts with `QFI\xfb` and passes this
+gate. The whole-file-zeroed shape the gate does catch is the small-object case, where the entire
+write fit inside the dirty window.
+
+So for the population decision 2 is the net for — bases staged by code that predates decision 1 —
+the net catches the head-damaged shapes and misses the likeliest large one. The gate is still worth
+having (truncation, empty, garbage, and non-crash corruption from a bad disk or a stray `cp` are all
+real), but it is not a crash-torn-base detector for multi-GiB bases and must not be read as one. The
+sidecar completion marker under *Considered & rejected* is the design that would close it; #1539
+tracks it, rather than a conditional on the residue "proving real". An operator who knows a host
+crashed while an investigation was staging a base should delete that investigation's staging
+directory rather than trust this gate to have caught it.
 
 That residue is why the ordering of the two halves matters. Decision 1 removes the crash window that
 produces a torn base at all; decision 2 is the net for a base staged by code that predates decision
@@ -198,9 +216,11 @@ ownership of a file that is already present and probably intact.
   sync is largely a wait for writeback that would have happened anyway; the wall-clock cost is
   bounded by the disk, not added to it. It is paid once per investigation per checksum, never per
   System.
-- Bases staged by pre-ADR-0443 code are not trusted. A torn one is re-downloaded once, with a
-  `WARNING` naming it. A good one passes the magic gate and is reused as before, so there is no mass
-  re-download on upgrade.
+- Bases staged by pre-ADR-0443 code are **partially** re-validated. A head-damaged one is
+  re-downloaded once with a `WARNING` naming it; a good one passes and is reused, so there is no
+  mass re-download on upgrade. But a large base torn only in its tail — per decision 3, the likeliest
+  crash survivor — passes the gate and is reused silently, exactly as before. The upgrade does not
+  retroactively clean a host that already crashed mid-stage; only #1539 would.
 - An unreadable staged base now fails the provision with an `INFRASTRUCTURE_FAILURE` where the old
   `is_file()` would have reused it (if `stat` succeeded) or silently re-downloaded it. That is a new
   loud failure on a genuinely broken host, and it is the intended trade against a silent
@@ -210,9 +230,10 @@ ownership of a file that is already present and probably intact.
   `qemu-img` moments later regardless.
 - `_require_qcow2_magic` and `_reusable_staged_base` share one probe, so a future format change
   (a second magic, a version check) lands in one place and cannot leave the reuse gate behind.
-- Interior corruption of a base whose header survives is still reused. Detecting it requires reading
-  the base, which is the trade decision 3 declines. If that residue ever needs closing, the shape is
-  decision 3's rejected sidecar marker, not a hot-path checksum.
+- Damage past the first four bytes of a base is still reused, and per decision 3 that covers the
+  expected crash-torn shape of a multi-GiB base staged by pre-ADR-0443 code. Detecting it requires
+  reading the base, which is the trade decision 3 declines on the hot path. #1539 tracks the sidecar
+  completion marker, which closes it without one.
 
 ## Considered & rejected
 
@@ -228,9 +249,10 @@ ownership of a file that is already present and probably intact.
   otherwise does not touch. Second, it does not subsume decision 1: a marker written and synced
   after a *non*-synced base still admits a crash that loses the base's data and keeps both the
   rename and the marker, because nothing ordered them. The marker is a complement to the `fsync`,
-  not a substitute, and its incremental value over `fsync` + magic is the interior-corruption
-  residue alone. That is not worth a cross-file reclaim change here; it is recorded as the shape to
-  reach for if the residue proves real.
+  not a substitute, and its incremental value over `fsync` + magic is the past-the-header residue
+  alone — which decision 3 establishes is the *expected* shape for a large pre-ADR-0443 base, not a
+  hypothetical one. It is therefore filed as **#1539** rather than left conditional; it is deferred
+  only because the cross-file reclaim change does not belong in this diff.
 - **Re-verify the checksum on reuse.** The only check that fully answers "is this the base I
   staged". O(filesize) on every guest start against a base up to the 50 GiB cap, which negates
   ADR-0441's stage-once decision. Rejected in decision 3.

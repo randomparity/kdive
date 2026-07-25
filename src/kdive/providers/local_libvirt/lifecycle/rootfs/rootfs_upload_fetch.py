@@ -443,18 +443,21 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     close — with the checksum machinery skipped *because* the file existed.
 
     The re-check is the qcow2-magic probe the staging path already applies. It is O(1), so it stays
-    affordable on the per-System provision hot path, and it catches the zeroed-head, truncated,
-    empty, and garbage shapes a torn or half-written base takes. It is deliberately **not** a
-    checksum re-verify — that is O(filesize) against a base of tens of GiB, on every guest start,
-    which would undo the point of staging once per investigation. It is also deliberately not a
-    size comparison: ``artifacts.uncompressed_size`` is an upper *bound* rather than an exact size
+    affordable on the per-System provision hot path, and it catches the truncated, empty, garbage,
+    and whole-file-zeroed shapes. It is deliberately **not** a checksum re-verify — that is
+    O(filesize) against a base of tens of GiB, on every guest start, which would undo the point of
+    staging once per investigation. It is also deliberately not a size comparison:
+    ``artifacts.uncompressed_size`` is an upper *bound* rather than an exact size
     (``strip_gzip_to_writer`` caps output at it and accepts less) and is NULL on the identity path,
     so an equality gate would false-reject a good base and re-download it on every provision.
 
-    A base corrupted only in its interior therefore still passes here. That residue is why the
-    write side syncs (:func:`_durable_replace`) rather than relying on this gate: the sync removes
-    the crash window that produces such a base, and this gate is the net for one staged by code that
-    predates it, or corrupted by some other means.
+    **Do not read this as a crash-torn-base detector** (ADR-0443 §3). Damage past the first four
+    bytes passes, and the rename follows the *completed* write — so writeback has already flushed
+    most of a multi-GiB base by then and the dirty residue at crash time is its **tail**. The
+    expected large crash survivor is head-intact and tail-zeroed, and it passes here. That is why
+    the write side syncs (:func:`_durable_replace`) rather than relying on this gate: the sync
+    removes the crash window going forward, while this gate is a *partial* net for a base staged by
+    code that predates it, or corrupted by some other means. #1539 tracks closing the residue.
 
     Only the errors that mean *there is no usable base at this path* — it is absent, or a
     non-directory sits on its parent path, or a directory sits on its own — read as not reusable,
