@@ -64,20 +64,26 @@ def _report() -> Report:
     return Report(sections=(section,), as_of=_AS_OF)
 
 
-def _sheet_values(xlsx: bytes) -> dict[str, list[list[object]]]:
-    """Return ``{sheet title: rows of cell values}`` for a rendered workbook.
+def _sheet_values(xlsx: bytes) -> list[tuple[str, list[list[object]]]]:
+    """Return ``(sheet title, rows of cell values)`` per sheet, in workbook order.
 
-    The comparison unit is parsed content, not bytes. Two independent ``render_xlsx``
-    calls of the same report produce different bytes whenever they straddle a tick of
-    the zip format's two-second mtime granularity, and openpyxl stamps wall clock into
-    ``docProps/core.xml`` as well (#1494). Byte identity is not a property the renderer
-    offers; the workbook's content is.
+    The comparison unit is parsed content, not bytes, because two independent
+    ``render_xlsx`` calls of the same report differ in bytes on wall clock alone
+    (#1494), by two mechanisms: openpyxl stamps ``dcterms:created``/``modified`` into
+    ``docProps/core.xml``, and it writes every zip member with a bare arcname, so
+    ``zipfile`` stamps each member's mtime header at the format's two-second
+    granularity. Byte identity is not a property the renderer offers; the workbook's
+    content is.
+
+    A sequence, not a mapping: ``render_xlsx`` documents one sheet per section *in
+    registry order*, and dicts compare equal regardless of insertion order, so a
+    mapping would let a sheet reordering pass.
     """
     workbook = openpyxl.load_workbook(io.BytesIO(xlsx))
-    return {
-        title: [[cell.value for cell in row] for row in workbook[title].rows]
+    return [
+        (title, [[cell.value for cell in row] for row in workbook[title].rows])
         for title in workbook.sheetnames
-    }
+    ]
 
 
 def test_write_report_artifacts_xlsx_puts_named_data_and_presigns(migrated_url: str) -> None:
@@ -101,7 +107,7 @@ def test_write_report_artifacts_xlsx_puts_named_data_and_presigns(migrated_url: 
     assert put.name == "report.xlsx"
     put_values = _sheet_values(put.data)
     # The put payload is a readable workbook carrying this report's section and rows...
-    assert put_values == {"inventory": [["system_id", "vcpus"], ["s1", "4"]]}
+    assert put_values == [("inventory", [["system_id", "vcpus"], ["s1", "4"]])]
     # ...and it is the same workbook render_xlsx produces for the report.
     assert put_values == _sheet_values(expected_xlsx)
     assert put.owner_id == str(report_id)
