@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
@@ -24,6 +24,7 @@ from psycopg import AsyncConnection
 
 from kdive.artifacts.storage import ObjectListing
 from kdive.artifacts.upload_manifest import UPLOAD_TENANT
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.uploads import UPLOAD_OWNER_KINDS, UploadStore
 
 _log = logging.getLogger(__name__)
@@ -102,10 +103,13 @@ async def repair_leaked_upload_objects(
     threshold a full ``orphan_grace`` past the earliest reap of any window the object could have
     belonged to, whatever the operator sets ``KDIVE_UPLOAD_TTL_SECONDS`` to.
 
-    Nothing is caught. Unlike the reaper's phase 2 — which tolerates a failed key because its row
-    delete has already committed and there is nothing left to retry — this sweep commits nothing,
-    so a store fault costs one pass, re-derives the identical candidates on the next, and reaches
-    the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures`` (ADR-0455 §4).
+    A failed key is logged, counted, and skipped, and the pass raises once at the end (ADR-0455
+    §5). Aborting at the first failure would let one permanently undeletable object — an S3 Object
+    Lock hold, a per-key deny — starve every candidate behind it and the whole second root, on
+    every pass forever, which is the leak this repair exists to drain. Raising at the end still
+    reaches the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures``, and nothing
+    is lost by either path: this sweep commits nothing, so the next pass re-derives the identical
+    candidates.
 
     Args:
         conn: An async connection. Each query runs in its own short transaction so no snapshot is
@@ -123,6 +127,7 @@ async def repair_leaked_upload_objects(
     """
     grace = orphan_grace + upload_ttl
     deleted = 0
+    failed = 0
     for root in UPLOAD_ORPHAN_ROOTS:
         listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
         candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
@@ -133,16 +138,72 @@ async def repair_leaked_upload_objects(
         for candidate in candidates:
             if candidate.key not in reclaimable:
                 continue
-            if not await reclaimable_upload_keys(conn, [candidate], grace):
-                continue  # a row landed between the classify and the delete
-            await asyncio.to_thread(store.delete, candidate.key)
-            _log.info(
-                "reconciler: leaked upload object %s deleted (no artifacts row, no upload "
-                "window, past grace)",
-                candidate.key,
-            )
-            deleted += 1
+            try:
+                deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
+            except CategorizedError as exc:
+                failed += 1
+                _log.warning(
+                    "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
+                )
+    if failed:
+        raise CategorizedError(
+            f"upload orphan sweep could not reclaim {failed} object(s); {deleted} were reclaimed. "
+            "Nothing is lost — the next pass re-derives the same candidates — but a key that "
+            "fails every pass (an object-lock hold, a per-key deny) leaks until it is cleared.",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
     return deleted
+
+
+async def _delete_if_still_reclaimable(
+    conn: AsyncConnection,
+    store: UploadOrphanStore,
+    candidate: UploadOrphanCandidate,
+    grace: timedelta,
+) -> bool:
+    """Re-decide one candidate against **current** store and database state, then delete it.
+
+    Both halves are re-read, because both can change after the listing and only one of them is a
+    row. The database fences catch a finalize or a re-mint that committed in the gap. The object's
+    mtime is re-read from the store because the writers under this prefix are **object-before-row**
+    — a vmcore's multi-GiB ``put_stream`` and a ``capture_traffic`` retry's re-PUT both land minutes
+    before their ``artifacts`` row commits — so a key rewritten after the listing has no row to
+    protect it yet, and re-checking the *listed* mtime would delete the bytes that were just
+    written. That is the one fence that has to come from the store rather than from Postgres, and
+    it is why this is not simply ``repair_leaked_images``' row re-check.
+
+    Returns:
+        Whether the object was deleted. ``False`` means the re-read declined it, or the object was
+        already gone.
+    """
+    current = await _with_current_mtime(store, candidate)
+    if current is None:
+        return False  # deleted by someone else between the listing and here
+    if not await reclaimable_upload_keys(conn, [current], grace):
+        return False  # a row landed, or the object was rewritten, after the classify
+    await asyncio.to_thread(store.delete, current.key)
+    _log.info(
+        "reconciler: leaked upload object %s deleted (no artifacts row, no upload window, "
+        "past grace)",
+        current.key,
+    )
+    return True
+
+
+async def _with_current_mtime(
+    store: UploadOrphanStore, candidate: UploadOrphanCandidate
+) -> UploadOrphanCandidate | None:
+    """Re-read ``candidate``'s store mtime, or ``None`` if the object is no longer there.
+
+    Listing the exact key as a prefix is an exact re-read without a second store method: a LIST
+    scoped to the full key returns that object (alongside any key it prefixes, which is filtered
+    out here).
+    """
+    listings = await asyncio.to_thread(store.list_prefix_with_mtime, candidate.key)
+    for listing in listings:
+        if listing.key == candidate.key:
+            return replace(candidate, last_modified=listing.last_modified)
+    return None
 
 
 async def reclaimable_upload_keys(

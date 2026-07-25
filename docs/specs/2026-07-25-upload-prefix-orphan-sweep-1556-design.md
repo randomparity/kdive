@@ -57,8 +57,10 @@ A new reconciler repair, `repair_leaked_upload_objects`, in
    `local/<kind>/<uuid>/<name>`, `<kind>` a known upload owner kind and `<uuid>` a parseable UUID.
    A key of any other shape is dropped, never deleted (AC-5).
 3. Classify the whole listing in **one** query (below) into the reclaimable set.
-4. For each reclaimable key, re-run the *same* query for that key alone, immediately before the
-   delete, and delete only if it still classifies. Log one INFO per delete.
+4. For each reclaimable key, re-read its store mtime (a LIST scoped to the exact key) and re-run
+   the *same* query for that key alone, immediately before the delete; delete only if it still
+   classifies. Log one INFO per delete. A failed delete is logged, counted, and skipped; the pass
+   raises once at the end.
 
 ### The predicate
 
@@ -83,7 +85,9 @@ Three fences, all evaluated in Postgres `now()` — and the third is not indepen
   no legitimate PUT can exist for a window whose row is absent.
 - **the mtime threshold** — a presigned PUT may begin before the deadline and complete after it,
   which is routine. An in-flight PUT is not listed at all; a just-completed one is protected past
-  its completion (AC-3).
+  its completion (AC-3). For the per-key re-check this mtime is **re-read from the store**, because
+  the non-upload writers under `local/runs/` are object-before-row (a vmcore's `put_stream`, a
+  `capture_traffic` retry) and have no row to protect them while their PUT is in flight.
 
 ### The threshold is `orphan_grace + upload_ttl`
 
@@ -116,11 +120,12 @@ tenant from `upload_manifest.UPLOAD_TENANT`, which the mint sites now share.
 
 ### Failure handling
 
-Unlike the reaper's phase 2, this sweep catches nothing. Nothing here is irreversible-once-committed
-— a store fault aborts the pass with the same candidates derivable next pass — so letting it
-propagate gives `_run_repair_plan` the error counter and costs nothing (AC-6). This is
-`repair_leaked_images`' treatment, and the reason it differs from the reaper is that the reaper's
-row delete has already committed by the time its sweep runs.
+A failed delete is logged, counted, and skipped; the pass raises once after the last root, so
+`_run_repair_plan` still records it on the ADR-0190 error counter (AC-6). Aborting at the first
+failure would let one permanently undeletable object — an S3 Object Lock hold, a per-key deny —
+starve every candidate behind it and the whole second root on every pass forever, which is the leak
+this repair exists to drain. Nothing is lost either way: this sweep commits nothing, so the next
+pass re-derives the identical candidates.
 
 ### Cost, and what is deferred
 

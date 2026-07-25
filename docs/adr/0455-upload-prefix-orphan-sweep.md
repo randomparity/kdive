@@ -177,14 +177,16 @@ and paying the connection they cost the phase #1554 wants connection-free, remai
 
 **The sweep is scoped to the owner prefix, not to upload keys.** `local/runs/<id>/` holds every
 run-scoped object, not only uploads — `control.capture_traffic`'s pcap and the vmcore objects live
-there too. They are protected by their `artifacts` rows once registered and by the grace before
-that, which is sound because both register within seconds of their PUT. It does mean a *future*
-writer that puts a run-owned object and leaves it rowless for more than 24h by design would be
-swept; that constraint is the same one `repair_leaked_images` places on the image prefix, and it is
-recorded here so it is a known rule rather than a surprise.
+there too. They are protected by their `artifacts` rows once registered, by the threshold
+before that, and — for the interval between their PUT completing and their row committing, which
+for a vmcore is minutes rather than seconds — by §3's store-side mtime re-read, which exists for
+exactly these object-before-row writers. It does mean a *future* writer that puts a run-owned object
+and leaves it rowless past the threshold **by design** would be swept; that constraint is the same
+one `repair_leaked_images` places on the image prefix, and it is recorded here so it is a known rule
+rather than a surprise.
 
-**A grace this long is a deliberate detection delay.** An orphan is not reclaimed for 24h after its
-last write. That is the correct direction for an irreversible delete, but it means the bucket-size
+**A threshold this long is a deliberate detection delay.** An orphan is not reclaimed until an
+orphan grace plus an upload TTL — 48h at the defaults — past its last write. That is the correct direction for an irreversible delete, but it means the bucket-size
 signal an operator watches lags the leak by a day.
 
 **Only these two roots are swept.** `local/systems/`, `local/reports/`, the `remote-libvirt/` and

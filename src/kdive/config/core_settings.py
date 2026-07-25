@@ -21,6 +21,11 @@ _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
+# The upload window's TTL is set by the server that mints it and read by the reconciler that
+# reclaims against it (ADR-0455 §2), so both must declare it or the reclaim side silently
+# defaults away from the operator's value.
+_MINT_AND_RECLAIM = frozenset({"server", "reconciler"})
+_RECONCILER = frozenset({"reconciler"})
 # Processes that read the on-disk provider fixture catalog: the worker/reconciler build paths
 # plus the server's fixtures.validate read (ADR-0120).
 _CATALOG_READERS = frozenset({"server", "worker", "reconciler"})
@@ -186,8 +191,12 @@ UPLOAD_TTL_SECONDS = Setting(
     parse=_int,
     default="86400",
     group="upload",
-    processes=_SERVER,
-    help="Presigned upload-URL TTL in seconds.",
+    # The reconciler reads this too, not only the minting server: the orphan sweep's reclaim
+    # threshold is stacked on top of it (ADR-0455 §2), so a reconciler that could not see the
+    # operator's value would fall back to the default and reclaim a window's bytes in the pass
+    # that reaped them. Declaring it here is also what makes `config validate reconciler` check it.
+    processes=_MINT_AND_RECLAIM,
+    help="Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455).",
     suggest="an integer number of seconds, e.g. 86400",
 )
 UPLOAD_ORPHAN_GRACE = Setting(
@@ -195,7 +204,7 @@ UPLOAD_ORPHAN_GRACE = Setting(
     parse=_int,
     default="86400",
     group="upload",
-    processes=_DISCOVERY,
+    processes=_RECONCILER,
     help=(
         "Grace window in seconds protecting an unreferenced object under an upload prefix from "
         "the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and "

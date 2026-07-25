@@ -71,6 +71,10 @@ class _FakeUploadStore:
     def put(self, key: str, age: timedelta = timedelta(0)) -> None:
         self._objects[key] = age
 
+    def forget(self, key: str) -> None:
+        """Remove an object without recording a delete — another actor got there first."""
+        self._objects.pop(key, None)
+
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(key for key in self._objects if key.startswith(prefix))
 
@@ -570,5 +574,100 @@ def test_a_clean_sweep_logs_no_drift_warning(
             async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
                 assert await run_repair(pool, _sweep(store)) == 1
         assert caplog.records == []
+
+    asyncio.run(_run())
+
+
+def test_an_object_rewritten_between_the_listing_and_the_delete_is_not_reclaimed(
+    migrated_url: str,
+) -> None:
+    """The object-before-row writers under this prefix, and why the mtime is re-read from the store.
+
+    A vmcore's multi-GiB ``put_stream`` and a ``capture_traffic`` retry's re-PUT both land minutes
+    before their ``artifacts`` row commits, and both reuse a deterministic key name. So a rowless
+    key that outlived the threshold and is then re-written has, for the length of that PUT, no row
+    to protect it — only its mtime. Re-checking the *listed* mtime would find it stale and delete
+    bytes that were just written, and ``finalize_capture`` would then commit rows against an object
+    that no longer exists. ``repair_leaked_images`` is not exposed to this because image publishes
+    are row-before-object; under ``local/runs/`` the ordering is reversed.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        vmcore = f"{prefix}vmcore-kdump"
+        store: _FakeUploadStore
+
+        def _rewrite_the_vmcore() -> None:
+            # The retry's PUT completes; its artifacts row is still minutes away.
+            store.put(vmcore, timedelta(seconds=0))
+
+        # 'kernel' sorts before 'vmcore-kdump', so the hook fires while the vmcore is still pending.
+        store = _HookedStore(
+            {f"{prefix}kernel": _GRACE * 2, vmcore: _GRACE * 2},
+            before_delete=_rewrite_the_vmcore,
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 1
+        assert store.deleted == [f"{prefix}kernel"]
+        assert vmcore in store.present
+
+    asyncio.run(_run())
+
+
+def test_an_object_deleted_by_someone_else_before_the_delete_is_skipped(
+    migrated_url: str,
+) -> None:
+    """The re-read's other arm: an object already gone is not a delete and not a failure."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        vanishing = f"{prefix}vanishing"
+        store: _FakeUploadStore
+
+        def _drop_the_other_object() -> None:
+            store.forget(vanishing)
+
+        store = _HookedStore(
+            {f"{prefix}kernel": _GRACE * 2, vanishing: _GRACE * 2},
+            before_delete=_drop_the_other_object,
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 1
+        assert store.deleted == [f"{prefix}kernel"]
+
+    asyncio.run(_run())
+
+
+def test_one_undeletable_key_does_not_starve_the_keys_behind_it(migrated_url: str) -> None:
+    """ADR-0455 §5: aborting at the first failed key would make one stuck object a permanent leak.
+
+    A transient store fault costs a pass either way. A *persistent* per-object one — an S3 Object
+    Lock retention, a per-key deny — would abort at the same key on every pass forever under a
+    first-failure abort, so every candidate behind it and the whole second root would never be
+    reclaimed. The failure is still reported, once, after the loop.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        stuck, behind = f"{prefix}a-locked", f"{prefix}b-behind"
+        other_root = f"{inv_prefix}rootfs-abc"
+        store = _FailingDeleteStore(
+            dict.fromkeys([stuck, behind, other_root], _GRACE * 2), fail_keys={stuck}
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:  # still reported, once
+                await run_repair(pool, _sweep(store))
+        assert "could not reclaim 1 object(s); 2 were reclaimed" in str(caught.value)
+        assert sorted(store.deleted) == sorted([behind, other_root])
 
     asyncio.run(_run())

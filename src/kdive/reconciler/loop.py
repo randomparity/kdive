@@ -250,7 +250,6 @@ class ReconcileConfig:
     report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
     investigation_cleanup_grace: timedelta = DEFAULT_INVESTIGATION_CLEANUP_GRACE
     build_artifact_retention: timedelta = DEFAULT_BUILD_ARTIFACT_RETENTION
-    upload_orphan_grace: timedelta = field(default_factory=lambda: _upload_orphan_grace())
     investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
@@ -299,7 +298,7 @@ def _leaked_upload_objects_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _repair_leaked_upload_objects(
-        conn, config.upload_store, config.upload_orphan_grace, _upload_window_ttl()
+        conn, config.upload_store, _upload_orphan_grace(), _upload_window_ttl()
     )
 
 
@@ -542,7 +541,13 @@ def _image_publish_grace() -> timedelta:
 
 
 def _upload_orphan_grace() -> timedelta:
-    """Resolve the upload-orphan grace from config (ADR-0455 §5); the operator's brake."""
+    """Resolve the upload-orphan grace from config (ADR-0455 §6); the operator's brake.
+
+    Resolved per pass, not once at ``ReconcileConfig`` construction, because the brake exists for
+    an operator who has just found the sweep removing live bytes — one that needed a reconciler
+    restart to take effect would be no better than the redeploy it replaced. Same treatment as
+    :func:`_image_publish_grace`.
+    """
     seconds = config.get(UPLOAD_ORPHAN_GRACE)
     if seconds is None:
         return DEFAULT_UPLOAD_ORPHAN_GRACE
