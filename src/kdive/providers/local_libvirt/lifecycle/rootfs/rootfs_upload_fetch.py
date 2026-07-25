@@ -722,8 +722,16 @@ def _sibling_already_published(dest: Path) -> bool:
     a silent, perpetual multi-GiB re-download. Here the polarity is reversed: a ``False`` costs one
     ``os.replace`` — the behavior before this guard existed, and one that *repairs* an unreadable
     ``dest``, since a rename needs permission on the directory rather than on the file. So every
-    ``OSError`` is answered "publish", and this can only ever remove work, never add a failure to a
-    download that already succeeded.
+    ``OSError`` is answered "publish", and this can never add a failure to a download that already
+    succeeded.
+
+    Answering "publish" on an *unreadable* ``dest`` is a deliberate trade, not an oversight: the
+    alternative — skip, and hand back a base this process could not evaluate at all — is worse than
+    the orphaned inode it avoids, when a verified copy of the same content-addressed bytes is
+    already in hand. ``EACCES`` is the case the rename repairs outright. ``EMFILE`` cannot reach the
+    publish anyway, because :func:`_durable_replace` needs a descriptor of its own and fails first.
+    That leaves a transient ``EIO``, where publishing costs at most ADR-0443 §2's already-accepted
+    inode orphan; ADR-0446 §7 records it as a residue rather than claiming the gate is airtight.
     """
     try:
         return stat.S_ISREG(dest.stat().st_mode) and _starts_with_qcow2_magic(dest)

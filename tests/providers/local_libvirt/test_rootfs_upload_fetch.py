@@ -1451,9 +1451,12 @@ def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None
 
 def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path: Path) -> None:
     # Polarity is the opposite of _reusable_staged_base's, which raises on an unreadable dest to
-    # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS an
-    # unreadable dest, a rename needing permission on the directory rather than on the file -- so an
-    # OSError must never turn a download that already succeeded into a failure.
+    # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS
+    # an unreadable dest, a rename needing permission on the directory rather than the file --
+    # so an OSError must never turn a download that already succeeded into a failure. The trade
+    # is deliberate: skipping would hand back a base this process could not evaluate at all,
+    # which is worse than the inode orphan it avoids when a verified copy of the same
+    # content-addressed bytes is in hand (ADR-0446 section 7 records the residue).
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     dest = _dest(tmp_path)
     dest.write_bytes(_QCOW2)

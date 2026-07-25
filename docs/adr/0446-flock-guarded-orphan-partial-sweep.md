@@ -8,7 +8,18 @@
   and ADR-0443's durability half.
 - **Depends on:** [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) (the shared staging path
   and the sweep this bounds), [ADR-0443](0443-durable-rootfs-staging-and-reuse-recheck.md) (the
-  `_durable_replace` publish the writer's lock is now held across).
+  `_durable_replace` publish the writer's lock is now held across),
+  [ADR-0005](0005-postgres-object-store-state.md) (the boundary below).
+- **Relation to [ADR-0005](0005-postgres-object-store-state.md), which is *not* reversed.**
+  ADR-0005 decides that Postgres advisory locks replace "the PoC's `flock`/`O_CREAT|O_EXCL`"
+  for concurrency, and this change introduces exactly those primitives — so the boundary is
+  worth stating rather than leaving a reader to infer a reversal. ADR-0005 bans them for
+  serializing **state**, and that is untouched here: the fetch lock stays a Postgres advisory
+  lock and keeps its one job of collapsing the redundant download. This `flock` serializes
+  nothing. It is a host-local liveness marker on a host-local file, answering "is the process
+  that wrote this still alive" — which is precisely what ADR-0005's own Consequences say
+  advisory locks cannot answer, since they "auto-release on connection close — they protect
+  *rows*, not *infrastructure*". That sentence is the prior art for this entire ADR.
 - **Spec:** [`../specs/2026-07-24-flock-guarded-orphan-partial-sweep-1524-design.md`](../specs/2026-07-24-flock-guarded-orphan-partial-sweep-1524-design.md)
 
 ## Context
@@ -188,6 +199,17 @@ unreachable on the ordinary path (the caller checked `dest` twice under the fetc
 nothing), costs one O(1) probe after a download that already took minutes, and gets its own
 `WARNING`.
 
+Two residues, named here so §7 is not read as airtight the way §3's window is spelled out.
+**The probe and the `os.replace` are themselves two syscalls**, so a sibling that publishes
+strictly between them still has its inode swapped — the hole is narrowed, not closed. It is not
+closed with `RENAME_NOREPLACE`, which would fold the two into one atomic decision but would
+also refuse to replace a *torn* `dest`, which this path must still do. **And the probe answers
+"publish" on a present-but-unreadable `dest`**, which on a transient `EIO` can orphan an inode
+a guest holds; the alternative is handing back a base this process could not evaluate at all,
+which is worse when a verified copy of the same content-addressed bytes is in hand. `EACCES` is
+repaired by the rename outright, and `EMFILE` cannot reach the publish because
+`_durable_replace` needs a descriptor of its own and fails first.
+
 The probe is deliberately **not** `_reusable_staged_base`, despite asking the same question of the
 same file. That one raises on an unreadable `dest`, because answering "not reusable" there would
 trigger a silent perpetual multi-GiB re-download. Here the polarity is reversed: answering
@@ -261,6 +283,12 @@ hang that it did not have before.
   outside the process's control: clock skew after an NTP step, and coarse mtime granularity on
   filesystems that do not carry sub-second timestamps. `flock` asks the kernel a question with a
   correct answer instead of guessing from a timestamp.
+- **Replace the Postgres fetch lock with a host-local `flock` too, deleting the lost-session
+  class outright.** Out of scope here, and governed rather than open: ADR-0005 decides that
+  advisory locks are the concurrency primitive and rejects an external lock service. Worth
+  naming because the spec's own finding — every process that can contend is a worker on the
+  one local-libvirt host, under a non-configurable `UPLOADS_DIR` — is what makes it look like
+  a complete substitute. Revisiting it means superseding ADR-0005, not amending this.
 - **Do nothing; fix the connection instead (TCP keepalives, `keepalives_idle`).** Rejected as a
   substitute, reasonable as an independent hardening. Keepalives shorten the window for the
   idle-reap trigger and do nothing for backend termination, and a sweep whose correctness rests on

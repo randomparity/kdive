@@ -102,7 +102,12 @@ that held the lock has by then normally published `dest` and had a guest's overl
 it, so an unconditional `os.replace` would orphan that inode behind the guest's open descriptor —
 the very symptom this change removes, re-created at the far end of the same scenario. The publish is
 therefore skipped when `dest` already passes the qcow2 gate. That probe swallows every `OSError`
-(the opposite of `_reusable_staged_base`, whose polarity is reversed) so it can only remove work.
+(the opposite of `_reusable_staged_base`, whose polarity is reversed) so it can never fail a
+download that already succeeded. Two residues stay, recorded in ADR-0446 §7 rather than glossed:
+the probe and the `os.replace` are themselves two syscalls, so a sibling publishing between them
+is narrowed rather than excluded; and answering "publish" on an unreadable `dest` can orphan an
+inode on a transient `EIO`, which is still better than handing back a base this process could
+not evaluate.
 
 **Two more things had to hold for "never a failed provision" to be true.** A non-`EWOULDBLOCK`
 `flock` error on the writer path (`ENOLCK`, `EOPNOTSUPP`) was fatal, so a filesystem without lock
