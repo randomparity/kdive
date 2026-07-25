@@ -11,6 +11,7 @@ connection, and all assume READ COMMITTED (psycopg's default).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -34,6 +35,8 @@ from kdive.jobs.payloads import (
     dump_authorizing,
     dump_payload,
 )
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE = timedelta(minutes=5)
@@ -61,8 +64,32 @@ async def enqueue(
 
     When ``recycle_terminal`` is set, a **terminal** (``failed`` or ``succeeded``) job for
     ``dedup_key`` is reset in place to a fresh ``queued`` attempt before the fetch:
-    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, **and the payload
-    overwritten with the newly-supplied one**. Overwriting the payload matters for a re-stage
+    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, ``created_at`` re-dated
+    to the recycle, **and the payload overwritten with the newly-supplied one**. Re-dating
+    ``created_at`` is what keeps the recycle fair (ADR-0447): :func:`dequeue` orders by it and the
+    reset ``attempt`` makes the row eligible again, so a job left at its original creation would
+    win every claim and head-of-line-block its lane. Re-dated, it queues at the back — the recycle
+    becomes equivalent to the delete-and-re-insert a caller would otherwise hand-roll (ADR-0442
+    §6). So ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
+    inserted; ``updated_at`` is no substitute (its trigger stamps ``now()``, so a recycled row can
+    read ``created_at > updated_at``) — the caller's audit entry and the log line below are.
+
+    **Both statements stamp ``clock_timestamp()``, not ``now()``.** ``now()`` is
+    ``transaction_timestamp()``, and no production caller reaches here in a transaction of its own:
+    the re-stage and snapshot tools open ``conn.transaction()`` and then *block* on an
+    ``advisory_xact_lock`` first, and ``control.watch_for_crash`` runs on a pooled connection whose
+    implicit transaction opened several reads earlier. Stamping the transaction's start would date
+    the job to before that wait, leaving it ahead of everything another connection enqueued during
+    it — the very preemption this prevents, back again under the contention that makes it matter.
+    That holds for a first enqueue as much as a recycle, hence the explicit stamp on the ``INSERT``
+    rather than the column's ``DEFAULT now()``. Being always at or after the transaction's clock,
+    it also keeps a row's ``created_at`` moving only forward, so ``jobs.list``'s ``(created_at,
+    id)`` keyset cursor can only *skip* a re-dated row, never return it twice.
+
+    ``authorizing``, ``max_attempts``, ``kind`` and ``dispatch_lane`` are deliberately **not**
+    reset: they describe the job's slot, not the attempt. ``authorizing`` in particular stays with
+    the principal who first enqueued it, so a re-dated ``created_at`` must not be read as the
+    recycling principal's action time. Overwriting the payload matters for a re-stage
     (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
     the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
     case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
@@ -91,11 +118,13 @@ async def enqueue(
         raise ValueError("dispatch_lane must not be blank")
     payload_json = dump_payload(kind, payload)
     authorizing = dump_authorizing(authorizing)
+    recycled_id: UUID | None = None
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "INSERT INTO jobs "
-            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key, "
+            " created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
             "ON CONFLICT (dedup_key) DO NOTHING",
             (
                 kind,
@@ -114,8 +143,10 @@ async def enqueue(
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
-                "    result_ref = NULL, failure_context = '{}'::jsonb "
-                "WHERE dedup_key = %s AND state = ANY(%s)",
+                "    result_ref = NULL, failure_context = '{}'::jsonb, "
+                "    created_at = clock_timestamp() "
+                "WHERE dedup_key = %s AND state = ANY(%s) "
+                "RETURNING id",
                 (
                     JobState.QUEUED.value,
                     Jsonb(payload_json),
@@ -123,8 +154,21 @@ async def enqueue(
                     recyclable,
                 ),
             )
+            if (recycled := await cur.fetchone()) is not None:
+                recycled_id = recycled["id"]
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
+    # The reset leaves a recycled row indistinguishable from a first enqueue, so this line is the
+    # only record that a dedup_key is churning. It is an upper bound, not proof: for a production
+    # caller the block above is a SAVEPOINT in the caller's transaction, so releasing it is not a
+    # commit and the caller can still roll back. Read it as "a recycle was attempted".
+    if recycled_id is not None:
+        _log.info(
+            "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
+            recycled_id,
+            kind.value,
+            dedup_key,
+        )
     if row is None:  # Invariant: we just inserted the row, or it already existed.
         raise RuntimeError(f"enqueue found no job for dedup_key {dedup_key!r}")
     return Job.model_validate(row)
@@ -162,6 +206,10 @@ async def dequeue(
     ``accepted_lanes`` is the worker's explicit dispatch boundary. A worker claims only
     queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
     workers do not acquire work they cannot execute.
+
+    ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
+    inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
+    revived job queues behind the work admitted while it was settled instead of preempting it.
 
     Returns:
         The claimed :class:`Job`, or ``None`` when nothing is eligible for the accepted lanes.

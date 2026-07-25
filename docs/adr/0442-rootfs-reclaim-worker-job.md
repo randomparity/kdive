@@ -173,15 +173,19 @@ bound (≈2 880 rows/day for one stuck investigation) and would stack duplicate 
 
 Each enqueue therefore uses a **stable `dedup_key`** — `rootfs-reclaim:<investigation_id>` — so the
 sweeps hold at most **one** reclaim job row per investigation. Admission is gated in the sweep
-rather than delegated to `queue.enqueue`'s `recycle_terminal`, because two properties of that
-recycle are wrong at sweep cadence:
+rather than delegated to `queue.enqueue`'s `recycle_terminal`, because properties of that recycle
+are wrong at sweep cadence (the ordering bullet below was one of two; ADR-0447 fixed it in the
+primitive, leaving the retry-rate bullet in force):
 
-- **Ordering.** `dequeue` claims by `ORDER BY created_at`, and the recycle resets state in place
+- **Ordering.** ~~`dequeue` claims by `ORDER BY created_at`, and the recycle resets state in place
   without touching `created_at`. A job recycled every pass would keep its original timestamp
   forever and therefore sort ahead of every job enqueued after it — a permanently faulting
-  background reclaim would head-of-line-block provisioning and every other interactive job. The
+  background reclaim would head-of-line-block provisioning and every other interactive job.~~ The
   sweep instead deletes the settled row and inserts a fresh one, re-dating the reclaim to the pass
   that decided it is due. Nothing references `jobs.id`, so the delete is free of fallout.
+  *Superseded by [0447](0447-recycle-terminal-redates-created-at.md) — the recycle now re-dates
+  `created_at` itself, so this ordering hazard no longer argues for the delete-and-re-insert; the
+  retry-rate bullet below is what keeps it.*
 - **Retry rate.** A recycle every pass means a faulting reclaim re-runs twice a minute, each
   attempt holding the `INVESTIGATION` lock across object-store deletes. A settled job therefore
   keeps its slot until `ROOTFS_RECLAIM_RETRY_BACKOFF` (5 minutes) has elapsed. Reclaim is

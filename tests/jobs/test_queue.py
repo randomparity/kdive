@@ -232,6 +232,123 @@ def test_enqueue_recycle_terminal_resets_failed_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str) -> None:
+    # ADR-0447 (#1528): `dequeue` orders by `created_at`, so a recycle that left `created_at` at
+    # the original creation put the revived job ahead of everything enqueued since — and because
+    # the recycle also resets `attempt`, a job that kept failing kept winning the claim, blocking
+    # the lane head. A recycled job takes its place at the back of the lane instead.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            stale = await _terminal_failed_job(conn, "dk-stale")
+            await conn.execute(
+                "UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = %s",
+                (stale.id,),
+            )
+
+            # Enqueued after the recycled job's *original* creation, before the recycle.
+            newer = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-newer"
+            )
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-stale",
+                recycle_terminal=True,
+            )
+            assert recycled.id == stale.id  # still reset in place, not replaced
+            assert recycled.created_at > newer.created_at  # re-dated to the recycle
+
+            first = await queue.dequeue(conn, "w-order")
+            assert first is not None
+            assert first.id == newer.id  # the newer job is not starved
+
+            second = await queue.dequeue(conn, "w-order")
+            assert second is not None
+            assert second.id == stale.id  # the recycled job still runs, just behind
+
+    asyncio.run(_run())
+
+
+def test_enqueue_stamps_a_first_insert_at_the_insert_not_the_transaction(migrated_url: str) -> None:
+    # The INSERT stamps `clock_timestamp()` rather than taking the column's `DEFAULT now()`, for
+    # the same reason the recycle does (ADR-0447): a caller opens a transaction and then blocks on
+    # an advisory lock before enqueuing, so `transaction_timestamp()` would date a first enqueue to
+    # before its own lock wait and let it preempt everything admitted during that wait.
+    async def _run() -> None:
+        inserter = await psycopg.AsyncConnection.connect(migrated_url)  # autocommit off
+        try:
+            async with inserter.transaction():
+                # Fix this transaction's transaction_timestamp before the competing enqueue, the
+                # way an advisory-lock wait does.
+                await inserter.execute("SELECT 1")
+
+                async with await _connect(migrated_url) as other:
+                    competitor = await queue.enqueue(
+                        other, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-first-other"
+                    )
+
+                inserted = await queue.enqueue(
+                    inserter, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-first-late"
+                )
+                assert inserted.created_at > competitor.created_at
+        finally:
+            await inserter.close()
+
+        async with await _connect(migrated_url) as reader:
+            first = await queue.dequeue(reader, "w-first")
+            assert first is not None
+            assert first.id == competitor.id  # not preempted by the later insert
+
+    asyncio.run(_run())
+
+
+def test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue(migrated_url: str) -> None:
+    # Every production caller reaches `enqueue` inside a transaction its own caller opened, after
+    # blocking on an advisory lock — so `now()` (= transaction_timestamp) would stamp the revived
+    # job at the transaction's *start*, leaving it ahead of everything enqueued during the wait.
+    # `clock_timestamp()` re-dates at the recycle itself. This drives the recycle on a
+    # non-autocommit connection in one explicit transaction, with the competing job admitted by a
+    # separate connection after that transaction opened.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as setup:
+            stale = await _terminal_failed_job(setup, "dk-txn-stale")
+
+        recycler = await psycopg.AsyncConnection.connect(migrated_url)  # autocommit off
+        try:
+            async with recycler.transaction():
+                # Open the transaction — and so fix its transaction_timestamp — before the
+                # competing enqueue, the way an advisory-lock wait does.
+                await recycler.execute("SELECT 1")
+
+                async with await _connect(migrated_url) as other:
+                    newer = await queue.enqueue(
+                        other, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-txn-newer"
+                    )
+
+                recycled = await queue.enqueue(
+                    recycler,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-txn-stale",
+                    recycle_terminal=True,
+                )
+                assert recycled.id == stale.id
+                assert recycled.created_at > newer.created_at
+        finally:
+            await recycler.close()
+
+        async with await _connect(migrated_url) as reader:
+            first = await queue.dequeue(reader, "w-txn")
+            assert first is not None
+            assert first.id == newer.id  # not preempted by the job recycled after it
+
+    asyncio.run(_run())
+
+
 def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

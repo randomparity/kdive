@@ -348,15 +348,15 @@ async def _enqueue_rootfs_reclaim(
 
     The dedup key is **stable** per investigation (ADR-0442 §6), so the sweeps hold at most one job
     row per investigation instead of one per ~30 s pass. Admission is gated here rather than left to
-    ``queue``'s ``recycle_terminal``, for two reasons the sweep cadence makes load-bearing:
+    ``queue``'s ``recycle_terminal`` for the one reason the sweep cadence still makes load-bearing:
+    a settled job is left alone until :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` has passed, so a reclaim
+    that keeps faulting retries on the order of minutes rather than twice a minute — and its
+    ``failed`` row stays inspectable for that window instead of being reset within 30 s.
 
-    - A recycle resets state in place and leaves ``created_at`` alone, but ``dequeue`` orders by
-      ``created_at``, so a repeatedly-recycled background job would sort ahead of every job enqueued
-      after it and head-of-line-block interactive work. Deleting the settled row and inserting a
-      fresh one re-dates the reclaim to the pass that decided it is due.
-    - A settled job is left alone until :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` has passed, so a
-      reclaim that keeps faulting retries on the order of minutes rather than twice a minute — and
-      its ``failed`` row stays inspectable for that window instead of being reset within 30 s.
+    ADR-0442 §6 also cited dispatch fairness — a recycle left ``created_at`` at the original
+    creation, so a repeatedly-recycled background job sorted ahead of every job enqueued after it.
+    ADR-0447 fixed that in the primitive (the recycle now re-dates ``created_at`` too), so this
+    delete-and-insert no longer carries that burden; the backoff is what keeps it here.
 
     The delete and the insert share one transaction, so a fault between them cannot leave the
     investigation with neither a failure record nor a queued reclaim. A ``queued``/``running`` job
