@@ -591,7 +591,7 @@ _SHORTFALL_PROSE = {
 }
 
 
-def _required_staging_bytes(
+def _staging_budget(
     effective: str | None, *, object_size: int, uncompressed_size: int | None
 ) -> _StagingBudget | None:
     """The staged base's budget, or ``None`` when the occupied size is not knowable up front.
@@ -645,7 +645,7 @@ def _require_staging_free_space(
     handling of one physical condition depend on which side of a race window it was observed from.
 
     ``budget`` is ``None`` when the staged size is not knowable (see
-    :func:`_required_staging_bytes`); there is nothing to compare against, so the check is skipped
+    :func:`_staging_budget`); there is nothing to compare against, so the check is skipped
     rather than guessed at, and the codec's own declaration error carries the failure.
 
     The measured figure is ``statvfs``'s ``f_bavail`` — space available to unprivileged users,
@@ -797,7 +797,7 @@ def stage_uploaded_rootfs(
         )
     partial = dest.parent / f"{dest.stem}.{uuid4().hex}.partial"
     effective = normalize_encoding(encoding)
-    budget = _required_staging_bytes(
+    budget = _staging_budget(
         effective, object_size=head.size_bytes, uncompressed_size=uncompressed_size
     )
     try:
