@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Swap the upload lane to investigation-scoped resolution
 - Couple close with bound Systems + force teardown
 - Investigation-scoped uploaded-rootfs reclaim sweeps (#1502)
+- Count the usage-recording failures ADR-0148 swallows
 
 ### Changed
 
@@ -106,14 +107,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Caveat the no-live-sibling-partial claim
 - Record the uploaded-rootfs manual proof
 - Deadline-governed reap of uncommitted uploads
+- Name the growth-connect residual the fix leaves open
+- Record the min_size and cardinality decisions
+- Record the teardown leg and the lost /readyz diagnosis
+- Drop the exit-code claim and name the second surface
+- Repair the ADR sentence and the two stale claims left behind
+- Link the dispatch-lane follow-up, drop stale claims
+- Tighten the enqueue docstring and recycle comment
+- State what the reuse gate actually catches
 - Accept ADR-0448 for the run finalize deadline
 - Record the locked re-read and the recovery's real cost
 - Record where the unlocked stretch actually is
 - Note the identity check in the ADR-0448 index row
 - Record the partial-reap hole the identity guard misses
-- State what the reuse gate actually catches
-- Link the dispatch-lane follow-up, drop stale claims
-- Tighten the enqueue docstring and recycle comment
 
 ### Fixed
 
@@ -160,17 +166,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface the swallowed cause, not just the tool name
 - Apply the warm pool to every usage-row assertion
 - Scope the session lock probe to the current database
-- Enforce the upload deadline on the single-PUT finalize
-- Re-read the upload window under the RUN lock before commit
-- Check window identity, not presence, before committing
-- Attribute the expiry log and document the third reason
+- Warm the process pool before the body runs
+- Report an unreachable database as a categorized error
+- Restart the app services so a backend outage recovers
+- Warm one connection, not the pool's whole min_size
+- Drop the client-controlled label off the drop counter
+- Restart the backends, not just the app tier
+- Bound pool teardown and name every startup-failure cause
+- Use on-failure, not unless-stopped, and cover obs services
+- Settle past the daemons' own startup budget
+- Split the drop counter by a bounded reason label
+- Bound the compose --wait in the local-libvirt bring-up
+- Re-date created_at when recycling a terminal job
+- Stamp the recycle re-date with clock_timestamp()
+- Stamp the insert from the same clock as the recycle
 - Fsync the staged base and re-verify it on reuse
 - Sync at publish, surface unreadable bases, log rejects
 - Stop blaming a sibling for a stale staged base
 - Reject a non-regular staged path before opening it
-- Re-date created_at when recycling a terminal job
-- Stamp the recycle re-date with clock_timestamp()
-- Stamp the insert from the same clock as the recycle
+- Enforce the upload deadline on the single-PUT finalize
+- Re-read the upload window under the RUN lock before commit
+- Check window identity, not presence, before committing
+- Attribute the expiry log and document the third reason
 
 ### Build
 
