@@ -39,6 +39,7 @@ from kdive.providers.shared.runtime_paths import (
     overlay_name,
     staged_rootfs_path,
 )
+from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
 
 _log = logging.getLogger(__name__)
 
@@ -160,20 +161,50 @@ def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) ->
         dest.unlink()
 
 
-def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) -> None:
-    """Glob-unlink stale ``*.partial`` then remove the now-empty per-investigation staging dir.
+def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) -> bool:
+    """Unlink each **unheld** ``*.partial``, then remove the now-empty staging dir (ADR-0452).
 
     Best-effort (ADR-0441 §5): a crash-orphaned ``<token>.*.partial`` no row owns is unlinked here
     as the backstop to the live fetcher's opportunistic cleanup, **before** the empty-dir removal
-    (else a leftover partial keeps the dir non-empty forever). Called only once **no** rootfs row
-    remains for the investigation, so a remaining row's in-flight download is never clobbered.
+    (else a leftover partial keeps the dir non-empty forever).
+
+    What it must not collect is a partial some fetcher is still writing. ADR-0442 §7 justified the
+    unconditional unlink on this running only once **no** rootfs row remains for the investigation,
+    "so a remaining row's in-flight download is never clobbered" — but that is a *derived* claim and
+    the derivation does not hold. The row count reaches zero only because
+    :func:`rootfs_base_reclaimable` classified the base as unpinned, and that gate reads the System
+    row's state column plus overlay-file presence: :data:`_ROOTFS_REFERENCERS_SQL` excludes
+    ``torn_down`` outright, ``failed`` is outside
+    :data:`ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES`, and a *provisioning* System has no overlay file
+    yet. ``PROVISIONING -> TORN_DOWN`` and ``PROVISIONING -> FAILED`` are both legal transitions,
+    the download runs detached under ``asyncio.to_thread`` and cannot be cancelled, and nothing
+    serializes the two — the fetch takes only its per-(investigation, checksum) session lock, never
+    the ``INVESTIGATION`` lock this job holds. So a concurrent teardown drops the pin, this reclaim
+    deletes the last row, and the next statement would sweep a **live** partial (#1544).
+
+    Liveness is therefore asked of the kernel, exactly as the fetch-side sweep asks it (ADR-0446):
+    a live writer holds an exclusive ``flock`` on its own partial and a candidate that cannot be
+    locked is skipped. Do not re-derive the safety from the row count, and do not narrow the glob —
+    it deliberately covers every token in the directory, not one base's.
+
+    The ``suppress`` covers the directory walk only; every per-candidate fault is handled inside
+    :func:`unlink_partial_if_unheld`, so one unsweepable file cannot truncate the pass.
+
+    Returns:
+        Whether a live writer's ``flock`` left a partial behind. That partial also keeps ``inv_dir``
+        non-empty, so the ``rmdir`` below fails with ``ENOTEMPTY`` — the deliberate post-state of a
+        live-held skip, not a surprise (ADR-0452 §4). The caller retains the drain marker on it so a
+        later pass finishes the job.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
+    held = False
     with suppress(OSError):
         for partial in inv_dir.glob("*.partial"):
-            partial.unlink(missing_ok=True)
+            if unlink_partial_if_unheld(partial):
+                held = True
     with suppress(OSError):
         inv_dir.rmdir()
+    return held
 
 
 async def _reclaim_one_checksum(
@@ -238,8 +269,20 @@ async def _finish_drained_investigation(
     Replaces the sweep's single-pass ``drained`` flag with a read of the real post-state, which is
     what makes the bookkeeping correct across a worker that died mid-reclaim, a stale due-set, and a
     concurrent finalize: each is just a different answer to "are there rows left?". Clearing is
-    unconditional on the drain rather than on which sweep enqueued the job — a TTL job only runs
-    against an ``open``/``active`` investigation, whose marker is already NULL.
+    keyed on the drain rather than on which sweep enqueued the job — a TTL job only runs against an
+    ``open``/``active`` investigation, whose marker is already NULL.
+
+    The marker is retained for exactly one non-drained case: the sweep skipped a partial a live
+    writer still ``flock``\\ s (ADR-0452 §4). Neither neighbouring choice is right. Clearing
+    unconditionally would leave that partial with **no** collector — this marker is the only thing
+    that re-enqueues a reclaim for a closed investigation, and the fetch-side opportunistic sweep
+    only fires on the next fetch of that base, which never comes once the investigation is closed —
+    so a holder killed mid-download would leak its multi-GiB SENSITIVE partial permanently, which is
+    what this backstop exists to prevent. Retaining on *every* non-drain would be worse the other
+    way: an unopenable or unlinkable partial is permanent until an operator acts, and pinning the
+    marker on it resurrects the never-clearing marker and the re-fail-every-pass loop ADR-0442 was
+    written about. A held ``flock`` is the one outcome the kernel guarantees is transient — it is
+    released when the holding descriptor closes, including on ``SIGKILL`` — so the retry converges.
     """
     async with (
         conn.transaction(),
@@ -249,7 +292,16 @@ async def _finish_drained_investigation(
             await cur.execute(_REMAINING_ROOTFS_ROWS_SQL, (investigation_id,))
             if await cur.fetchone() is not None:
                 return
-        await asyncio.to_thread(sweep_investigation_staging_dir, uploads_dir, investigation_id)
+        held = await asyncio.to_thread(
+            sweep_investigation_staging_dir, uploads_dir, investigation_id
+        )
+        if held:
+            _log.info(
+                "investigation %s drained its rootfs rows but a live writer still holds a staging "
+                "partial; keeping rootfs_cleanup_pending_at so a later reclaim collects it",
+                investigation_id,
+            )
+            return
         await conn.execute(
             "UPDATE investigations SET rootfs_cleanup_pending_at = NULL WHERE id = %s",
             (investigation_id,),

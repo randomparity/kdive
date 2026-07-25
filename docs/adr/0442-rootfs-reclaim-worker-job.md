@@ -252,6 +252,18 @@ The marker clear is unconditional on the drain rather than on which sweep enqueu
 job only ever runs against an `open`/`active` investigation, whose marker is NULL, so the clear is
 a no-op there; the handler needs no discriminator and carries none.
 
+> *Amended (#1544 / [ADR-0452](0452-flock-guarded-reclaim-staging-sweep.md)).* The parenthetical
+> above — "a remaining row means a live fetch may be writing a `*.partial` that must not be
+> clobbered" — has the implication backwards: *no* remaining row is not evidence that no fetch is
+> writing, because the row count reaches zero through `rootfs_base_reclaimable`'s System-state
+> classification, which `PROVISIONING -> TORN_DOWN` and `PROVISIONING -> FAILED` falsify. The
+> staging-dir sweep is therefore `flock`-gated and the marker clear gains exactly one exception: a
+> partial a live writer still holds retains `rootfs_cleanup_pending_at`, so the close-driven sweep
+> re-issues the reclaim past its backoff and a later pass collects it. Every other non-drained
+> outcome — unopenable, unlinkable — still clears, because those are permanent until an operator
+> acts and pinning the marker on them is the never-clearing-marker failure this ADR's Context is
+> about. The `rmdir`'s `ENOTEMPTY` under a held partial is then the deliberate post-state.
+
 ### 8. Payload carries the due row set
 
 The payload is `{investigation_id, artifact_ids}`. The reconciler's two sweeps differ only in

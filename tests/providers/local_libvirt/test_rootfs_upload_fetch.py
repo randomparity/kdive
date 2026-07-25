@@ -1792,14 +1792,16 @@ def test_sweep_warns_when_it_skips_a_partial_a_live_sibling_holds(
 ) -> None:
     # The skip is correct and also the only externally visible symptom of the lost session lock: its
     # other consequence is a redundant multi-GiB download that reads as ordinary slowness. Silent,
-    # the condition this change exists to survive would be undiagnosable.
+    # the condition this change exists to survive would be undiagnosable. The text reports the
+    # observation rather than either caller's inferred cause, because ADR-0452 gave the same helper
+    # a reclaim-side caller where no fetch lock exists at all.
     dest = _dest(tmp_path)
     with caplog.at_level(logging.WARNING), _held_partial(dest) as live:
         _unlink_orphan_partials(dest)
 
     assert live.exists()
     assert any(
-        str(live) in r.getMessage() and "still holds it" in r.getMessage()
+        str(live) in r.getMessage() and "a live writer holds its flock" in r.getMessage()
         for r in caplog.records
         if r.levelno == logging.WARNING
     ), caplog.text
@@ -2144,8 +2146,10 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     # Named for the window it actually went in. "between its creation and its lock" would point the
     # operator at a sub-millisecond race that additionally needs a lost session lock, and away from
-    # the two conditions that really produce this -- which is most of what the check is here for.
+    # the condition that really produces this -- which is most of what the check is here for. Both
+    # sweeps are flock-gated since ADR-0452, so an *unguarded* stage is the only remaining cause and
+    # the message says so instead of also naming the reclaim backstop.
     assert "concurrent orphan sweep" in str(error.value)
     assert "while it was being downloaded" in str(error.value)
-    assert "#1544" in str(error.value)
+    assert "the filesystem could not flock the partial" in str(error.value)
     assert not dest.exists()

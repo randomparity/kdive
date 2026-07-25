@@ -240,6 +240,14 @@ lock:
   > while the detached `asyncio.to_thread` download keeps writing. Filed as **#1544**; this decision
   > is the text a reader tracing the sweep reaches first, so it must not restate the invariant
   > ADR-0446 disproved.
+
+  > *Amended (#1544 / [ADR-0452](0452-flock-guarded-reclaim-staging-sweep.md)).* The reclaim-side
+  > backstop no longer unlinks unconditionally either: it runs the same `flock` gate, through the
+  > shared `providers.shared.staging_partials.unlink_partial_if_unheld`, so neither of this
+  > decision's two collection paths derives its safety from state it happens to hold. Its reach
+  > narrows the same way the fetch side's did, and with no backstop behind it — so a skipped
+  > candidate is a `WARNING` and, when the skip is a *held* `flock`, `rootfs_cleanup_pending_at` is
+  > retained so a later reclaim collects it (ADR-0452 §4).
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's
