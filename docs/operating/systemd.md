@@ -15,8 +15,8 @@ appropriate `After=`/`Wants=` via a drop-in. Run the provider preflight (see
 [install](install.md)) before the first start.
 
 The retry lives in the supervisor, not inside the process. Each process waits up to ten
-seconds at start for its first database connection; if Postgres is unreachable it logs an
-ERROR record reading `database unreachable: no connection within 10s of process start`,
+seconds at start for its first database connection; if it cannot get one it logs an ERROR
+record reading `no database connection within 10s of process start`,
 exits with the infrastructure-failure code, and `Restart=on-failure` with `RestartSec=5`
 brings it back — so a database that is down looks like a unit restarting roughly every
 fifteen seconds, not one that stays active. That record is on the structured JSON log

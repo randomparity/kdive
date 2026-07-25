@@ -36,12 +36,14 @@ never reach the database ahead of the migration.
 ## Startup and database reachability
 
 Each process waits up to ten seconds at start for its first database connection before it
-begins serving. If Postgres is unreachable it logs an ERROR record reading
-`database unreachable: no connection within 10s of process start` and exits, so the pod
-restarts — a database outage surfaces as `CrashLoopBackOff` on all three Deployments rather
+begins serving. If it cannot get one it logs an ERROR record reading
+`no database connection within 10s of process start` and exits, so the pod restarts — a database outage surfaces as `CrashLoopBackOff` on all three Deployments rather
 than as pods that are Running and permanently not-Ready. Check the pod logs for that record
 before looking at the KDIVE processes themselves; the usual cause is the database, its
-credentials, or a NetworkPolicy, not the chart.
+credentials, or a NetworkPolicy, not the chart. The record cannot narrow it further on its
+own: the pooling layer reports an unreachable host, a wrong password, and a missing
+database identically, so read the `psycopg.pool` warning just above it — that one carries
+Postgres's own error.
 
 Because Kubernetes backs a crash loop off to a five-minute ceiling, a pod can lag the
 database's own recovery by up to that long. `kubectl rollout restart` on the affected

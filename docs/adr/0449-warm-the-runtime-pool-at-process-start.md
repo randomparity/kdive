@@ -87,13 +87,19 @@ configured properly, rather than trying to stay up the hardest it can."
   The aux listener does not start until the pool is open, so a longer budget would mean the
   kubelet killing the container mid-open with a probe failure that cannot explain itself.
   At 10s the process fails on its own terms, with the cause in its logs, before the second
-  probe. Sizing this up means budgeting against that 25s *minus* everything the process does
-  before the open — interpreter start, imports, `config.validate`, `init_telemetry`.
+  probe. Two further things sit inside that same 25s and are *not* covered by this constant:
+  everything the process does before the open (interpreter start, imports, `config.validate`,
+  `init_telemetry`), and the teardown below. Budget against 25s minus both.
 
 The open moves *inside* `run_process_runtime`'s `try`, so a failed open still runs the
-teardown: `secret_registry.clear()` and `pool.close()`. (`wait()` closes the pool itself on
-timeout; `close()` is idempotent, and the registry clear was previously skipped entirely on
-this path.)
+teardown: `secret_registry.clear()` and `pool.close()`. (`close()` is idempotent, and the
+registry clear was previously skipped entirely on this path.) That teardown is on the
+critical path to the diagnostic — the error only becomes an ERROR record once it reaches
+`__main__` — and `psycopg_pool`'s `close()` waits 5 seconds by default for background
+workers, which a worker blocked mid-connect never satisfies (the shape a dropped-packet
+backend produces, where libpq waits on the OS TCP timeout). `POOL_CLOSE_TIMEOUT_SECONDS`
+overrides it to 1, keeping the worst case to an operator-visible error at ~11s rather than
+~15s, and taking those five seconds off every crash-loop cycle too.
 
 ### 2. The startup failure is a `CategorizedError`, not a bare `PoolTimeout`
 
@@ -179,13 +185,16 @@ data-driven follow-up promised below could not actually be run.
   declared no `restart:` policy on `server`/`worker`/`reconciler`. `depends_on` protects only
   the first `up`; every later recreate during a backend outage would have left the container
   `Exited (1)` permanently, where before this change it came up and recovered on its own. The
-  every long-running service gains `restart: unless-stopped`, guarded by a test, and
+  every long-running service gains `restart: on-failure`, guarded by a test, and
   `operating/docker-compose.md` gains the same startup paragraph the other two surfaces got.
-  The backends (`postgres`, `minio`, `oidc`) are policed alongside the app tier, not just it:
-  policing only the app services would make a host reboot *worse* than no policy at all,
-  since they would come back and crash-loop forever against backends that stayed stopped —
-  reading as transient while permanently unable to progress. The `migrate` and `minio-init`
-  one-shots stay unpoliced by design.
+  The backends (`postgres`, `minio`, `oidc`, and the obs-profile `prometheus`/`grafana`) are
+  policed alongside the app tier, not just it: policing only the app services leaves them
+  restarting against a backend that can never answer — reading as transient while unable to
+  progress. `on-failure` specifically, matching the units' `Restart=on-failure`;
+  `unless-stopped` would additionally start containers on *daemon start*, making this
+  stack's demo-credential MinIO and token-minting mock issuer — both published on host
+  ports — boot-persistent on any machine that ever ran the stack, a change in exposure this
+  ADR has no reason to make. The `migrate`/`minio-init` one-shots stay unpoliced by design.
 - `/livez`, `/readyz`, and `/metrics` are unavailable for up to 10 seconds longer at
   startup, because the aux listener starts after the pool opens. Sized to stay inside the
   chart's `initialDelaySeconds: 5` plus one probe period, as above.
@@ -198,6 +207,15 @@ data-driven follow-up promised below could not actually be run.
   termination grace, so nothing is lost or corrupted — it slows drains and rollouts during an
   outage. Accepted rather than fixed: racing the open against the stop event adds startup
   concurrency to buy back at most ten seconds inside a grace period three times that long.
+- **A credential or database-name error is now indistinguishable from an outage at this
+  seam, and is no longer visible on `/readyz`.** `psycopg_pool` absorbs every connect-side
+  error into its retry loop and re-raises its own `PoolTimeout` `from None`, so a wrong
+  password, a missing database, and an unreachable host all arrive here identically; the
+  server's `FATAL: ...` survives only as a `psycopg.pool` WARNING. Previously the process
+  stayed up and the Postgres check behind `/readyz` surfaced the real error. The message is
+  the only lever left, so it names all three causes and points at that warning rather than
+  asserting the one that would send an operator down the wrong path. A permanently
+  misconfigured deployment now crash-loops under an infrastructure exit code.
 - No schema change, no migration, no MCP or RBAC surface change.
 
 ## Alternatives considered
