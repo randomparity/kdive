@@ -145,6 +145,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enforce the manifest deadline at rootfs finalize
 - Reap investigation uploads on the deadline alone
 - Point expiry recovery at re-mint, not re-upload
+- Warm the usage-tracking pool before the acquire budget
+- Surface the swallowed cause, not just the tool name
+- Apply the warm pool to every usage-row assertion
 
 ### Build
 
