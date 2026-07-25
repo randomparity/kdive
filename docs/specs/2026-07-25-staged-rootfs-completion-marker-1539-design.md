@@ -31,8 +31,8 @@ unbootable or subtly wrong guest attributed to the kernel under test.
   `<uploads_dir>/<investigation_id>/<token>.qcow2`. A sibling needs its own helper here so the
   writer, the gate, the reclaim unlink and the sweep glob cannot drift.
 - `providers/local_libvirt/lifecycle/rootfs/rootfs_upload_fetch.py` — `_durable_replace` (publish),
-  `_reusable_staged_base` (reuse gate, both fetch-lock sides), `_sibling_already_published`
-  (skip-publish probe).
+  `_reusable_staged_base` (reuse gate, both fetch-lock sides; it becomes `_staged_base_rejection`,
+  see below), `_sibling_already_published` (skip-publish probe).
 - `jobs/handlers/artifacts/rootfs_reclaim.py` — `_unlink_staged_base` (per-row reclaim) and
   `sweep_investigation_staging_dir` (drain tail).
 
@@ -83,7 +83,7 @@ marker.unlink(missing_ok=True)          # 2. any stale marker goes first
 _fsync_path(dest.parent, O_RDONLY)      # 3. ...and its absence is durable before the rename
 os.replace(partial, dest)               # 4. publish
 _fsync_path(dest.parent, O_RDONLY)      # 5. rename + partial-unlink durable (ADR-0443 decision 1)
-_touch_marker(marker)                   # 6. create + fsync the marker
+_write_completion_marker(marker)        # 6. create + fsync the marker
 _fsync_path(dest.parent, O_RDONLY)      # 7. the marker's link is durable
 ```
 
@@ -100,7 +100,14 @@ alone.
 
 ### The reuse gate
 
-`_reusable_staged_base` becomes `S_ISREG(dest)` **and** marker present **and** qcow2 magic.
+`_reusable_staged_base` becomes `S_ISREG(dest)` **and** marker present **and** qcow2 magic, and is
+renamed `_staged_base_rejection`: it returns the slug naming *which* gate rejected rather than a
+bool. That return type is load-bearing rather than cosmetic. The gate now has three rejection
+reasons that mean opposite things to an operator — a failed format gate says the durability bug
+fired or the base was corrupted by other means, while a missing marker on the first provision after
+an upgrade is expected and needs no action — and on upgrade the second is the reason for *every*
+base in the tree. A single message keyed on the format gate would turn the one-time upgrade cost
+into a fleet-wide false durability alarm.
 
 Keeping the magic probe is not redundancy. The marker is a **completion** witness, not an
 **integrity** witness: it says "a stage of this base ran to a durable finish", which is what closes
@@ -111,7 +118,7 @@ rather than on the base" (the issue's phrasing) would trade one residue for anot
 
 The marker probe is a `stat` inside the existing `try`, so it inherits ADR-0443 decision 2's error
 taxonomy unchanged: `FileNotFoundError`/`NotADirectoryError`/`IsADirectoryError` mean *no usable
-base at this path* and return `False`; every other `OSError` raises `_unreadable_base_fault` as an
+base at this path* and are a cache miss; every other `OSError` raises `_unreadable_base_fault` as an
 `INFRASTRUCTURE_FAILURE`, because a marker this process cannot `stat` (`EACCES` under the ADR-0442
 uid asymmetry, `EIO`) is an operator-visible fault and swallowing it as a cache miss would produce
 the silent perpetual re-download loop that decision explicitly rejects. `details` carries the probed
@@ -124,10 +131,14 @@ guest". Under the new gate a marker-less base is one the reuse path will *reject
 publish on it would leave the investigation with a base every future fetch re-downloads and
 re-rejects, forever. Requiring the marker makes the losing fetcher publish and complete it instead.
 
-That is reachable only when a sibling died between its `os.replace` and its marker write — a
-sub-millisecond window — and the cost is ADR-0443 §2's already-accepted orphan-inode residue, paid
-once. The probe's `except OSError: return False` polarity is untouched: an unreadable marker answers
-"publish", which can only remove work, never fail a download that already succeeded.
+**That branch is not rare.** It is the *deterministic* first re-provision of every base staged
+before this change — present, magic-passing, marker-less, so the re-stage `os.replace`s over it —
+and only secondarily the sibling that died between its `os.replace` and its marker write, which is
+a sub-millisecond window. The cost is ADR-0443 §2's already-accepted orphan-inode residue, escalated
+from a rare race to one occurrence per (investigation, token) whose base a running guest holds. See
+*What this does not fix*. The probe's `except OSError: return False` polarity is untouched: an
+unreadable marker answers "publish", which can only remove work, never fail a download that already
+succeeded.
 
 ### Reclaim: `_unlink_staged_base`
 
@@ -160,10 +171,27 @@ residue; #1558 is what removes the race.
   (investigation, token) that survives the upgrade. This is a real operational consequence and is
   stated in the ADR rather than left to surprise an operator. It is also the only way the fix can
   work: the whole point is that a pre-ADR-0443 base cannot be shown intact by anything cheaper.
+- **That re-stage peaks at two copies of the base on the staging volume, and ADR-0450's
+  `_require_staging_free_space` can refuse it outright.** The old base is still there while the new
+  `<token>.<uuid>.partial` is written beside it, and the precheck demands `base_bytes` plus a 1 GiB
+  floor — so a volume provisioned for one copy refuses the upgrade re-stage with an
+  `INFRASTRUCTURE_FAILURE` that burns all three attempts in milliseconds and dead-letters.
+  **Confirm the staging volume holds two copies of the largest live base before deploying, or close
+  the affected investigations first.** The precheck is advisory rather than a reservation
+  (ADR-0450), so concurrent stagers in different investigations each pass against the same bytes.
+- **One orphaned inode per replaced base whose guest is still running** — the `os.replace` drops the
+  last link while QEMU holds it open, charged to `df` and matching no path. ADR-0443 §2's accepted
+  residue, escalated by the upgrade from a rare race to once per (investigation, token). A capacity
+  fault, not a correctness one, and bounded by the holding guest's lifetime.
+- **During the upgrade window an investigation with a pre-marker base cannot provision while the
+  object store is unreachable**, where it previously provisioned off the cached base with no store
+  call at all. Fold store reachability into the same pre-deploy check as the free space above.
 - **The doomed-fetcher publish race** (ADR-0452 §6 / #1558) now covers the marker as well as the
   base. Same bound, same fix.
-- Nothing about `_unlink_orphan_partials`, the fetch lock, the free-space precheck, or the reclaim
-  gate's row-state classification.
+- **Rolling back leaks one staging directory per investigation.** A release without the `*.ready`
+  glob cannot see the markers this one wrote; run `find <uploads_dir> -name '*.ready' -delete`.
+- Nothing about `_unlink_orphan_partials`, the fetch lock, or the reclaim gate's row-state
+  classification.
 
 ## Test plan
 

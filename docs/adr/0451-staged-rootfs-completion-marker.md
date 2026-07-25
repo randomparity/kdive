@@ -111,7 +111,13 @@ them.
 
 ### 3. Reuse requires the marker **and** keeps the magic probe
 
-`_reusable_staged_base` becomes `S_ISREG(dest)` and marker-present and qcow2-magic.
+`_reusable_staged_base` becomes `S_ISREG(dest)` and marker-present and qcow2-magic, and is renamed
+`_staged_base_rejection`: it returns the slug naming *which* gate rejected rather than a bool, and
+both call sites render that into their WARNING. The return type is load-bearing. The gate now has
+three rejection reasons that mean opposite things to an operator, and on the first provision after
+an upgrade the missing-marker one is the reason for **every** base in the tree — so a single message
+keyed on the format gate would turn the one-time upgrade cost into a fleet-wide "the durability bug
+fired" alarm about bases that are perfectly intact.
 
 Gating on the marker *instead of* the base — the issue's own phrasing, and ADR-0443's — would be a
 straight trade of one residue for another. **The marker is a completion witness, not an integrity
@@ -230,6 +236,19 @@ that is better than implying the ordering solves it.
   Bounded by the holding guest's lifetime, and content-addressing means the bytes are equivalent, so
   it is a capacity fault rather than a correctness one. Adopting the marker-less base in place would
   avoid it and is rejected below.
+- **The upgrade re-stage makes a previously store-independent provision depend on the object store,
+  for one provision per base.** On `main` `fetch_uploaded_rootfs` returns a present, magic-passing
+  `dest` before any store call is made — `head` and the download both live inside
+  `stage_uploaded_rootfs`, past the reuse fast path — so a staged base insulated every subsequent
+  System in the investigation from the store entirely. During the upgrade window that insulation is
+  gone for each pre-marker base: an S3/MinIO outage, expired credentials or a partition fails
+  provisions that would previously have succeeded off the cached base. Store reachability therefore
+  belongs in the same pre-deploy check as the free space above. A narrower case: an object removed
+  out of band while its `artifacts` row survives (a bucket lifecycle rule, a partial restore —
+  `_reclaim_one_checksum` cannot produce it, since it unlinks the base first) now dead-letters with
+  `CONFIGURATION_ERROR: upload-kind rootfs was never uploaded` despite an intact base on disk, which
+  is an unactionable message for that operator. Disclosed rather than fixed here; **#1571** carries
+  naming the staged base in that message.
 - **Post-publish corruption is still only magic-gated.** A base tail-damaged by a dying disk *after* a
   durable publish passes both halves of the gate, because the marker witnesses completion rather than
   integrity. Closing that needs a checksum re-verify on the hot path, which ADR-0443 §3 declines for
