@@ -7,6 +7,7 @@ import errno
 import gzip
 import hashlib
 import io
+import logging
 import multiprocessing as mp
 import os
 from collections.abc import Iterator
@@ -459,14 +460,24 @@ def test_stage_gzip_also_syncs_the_partial_before_publishing(
 def test_stage_does_not_sync_a_partial_it_is_about_to_discard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The sync costs a full flush of a multi-GiB base, so it belongs on the success path only: a
-    # partial that fails verification is unlinked in the `finally` and never published, and paying
-    # to make those bytes durable buys nothing.
+    # The sync costs a full flush of a base up to the 50 GiB canonical cap, so it belongs on the
+    # publish path only: a partial that fails verification is unlinked in the `finally` and never
+    # published, and paying to make those bytes durable buys nothing.
+    #
+    # BOTH rejections are covered, because they fail at different gates. The checksum arm raises
+    # inside the stager; the format arm raises from the shared magic gate *after* the stager has
+    # returned and closed its writer -- so a design that synced as each stager closed its writer
+    # would still flush a 50 GiB raw/vmdk upload whose SHA-256 matched perfectly before rejecting
+    # it. Syncing at the publish point instead is what makes the second case free.
     trace = _trace_durability_syscalls(monkeypatch)
-    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+    checksum_mismatch = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+    not_a_qcow2 = _FakeStore(
+        b"a perfectly intact vmdk", checksum=_sha256_b64(b"a perfectly intact vmdk")
+    )
 
-    with pytest.raises(CategorizedError):
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+    for store in (checksum_mismatch, not_a_qcow2):
+        with pytest.raises(CategorizedError):
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert trace == []
 
@@ -638,7 +649,7 @@ def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> Non
     ],
 )
 def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
-    tmp_path: Path, name: str, content: bytes
+    tmp_path: Path, name: str, content: bytes, caplog: pytest.LogCaptureFixture
 ) -> None:
     # #1526: the reuse fast path used to be `if dest.is_file(): return dest` -- it verified
     # NOTHING, so a base left corrupt by a crash mid-stage was handed straight back, and under
@@ -653,12 +664,53 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
-    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
     assert result.read_bytes() == _QCOW2, f"{name}: handed back the unverifiable base"
     assert store.stream_calls == 1  # it really went back to the object store
     assert conn.lock_keys and conn.unlock_keys  # re-staged under the serializing fetch lock
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+    # The rejection is the one event this change exists to detect, and the re-stage succeeds, so a
+    # log line is the ONLY signal it ever fired. Without it the fix is unmeasurable in production.
+    assert any(
+        "did not re-pass the qcow2 format gate" in record.message and str(dest) in record.message
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ), f"{name}: rejected the base silently"
+
+
+def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
+    tmp_path: Path,
+) -> None:
+    # "I cannot read the staged base" is NOT "there is no staged base". The old `dest.is_file()`
+    # was a stat, which needs only traverse permission on the parent; the format probe opens the
+    # file, so it can also fail with EACCES (a worker/staging-user asymmetry of the shape ADR-0442
+    # documents), EMFILE, or a transient EIO. Swallowing those as a cache miss would swap a good
+    # multi-GiB base out from under any guest holding it open and re-download it on every single
+    # provision for as long as the fault lasts -- silently. It must surface instead.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_QCOW2)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_open = Path.open
+
+    def refusing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == dest:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", refusing_open)
+        with pytest.raises(CategorizedError) as error:
+            fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["dest"] == str(dest)
+    assert store.stream_calls == 0  # no re-download was attempted behind the operator's back
+    assert dest.read_bytes() == _QCOW2  # and the good base was left exactly where it was
 
 
 class _SiblingStagesWhileWeWait(_FakeConn):
@@ -704,7 +756,7 @@ def test_fetch_reuses_a_sibling_staged_base_that_appeared_during_the_lock_wait(
 
 
 def test_fetch_restages_over_a_torn_base_that_appeared_during_the_lock_wait(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The same window, but what appeared is a torn base rather than a good one -- the post-lock
     # check must verify it too, or a re-check on the pre-lock call site alone leaves the hole open
@@ -719,10 +771,14 @@ def test_fetch_restages_over_a_torn_base_that_appeared_during_the_lock_wait(
     )
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
-    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
     assert result.read_bytes() == _QCOW2
     assert store.stream_calls == 1  # the torn base was rejected and re-fetched
+    # A sibling that just published something unverifiable is a louder signal than finding a stale
+    # base on arrival, so the two rejection sites must not collapse into one indistinguishable line.
+    assert any("a sibling published" in record.message for record in caplog.records)
 
 
 def test_fetch_reuse_check_does_not_rescan_the_whole_base(tmp_path: Path) -> None:

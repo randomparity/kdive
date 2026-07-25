@@ -46,14 +46,28 @@ file is the only thing standing between an upload and a guest.
 
 ### 1. `fsync` the partial before the rename, and the staging directory after
 
-A `_durable_partial_writer` context manager replaces the bare `partial.open("wb")` in both stagers.
-It yields the writer and, after the body returns, `flush()`es and `os.fsync()`s the descriptor.
-`_durable_replace` then performs the `os.replace` and `fsync`s `dest.parent`.
+`_durable_replace` replaces the bare `os.replace(partial, dest)`. It `fsync`s the partial, renames
+it onto `dest`, and then `fsync`s `dest.parent`. The stagers are untouched and keep writing through
+a plain `partial.open("wb")`.
 
 This is not a new pattern in the repo — `inventory/writeback.py` already writes the systems TOML as
 flush → `fsync` → `os.replace`. What is new is applying it to a file whose loss is silent rather
 than loud, and adding the directory sync, which the TOML writer omits because a lost inventory
 rename is self-evident on the next read.
+
+**The sync belongs at the publish point, not at each stager's writer close.** This is the decision
+that keeps the cost honest. Every verification gate — each stager's checksum and the shared
+qcow2-magic gate — has already run and raised by the time `_durable_replace` is called, so *no*
+rejection path pays for a flush. Syncing as each stager closed its writer would look equivalent and
+is not: the format gate runs *after* the stager returns, so a checksum-valid upload that is a raw or
+vmdk image rather than a qcow2 — an ordinary operator mistake, up to the 50 GiB canonical cap —
+would be flushed in full and then unlinked. It also leaves durability at one site instead of one per
+codec, so a future third codec cannot forget it.
+
+The partial's writer is closed by then, so `_fsync_path` opens a fresh descriptor on the same inode;
+its bytes are in the page cache and are flushed identically. The partial is opened `O_WRONLY` rather
+than `O_RDONLY` because POSIX leaves `fsync` on a read-only descriptor free to return `EBADF`;
+Linux happens to allow it, but a durability guarantee should not rest on that.
 
 The directory `fsync` is deliberately *not* justified by the data. A rename lost to a crash leaves
 no `dest`, and an absent `dest` is simply re-staged — benign. It is justified by the *other* half of
@@ -61,22 +75,26 @@ the same directory entry: the rename consumes the `.partial` name, and losing th
 a multi-GiB SENSITIVE partial as an orphan. Syncing the pair together is one metadata sync per
 staged base.
 
-Both helpers raise `OSError`, which `stage_uploaded_rootfs`'s existing `except OSError` already maps
+Both syncs raise `OSError`, which `stage_uploaded_rootfs`'s existing `except OSError` already maps
 to the uniform `INFRASTRUCTURE_FAILURE` naming `dest`. A directory sync that fails after a
 successful rename therefore fails the provision while leaving a good `dest` behind — the next fetch
 reuses it, which is the honest outcome: the bytes are fine, only their durability is unproven.
 
-The sync sits *after* the `yield`, so a stager that raises skips it. The identity path's checksum
-comparison moves inside the writer context to take advantage of that: a mismatched multi-GiB
-download is discarded by the existing `finally` without first being flushed to disk. The gzip path
-already raises from inside its writer context. The cost of the fix is therefore one full flush per
-*published* base and none per rejected one.
+**Stated exclusion.** `dest.parent` is `<uploads_dir>/<investigation_id>/`, and `fsync`ing a
+directory does not make that directory's own link in *its* parent durable. So on the first stage
+into a fresh investigation, a crash can still lose `<investigation_id>/` entirely. This is left
+unfixed rather than closed with a second sync, because losing the directory loses `dest` and the
+consumed `.partial` **together** — which is precisely the state both halves of the directory-sync
+argument are designed for. The next fetch finds nothing, re-stages, and there is no orphan to
+resurrect. The guarantee is therefore "the rename is durable within an already-durable staging
+directory", and adding a syscall to make a formal statement true while changing no outcome is not a
+trade worth making.
 
 ### 2. The reuse fast path re-applies the qcow2-magic gate
 
 `_starts_with_qcow2_magic` is extracted from `_require_qcow2_magic` as the single implementation of
-the format probe, and `_reusable_staged_base` wraps it for the reuse path, returning `False` on any
-`OSError`. Both `if dest.is_file()` sites become `if _reusable_staged_base(dest)`.
+the format probe, and `_reusable_staged_base` wraps it for the reuse path. Both `if dest.is_file()`
+sites become `if _reusable_staged_base(dest, system_id=...)`.
 
 Extracting rather than writing a second probe is the point: the repo has already been bitten by a
 duplicated magic check that was written as an equality against a whole prefix and was therefore a
@@ -87,9 +105,30 @@ The re-check runs on **both** sides of the lock. A re-check on the pre-lock site
 the hole open for exactly the fetchers that queued — the ones a torn base is most likely to be
 handed to, since a sibling crashing mid-stage is what produces both the torn base and the queue.
 
-A rejected base needs no unlink. It falls through to the existing lock-and-stage path, whose
-`os.replace` overwrites it in place, so there is never a window in which the investigation has no
-base at all.
+**"Cannot read" is not "corrupt."** `dest.is_file()` was a `stat`, needing only traverse permission
+on the parent; the format probe `open`s the file, so it can fail for reasons that say nothing about
+the base — `EACCES` under a worker/staging-user asymmetry of the shape ADR-0442 documents in this
+same subsystem, `EMFILE` under descriptor exhaustion, a transient `EIO`. `_reusable_staged_base`
+therefore returns `False` only for the errors that mean *there is no usable base at this path*
+(`FileNotFoundError`, `NotADirectoryError`, `IsADirectoryError` — the set `is_file()` answered
+`False` for) and raises everything else through `_staging_fault` as an `INFRASTRUCTURE_FAILURE`.
+Swallowing those as a cache miss would be strictly worse than the code being fixed: the fault is
+persistent, so every provision in the investigation would serialize on the fetch lock and
+re-download a multi-GiB base, forever, with no error and no log.
+
+A rejected base needs no unlink; it falls through to the lock-and-stage path, whose `os.replace`
+supersedes it, so there is never a window in which the investigation has no base at all.
+
+**Accepted residue — a superseded base a guest still holds open.** `os.replace` does not overwrite
+bytes in place; it repoints the directory entry at the *new* inode and drops the last link to the
+old one. If some QEMU has the rejected base open as a backing file, that inode survives with zero
+links until the guest exits: charged to `df`, matching no path, and therefore unreachable by
+ADR-0442's path-based `_unlink_staged_base` and `sweep_investigation_staging_dir` — the same
+"charged to `df` yet invisible to every path-matching tool" shape `_unlink_orphan_partials` already
+warns about for partials. Unlinking the rejected base first would not help: an unlink drops the link
+identically and orphans an open inode just the same. The exposure is bounded by the holding guest's
+lifetime and is the right side of the trade — the alternative is knowingly booting every new System
+in the investigation off a base that failed its format gate.
 
 ### 3. Magic-only, not size and not checksum
 
@@ -119,6 +158,25 @@ produces a torn base at all; decision 2 is the net for a base staged by code tha
 backup). Neither is sufficient alone, and the reuse gate is explicitly *not* claimed to be a
 verification of the base — only a rejection of the shapes a broken one takes.
 
+### 4. A rejection is logged, because it is otherwise undetectable
+
+The module gains `_log = logging.getLogger(__name__)` — the settled convention in this package
+(`lifecycle/rootfs/customization_boot.py`, `jobs/handlers/artifacts/rootfs_reclaim.py`) — and each
+rejection site emits a `WARNING` naming `dest`, the investigation, and the System.
+
+Without it the fix is unmeasurable. The re-stage *succeeds*, so no error is raised and no job fails;
+the only symptom of the durability bug firing is a provision that took one multi-GiB download longer
+than it should have. The ADR's own Context argues that the two defects masked each other
+diagnostically, and shipping the detection while discarding the detection signal would preserve
+exactly that. It is also the anchor for the pathological case: a base that keeps failing the gate
+(a dying disk, a stray `cp`) presents as an unbounded loop of serialized re-downloads, and one log
+line is the difference between diagnosing that and staring at object-store egress.
+
+The two sites log distinguishably. A pre-lock rejection means a stale unusable base was already
+there; a post-lock one means a **sibling just published** something that does not verify, which is a
+materially louder condition. No metric is added — the log line carries the identifiers, and a
+counter with no dimension to slice by would not answer a question the line does not.
+
 ## Consequences
 
 - A host crash mid-stage can no longer leave a base that silently backs every guest in the
@@ -128,9 +186,13 @@ verification of the base — only a rejection of the shapes a broken one takes.
   sync is largely a wait for writeback that would have happened anyway; the wall-clock cost is
   bounded by the disk, not added to it. It is paid once per investigation per checksum, never per
   System.
-- Bases staged by pre-ADR-0443 code are not trusted. A torn one is re-downloaded once, silently and
-  correctly. A good one passes the magic gate and is reused as before, so there is no mass
+- Bases staged by pre-ADR-0443 code are not trusted. A torn one is re-downloaded once, with a
+  `WARNING` naming it. A good one passes the magic gate and is reused as before, so there is no mass
   re-download on upgrade.
+- An unreadable staged base now fails the provision with an `INFRASTRUCTURE_FAILURE` where the old
+  `is_file()` would have reused it (if `stat` succeeded) or silently re-downloaded it. That is a new
+  loud failure on a genuinely broken host, and it is the intended trade against a silent
+  re-download loop.
 - The reuse fast path now performs a file `open` + 4-byte read where it performed a `stat`. Both are
   a single syscall pair against warm dentry cache; the provision path around it opens the file for
   `qemu-img` moments later regardless.
@@ -169,6 +231,14 @@ verification of the base — only a rejection of the shapes a broken one takes.
 - **`O_DSYNC`/`O_SYNC` on the partial instead of a closing `fsync`.** Makes every one of the
   4 MiB streaming writes synchronous, serializing the download against the disk for the whole
   multi-GiB transfer rather than syncing once at the end. Strictly worse for the same guarantee.
+- **Sync inside each stager as its writer closes** (a `_durable_partial_writer` context manager).
+  The first shape this change took, and it reads as the tidier one — durability adjacent to the
+  writes it covers. Rejected in decision 1: the shared qcow2-magic gate runs *after* the stager
+  returns, so a checksum-valid non-qcow2 upload would be flushed in full before being rejected, and
+  the sync would have to be repeated in every future codec.
+- **Also `fsync` the parent of a newly created per-investigation staging directory.** Would make
+  the durability statement formally complete. Rejected in decision 1 as a syscall that changes no
+  outcome: losing that directory loses `dest` and the `.partial` together, which is the benign case.
 - **Sync only the directory, not the file.** A misreading of what the rename guarantees: it would
   make the *name* durable while leaving the data it points at unwritten, which is the bug.
 - **Leave the reuse path alone on the grounds that decision 1 makes a torn base impossible.** True

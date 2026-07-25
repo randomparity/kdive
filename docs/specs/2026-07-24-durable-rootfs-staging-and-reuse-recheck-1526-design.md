@@ -33,30 +33,38 @@ Surfaced by the `/challenge` review on #1520, which flagged it as out of scope f
 
 - **R1** — A staged base's bytes are durable before the rename that publishes them, on both the
   identity and the gzip stager.
-- **R2** — The rename itself is durable, so a crash cannot resurrect the consumed `.partial`.
+- **R2** — The rename itself is durable, so a crash cannot resurrect the consumed `.partial`. Scoped
+  to a staging directory that already exists: the first stage into a fresh investigation can still
+  lose `<investigation_id>/` whole, which takes `dest` and the `.partial` with it and is therefore
+  the benign case R2 exists to avoid (ADR-0443 §1, stated exclusion).
 - **R3** — The reuse fast path re-verifies a present base before returning it, on **both** sides of
   the fetch lock, and re-stages one that fails.
 - **R4** — The re-verification is O(1) in the base size. A base can be tens of GiB and the check
   runs on every System provision in the investigation.
 - **R5** — The re-verification never false-rejects a base the staging path itself produced, or it
   would re-download on every provision forever.
-- **R6** — The durability cost falls only on bases that are actually published.
+- **R6** — The durability cost falls only on bases that are actually published — including bases
+  rejected by the format gate, which runs after the stager returns.
+- **R7** — An unreadable base is reported, not silently re-downloaded; a rejected one is logged.
 
 ## Design
 
 ### Sync the partial before the rename, and the directory after
 
-A `_durable_partial_writer` context manager replaces the bare `partial.open("wb")` in both stagers.
-It yields the writer, and after the body returns it `flush()`es and `os.fsync()`s the descriptor —
-the shape `inventory/writeback.py` already uses for the systems TOML. Because the sync is *after*
-the `yield`, a stager that raises skips it (R6): the identity path's checksum comparison moves
-inside the writer context for exactly this reason, so a mismatched multi-GiB download is discarded
-without first being flushed to disk.
+`_durable_replace` replaces the bare `os.replace(partial, dest)`: it `fsync`s the partial, renames,
+then `fsync`s the staging directory — the flush → `fsync` → `os.replace` shape
+`inventory/writeback.py` already uses for the systems TOML. The stagers are untouched.
 
-`_durable_replace` then performs the `os.replace` and `fsync`s the staging directory. The directory
-sync is not about the data — an absent `dest` after a crash simply re-stages — but the same
-directory entry carries the partial's unlink, so without it a lost rename can resurrect the partial
-as a SENSITIVE orphan.
+Placing the sync at the publish point rather than at each stager's writer close is what satisfies R6
+in full. Every gate — each stager's checksum and the shared qcow2-magic gate — has already raised by
+then, so no rejection pays for a flush. A per-stager sync would miss the format gate specifically,
+since it runs after the stager returns: a checksum-valid raw or vmdk upload of up to 50 GiB would be
+flushed and then discarded. `_fsync_path` opens the partial `O_WRONLY` (POSIX lets `fsync` on a
+read-only descriptor return `EBADF`).
+
+The directory sync is not about the data — an absent `dest` after a crash simply re-stages — but the
+same directory entry carries the partial's unlink, so without it a lost rename can resurrect the
+partial as a SENSITIVE orphan.
 
 Both raise `OSError`, which the existing `except OSError` in `stage_uploaded_rootfs` already maps to
 the uniform `INFRASTRUCTURE_FAILURE` naming `dest`.
@@ -65,11 +73,24 @@ the uniform `INFRASTRUCTURE_FAILURE` naming `dest`.
 
 `_starts_with_qcow2_magic` is extracted from `_require_qcow2_magic` as the single implementation of
 the format probe. `_require_qcow2_magic` (the staging gate) keeps raising `CONFIGURATION_ERROR`;
-`_reusable_staged_base` (the reuse gate) wraps the same probe and returns `False` on any `OSError`,
-which subsumes the `dest.is_file()` test it replaces — absent, unreadable, or a directory in its
-place all read as not reusable. Both `if dest.is_file()` sites in `fetch_uploaded_rootfs` become
-`if _reusable_staged_base(dest)`; a rejected base falls through to the existing lock-and-stage path,
-whose `os.replace` overwrites it, so no separate unlink is needed.
+`_reusable_staged_base` (the reuse gate) wraps the same probe. Both `if dest.is_file()` sites in
+`fetch_uploaded_rootfs` become `if _reusable_staged_base(dest, system_id=...)`; a rejected base falls
+through to the existing lock-and-stage path, whose `os.replace` supersedes it, so no separate unlink
+is needed (and would not help — see the ADR's accepted residue on superseding an inode a guest holds
+open).
+
+The gate distinguishes "no usable base" from "cannot look" (R7). `FileNotFoundError`,
+`NotADirectoryError`, and `IsADirectoryError` — the set `is_file()` answered `False` for — return
+`False`; every other `OSError` raises `_staging_fault`. `is_file()` was a `stat` needing only
+traverse permission, while the probe `open`s the file, so `EACCES`/`EMFILE`/`EIO` are newly
+reachable and none of them means the base is corrupt.
+
+### Log the rejection
+
+The module gains `_log = logging.getLogger(__name__)` (the package convention) and each rejection
+site emits a `WARNING` naming `dest`, the investigation, and the System. The re-stage succeeds, so
+the log line is the *only* evidence the durability bug ever fired. The pre-lock and post-lock sites
+log distinguishably: the latter means a sibling just published something unverifiable.
 
 The magic read is a 4-byte read (R4) and is exactly what the staging path already asserted about
 the same bytes, so it cannot false-reject a base this code produced (R5).
@@ -88,7 +109,8 @@ Two alternatives are ruled out by the data rather than by preference:
 - **AC-1** — Staging a base `fsync`s the partial, *then* renames, *then* `fsync`s the directory —
   asserted as an inode-tagged syscall sequence, not merely as "a sync happened". Holds on the gzip
   stager as well as the identity one.
-- **AC-2** — A staging attempt that fails verification performs no `fsync`.
+- **AC-2** — A staging attempt that fails verification performs no `fsync` — covering both the
+  checksum arm (raised inside the stager) and the format arm (raised after it returns).
 - **AC-3** — A full-length zeroed base at `dest` (the crash-torn shape), a base truncated below the
   magic, an empty file, and a garbage document are each rejected on reuse and re-fetched from the
   object store; the caller receives the re-staged bytes.
@@ -96,3 +118,7 @@ Two alternatives are ruled out by the data rather than by preference:
   proving the post-lock call site re-verifies too.
 - **AC-5** — The reuse check reads a bounded number of bytes of the base, not the whole file.
 - **AC-6** — A valid present base is still a cache hit that takes neither the lock nor the store.
+- **AC-7** — A present base the probe cannot read (`EACCES`) raises `INFRASTRUCTURE_FAILURE` naming
+  `dest`, attempts no download, and leaves the base untouched.
+- **AC-8** — Every reuse rejection emits a `WARNING` naming `dest`, and the post-lock site's line is
+  distinguishable from the pre-lock one.

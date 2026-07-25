@@ -18,7 +18,9 @@ canonical base is qcow2-magic-validated before it backs an overlay.
 Durability (ADR-0443): the partial is ``fsync``\\ ed before the ``os.replace`` publishes it and the
 staging directory ``fsync``\\ ed after, so a host crash cannot leave a durable rename over
 non-durable data; and the reuse fast path re-applies the qcow2-magic gate rather than trusting a
-present file, so a base torn by a crash that predates this cannot back an overlay.
+present file, so a base torn by a crash that predates this cannot back an overlay. A rejection is
+logged — the re-stage succeeds, so the log line is the only evidence it ever fired — while a base
+that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
 
 Concurrency (ADR-0441 §5): the shared per-(investigation, checksum) staging path means two sibling
 Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>.partial`` and
@@ -34,12 +36,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
-from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager, suppress
+from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Protocol
+from typing import Protocol
 from uuid import UUID, uuid4
 
 import psycopg
@@ -62,6 +64,8 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     staged_rootfs_path,
 )
 from kdive.store.objectstore import artifact_key, object_store_from_env
+
+_log = logging.getLogger(__name__)
 
 _TENANT = "local"
 _OWNER_KIND = "investigations"
@@ -153,13 +157,36 @@ def fetch_uploaded_rootfs(
     investigation_id = _resolve_investigation(conn, upload.system_id)
     resolved = _resolve_object(conn, investigation_id, token, upload)
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
-    if _reusable_staged_base(dest):
+    if _reusable_staged_base(dest, system_id=upload.system_id):
         return dest
+    if dest.exists():
+        # The signal this change exists to produce. A base that is present but does not re-pass the
+        # format gate is the durability bug firing (or a base corrupted by some other means), and
+        # it is otherwise invisible: the re-stage below succeeds, so no error is ever raised and the
+        # only symptom is a provision that took a multi-GiB download longer than it should have.
+        _log.warning(
+            "staged rootfs base at %s did not re-pass the qcow2 format gate; re-staging it "
+            "(investigation=%s system=%s)",
+            dest,
+            investigation_id,
+            upload.system_id,
+        )
     lock_key = _session_lock_key(_fetch_lock_name(investigation_id, token))
     conn.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
     try:
-        if _reusable_staged_base(dest):  # a sibling fetcher finished while we waited on the lock
-            return dest
+        if _reusable_staged_base(dest, system_id=upload.system_id):
+            return dest  # a sibling fetcher finished while we waited on the lock
+        if dest.exists():
+            # Distinct from the pre-lock line above: something appeared at ``dest`` *while we
+            # waited*, which means a sibling fetcher just published a base that does not verify —
+            # a materially louder signal than finding a stale one on arrival.
+            _log.warning(
+                "a sibling published a staged rootfs base at %s that does not re-pass the qcow2 "
+                "format gate; re-staging it (investigation=%s system=%s)",
+                dest,
+                investigation_id,
+                upload.system_id,
+            )
         _unlink_orphan_partials(dest)
         stage_uploaded_rootfs(
             store,
@@ -352,22 +379,16 @@ def _stage_identity(
     the byte-identical failure — and is tracked in #1523.)
     """
     hasher = hashlib.sha256()
-    with (
-        store.get_artifact_stream(key, None) as fetched,
-        _durable_partial_writer(partial) as writer,
-    ):
+    with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
         while chunk := fetched.reader.read(_STREAM_CHUNK_BYTES):
             hasher.update(chunk)
             writer.write(chunk)
-        # Inside the writer context deliberately: raising here skips the ``fsync``
-        # ``_durable_partial_writer`` does after the ``yield``, so a partial the ``finally`` is
-        # about to unlink never costs a full flush of a multi-GiB base (ADR-0443).
-        if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
-            raise CategorizedError(
-                "uploaded rootfs object failed checksum verification",
-                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-                details={"system_id": str(system_id)},
-            )
+    if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
+        raise CategorizedError(
+            "uploaded rootfs object failed checksum verification",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={"system_id": str(system_id)},
+        )
 
 
 def _stage_gzip(
@@ -394,7 +415,7 @@ def _stage_gzip(
         expected_sha256=checksum,
         uncompressed_size=uncompressed_size,
     )
-    with _durable_partial_writer(partial) as writer:
+    with partial.open("wb") as writer:
         strip_gzip_to_writer(store, request, writer)
 
 
@@ -409,7 +430,7 @@ def _starts_with_qcow2_magic(staged: Path) -> bool:
         return reader.read(len(_QCOW2_MAGIC)) == _QCOW2_MAGIC
 
 
-def _reusable_staged_base(dest: Path) -> bool:
+def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     """Whether a present staged base may back an overlay without being fetched again (#1526).
 
     The reuse fast path used to treat *any* present ``dest`` as authoritative (a bare
@@ -432,49 +453,61 @@ def _reusable_staged_base(dest: Path) -> bool:
     removes the crash window that produces such a base, and this gate is the net for one staged by
     code that predates it, or corrupted by some other means.
 
-    Any ``OSError`` — an absent file, an unreadable one, a directory in its place — reads as not
-    reusable, so this subsumes the ``dest.is_file()`` test it replaces.
+    Only the errors that mean *there is no usable base at this path* — it is absent, or a
+    non-directory sits on its parent path, or a directory sits on its own — read as not reusable,
+    which is the set ``dest.is_file()`` answered ``False`` for. Every other ``OSError`` is raised as
+    an ``INFRASTRUCTURE_FAILURE``: a base that is present but unreadable (``EACCES`` under a
+    worker/staging-user asymmetry of the shape ADR-0442 documents, ``EMFILE`` under descriptor
+    exhaustion, a transient ``EIO``) is an operator-visible fault, **not** a cache miss. Treating it
+    as one would swap a good multi-GiB base out from under any guest holding it (see the residue in
+    ADR-0443 §2) and re-download it on every provision, silently, for as long as the fault lasts.
     """
     try:
         return _starts_with_qcow2_magic(dest)
-    except OSError:
+    except FileNotFoundError, NotADirectoryError, IsADirectoryError:
         return False
+    except OSError as err:
+        raise _staging_fault(dest, err, system_id=str(system_id)) from err
 
 
-@contextmanager
-def _durable_partial_writer(partial: Path) -> Iterator[IO[bytes]]:
-    """Open the staging partial and force its bytes onto the disk before the handle closes.
+def _fsync_path(path: Path, flags: int) -> None:
+    """``fsync`` whatever ``path`` names, opening it just for the sync and always closing it.
 
-    ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
-    or power loss: on a default ext4 mount the rename can become durable while the data blocks
-    behind it are not, leaving a full-length ``dest`` of zeros or stale blocks (#1526). Syncing here
-    — the shape ``inventory/writeback.py`` already uses — makes the canonical bytes durable before
-    :func:`_durable_replace` publishes them.
-
-    The sync is inside the ``with`` and after the ``yield``, so a stager that raises skips it: a
-    partial about to be discarded in ``stage_uploaded_rootfs``'s ``finally`` never pays for a
-    full flush of a multi-GiB base it will never publish.
+    The stager's own writer is already closed by the time this runs, so its bytes are in the page
+    cache and a fresh descriptor on the same inode flushes exactly the same data. ``flags`` is
+    ``O_WRONLY`` for the partial and ``O_RDONLY`` for a directory: POSIX leaves ``fsync`` on a
+    read-only descriptor free to return ``EBADF``, so a file is never synced through one.
     """
-    with partial.open("wb") as writer:
-        yield writer
-        writer.flush()
-        os.fsync(writer.fileno())
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _durable_replace(partial: Path, dest: Path) -> None:
-    """Publish the synced partial onto ``dest``, then sync the directory holding the rename.
+    """Sync the verified partial, publish it onto ``dest``, then sync the directory (ADR-0443).
+
+    ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
+    or power loss: on a default ext4 mount the rename can become durable while the data blocks
+    behind it are not, leaving a full-length ``dest`` of zeros or stale blocks (#1526). The file
+    sync closes that window, in the flush → ``fsync`` → ``os.replace`` shape
+    ``inventory/writeback.py`` already uses for the systems TOML.
+
+    Syncing **here** rather than as each stager closes its writer is what keeps the cost on the
+    published bases only: every verification gate — each stager's checksum and the shared
+    qcow2-magic gate — has already run and raised by the time this is called, so a partial the
+    ``finally`` is about to discard never costs a full flush of a base up to the 50 GiB canonical
+    cap. It also leaves durability at the single publish point instead of once per codec.
 
     Without the directory sync the *rename* can be lost on a crash even though the data behind it
     survived. That alone is benign — an absent ``dest`` is re-staged — but the same directory entry
     carries the partial's unlink, so a lost rename can resurrect the partial as an orphan. Both
     halves are made durable together, at the cost of one metadata sync per staged base.
     """
+    _fsync_path(partial, os.O_WRONLY)
     os.replace(partial, dest)
-    directory = os.open(dest.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _fsync_path(dest.parent, os.O_RDONLY)
 
 
 def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
