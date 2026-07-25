@@ -42,6 +42,8 @@ is the difference between an enumerable backlog and log archaeology.
   candidates, and the fault is visible on the ADR-0190 group-E error counter.
 - **AC-7** A sweep scoped out of its own bucket by key-layout drift is distinguishable from a clean
   one, rather than reporting the same zero.
+- **AC-8** One pass's reclaim work is bounded, so draining a backlog does not stall the rest of the
+  reconciler catalog, and one permanently undeletable object does not starve the keys behind it.
 
 ## Design
 
@@ -60,7 +62,7 @@ A new reconciler repair, `repair_leaked_upload_objects`, in
 4. For each reclaimable key, re-read its store mtime (a LIST scoped to the exact key) and re-run
    the *same* query for that key alone, immediately before the delete; delete only if it still
    classifies. Log one INFO per delete. A failed delete is logged, counted, and skipped; the pass
-   raises once at the end.
+   raises once at the end. At most `MAX_RECLAIMS_PER_PASS` keys are processed per pass.
 
 ### The predicate
 
@@ -121,11 +123,20 @@ tenant from `upload_manifest.UPLOAD_TENANT`, which the mint sites now share.
 ### Failure handling
 
 A failed delete is logged, counted, and skipped; the pass raises once after the last root, so
-`_run_repair_plan` still records it on the ADR-0190 error counter (AC-6). Aborting at the first
+`_run_repair_plan` still records it on the ADR-0190 error counter (AC-6, AC-8). The raise forfeits
+the pass's count (`_run_repair_plan` records one only for a repair that returns), so the count is
+logged at ERROR immediately before it. Aborting at the first
 failure would let one permanently undeletable object — an S3 Object Lock hold, a per-key deny —
 starve every candidate behind it and the whole second root on every pass forever, which is the leak
 this repair exists to drain. Nothing is lost either way: this sweep commits nothing, so the next
 pass re-derives the identical candidates.
+
+### Bounding one pass
+
+`MAX_RECLAIMS_PER_PASS` caps how many keys one pass reclaims (AC-8). The reconciler runs its catalog
+sequentially on one connection with no per-pass deadline, and each reclaim costs a LIST, a query,
+and a delete — so an unbounded drain of the backlog accumulated since ADR-0453 would hold every
+other repair behind it. This is the drain-side counterpart of ADR-0453 §4's cap on the reap side.
 
 ### Cost, and what is deferred
 

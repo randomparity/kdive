@@ -58,7 +58,6 @@ from kdive.reconciler.cleanup.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
 )
 from kdive.reconciler.cleanup.upload_orphans import (
-    DEFAULT_UPLOAD_ORPHAN_GRACE,
     UploadOrphanStore,
 )
 from kdive.reconciler.cleanup.upload_orphans import (
@@ -159,10 +158,6 @@ DEFAULT_DEBUG_SESSION_STALE_AFTER = timedelta(minutes=2)
 # default is the same 3600s). A pending image row (or an orphan object with no row) is
 # protected from the leaked/dangling image sweeps until this window past pending_since/mtime.
 DEFAULT_IMAGE_PUBLISH_GRACE = timedelta(seconds=3600)
-# Fallback upload-window TTL when KDIVE_UPLOAD_TTL_SECONDS is unset (its declared default is the
-# same 86400s). The orphan sweep's reclaim threshold is stacked on top of this, so an object is
-# never reclaimed until a full grace past the earliest reap of a window it could belong to.
-DEFAULT_UPLOAD_WINDOW_TTL = timedelta(seconds=86400)
 
 type _RepairFn = Callable[[AsyncConnection], Awaitable[int]]
 
@@ -541,30 +536,24 @@ def _image_publish_grace() -> timedelta:
 
 
 def _upload_orphan_grace() -> timedelta:
-    """Resolve the upload-orphan grace from config (ADR-0455 §6); the operator's brake.
+    """Resolve the upload-orphan grace from config (ADR-0455 §7); the operator's brake.
 
     Resolved per pass, not once at ``ReconcileConfig`` construction, because the brake exists for
     an operator who has just found the sweep removing live bytes — one that needed a reconciler
-    restart to take effect would be no better than the redeploy it replaced. Same treatment as
-    :func:`_image_publish_grace`.
+    restart to take effect would be no better than the redeploy it replaced. ``require`` rather
+    than ``get``: the setting declares a default, so there is no unset case to fall back for.
     """
-    seconds = config.get(UPLOAD_ORPHAN_GRACE)
-    if seconds is None:
-        return DEFAULT_UPLOAD_ORPHAN_GRACE
-    return timedelta(seconds=seconds)
+    return timedelta(seconds=config.require(UPLOAD_ORPHAN_GRACE))
 
 
 def _upload_window_ttl() -> timedelta:
     """Resolve the upload-window TTL the orphan grace is stacked on top of (ADR-0455 §2).
 
-    Read here rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
+    Read per pass rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
     postpones every reap by the same amount, and an orphan grace that did not move with it would
     let the sweep reclaim a window's bytes in the very pass that reaped them.
     """
-    seconds = config.get(UPLOAD_TTL_SECONDS)
-    if seconds is None:
-        return DEFAULT_UPLOAD_WINDOW_TTL
-    return timedelta(seconds=seconds)
+    return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
 
 
 async def _run_repair_plan(

@@ -38,9 +38,14 @@ UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
     f"{UPLOAD_TENANT}/{kind}/" for kind in UPLOAD_OWNER_KINDS
 )
 
-#: The default orphan grace, protecting an unreferenced object for this long past its store mtime
-#: **in addition to** the configured upload-window TTL (see :func:`repair_leaked_upload_objects`).
-DEFAULT_UPLOAD_ORPHAN_GRACE = timedelta(hours=24)
+#: How many objects one pass may reclaim. The reconciler runs its catalog strictly sequentially on
+#: one connection with no per-pass deadline, so an unbounded drain — and the first pass after this
+#: ships is the largest this code will ever run, against a backlog that has accumulated since
+#: ADR-0453 — would stall allocation expiry, orphaned-System repair, and domain reaping behind it
+#: for as long as it took. Each reclaim costs a LIST, a query, and a delete, and the query is the
+#: unindexed anti-join of #1570, so the cost is per key rather than per pass. The cap is the drain
+#: side of the brake ADR-0453 §4 put on the reap side; the remainder is reclaimed 30 seconds later.
+MAX_RECLAIMS_PER_PASS = 200
 
 # The number of ``/``-separated components in an upload object key: ``<tenant>/<kind>/<id>/<name>``.
 # ``validate_key_component`` rejects ``/`` in every component, so a well-formed key has exactly
@@ -138,6 +143,13 @@ async def repair_leaked_upload_objects(
         for candidate in candidates:
             if candidate.key not in reclaimable:
                 continue
+            if deleted + failed >= MAX_RECLAIMS_PER_PASS:
+                _log.info(
+                    "reconciler: upload orphan sweep stopped at its %d-object per-pass cap; the "
+                    "remaining backlog is reclaimed by the following passes",
+                    MAX_RECLAIMS_PER_PASS,
+                )
+                return _reported(deleted, failed)
             try:
                 deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
             except CategorizedError as exc:
@@ -145,14 +157,33 @@ async def repair_leaked_upload_objects(
                 _log.warning(
                     "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
                 )
-    if failed:
-        raise CategorizedError(
-            f"upload orphan sweep could not reclaim {failed} object(s); {deleted} were reclaimed. "
-            "Nothing is lost — the next pass re-derives the same candidates — but a key that "
-            "fails every pass (an object-lock hold, a per-key deny) leaks until it is cleared.",
-            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        )
-    return deleted
+    return _reported(deleted, failed)
+
+
+def _reported(deleted: int, failed: int) -> int:
+    """Return the reclaimed count, or raise if any key failed — logging the count either way.
+
+    ``_run_repair_plan`` records a count only for a repair that returns, so a pass that deleted
+    irreversibly and *then* hit one undeletable key reports zero on the ADR-0190 repairs counter.
+    That is the trade ADR-0453 §3 already made for the reaper — the count is a gauge, the raise is
+    the alert, and a key failing every pass is a permanent leak that has to alert — but here it can
+    pin a working drain's gauge at zero, so the count goes on the record as a log line before the
+    raise rather than being lost with it.
+    """
+    if not failed:
+        return deleted
+    _log.error(
+        "reconciler: upload orphan sweep reclaimed %d object(s) and could not reclaim %d; the "
+        "reclaimed count is not reported to the repairs counter because this pass raises",
+        deleted,
+        failed,
+    )
+    raise CategorizedError(
+        f"upload orphan sweep could not reclaim {failed} object(s); {deleted} were reclaimed this "
+        "pass. Nothing is lost — the next pass re-derives the same candidates — but a key that "
+        "fails every pass (an object-lock hold, a per-key deny) leaks until it is cleared.",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
 
 
 async def _delete_if_still_reclaimable(

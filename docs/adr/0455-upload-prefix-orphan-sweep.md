@@ -97,10 +97,25 @@ predicate alone, immediately before its `delete_object`. The re-check is `repair
 precedent and it shrinks — it does not close — the window between deciding and deleting: a finalize
 or a re-mint that commits in that gap protects its object.
 
-The residual it leaves is narrow and stated rather than implied: a mint that commits between the
-re-check and the `delete_object`, followed by a PUT landing on that key inside the same gap, is
-deleted. That needs a re-mint to interleave inside a single check→delete gap for a key that has
-already been rowless and manifest-less for a full grace period.
+**The object's mtime is re-read from the store for that re-check, not carried from the listing**,
+and this is where the precedent stops applying. `repair_leaked_images` can re-check the row alone
+because ADR-0092 makes an image publish **row-before-object**, so a row is always in place before
+any bytes exist. Under `local/runs/` the ordering is reversed for the non-upload writers
+§Consequences puts in scope: a vmcore's multi-GiB `put_stream` and a `capture_traffic` retry's
+re-PUT both land at a deterministic, reusable key name minutes before `finalize_capture`'s row
+commits. For the length of that PUT the object has **no row to protect it** and its mtime is the
+only fence — so re-checking the *listed* mtime would find it stale, and the sweep would delete
+bytes that had just been written and leave `finalize_capture` committing rows against an object
+that no longer exists. The re-read is one LIST scoped to the exact key, paid only for keys actually
+being deleted.
+
+The residual it leaves is narrow and stated rather than implied: a PUT that lands between that
+re-read and the `delete_object` is deleted. That is a single re-read→delete gap, for a key that has
+been rowless, manifest-less, and unwritten for the whole threshold. It does **not** require a
+re-mint to reach — the vmcore keys are deterministic per `(run, method)` and involve no upload
+window at all, so a capture retried more than a threshold after an attempt that PUT the core and
+died before `finalize_capture` is the cheapest way in. Saying "a re-mint has to interleave" would
+make the residual sound rarer than it is.
 
 Bulk-then-recheck is also the cost decision, and the honest version of it is not "cheaper than the
 precedent". Steady state with no leak is one LIST and one query per root per pass; the per-key round
@@ -130,20 +145,51 @@ swept prefix are derived: the owner kinds from the reaper's table, and the tenan
 own `_TENANT = "local"` literal. A fourth copy in this module would have been the drift this
 warning exists to catch.
 
-### 5. Nothing is caught
+### 5. A failed key is skipped and counted; the pass raises once at the end
 
-A store fault propagates out of this repair. `_run_repair_plan` isolates it, logs it, and records it
-in `failures`, which is the sole input to the ADR-0190 group-E error counter — so a bucket policy
-without `s3:DeleteObject` shows up as an error rather than as a quiet zero.
+A store fault must be visible: `_run_repair_plan` records a raising repair in `failures`, the sole
+input to the ADR-0190 group-E error counter, so a bucket policy without `s3:DeleteObject` shows up
+as an error rather than as a quiet zero. But raising *at the first failed key* would be wrong in the
+one direction that matters here. A **persistent** per-object fault — an S3 Object Lock retention or
+legal hold on a single orphan, a deny scoped to one key — would abort at that same key on every
+30-second pass forever, so every candidate behind it in listing order and the whole second root
+would never be reclaimed. That is the leak this repair exists to drain, resuming unbounded behind
+one stuck object, with a repeating error indistinguishable from a transient blip.
 
-This is the opposite of the reaper's per-key tolerance, and the asymmetry has a reason. The reaper
-tolerates because its row delete has **already committed**: the owner is reaped, there is nothing to
-retry, and raising would abandon later owners over one bad key. Here nothing is committed at all —
-the candidates are re-derived from the store and the database on the next pass, with the same
-verdict — so aborting costs one pass and buys the alert. It is also `repair_leaked_images`'
-treatment, which this sweep is otherwise modelled on.
+So the failed key is logged and skipped, the count travels to the end of the pass, and the repair
+raises once — `repair_abandoned_uploads`' shape, adopted for a different reason than the reaper has
+for it. The reaper *must* tolerate because its row delete has already committed and there is nothing
+to retry; this sweep commits nothing and could safely abort, but abort is what turns one stuck
+object into a permanent leak. A failing `list_prefix_with_mtime` still ends the pass immediately:
+without a listing there is no candidate set to be partial about.
 
-### 6. One prefix-parameterised listing primitive; `ImageSweepStore` stays narrow
+Raising forfeits the pass's reclaimed count: `_run_repair_plan` records a count only for a repair
+that *returns*, so a pass that deleted 500 objects and then hit one object-lock hold reports zero on
+the ADR-0190 repairs counter. That is the trade ADR-0453 §3 already took for the reaper — the count
+is a gauge, the raise is the alert — but it lands harder here, because a persistently undeletable
+key would pin a working drain's gauge at zero indefinitely, and it is the opposite of the treatment
+`reconcile_once`'s docstring records for the catalog's other irreversible repair
+(`_repair_leaked_domains` catches per domain and keeps its count). The seam offers one or the other
+and the alert is the one a permanent leak needs, so the count is written to the log as an ERROR
+immediately before the raise instead of being lost with it.
+
+### 6. One pass reclaims at most `MAX_RECLAIMS_PER_PASS`
+
+Each reclaim costs a LIST, a query, and a delete, and the query is the unindexed `artifacts`
+anti-join filed as #1570 — so the cost is per key, not per pass, and the disclosure in §Consequences
+that prices the steady state does not price a drain. The reconciler runs its catalog strictly
+sequentially on one connection with no per-pass deadline, so an unbounded drain would hold
+allocation expiry, orphaned-System repair, dead-session reaping, and domain reaping behind it for
+however long it took. The first pass after this ships is the largest this code will ever run,
+against a backlog accumulating since ADR-0453.
+
+The grace is not a substitute: it decides *which* keys become candidates, not how many are processed
+once they do, and raising it does not shorten a pass already in flight. ADR-0453 §4 put exactly this
+brake on the reap side, capping a degraded pass at one owner's leak; this is the same brake on the
+drain side. The remainder is reclaimed 30 seconds later, and the cap is a module constant rather
+than a setting because it bounds a loop rather than expressing a policy.
+
+### 7. One prefix-parameterised listing primitive; `ImageSweepStore` stays narrow
 
 `ObjectStore.list_prefix_with_mtime(prefix)` is the paginated key+mtime listing, and
 `list_image_objects()` becomes a one-line delegate over `images/` so the pagination loop exists
@@ -151,11 +197,13 @@ once. The `ImageSweepStore` **port** deliberately keeps its prefix-free method: 
 no business being able to list an arbitrary prefix, and widening the port to avoid one delegating
 line would trade a real authority bound for a cosmetic one.
 
-The grace is a `ReconcileConfig` field defaulting to 24h, not an environment setting — the shape
-`build_artifact_retention` and `dump_volume_grace` already use. 24h sits far above every legitimate
-rowless interval under these roots (a `capture_traffic` pcap's PUT and its row share one
-transaction; a vmcore object is PUT minutes before `finalize_capture` inserts its rows), and the
-asymmetry is chosen: a day of extra leak is a cost bug, a deleted live object is a correctness bug.
+The threshold's two terms are both real settings resolved per pass —
+`KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` and `KDIVE_UPLOAD_TTL_SECONDS`, 86400s each — rather than
+`ReconcileConfig` defaults in the shape `build_artifact_retention` and `dump_volume_grace` use.
+§Consequences records why that exception is taken. Per pass matters as much as configurable does: a
+brake that needed a reconciler restart to engage would be no better than the redeploy it replaces.
+48h at the defaults sits far above every legitimate rowless interval under these roots, and the
+asymmetry is chosen: an extra day of leak is a cost bug, a deleted live object is a correctness bug.
 
 ## Consequences
 
