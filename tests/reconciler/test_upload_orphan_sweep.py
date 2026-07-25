@@ -540,17 +540,21 @@ def test_both_threshold_terms_are_declared_for_both_processes_that_sweep() -> No
     assert UPLOAD_ORPHAN_GRACE.default == "86400"
 
 
-def test_a_negative_orphan_grace_is_rejected_at_parse_rather_than_at_the_first_delete() -> None:
-    """A negative grace inverts the brake: it moves the cutoff into the *future*.
+def test_neither_threshold_term_accepts_a_value_that_inverts_the_cutoff() -> None:
+    """A negative term inverts the brake: it moves the cutoff into the *future*.
 
-    ``now() - grace`` with a negative grace makes every rowless object under both roots older than
+    ``now() - grace`` with a negative sum makes every rowless object under both roots older than
     the threshold, including one whose PUT landed seconds ago, and the per-key re-read cannot catch
     it because it re-evaluates the same inverted predicate. This is the only brake on a repair that
     deletes irreversibly, so a sign error has to fail at ``config validate``, not at the delete.
+
+    **Both** terms are pinned because the threshold is their sum: guarding the grace alone leaves a
+    negative TTL cancelling it and reaching the identical inversion through the unguarded half.
     """
-    assert UPLOAD_ORPHAN_GRACE.parse("0") == 0
-    with pytest.raises(ValueError, match="must be >= 0"):
-        UPLOAD_ORPHAN_GRACE.parse("-86400")
+    for setting in (UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS):
+        assert setting.parse("0") == 0
+        with pytest.raises(ValueError, match="must be >= 0"):
+            setting.parse("-86400")
 
 
 def test_the_reclaim_threshold_stacks_the_orphan_grace_on_the_upload_ttl(

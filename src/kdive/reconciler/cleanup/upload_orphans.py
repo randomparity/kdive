@@ -108,9 +108,10 @@ async def repair_leaked_upload_objects(
     and merely *equal* to the TTL makes the bytes reclaimable within seconds of the reap, and one
     above it makes them reclaimable in the very pass that reaped them. Summing the two puts the
     threshold a full ``orphan_grace`` past the earliest reap of any window the object could have
-    belonged to, at whatever TTL **this process** is configured with — a reconciler provisioned
-    without ``KDIVE_UPLOAD_TTL_SECONDS`` while the minting server raises it is deployment skew the
-    code cannot see, and is the one way the margin can still go negative (ADR-0455 §2).
+    belonged to, at whatever TTL **this process** is configured with. Both terms parse as
+    non-negative, so no configured value can invert the cutoff; what remains is deployment skew the
+    code cannot see — a reconciler provisioned without ``KDIVE_UPLOAD_TTL_SECONDS`` while the
+    minting server raises it — which is the one way the margin can still go negative (ADR-0455 §2).
 
     A root has three failure sites — its listing, its bulk classify, and each per-key delete — and
     all three are logged, counted, and skipped, with the pass raising once at the end (ADR-0455 §5);

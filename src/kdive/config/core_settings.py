@@ -200,7 +200,11 @@ PROVISION_PREMUTATION_TIMEOUT_S = Setting(
 
 UPLOAD_TTL_SECONDS = Setting(
     name="KDIVE_UPLOAD_TTL_SECONDS",
-    parse=_int,
+    # Bounded for the same reason as its twin below, and it needs saying separately because the
+    # threshold is their *sum*: a negative TTL cancels the grace and pushes the mtime cutoff into
+    # the future just as effectively. A negative presigned-URL TTL is nonsense on the server too,
+    # so nothing is given up by rejecting it in both processes.
+    parse=_nonnegative_int,
     default="86400",
     group="upload",
     # Read by the reconciler as well as *set* by the minting server: the orphan sweep's reclaim
@@ -208,7 +212,7 @@ UPLOAD_TTL_SECONDS = Setting(
     # variable falls back to the default and reclaims a window's bytes in the pass that reaped them.
     processes=_UPLOAD_RECLAIM_READERS,
     help="Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455).",
-    suggest="an integer number of seconds, e.g. 86400",
+    suggest="a non-negative integer number of seconds, e.g. 86400",
 )
 UPLOAD_ORPHAN_GRACE = Setting(
     name="KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS",
