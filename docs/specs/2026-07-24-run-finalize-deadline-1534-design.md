@@ -53,16 +53,23 @@ inside one transaction on the pooled non-autocommit connection, so this is a ver
 request's **arrival**: a finalize that arrived inside the window is not then rejected for the
 seconds it spends reading a multi-GiB payload off S3.
 
-### The locked re-read
+### The locked identity re-read
 
-Arrival alone does not make the enforcement safe. `_validate_uploads` runs between the check and the
-commit on **no lock**, and the 30-second upload reaper takes the `RUN` lock finalize has not yet
-acquired, deletes the still-uncommitted objects, and drops the manifest. `_finalize_external_build`
-therefore re-reads the manifest inside the transaction it already opens under
-`advisory_xact_lock(conn, LockScope.RUN, run.id)`, immediately before the writes, and rejects with
-`no_upload_manifest` if it is gone — so a reaped window cannot commit `artifacts` rows against
-deleted keys. The deadline is not re-compared there (`now()` is frozen for the transaction, so it
-would be dead code).
+Arrival alone does not make the enforcement safe on the single-PUT path. `_validate_uploads` runs
+between the check and the commit holding **no lock**, and the 30-second upload reaper takes the
+`RUN` lock finalize has not yet acquired, deletes the still-uncommitted objects, and drops the
+manifest. (The chunked path is not exposed: its `RUN` lock is transaction-scoped and taken inside a
+savepoint, so it is held from reassembly to request end — verified against this tree.)
+
+`_finalize_external_build` therefore re-reads the manifest inside the transaction it already opens
+under `advisory_xact_lock(conn, LockScope.RUN, run.id)`, immediately before the writes. It compares
+**identity, not presence**: a reap followed by a re-mint leaves a row whose keys are byte-identical
+(owner-addressed), so a presence check would still commit rows for deleted objects. The window's
+deadline is the identity — `replace_manifest` re-stamps it from `now()` on every re-mint — and is
+carried on `_ExternalBuildFinalization` (`refresh_deadline` now returns the deadline it wrote, so
+the chunked path carries the refreshed value). Gone → `no_upload_manifest`; different →
+`upload_window_replaced`. The deadline is not re-compared against `now()` (frozen for the
+transaction, so it would be dead code).
 
 ### The error
 
@@ -123,6 +130,8 @@ New, all against a real Postgres (`migrated_url`):
 - an in-window chunked finalize still refreshes the deadline before reassembly (pins requirement 5).
 - the reaper wins mid-validation (the validator seam deletes the manifest row): rejected with
   `no_upload_manifest`, no `artifacts` rows, no `run_steps` row, Run still `created`.
+- the reaper wins *and* the agent re-mints mid-validation: rejected with `upload_window_replaced`,
+  no `artifacts` rows, Run still `created`, and the fresh window left intact.
 - the reaper wins between the check and the chunked refresh (the object-store-factory seam deletes
   the row): rejected, no multipart copy attempted. This is the only coverage `refresh_deadline`'s
   declined branch has.

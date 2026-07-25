@@ -75,27 +75,49 @@ deadline; past that a finalize lands on `no_upload_manifest` with the bytes alre
 rejections therefore point at `artifacts.create_run_upload` (see decision 2), and the agent-facing
 wording tells the agent to expect a re-upload unless the retry succeeds.
 
-### 2. A second, authoritative check under the `RUN` lock makes enforcement atomic with the commit
+### 2. The commit re-reads the window under the `RUN` lock and checks its *identity*
 
-Arrival alone is not enough, and the first draft of this change assumed it was. Between `_prepare`
-and the commit sits `_validate_uploads`, which HEADs every artifact and range-reads up to 128 MiB of
-the kernel tar off S3 — seconds to tens of seconds on **no lock at all**. The upload reaper runs
-every 30 seconds, takes the very `RUN` advisory lock finalize has not yet acquired, deletes every
-object under the Run's prefix that has no `artifacts` row (there is none — finalize has not
-committed), and drops the manifest. Finalize would then take the freed lock, re-read only
-`runs.state`, and commit `artifacts` rows against just-deleted keys plus a `succeeded` Run.
+Arrival alone is not enough on the **single-PUT** path, and the first draft of this change assumed
+it was. Between `_prepare` and the commit sits `_validate_uploads`, which HEADs every artifact and
+range-reads up to 128 MiB of the kernel tar off S3 — seconds to tens of seconds holding **no lock**.
+The upload reaper runs every 30 seconds, takes the `RUN` advisory lock finalize has not yet
+acquired, deletes every object under the Run's prefix that has no `artifacts` row (there is none —
+finalize has not committed), and drops the manifest. Finalize would then take the freed lock,
+re-read only `runs.state`, and commit `artifacts` rows against just-deleted keys plus a `succeeded`
+Run.
+
+The **chunked** path does not have that stretch, and it is worth stating why rather than assuming
+symmetry. `_reassemble_chunked_artifacts` takes the `RUN` lock inside a `conn.transaction()` that is
+a *savepoint* (the request's transaction is already open on the non-autocommit pooled connection);
+`pg_advisory_xact_lock` releases at top-level transaction end, and `RELEASE SAVEPOINT` does not drop
+it. Verified against this tree: the lock is still held after the inner block exits. So a chunked
+finalize holds the `RUN` lock from reassembly through commit, and neither the reaper nor a re-mint
+can interleave.
 
 So `_finalize_external_build` re-reads the manifest inside the transaction it already opens under
-`advisory_xact_lock(conn, LockScope.RUN, run.id)`, immediately before the writes, and rejects with
-`no_upload_manifest` if it is gone. That is one query inside an existing locked transaction, and it
-is what actually serializes finalize with the reaper — in both orders, which is the property the
-investigation lane gets from doing its whole finalize inside the `INVESTIGATION` lock. The deadline
-is deliberately **not** re-compared there: `now()` is frozen for the transaction, so the arrival
-verdict decision 1 reached is the one that stands, and a second comparison would be dead code.
+`advisory_xact_lock(conn, LockScope.RUN, run.id)`, immediately before the writes. **Presence is not
+identity**: a reap followed by a re-mint leaves *a* row, and because the run object keys are
+owner-addressed and unchanged across re-mints, nothing downstream would notice the swap — the commit
+would register `artifacts` rows carrying the deleted objects' etags, mark the Run `succeeded` with a
+dangling `kernel_ref`, and (on the non-chunked path) delete the agent's brand-new window row. The
+guard therefore compares the **deadline of the window that was validated**, carried on
+`_ExternalBuildFinalization`: `replace_manifest` stamps `deadline = now() + ttl` on every re-mint,
+so a different value is a different window. Gone → `no_upload_manifest`; different →
+`upload_window_replaced`.
+
+The deadline is *not* re-compared against `now()` there — `now()` is frozen for the transaction, so
+the arrival verdict decision 1 reached is the one that stands, and a second comparison would be dead
+code.
 
 The `_prepare` check is therefore the fail-fast — it keeps a lapsed window from being read at all,
-and it is what produces the self-correcting `upload_window_expired` payload — and the locked re-read
-is the guard that makes the commit safe.
+and it is what produces the self-correcting `upload_window_expired` payload — and the locked
+identity re-read is the guard that makes the commit safe.
+
+**A pre-existing residual, recorded not fixed.** Because the chunked path holds the `RUN` lock for
+the whole request and `reap_one_owner` is awaited serially inside `repair_abandoned_uploads`, one
+slow multi-GiB chunked finalize stalls the entire upload-reaper sweep — for every owner, runs and
+investigations alike. That predates this change and is not touched here; it belongs to the
+reconciler and wants its own issue.
 
 ### 3. Rendering stays in the response layer; the shared helper is reused
 
@@ -160,15 +182,20 @@ reach never depended on finalize's blindness. No metric, for the same reason ADR
   existing tests that asserted the bare `{"reason": ...}` dict are updated.
 - **The agent-facing wrapper docstring changes.** FastMCP serializes only the `@app.tool` wrapper
   docstring and `Field(...)` text, so the rejection is stated there, not only in the handler.
-- **`no_upload_manifest` gains a recovery pointer.** It is the *more common* post-expiry landing —
-  the reaper's candidate predicate is the same `deadline < now()` — so it now carries a `detail`
-  and `suggested_next_actions: [artifacts.create_run_upload]`, matching what ADR-0444 did for the
-  investigation lane's `_no_manifest_error`. Every "your window is gone" path routes to one call.
+- **`no_upload_manifest` gains a recovery pointer, and `upload_window_replaced` joins it.** The
+  first is the *more common* post-expiry landing — the reaper's candidate predicate is the same
+  `deadline < now()` — so it now carries a `detail` and
+  `suggested_next_actions: [artifacts.create_run_upload]`, matching what ADR-0444 did for the
+  investigation lane's `_no_manifest_error`. The second is new (decision 2). All three "your window
+  is gone" rejections route to one call.
+- **`refresh_deadline` returns the stamped deadline instead of a bool.** It has exactly one caller,
+  which now needs the value as the chunked path's window identity.
 - **A latent bug fixed in passing.** `CompleteBuildConfigurationError` was a `frozen` dataclass, and
   `contextlib` assigns `__traceback__` to an exception it re-raises out of an async context manager,
   so *any* raise of it inside `advisory_xact_lock` died with `FrozenInstanceError` instead of the
   intended rejection. Two such raises already existed, both untested; the new locked re-read is a
-  third. The class is no longer frozen.
+  third. The class is now `@dataclass(slots=True, eq=False)` — unfreezing alone would have set
+  `__hash__ = None` and given it value equality, which an exception should not have.
 - **A recorded, unfixed residual** — unbounded deadline extension by repeated failing chunked
   finalizes (decision 4).
 
@@ -181,10 +208,14 @@ reach never depended on finalize's blindness. No metric, for the same reason ADR
   the deadline on arrival and reads well, but it is not atomic with the commit: the reaper can
   collect the window during validation and the Run still commits `succeeded` against deleted keys.
   Decision 2.
-- **Move the whole finalize inside the `RUN` lock**, as the investigation lane does. That lane's
-  finalize is a HEAD and a row write; this one range-reads up to 128 MiB off S3, so holding the
-  advisory lock across it would serialize unrelated work on the same Run behind a slow object-store
-  read. Re-reading one row at the end buys the same safety for one query.
+- **Move the whole single-PUT finalize inside the `RUN` lock**, as the investigation lane does and
+  as the chunked path here already does de facto. It is the simpler shape — one guard instead of
+  two, and the identity question dissolves. Rejected because of what the chunked path's version of
+  it already costs: an advisory lock held across an object-store read stalls the *serial* upload
+  reaper sweep for every owner (see decision 2's residual). Extending that from the chunked path to
+  every finalize trades a narrow correctness race for a broad liveness cost, so the one-query
+  identity re-read is preferred. If the reaper sweep is ever made concurrent per owner, this
+  becomes the better design and should be revisited.
 - **Compare in Python against `datetime.now(UTC)`.** Simpler to read, and wrong for the same reason
   ADR-0444 rejected it: it puts finalize on a different clock from the reaper's `now()`, so the two
   can disagree on one manifest under clock skew. The DB clock is the single reference the contract
