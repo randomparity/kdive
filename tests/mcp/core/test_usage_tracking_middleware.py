@@ -200,16 +200,12 @@ def test_swallowed_recording_failure_increments_the_drop_counter(
 ) -> None:
     # ADR-0148 keeps the swallow, ADR-0449 makes it countable: a dropped row is only
     # observable to an operator through a WARNING in the log stream today, which is
-    # invisible to anything scraping /metrics. Assert the counter fires with the tool
-    # label the warning already carries.
+    # invisible to anything scraping /metrics. Unlabelled by design — the tool name is
+    # client-supplied and unbounded, see the counter's definition.
     monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
-    drops: list[tuple[int, dict[str, str]]] = []
-    monkeypatch.setattr(
-        usage_mod._RECORDING_FAILURES,
-        "add",
-        lambda amount, labels: drops.append((amount, labels)),
-    )
+    drops: list[int] = []
+    monkeypatch.setattr(usage_mod._RECORDING_FAILURES, "add", drops.append)
 
     async def _run() -> None:
         pool = AsyncConnectionPool("postgresql://unused", open=False)  # never opened
@@ -222,7 +218,34 @@ def test_swallowed_recording_failure_increments_the_drop_counter(
         await mw.on_call_tool(_Ctx("jobs.get"), ok)
 
     asyncio.run(_run())
-    assert drops == [(1, {"tool": "jobs.get"})]
+    assert drops == [1]
+
+
+def test_a_failing_drop_counter_still_cannot_fail_the_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ADR-0148's swallow is unconditional, so the instrument added to observe it must not
+    # outrank the failure it observes: a raising `add()` must not escape `_record` and fail
+    # a call the swallow exists to protect.
+    monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _ctx)
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
+
+    def _broken(_amount: int) -> None:
+        raise RuntimeError("meter provider is broken")
+
+    monkeypatch.setattr(usage_mod._RECORDING_FAILURES, "add", _broken)
+
+    async def _run() -> Any:
+        pool = AsyncConnectionPool("postgresql://unused", open=False)  # never opened
+        mw = UsageTrackingMiddleware(pool, secret_registry=SecretRegistry(), acquire_timeout=0.05)
+
+        async def ok(_c: Any) -> ToolResult:
+            envelope = ToolResponse.success("jobs.get", "ok")
+            return ToolResult(structured_content=envelope.model_dump(mode="json"))
+
+        return await mw.on_call_tool(_Ctx("jobs.get"), ok)
+
+    assert asyncio.run(_run()) is not None
 
 
 def test_successful_recording_leaves_the_drop_counter_alone(
@@ -230,12 +253,8 @@ def test_successful_recording_leaves_the_drop_counter_alone(
 ) -> None:
     # The counter must mean "a row was lost", not "a call happened" — otherwise an alert on
     # it fires constantly and stops being read.
-    drops: list[tuple[int, dict[str, str]]] = []
-    monkeypatch.setattr(
-        usage_mod._RECORDING_FAILURES,
-        "add",
-        lambda amount, labels: drops.append((amount, labels)),
-    )
+    drops: list[int] = []
+    monkeypatch.setattr(usage_mod._RECORDING_FAILURES, "add", drops.append)
 
     async def ok(_c: Any) -> ToolResult:
         envelope = ToolResponse.success("jobs.get", "ok")

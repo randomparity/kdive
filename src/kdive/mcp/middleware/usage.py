@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -29,6 +30,13 @@ _log = logging.getLogger(__name__)
 # swallowed write is a *lost row*, and a WARNING is invisible to anything scraping /metrics.
 # Counting it makes the loss rate a signal an operator can alert on (ADR-0449). Named and
 # scoped like the exposure middleware's fail-open counters, its nearest precedent.
+#
+# No attributes, also matching that precedent. The obvious label would be the tool name, but
+# it is the raw name off the client's `tools/call`: FastMCP resolves the tool *inside*
+# `call_next`, so an unknown one reaches the `except` branch below with arbitrary content,
+# and the SDK enforces no cardinality limit. Labelling would let one authenticated client
+# grow the metric store without bound precisely while recording is already failing. The tool
+# name is in the WARNING beside this, and in `tool_invocation.tool` for the calls that land.
 _RECORDING_FAILURES = metrics.get_meter("kdive.mcp").create_counter(
     "kdive_mcp_usage_recording_failures",
     description="tool_invocation rows dropped by best-effort usage recording (ADR-0148)",
@@ -128,5 +136,9 @@ class UsageTrackingMiddleware(Middleware):
             ):
                 await record_usage(conn, event)
         except Exception:
-            _RECORDING_FAILURES.add(1, {"tool": tool})
+            # Log first, then count, and never let the counting be what fails the call:
+            # ADR-0148's swallow is unconditional, so the instrument observing it must not
+            # outrank the failure it observes.
             _log.warning("usage recording failed for tool %s", tool, exc_info=True)
+            with contextlib.suppress(Exception):
+                _RECORDING_FAILURES.add(1)
