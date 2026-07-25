@@ -187,9 +187,6 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
     locked is skipped. Do not re-derive the safety from the row count, and do not narrow the glob —
     it deliberately covers every token in the directory, not one base's.
 
-    The ``suppress`` covers the directory walk only; every per-candidate fault is handled inside
-    :func:`unlink_partial_if_unheld`, so one unsweepable file cannot truncate the pass.
-
     A staged **base** found here is unowned by construction and is collected too
     (:func:`_unlink_unowned_base`), which is what keeps the gate above from trading one leak for a
     worse one: the writer it now protects can run to completion and publish onto ``<token>.qcow2``
@@ -197,23 +194,97 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
 
     Returns:
         Whether a live writer's ``flock`` left a partial behind. That partial also keeps ``inv_dir``
-        non-empty, so the ``rmdir`` below fails with ``ENOTEMPTY`` — the deliberate post-state of a
+        non-empty, so the ``rmdir`` fails with ``ENOTEMPTY`` — the deliberate post-state of a
         live-held skip, not a surprise (ADR-0452 §5). The caller retains the drain marker on it so a
         later pass finishes the job, which is also the pass that collects whatever that writer
         published in the meantime.
+
+        It is emphatically **not** "the directory drained", and the caller must not read it that
+        way: ``Path.glob`` returns an empty iterator for a directory it cannot *enumerate* rather
+        than raising, so an unreadable staging tree produces exactly the same ``False`` as an empty
+        one. :func:`_remove_drained_dir` is what tells them apart and says so out loud.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
+    held = _unlink_unheld_partials(inv_dir)
+    _collect_unowned_bases(inv_dir)
+    _remove_drained_dir(inv_dir, held=held)
+    return held
+
+
+def _unlink_unheld_partials(inv_dir: Path) -> bool:
+    """Run the liveness gate over every ``*.partial``; return whether a live writer held one.
+
+    The ``try`` covers the directory walk only — every per-candidate fault is handled inside
+    :func:`unlink_partial_if_unheld`, so one unsweepable file cannot truncate the pass — and a walk
+    that faults is logged rather than swallowed, because this sweep is the last collector and a
+    silent empty walk is indistinguishable from a drained directory.
+    """
     held = False
-    with suppress(OSError):
+    try:
         for partial in inv_dir.glob("*.partial"):
             if unlink_partial_if_unheld(partial, unlink_when_unlockable=True):
                 held = True
-    with suppress(OSError):
+    except OSError as err:
+        _log.warning(
+            "could not walk the rootfs staging directory %s for staging partials (%s); anything it "
+            "holds is left uncollected",
+            inv_dir,
+            err.strerror,
+        )
+    return held
+
+
+def _collect_unowned_bases(inv_dir: Path) -> None:
+    """Collect every staged base left in a drained investigation's staging dir (ADR-0452 §6)."""
+    try:
         for base in inv_dir.glob("*.qcow2"):
             _unlink_unowned_base(base)
-    with suppress(OSError):
+    except OSError as err:
+        _log.warning(
+            "could not walk the rootfs staging directory %s for staged bases (%s); anything it "
+            "holds is left uncollected",
+            inv_dir,
+            err.strerror,
+        )
+
+
+def _remove_drained_dir(inv_dir: Path, *, held: bool) -> None:
+    """Remove the staging dir, and say so when it survives for a reason nothing else reported.
+
+    This ``rmdir`` is the only step that can tell a directory that **drained** from one this pass
+    could not *read*: ``Path.glob`` yields nothing for an unenumerable directory instead of raising,
+    so both walks above return quietly and ``held`` comes back ``False`` either way. Left as a bare
+    ``suppress(OSError)`` that would be the one silent skip in the whole design — and the most
+    consequential, since the caller then clears ``rootfs_cleanup_pending_at`` and retires every
+    collector this investigation has for a tree that may hold SENSITIVE bytes up to the 50 GiB
+    canonical cap. The triggers are this subsystem's own: the worker/staging-user uid asymmetry
+    ADR-0442 documents and #1522 was bitten by, a mode change on the staging tree, ``EIO``, a stale
+    NFS handle.
+
+    ``ENOTEMPTY`` under ``held`` is the *expected* post-state of a live-held skip, already reported
+    by :func:`unlink_partial_if_unheld` and answered by the retained marker, so it is not repeated
+    here. ``ENOENT`` is the achieved post-state for an investigation that never staged anything.
+    Everything else is a surprise and is logged.
+
+    The marker is still cleared on it (the caller reads ``held``, not this): ADR-0452 §5's argument
+    that a permanent fault must not pin the marker forever applies to a permanently unreadable
+    directory exactly as it does to a permanently unopenable partial. What this adds is that an
+    operator gets a line naming it.
+    """
+    try:
         inv_dir.rmdir()
-    return held
+    except FileNotFoundError:
+        return
+    except OSError as err:
+        if held:
+            return
+        _log.warning(
+            "the rootfs staging directory %s survived its investigation's drain (%s) and no live "
+            "writer explains it; its drain marker is cleared regardless, so nothing will revisit "
+            "it — inspect it for uncollected SENSITIVE staging files",
+            inv_dir,
+            err.strerror,
+        )
 
 
 def _unlink_unowned_base(base: Path) -> None:
@@ -221,10 +292,19 @@ def _unlink_unowned_base(base: Path) -> None:
 
     Reached only from the drain tail, which runs under the ``INVESTIGATION`` lock and only once
     :data:`_REMAINING_ROOTFS_ROWS_SQL` returns nothing — so **every** file here is unowned by
-    construction, and no System can be running off this base either: an overlay on it would have
-    pinned its row through :func:`_overlay_pins_base`, and a row that survives ends the drain tail
-    before this runs. That precondition is the whole licence for an ungated unlink, so do not move
-    this call anywhere the row count has not just been read under the lock.
+    construction. That precondition is the whole licence for an ungated unlink, so do not move this
+    call anywhere the row count has not just been read under the lock.
+
+    **What "unowned" does and does not cover.** No overlay that *predates* this drain can be backed
+    by this base: one would have pinned its row through :func:`_overlay_pins_base`, and a surviving
+    row ends the drain tail before this runs. It says nothing about an overlay created *after* the
+    row was reclaimed, which the ``flock`` gate newly makes reachable — the doomed fetcher whose
+    partial an earlier pass skipped can publish this base and its provision can go on to create a
+    per-System overlay against it, which a later pass then unlinks underneath. Bounded, because that
+    System is already ``FAILED``/``TORN_DOWN`` (the only way the pin dropped) and the reconciler
+    reaps its domain, but stated rather than written down as a construction-level invariant: it is
+    conditional, and #1558 removes the condition by deferring the whole checksum while a live writer
+    holds a partial.
 
     It should also never fire. :func:`_unlink_staged_base` removes each base as its own row drains,
     so a base surviving to here means one was published *without* a row — the shape the ``flock``
