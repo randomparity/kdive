@@ -99,6 +99,11 @@ def test_strip_gzip_streams_ranged_reads_without_buffering_whole_object() -> Non
     assert all(length <= _RANGE_CHUNK_BYTES for _, length in store.reads)
 
 
+# The object-defect side of the ADR-0445 split: each of these is a defect in the object the agent
+# uploaded, so retrying the same key re-reads the same defect and the category stays terminal.
+# Widening the retryable constructor over any of them reddens here.
+
+
 def test_strip_gzip_rejects_bomb_exceeding_bound() -> None:
     # A tiny gzip of a large canonical object whose declared bound is far smaller: the guard
     # fails closed the instant output exceeds the bound rather than expanding the whole thing.
@@ -116,7 +121,12 @@ def test_strip_gzip_rejects_bomb_exceeding_bound() -> None:
     assert len(writer.getvalue()) <= bound + 1  # never expanded past the bound
 
 
-def test_strip_gzip_rejects_transport_hash_mismatch() -> None:
+def test_strip_gzip_transport_hash_mismatch_is_retryable_infrastructure_failure() -> None:
+    # #1523 / ADR-0445. The bytes read back do not hash to the checksum the signed PUT bound.
+    # That single observation covers two modes — transient GET-side transport corruption and
+    # permanent post-PUT bit rot — so it is reported RETRYABLE, matching the identity staging
+    # path (ADR-0434 §2) and the catalog digest check. It is deliberately NOT the category the
+    # object-defect branches below use: this asserts the split, not just one branch.
     payload = b"canonical bytes"
     compressed = gzip.compress(payload)
     store = _FakeRangedStore(compressed)
@@ -127,8 +137,12 @@ def test_strip_gzip_rejects_transport_hash_mismatch() -> None:
             store, _req(compressed, len(payload), sha256="not-the-real-hash"), writer
         )
 
-    assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "transport checksum mismatch" in str(exc.value)
+    # The remediation the identity path also gives, and not the old "do not retry" advice that
+    # contradicted a retryable category.
+    assert "retry, and if it persists the stored object is damaged" in str(exc.value)
+    assert "do not retry" not in str(exc.value)
 
 
 def test_strip_gzip_rejects_truncated_stream() -> None:

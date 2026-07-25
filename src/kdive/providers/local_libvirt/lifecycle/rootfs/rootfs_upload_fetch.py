@@ -881,9 +881,11 @@ def _stage_identity(
 
     The checksum is verified here, before the caller's shared qcow2-magic gate, which is the order
     ADR-0438 §3 and ADR-0441 §5 specify: a mismatch keeps ADR-0434 §2's ``INFRASTRUCTURE_FAILURE``
-    rather than being reported by whichever gate a corrupt object happens to trip first. (Whether
-    that category is the right one is unsettled — the gzip path raises ``CONFIGURATION_ERROR`` for
-    the byte-identical failure — and is tracked in #1523.)
+    rather than being reported by whichever gate a corrupt object happens to trip first. ADR-0445
+    settled that category, which the gzip path used to answer differently for the byte-identical
+    failure (#1523): it is retryable on both paths, because the recomputed hash covers transient
+    GET-side transport corruption as well as permanent post-PUT bit rot, and the message says so
+    in the same words ``strip_gzip_to_writer`` uses.
     """
     hasher = hashlib.sha256()
     with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
@@ -892,7 +894,9 @@ def _stage_identity(
             writer.write(chunk)
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
         raise CategorizedError(
-            "uploaded rootfs object failed checksum verification",
+            "uploaded rootfs object failed checksum verification: the stored bytes do not match "
+            "the checksum signed at upload; retry, and if it persists the stored object is "
+            "damaged and must be re-uploaded",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )

@@ -221,12 +221,31 @@ def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
     assert store.stream_calls == 0
 
 
-def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
-    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+@pytest.mark.parametrize("encoding", [None, "gzip"], ids=["identity", "gzip"])
+def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
+    tmp_path: Path, encoding: str | None
+) -> None:
+    # ADR-0445 (#1523). Both staging paths end by comparing a hash they recomputed over the bytes
+    # they read against the checksum the signed PUT bound. The object is byte-identically as
+    # damaged either way, so the transport codec must not decide the category — and therefore must
+    # not decide the agent-visible `retryable` boolean `_RETRYABLE_BY_CATEGORY` derives from it.
+    # Parametrised on purpose: two separate tests would let the paths re-diverge and stay green.
+    canonical = _QCOW2 + b"z" * 512
+    stored = gzip.compress(canonical) if encoding == "gzip" else canonical
+    store = _FakeStore(stored, checksum=_sha256_b64(b"a-different-object"))
+
     with pytest.raises(CategorizedError) as error:
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+        _stage(
+            store,
+            tmp_path,
+            encoding=encoding,
+            uncompressed_size=len(canonical) if encoding == "gzip" else None,
+        )
+
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert "checksum verification" in str(error.value)
+    assert "checksum" in str(error.value)
+    # Aligned remediation: the flag alone cannot say "retry once, then re-upload".
+    assert "retry, and if it persists the stored object is damaged" in str(error.value)
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
@@ -236,8 +255,8 @@ def test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate(tmp_
     # magic too, so gating on the unauthenticated first chunk would report this as the *format*
     # gate ("upload a qcow2 image", CONFIGURATION_ERROR) instead of the checksum gate. The checksum
     # is compared first, so the object is fully drained and the failure keeps the category
-    # ADR-0434 §2 decided for it. This pins the gate that fires, not the wider retryability
-    # question the gzip path answers differently (#1523).
+    # ADR-0434 §2 decided for it and ADR-0445 extended to every staging path. This pins the gate
+    # that fires; the convergence itself is pinned above, parametrised over both codecs.
     payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * 500
     store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"), max_chunk=8)
 
