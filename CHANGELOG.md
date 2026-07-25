@@ -107,6 +107,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Caveat the no-live-sibling-partial claim
 - Record the uploaded-rootfs manual proof
 - Deadline-governed reap of uncommitted uploads
+- State what the reuse gate actually catches
+- Draw the ADR-0005 boundary and name §7's residues
 - Name the growth-connect residual the fix leaves open
 - Record the min_size and cardinality decisions
 - Record the teardown leg and the lost /readyz diagnosis
@@ -114,7 +116,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repair the ADR sentence and the two stale claims left behind
 - Link the dispatch-lane follow-up, drop stale claims
 - Tighten the enqueue docstring and recycle comment
-- State what the reuse gate actually catches
 - Accept ADR-0448 for the run finalize deadline
 - Record the locked re-read and the recovery's real cost
 - Record where the unlocked stretch actually is
@@ -166,6 +167,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Surface the swallowed cause, not just the tool name
 - Apply the warm pool to every usage-row assertion
 - Scope the session lock probe to the current database
+- Fsync the staged base and re-verify it on reuse
+- Sync at publish, surface unreadable bases, log rejects
+- Stop blaming a sibling for a stale staged base
+- Reject a non-regular staged path before opening it
+- Gate the orphan-partial sweep on an flock
+- Log every sweep skip and spare a sibling's base
+- Keep a lost session from failing the provision anyway
+- Report the observed unlock state, recheck before publish
+- Name the window the sweep actually took the partial in
 - Warm the process pool before the body runs
 - Report an unreachable database as a categorized error
 - Restart the app services so a backend outage recovers
@@ -180,10 +190,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-date created_at when recycling a terminal job
 - Stamp the recycle re-date with clock_timestamp()
 - Stamp the insert from the same clock as the recycle
-- Fsync the staged base and re-verify it on reuse
-- Sync at publish, surface unreadable bases, log rejects
-- Stop blaming a sibling for a stale staged base
-- Reject a non-regular staged path before opening it
 - Enforce the upload deadline on the single-PUT finalize
 - Re-read the upload window under the RUN lock before commit
 - Check window identity, not presence, before committing
