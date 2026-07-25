@@ -29,12 +29,18 @@ worker's first artifact write never races a missing bucket. A non-zero `migrate`
 app start. You do not order these services by hand — Compose does it from the graph.
 
 That graph orders the first bring-up only. Each app process also waits up to ten seconds at
-start for its own first database connection and exits if Postgres is unreachable, so the
-three app services carry `restart: unless-stopped` to cover every *later* recreate — a
-Postgres image bump, a bare `docker compose restart server`, or a host reboot that races the
-Postgres container. Without that policy such a recreate would leave the container in
+start for its own first database connection and exits if Postgres is unreachable, so every
+long-running service — the three app processes *and* `postgres`, `minio`, `oidc` — carries
+`restart: unless-stopped` to cover each *later* recreate: a Postgres image bump, a bare
+`docker compose restart server`, or a host reboot. Without it the container would sit in
 `Exited (1)`. With it, the container retries until the database answers; `docker compose ps`
 shows it restarting and `docker compose logs server` names the cause.
+
+The backends carry the policy for the same reason the app services do. Policing only the app
+tier would make a reboot worse than no policy at all: the app processes would come back and
+crash-loop against backends that stayed stopped, reading as transient while being unable to
+progress. The `migrate` and `minio-init` one-shots are deliberately unpoliced — they are
+meant to run once and exit.
 
 ## Pointing an agent at the endpoint
 
