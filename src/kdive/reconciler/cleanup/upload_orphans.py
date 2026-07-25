@@ -150,7 +150,7 @@ async def repair_leaked_upload_objects(
 
 @dataclass
 class _Tally:
-    """One pass's outcome counts, and the per-root work budget the cap spends."""
+    """One pass's outcome counts, accumulated across every root it reaches."""
 
     deleted: int = 0
     failed: int = 0
