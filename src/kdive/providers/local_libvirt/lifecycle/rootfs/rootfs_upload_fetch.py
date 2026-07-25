@@ -22,6 +22,13 @@ present file, so a base torn by a crash that predates this cannot back an overla
 logged — the re-stage succeeds, so the log line is the only evidence it ever fired — while a base
 that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
 
+Capacity (#1525): a stage the staging filesystem plainly cannot hold is refused before its first
+byte (:func:`_require_staging_free_space`). Since the identity path started streaming (#1520) a
+*rejected* object is written in full and only then rejected, onto a filesystem that by default also
+holds every live System's overlay — so the cost of a bad upload was paid by running guests. The
+check is advisory, not a reservation: concurrent siblings each pass their own, and free space can
+vanish before the write, so the real ENOSPC guard is still :func:`_staging_fault`.
+
 Concurrency (ADR-0441 §5): the shared per-(investigation, checksum) staging path means two sibling
 Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>.partial`` and
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
@@ -51,6 +58,10 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+# The function rather than the module, so a test's monkeypatch is scoped to this module instead of
+# replacing ``shutil.disk_usage`` process-wide for every other importer for the test's duration.
+from shutil import disk_usage
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -86,6 +97,18 @@ _QCOW2_MAGIC = b"QFI\xfb"
 # peak memory is this constant rather than the object size (up to the 5 GiB single-PUT ceiling).
 # Matches the gzip path's ranged-read window in ``transport_encoding``.
 _STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+# The floor the staging free-space precheck keeps free beyond the base itself (ADR-0450, #1525).
+# Fixed rather than a fraction of the object: a percentage scales with the base, so 10% of the
+# 50 GiB canonical cap would demand 5 GiB of slack and refuse a stage on a volume that comfortably
+# holds it. It is also a property of the *volume*, not of the base — capping it at the base size
+# would let a stream of small bases walk the volume to zero one step at a time, which is the same
+# harm arriving slower. The floor is what stops a *passing* check from meaning "this write ends the
+# volume at exactly zero bytes free", which is the degraded state for the sibling overlays the
+# precheck exists to protect, not the avoidance of it. A consequence worth knowing before tuning
+# it: a volume with less than this free refuses every uploaded-rootfs stage regardless of base
+# size. It is a judgment call sized to keep a volume usable, not a measured overlay growth rate,
+# and it is not a reservation — see :func:`_require_staging_free_space`.
+_STAGING_FREE_SPACE_MARGIN_BYTES = 1024**3
 
 
 class UploadObjectStore(Protocol):
@@ -534,6 +557,202 @@ def _swept_partial_error(partial: Path, *, window: str) -> OSError:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StagingBudget:
+    """The bytes a stage will occupy, and where that figure came from.
+
+    The provenance is load-bearing rather than diagnostic colour. On the identity path the figure is
+    the stored object's **exact** size. On the gzip path it is the agent's declared
+    ``uncompressed_size``, which nothing validates against the real decompressed length: ADR-0437's
+    validator enforces only "positive integer, under the 50 GiB cap", ``strip_gzip_to_writer``
+    accepts less than the bound without complaint, and the agent-facing schema calls the field "the
+    gzip-bomb bound" — language that positively invites rounding it up, because over-stating a bomb
+    bound is the safe direction everywhere else in the system. Over-reserving is free for a
+    *reservation* and is not free for a *refusal*, so an over-stated declaration must not be
+    reported as a host that is out of disk with no hint of where the number came from (ADR-0450 §2).
+    """
+
+    required: int
+    source: str
+
+
+#: The provenance of a :class:`_StagingBudget`, and the ``budget_source`` detail it surfaces.
+_OBJECT_SIZE = "object_size"
+_UNCOMPRESSED_SIZE_BOUND = "uncompressed_size_bound"
+
+#: Which of the two conditions refused a stage. Slugs rather than only prose because the structured
+#: ``details`` reach a dashboard or a triage script that never sees the message, and "needs N, has
+#: M" alone re-derives exactly the misattribution the split message exists to prevent.
+_BASE_DOES_NOT_FIT = "base_does_not_fit"
+_FLOOR_BREACHED = "floor_breached"
+_SHORTFALL_PROSE = {
+    _BASE_DOES_NOT_FIT: "the base does not fit at all",
+    _FLOOR_BREACHED: "the base itself fits; it is the floor that would be breached",
+}
+
+
+def _staging_budget(
+    effective: str | None, *, object_size: int, uncompressed_size: int | None
+) -> _StagingBudget | None:
+    """The staged base's budget, or ``None`` when the occupied size is not knowable up front.
+
+    Identity stages the stored object verbatim, so its size is exact. The gzip path never writes the
+    stored object at all — it is read through ranged GETs — and what lands on disk is the
+    *decompressed* output, which the stored size understates by the whole compression ratio. Its
+    budget is therefore ``uncompressed_size``, the declared upper bound on that output; budgeting
+    the stored size instead would under-reserve by exactly the compression ratio. What that bound
+    costs when it is over-stated is :class:`_StagingBudget`'s subject.
+
+    A gzip declaration carrying no ``uncompressed_size`` has no knowable requirement, and returns
+    ``None`` rather than falling back to the stored size — that fallback would under-reserve by
+    construction, which is the exact failure the precheck exists to prevent. :func:`_stage_gzip`
+    then rejects the declaration with the actionable ``CONFIGURATION_ERROR``, which is the error an
+    agent can act on; a free-space message computed from a number nobody knows would bury it.
+    ``None`` is likewise returned for an unsupported codec, whose own rejection is the right one.
+    """
+    if effective is None:
+        return _StagingBudget(object_size, _OBJECT_SIZE)
+    if effective == GZIP_ENCODING and uncompressed_size is not None:
+        return _StagingBudget(uncompressed_size, _UNCOMPRESSED_SIZE_BOUND)
+    return None
+
+
+def _require_staging_free_space(
+    dest: Path, *, budget: _StagingBudget | None, system_id: UUID
+) -> None:
+    """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (ADR-0450).
+
+    Since the identity path started streaming (#1520) a **rejected** object — a failed checksum, a
+    non-qcow2 base — is written in full and only then rejected. ``UPLOADS_DIR`` and ``ROOTFS_DIR``
+    are hardcoded siblings under ``/var/lib/kdive`` with no provider-side knob to relocate either,
+    so unless an operator separately mounts one of them, those discarded bytes land on the same
+    filesystem as every live System's qcow2 overlay: an oversized upload degrades *running guests*
+    rather than only failing its own provision. This measures ``dest.parent``'s own filesystem, so
+    it is correct under either mount layout — only the blast radius differs.
+
+    **What this does not cover.** It is advisory, not a reservation, and one case is worth naming
+    outright rather than leaving a reader to derive it: #1525's own worked example — two Systems in
+    different investigations staging 4 GiB bases onto a volume with 6 GiB free — is **not**
+    prevented. The fetch lock is per-(investigation, checksum), so nothing serializes them, and
+    each passes its own check against the same free bytes before either writes. Free space can also
+    vanish between this ``statvfs`` and the write, and a live guest's overlay keeps growing
+    throughout. What the check buys is the single-stager case: one oversized or invalid object
+    against a volume that was never going to hold it now fails immediately and attributably instead
+    of after a multi-GiB write that takes the volume down with it. ADR-0450 §4 records the
+    kernel-enforced alternative (``posix_fallocate`` on the partial) and why it is not taken here;
+    #1546 tracks it. The real ENOSPC guard therefore remains :func:`_staging_fault`, and this shares
+    its ``INFRASTRUCTURE_FAILURE`` category deliberately: splitting them would make an agent's
+    handling of one physical condition depend on which side of a race window it was observed from.
+
+    ``budget`` is ``None`` when the staged size is not knowable (see
+    :func:`_staging_budget`); there is nothing to compare against, so the check is skipped
+    rather than guessed at, and the codec's own declaration error carries the failure.
+
+    The measured figure is ``statvfs``'s ``f_bavail`` — space available to unprivileged users,
+    which is ``df``'s ``Avail`` column and excludes the filesystem's reserved blocks. The staging
+    worker often runs as root and could write into that reserve, so this is deliberately the
+    conservative number: those blocks exist to keep a full volume usable, which is the same thing
+    this guard protects. The error text says which figure it is, so it reconciles with ``df``.
+
+    A ``statvfs`` that *itself* faults degrades to staging with a warning rather than failing —
+    ``EACCES`` under the worker/staging-user asymmetry ADR-0442 documents in this same subsystem,
+    a transient ``EIO``. This is :func:`_flocked_partial`'s ``ENOLCK`` precedent: turning a host
+    quirk that only disables an *advisory* check into a total uploaded-rootfs outage costs
+    availability for no safety, since the write stays guarded by the real ENOSPC either way.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` naming the required and available bytes.
+            ``CONFIGURATION_ERROR`` would be wrong: the upload is fine, the host is full, and a
+            non-retryable category would tell the agent to re-declare something correct. One
+            consequence of failing *fast* on a retryable category: ``jobs.fail`` requeues with no
+            backoff, so a provision job now spends its three attempts in milliseconds and
+            dead-letters, where the pre-precheck ENOSPC spread them over three multi-GiB downloads.
+            The remedy is unchanged — free space, re-issue the provision — but it is re-issued
+            rather than picked up by a later attempt. Not marked ``terminal``: a sibling stage
+            finishing or the reclaim sweep can free space between attempts, so a retry is not
+            provably useless.
+    """
+    if budget is None:
+        return
+    try:
+        free = disk_usage(dest.parent).free
+    except OSError as err:
+        _log.warning(
+            "could not measure the free space on the rootfs staging filesystem at %s (%s); staging "
+            "without the precheck, so an oversized base is caught mid-write by ENOSPC instead — "
+            "the behavior before the precheck existed",
+            dest.parent,
+            err.strerror,
+        )
+        return
+    needed = budget.required + _STAGING_FREE_SPACE_MARGIN_BYTES
+    if free >= needed:
+        return
+    reason = _BASE_DOES_NOT_FIT if free < budget.required else _FLOOR_BREACHED
+    # Logged as well as raised, unlike every other refusal in this module, because this one's whole
+    # remedy is host-side. The raised error reaches the operator only as one more
+    # `INFRASTRUCTURE_FAILURE` among many in `record_job_failure`, so without this an operator
+    # watching a filling volume cannot tell "provisions are being refused for capacity" from any
+    # other infrastructure fault without pulling each job's failure_context back through MCP.
+    _log.warning(
+        "refusing to stage an uploaded rootfs under %s: it needs %d bytes free (%d for the base, "
+        "from %s, plus a %d-byte floor) and only %d are available — %s",
+        dest.parent,
+        needed,
+        budget.required,
+        budget.source,
+        _STAGING_FREE_SPACE_MARGIN_BYTES,
+        free,
+        reason,
+    )
+    raise CategorizedError(
+        _shortfall_message(dest, budget=budget, free=free, needed=needed, reason=reason),
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={
+            "system_id": str(system_id),
+            "dest": str(dest),
+            "needed_bytes": needed,
+            "base_bytes": budget.required,
+            "floor_bytes": _STAGING_FREE_SPACE_MARGIN_BYTES,
+            "free_bytes": free,
+            "budget_source": budget.source,
+            "reason": reason,
+        },
+    )
+
+
+def _shortfall_message(
+    dest: Path, *, budget: _StagingBudget, free: int, needed: int, reason: str
+) -> str:
+    """The refusal text, naming which condition fired and where each of its two figures came from.
+
+    The condition is reported because the fixed floor means most refusals are *not* "your object is
+    too big": stage a 20 MiB base onto a volume with 900 MiB free and a message claiming the write
+    would fill the volume is simply false — it would leave 880 MiB — while pointing the operator at
+    the upload instead of at the volume-wide floor that actually fired.
+
+    The base figure's provenance is reported on the gzip path for the reason :class:`_StagingBudget`
+    gives: nothing checks the declared bound against the real decompressed size, so an agent that
+    rounded it up is refused as though the host were full. Without this sentence that refusal names
+    a host-side remedy for a declaration fault and the real cause is surfaced nowhere.
+    """
+    provenance = (
+        " That base figure is the declared uncompressed_size upper bound rather than a measured "
+        "size; if it was rounded up, re-declare the upload with the real decompressed size."
+        if budget.source == _UNCOMPRESSED_SIZE_BOUND
+        else ""
+    )
+    return (
+        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: staging needs "
+        f"{needed} bytes free ({budget.required} for the base, plus a "
+        f"{_STAGING_FREE_SPACE_MARGIN_BYTES}-byte floor kdive keeps for the running Systems whose "
+        f"overlays share this volume) and only {free} are available — {_SHORTFALL_PROSE[reason]}. "
+        f"The available figure is the unprivileged-available space on the filesystem holding "
+        f"{str(dest.parent)!r} (df's Avail column, which excludes the reserved blocks); free space "
+        f"there and re-issue the provision.{provenance}"
+    )
+
+
 def stage_uploaded_rootfs(
     store: UploadObjectStore,
     *,
@@ -546,7 +765,10 @@ def stage_uploaded_rootfs(
     """Download + verify the object and stage it to ``dest`` via a unique per-fetcher ``.partial``.
 
     HEAD the object (absent → ``CONFIGURATION_ERROR``; no stored checksum →
-    ``INFRASTRUCTURE_FAILURE``). When ``encoding`` is ``gzip`` the object is streamed-decompressed
+    ``INFRASTRUCTURE_FAILURE``), then refuse the stage outright if the staging filesystem cannot
+    hold the base plus a margin (:func:`_require_staging_free_space`, #1525) — an advisory check,
+    ordered behind the HEAD because the size it budgets comes from there. When ``encoding`` is
+    ``gzip`` the object is streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
     streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
     the canonical base is qcow2-magic-validated and written atomically **and durably** (a
@@ -575,8 +797,14 @@ def stage_uploaded_rootfs(
         )
     partial = dest.parent / f"{dest.stem}.{uuid4().hex}.partial"
     effective = normalize_encoding(encoding)
+    budget = _staging_budget(
+        effective, object_size=head.size_bytes, uncompressed_size=uncompressed_size
+    )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # After the mkdir (there is no filesystem to measure until the staging directory exists)
+        # and before the partial is created, so a refused stage leaves nothing at all behind.
+        _require_staging_free_space(dest, budget=budget, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
             if effective is None:
                 _stage_identity(
