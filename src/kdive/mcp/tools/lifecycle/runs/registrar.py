@@ -473,6 +473,14 @@ def _register_runs_complete_build(
         (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
         does not match the declared arch is rejected. See artifacts.expected_uploads for the
         per-arch byte contract.
+
+        Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
+        chunked and single-PUT alike. A later call is rejected with
+        `reason: "upload_window_expired"`, echoing that deadline and the server clock it is
+        measured on. To recover, re-mint the window with that tool and call this again: the object
+        keys are derived from the Run and the artifact names, so re-upload only if the retry
+        reports a missing object (the lapsed upload was reclaimed) or you are declaring a
+        different checksum.
         """
         ctx = current_context()
         return await with_runtime_for_run_target_kind(

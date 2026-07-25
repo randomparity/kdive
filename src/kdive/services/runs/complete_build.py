@@ -81,6 +81,18 @@ class CompleteBuildConfigurationError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class CompleteBuildExpiredWindowError(Exception):
+    """The Run's upload window lapsed before this finalize arrived (ADR-0448).
+
+    Carries the raw Postgres clock pair rather than a rendered envelope: the response layer
+    owns the agent-facing ``server_time`` / ``manifest_deadline`` / ``on_expiry`` rendering
+    (ADR-0394), and this service does not import it.
+    """
+
+    stamp: upload_manifest.ManifestStamp
+
+
+@dataclass(frozen=True, slots=True)
 class CompleteBuildValidationError(Exception):
     """External upload validation rejected the artifact set."""
 
@@ -131,6 +143,7 @@ class CompleteBuildFinalizer:
         manifest_row = await upload_manifest.get_manifest(conn, "runs", run.id)
         if manifest_row is None:
             raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
+        await _require_open_window(conn, manifest_row)
         has_chunks = any(entry.chunks is not None for entry in manifest_row.entries)
         keys = {entry.name: f"{manifest_row.prefix}{entry.name}" for entry in manifest_row.entries}
         store = self.object_store_factory() if has_chunks else None
@@ -218,6 +231,26 @@ class _ExternalBuildFinalization:
     chunked: bool
 
 
+async def _require_open_window(
+    conn: AsyncConnection, manifest_row: upload_manifest.UploadManifest
+) -> None:
+    """Reject a finalize past the manifest deadline; return while the window is open (ADR-0448).
+
+    Sited here so it covers the single-PUT and chunked paths from one place — the asymmetry #1534
+    reported was two paths reading (or not reading) the same field independently. The deadline is
+    measured against the Postgres clock that stamped it and that the upload reaper measures
+    against, so finalize and the reaper cannot reach opposite verdicts on one manifest. ``now()``
+    is the transaction's start, so a request that arrived inside the window is never rejected for
+    time it spent queueing behind the ``RUN`` lock.
+
+    Raises:
+        CompleteBuildExpiredWindowError: The window closed before this finalize arrived.
+    """
+    stamp = await upload_manifest.deadline_stamp(conn, manifest_row)
+    if stamp.deadline < stamp.server_time:
+        raise CompleteBuildExpiredWindowError(stamp)
+
+
 async def _reassemble_chunked_artifacts(
     conn: AsyncConnection,
     uid: UUID,
@@ -237,9 +270,13 @@ async def _reassemble_chunked_artifacts(
                 raise _CompleteBuildAlreadyRecorded(recorded) from exc
             raise
         return
-    if await upload_manifest.get_manifest(conn, "runs", uid) is None:
+    # `_require_open_window` already passed, so a declined refresh means the row was reaped or
+    # its deadline lapsed between the two reads. Re-read to tell those apart, and report the
+    # observed clock pair rather than a bare reason, so both paths raise one payload.
+    current = await upload_manifest.get_manifest(conn, "runs", uid)
+    if current is None:
         raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
-    raise CompleteBuildConfigurationError({"reason": "upload_window_expired"})
+    raise CompleteBuildExpiredWindowError(await upload_manifest.deadline_stamp(conn, current))
 
 
 async def _reassemble_artifacts(
@@ -409,6 +446,7 @@ async def _cleanup_chunks_and_manifest(
 
 __all__ = [
     "CompleteBuildConfigurationError",
+    "CompleteBuildExpiredWindowError",
     "CompleteBuildFinalizer",
     "CompleteBuildValidation",
     "CompleteBuildValidationError",

@@ -24,6 +24,7 @@ from kdive.security.audit import args_digest
 from kdive.services.runs import complete_build
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
+    CompleteBuildExpiredWindowError,
     CompleteBuildFinalizer,
 )
 from kdive.services.runs.steps import BuildStepResult
@@ -148,6 +149,20 @@ async def _complete_config_error(
     raise AssertionError("complete_build did not raise CompleteBuildConfigurationError")
 
 
+async def _complete_expired_window_error(
+    pool: AsyncConnectionPool,
+    run_id: Any,
+    finalizer: CompleteBuildFinalizer,
+) -> CompleteBuildExpiredWindowError:
+    run = await _run_by_id(pool, run_id)
+    async with pool.connection() as conn:
+        try:
+            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+        except CompleteBuildExpiredWindowError as exc:
+            return exc
+    raise AssertionError("complete_build did not raise CompleteBuildExpiredWindowError")
+
+
 def _output(run_id: Any) -> BuildOutput:
     return BuildOutput(f"local/runs/{run_id}/kernel", "", "build-id")
 
@@ -170,27 +185,62 @@ def test_complete_build_finalizer_rejects_missing_manifest(migrated_url: str) ->
 def test_complete_build_finalizer_rejects_expired_chunk_manifest(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            run_id = await seed_external_run(pool)
-            async with pool.connection() as conn:
-                await upload_manifest.replace_manifest(
-                    conn,
-                    upload_manifest.UploadManifestReplaceRequest(
-                        owner_kind="runs",
-                        owner_id=run_id,
-                        prefix=f"local/runs/{run_id}/",
-                        entries=[_CHUNKED_KERNEL],
-                        ttl=timedelta(seconds=-1),
-                    ),
-                )
+            run_id = await seed_external_run_with_manifest(
+                pool, entries=[_CHUNKED_KERNEL], ttl=timedelta(seconds=-1)
+            )
             store = _ChunkedStore()
             finalizer = CompleteBuildFinalizer(
                 validate_complete_build=FakeValidator(_output(run_id)),
                 object_store_factory=lambda: store,
             )
-            error = await _complete_config_error(pool, run_id, finalizer)
+            error = await _complete_expired_window_error(pool, run_id, finalizer)
 
-        assert error.data == {"reason": "upload_window_expired"}
+        assert error.stamp.deadline < error.stamp.server_time
         assert store.events == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_rejects_expired_single_put_manifest(migrated_url: str) -> None:
+    """A non-chunked finalize past the deadline is rejected, not silently committed (#1534)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
+            validator = FakeValidator(_output(run_id))
+            error = await _complete_expired_window_error(
+                pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator)
+            )
+            run = await _run_by_id(pool, run_id)
+            manifest_kept = await _manifest_present(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+
+        assert error.stamp.deadline < error.stamp.server_time
+        assert validator.calls == 0  # rejected before the payload is read
+        assert run.state is RunState.CREATED
+        assert manifest_kept  # left for the reaper, exactly as the chunked path leaves it
+        assert artifact_rows == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_accepts_single_put_inside_window(migrated_url: str) -> None:
+    """The deadline is a wall, not a floor: a still-open window finalizes (#1534)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=30))
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+            )
+            run = await _run_by_id(pool, run_id)
+
+        assert result.kernel_ref == f"local/runs/{run_id}/kernel"
+        assert run.state is RunState.SUCCEEDED
 
     asyncio.run(_run())
 

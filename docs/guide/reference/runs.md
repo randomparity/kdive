@@ -63,6 +63,14 @@ The `kernel` tar's boot/vmlinuz member is validated against the Run's build-prof
 does not match the declared arch is rejected. See artifacts.expected_uploads for the
 per-arch byte contract.
 
+Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
+chunked and single-PUT alike. A later call is rejected with
+`reason: "upload_window_expired"`, echoing that deadline and the server clock it is
+measured on. To recover, re-mint the window with that tool and call this again: the object
+keys are derived from the Run and the artifact names, so re-upload only if the retry
+reports a missing object (the lapsed upload was reclaimed) or you are declaring a
+different checksum.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |
