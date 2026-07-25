@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import openpyxl
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
@@ -62,6 +64,28 @@ def _report() -> Report:
     return Report(sections=(section,), as_of=_AS_OF)
 
 
+def _sheet_values(xlsx: bytes) -> list[tuple[str, list[list[object]]]]:
+    """Return ``(sheet title, rows of cell values)`` per sheet, in workbook order.
+
+    The comparison unit is parsed content, not bytes, because two independent
+    ``render_xlsx`` calls of the same report differ in bytes on wall clock alone
+    (#1494), by two mechanisms: openpyxl stamps ``dcterms:created``/``modified`` into
+    ``docProps/core.xml``, and it writes every zip member with a bare arcname, so
+    ``zipfile`` stamps each member's mtime header at the format's two-second
+    granularity. Byte identity is not a property the renderer offers; the workbook's
+    content is.
+
+    A sequence, not a mapping: ``render_xlsx`` documents one sheet per section *in
+    registry order*, and dicts compare equal regardless of insertion order, so a
+    mapping would let a sheet reordering pass.
+    """
+    workbook = openpyxl.load_workbook(io.BytesIO(xlsx))
+    return [
+        (title, [[cell.value for cell in row] for row in workbook[title].rows])
+        for title in workbook.sheetnames
+    ]
+
+
 def test_write_report_artifacts_xlsx_puts_named_data_and_presigns(migrated_url: str) -> None:
     report = _report()
     report_id = uuid4()
@@ -76,11 +100,16 @@ def test_write_report_artifacts_xlsx_puts_named_data_and_presigns(migrated_url: 
 
     refs = asyncio.run(_run())
 
-    # One xlsx put carrying the rendered bytes, the fixed object name, and the report owner_id.
+    # One xlsx put carrying the rendered workbook, the fixed object name, and the report
+    # owner_id.
     assert len(store.puts) == 1
     put = store.puts[0]
     assert put.name == "report.xlsx"
-    assert put.data == expected_xlsx
+    put_values = _sheet_values(put.data)
+    # The put payload is a readable workbook carrying this report's section and rows...
+    assert put_values == [("inventory", [["system_id", "vcpus"], ["s1", "4"]])]
+    # ...and it is the same workbook render_xlsx produces for the report.
+    assert put_values == _sheet_values(expected_xlsx)
     assert put.owner_id == str(report_id)
     # The presign uses the stored key and the requested ttl, and surfaces under the xlsx ref.
     stored_key = put.key()
