@@ -39,11 +39,43 @@ CUSTOM_SHAPE_SENTINEL = "__custom__"
 """The ``shape`` filter value selecting full-custom Systems (``shape IS NULL``)."""
 
 NO_JOB_SYSTEM_FAILURE_DETAIL = "System failed with no job recording a reason"
-"""``detail`` for a ``failed`` System with no failing job to attribute (ADR-0454 §3).
+"""``detail`` for a ``failed`` System whose failing job recorded no reason (ADR-0454 §3).
 
-The reconciler resolves a stalled ``restoring`` System to ``failed`` with no job behind it, so
-that path would otherwise surface a bare category. Names the condition and no project, host, or
-id, so it carries no resource-existence signal.
+Used when no job could be attributed at all, and — the commoner case — when the attributed job
+carries an empty ``failure_context``. Names the condition and no project, host, or id, so it
+carries no resource-existence signal.
+"""
+
+ABANDONED_JOB_SYSTEM_FAILURE_DETAIL = (
+    "System failed while its job was abandoned: the job's lease expired before it recorded a "
+    "reason, so the original failure reason was not retained"
+)
+"""``detail`` for a ``failed`` System attributed to a lease-expired job (ADR-0454 §3).
+
+``repair_abandoned_jobs`` dead-letters a zombie job with ``lease_expired`` and an untouched
+(empty) ``failure_context``, so this is what a System failed by a worker that died — or whose
+``queue.fail`` never landed — actually looks like. Saying so beats a bare ``lease_expired``,
+which reads as a verdict on the System rather than on the bookkeeping. Resource-free.
+"""
+
+_SYSTEM_FAILURE_DETAIL: dict[ErrorCategory, str] = {
+    ErrorCategory.LEASE_EXPIRED: ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
+}
+"""Category-derived reasons for a ``failed`` System whose job recorded no message.
+
+Only ``lease_expired`` earns its own string: it is the one category reachable *without* a
+handler having written a reason (the reconciler stamps it), so it is the one whose bare form
+would actively mislead. Every other category arrives from a handler that normally supplies a
+message, and falls back to :data:`NO_JOB_SYSTEM_FAILURE_DETAIL`.
+"""
+
+FAILED_SYSTEM_NEXT_ACTIONS = ["allocations.release", "allocations.request"]
+"""Recovery actions for a ``failed`` System (ADR-0454 §5, matching ADR-0149's guidance).
+
+``SystemState.FAILED`` is terminal — its outbound transition set is empty — so there is no
+System-scoped tool to retry with, whatever ``retryable`` says. The way forward is the one
+``systems.provision`` already names on this System: release the allocation and request a fresh
+one. Static and unfiltered, like the success path's list in the same function.
 """
 
 
@@ -125,7 +157,14 @@ def _failed_system_envelope(
     """Build the ``failed`` System envelope from its failing job's verdict (ADR-0454).
 
     The category is the job's, defaulting to ``infrastructure_failure`` only when there is no
-    job to attribute (the reconciler orphan) or the job never recorded one.
+    job to attribute or the job never recorded one.
+
+    ``detail`` is derived from the **resolved reason**, not from the presence of a job: a job
+    with an empty ``failure_context`` is as reasonless as no job at all, and is in fact the
+    likelier shape — ``repair_abandoned_jobs`` dead-letters a zombie job with ``lease_expired``
+    and an untouched context, and the System-failing reconciler repairs run after it. Gating the
+    fallback on ``failing_job is None`` would leave that path a bare category, which is the
+    surface #1550 set out to remove.
 
     The job-derived surface (``detail``, ``failing_job_id``) is suppressed entirely for a
     no-leak category (ADR-0123): ``ToolResponse.failure`` already suppresses ``detail``, but the
@@ -139,12 +178,18 @@ def _failed_system_envelope(
         ErrorCategory.INFRASTRUCTURE_FAILURE
     )
     failure_data: dict[str, JsonValue] = {"current_status": system.state.value, **data}
-    detail: str | None = NO_JOB_SYSTEM_FAILURE_DETAIL
-    if failing_job is not None:
-        detail = failing_job.failure_context.get("failure_message") or None
-        if suppressed_detail(category, None) is None:
-            failure_data["failing_job_id"] = str(failing_job.id)
-    return ToolResponse.failure(str(system.id), category, detail=detail, data=failure_data)
+    detail = failing_job.failure_context.get("failure_message") if failing_job else None
+    if not detail:
+        detail = _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
+    if failing_job is not None and suppressed_detail(category, None) is None:
+        failure_data["failing_job_id"] = str(failing_job.id)
+    return ToolResponse.failure(
+        str(system.id),
+        category,
+        detail=detail,
+        suggested_next_actions=list(FAILED_SYSTEM_NEXT_ACTIONS),
+        data=failure_data,
+    )
 
 
 def defined_system_envelope(system: System) -> ToolResponse:

@@ -3,7 +3,7 @@
 `systems.get` used to render every `SystemState.FAILED` as `infrastructure_failure`, which
 `_RETRYABLE_BY_CATEGORY` turns into `retryable: true` — telling an agent to retry a
 non-retryable configuration error. ADR-0454 resolves the category from the job that actually
-failed the System, keeping the default only for the reconciler-orphan path that has no job.
+failed the System, keeping the default only for the path with no attributable job.
 """
 
 from __future__ import annotations
@@ -20,14 +20,24 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import SYSTEM_FAILING_JOB_KINDS, Job, JobKind
 from kdive.jobs import queue
-from kdive.jobs.payloads import CheckSshReachablePayload, ReprovisionPayload, SystemPayload
+from kdive.jobs.payloads import (
+    CheckSshReachablePayload,
+    ReprovisionPayload,
+    RestorePayload,
+    SystemPayload,
+)
+from kdive.mcp.exposure import _REGISTERED_TOOLS
 from kdive.mcp.tools.lifecycle.systems.view import (
+    ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
+    FAILED_SYSTEM_NEXT_ACTIONS,
     NO_JOB_SYSTEM_FAILURE_DETAIL,
     SystemsListRequest,
     get_system,
     list_systems,
     system_envelope,
 )
+from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
+from kdive.reconciler.repairs.systems import repair_stalled_restoring_systems
 from tests.mcp.systems_support import (
     ctx as _ctx,
 )
@@ -125,14 +135,45 @@ def test_failed_system_with_uncategorized_job_falls_back_to_the_default() -> Non
     assert resp.data["failing_job_id"] == str(job.id)
 
 
-def test_failed_system_job_without_message_still_links_the_job() -> None:
+def test_failed_system_job_without_message_still_gets_a_reason() -> None:
+    # A job with an empty `failure_context` is as reasonless as no job, so the fallback keys on
+    # the resolved detail rather than on the job's presence — a bare category is the surface
+    # #1550 exists to remove.
     job = _failed_job(ErrorCategory.PROVISIONING_FAILURE, {})
 
     resp = system_envelope(_system(), failing_job=job)
 
     assert resp.error_category == "provisioning_failure"
-    assert resp.detail is None
+    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
     assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_failed_system_attributed_to_an_abandoned_job_says_so() -> None:
+    # `repair_abandoned_jobs` dead-letters a zombie job with `lease_expired` and an untouched
+    # (empty) `failure_context`, and the System-failing reconciler repairs run after it — so
+    # this, not "no job at all", is what a worker that died actually leaves behind.
+    job = _failed_job(ErrorCategory.LEASE_EXPIRED, {}, kind=JobKind.RESTORE)
+
+    resp = system_envelope(_system(), failing_job=job)
+
+    assert resp.error_category == "lease_expired"
+    assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.detail != NO_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_failed_system_offers_the_recovery_actions_not_a_dead_end() -> None:
+    # `SystemState.FAILED` is terminal, so `retryable` names no System-scoped tool to retry
+    # with; the way forward is the one `systems.provision` already names (ADR-0149).
+    resp = system_envelope(_system(), failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR))
+
+    assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+
+
+def test_failed_system_next_actions_name_registered_tools() -> None:
+    # `visible_next_actions` raises on an unregistered breadcrumb (#1444); this envelope builds
+    # its list unfiltered, so the registry check has to happen here.
+    assert all(name in _REGISTERED_TOOLS for name in FAILED_SYSTEM_NEXT_ACTIONS)
 
 
 def test_failed_system_suppresses_the_job_surface_for_a_no_leak_category() -> None:
@@ -198,6 +239,8 @@ def _payload_for(kind: JobKind, system_id: UUID) -> SystemPayload:
         return ReprovisionPayload(system_id=str(system_id), profile_digest="digest-1")
     if kind is JobKind.CHECK_SSH_REACHABLE:
         return CheckSshReachablePayload(system_id=str(system_id))
+    if kind is JobKind.RESTORE:
+        return RestorePayload(system_id=str(system_id), name="snap-1", start_paused=False)
     return SystemPayload(system_id=str(system_id))
 
 
@@ -362,6 +405,41 @@ def test_get_system_surfaces_the_provision_jobs_category(migrated_url: str) -> N
         assert resp.retryable is False
         assert resp.detail == "rootfs checksum is not owned by this System's investigation"
         assert resp.data["failing_job_id"] == str(job.id)
+
+    asyncio.run(_run())
+
+
+def test_get_system_after_the_real_abandoned_job_sweep(migrated_url: str) -> None:
+    # The production route into a "reconciler orphan": `repair_abandoned_jobs` dead-letters the
+    # zombie restore job (`lease_expired`, `failure_context` untouched), and only then does
+    # `repair_stalled_restoring_systems` resolve the System to `failed`. Driven through the real
+    # reconciler rather than a hand-built row, so the shape cannot drift from the sweep.
+    async def _run() -> None:
+        async with _pool(migrated_url) as conn_pool:
+            alloc_id = await _granted_allocation(conn_pool)
+            system_id = await _seed_system(conn_pool, alloc_id, SystemState.RESTORING)
+            async with conn_pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.RESTORE,
+                    _payload_for(JobKind.RESTORE, system_id),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    "dk-restore",
+                )
+                # A zombie: claimed, out of attempts, lease long lapsed.
+                await conn.execute(
+                    "UPDATE jobs SET state = 'running', worker_id = 'w1', attempt = 3, "
+                    "max_attempts = 3, lease_expires_at = now() - interval '1 hour'"
+                )
+                assert await repair_abandoned_jobs(conn) == 1
+                assert await repair_stalled_restoring_systems(conn) == 1
+            resp = await get_system(
+                conn_pool, _ctx(), str(system_id), resolver=_provider_resolver()
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "lease_expired"
+        assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+        assert "failing_job_id" in resp.data
 
     asyncio.run(_run())
 
