@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import multiprocessing as mp
 import os
 import time
@@ -69,19 +70,46 @@ def test_partial_sweep_unlinks_and_removes_empty_dir(tmp_path: Path) -> None:
     assert not inv_dir.exists()  # empty after the partial swept -> removed
 
 
-def test_partial_sweep_keeps_dir_holding_a_base(tmp_path: Path) -> None:
+def test_a_base_left_after_the_drain_is_unowned_and_collected(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ADR-0452 §6. The sweep runs only once no rootfs row remains for the investigation, so a base
+    # still sitting here holds no row and no overlay can be backed by it — an overlay would have
+    # pinned the row and ended the drain tail before this ran. It is the shape the flock gate makes
+    # reachable: a doomed fetcher publishes onto a path its own reclaim already emptied. Leaving it
+    # would trade the live-partial defect for a permanent SENSITIVE leak nothing else collects.
     inv, inv_dir = _inv_dir(tmp_path)
     (inv_dir / f"{_TOKEN}.{uuid4().hex}.partial").write_bytes(b"partial")
     base = inv_dir / f"{_TOKEN}.qcow2"
-    base.write_bytes(b"base")  # a still-deferred base keeps the dir non-empty
+    base.write_bytes(b"published after its own row was reclaimed")
 
-    # A base is not a live writer: the dir survives the rmdir, but nothing is being waited on, so
-    # the caller's drain marker must still clear.
-    assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+    with caplog.at_level(logging.WARNING):
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
 
-    assert inv_dir.exists()
+    assert not base.exists()
+    assert not inv_dir.exists()  # the dir now actually drains, so the rmdir stops failing silently
+    assert any("outlived the artifacts row" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_an_unowned_base_that_cannot_be_unlinked_is_warned_not_raised(tmp_path: Path) -> None:
+    # Per candidate, like the partial loop: one bad file must not abort the pass or raise into the
+    # handler, which would fail a job whose reclaim already succeeded.
+    inv, inv_dir = _inv_dir(tmp_path)
+    base = inv_dir / f"{_TOKEN}.qcow2"
+    base.write_bytes(b"base")
+    real_unlink = os.unlink
+
+    def refusing_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == base:
+            raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "unlink", refusing_unlink)
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+
     assert base.exists()
-    assert not list(inv_dir.glob("*.partial"))  # partial still swept
+    assert inv_dir.exists()
 
 
 def test_sweep_skips_a_partial_a_live_fetcher_still_holds(tmp_path: Path) -> None:

@@ -136,6 +136,27 @@ The narrowness is the point in both directions:
 post-state of a live-held skip rather than a surprise, and the retained marker is what brings the
 next pass back to finish the job.
 
+### The same pass collects a staged base left behind
+
+Every reachable held skip is a *doomed* provision — a System still fetching is in
+`PROVISIONING`/`REPROVISIONING`/`RESTORING`, all pinning states, so the pin can only have dropped
+because that System is already `FAILED` or `TORN_DOWN`. Preserving its partial therefore does not
+save a provision; it changes the end state. On the identity path the download streams off an
+already-open GET body, so the concurrent object delete does not stop it: the fetcher completes,
+passes its gates, finds nothing at `dest` (this reclaim unlinked it) and publishes `<token>.qcow2`
+into an investigation with zero rootfs rows. Every collector in the tree is driven by an `artifacts`
+row, so nothing would ever remove it — trading a self-collecting unlinked inode for an unbounded
+SENSITIVE base of up to the 50 GiB canonical cap.
+
+So the sweep globs `*.qcow2` after the partials and unlinks each with a `WARNING`. The licence is the
+drain tail's own precondition, already established under the `INVESTIGATION` lock: no rootfs row
+remains, so every file there is unowned by construction and no overlay can be backed by one (an
+overlay pins its row through `_overlay_pins_base`, and a surviving row ends the drain tail before
+the sweep runs). It should never fire — `_unlink_staged_base` removes each base as its own row
+drains — so a hit is evidence of the publish-after-reclaim above, which is why it is a `WARNING`
+rather than a silent unlink. The retained marker makes it converge: the deferred pass is the one
+that collects what the live writer published.
+
 ## What this does not fix
 
 - **The `flock` guard is best-effort, because `_flocked_partial` degrades.** On a filesystem that
@@ -151,11 +172,16 @@ next pass back to finish the job.
   `_reclaim_one_checksum` still deletes the base, the object and the row under a live download. This
   gate preserves the partial's bytes, not the fetch: on the gzip path the remaining ranged GETs then
   404. The drain tail warns; **#1558** fixes it by running the same probe before the base unlink.
-- **A base a doomed fetcher publishes after the pin dropped.** If the live writer runs to
-  completion it `os.replace`s its partial onto `<token>.qcow2` whose `artifacts` row the reclaim has
-  already deleted, leaving a staged base nothing owns. That is a consequence of the pin-dropping
-  transition, not of this gate — but this change does alter its shape, so **#1559** carries it, with
-  an operator-side detection recipe in the meantime.
+- **An orphan base in an investigation that still has other rootfs rows.** The drain tail collects
+  unowned bases (below) only because it has just read that *no* rootfs row remains, which is what
+  licenses an ungated unlink. A base orphaned while other rows survive is out of that precondition;
+  **#1559** carries it.
+- **The TTL lane has no retry for a live-held skip.** The retained marker re-issues the reclaim on
+  the close-driven lane only. A TTL job runs against an `open`/`active` investigation whose marker is
+  already NULL, and `_TTL_ROOTFS_OBJECTS_SQL` is a pure `artifacts` query over rows the job just
+  deleted, so nothing re-selects it — a partial skipped there waits for the investigation to close.
+  Narrow (the fetcher unlinks its own partial in its `finally`, so only a killed holder leaves one)
+  but real; **#1565** carries it.
 
 ## Test plan
 
@@ -165,7 +191,8 @@ next pass back to finish the job.
 | R1 | The same, driven through the real handler on the `PROVISIONING -> TORN_DOWN` ordering: the System row is torn down, the last rootfs row is reclaimed, and the sweep runs against a held partial |
 | R2 | An unheld crash orphan is still unlinked, including beside a held one in the same directory (an all-or-nothing gate fails this) |
 | R2 | A partial whose holder process is `SIGKILL`ed is collected on the next sweep with no timeout |
-| R3 | The staging dir is removed once it drains; a dir still holding a base is left in place |
+| R3 | The staging dir is removed once it drains, including a base left behind after the drain, which is collected and `WARNING`-logged |
+| R3 | An unowned base that cannot be unlinked warns and does not raise into the handler |
 | R5 | A live-held skip retains `rootfs_cleanup_pending_at`; a drained sweep clears it |
 | R5 | An *unopenable* partial (no `flock` held) clears the marker, so a permanent fault cannot pin it forever |
 | R2 | On a filesystem that cannot `flock` at all, the reclaim sweep still collects and still clears the marker, while the fetch-side sweep still skips |

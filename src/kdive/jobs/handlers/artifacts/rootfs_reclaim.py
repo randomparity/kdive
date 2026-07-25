@@ -162,7 +162,7 @@ def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) ->
 
 
 def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) -> bool:
-    """Unlink each **unheld** ``*.partial``, then remove the now-empty staging dir (ADR-0452).
+    """Empty a drained investigation's staging dir: unheld ``*.partial``, then unowned bases.
 
     Best-effort (ADR-0441 §5): a crash-orphaned ``<token>.*.partial`` no row owns is unlinked here
     as the backstop to the live fetcher's opportunistic cleanup, **before** the empty-dir removal
@@ -190,11 +190,17 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
     The ``suppress`` covers the directory walk only; every per-candidate fault is handled inside
     :func:`unlink_partial_if_unheld`, so one unsweepable file cannot truncate the pass.
 
+    A staged **base** found here is unowned by construction and is collected too
+    (:func:`_unlink_unowned_base`), which is what keeps the gate above from trading one leak for a
+    worse one: the writer it now protects can run to completion and publish onto ``<token>.qcow2``
+    whose row this reclaim already deleted, and nothing else in the tree collects a row-less base.
+
     Returns:
         Whether a live writer's ``flock`` left a partial behind. That partial also keeps ``inv_dir``
         non-empty, so the ``rmdir`` below fails with ``ENOTEMPTY`` — the deliberate post-state of a
-        live-held skip, not a surprise (ADR-0452 §4). The caller retains the drain marker on it so a
-        later pass finishes the job.
+        live-held skip, not a surprise (ADR-0452 §5). The caller retains the drain marker on it so a
+        later pass finishes the job, which is also the pass that collects whatever that writer
+        published in the meantime.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
     held = False
@@ -203,8 +209,46 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
             if unlink_partial_if_unheld(partial, unlink_when_unlockable=True):
                 held = True
     with suppress(OSError):
+        for base in inv_dir.glob("*.qcow2"):
+            _unlink_unowned_base(base)
+    with suppress(OSError):
         inv_dir.rmdir()
     return held
+
+
+def _unlink_unowned_base(base: Path) -> None:
+    """Collect a staged base left in a drained investigation's staging dir (ADR-0452 §6, #1559).
+
+    Reached only from the drain tail, which runs under the ``INVESTIGATION`` lock and only once
+    :data:`_REMAINING_ROOTFS_ROWS_SQL` returns nothing — so **every** file here is unowned by
+    construction, and no System can be running off this base either: an overlay on it would have
+    pinned its row through :func:`_overlay_pins_base`, and a row that survives ends the drain tail
+    before this runs. That precondition is the whole licence for an ungated unlink, so do not move
+    this call anywhere the row count has not just been read under the lock.
+
+    It should also never fire. :func:`_unlink_staged_base` removes each base as its own row drains,
+    so a base surviving to here means one was published *without* a row — the shape the ``flock``
+    gate above makes reachable, where a doomed fetcher whose System was torn down mid-download
+    completes anyway and ``os.replace``\\ s onto a path this reclaim already emptied. ``WARNING``
+    rather than a silent unlink, because a SENSITIVE base of up to the 50 GiB canonical cap arriving
+    after its own reclaim is worth seeing, and because it is otherwise indistinguishable from the
+    directory simply being empty.
+    """
+    try:
+        base.unlink(missing_ok=True)
+    except OSError as err:
+        _log.warning(
+            "could not unlink the unowned staged rootfs base %s (%s); it holds no artifacts row, "
+            "and no sweep will revisit it once this investigation's drain marker clears",
+            base,
+            err.strerror,
+        )
+        return
+    _log.warning(
+        "collected the staged rootfs base %s, which outlived the artifacts row that owned it; a "
+        "fetcher published it after its checksum had already been reclaimed (#1544)",
+        base,
+    )
 
 
 async def _reclaim_one_checksum(
@@ -283,6 +327,17 @@ async def _finish_drained_investigation(
     marker on it resurrects the never-clearing marker and the re-fail-every-pass loop ADR-0442 was
     written about. A held ``flock`` is the one outcome the kernel guarantees is transient — it is
     released when the holding descriptor closes, including on ``SIGKILL`` — so the retry converges.
+
+    **That retry exists on the close-driven lane only, and the asymmetry is real.** A TTL job runs
+    against an ``open``/``active`` investigation whose marker is already NULL, so retaining is a
+    no-op there — and that lane's own worklist (``reconciler.cleanup.gc._TTL_ROOTFS_OBJECTS_SQL``)
+    is a pure ``artifacts`` query over rows this job just deleted, so it cannot re-select the
+    investigation either. A partial skipped on the TTL path therefore waits for the investigation to
+    close. It is narrow — the fetcher unlinks its own partial in its ``finally``, so only a *killed*
+    holder leaves one — and :func:`sweep_investigation_staging_dir` still empties the rest of the
+    directory in that same pass. #1565 tracks giving that lane a trigger of its own; the close
+    marker is deliberately not overloaded onto an open investigation here, because it is durable
+    state whose meaning is "this investigation was closed and its rootfs is being reclaimed".
     """
     async with (
         conn.transaction(),
@@ -296,18 +351,20 @@ async def _finish_drained_investigation(
             sweep_investigation_staging_dir, uploads_dir, investigation_id
         )
         if held:
-            # WARNING, not INFO, and worded for what was *observed* rather than for the UPDATE
-            # below — which is a no-op on the TTL path, whose investigations are ``open``/``active``
-            # with a NULL marker, so an "the marker is kept" line would be false exactly there. The
-            # observation itself is the actionable part: every rootfs row, object and staged base of
-            # this investigation is now gone while a writer is still staging into its directory, so
-            # that fetch is going to fail against a deleted object (the pin-dropping window ADR-0452
-            # leaves open). Without this line that failure surfaces only as a store-shaped
-            # ``INFRASTRUCTURE_FAILURE`` on the provision side, with nothing naming the reclaim.
+            # WARNING, not INFO, and worded for the *observation* and the achieved post-state rather
+            # than for the UPDATE below — which is a no-op on the TTL path, whose investigations
+            # carry a NULL marker, so "the marker is kept" would be false exactly there. It also
+            # does not predict how that writer ends: on the gzip path its remaining ranged GETs 404
+            # against the object this reclaim deleted, while on the identity path the response body
+            # is already open and it usually *succeeds* — publishing a base with no row, which the
+            # deferred pass collects. Asserting either would be the inference-as-invariant this
+            # change removes from the sweep's own WARNING one file over.
             _log.warning(
                 "investigation %s has no rootfs rows left, but a live writer still holds a staging "
-                "partial under its staging directory; its staging dir is kept and its fetch will "
-                "fail against the object this reclaim deleted",
+                "partial; keeping its staging directory and deferring the drain until that writer "
+                "exits. Its System is already failed or torn down — that is the only way the pin "
+                "dropped — so the fetch is doomed either way, and anything it publishes there is "
+                "unowned and is collected by the deferred pass",
                 investigation_id,
             )
             return

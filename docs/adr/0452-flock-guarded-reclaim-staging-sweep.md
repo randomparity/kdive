@@ -104,6 +104,30 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
    kernel releases it when the holding descriptor closes, including on process exit, normal or
    `SIGKILL`.
 
+6. **The same pass collects a staged base left behind, because the gate makes one reachable.**
+   Every reachable held skip is a *doomed* provision: a System that is still fetching sits in
+   `PROVISIONING`/`REPROVISIONING`/`RESTORING`, all inside
+   `ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES`, so it pins — the pin can only have dropped because that
+   System is already `FAILED` or `TORN_DOWN`. Preserving its partial therefore does not save a
+   provision. What it changes is the *end state*: on the identity path the download is streaming off
+   an already-open GET body, so a concurrent object delete does not stop it, and the fetcher
+   completes, passes its gates, finds nothing at `dest` (this reclaim unlinked it) and publishes
+   `<token>.qcow2` into an investigation with zero rootfs rows. Every collector in the tree is
+   driven by an `artifacts` row, so nothing would ever remove it — an unbounded SENSITIVE retention
+   failure of up to the 50 GiB canonical cap, replacing an unlinked inode the kernel released when
+   the fetcher's descriptors closed. That is a bad trade and it is not deferred to #1559.
+
+   The drain tail is where it costs nothing to fix. It has already read, under the `INVESTIGATION`
+   lock, that no rootfs row remains — so every file in that directory is unowned *by construction*,
+   and no overlay can be backed by one either, because an overlay pins its row through
+   `_overlay_pins_base` and a surviving row ends the drain tail before the sweep runs. The sweep
+   globs `*.qcow2` after the partials and unlinks each with a `WARNING`, which should never fire:
+   `_unlink_staged_base` removes each base as its own row drains, so one surviving to here is
+   evidence of exactly the publish-after-reclaim above. The retained marker then makes it converge —
+   the deferred pass is the one that collects what the writer published — and the `rmdir` stops
+   failing silently once the directory really is empty. #1559 keeps the general case, where a base
+   is orphaned while *other* rootfs rows remain.
+
 ## Consequences
 
 - A live fetcher's partial survives the reclaim sweep. Both partial-unlinking paths in the tree are
@@ -142,15 +166,22 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
   diagnosis, not prevention — and **#1558** carries the fix (run the same `flock` probe inside
   `_reclaim_one_checksum` and defer the checksum). It is not a substitute for this change: a sweep
   whose correctness rests on a state column is the defect class both ADRs are removing.
-- **A doomed fetcher can now publish a base nothing owns, and that shape is new.** Before this
-  change the sweep destroyed the live partial, so the fetcher died at `_require_still_linked` and
-  published nothing. Now it runs to completion and `os.replace`s onto `<token>.qcow2` whose
-  `artifacts` row the reclaim already deleted — a staged base with no row, in a closed
-  investigation, which no sweep reclaims. That trade is deliberate: the previous behaviour's "no
-  leak" was an invisible-inode leak plus a failed provision, and a path-addressable file an operator
-  can find and an orphan-base sweep can later collect is the better of the two. **#1559** carries it,
-  with the operator-side detection recipe in the meantime, because collecting orphan *bases* is a
-  different worklist from collecting orphan partials.
+- **A doomed fetcher can now publish a base nothing owns — collected in the same pass** (decision
+  6). Before this change the sweep destroyed the live partial, so the fetcher died at
+  `_require_still_linked` and published nothing; the guard makes it complete instead. The drain
+  tail's `*.qcow2` collection is what keeps that from being a permanent leak. **#1559** keeps the
+  case this does not reach: a base orphaned while *other* rootfs rows remain, where the zero-row
+  precondition that licenses an ungated unlink does not hold.
+- **The retained marker converges on the close-driven lane only.** A TTL job runs against an
+  `open`/`active` investigation whose marker is already NULL, so the retain is a no-op there — and
+  `_TTL_ROOTFS_OBJECTS_SQL` is a pure `artifacts` query over rows the job just deleted, so that lane
+  cannot re-select the investigation either. A partial skipped on the TTL path waits for the
+  investigation to close. Narrow — the fetcher unlinks its own partial in its `finally`, so only a
+  *killed* holder leaves one, and decision 6 still empties the rest of the directory in that pass —
+  but real, and asserting unqualified convergence would be the same defect this ADR is about.
+  **#1565** carries it. Overloading `rootfs_cleanup_pending_at` onto an open investigation would fix
+  it in one line and is deliberately not done: that column is durable, record-model-visible state
+  meaning "this investigation was closed and its rootfs is being reclaimed".
 - No schema, no migration, no config setting, no new dependency, no MCP/RBAC surface. Not an AI
   surface. `#1539` adds a sidecar completion marker to this same directory and this pass keeps the
   shape it needs: a second, non-`flock`ed glob added to the same function.
