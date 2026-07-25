@@ -109,9 +109,13 @@ overrides it to 1, keeping the worst case to an operator-visible error at ~11s r
 This follows directly from decision 1 rather than being incidental to it. `__main__`'s only
 handler is `except CategorizedError`, which routes a failure through
 `_report_categorized_error` — an ERROR record on the ADR-0090 structured stdout floor,
-redacted, carrying the message and actionable details, plus a stable
-`exit_code_for_category`. An uncategorized raise gets none of that: a multi-line traceback
-on stderr and a generic exit 1. Decision 1 turns "the backend is not up yet" into a
+redacted, carrying the message and actionable details. An uncategorized raise gets none of
+that: a multi-line traceback on stderr, which a deployment scraping JSON cannot read.
+(The *exit code* is unchanged either way — `cli/errors.py` maps no code for
+`infrastructure_failure`, so `exit_code_for_category` falls through to the generic 1. Giving
+the category its own code would change the exit status of every existing infrastructure
+failure across the CLI, a CLI-contract decision well outside this issue. The ERROR record,
+not the exit status, is what this decision buys.) Decision 1 turns "the backend is not up yet" into a
 *routine* outcome, and a routine outcome that a deployment scraping JSON logs cannot see,
 alert on, or distinguish from any other crash is not an acceptable one. The message and the
 `KDIVE_DATABASE_URL` hint are what the operator docs tell readers to look for.
@@ -180,8 +184,8 @@ data-driven follow-up promised below could not actually be run.
   of this decision. It is accepted: the outage itself dominates that lag, and
   `CrashLoopBackOff` with `PoolTimeout` in the logs is a more diagnosable state than a pod
   that is Running and permanently not-Ready.
-- **The supervision premise had a gap on one shipped surface, now closed.** "The retry lives
-  in the supervisor" held for systemd and Kubernetes but not for `docker-compose.yml`, which
+- **The supervision premise had gaps on two shipped surfaces.** "The retry lives in the
+  supervisor" held for systemd and Kubernetes but not for `docker-compose.yml`, which
   declared no `restart:` policy on `server`/`worker`/`reconciler`. `depends_on` protects only
   the first `up`; every later recreate during a backend outage would have left the container
   `Exited (1)` permanently, where before this change it came up and recovered on its own. The
@@ -195,6 +199,16 @@ data-driven follow-up promised below could not actually be run.
   stack's demo-credential MinIO and token-minting mock issuer — both published on host
   ports — boot-persistent on any machine that ever ran the stack, a change in exposure this
   ADR has no reason to make. The `migrate`/`minio-init` one-shots stay unpoliced by design.
+- **The second gap is the live-stack host processes, and it closes differently.**
+  `scripts/live-stack/` runs the three processes as bare `setsid nohup` background jobs with
+  no supervisor at all, and that surface is documented and used by this repo's own
+  `live_stack`/`live_vm` tiers. There is nothing to attach a restart policy to, and inventing
+  a supervisor for a development bring-up script is out of scope. What this change actually
+  broke there is narrower: bring-up settled for a flat 5 seconds — *inside* the ~11s a doomed
+  daemon now lives — so `status.sh` reported three healthy processes and `up.sh` exited 0 for
+  a stack that vanished moments later. The settle now outlasts the startup budget and fails
+  the moment a daemon dies, so the script's exit code means what it says. Recovery there is
+  still manual (re-run bring-up), which is the honest position for an unsupervised path.
 - `/livez`, `/readyz`, and `/metrics` are unavailable for up to 10 seconds longer at
   startup, because the aux listener starts after the pool opens. Sized to stay inside the
   chart's `initialDelaySeconds: 5` plus one probe period, as above.

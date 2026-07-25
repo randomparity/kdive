@@ -16,9 +16,8 @@ appropriate `After=`/`Wants=` via a drop-in. Run the provider preflight (see
 
 The retry lives in the supervisor, not inside the process. Each process waits up to ten
 seconds at start for its first database connection; if it cannot get one it logs an ERROR
-record reading `no database connection within 10s of process start`,
-exits with the infrastructure-failure code, and `Restart=on-failure` with `RestartSec=5`
-brings it back — so a database that is down looks like a unit restarting roughly every
+record reading `no database connection within 10s of process start`, exits non-zero, and
+`Restart=on-failure` with `RestartSec=5` brings it back — so a database that is down looks like a unit restarting roughly every
 fifteen seconds, not one that stays active. That record is on the structured JSON log
 floor, so it is greppable in the journal and scrapeable by a log pipeline. Waiting for that
 first connection is deliberate: it keeps the connect out of the per-call budget the server

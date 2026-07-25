@@ -65,5 +65,7 @@ drops as `kdive_mcp_usage_recording_failures`.
 
 A steady zero is the expected reading. A non-zero rate means usage data is incomplete, and
 the usual cause is the server pool having to open a fresh connection inside that one-second
-budget under concurrency. That counter is the signal to size the server's pool against —
-raise its minimum connections if the rate is material to you, rather than guessing.
+budget under concurrency. There is no setting to tune for this: the pool's minimum size is
+fixed in KDIVE's source. What the rate gives you is the evidence for raising it — report it
+on [#1535](https://github.com/randomparity/kdive/issues/1535) rather than treating a
+non-zero reading as something to configure your way out of.
