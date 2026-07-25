@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import contextlib
+from collections.abc import AsyncIterator, Callable
 
 import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
@@ -16,11 +17,11 @@ from kdive.processes import runtime
 # until its open budget expires rather than hanging on an unroutable address.
 _UNREACHABLE_DB = "postgresql://kdive@127.0.0.1:1/kdive?connect_timeout=1"
 
-# The exact open the runtime must make (ADR-0449). Spelled out so a revert to the cold
-# `open()` default reddens every fake-pool test here, not only the PG-backed one — which
-# skips silently on a runner without Docker (`KDIVE_REQUIRE_DOCKER` is set in CI, not
-# locally), and would otherwise leave the decision unguarded there.
-_WARM_OPEN = f"open(wait=True, timeout={runtime.POOL_OPEN_TIMEOUT_SECONDS})"
+# The warm-up the runtime must perform (ADR-0449): open, then take one connection under the
+# startup budget. Spelled out so a revert to a bare `open()` reddens every fake-pool test
+# here, not only the PG-backed one — which skips silently on a runner without Docker
+# (`KDIVE_REQUIRE_DOCKER` is set in CI, not locally) and would leave the decision unguarded.
+_WARM_OPEN = ["open", f"acquire(timeout={runtime.POOL_OPEN_TIMEOUT_SECONDS})"]
 
 
 class FakePool:
@@ -28,10 +29,14 @@ class FakePool:
         self.events: list[str] = []
 
     async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
-        # Record the arguments, not just the call: the whole decision under test is *how*
-        # the runtime opens the pool, and a fake that discards them lets a revert to the
-        # cold default pass on any runner without Docker for the PG-backed test below.
-        self.events.append(f"open(wait={wait}, timeout={timeout})")
+        # Record the arguments, not just the call: the runtime must not use `wait=True`
+        # (which would wait for the full `min_size` — see the min_size test below).
+        self.events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
+
+    @contextlib.asynccontextmanager
+    async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+        self.events.append(f"acquire(timeout={timeout})")
+        yield object()
 
     async def close(self) -> None:
         self.events.append("close")
@@ -181,6 +186,53 @@ def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
     asyncio.run(run())
 
 
+def test_runtime_starts_on_one_connection_not_the_pools_min_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warming must need one connection, not ``min_size`` (ADR-0449).
+
+    ``open(wait=True)`` returns only once ``len(pool) >= min_size``. The worker's pool is
+    ``min_size=2``, so waiting would make it hard-fail whenever Postgres is reachable but at
+    ``max_connections`` — a state it previously started and drained jobs in, and one each
+    crash-loop restart would worsen by re-attempting connections against a saturated server.
+    The defect #1535 is about is a pool with *zero* connections; one removes it.
+
+    This pool models exactly that partial availability: it can serve a connection but can
+    never reach ``min_size``, so ``open(wait=True)`` would time out where an acquire does not.
+    """
+
+    class PartiallyAvailablePool(FakePool):
+        async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+            if wait:
+                raise PoolTimeout(f"pool initialization incomplete after {timeout} sec")
+            await super().open()
+
+    async def run() -> None:
+        harness = AuxHarness()
+        _install_aux_harness(monkeypatch, harness)
+        pool = PartiallyAvailablePool()
+        started = False
+
+        async def body(_pool: object, _heartbeat: object, _probe: object) -> None:
+            nonlocal started
+            started = True
+
+        await runtime.run_process_runtime(
+            process="worker",
+            pool=pool,  # ty: ignore[invalid-argument-type]
+            secret_registry=FakeSecretRegistry(),  # ty: ignore[invalid-argument-type]
+            telemetry=FakeTelemetry(),  # ty: ignore[invalid-argument-type]
+            heartbeat_stale_after=5.0,
+            probe_builder=lambda _pool: object(),  # ty: ignore[invalid-argument-type]
+            body=body,
+        )
+
+        assert started, "a pool short of min_size but able to serve one connection must start"
+        assert pool.events == [*_WARM_OPEN, "close"]
+
+    asyncio.run(run())
+
+
 def test_runtime_success_closes_clears_and_cancels_aux_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,7 +260,7 @@ def test_runtime_success_closes_clears_and_cancels_aux_task(
             body=body,
         )
 
-        assert pool.events == [_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, "close"]
         assert registry.cleared
         assert harness.cancelled
 
@@ -240,7 +292,7 @@ def test_runtime_exception_still_closes_clears_cancels_and_reraises(
                 body=body,
             )
 
-        assert pool.events == [_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, "close"]
         assert registry.cleared
         assert harness.cancelled
 
@@ -287,7 +339,7 @@ def test_runtime_tick_heartbeat_starts_and_cancels_heartbeat_task(
 
         assert harness.cancelled
         assert heartbeat_cancelled
-        assert pool.events == [_WARM_OPEN, "close"]
+        assert pool.events == [*_WARM_OPEN, "close"]
         assert registry.cleared
 
     asyncio.run(run())

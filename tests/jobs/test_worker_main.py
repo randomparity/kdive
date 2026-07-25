@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -12,9 +14,9 @@ from kdive.processes.runtime import POOL_OPEN_TIMEOUT_SECONDS
 from kdive.security.secrets.secret_registry import SecretRegistry
 
 
-def _warm_open() -> str:
-    """The exact open the runtime must make: warm, at the ADR-0449 budget."""
-    return f"open(wait=True, timeout={POOL_OPEN_TIMEOUT_SECONDS})"
+def _warm_open() -> list[str]:
+    """The warm-up the runtime must perform: open, then take one connection (ADR-0449)."""
+    return ["open", f"acquire(timeout={POOL_OPEN_TIMEOUT_SECONDS})"]
 
 
 def _fake_telemetry() -> Telemetry:
@@ -42,11 +44,16 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     events: list[str] = []
 
     class _FakePool:
-        # Signature mirrors `AsyncConnectionPool.open`. Record the arguments, not just the
-        # call: the runtime must warm the pool with `wait=True` at start (ADR-0449), and a
-        # fake that discards them lets a revert to the cold default pass.
+        # Mirrors the `AsyncConnectionPool` surface the runtime uses. Record the warm-up,
+        # not just the open: the runtime must establish one connection at start (ADR-0449),
+        # and a fake that discards that lets a revert to the cold default pass.
         async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
-            events.append(f"open(wait={wait}, timeout={timeout})")
+            events.append("open" if not wait else f"open(wait=True, timeout={timeout})")
+
+        @contextlib.asynccontextmanager
+        async def connection(self, timeout: float | None = None) -> AsyncIterator[object]:
+            events.append(f"acquire(timeout={timeout})")
+            yield object()
 
         async def close(self) -> None:
             events.append("close")
@@ -77,7 +84,7 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
 
     asyncio.run(__main__._run_worker(SecretRegistry(), _fake_telemetry()))
 
-    assert events == [_warm_open(), "run", "close"]
+    assert events == [*_warm_open(), "run", "close"]
     config = constructed["config"]
     assert isinstance(config, WorkerConfig)
     assert config.heartbeat is not None

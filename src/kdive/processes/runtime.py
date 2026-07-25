@@ -73,13 +73,22 @@ async def run_process_runtime(
 
 
 async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
-    """Open ``pool`` with its first connection established, or fail with a named cause.
+    """Open ``pool`` with one connection established, or fail with a named cause.
 
-    ``wait=True`` so the first connect completes here rather than in a background task
-    (ADR-0449). ``open()``'s default returns before any connection exists, which hands the
-    process body a pool reporting zero available connections — and the server's
-    ``UsageTrackingMiddleware`` acquires with a 1-second budget and swallows the resulting
-    ``PoolTimeout`` into a WARNING, silently dropping the row (#1535, #1527).
+    ``open()`` returns before any connection exists and leaves the first connect to a
+    background task, which hands the process body a pool reporting zero available
+    connections — and the server's ``UsageTrackingMiddleware`` acquires with a 1-second
+    budget and swallows the resulting ``PoolTimeout`` into a WARNING, silently dropping the
+    row (#1535, #1527, ADR-0449). Acquiring one connection under the startup budget moves
+    that connect out of every caller's acquire budget.
+
+    Deliberately *one* connection rather than ``open(wait=True)``, which waits for the full
+    ``min_size``. The defect is a pool with **zero** connections; one removes it. Waiting for
+    ``min_size`` would additionally make the worker (``min_size=2``) hard-fail when Postgres
+    is reachable but at ``max_connections`` — a state it previously started and drained jobs
+    in — and each crash-loop restart would re-attempt connections against the already
+    saturated server. The background tasks still fill the pool to ``min_size`` as capacity
+    frees up, exactly as before.
 
     An unreachable backend is a routine startup condition, not a bug, so it is translated
     into a ``CategorizedError``: that is what ``__main__`` handles, and it is the difference
@@ -91,7 +100,9 @@ async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
             :data:`POOL_OPEN_TIMEOUT_SECONDS` (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
     """
     try:
-        await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_SECONDS)
+        await pool.open()
+        async with pool.connection(timeout=POOL_OPEN_TIMEOUT_SECONDS):
+            pass
     except PoolTimeout as exc:
         raise CategorizedError(
             f"database unreachable: no connection within {POOL_OPEN_TIMEOUT_SECONDS:.0f}s "
