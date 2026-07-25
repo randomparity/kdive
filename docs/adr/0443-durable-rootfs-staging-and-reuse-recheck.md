@@ -110,12 +110,21 @@ on the parent; the format probe `open`s the file, so it can fail for reasons tha
 the base — `EACCES` under a worker/staging-user asymmetry of the shape ADR-0442 documents in this
 same subsystem, `EMFILE` under descriptor exhaustion, a transient `EIO`. `_reusable_staged_base`
 therefore returns `False` only for the errors that mean *there is no usable base at this path*
-(`FileNotFoundError`, `NotADirectoryError`, `IsADirectoryError` — the set `is_file()` answered
-`False` for) and raises everything else through `_unreadable_base_fault` (its own message, for the
-reason decision 4 gives) as an `INFRASTRUCTURE_FAILURE`.
-Swallowing those as a cache miss would be strictly worse than the code being fixed: the fault is
-persistent, so every provision in the investigation would serialize on the fetch lock and
-re-download a multi-GiB base, forever, with no error and no log.
+(`FileNotFoundError`, `NotADirectoryError`, `IsADirectoryError`) and raises everything else through
+`_unreadable_base_fault` (its own message, for the reason decision 4 gives) as an
+`INFRASTRUCTURE_FAILURE`. Swallowing those as a cache miss would be strictly worse than the code
+being fixed: the fault is persistent, so every provision in the investigation would serialize on the
+fetch lock and re-download a multi-GiB base, forever, with no error and no log.
+
+This is deliberately **narrower** than the `is_file()` it replaces, which swallowed every `OSError`
+alike — that narrowing is the decision above. In one respect it must stay exactly as **wide**,
+though: `is_file()` also answered `False` for a path that is not a regular file, and the probe must
+too, so the mode is checked before the `open`. Opening a FIFO for reading blocks until a writer
+appears, so a probe without that check would hang the provision thread indefinitely — and at the
+post-lock call site it would hang *holding* the fetch advisory lock, on an autocommit connection
+with no `idle_in_transaction_session_timeout` to break it, wedging every sibling System on that
+(investigation, checksum). Nothing in kdive creates a non-regular file there, but a stat the old
+code already paid for is not worth trading for a deadlock.
 
 A rejected base needs no unlink; it falls through to the lock-and-stage path, whose `os.replace`
 supersedes it, so there is never a window in which the investigation has no base at all.

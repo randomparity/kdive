@@ -38,6 +38,7 @@ import base64
 import hashlib
 import logging
 import os
+import stat
 from contextlib import AbstractContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,7 +152,9 @@ def fetch_uploaded_rootfs(
         CategorizedError: ``CONFIGURATION_ERROR`` when the System has no investigation binding, the
             checksum is not owned by the investigation, the object was never uploaded, or the
             canonical base is not a qcow2; ``INFRASTRUCTURE_FAILURE`` on a missing/mismatched
-            checksum or a staging IO fault.
+            checksum, a staging IO fault, or a staged base that is present but unreadable
+            (:func:`_unreadable_base_fault` — deliberately *not* a staging fault, because nothing
+            was being staged and the remedy is the file, not the object store).
     """
     token = rootfs_object_token(upload.checksum_sha256)
     investigation_id = _resolve_investigation(conn, upload.system_id)
@@ -459,16 +462,27 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     removes the crash window going forward, while this gate is a *partial* net for a base staged by
     code that predates it, or corrupted by some other means. #1539 tracks closing the residue.
 
-    Only the errors that mean *there is no usable base at this path* — it is absent, or a
-    non-directory sits on its parent path, or a directory sits on its own — read as not reusable,
-    which is the set ``dest.is_file()`` answered ``False`` for. Every other ``OSError`` is raised as
-    an ``INFRASTRUCTURE_FAILURE``: a base that is present but unreadable (``EACCES`` under a
+    Not reusable, without reading anything: the path is absent, a non-directory sits on its parent
+    path, a directory sits on its own, or what is there is **not a regular file**. The last is why
+    the mode is checked before the ``open`` rather than left to the error taxonomy — opening a FIFO
+    for reading blocks until a writer appears, so a probe that skipped the ``S_ISREG`` test would
+    hang the provision thread forever, and the post-lock call site would hang *holding* the fetch
+    advisory lock, wedging every sibling System on that (investigation, checksum). Nothing in kdive
+    creates a non-regular file here, but ``dest.is_file()`` rejected one for free and this must not
+    regress into a hang.
+
+    Every other ``OSError`` — from the ``stat`` or the ``open`` — is raised as an
+    ``INFRASTRUCTURE_FAILURE``: a base that is present but unreadable (``EACCES`` under a
     worker/staging-user asymmetry of the shape ADR-0442 documents, ``EMFILE`` under descriptor
-    exhaustion, a transient ``EIO``) is an operator-visible fault, **not** a cache miss. Treating it
-    as one would swap a good multi-GiB base out from under any guest holding it (see the residue in
-    ADR-0443 §2) and re-download it on every provision, silently, for as long as the fault lasts.
+    exhaustion, a transient ``EIO``) is an operator-visible fault, **not** a cache miss. This is the
+    one place the gate is deliberately *narrower* than the ``dest.is_file()`` it replaces, which
+    swallowed every ``OSError`` alike: treating those as a cache miss would swap a good multi-GiB
+    base out from under any guest holding it (see the residue in ADR-0443 §2) and re-download it on
+    every provision, silently, for as long as the fault lasts.
     """
     try:
+        if not stat.S_ISREG(dest.stat().st_mode):
+            return False
         return _starts_with_qcow2_magic(dest)
     except FileNotFoundError, NotADirectoryError, IsADirectoryError:
         return False

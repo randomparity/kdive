@@ -46,6 +46,8 @@ Surfaced by the `/challenge` review on #1520, which flagged it as out of scope f
 - **R6** — The durability cost falls only on bases that are actually published — including bases
   rejected by the format gate, which runs after the stager returns.
 - **R7** — An unreadable base is reported, not silently re-downloaded; a rejected one is logged.
+- **R8** — The reuse probe never blocks. It replaces a `stat` with an `open`, so a non-regular file
+  at the staged path must be rejected without opening it.
 
 ## Design
 
@@ -80,10 +82,15 @@ is needed (and would not help — see the ADR's accepted residue on superseding 
 open).
 
 The gate distinguishes "no usable base" from "cannot look" (R7). `FileNotFoundError`,
-`NotADirectoryError`, and `IsADirectoryError` — the set `is_file()` answered `False` for — return
-`False`; every other `OSError` raises `_unreadable_base_fault`. `is_file()` was a `stat` needing only
-traverse permission, while the probe `open`s the file, so `EACCES`/`EMFILE`/`EIO` are newly
-reachable and none of them means the base is corrupt.
+`NotADirectoryError`, and `IsADirectoryError` return `False`; every other `OSError` raises
+`_unreadable_base_fault`. `is_file()` was a `stat` needing only traverse permission, while the probe
+`open`s the file, so `EACCES`/`EMFILE`/`EIO` are newly reachable and none of them means the base is
+corrupt — the gate is deliberately narrower than `is_file()` here.
+
+It must stay as wide in one respect (R8): `is_file()` also returned `False` for a non-regular file,
+so `_reusable_staged_base` checks `S_ISREG` before opening. Opening a FIFO for reading blocks until
+a writer appears, which at the post-lock call site would hang while holding the fetch advisory lock
+on an autocommit connection.
 
 ### Log the rejection
 
@@ -139,3 +146,8 @@ Two alternatives are ruled out by the data rather than by preference:
 - **AC-8** — Every reuse rejection emits a `WARNING` naming `dest`. The sibling-attributed line is
   emitted **only** when the base appeared during the lock wait, and never on an ordinary stale-base
   rejection.
+- **AC-9** — A FIFO at the staged path is re-staged over without the fetch blocking (asserted on a
+  bounded thread join, so a regression fails this test rather than hanging the suite).
+- **AC-10** — An `fsync` failure on the partial publishes nothing and leaves no partial; an `fsync`
+  failure on the *directory*, which runs after the rename, fails the provision but leaves `dest`
+  intact and reusable — the outcome ADR-0443 §1 states as deliberate.
