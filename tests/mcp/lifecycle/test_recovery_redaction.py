@@ -304,5 +304,11 @@ def test_system_envelope_failed_state_is_failure_envelope() -> None:
     assert resp.status == "error"
     assert resp.error_category == "infrastructure_failure"
     assert resp.data["current_status"] == "failed"
-    # The success-only teardown action is not offered on a failure envelope.
-    assert resp.suggested_next_actions == []
+    # The success-only teardown action is not offered on a failure envelope; `failed` is
+    # terminal, so the envelope names the allocation-level recovery instead (ADR-0454 §5).
+    assert "systems.teardown" not in resp.suggested_next_actions
+    assert resp.suggested_next_actions == [
+        "jobs.list",
+        "allocations.release",
+        "allocations.request",
+    ]
