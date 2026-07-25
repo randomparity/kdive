@@ -9,7 +9,7 @@ from typing import Any
 
 from fastmcp.server.middleware import Middleware
 from opentelemetry import metrics
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.shared import (
@@ -31,16 +31,27 @@ _log = logging.getLogger(__name__)
 # Counting it makes the loss rate a signal an operator can alert on (ADR-0449). Named and
 # scoped like the exposure middleware's fail-open counters, its nearest precedent.
 #
-# No attributes, also matching that precedent. The obvious label would be the tool name, but
-# it is the raw name off the client's `tools/call`: FastMCP resolves the tool *inside*
-# `call_next`, so an unknown one reaches the `except` branch below with arbitrary content,
-# and the SDK enforces no cardinality limit. Labelling would let one authenticated client
-# grow the metric store without bound precisely while recording is already failing. The tool
-# name is in the WARNING beside this, and in `tool_invocation.tool` for the calls that land.
+# Attributed only by `reason`, which is server-derived and two-valued. `_record`'s except
+# clause covers the whole body — context lookup, digest, acquire, and the INSERT — so an
+# unattributed count could not tell "the pool could not hand out a connection in time", the
+# loss mode ADR-0449 defers a pool-sizing decision to, from a SQL or schema failure that
+# argues for something else entirely.
+#
+# Deliberately *not* labelled by tool name, matching the exposure middleware's fail-open
+# counters: that name is the raw string off the client's `tools/call` (FastMCP resolves the
+# tool *inside* `call_next`, so an unknown one reaches the except branch with arbitrary
+# content) and the SDK enforces no cardinality limit, so one authenticated client could grow
+# the metric store without bound precisely while recording is already failing. The tool name
+# is in the WARNING beside the increment, and in `tool_invocation.tool` for calls that land.
 _RECORDING_FAILURES = metrics.get_meter("kdive.mcp").create_counter(
     "kdive_mcp_usage_recording_failures",
     description="tool_invocation rows dropped by best-effort usage recording (ADR-0148)",
 )
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Classify a swallowed recording failure into a bounded, server-derived label."""
+    return "pool_timeout" if isinstance(exc, PoolTimeout) else "other"
 
 
 def _call_arguments(context: Any) -> Mapping[str, object] | None:
@@ -135,10 +146,10 @@ class UsageTrackingMiddleware(Middleware):
                 conn.transaction(),
             ):
                 await record_usage(conn, event)
-        except Exception:
+        except Exception as exc:
             # Log first, then count, and never let the counting be what fails the call:
             # ADR-0148's swallow is unconditional, so the instrument observing it must not
             # outrank the failure it observes.
             _log.warning("usage recording failed for tool %s", tool, exc_info=True)
             with contextlib.suppress(Exception):
-                _RECORDING_FAILURES.add(1)
+                _RECORDING_FAILURES.add(1, {"reason": _failure_reason(exc)})
