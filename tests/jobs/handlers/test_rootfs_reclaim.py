@@ -13,13 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
@@ -681,6 +685,144 @@ def test_reclaim_reconverges_when_both_targets_are_already_absent(
         check = await connect(migrated_url)
         try:
             assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+@contextmanager
+def _held_partial(uploads: Path, inv: UUID) -> Iterator[Path]:
+    """A ``<token>.<uuid>.partial`` under an exclusive ``flock``, as a live fetcher holds it."""
+    inv_dir = uploads / str(inv)
+    inv_dir.mkdir(parents=True, exist_ok=True)
+    partial = inv_dir / f"{_TOKEN}.{uuid4().hex}.partial"
+    partial.write_bytes(b"a detached download is still writing this")
+    fd = os.open(partial, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield partial
+    finally:
+        os.close(fd)
+
+
+def test_a_live_partial_survives_the_torn_down_ordering_and_retains_the_marker(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # #1544 end to end, on the exact ordering that falsifies the old derivation. The System that
+    # requested this base is torn_down, so _ROOTFS_REFERENCERS_SQL does not even consider it, the
+    # gate reclaims the last rootfs row, and the drain tail sweeps — while the detached,
+    # uncancellable download is still writing its partial. Before ADR-0452 the partial was unlinked
+    # here and the fetcher died at os.replace.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+
+        with _held_partial(uploads, inv) as live:
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+            assert result == "1"
+            assert live.exists(), "the reclaim sweep destroyed a live fetcher's partial"
+            assert live.read_bytes() == b"a detached download is still writing this"
+
+        assert not staged.exists()  # the committed base is still reclaimed
+        assert store.deleted == [_object_key(inv)]
+        assert (uploads / str(inv)).exists()  # ENOTEMPTY: the held partial keeps the dir
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            # Retained deliberately: the marker is the only thing that re-enqueues a reclaim for a
+            # closed investigation, so clearing it here would leave the skipped partial with no
+            # collector if its holder is then killed (ADR-0452 §4).
+            assert await _marker(check, inv) is not None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_unopenable_partial_still_clears_the_marker(migrated_url: str, tmp_path: Path) -> None:
+    # ADR-0452 §4's other half: an EACCES partial is permanent until an operator acts, so pinning
+    # the marker on it would resurrect ADR-0442's never-clearing marker and its re-fail-every-pass
+    # loop. Only a held flock — released by the kernel on process exit — retains the marker.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        inv_dir = uploads / str(inv)
+        inv_dir.mkdir(parents=True)
+        unopenable = inv_dir / f"{_TOKEN}.deadbeef.partial"
+        unopenable.write_bytes(b"present but not openable by this uid")
+        real_open = os.open
+
+        def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path) == unopenable:
+                raise PermissionError(13, "Permission denied")
+            return real_open(path, flags, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "open", refusing_open)
+            result = await _run_handler(
+                migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads
+            )
+        assert result == "0"
+
+        assert unopenable.exists()  # left for an operator rather than unlinked unchecked
+        check = await connect(migrated_url)
+        try:
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_base_published_after_its_row_was_reclaimed_is_collected(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # ADR-0452 §6, at the handler. The deferred pass that runs once the live writer is gone finds
+    # the base it published onto a path whose artifacts row this reclaim already deleted, collects
+    # it, removes the drained directory, and only then clears the marker. Without this the flock
+    # gate would trade a destroyed download for a permanent SENSITIVE base nothing else reclaims.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        orphan_base = _stage(uploads, inv)  # no artifacts row owns it
+
+        assert await _run_handler(
+            migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads
+        ) == ("0")
+
+        assert not orphan_base.exists()
+        assert not (uploads / str(inv)).exists()
+        check = await connect(migrated_url)
+        try:
             assert await _marker(check, inv) is None
         finally:
             await check.close()

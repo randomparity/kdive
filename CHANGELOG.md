@@ -204,6 +204,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the convergence's real reach and add system_id
 - Log the checksum mismatch the category no longer isolates
 - Key the mismatch log on the gate, not the category
+- Flock-gate the reclaim-side staging sweep
+- Decide the lock-less degrade per sweep, not by default
+- Collect the unowned base the gate lets a fetcher publish
+- Make no step of the staging sweep silent
 
 ### Build
 
