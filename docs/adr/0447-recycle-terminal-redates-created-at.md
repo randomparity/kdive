@@ -42,20 +42,25 @@ asymmetry live in the primitive for the next caller to rediscover — which the 
 
 ## Decision
 
-The recycle `UPDATE` sets `created_at = now()` alongside the fields it already resets. A revived
-job takes its place at the **back** of its lane.
+The recycle `UPDATE` sets `created_at` to the database clock alongside the fields it already resets.
+A revived job takes its place at the **back** of its lane.
 
-The stamp is **`clock_timestamp()`, not `now()`.** `now()` is `transaction_timestamp()`, fixed when
-the enclosing transaction begins — and `enqueue` never opens a top-level transaction of its own in
+The stamp is **`clock_timestamp()`, not `now()`, on both statements** — the recycle `UPDATE` and the
+`INSERT`, which now stamps explicitly rather than taking the column's `DEFAULT now()`, so `enqueue`
+uses one clock throughout. `now()` is `transaction_timestamp()`, fixed when the enclosing
+transaction begins — and `enqueue` never opens a top-level transaction of its own in
 production. The re-stage (`runs/steps.py`) and the snapshot tools (`systems/snapshot.py`) open
 `conn.transaction()` and then *block* on an `advisory_xact_lock` before enqueuing, and
 `control.watch_for_crash` runs on a pooled connection (autocommit off) whose implicit transaction
 opened several reads earlier. Stamping the transaction's start would date the revived job to before
 the lock wait, so everything another connection enqueued *during* that wait would still sort behind
 it — the preemption this ADR exists to end, returning precisely under the contention that makes
-head-of-line blocking matter. `clock_timestamp()` is the same database clock (so no worker clocks
-need to agree) and is always at or after `transaction_timestamp()`, which additionally makes
-`created_at` monotonic **by construction** — the property the keyset-cursor argument below rests on.
+head-of-line blocking matter. That argument holds for a *first* enqueue no less than for a recycle —
+an insert dated to the start of its own lock wait preempts the same way — which is why the `INSERT`
+stamps explicitly too rather than leaving one branch of the function on the other clock.
+`clock_timestamp()` is the same database clock (so no worker clocks need to agree) and is always at
+or after `transaction_timestamp()`, so **a given row's `created_at` only ever moves forward** — the
+per-row property the keyset-cursor argument below rests on.
 `tests/jobs/test_queue.py::test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue` drives
 the recycle on a non-autocommit connection in one explicit transaction and fails under `now()`.
 
@@ -89,7 +94,13 @@ neither the audit log nor accounting joins it. Of the readers that exist:
   produces. The cursor is a boundary, not a snapshot.
 - `latest_succeeded_job_for_system` filters `state = 'succeeded'` and so never sees a recycled row.
 
-`updated_at` stays trigger-maintained and, with the audit trail, remains the change-history record.
+`updated_at` is **not** the fallback record it might look like. Its trigger stamps `now()` while the
+recycle stamps `clock_timestamp()`, so a recycled row can read `created_at > updated_at`, and the
+value it holds is the enclosing transaction's start — not the recycle instant, which is the one
+moment an operator investigating a churning `dedup_key` wants. Nothing in `src/` reads
+`jobs.updated_at` today, so no consumer breaks; the caller's audit entry and the log line below are
+the faithful records. Fixing the skew would mean changing the shared `set_updated_at()` trigger,
+i.e. a migration, which is out of scope here.
 
 There is a real observability **loss**, not only improvement. An old `created_at` was the last
 in-row evidence that a job had been recycled at all: `attempt` is already reset, the failure fields
@@ -134,6 +145,17 @@ SKIP LOCKED` keeps a tie making progress.
   work that has been waiting longer, which is the same fairness rule ADR-0018 already sets for
   first-time enqueues. Scoping the re-date to an opt-in keyword was rejected: it is a speculative
   flag for a caller that does not exist, and it leaves the footgun armed for the one that will.
+- **For `systems.restore` that wait is state-fenced, not merely perceived.** `systems.restore`
+  sets the System to `RESTORING` *before* enqueuing, in the same transaction, and `delete_snapshot`
+  rejects with `system_restoring` for the duration — so the added queue time is spent with the
+  System unusable, not just with the agent waiting. Two facts make the window unbounded rather than
+  short: no caller anywhere passes `dispatch_lane`, so every kind (`build`, `provision`, `install`,
+  `boot`, `snapshot`, `restore`, `reclaim_investigation_rootfs`) shares the single `default` lane;
+  and nothing times out a *queued* job (`repair_abandoned_jobs` reaps only `running` rows with a
+  lapsed lease). A retried restore can therefore sit behind a long `build` with the System fenced.
+  This is accepted here rather than fixed, because the fix is orthogonal to the ordering bug and
+  should not ride on it: putting the state-fenced kinds on their own `dispatch_lane` needs no
+  migration (the column and `accepted_lanes` already exist) and is filed as a follow-up.
 - `jobs.created_at` is an attempt-queued timestamp, not a first-insertion timestamp. Any future
   reader wanting first-insertion provenance needs the `queued_at` split above.
 - `gc.py`'s delete-and-re-insert stays, now justified solely by its retry backoff; its stale

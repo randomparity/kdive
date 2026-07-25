@@ -73,20 +73,25 @@ async def enqueue(
     revived job takes its place at the back, which makes the recycle equivalent to the
     delete-and-re-insert a caller would otherwise hand-roll (ADR-0442 §6). The cost is that
     ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
-    inserted; ``updated_at`` (trigger-maintained) and the audit trail carry change history, and
-    the worker's ``time_to_claim`` telemetry (``heartbeat_at - created_at``) is measuring queue
-    wait, so re-dating is what it wants.
+    inserted. The worker's ``time_to_claim`` telemetry (``heartbeat_at - created_at``) is measuring
+    queue wait, so re-dating is what it wants. ``updated_at`` is **not** a substitute record of the
+    recycle: its trigger stamps ``now()`` while this stamps ``clock_timestamp()``, so a recycled
+    row can read ``created_at > updated_at``, and the value is the enclosing transaction's start
+    rather than the recycle instant. The caller's own audit entry and the log line below are the
+    faithful records.
 
-    The re-date reads ``clock_timestamp()``, **not** ``now()``. ``now()`` is
-    ``transaction_timestamp()``, and no production caller reaches here in a transaction of its
-    own: the re-stage and the snapshot tools open ``conn.transaction()`` and then *block* on an
-    ``advisory_xact_lock`` before enqueuing, and ``control.watch_for_crash`` runs on a pooled
-    connection whose implicit transaction opened several reads earlier. Stamping the transaction's
-    start would therefore date the revived job to before the lock wait, leaving it ahead of
-    everything another connection enqueued during that wait — the preemption this is meant to end,
-    reappearing exactly under the contention that makes it matter. ``clock_timestamp()`` is the
-    same database clock and is always at or after the transaction's, so it also makes
-    ``created_at`` monotonic by construction, which is what lets ``jobs.list``'s ``(created_at,
+    Both statements stamp ``created_at`` with ``clock_timestamp()``, **not** ``now()`` — one clock
+    for the insert and the recycle alike. ``now()`` is ``transaction_timestamp()``, and no
+    production caller reaches here in a transaction of its own: the re-stage and the snapshot tools
+    open ``conn.transaction()`` and then *block* on an ``advisory_xact_lock`` before enqueuing, and
+    ``control.watch_for_crash`` runs on a pooled connection whose implicit transaction opened
+    several reads earlier. Stamping the transaction's start would date the job to before the lock
+    wait, leaving it ahead of everything another connection enqueued during that wait — the
+    preemption this is meant to end, reappearing exactly under the contention that makes it matter.
+    That argument applies to a first enqueue no less than to a recycle, which is why the ``INSERT``
+    stamps explicitly instead of taking the column's ``DEFAULT now()``. ``clock_timestamp()`` is
+    the same database clock and is always at or after the transaction's, so a given row's
+    ``created_at`` only ever moves forward — which is what lets ``jobs.list``'s ``(created_at,
     id)`` keyset cursor only ever *skip* a re-dated row rather than return it twice.
 
     ``authorizing``, ``max_attempts``, ``kind`` and ``dispatch_lane`` are deliberately **not**
@@ -122,11 +127,13 @@ async def enqueue(
         raise ValueError("dispatch_lane must not be blank")
     payload_json = dump_payload(kind, payload)
     authorizing = dump_authorizing(authorizing)
+    recycled_id: UUID | None = None
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "INSERT INTO jobs "
-            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "(kind, dispatch_lane, payload, state, max_attempts, authorizing, dedup_key, "
+            " created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
             "ON CONFLICT (dedup_key) DO NOTHING",
             (
                 kind,
@@ -156,19 +163,24 @@ async def enqueue(
                     recyclable,
                 ),
             )
-            # The reset leaves a recycled row indistinguishable from a first enqueue (attempt 0,
-            # failure fields cleared, payload overwritten, and now created_at fresh), so this line
-            # is the only record that a dedup_key is churning. One per recycle, so a lane that is
-            # thrashing says so in the log rather than only in a lane-depth gauge.
             if (recycled := await cur.fetchone()) is not None:
-                _log.info(
-                    "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
-                    recycled["id"],
-                    kind.value,
-                    dedup_key,
-                )
+                recycled_id = recycled["id"]
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
+    # The reset leaves a recycled row indistinguishable from a first enqueue (attempt 0, failure
+    # fields cleared, payload overwritten, created_at fresh), so this line is the only record that
+    # a dedup_key is churning. Emitted outside the block so a failure in the rest of it does not
+    # log a recycle that never landed — but it is still an **upper bound**, not proof: for every
+    # production caller this `conn.transaction()` is a SAVEPOINT inside the caller's transaction,
+    # so releasing it is not a commit and the caller can still roll back (`runs.install` records
+    # its audit after this returns). Read the line as "a recycle was attempted".
+    if recycled_id is not None:
+        _log.info(
+            "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
+            recycled_id,
+            kind.value,
+            dedup_key,
+        )
     if row is None:  # Invariant: we just inserted the row, or it already existed.
         raise RuntimeError(f"enqueue found no job for dedup_key {dedup_key!r}")
     return Job.model_validate(row)

@@ -82,7 +82,8 @@ trail, remains the change-history record.
 
 ## Design
 
-Add `created_at = clock_timestamp()` to the recycle `UPDATE`.
+Add `created_at = clock_timestamp()` to the recycle `UPDATE`, and stamp the `INSERT` with the same
+expression instead of letting it take the column's `DEFAULT now()`.
 
 **Why `clock_timestamp()` and not `now()`.** `now()` is `transaction_timestamp()`, fixed when the
 enclosing transaction begins, and `enqueue` never opens a top-level transaction of its own in
@@ -90,10 +91,17 @@ production: `runs/steps.py` and `systems/snapshot.py` open `conn.transaction()` 
 `advisory_xact_lock` before enqueuing, and `control.watch_for_crash` runs on a pooled connection
 (autocommit off) whose implicit transaction opened several reads earlier. `now()` would date the
 revived job to *before* the lock wait, leaving it ahead of everything another connection enqueued
-during that wait — R1 violated exactly under contention. `clock_timestamp()` is the same database
-clock, always at or after `transaction_timestamp()`, so it also makes `created_at` monotonic by
-construction (the property the keyset-cursor row above depends on). No worker clocks need to agree
-either way.
+during that wait — R1 violated exactly under contention. The same reasoning applies to a *first*
+enqueue, so both statements stamp from one clock rather than leaving the two branches of `enqueue`
+on different ones. `clock_timestamp()` is always at or after `transaction_timestamp()`, so a given
+row's `created_at` only ever moves forward — the per-row property the keyset-cursor row above
+depends on. It is the same database clock either way, so no worker clocks need to agree.
+
+`updated_at` is not a fallback record of the recycle: its trigger stamps `now()` while this stamps
+`clock_timestamp()`, so a recycled row can read `created_at > updated_at`, and the value is the
+transaction's start rather than the recycle instant. Nothing in `src/` reads it today; correcting
+the skew would mean changing the shared `set_updated_at()` trigger, i.e. a migration, which is out
+of scope.
 
 The `WHERE dedup_key = %s AND state = ANY(%s)` fence is unchanged, so the re-dating reaches only
 rows the recycle already resets: a row that was just inserted is `queued` and does not match, and
@@ -102,7 +110,9 @@ an in-flight or (absent `recycle_canceled`) `canceled` row is left alone.
 The `UPDATE` gains `RETURNING id`, and a matched row logs one `INFO` line. Re-dating removes the
 last in-row evidence that a job has been recycled (`attempt` is already reset, failure fields and
 `result_ref` cleared, payload overwritten), so without this a churning `dedup_key` is invisible;
-nothing else counts recycles.
+nothing else counts recycles. The line is emitted after the `conn.transaction()` block, but it is
+an **upper bound** rather than proof: for a production caller that block is a SAVEPOINT inside the
+caller's transaction, so releasing it is not a commit and the caller can still roll back.
 
 `authorizing`, `max_attempts`, `kind` and `dispatch_lane` stay untouched — they describe the slot,
 not the attempt. That asymmetry is pre-existing, but re-dating is what makes the timestamp and the
@@ -118,6 +128,14 @@ now queues behind everything admitted while the run was settled — possibly a l
 the delta is bounded and usually small (a re-stage's original `created_at` is recent), and it is the
 correct direction — a retrying agent should not outrank work that has waited longer. An opt-in
 keyword was rejected as a speculative flag that leaves the footgun armed.
+
+For `systems.restore` the wait is **state-fenced**, not merely perceived: it sets the System to
+`RESTORING` before enqueuing in the same transaction, and `delete_snapshot` rejects with
+`system_restoring` meanwhile. No caller passes `dispatch_lane`, so every kind shares the single
+`default` lane, and nothing times out a queued job — so a retried restore can sit behind a long
+`build` with the System fenced. Accepted here and filed as a follow-up: giving the state-fenced
+kinds their own `dispatch_lane` needs no migration (the column and `accepted_lanes` already exist)
+and is orthogonal to the ordering bug, so it should not ride on this change.
 
 ## Test plan
 
