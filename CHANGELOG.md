@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - One envelope for the window rejections, scalar re-read
 - Rename _required_staging_bytes to _staging_budget
 - Reuse the manifest helpers and fold the test stores
+- Name the renamed reuse gate in two stale comments
 
 ### Documentation
 
@@ -126,6 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the partial-reap hole the identity guard misses
 - Record the staging free-space precheck as ADR-0450
 - Add the bomb branch to the disclosed residual
+- Reconcile the 1539 spec with ADR-0451's residues
 
 ### Fixed
 
@@ -217,6 +219,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the upload reap's prefix before the sweep starts
 - Report a failed upload sweep as a failed pass
 - Stop the upload pass when a whole owner's sweep is refused
+- Gate staged-base reuse on a completion marker
+- Key the reuse rejection log on the gate that fired
+- Give the marker steps a fault that names the marker
+- Put the marker fsync and close inside the marker fault
 
 ### Build
 
