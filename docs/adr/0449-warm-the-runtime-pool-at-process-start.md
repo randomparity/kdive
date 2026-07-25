@@ -84,7 +84,22 @@ teardown: `secret_registry.clear()` and `pool.close()`. (`wait()` closes the poo
 timeout; `close()` is idempotent, and the registry clear was previously skipped entirely on
 this path.)
 
-### 2. Count swallowed usage-recording failures
+### 2. The startup failure is a `CategorizedError`, not a bare `PoolTimeout`
+
+`open_pool_or_fail` translates `psycopg_pool.PoolTimeout` into a `CategorizedError` with
+`ErrorCategory.INFRASTRUCTURE_FAILURE`, chaining the original as `__cause__`.
+
+This follows directly from decision 1 rather than being incidental to it. `__main__`'s only
+handler is `except CategorizedError`, which routes a failure through
+`_report_categorized_error` — an ERROR record on the ADR-0090 structured stdout floor,
+redacted, carrying the message and actionable details, plus a stable
+`exit_code_for_category`. An uncategorized raise gets none of that: a multi-line traceback
+on stderr and a generic exit 1. Decision 1 turns "the backend is not up yet" into a
+*routine* outcome, and a routine outcome that a deployment scraping JSON logs cannot see,
+alert on, or distinguish from any other crash is not an acceptable one. The message and the
+`KDIVE_DATABASE_URL` hint are what the operator docs tell readers to look for.
+
+### 3. Count swallowed usage-recording failures
 
 `UsageTrackingMiddleware._record` increments a
 `kdive_mcp_usage_recording_failures` counter, labelled by `tool`, alongside the WARNING it
@@ -108,9 +123,26 @@ making the drop visible.
 
 ## Consequences
 
-- The `tool_invocation` row can no longer be lost to a pool that has not finished opening.
-  The remaining loss modes are the ones ADR-0148 accepted on their merits, and all of them
-  now increment a counter.
+- The `tool_invocation` row can no longer be lost to the process's *first* connection still
+  being in flight. That is the systematic case — every process, every start — and it is the
+  one #1527 reproduced.
+- **A residual remains, and it is not one ADR-0148 weighed either: pool growth.**
+  `psycopg_pool` charges a growth connect to the acquiring client, not to a background task
+  (`getconn` queues the caller and waits inside the caller's own timeout while
+  `_maybe_grow_pool` schedules the connect), and `open(wait=True)` warms exactly `min_size`.
+  The server builds its pool at the `create_pool` default `min_size=1`, so the second
+  concurrent tool call — and any call arriving after psycopg's idle shrink has taken the
+  pool back toward `min_size` — can still wait on a cold connect inside the middleware's
+  1-second budget and lose its row. This is the same "pool has not finished connecting"
+  condition, one connection later, not the saturated-`max_size` contention ADR-0148 accepted.
+  It is *not* fixed here. Raising `min_size` would fix it, but pool sizing is a Postgres
+  connection-budget decision across three process types with no bearing on the startup
+  defect this ADR is about, and guessing a number is how one arrives at the wrong one.
+  Decision 3's counter is the instrument to size it against: `kdive_mcp_usage_recording_failures`
+  on a warm server measures exactly this residual, so the follow-up is data-driven rather
+  than speculative.
+- Every remaining loss mode — the growth residual above and the saturation ADR-0148 accepted
+  on its merits — now increments that counter.
 - **A Postgres outage at process start becomes a restart loop rather than a not-ready
   process.** Under systemd that is a retry every ~15s (`RestartSec=5` plus the 10s budget),
   which is what ADR-0114 §4 describes. Under Kubernetes it is `CrashLoopBackOff`, whose
@@ -119,9 +151,25 @@ making the drop visible.
   of this decision. It is accepted: the outage itself dominates that lag, and
   `CrashLoopBackOff` with `PoolTimeout` in the logs is a more diagnosable state than a pod
   that is Running and permanently not-Ready.
+- **The supervision premise had a gap on one shipped surface, now closed.** "The retry lives
+  in the supervisor" held for systemd and Kubernetes but not for `docker-compose.yml`, which
+  declared no `restart:` policy on `server`/`worker`/`reconciler`. `depends_on` protects only
+  the first `up`; every later recreate during a backend outage would have left the container
+  `Exited (1)` permanently, where before this change it came up and recovered on its own. The
+  three services gain `restart: unless-stopped`, guarded by a test, and
+  `operating/docker-compose.md` gains the same startup paragraph the other two surfaces got.
 - `/livez`, `/readyz`, and `/metrics` are unavailable for up to 10 seconds longer at
   startup, because the aux listener starts after the pool opens. Sized to stay inside the
   chart's `initialDelaySeconds: 5` plus one probe period, as above.
+- **`SIGTERM` is ignored for up to the open budget when the database is unreachable.**
+  `run_worker` and `run_reconciler` install their signal handlers before
+  `run_process_runtime`, and those handlers only set an event that nothing awaits during the
+  open. Previously the open returned immediately and the window was ~0; now a `systemctl
+  stop`, `compose down`, or pod delete that coincides with a database outage waits up to 10s,
+  repeating on each crash-loop attempt. It stays well inside Kubernetes' 30s default
+  termination grace, so nothing is lost or corrupted — it slows drains and rollouts during an
+  outage. Accepted rather than fixed: racing the open against the stop event adds startup
+  concurrency to buy back at most ten seconds inside a grace period three times that long.
 - No schema change, no migration, no MCP or RBAC surface change.
 
 ## Alternatives considered
