@@ -467,7 +467,7 @@ def _flocked_partial(partial: Path) -> Iterator[int]:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as err:
-            raise _swept_partial_error(partial) from err
+            raise _swept_partial_error(partial, window=_CREATION_WINDOW) from err
         except OSError as err:
             # A filesystem that cannot lock at all (``ENOLCK`` on an NFS mount whose lock manager is
             # down, ``EOPNOTSUPP`` on some FUSE and 9p backends). Staging unguarded is exactly the
@@ -482,20 +482,24 @@ def _flocked_partial(partial: Path) -> Iterator[int]:
                 partial,
                 err.strerror,
             )
-        _require_still_linked(fd, partial)
+        _require_still_linked(fd, partial, window=_CREATION_WINDOW)
         yield fd
     finally:
         os.close(fd)
 
 
-def _require_still_linked(fd: int, partial: Path) -> None:
+def _require_still_linked(fd: int, partial: Path, *, window: str) -> None:
     """Raise if the partial behind ``fd`` has been unlinked, so the fault names the sweep.
 
-    Called twice. At creation it closes the two-syscall window ADR-0446 §3 describes. After the
-    download it covers the :func:`_flocked_partial` degrade path, where the filesystem could not
-    lock and so nothing kept a sweeper out for the whole transfer — §5's symmetry argument
-    (a sweeper there cannot lock either) is evaluated at one instant and not maintained across
-    minutes, and a recovering ``lockd`` falsifies it mid-download.
+    Called twice, with a different ``window`` each time because the two mean different things to
+    an operator — nothing can take a partial "between its creation and its lock" minutes after
+    that lock succeeded. At creation it closes the two-syscall window ADR-0446 §3 describes.
+    After the download the causes are two, and neither is that window. First, the
+    :func:`_flocked_partial` degrade path, where the filesystem could not lock and so nothing kept a
+    sweeper out for the whole transfer — §5's symmetry argument (a sweeper there cannot lock either)
+    is evaluated at one instant and not maintained across minutes, and a recovering ``lockd``
+    falsifies it mid-download. Second, the reclaim-side backstop sweep, which is gated on nothing at
+    all and is the open #1544.
 
     The degrade path's outcome is then the pre-ADR-0446 one, which is the point of degrading rather
     than failing. What this adds is the diagnosis: without it the fetcher streams on and dies at
@@ -507,15 +511,25 @@ def _require_still_linked(fd: int, partial: Path) -> None:
         OSError: ``ENOENT`` when the partial no longer has a directory entry.
     """
     if os.fstat(fd).st_nlink == 0:
-        raise _swept_partial_error(partial)
+        raise _swept_partial_error(partial, window=window)
 
 
-def _swept_partial_error(partial: Path) -> OSError:
-    """The ``ENOENT`` for a partial a concurrent sweep took in the create-then-lock window."""
+#: What took the partial, per call site. The two are materially different conditions and an operator
+#: acts on them differently, so the fault names the one that applies rather than one fixed string:
+#: the creation window is a sub-millisecond race, while the download window points at an unguarded
+#: stage or the reclaim-side backstop.
+_CREATION_WINDOW = "between its creation and its lock"
+_DOWNLOAD_WINDOW = (
+    "while it was being downloaded — this stage was unguarded (the filesystem could not flock), or "
+    "the investigation-reclaim backstop sweep took it (#1544)"
+)
+
+
+def _swept_partial_error(partial: Path, *, window: str) -> OSError:
+    """The ``ENOENT`` for a partial a concurrent sweep took, naming which window it went in."""
     return OSError(
         errno.ENOENT,
-        "a concurrent orphan sweep took the staging partial between its creation and its lock; "
-        "retry the provision",
+        f"a concurrent orphan sweep took the staging partial {window}; retry the provision",
         str(partial),
     )
 
@@ -592,7 +606,7 @@ def stage_uploaded_rootfs(
                     category=ErrorCategory.CONFIGURATION_ERROR,
                     details={"system_id": str(system_id)},
                 )
-            _require_still_linked(guard_fd, partial)
+            _require_still_linked(guard_fd, partial, window=_DOWNLOAD_WINDOW)
             _require_qcow2_magic(partial, system_id=str(system_id))
             if _sibling_already_published(dest):
                 # Only reachable on the lost-session-lock path: the caller checked ``dest`` twice

@@ -1305,7 +1305,7 @@ def test_stage_fails_loud_when_its_partial_is_unlinked_in_the_create_lock_window
             _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert "concurrent orphan sweep" in str(error.value)  # same message as the other window
+    assert "took the staging partial between its creation and its lock" in str(error.value)
     assert store.stream_calls == 0  # failed before spending the download
     assert not _dest(tmp_path).exists()
 
@@ -1386,7 +1386,7 @@ def test_stage_fails_loud_when_a_sweep_holds_the_lock_across_the_create_window(
 
     assert held, "the test never took the rival lock, so the window was not exercised"
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert "concurrent orphan sweep" in str(error.value)
+    assert "took the staging partial between its creation and its lock" in str(error.value)
     assert store.stream_calls == 0  # failed before spending the download
 
 
@@ -1665,5 +1665,10 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
             _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # Named for the window it actually went in. "between its creation and its lock" would point the
+    # operator at a sub-millisecond race that additionally needs a lost session lock, and away from
+    # the two conditions that really produce this -- which is most of what the check is here for.
     assert "concurrent orphan sweep" in str(error.value)
+    assert "while it was being downloaded" in str(error.value)
+    assert "#1544" in str(error.value)
     assert not dest.exists()

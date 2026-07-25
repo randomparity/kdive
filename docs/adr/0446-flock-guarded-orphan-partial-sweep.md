@@ -169,8 +169,19 @@ finally:
     conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
 ```
 
-Both triggers in the Context destroy the client connection at the instant they release the lock, so
-that statement raises `AdminShutdown`/`OperationalError`. The fetcher would survive the sibling's
+Where the loss is *reported* — a terminated backend, or an evicted flow that draws an `RST` — that
+statement raises `AdminShutdown`/`OperationalError`.
+
+Where it is **silent**, which is the trigger the Context ranks first, it does not raise promptly:
+a dropped conntrack entry sends the client nothing, so the unlock writes into a black hole and
+blocks on TCP retransmission — roughly 13–30 minutes at Linux defaults — before any
+`psycopg.Error` exists to catch. Nothing in the tree narrows that: no `keepalives_idle`, no
+`tcp_user_timeout`, a bare `psycopg.connect`. The residue is bounded and is not a data-safety
+one — `dest` is published before the `finally` runs and the call still returns it — but the
+provision stalls for the retransmit budget holding one `asyncio.to_thread` worker thread, which
+can trip an upstream timeout. Recorded rather than closed: the fix is `keepalives_idle` /
+`tcp_user_timeout` on this dedicated connection, which Considered & rejected already names as
+reasonable independent hardening and not a substitute for gating the sweep. The fetcher would survive the sibling's
 sweep, publish correctly — and fail its provision one line later, which is the first Consequence
 below not holding for the one scenario it is about.
 
@@ -241,7 +252,8 @@ hang that it did not have before.
   halves of that are load-bearing and neither was free — the redundant copy is discarded rather
   than published (§7) so the sibling's base keeps its inode, and the lock release no longer
   raises on the dead session (§6), which by itself would have failed the provision one line
-  after the guard had saved it.
+  after the guard had saved it. On a *silently* evicted flow the release instead stalls on TCP
+  retransmission before it can raise; §6 records that residue and its bound.
 - Crash-orphan collection is unchanged in **latency** — still bounded by the next fetch of that base
   rather than by full investigation reclaim — and slightly narrowed in **reach**: a partial this
   process cannot `open` is no longer unlinked, where the previous unconditional `unlink` needed only

@@ -228,10 +228,18 @@ lock:
   > across a download during which that connection sends nothing, so an idle-connection reap or a
   > terminated backend releases it with the owner still writing. The sweep is now gated on an
   > `flock` the live writer holds on its own partial and skips any candidate it cannot lock, so its
-  > safety no longer rests on the fetch lock at all. Reach is unchanged: the kernel drops an `flock`
-  > when the holding descriptor closes, including on process exit, so a killed worker's orphan is
-  > already unlocked by the time a sibling sweeps it. The reclaim-side backstop is untouched — it
-  > runs only once no committed rootfs row remains, so no live fetcher for that base can exist.
+  > safety no longer rests on the fetch lock at all. Crash-orphan *latency* is unchanged — the kernel
+  > drops an `flock` when the holding descriptor closes, including on process exit, so a killed
+  > worker's orphan is already unlocked by the time a sibling sweeps it — while *reach* narrows
+  > slightly: `unlink` needed only directory permissions where the new `open` needs to read the file,
+  > so an `EACCES`/`EMFILE`/`ENOLCK` candidate now falls to the reclaim backstop instead of being
+  > unlinked blind, each skip `WARNING`-logged (ADR-0446 §4). **The reclaim-side backstop still
+  > unlinks unconditionally**, and the reflex justification for that — it runs only once no committed
+  > rootfs row remains, so no live fetcher can exist — is *derived* from `rootfs_base_reclaimable`'s
+  > row-state classification, which `PROVISIONING -> TORN_DOWN` and `PROVISIONING -> FAILED` falsify
+  > while the detached `asyncio.to_thread` download keeps writing. Filed as **#1544**; this decision
+  > is the text a reader tracing the sweep reaches first, so it must not restate the invariant
+  > ADR-0446 disproved.
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's
