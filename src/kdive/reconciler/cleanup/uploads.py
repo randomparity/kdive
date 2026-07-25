@@ -44,19 +44,20 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
     *finalized* rootfs stays safe on the per-key committed-object skip in
     :func:`reap_one_owner`, not on the owner's state.
 
-    Every candidate is attempted before any object-store failure is reported, and the report is a
-    raise at the end of the pass (ADR-0453 §3). Swallowing it entirely would be a regression:
-    ``_run_repair_plan`` puts a repair that raises into ``failures``, which is the only thing that
-    increments the ADR-0190 group-E error counter, so a store rejecting every delete — the exact
-    condition that leaks bytes permanently — would otherwise report as N successful reaps and zero
-    errors, the healthiest-looking pass on the dashboard. The pass forfeits its reaped count to
-    say so, which is the right way round: the count is a gauge, the error is the alert, and the
-    rows are durably deleted either way.
+    A failed delete is tolerated but bounded twice over (ADR-0453 §3). It is reported by a raise at
+    the end of the pass, because ``_run_repair_plan`` puts only a repair that raises into
+    ``failures``, which is the only input to the ADR-0190 group-E error counter — swallowing it
+    would make a store rejecting every delete report as N successful reaps and zero errors. And a
+    whole owner's sweep failing stops the pass claiming further candidates, because each candidate
+    claimed under a systemic delete fault costs an irreversible row delete over bytes nothing will
+    reclaim (#1556). The candidate select is unbounded, so without that brake one misconfigured
+    bucket policy would orphan the entire past-deadline backlog in a single pass, and again every
+    30 seconds after.
 
     Raises:
         CategorizedError: At least one object could not be deleted this pass
-            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`). Raised only after every candidate has
-            been reaped, so it never costs a later owner its reap.
+            (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`). Raised after the loop, so a partial
+            failure never costs a later owner its reap.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -67,25 +68,42 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
         candidates = await cur.fetchall()
     reaped = 0
     undeleted = 0
-    for cand in candidates:
+    unclaimed = 0
+    for position, cand in enumerate(candidates):
         owner_kind = cast(upload_manifest.UploadOwnerKind, cand["owner_kind"])
         outcome = await reap_one_owner(conn, store, owner_kind, cand["owner_id"])
         reaped += int(outcome.reaped)
         undeleted += outcome.undeleted
+        if outcome.store_refused_everything:
+            unclaimed = len(candidates) - position - 1
+            break
     if undeleted:
         raise CategorizedError(
             f"upload reap could not delete {undeleted} object(s) across {reaped} reaped owner(s); "
-            "their manifest rows are already gone, so nothing will rediscover them (ADR-0453)",
+            "their manifest rows are already gone, so nothing will rediscover them (ADR-0453). "
+            f"Left {unclaimed} candidate(s) unclaimed for the next pass.",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         )
     return reaped
 
 
 class ReapOutcome(NamedTuple):
-    """What one owner's reap did: whether the row went, and how many objects outlived it."""
+    """What one owner's reap did: whether the row went, and how the object sweep fared."""
 
     reaped: bool
+    attempted: int
     undeleted: int
+
+    @property
+    def store_refused_everything(self) -> bool:
+        """Every object this owner offered the store failed — evidence of a systemic delete fault.
+
+        One bad key is a bad key. A whole owner's sweep failing is the signature of a condition
+        that will fail the next owner too — a bucket policy without ``s3:DeleteObject``, an
+        endpoint rejecting DELETE — and each further owner costs an irreversible row delete
+        (ADR-0453 §3).
+        """
+        return self.attempted > 0 and self.undeleted == self.attempted
 
 
 async def reap_one_owner(
@@ -113,21 +131,24 @@ async def reap_one_owner(
     in this tree sweeps that prefix (#1556), and the unlocked sweep no longer serializes against
     the writers that can commit an ``artifacts`` row at a doomed key (#1557).
 
-    The prefix is logged before the sweep starts, because it is the last moment it is derivable
-    from anything: the row that held it is already gone, so an abort that skips
-    :func:`_sweep_uncommitted_objects`' own reporting — cancellation at shutdown, a process kill —
-    would otherwise leave the leaked bytes with no recoverable handle at all.
+    The prefix and the doomed key count are logged before the sweep starts, so an abort that never
+    reaches :func:`_sweep_uncommitted_objects`' own reporting — cancellation at shutdown, a process
+    kill — still timestamps the claim and records how much was left behind. (The prefix itself is
+    not lost with the row: it is ``owner_prefix(_TENANT, owner_kind, owner_id)`` from the single
+    mint site, so a leaked window stays enumerable from the owner tables. What the log adds is
+    *when*, and *how many*.)
 
     Returns:
         The :class:`ReapOutcome`. ``reaped`` is ``False`` when the locked re-read declined the
         owner (the manifest was gone, or its deadline had been renewed since the candidate
         select); it is ``True`` however many objects the sweep failed to delete, because the row
-        is durably gone and there is nothing left to retry. ``undeleted`` carries those failures
-        up to :func:`repair_abandoned_uploads`, which reports them once the pass is complete.
+        is durably gone and there is nothing left to retry. ``attempted`` and ``undeleted`` carry
+        the sweep's fate up to :func:`repair_abandoned_uploads`, which reports it once the pass is
+        over and stops claiming candidates if a whole owner's sweep was refused.
     """
     claimed = await _claim_abandoned_prefix(conn, store, owner_kind, owner_id)
     if claimed is None:
-        return ReapOutcome(reaped=False, undeleted=0)
+        return ReapOutcome(reaped=False, attempted=0, undeleted=0)
     _log.info(
         "reconciler: abandoned upload owner %s/%s claimed; sweeping %d object(s) under %s",
         owner_kind,
@@ -137,7 +158,7 @@ async def reap_one_owner(
     )
     undeleted = await _sweep_uncommitted_objects(store, claimed.keys, owner_kind, owner_id)
     _log.info("reconciler: abandoned upload owner %s/%s reaped", owner_kind, owner_id)
-    return ReapOutcome(reaped=True, undeleted=undeleted)
+    return ReapOutcome(reaped=True, attempted=len(claimed.keys), undeleted=undeleted)
 
 
 class _ClaimedWindow(NamedTuple):

@@ -143,21 +143,35 @@ leaving #1556's backlog unmeasurable. The pass forfeits its reaped count in exch
 a gauge, the error is the alert, and the rows are durably deleted either way. Raising after the
 loop rather than inside it keeps requirement 4 true at the same time.
 
-Those two logs only cover what phase 2 can observe. The abort modes in Problem above — cancellation
-at shutdown, a lost connection, a process kill — unwind past both, and by then the row that held
-the prefix is gone, so the leaked bytes would have no derivable handle at all. `reap_one_owner`
-therefore logs the prefix and the key count at INFO **before** the sweep begins, which is the last
-instant the prefix exists anywhere (requirement 6). That INFO line is the recoverable record; the
-WARNING/ERROR pair is the report layered on it. Per Problem claim 1 nothing sweeps that prefix, so
-the log is the only trace these objects ever existed.
+Those logs only cover what phase 2 can observe. The abort modes in Problem above — cancellation at
+shutdown, a lost connection, a process kill — unwind past them, leaving no record that the claim
+happened at all. `reap_one_owner` therefore logs the prefix and the doomed key count at INFO
+**before** the sweep begins (requirement 6). What that buys is the *timestamp* and the *count*, and
+deliberately not a rescued handle: the prefix is `owner_prefix(_TENANT, owner_kind, owner_id)` from
+the single mint site (`mcp/tools/catalog/artifacts/uploads.py`, the only construction of
+`UploadManifestReplaceRequest` in `src/`), so it stays derivable from the owner row, which outlives
+the reap. Overstating that would mislead #1556, which needs exactly this fact to scope its sweep.
 
-Phase 1 is deliberately **not** given the same tolerance. `store.list_prefix` raises
-`CategorizedError` on the same faults `store.delete` does — and in a store outage a failing LIST is
-the likelier of the two — and phase 1 does not catch it, so a listing failure ends the pass and
-drops the later candidates. That is benign exactly where a sweep failure is not: phase 1 aborts
-*before* the row delete commits, so the transaction rolls back with nothing deleted and the next
-30-second pass retries the same candidates unchanged. `_run_repair_plan` isolates each repair, so
-the blast radius is this one repair's pass. Tolerance is bought only where a retry is impossible.
+### Bounding a systemic delete fault
+
+Per-key tolerance alone is unbounded in the one direction that matters. The candidate select has no
+`LIMIT`, and a systemic delete fault — a bucket policy granting `s3:PutObject` and `ListBucket` but
+not `s3:DeleteObject`, an endpoint rejecting DELETE — fails every key of every owner while LIST
+keeps succeeding, so the pass would walk the whole past-deadline backlog, commit an irreversible row
+delete for each, orphan all their bytes, and repeat every 30 seconds. Row-first makes a *single*
+leak acceptable; it says nothing about how many one pass produces.
+
+`ReapOutcome.store_refused_everything` — every key of a non-empty sweep failed — therefore stops the
+loop claiming further candidates, and the end-of-pass raise names how many were left. A partial
+failure is still just a bad key and still sweeps the remaining keys and owners (requirement 4).
+
+This also makes the two phases consistent. `store.list_prefix` raises `CategorizedError` on the same
+faults `store.delete` does — in a store outage a failing LIST is the likelier of the two — and phase
+1 catches nothing, so a listing failure ends the pass and drops the later candidates. That abort is
+*free*: it precedes the row-delete commit, so the transaction rolls back with nothing deleted and
+the next pass retries the same candidates unchanged. `_run_repair_plan` isolates each repair, so the
+blast radius is this one repair's pass either way. Tolerance is bought only where a retry is
+impossible, and capped where it is irreversible.
 
 ### Shape for #1554
 
@@ -210,9 +224,10 @@ Both are recorded in ADR-0453 §Consequences and filed.
 1. **The unswept leak — [#1556](https://github.com/randomparity/kdive/issues/1556).** A phase-2
    failure, or a crash between the commit and the last delete, leaks objects under
    `local/<kind>/<id>/` with no manifest row and no `artifacts` row. Nothing in the tree sweeps
-   that prefix. `reap_one_owner` logs the prefix at INFO before the sweep starts — the last instant
-   it is derivable from anything — so every abort mode leaves a recoverable handle, but a log line
-   is not a reclaim path.
+   that prefix. It is at least **enumerable**: the prefix is a pure function of the owner, which
+   outlives the reap, so #1556 can walk the owner tables and derive it — the same shape as the
+   existing `images/` scan. "Bounding a systemic delete fault" above caps how fast one degraded
+   pass can grow the backlog.
 2. **The unlocked sweep's races — [#1557](https://github.com/randomparity/kdive/issues/1557).**
    Phase 2 holds no owner lock and re-reads nothing, so any writer that can put an object at a
    doomed key, or commit an `artifacts` row for one, wins a race the old order made impossible.
@@ -247,6 +262,9 @@ New tests in `tests/reconciler/test_upload_reaper.py`, all against real Postgres
 - **A totally failed sweep reports as a failed pass**, with an `INFRASTRUCTURE_FAILURE`
   `CategorizedError` naming the object and owner counts — and a companion test that a clean sweep
   returns the reaped count and does not raise, so the signal is conditional.
+- **A wholly refused sweep stops the pass**: three past-deadline owners, every delete failing —
+  exactly one row goes, two survive for the next pass, and only one owner's keys are attempted.
+  Written order-independently, since the candidate select has no `ORDER BY`.
 - **A key that gains an `artifacts` row after the claim is still deleted**, pinning residual 2 as
   known behaviour with a reproducer rather than leaving it a prose claim.
 - Existing reaper tests carry forward unchanged; they already pin the exemption, the renewed-window

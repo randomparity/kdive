@@ -101,29 +101,43 @@ store wraps `BotoCoreError`/`ClientError` in, matching `_cleanup_chunks_and_mani
 so a programming error still crashes and `CancelledError` still propagates.
 
 Swallowing it *entirely*, however, would silently degrade an existing signal, so the counts travel
-up as `ReapOutcome.undeleted` and `repair_abandoned_uploads` raises once, **after** every candidate
-has been reaped. `_run_repair_plan` puts only a repair that raises into `failures`, and `failures`
-is the sole input to the ADR-0190 group-E error counter — so without the end-of-pass raise, a store
-rejecting every delete would add N to `kdive.reconciler.repairs` and zero to `kdive.errors`, making
-the one condition that leaks bytes permanently the healthiest-looking pass on the dashboard, and
-leaving #1556's backlog unmeasurable. The pass forfeits its reaped count to say so, which is the
-right way round: the count is a gauge, the error is the alert, and the rows are durably deleted
-either way. Raising after the loop rather than inside it is what keeps requirement "one bad key
-costs no other owner its reap" true at the same time.
+up as `ReapOutcome.undeleted` and `repair_abandoned_uploads` raises once, **after** the loop.
+`_run_repair_plan` puts only a repair that raises into `failures`, and `failures` is the sole input
+to the ADR-0190 group-E error counter — so without that raise, a store rejecting every delete would
+add N to `kdive.reconciler.repairs` and zero to `kdive.errors`, making the one condition that leaks
+bytes permanently the healthiest-looking pass on the dashboard, and leaving #1556's backlog
+unmeasurable. The pass forfeits its reaped count to say so, which is the right way round: the count
+is a gauge, the error is the alert, and the rows are durably deleted either way. Raising after the
+loop rather than inside it is what keeps "one bad key costs no other owner its reap" true at the
+same time.
 
-Those two logs only cover the failure modes phase 2 can *observe*. The abort modes this ADR's
-Context names as motivating — cancellation at shutdown, a lost connection, a process kill — unwind
-past them, and by then the row that held the prefix is gone, so the leaked bytes would have no
-derivable handle at all. `reap_one_owner` therefore logs the prefix and the key count at INFO
-**before** the sweep begins, which is the last instant the prefix exists anywhere. That is the
-recoverable record; the WARNING/ERROR pair is the report on top of it. Neither is decoration: per
-§Consequences nothing sweeps that prefix, so the log is the only trace these objects ever existed.
+### 4. A whole owner's sweep failing stops the pass claiming more candidates
 
-The asymmetry with phase 1 is deliberate. `store.list_prefix` raises `CategorizedError` on the same
-faults `store.delete` does, and phase 1 does **not** catch it — a listing failure ends the whole
-pass. That is benign where a sweep failure is not: phase 1 aborts before the row delete commits, so
-the transaction rolls back with nothing deleted and the next 30-second pass retries the same
-candidates unchanged. Tolerance is bought only where a retry is impossible.
+Per-key tolerance alone would be unbounded in the one direction that matters. The candidate select
+carries no `LIMIT`, and a *systemic* delete fault — a bucket policy granting `s3:PutObject` and
+`ListBucket` but not `s3:DeleteObject`, an endpoint or proxy rejecting DELETE — fails every key of
+every owner while LIST keeps succeeding. Tolerating that per key would walk the entire past-deadline
+backlog in one pass, commit an irreversible row delete for each, orphan all of their bytes where
+nothing reclaims them (#1556), and repeat every 30 seconds. Row-first is what makes a *single* leak
+acceptable; nothing in it bounds how many single leaks one pass produces.
+
+So `ReapOutcome.store_refused_everything` — every key of a non-empty sweep failed — stops the loop
+claiming further candidates, and the end-of-pass raise names how many were left unclaimed. One bad
+key is still just a bad key: a partial failure sweeps the remaining keys and the remaining owners,
+exactly as before. This also makes the delete side consistent with the list side: a failing
+`store.list_prefix` already ends the pass — phase 1 catches nothing, and that abort is *free*,
+because it precedes the row-delete commit, so the transaction rolls back with nothing deleted — and
+a store that lists but refuses to delete had been getting the opposite treatment for no stated
+reason. The cap is one owner's leak per pass, and the unclaimed candidates are re-read unchanged 30
+seconds later with their rows and bytes intact.
+
+Those logs only cover the failure modes phase 2 can *observe*. The abort modes this ADR's Context
+names as motivating — cancellation at shutdown, a lost connection, a process kill — unwind past
+them, leaving no record that the claim happened at all. `reap_one_owner` therefore logs the prefix
+and the doomed key count at INFO **before** the sweep begins. What that buys is the *timestamp* and
+the *count*: it is deliberately not claimed to rescue an otherwise-lost handle, because the prefix
+is `owner_prefix(_TENANT, owner_kind, owner_id)` from the single mint site and so stays derivable
+from the owner row, which outlives the reap (§Consequences records this, since #1556 needs it).
 
 ## Consequences
 
@@ -137,7 +151,11 @@ The claim that #768's reaper covers this is false and is not relied on. Filed as
 upload-prefix orphan sweep (or a bucket lifecycle rule). Row-first converts a correctness bug into
 a storage-cost bug that is invisible until someone looks at the bucket — accepted, because a
 dangling `kernel_ref` on a `succeeded` Run is not recoverable by any later sweep and leaked bytes
-are.
+are. The leak is **enumerable**, which is what makes that trade cheap to unwind: the prefix is
+`owner_prefix(_TENANT, owner_kind, owner_id)` from the single mint site, so #1556 can walk the
+`runs`/`investigations` tables, derive each prefix, list it, and subtract the `artifacts` rows —
+the same shape as the existing `images/` scan — rather than scraping logs or reaching for a
+bucket-wide lifecycle rule. §Decision 4 caps how much one degraded pass can add to that backlog.
 
 **Phase 2 no longer serializes against the writers that can commit a row at a doomed key.** The
 sweep deletes the phase-1 key list unconditionally, re-reading nothing, and it holds no owner lock
