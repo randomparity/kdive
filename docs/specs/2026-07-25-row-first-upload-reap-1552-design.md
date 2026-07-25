@@ -56,10 +56,13 @@ deadline while a reap fails partway — narrow, but reachable.
    deleted, for either owner kind, in any owner state.
 3. A failure partway through the object sweep leaves **no** `upload_manifests` row for that owner —
    the reap is durable regardless of what the object store does.
-4. A failed key does not abort the sweep of the remaining keys, and does not abort the reap of
-   other owners in the same pass.
+4. A failed object **delete** does not abort the sweep of the remaining keys, and does not abort
+   the reap of other owners in the same pass. This does not extend to phase 1: a failing
+   `list_prefix` still ends the pass, deliberately — see Design, "Failure handling".
 5. Object deletion holds neither the owner advisory lock nor a database transaction.
-6. The locked re-read still declines a manifest whose deadline was renewed since the candidate
+6. The window's prefix is recorded before the first object is deleted, so an abort that skips the
+   sweep's own reporting still leaves the leaked bytes a derivable handle.
+7. The locked re-read still declines a manifest whose deadline was renewed since the candidate
    select, and an unknown owner kind still fails loud rather than locking under a guessed scope.
 
 ## Design
@@ -100,23 +103,40 @@ The per-key `SELECT 1 FROM artifacts WHERE object_key = %s` becomes a single
 `WHERE object_key = ANY(%s)`. Same verdict, one round trip, and it shortens the locked phase —
 which matters now that phase 1 is the only part holding the lock.
 
-### Failure handling in phase 2
+### Failure handling
 
 A failed `store.delete` is logged at WARNING with the key, and the loop continues. After the loop,
-a non-zero failure count is logged at ERROR naming the owner and the counts, because those bytes
-are now unreferenced and (per Problem, claim 1) nothing will rediscover them — the log is the only
-signal that exists. Raising instead would be worse on every axis: the row is already durably gone,
-so the owner *is* reaped and there is nothing to retry; and `repair_abandoned_uploads` has no
-per-candidate `try`, so a raise would also abandon every later owner in the pass over one bad key.
-`CategorizedError` is caught specifically — the category the store wraps `BotoCoreError`/
-`ClientError` in — matching `_cleanup_chunks_and_manifest`'s precedent, so a programming error
-still crashes and `CancelledError` (a `BaseException`) still propagates.
+a non-zero failure count is logged at ERROR naming the owner and the counts. Raising instead would
+be worse on every axis: the row is already durably gone, so the owner *is* reaped and there is
+nothing to retry; and `repair_abandoned_uploads` has no per-candidate `try`, so a raise would also
+abandon every later owner in the pass over one bad key. `CategorizedError` is caught specifically —
+the category the store wraps `BotoCoreError`/`ClientError` in — matching
+`_cleanup_chunks_and_manifest`'s precedent, so a programming error still crashes and
+`CancelledError` (a `BaseException`) still propagates.
+
+Those two logs only cover what phase 2 can observe. The abort modes in Problem above — cancellation
+at shutdown, a lost connection, a process kill — unwind past both, and by then the row that held
+the prefix is gone, so the leaked bytes would have no derivable handle at all. `reap_one_owner`
+therefore logs the prefix and the key count at INFO **before** the sweep begins, which is the last
+instant the prefix exists anywhere (requirement 6). That INFO line is the recoverable record; the
+WARNING/ERROR pair is the report layered on it. Per Problem claim 1 nothing sweeps that prefix, so
+the log is the only trace these objects ever existed.
+
+Phase 1 is deliberately **not** given the same tolerance. `store.list_prefix` raises
+`CategorizedError` on the same faults `store.delete` does — and in a store outage a failing LIST is
+the likelier of the two — and phase 1 does not catch it, so a listing failure ends the pass and
+drops the later candidates. That is benign exactly where a sweep failure is not: phase 1 aborts
+*before* the row delete commits, so the transaction rolls back with nothing deleted and the next
+30-second pass retries the same candidates unchanged. `_run_repair_plan` isolates each repair, so
+the blast radius is this one repair's pass. Tolerance is bought only where a retry is impossible.
 
 ### Shape for #1554
 
 #1554 lands a concurrent sweep in this function. The split it needs is the one drawn here: a short
 locked transaction that decides, and a phase that touches only the object store — parallelizable
-without holding a lock or a pooled connection across the fan-out.
+without holding a lock or a pooled connection across the fan-out. Its author should read residual 2
+first: phase 2 deletes its key list unconditionally, so anything that lengthens or fans out that
+phase widens #1557. `_sweep_uncommitted_objects`' docstring says so at the site.
 
 ## Alternatives considered
 
@@ -130,19 +150,46 @@ without holding a lock or a pooled connection across the fan-out.
   re-mint residual below, at the cost of a HEAD per key and a widened `UploadStore` port, and does
   not close it (S3 `Last-Modified` has one-second granularity, and a byte-identical re-upload has
   the same etag). Not taken; the residual is disclosed and filed instead.
+- **Re-read `upload_manifests` for the owner once before the sweep, abandoning it if a row
+  exists.** One indexed query, no port change. Not taken because it buys almost nothing: the guard
+  would sit *before* the delete loop, and the delete loop is the exposed interval. A guard that
+  narrows the window by the time it takes to run one query, while implying the hole is closed, is
+  worse than an honest disclosure.
+- **Re-check each key's protection immediately before its delete**, the precedent
+  `repair_leaked_images` already sets in this package ("a row that landed between the listing and
+  the delete protects its object"). This genuinely shrinks the re-mint residual to a single
+  check→delete gap per key. Not taken here: it returns a query per key and a live database
+  connection to the phase #1554 wants free of both, so the two decisions should be costed together
+  — which is what #1557 says.
+- **Gate the deletes on a store-mtime grace**, `repair_leaked_images`' other guard. It closes the
+  re-mint residual outright, since a re-minted object is newer than the reaped window's deadline.
+  Not taken: it needs a prefix-parameterised sibling of `list_image_objects` (the existing one
+  hardcodes `images/`), and it would permanently leak any object whose presigned PUT began before
+  the deadline and completed after it — a routine path, since the sweep runs within 30s of the
+  deadline — trading a rare corruption for a routine leak that, per residual 1, nothing collects.
 
 ## Residuals
 
-Both are recorded in ADR-0453 §Consequences and filed as follow-up issues.
+Both are recorded in ADR-0453 §Consequences and filed.
 
-1. **The unswept leak.** A phase-2 failure leaks objects under `local/<kind>/<id>/` with no
-   manifest row and no `artifacts` row. Nothing in the tree sweeps that prefix.
-2. **The re-mint window.** Phase 2 no longer holds the owner lock, so a re-mint can now interleave
-   between the row-delete commit and the object deletes. Upload keys are owner-addressed, so a
-   re-minted window reuses the same key names, and the deferred delete would remove the new
-   window's bytes. It requires a full create-upload → PUT → finalize cycle to complete inside the
-   time it takes to issue N `delete_object` calls, against the pre-existing defect's requirement
-   that a finalize merely straddle the deadline.
+1. **The unswept leak — [#1556](https://github.com/randomparity/kdive/issues/1556).** A phase-2
+   failure, or a crash between the commit and the last delete, leaks objects under
+   `local/<kind>/<id>/` with no manifest row and no `artifacts` row. Nothing in the tree sweeps
+   that prefix. `reap_one_owner` logs the prefix at INFO before the sweep starts — the last instant
+   it is derivable from anything — so every abort mode leaves a recoverable handle, but a log line
+   is not a reclaim path.
+2. **The re-mint window — [#1557](https://github.com/randomparity/kdive/issues/1557).** Phase 2 no
+   longer holds the owner lock, so a re-mint can now interleave between the row-delete commit and
+   the object deletes. Upload keys are owner-addressed, so a re-minted window reuses the same key
+   names, and the sweep — which deletes the phase-1 key list unconditionally, re-reading nothing —
+   would remove the new window's bytes. The trigger is one re-minted PUT landing on a key before
+   the sweep reaches that key's delete; the finalize may commit arbitrarily later and still be
+   corrupted, since `_require_unreaped_window` compares the *new* window's deadline against the one
+   that finalize validated and they match. This puts the **investigations** lane in scope too:
+   Problem claim 2 above holds only for the original defect, because that lane's finalize
+   serialised against a reap only while the reap held the `INVESTIGATION` lock, and phase 2 does
+   not. A re-mint is the documented recovery from a reap, so this sits on the recovery path;
+   reaching it needs a sweep slow enough for an agent to re-mint and re-upload into it.
 
 ## Test plan
 
@@ -158,5 +205,12 @@ New tests in `tests/reconciler/test_upload_reaper.py`, all against real Postgres
   just asserting the end state.
 - **Committed-object exemption under the set-valued query**, including the mixed case (one
   committed key, one stray) and the all-committed case (empty doomed set, no `delete` call).
+- **The leak is reported.** A store whose every delete fails: one WARNING per key naming the key,
+  and exactly one ERROR summary naming the owner and the counts — with a companion test asserting a
+  clean sweep emits neither, so the summary is conditional rather than unconditional.
+- **The prefix is on the record before the first delete**, asserted by position in the log
+  sequence rather than by mere presence.
+- **A failing `list_prefix` aborts the pass and deletes nothing**, pinning the deliberate asymmetry
+  above: no delete is attempted and the manifest row survives intact for the retry.
 - Existing reaper tests carry forward unchanged; they already pin the exemption, the renewed-window
   decline, and the fail-loud unknown owner kind.

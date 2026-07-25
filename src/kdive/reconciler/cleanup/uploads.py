@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Protocol, cast, runtime_checkable
+from typing import NamedTuple, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from psycopg import AsyncConnection
@@ -77,9 +77,15 @@ async def reap_one_owner(
 
     The two phases split on that commit: :func:`_claim_abandoned_prefix` makes every decision that
     needs the database, under the lock a finalize also takes; :func:`_sweep_uncommitted_objects`
-    then holds neither lock nor connection. What is traded for it is disclosed in ADR-0453
-    §Consequences — the objects a failed sweep leaves behind are unreferenced and nothing in this
-    tree sweeps that prefix.
+    then holds neither lock nor connection. Both residuals of that trade are disclosed in ADR-0453
+    §Consequences and filed — the objects a failed sweep leaves behind are unreferenced and nothing
+    in this tree sweeps that prefix (#1556), and the unlocked sweep no longer excludes a concurrent
+    re-mint (#1557).
+
+    The prefix is logged before the sweep starts, because it is the last moment it is derivable
+    from anything: the row that held it is already gone, so an abort that skips
+    :func:`_sweep_uncommitted_objects`' own reporting — cancellation at shutdown, a process kill —
+    would otherwise leave the leaked bytes with no recoverable handle at all.
 
     Returns:
         Whether the owner was reaped. ``False`` means the locked re-read declined it (the manifest
@@ -87,12 +93,26 @@ async def reap_one_owner(
         commits is ``True`` however many objects the sweep failed to delete: the row is durably
         gone, so the owner *is* reaped and there is nothing left to retry.
     """
-    doomed = await _claim_abandoned_prefix(conn, store, owner_kind, owner_id)
-    if doomed is None:
+    claimed = await _claim_abandoned_prefix(conn, store, owner_kind, owner_id)
+    if claimed is None:
         return False
-    await _sweep_uncommitted_objects(store, doomed, owner_kind, owner_id)
+    _log.info(
+        "reconciler: abandoned upload owner %s/%s claimed; sweeping %d object(s) under %s",
+        owner_kind,
+        owner_id,
+        len(claimed.keys),
+        claimed.prefix,
+    )
+    await _sweep_uncommitted_objects(store, claimed.keys, owner_kind, owner_id)
     _log.info("reconciler: abandoned upload owner %s/%s reaped", owner_kind, owner_id)
     return True
+
+
+class _ClaimedWindow(NamedTuple):
+    """A reaped window: the prefix its row named, and the keys under it left to delete."""
+
+    prefix: str
+    keys: list[str]
 
 
 async def _claim_abandoned_prefix(
@@ -100,22 +120,25 @@ async def _claim_abandoned_prefix(
     store: UploadStore,
     owner_kind: upload_manifest.UploadOwnerKind,
     owner_id: UUID,
-) -> list[str] | None:
-    """Delete the past-deadline manifest row and return the keys its window abandoned.
+) -> _ClaimedWindow | None:
+    """Delete the past-deadline manifest row and return the window its deletion abandoned.
 
     The locked re-read is what declines a manifest whose deadline was renewed since the candidate
     select, and the per-owner lock is the one a finalize also takes — so a reap and a finalize
     serialize rather than overlapping, in either order.
 
-    The committed-object exemption is computed here, before the objects are deleted, and stays
-    valid across that gap because the row delete this commits is itself the barrier: the only
-    writers that insert an ``artifacts`` row against these keys are the two finalizes, and both
-    require the manifest row that is gone by the time this returns (ADR-0453 §2).
+    The committed-object exemption is computed here, before the objects are deleted, and — **absent
+    a re-mint of the same owner** — stays valid across that gap, because the row delete this
+    commits is itself the barrier: the only writers that insert an ``artifacts`` row against these
+    keys are the two finalizes, and both require the manifest row that is gone by the time this
+    returns (ADR-0453 §2). A re-mint creates a *new* row, which lifts that barrier for the window
+    it opens; the keys are owner-addressed, so the new window reuses these key names and its
+    finalize can commit rows against them. That is ADR-0453's second residual, filed as #1557.
 
     Returns:
-        The keys to delete — every object under the window's prefix that holds no committed
-        ``artifacts`` row — or ``None`` if the locked re-read declined the owner. An empty list is
-        a reap with nothing to sweep, which is not the same as a decline.
+        The window's prefix and the keys to delete — every object under it holding no committed
+        ``artifacts`` row — or ``None`` if the locked re-read declined the owner. An empty key list
+        is a reap with nothing to sweep, which is not the same as a decline.
     """
     async with conn.transaction(), advisory_xact_lock(conn, lock_scope_for(owner_kind), owner_id):
         async with conn.cursor(row_factory=dict_row) as cur:
@@ -127,13 +150,14 @@ async def _claim_abandoned_prefix(
             row = await cur.fetchone()
         if row is None:
             return None
-        keys = await asyncio.to_thread(store.list_prefix, row["prefix"])
+        prefix = cast(str, row["prefix"])
+        keys = await asyncio.to_thread(store.list_prefix, prefix)
         doomed = await _uncommitted_keys(conn, keys)
         await conn.execute(
             "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
             (owner_kind, owner_id),
         )
-    return doomed
+    return _ClaimedWindow(prefix, doomed)
 
 
 async def _uncommitted_keys(conn: AsyncConnection, keys: list[str]) -> list[str]:
@@ -164,6 +188,12 @@ async def _sweep_uncommitted_objects(
     every later owner in the pass over one bad key. ``CategorizedError`` is caught specifically,
     the category the store wraps its client and transport errors in, so a programming error still
     crashes and cancellation still propagates.
+
+    ``keys`` is deleted unconditionally: it was decided in :func:`_claim_abandoned_prefix` and is
+    never re-read here. **Anything that lengthens this phase widens #1557** — upload keys are
+    owner-addressed, so a re-mint that PUTs to one of these key names before this loop reaches it
+    has its bytes deleted, on either owner lane, and neither the owner lock nor the manifest row
+    is held to prevent it. Worth costing before #1554 fans this out.
     """
     failed = 0
     for key in keys:

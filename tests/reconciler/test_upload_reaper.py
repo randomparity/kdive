@@ -63,10 +63,27 @@ class _FailingStore(_FakeStore):
     ``CategorizedError``, so that is the exception a mid-sweep failure actually presents.
     """
 
-    def __init__(self, objects: dict[str, list[str]], *, fail_keys: set[str]) -> None:
+    def __init__(
+        self,
+        objects: dict[str, list[str]],
+        *,
+        fail_keys: set[str] | None = None,
+        fail_list_prefixes: set[str] | None = None,
+    ) -> None:
         super().__init__(objects)
-        self._fail_keys = fail_keys
+        self._fail_keys = fail_keys or set()
+        self._fail_list_prefixes = fail_list_prefixes or set()
         self.attempted: list[str] = []
+        self.listed: list[str] = []
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        self.listed.append(prefix)
+        if prefix in self._fail_list_prefixes:
+            raise CategorizedError(
+                f"list_objects_v2 failed for {prefix}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        return super().list_prefix(prefix)
 
     def delete(self, key: str) -> None:
         self.attempted.append(key)
@@ -499,6 +516,70 @@ def test_undeleted_objects_are_reported_at_error(
         ]
         assert len(errors) == 1  # one summary, naming the counts and the owner
         assert f"left 2 of 2 object(s) for owner runs/{run_id}" in errors[0].getMessage()
+
+    asyncio.run(_run())
+
+
+def test_the_prefix_is_logged_before_the_sweep_starts(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0453 §3: the prefix must be on the record *before* the first delete is attempted.
+
+    The row that held it is already gone by then, so an abort that never reaches the sweep's own
+    reporting — cancellation at shutdown, a process kill — would otherwise leave leaked bytes with
+    no derivable handle. Pinned by ordering against the delete, not merely by presence.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+            prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FakeStore({prefix: [f"{prefix}a"]})
+        with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.uploads"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _reap(store)) == 1
+        messages = [r.getMessage() for r in caplog.records]
+        claimed = [i for i, m in enumerate(messages) if "claimed; sweeping" in m]
+        assert len(claimed) == 1
+        assert prefix in messages[claimed[0]]
+        assert "1 object(s)" in messages[claimed[0]]
+
+    asyncio.run(_run())
+
+
+def test_a_failing_list_prefix_aborts_the_pass_without_deleting_the_row(
+    migrated_url: str,
+) -> None:
+    """A store outage during phase 1 is benign, and this pins that it stays benign.
+
+    ``ObjectStore.list_prefix`` raises ``CategorizedError`` on any client or transport fault, and
+    phase 1 does not catch it — so the pass ends and later candidates are dropped. That asymmetry
+    with the sweep's per-key tolerance (ADR-0453 §3) is deliberate: phase 1 aborts *before* the
+    row delete commits, so the transaction rolls back with nothing deleted and the next 30-second
+    pass retries the same candidates. Nothing is lost, which is precisely what is not true once
+    the row delete has committed.
+    """
+
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            system_id = await seed_system(seed)
+            run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
+            prefix, request = _run_manifest(run_id, timedelta(seconds=-1))
+            await upload_manifest.replace_manifest(seed, request)
+        store = _FailingStore({prefix: [f"{prefix}kernel"]}, fail_list_prefixes={prefix})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            try:
+                await run_repair(pool, _reap(store))
+            except CategorizedError:
+                pass
+            else:
+                raise AssertionError("a failing list_prefix must not be silently absorbed")
+        assert store.attempted == []
+        async with await connect(migrated_url) as check:
+            # The window survives intact: nothing was deleted, so the retry loses nothing.
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is not None
 
     asyncio.run(_run())
 
