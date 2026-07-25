@@ -1470,3 +1470,126 @@ def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path
 
     assert dest.read_bytes() == _QCOW2
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_fetch_survives_a_dead_session_when_releasing_the_lock(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The flock guard saves the fetcher from the sweep, and then the `finally` released the lock on
+    # the very connection whose loss is the whole premise -- raising, and failing the provision one
+    # line later. A `finally` also REPLACES an in-flight exception, so an actionable
+    # CategorizedError would reach the operator as a bare Postgres error. A terminated backend
+    # has already
+    # released the lock, so suppressing is the correct semantics, not a convenience.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    real_execute = conn.execute
+
+    def dying_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            raise psycopg.OperationalError("terminating connection due to administrator command")
+        return real_execute(sql, params)
+
+    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2  # published, not a failed provision
+    assert any(
+        "could not release the rootfs fetch advisory lock" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+
+def test_a_dead_session_does_not_mask_the_real_staging_error(tmp_path: Path) -> None:
+    # The second-order half: the unlock ran in a `finally`, so on a connection that had since died
+    # it replaced whatever the fetch was already raising. A checksum mismatch has to stay a checksum
+    # mismatch, not become an admin-shutdown message with the actionable text in __context__.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    real_execute = conn.execute
+
+    def dying_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            raise psycopg.OperationalError("terminating connection due to administrator command")
+        return real_execute(sql, params)
+
+    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+
+    with pytest.raises(CategorizedError) as error:
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "checksum verification" in str(error.value)
+
+
+def test_stage_completes_unguarded_where_the_filesystem_cannot_flock(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ENOLCK on an NFS mount whose lock manager is down, EOPNOTSUPP on some FUSE and 9p backends.
+    # Staging unguarded is exactly the pre-ADR-0446 behaviour and no worse -- a sweep on that same
+    # filesystem cannot lock either, so it skips every candidate. Failing instead would turn a
+    # filesystem without lock support into a total uploaded-rootfs outage.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    def unlockable_flock(fd: Any, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert any("cannot flock the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_sweep_warns_and_continues_when_one_candidate_cannot_be_unlinked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The fourth sweep outcome, and the likeliest to matter: EPERM under a sticky-bit or foreign-uid
+    # staging directory -- the ADR-0442 ownership asymmetry this subsystem was already bitten by.
+    # Left to escape, it landed in the caller's suppress() around the whole loop, so it emitted
+    # nothing AND abandoned every remaining orphan of that base on that pass.
+    dest = _dest(tmp_path)
+    stuck = dest.parent / f"{_TOKEN}.0000stuck.partial"
+    collectable = dest.parent / f"{_TOKEN}.9999free.partial"
+    for path in (stuck, collectable):
+        path.write_bytes(b"leaked")
+    real_unlink = Path.unlink
+
+    def sticky_unlink(self: Path, **kwargs: Any) -> None:
+        if self == stuck:
+            raise PermissionError(errno.EPERM, "Operation not permitted", str(self))
+        real_unlink(self, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "unlink", sticky_unlink)
+        _unlink_orphan_partials(dest)
+
+    assert stuck.exists()
+    assert not collectable.exists(), "one unsweepable candidate truncated the rest of the pass"
+    assert any("could not unlink the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_the_published_base_stays_readable_by_the_hypervisor(tmp_path: Path) -> None:
+    # The partial's mode is carried onto the published base by os.replace, and QEMU reads that base
+    # as the unprivileged hypervisor user -- so the explicit 0o666 in _flocked_partial is NOT
+    # free to tighten to the 0o600 a SENSITIVE file invites. Nothing else in this suite would
+    # notice: every other test asserts bytes, and a 0o600 base fails only at guest boot on a real
+    # host. Same canary role as the lockf test above.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    previous = os.umask(0o022)
+    try:
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+        mode = stat.S_IMODE(dest.stat().st_mode)
+    finally:
+        os.umask(previous)
+
+    assert mode == 0o666 & ~0o022, f"the published base was staged {mode:o}, not 0o644"
+    assert mode & (stat.S_IRGRP | stat.S_IROTH), "the hypervisor user cannot read the staged base"

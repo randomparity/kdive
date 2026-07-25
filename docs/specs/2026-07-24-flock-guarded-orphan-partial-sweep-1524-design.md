@@ -44,8 +44,8 @@ Both release the lock without the downloader noticing until its `pg_advisory_unl
 ## Constraints established by reading the code
 
 - **Partial names are already per-attempt unique:** `f"{dest.stem}.{uuid4().hex}.partial"`. No two
-  fetchers ever name the same partial, so a per-partial exclusive lock is uncontended by
-  construction — it is a liveness marker, not a mutex.
+  fetchers ever name the same partial, so two *writers* never contend — it is a liveness marker,
+  not a mutex. The one contender that does exist is a sibling's sweep, in the creation window.
 - **The staging directory is local and not operator-configurable.**
   `UPLOADS_DIR = /var/lib/kdive/rootfs-uploads` is a module constant in
   `providers/shared/runtime_paths.py`, on the local-libvirt provider's own host. Every process that
@@ -89,7 +89,7 @@ a lock on a file the sweeper's very next syscall removes, so it does not retry. 
 residue from the silent invisible-blocks leak the current code produces into a loud, attributable
 failure, and it requires a lost session lock *and* a sub-millisecond interleave to reach at all.
 
-## Two consequences the review surfaced
+## Consequences the review surfaced
 
 **Reach narrows slightly, and is logged rather than claimed away.** `unlink` needed write and
 execute on the *directory* and no permission on the file; `open` needs to read the file. So an
@@ -103,6 +103,16 @@ it, so an unconditional `os.replace` would orphan that inode behind the guest's 
 the very symptom this change removes, re-created at the far end of the same scenario. The publish is
 therefore skipped when `dest` already passes the qcow2 gate. That probe swallows every `OSError`
 (the opposite of `_reusable_staged_base`, whose polarity is reversed) so it can only remove work.
+
+**Two more things had to hold for "never a failed provision" to be true.** A non-`EWOULDBLOCK`
+`flock` error on the writer path (`ENOLCK`, `EOPNOTSUPP`) was fatal, so a filesystem without lock
+support became a total uploaded-rootfs outage; the writer now stages unguarded with a `WARNING`,
+which is no worse than before the guard existed since a sweeper there cannot lock either. And
+`pg_advisory_unlock` ran bare in a `finally` on the very connection whose loss is the premise — it
+raises on a terminated backend, failing the provision one line after the guard had saved it, and a
+`finally` *replaces* any in-flight exception, so an actionable `CategorizedError` surfaced as a bare
+Postgres message. It is now suppressed with a `WARNING`; a lock whose session is gone is already
+released.
 
 ## Tests (TDD)
 
@@ -132,3 +142,9 @@ Green-only (they pass before and after, and pin behavior the fix must not regres
 11. A sweep whose candidate vanishes between the glob and the open is a no-op, not an error.
 12. A torn `dest` is still published over, and an unreadable `dest` is published over rather than
     failing the completed download.
+13. A dead session on the lock release still returns a published base, and does not mask an
+    in-flight `CategorizedError`.
+14. `ENOLCK` at `fcntl.flock` still completes the stage, unguarded and warned.
+15. One unsweepable candidate warns and does not truncate the rest of the pass.
+16. The published base carries group/other read under a known umask — the canary for the `0o666`
+    literal, whose tightening to `0o600` no other test in the file would notice.

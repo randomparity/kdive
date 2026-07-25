@@ -108,7 +108,7 @@ the invisible-blocks leak the current code produces.
 
 ### 4. Every skip is logged, and the narrowing in reach is stated rather than claimed away
 
-`_unlink_if_unheld` has three outcomes and they are materially different, so none of them is a bare
+`_unlink_if_unheld` has four outcomes and they are materially different, so none of them is a bare
 `return`.
 
 *Held* (`EWOULDBLOCK`) is the correct action and also the **only** externally visible symptom of
@@ -131,7 +131,47 @@ altogether and nothing would say so.
 *Absent* is the achieved post-state, not a fault: the reclaim-side backstop sweeps the same
 directory.
 
-### 5. A base a sibling already published is not superseded
+*A failing `unlink`* — `EPERM` under a sticky-bit or foreign-uid staging directory, which is the
+ADR-0442 ownership asymmetry this very subsystem was bitten by, plus `EROFS` and `EIO` — is handled
+per candidate rather than left to the caller's `suppress`, which wrapped the whole loop and so both
+swallowed the line and abandoned every remaining orphan of that base on that pass.
+
+### 5. The writer degrades where the filesystem cannot lock at all
+
+`ENOLCK` on an NFS mount whose lock manager is down, `EOPNOTSUPP` on some FUSE and 9p backends: the
+`flock` call itself fails rather than reporting contention. The sweep already degrades gracefully
+there (§4), and the writer must match, or a filesystem without lock support becomes a total
+uploaded-rootfs outage — announced as "failed to stage", pointing an operator at the object store.
+
+So a non-`EWOULDBLOCK` `OSError` from the writer's acquisition logs a `WARNING` and stages
+**unguarded**. That is exactly the pre-ADR-0446 behavior and no worse than it: a sweeper on that
+same filesystem cannot lock either, so it skips every candidate and collection falls to the reclaim
+backstop. The guard is an improvement where locking works and a no-op where it does not, never a
+new hard dependency.
+
+### 6. Releasing the fetch lock tolerates the session loss this ADR is written about
+
+The release ran bare in a `finally`, on the *same* connection whose loss is the entire premise:
+
+```python
+finally:
+    conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+```
+
+Both triggers in the Context destroy the client connection at the instant they release the lock, so
+that statement raises `AdminShutdown`/`OperationalError`. The fetcher would survive the sibling's
+sweep, publish correctly — and fail its provision one line later, which is the first Consequence
+below not holding for the one scenario it is about.
+
+A `finally` also *replaces* an in-flight exception, so on those runs an actionable
+`CategorizedError` (a checksum mismatch, a non-qcow2 upload) reached the operator as a bare Postgres
+message with the useful text demoted to `__context__`.
+
+The release is now suppressed with a `WARNING`. That is the correct semantics rather than a
+convenience: a lock whose session is gone has already been released by the backend's exit, and one
+whose session is alive is released by the statement that succeeds.
+
+### 7. A base a sibling already published is not superseded
 
 Letting the losing fetcher survive its sweep means it now *reaches* the publish, and the sibling
 that held the lock has by then normally finished, published `dest`, and had a per-System overlay
@@ -156,7 +196,13 @@ trigger a silent perpetual multi-GiB re-download. Here the polarity is reversed:
 `OSError` therefore answers "publish", so the guard can only ever remove work and can never add a
 failure to a download that already succeeded.
 
-### 6. The sweep's `open` is `O_RDONLY | O_NONBLOCK`
+The gate is the qcow2-magic probe, so it inherits ADR-0443 §3's stated limit: a head-intact,
+tail-zeroed crash survivor passes it, and this fetcher would then keep that base and discard its own
+freshly checksum-verified copy. That is the same residue `_reusable_staged_base` already carries at
+both of its call sites — the caller has *already* returned such a base to two earlier checks before
+reaching here, so this gate widens no window — and #1539's completion marker is what closes it.
+
+### 8. The sweep's `open` is `O_RDONLY | O_NONBLOCK`
 
 `O_NONBLOCK` is a no-op on a regular file and is there for the same reason ADR-0443 §2 checks
 `S_ISREG` before opening `dest`: opening a FIFO for reading blocks until a writer appears, and this
@@ -169,9 +215,11 @@ hang that it did not have before.
 
 - A live sibling's partial survives a sweep run by a fetcher that acquired the fetch lock after
   losing it — the acceptance criterion. The degradation from a lost session lock returns to
-  ADR-0441 §5's originally stated one: a redundant download, never a failed provision. The
-  redundant copy is then discarded rather than published (§5), so the sibling's base keeps its
-  inode.
+  ADR-0441 §5's originally stated one: a redundant download, never a failed provision. Both
+  halves of that are load-bearing and neither was free — the redundant copy is discarded rather
+  than published (§7) so the sibling's base keeps its inode, and the lock release no longer
+  raises on the dead session (§6), which by itself would have failed the provision one line
+  after the guard had saved it.
 - Crash-orphan collection is unchanged in **latency** — still bounded by the next fetch of that base
   rather than by full investigation reclaim — and slightly narrowed in **reach**: a partial this
   process cannot `open` is no longer unlinked, where the previous unconditional `unlink` needed only
@@ -187,6 +235,9 @@ hang that it did not have before.
   mode #1383's dead ELF-magic guard is the local precedent for.
 - One extra file descriptor is held per in-flight staging operation, and two syscalls are added per
   swept candidate. Both are negligible against a multi-GiB download.
+- **No new filesystem requirement.** A host whose storage cannot `flock` stages unguarded with a
+  `WARNING` (§5) rather than failing, so the guard is an improvement where locking works and a
+  no-op where it does not.
 - **A hung-but-live fetcher's partial is not collected**, and that is correct rather than a
   shortcoming: the process is alive and may still finish. An mtime window would have reclaimed it
   and destroyed the download. It is bounded by the reclaim-side backstop when the investigation

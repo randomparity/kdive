@@ -212,8 +212,34 @@ def fetch_uploaded_rootfs(
             system_id=upload.system_id,
         )
     finally:
-        conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+        _release_fetch_lock(conn, lock_key)
     return dest
+
+
+def _release_fetch_lock(conn: psycopg.Connection, lock_key: int) -> None:
+    """Release the fetch lock, tolerating the session loss this whole guard is written about.
+
+    Both triggers ADR-0446 names — a terminated backend, and a middlebox-evicted flow that later
+    draws an ``RST`` — destroy the *client* connection at the instant they release the lock, so the
+    unlock this issues is both redundant and doomed. Left bare it raised out of a ``finally`` and
+    failed the provision one line after the flock guard had saved it, which is exactly the
+    "degrades to a redundant download, never a failed provision" claim not holding.
+
+    A ``finally`` also *replaces* any in-flight exception, so the bare call demoted an actionable
+    ``CategorizedError`` — a checksum mismatch, a non-qcow2 upload — to ``__context__`` behind a
+    Postgres admin-shutdown message, on precisely the runs where the connection had since died.
+
+    Suppressing is the correct semantics rather than a convenience: a lock whose session is gone is
+    already released, and one whose session is alive is released by the statement that succeeds.
+    """
+    try:
+        conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+    except psycopg.Error as err:
+        _log.warning(
+            "could not release the rootfs fetch advisory lock (%s); its Postgres session is gone, "
+            "which already released it — this fetch held the lock for less than it appeared to",
+            err,
+        )
 
 
 def _resolve_investigation(conn: psycopg.Connection, system_id: UUID) -> UUID:
@@ -295,6 +321,9 @@ def _unlink_orphan_partials(dest: Path) -> None:
     unlocked by the time any sibling sweeps it and needs no timeout to age out. Correctness no
     longer depends on the fetch lock at all; do not re-derive it from the lock, and do not widen the
     glob over the whole uploads dir.
+
+    The ``suppress`` covers the directory walk only — every per-candidate fault is handled inside
+    :func:`_unlink_if_unheld`, so a single unsweepable file cannot truncate the pass.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
@@ -330,6 +359,9 @@ def _unlink_if_unheld(orphan: Path) -> None:
     and this sweep runs *holding* the fetch advisory lock, so a hang would wedge every sibling
     System on that (investigation, checksum). Nothing in kdive creates a non-regular file at a
     ``.partial`` path — this must simply not acquire a way to hang that it did not have before.
+
+    Every fault is handled **per candidate**, including the ``unlink``'s own, so one unsweepable
+    file cannot abort the pass and leave the rest of that base's orphans uncollected.
     """
     try:
         fd = os.open(orphan, os.O_RDONLY | os.O_NONBLOCK)
@@ -362,7 +394,20 @@ def _unlink_if_unheld(orphan: Path) -> None:
                 err.strerror,
             )
             return
-        orphan.unlink(missing_ok=True)
+        try:
+            orphan.unlink(missing_ok=True)
+        except OSError as err:
+            # The fourth outcome, and the one likeliest to matter: ``EPERM`` under a sticky-bit or
+            # foreign-uid staging directory — the ADR-0442 ownership asymmetry this same subsystem
+            # was bitten by — plus ``EROFS`` and ``EIO``. Handled per candidate so one bad file
+            # cannot abort the rest of the pass, which is what letting it reach the caller's
+            # ``suppress`` used to do.
+            _log.warning(
+                "could not unlink the staging partial %s (%s); leaving it for the "
+                "investigation-reclaim sweep",
+                orphan,
+                err.strerror,
+            )
     finally:
         os.close(fd)
 
@@ -410,6 +455,20 @@ def _flocked_partial(partial: Path) -> Iterator[None]:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as err:
             raise _swept_partial_error(partial) from err
+        except OSError as err:
+            # A filesystem that cannot lock at all (``ENOLCK`` on an NFS mount whose lock manager is
+            # down, ``EOPNOTSUPP`` on some FUSE and 9p backends). Staging unguarded is exactly the
+            # pre-ADR-0446 behavior and no worse: a sweep on this same filesystem cannot lock
+            # either, so it skips every candidate. Failing here instead would turn a filesystem
+            # without lock support into a total uploaded-rootfs outage, and would do it with a
+            # "failed to stage" message pointing at the object store.
+            _log.warning(
+                "this host cannot flock the staging partial %s (%s); staging it unguarded — a "
+                "sibling's orphan sweep on this filesystem cannot lock either, so it skips every "
+                "candidate and collection falls to the investigation-reclaim sweep",
+                partial,
+                err.strerror,
+            )
         if os.fstat(fd).st_nlink == 0:
             raise _swept_partial_error(partial)
         yield
