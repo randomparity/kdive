@@ -7,7 +7,11 @@ import errno
 import gzip
 import hashlib
 import io
+import logging
 import multiprocessing as mp
+import os
+import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -386,6 +390,162 @@ def test_stage_gzip_without_uncompressed_size_is_config_error(tmp_path: Path) ->
     assert "uncompressed_size" in str(error.value)
 
 
+# --- stage_uploaded_rootfs: crash durability of the publish (#1526) ------------------------------
+
+
+def _raise_eio(fd: int) -> None:
+    """An ``os.fsync`` stand-in for a disk that refuses the flush."""
+    raise OSError(errno.EIO, "Input/output error")
+
+
+def _trace_durability_syscalls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """Record every ``fsync``/``replace`` as ``(op, inode)``, in call order, and keep doing them.
+
+    The inode is what makes the trace meaningful: a rename preserves it, so the partial that was
+    synced, the file that was published, and the base sitting at ``dest`` afterwards are all the
+    same number, while the containing directory is a different one. That turns "durable before
+    visible" — which is otherwise unobservable in-process, since it is only decided by a power cut
+    — into an ordering assertion over the syscalls that decide it.
+    """
+    trace: list[tuple[str, int]] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd: int) -> None:
+        trace.append(("fsync", os.fstat(fd).st_ino))
+        real_fsync(fd)
+
+    def spy_replace(src: Any, dst: Any, **kwargs: Any) -> None:
+        trace.append(("replace", Path(src).stat().st_ino))
+        real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+    return trace
+
+
+def test_stage_syncs_the_partial_before_publishing_then_syncs_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #1526: `os.replace` is atomic against concurrent *readers*, not against a host crash. On a
+    # default ext4 mount the rename can become durable while the data blocks behind it are not,
+    # leaving a full-length `dest` of zeros or stale blocks. The partial's bytes must therefore be
+    # fsynced BEFORE the rename publishes them, and the directory holding the rename fsynced after.
+    # Order is the whole contract -- a sync after the rename would leave exactly the window the
+    # bug describes -- so this pins the sequence, not merely that a sync happened.
+    trace = _trace_durability_syscalls(monkeypatch)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    base_inode = dest.stat().st_ino  # the rename preserved the partial's inode
+    assert trace == [
+        ("fsync", base_inode),  # the staged bytes are on the disk ...
+        ("replace", base_inode),  # ... before the rename makes them reachable ...
+        ("fsync", dest.parent.stat().st_ino),  # ... and the rename itself is then durable
+    ]
+
+
+def test_stage_gzip_also_syncs_the_partial_before_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The gzip stager opens its own writer, so it needs the same durability as the identity one --
+    # a sync wired into a single codec would leave the other lane crash-torn.
+    trace = _trace_durability_syscalls(monkeypatch)
+    canonical = _QCOW2 + b"g" * 4096
+    compressed = gzip.compress(canonical)
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+
+    dest = _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+
+    assert dest.read_bytes() == canonical
+    base_inode = dest.stat().st_ino
+    assert trace.index(("fsync", base_inode)) < trace.index(("replace", base_inode))
+    assert trace[-1] == ("fsync", dest.parent.stat().st_ino)
+
+
+def test_stage_partial_sync_failure_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An fsync of the partial can fail for real (EIO, ENOSPC, EROFS after an error remount). It runs
+    # before the rename, so the contract is that nothing is published and no partial is left.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    monkeypatch.setattr(os, "fsync", _raise_eio)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_directory_sync_failure_leaves_the_good_base_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The directory fsync runs AFTER the rename, so its failure is the one case where the provision
+    # fails with `dest` already published and intact. ADR-0443 section 1 states that outcome as
+    # deliberate -- "the bytes are fine, only their durability is unproven" -- and it holds only
+    # because the error path unlinks `partial` and never touches `dest`. Nothing but this test stops
+    # a future cleanup from adding a `dest.unlink()` there and turning a benign failure into the
+    # deletion of a base other Systems in the investigation may already be booting off.
+    dest = _dest(tmp_path)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_fsync = os.fsync
+
+    def fail_on_the_directory(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_on_the_directory)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+    # And the next fetch reuses it rather than re-downloading, which is what makes the outcome
+    # "honest" rather than merely survivable.
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    inv = uuid4()
+    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(dest.read_bytes())
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
+    assert reuse_store.stream_calls == 0
+
+
+def test_stage_does_not_sync_a_partial_it_is_about_to_discard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sync costs a full flush of a base up to the 50 GiB canonical cap, so it belongs on the
+    # publish path only: a partial that fails verification is unlinked in the `finally` and never
+    # published, and paying to make those bytes durable buys nothing.
+    #
+    # BOTH rejections are covered, because they fail at different gates. The checksum arm raises
+    # inside the stager; the format arm raises from the shared magic gate *after* the stager has
+    # returned and closed its writer -- so a design that synced as each stager closed its writer
+    # would still flush a 50 GiB raw/vmdk upload whose SHA-256 matched perfectly before rejecting
+    # it. Syncing at the publish point instead is what makes the second case free.
+    trace = _trace_durability_syscalls(monkeypatch)
+    checksum_mismatch = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+    not_a_qcow2 = _FakeStore(
+        b"a perfectly intact vmdk", checksum=_sha256_b64(b"a perfectly intact vmdk")
+    )
+
+    for store in (checksum_mismatch, not_a_qcow2):
+        with pytest.raises(CategorizedError):
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert trace == []
+
+
 # --- fetch_uploaded_rootfs resolution + lock (fake sync connection, no DB) -----------------------
 
 
@@ -523,15 +683,246 @@ def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> Non
     inv = uuid4()
     dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
     dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"already-verified")
+    dest.write_bytes(_QCOW2 + b"-already-staged")
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
-    assert result == dest and result.read_bytes() == b"already-verified"
+    assert result == dest and result.read_bytes() == _QCOW2 + b"-already-staged"
     assert store.head_calls == 0 and store.stream_calls == 0
     assert conn.lock_keys == []  # the pre-lock cache hit never even took the lock
+
+
+# --- fetch_uploaded_rootfs: the reuse fast path re-verifies before handing a base back (#1526) ---
+
+
+@pytest.mark.parametrize(
+    ("name", "content"),
+    [
+        # A crash between the rename and the data blocks reaching disk: ext4 delayed allocation
+        # leaves the file at its full length with zeros behind it. This is the shape #1526 is
+        # named for, and the one a length- or existence-based gate cannot see.
+        ("crash_torn_zeroes", b"\x00" * len(_QCOW2)),
+        # A partial write that never reached the length of the magic.
+        ("truncated_below_the_magic", b"QF"),
+        # A zero-length file: `Path.touch()`, an ENOSPC at the first write, a restored-empty backup.
+        ("empty", b""),
+        # Not an image at all -- an error document or a log line written over the path.
+        ("garbage", b"<Error><Code>NoSuchKey</Code></Error>"),
+    ],
+)
+def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
+    tmp_path: Path, name: str, content: bytes, caplog: pytest.LogCaptureFixture
+) -> None:
+    # #1526: the reuse fast path used to be `if dest.is_file(): return dest` -- it verified
+    # NOTHING, so a base left corrupt by a crash mid-stage was handed straight back, and under
+    # ADR-0441's content-addressed reuse it then backed every System in the investigation until
+    # close. The checksum machinery was bypassed precisely BECAUSE the file existed. The observable
+    # contract is that such a base never reaches the caller: it is re-fetched from the object store
+    # and replaced, not returned.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(content)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2, f"{name}: handed back the unverifiable base"
+    assert store.stream_calls == 1  # it really went back to the object store
+    assert conn.lock_keys and conn.unlock_keys  # re-staged under the serializing fetch lock
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+    # The rejection is the one event this change exists to detect, and the re-stage succeeds, so a
+    # log line is the ONLY signal it ever fired. Without it the fix is unmeasurable in production.
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(
+        "staged rootfs base at" in message and str(dest) in message for message in warnings
+    ), f"{name}: rejected the base silently"
+    # And it must NOT claim a concurrent sibling. Nothing between the pre-lock and post-lock checks
+    # repairs `dest`, so an ungated post-lock warning would fire on every ordinary stale-base
+    # rejection -- attributing the commonest case to a racing fetcher that never existed, and
+    # making the genuinely concurrent case (the next test) indistinguishable from it.
+    assert not any("a sibling published" in message for message in warnings), (
+        f"{name}: blamed a sibling that never existed"
+    )
+
+
+def test_fetch_restages_over_a_non_regular_file_without_hanging(tmp_path: Path) -> None:
+    # `dest.is_file()` rejected a non-regular file for free. The format probe `open`s instead, and
+    # opening a FIFO for reading BLOCKS until a writer appears -- so a probe that did not check the
+    # mode first would hang the provision thread forever, and the post-lock call site would hang
+    # while HOLDING the fetch advisory lock, wedging every sibling System on that (investigation,
+    # checksum). The connection is autocommit, so no idle_in_transaction_session_timeout breaks it.
+    #
+    # The fetch runs on a daemon thread with a bounded join rather than inline: without the S_ISREG
+    # gate an inline call would hang the whole suite instead of failing this one test, and the repo
+    # has no pytest-timeout to catch that.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    os.mkfifo(dest)
+    assert not dest.is_file() and dest.exists()  # the shape the old gate rejected for free
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    outcome: list[Path | BaseException] = []
+
+    def run() -> None:
+        try:
+            outcome.append(fetch_uploaded_rootfs(conn, store, _upload(tmp_path)))  # ty: ignore[invalid-argument-type]
+        except BaseException as exc:  # noqa: BLE001  # reported on the main thread below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+
+    assert not worker.is_alive(), "the reuse probe blocked on a non-regular file at the staged path"
+    assert len(outcome) == 1 and isinstance(outcome[0], Path)
+    assert outcome[0].read_bytes() == _QCOW2  # re-staged over it, as the old code did
+    assert store.stream_calls == 1
+
+
+def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
+    tmp_path: Path,
+) -> None:
+    # "I cannot read the staged base" is NOT "there is no staged base". The old `dest.is_file()`
+    # was a stat, which needs only traverse permission on the parent; the format probe opens the
+    # file, so it can also fail with EACCES (a worker/staging-user asymmetry of the shape ADR-0442
+    # documents), EMFILE, or a transient EIO. Swallowing those as a cache miss would swap a good
+    # multi-GiB base out from under any guest holding it open and re-download it on every single
+    # provision for as long as the fault lasts -- silently. It must surface instead.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_QCOW2)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_open = Path.open
+
+    def refusing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == dest:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_open(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", refusing_open)
+        with pytest.raises(CategorizedError) as error:
+            fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["dest"] == str(dest)
+    assert store.stream_calls == 0  # no re-download was attempted behind the operator's back
+    assert dest.read_bytes() == _QCOW2  # and the good base was left exactly where it was
+    # The message must point at the present-but-unreadable file, not at a download that was never
+    # attempted: "failed to stage" would send an operator to the object store when the actionable
+    # fix is the mode bits on a file that is already there.
+    assert "present but could not be read" in str(error.value)
+    assert "failed to stage" not in str(error.value)
+
+
+class _SiblingStagesWhileWeWait(_FakeConn):
+    """A connection whose lock acquisition stands in for a sibling fetcher finishing the stage.
+
+    The pre-lock and post-lock reuse checks are separate call sites, so a re-check wired into only
+    the first one would still hand back whatever the wait produced. Writing ``content`` at
+    ``pg_advisory_lock`` reproduces exactly that window.
+    """
+
+    def __init__(self, *, dest: Path, content: bytes, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._dest = dest
+        self._content = content
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        super().execute(sql, params)
+        if "pg_advisory_lock" in sql:
+            self._dest.parent.mkdir(parents=True, exist_ok=True)
+            self._dest.write_bytes(self._content)
+
+
+def test_fetch_reuses_a_sibling_staged_base_that_appeared_during_the_lock_wait(
+    tmp_path: Path,
+) -> None:
+    # The post-lock fast path is the whole point of the lock: a sibling that finished while we
+    # waited must be a cache hit, not a redundant multi-GiB download.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    conn = _SiblingStagesWhileWeWait(
+        dest=dest,
+        content=_QCOW2,
+        investigation_id=inv,
+        owned_object_key=_owned_key(inv),
+    )
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2
+    assert store.stream_calls == 0  # served by the post-lock re-check, no download
+    assert conn.unlock_keys == conn.lock_keys  # and the lock was still released
+
+
+def test_fetch_restages_over_a_torn_base_that_appeared_during_the_lock_wait(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The same window, but what appeared is a torn base rather than a good one -- the post-lock
+    # check must verify it too, or a re-check on the pre-lock call site alone leaves the hole open
+    # for every fetcher that had to queue.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    conn = _SiblingStagesWhileWeWait(
+        dest=dest,
+        content=b"\x00" * len(_QCOW2),
+        investigation_id=inv,
+        owned_object_key=_owned_key(inv),
+    )
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2
+    assert store.stream_calls == 1  # the torn base was rejected and re-fetched
+    # A sibling that just published something unverifiable is a louder signal than finding a stale
+    # base on arrival, so the two rejection sites must not collapse into one indistinguishable line.
+    assert any("a sibling published" in record.message for record in caplog.records)
+
+
+def test_fetch_reuse_check_does_not_rescan_the_whole_base(tmp_path: Path) -> None:
+    # The re-check runs on every guest start against a base that can be tens of GiB, so it must
+    # stay O(1). A full checksum re-verify -- the obvious correct-but-unaffordable alternative --
+    # would read the whole file, which this bounds directly rather than by inspecting the code.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_QCOW2 + b"\xa5" * (8 * 1024 * 1024))
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    reads: list[int] = []
+    real_open = Path.open
+
+    def counting_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(self, *args, **kwargs)
+        if self == dest:
+            real_read = handle.read
+
+            def counting_read(size: int = -1, /) -> Any:
+                data = real_read(size)
+                reads.append(len(data))
+                return data
+
+            handle.read = counting_read
+        return handle
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", counting_open)
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result == dest and store.stream_calls == 0  # reused
+    assert sum(reads) <= 64, f"the reuse check read {sum(reads)} bytes of the base"
 
 
 def test_fetch_uses_deterministic_session_lock_key_not_hash(tmp_path: Path) -> None:
