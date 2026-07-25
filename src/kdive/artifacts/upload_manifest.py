@@ -115,10 +115,15 @@ async def refresh_deadline(
 ) -> datetime | None:
     """Set ``deadline = now() + ttl`` if a non-expired manifest exists; return the new deadline.
 
-    Returns ``None`` when no row exists OR the current deadline is already past — the caller
-    treats the latter as an expired upload window (ADR-0104 §6 step A). Refreshing the deadline
-    under the per-Run lock the reaper also takes is what stops the reaper from reclaiming an
-    in-flight reassembly's chunk objects.
+    Refreshing the deadline under the per-Run lock the reaper also takes is what stops the reaper
+    from reclaiming an in-flight reassembly's chunk objects (ADR-0104 §6 step A).
+
+    ``None`` means the ``UPDATE`` matched nothing: either no row exists or its deadline is already
+    past. **The caller must have established that the window is open before calling** — the sole
+    caller, ``runs.complete_build``, does so via ``_require_open_window`` earlier in the same
+    transaction, and ``now()`` is ``transaction_timestamp()``, so the ``deadline >= now()`` arm
+    cannot flip in between and a ``None`` there means the row was reaped. A caller without that
+    precondition cannot tell the two apart from the return value alone and must re-read the row.
 
     The stamped deadline is returned, not just a success flag, so the caller can carry it as the
     identity of the window it is committing against (ADR-0448 §2): a later re-read that finds a

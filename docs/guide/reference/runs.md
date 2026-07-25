@@ -73,6 +73,10 @@ from the Run and the artifact names, so a prompt re-mint of the same declaration
 what you already uploaded — but the reaper deletes a lapsed window's uncommitted objects
 within a sweep, so assume you will have to re-upload unless the retry succeeds.
 
+Do not re-mint while a finalize is still running: re-minting replaces the window that
+finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
+for the finalize to answer, then act on what it says.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |

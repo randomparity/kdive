@@ -483,6 +483,10 @@ def _register_runs_complete_build(
         from the Run and the artifact names, so a prompt re-mint of the same declaration reuses
         what you already uploaded — but the reaper deletes a lapsed window's uncommitted objects
         within a sweep, so assume you will have to re-upload unless the retry succeeds.
+
+        Do not re-mint while a finalize is still running: re-minting replaces the window that
+        finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
+        for the finalize to answer, then act on what it says.
         """
         ctx = current_context()
         return await with_runtime_for_run_target_kind(

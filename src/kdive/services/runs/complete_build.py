@@ -151,7 +151,7 @@ class CompleteBuildFinalizer:
         manifest_row = await upload_manifest.get_manifest(conn, "runs", run.id)
         if manifest_row is None:
             raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
-        await _require_open_window(conn, manifest_row)
+        await _require_open_window(conn, run.id, manifest_row)
         has_chunks = any(entry.chunks is not None for entry in manifest_row.entries)
         keys = {entry.name: f"{manifest_row.prefix}{entry.name}" for entry in manifest_row.entries}
         store = self.object_store_factory() if has_chunks else None
@@ -248,7 +248,7 @@ class _ExternalBuildFinalization:
 
 
 async def _require_open_window(
-    conn: AsyncConnection, manifest_row: upload_manifest.UploadManifest
+    conn: AsyncConnection, run_id: UUID, manifest_row: upload_manifest.UploadManifest
 ) -> None:
     """Reject a finalize past the manifest deadline; return while the window is open (ADR-0448).
 
@@ -272,7 +272,9 @@ async def _require_open_window(
     stamp = await upload_manifest.deadline_stamp(conn, manifest_row)
     if stamp.deadline < stamp.server_time:
         _log.info(
-            "runs.complete_build rejected: upload window expired (deadline %s, server_time %s)",
+            "runs.complete_build rejected: upload window expired (run %s, deadline %s, "
+            "server_time %s)",
+            run_id,
             stamp.deadline,
             stamp.server_time,
         )
