@@ -99,8 +99,16 @@ stored checksum, and atomically stage it — plus the new magic check below.
 > `UPLOADS_DIR` is a sibling of `ROOTFS_DIR` under `/var/lib/kdive`, so on a default deployment that
 > is the same filesystem as every live System's overlay. A rejected object — a failed checksum, a
 > non-qcow2 base, or the manifest-reaped identity fallback above — is now written in full before it
-> is rejected, where before it consumed no disk at all. There is no free-space precheck on either
-> staging path; adding one (both paths already hold the size to check against) is #1525.
+> is rejected, where before it consumed no disk at all.
+>
+> **Superseded by [ADR-0450](0450-uploaded-rootfs-staging-free-space-precheck.md) (#1525).** This
+> paragraph previously ended "there is no free-space precheck on either staging path; adding one
+> (both paths already hold the size to check against) is #1525". There is one now, and the
+> parenthetical was wrong in a way worth recording: only the identity path holds an exact size.
+> gzip writes the *decompressed* output, whose sole up-front figure is `uncompressed_size` — an
+> upper bound rather than a size (ADR-0443) — and a gzip declaration missing it has no knowable
+> requirement at all. ADR-0450 also records what the precheck does **not** cover: it is advisory,
+> so the concurrent-stager overlap this paragraph describes remains open (#1546).
 
 ### 3. qcow2 magic check, scoped to the upload path
 
