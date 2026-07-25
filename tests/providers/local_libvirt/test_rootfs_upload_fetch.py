@@ -1774,7 +1774,7 @@ def test_fetch_still_rejects_a_marked_base_whose_magic_fails(tmp_path: Path) -> 
 
 
 def test_fetch_reports_an_unreadable_completion_marker_and_names_it(tmp_path: Path) -> None:
-    # "I cannot stat the marker" is not "there is no completed stage", for _reusable_staged_base's
+    # "I cannot stat the marker" is not "there is no completed stage", for _staged_base_rejection's
     # own reason: answering it as a cache miss produces a silent, perpetual, fetch-lock-serialized
     # multi-GiB re-download loop. And the fault must name the MARKER -- sending an operator to
     # inspect a 50 GiB base when the zero-byte file beside it is what could not be read is the wrong
@@ -2370,7 +2370,7 @@ def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None
 
 
 def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path: Path) -> None:
-    # Polarity is the opposite of _reusable_staged_base's, which raises on an unreadable dest to
+    # Polarity is the opposite of _staged_base_rejection's, which raises on an unreadable dest to
     # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS
     # an unreadable dest, a rename needing permission on the directory rather than the file --
     # so an OSError must never turn a download that already succeeded into a failure. The trade
