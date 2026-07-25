@@ -272,6 +272,39 @@ def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_enqueue_stamps_a_first_insert_at_the_insert_not_the_transaction(migrated_url: str) -> None:
+    # The INSERT stamps `clock_timestamp()` rather than taking the column's `DEFAULT now()`, for
+    # the same reason the recycle does (ADR-0447): a caller opens a transaction and then blocks on
+    # an advisory lock before enqueuing, so `transaction_timestamp()` would date a first enqueue to
+    # before its own lock wait and let it preempt everything admitted during that wait.
+    async def _run() -> None:
+        inserter = await psycopg.AsyncConnection.connect(migrated_url)  # autocommit off
+        try:
+            async with inserter.transaction():
+                # Fix this transaction's transaction_timestamp before the competing enqueue, the
+                # way an advisory-lock wait does.
+                await inserter.execute("SELECT 1")
+
+                async with await _connect(migrated_url) as other:
+                    competitor = await queue.enqueue(
+                        other, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-first-other"
+                    )
+
+                inserted = await queue.enqueue(
+                    inserter, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-first-late"
+                )
+                assert inserted.created_at > competitor.created_at
+        finally:
+            await inserter.close()
+
+        async with await _connect(migrated_url) as reader:
+            first = await queue.dequeue(reader, "w-first")
+            assert first is not None
+            assert first.id == competitor.id  # not preempted by the later insert
+
+    asyncio.run(_run())
+
+
 def test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue(migrated_url: str) -> None:
     # Every production caller reaches `enqueue` inside a transaction its own caller opened, after
     # blocking on an advisory lock — so `now()` (= transaction_timestamp) would stamp the revived

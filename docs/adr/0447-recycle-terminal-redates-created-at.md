@@ -126,9 +126,11 @@ as the pattern for them.** No schema change, but it keeps a footgun in a core pr
 help the caller-triggered callers that already exist — a re-stage loop can still starve a lane, just
 more slowly. Rejected.
 
-**A tiebreaker on `id` in `dequeue`'s `ORDER BY`.** Out of scope: two jobs enqueued in the same
-transaction already tie via `DEFAULT now()`, the recycle does not make that worse, and `FOR UPDATE
-SKIP LOCKED` keeps a tie making progress.
+**A tiebreaker on `id` in `dequeue`'s `ORDER BY`.** Out of scope, and *less* needed after this
+change than before it: stamping the `INSERT` with `clock_timestamp()` — which advances per statement
+— means two jobs enqueued in the same transaction no longer share a `created_at` at all, where under
+`DEFAULT now()` they did. Any residual tie still makes progress under `FOR UPDATE SKIP LOCKED`, and
+`id` is a random uuid, so ordering by it would not be meaningfully fairer than ordering arbitrarily.
 
 ## Consequences
 

@@ -173,8 +173,9 @@ bound (≈2 880 rows/day for one stuck investigation) and would stack duplicate 
 
 Each enqueue therefore uses a **stable `dedup_key`** — `rootfs-reclaim:<investigation_id>` — so the
 sweeps hold at most **one** reclaim job row per investigation. Admission is gated in the sweep
-rather than delegated to `queue.enqueue`'s `recycle_terminal`, because two properties of that
-recycle are wrong at sweep cadence:
+rather than delegated to `queue.enqueue`'s `recycle_terminal`, because properties of that recycle
+are wrong at sweep cadence (the ordering bullet below was one of two; ADR-0447 fixed it in the
+primitive, leaving the retry-rate bullet in force):
 
 - **Ordering.** ~~`dequeue` claims by `ORDER BY created_at`, and the recycle resets state in place
   without touching `created_at`. A job recycled every pass would keep its original timestamp

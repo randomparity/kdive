@@ -159,9 +159,11 @@ canceled-only-when-opted-in) cover R3 and are unchanged.
 
 ## Non-goals
 
-- No `dequeue` tiebreaker on `id`. Two jobs enqueued in the *same* transaction already tie on
-  `created_at` via `DEFAULT now()`; the recycle does not make that worse, and `FOR UPDATE SKIP
-  LOCKED` keeps a tie making progress.
+- No `dequeue` tiebreaker on `id` — and this change makes one *less* necessary, not more. Under
+  `DEFAULT now()` two jobs enqueued in the same transaction shared a `created_at`; stamping the
+  `INSERT` with `clock_timestamp()`, which advances per statement, means they no longer tie at all.
+  Any residual tie still makes progress under `FOR UPDATE SKIP LOCKED`, and `id` is a random uuid,
+  so ordering by it would not be meaningfully fairer than ordering arbitrarily.
 - `gc.py`'s delete-and-re-insert is **not** replaced by `recycle_terminal`. Its second
   justification — a 5-minute backoff that also keeps the `failed` row inspectable, with
   `max_attempts=1` because the sweep is the retry loop — is independent of this bug and still
