@@ -8,11 +8,19 @@ from collections.abc import Callable
 import pytest
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
+from kdive.config.core_settings import DATABASE_URL
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.processes import runtime
 
 # A loopback port nothing listens on: connect is refused immediately, so the pool retries
 # until its open budget expires rather than hanging on an unroutable address.
 _UNREACHABLE_DB = "postgresql://kdive@127.0.0.1:1/kdive?connect_timeout=1"
+
+# The exact open the runtime must make (ADR-0449). Spelled out so a revert to the cold
+# `open()` default reddens every fake-pool test here, not only the PG-backed one — which
+# skips silently on a runner without Docker (`KDIVE_REQUIRE_DOCKER` is set in CI, not
+# locally), and would otherwise leave the decision unguarded there.
+_WARM_OPEN = f"open(wait=True, timeout={runtime.POOL_OPEN_TIMEOUT_SECONDS})"
 
 
 class FakePool:
@@ -20,8 +28,10 @@ class FakePool:
         self.events: list[str] = []
 
     async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
-        del wait, timeout
-        self.events.append("open")
+        # Record the arguments, not just the call: the whole decision under test is *how*
+        # the runtime opens the pool, and a fake that discards them lets a revert to the
+        # cold default pass on any runner without Docker for the PG-backed test below.
+        self.events.append(f"open(wait={wait}, timeout={timeout})")
 
     async def close(self) -> None:
         self.events.append("close")
@@ -126,9 +136,14 @@ def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
 ) -> None:
     """A database that never answers must end the process, not start a body it cannot serve.
 
-    This is the cost side of ADR-0449's fail-fast choice, so pin it: the open raises rather
-    than degrading, the body never runs, and the ``finally`` still clears the secret registry
-    — which only holds because the open moved *inside* the ``try``.
+    This is the cost side of ADR-0449's fail-fast choice, so pin all of it: the open raises
+    rather than degrading, the body never runs, and the ``finally`` still clears the secret
+    registry — which only holds because the open moved *inside* the ``try``.
+
+    The failure is a ``CategorizedError``, not the bare ``PoolTimeout``, because that is the
+    only thing ``__main__`` handles: an uncategorized raise exits on a stderr traceback with
+    a generic code, invisible to a deployment scraping the ADR-0090 structured floor — for
+    what this change makes a *routine* condition (the backend is not up yet).
     """
 
     async def run() -> None:
@@ -143,7 +158,7 @@ def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
             nonlocal started
             started = True
 
-        with pytest.raises(PoolTimeout):
+        with pytest.raises(CategorizedError) as caught:
             await runtime.run_process_runtime(
                 process="worker",
                 pool=pool,
@@ -154,6 +169,11 @@ def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
                 body=body,
             )
 
+        assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        assert "database unreachable" in str(caught.value)
+        assert caught.value.details["variable"] == DATABASE_URL.name
+        # The cause is chained, so the underlying timeout stays in the operator's traceback.
+        assert isinstance(caught.value.__cause__, PoolTimeout)
         assert not started
         assert registry.cleared
         assert not harness.started.is_set(), "aux listener started despite an unopened pool"
@@ -188,7 +208,7 @@ def test_runtime_success_closes_clears_and_cancels_aux_task(
             body=body,
         )
 
-        assert pool.events == ["open", "close"]
+        assert pool.events == [_WARM_OPEN, "close"]
         assert registry.cleared
         assert harness.cancelled
 
@@ -220,7 +240,7 @@ def test_runtime_exception_still_closes_clears_cancels_and_reraises(
                 body=body,
             )
 
-        assert pool.events == ["open", "close"]
+        assert pool.events == [_WARM_OPEN, "close"]
         assert registry.cleared
         assert harness.cancelled
 
@@ -267,7 +287,7 @@ def test_runtime_tick_heartbeat_starts_and_cancels_heartbeat_task(
 
         assert harness.cancelled
         assert heartbeat_cancelled
-        assert pool.events == ["open", "close"]
+        assert pool.events == [_WARM_OPEN, "close"]
         assert registry.cleared
 
     asyncio.run(run())

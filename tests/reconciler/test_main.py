@@ -9,8 +9,14 @@ import pytest
 
 from kdive.__main__ import build_parser
 from kdive.observability.facade import Telemetry
+from kdive.processes.runtime import POOL_OPEN_TIMEOUT_SECONDS
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.security.secrets.secret_registry import SecretRegistry
+
+
+def _warm_open() -> str:
+    """The exact open the runtime must make: warm, at the ADR-0449 budget."""
+    return f"open(wait=True, timeout={POOL_OPEN_TIMEOUT_SECONDS})"
 
 
 def test_reconciler_subcommand_parses() -> None:
@@ -52,11 +58,11 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     discovery_release = asyncio.Event()
 
     class _FakePool:
-        # Signature mirrors `AsyncConnectionPool.open`; the runtime warms the pool with
-        # `wait=True` at start (ADR-0449).
+        # Signature mirrors `AsyncConnectionPool.open`. Record the arguments, not just the
+        # call: the runtime must warm the pool with `wait=True` at start (ADR-0449), and a
+        # fake that discards them lets a revert to the cold default pass.
         async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
-            del wait, timeout
-            events.append("open")
+            events.append(f"open(wait={wait}, timeout={timeout})")
 
         async def close(self) -> None:
             events.append("close")
@@ -131,7 +137,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
 
     asyncio.run(__main__._run_reconciler(expected_registry, _fake_telemetry()))
 
-    assert events[0] == "open"
+    assert events[0] == _warm_open()
     assert events[-1] == "close"
     assert "discover-end" in events
     assert events.index("run") < events.index("discover-end")
