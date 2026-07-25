@@ -215,11 +215,23 @@ lock:
   the correctness guarantee — *against a concurrent reader; see the ADR-0443 amendment below for the
   host-crash case.* The fetcher unlinks its own `.partial` in a `finally` on any verify/download
   failure. A **crash-orphaned** `.partial` (a killed worker) is a SENSITIVE multi-GiB leak that no row
-  owns, collected on **two** paths: opportunistically, a live fetcher — holding the lock, which serializes
-  downloads so no *live* sibling exists — glob-unlinks any other `<token>.*.partial` on the next fetch of
+  owns, collected on **two** paths: opportunistically, a live fetcher — ~~holding the lock, which serializes
+  downloads so no *live* sibling exists~~ — glob-unlinks any other `<token>.*.partial` on the next fetch of
   that base; and as a backstop, the reclaim sweep globs and unlinks stale `<token>.*.partial` under
   `rootfs-uploads/<inv>/` **before** the empty-dir removal (else a leftover partial keeps the dir non-empty
   forever). So a crash-orphan is bounded by the *next fetch*, not only by full investigation reclaim.
+
+  > *Amended (#1524 / [ADR-0446](0446-flock-guarded-orphan-partial-sweep.md)).* "Holding the lock,
+  > which serializes downloads so no *live* sibling exists" is a conditional stated as an invariant,
+  > and it is the whole justification for the unconditional unlink. The fetch lock is a **session**
+  > `pg_advisory_lock` — a property of a Postgres connection, not of the process that took it — held
+  > across a download during which that connection sends nothing, so an idle-connection reap or a
+  > terminated backend releases it with the owner still writing. The sweep is now gated on an
+  > `flock` the live writer holds on its own partial and skips any candidate it cannot lock, so its
+  > safety no longer rests on the fetch lock at all. Reach is unchanged: the kernel drops an `flock`
+  > when the holding descriptor closes, including on process exit, so a killed worker's orphan is
+  > already unlocked by the time a sibling sweeps it. The reclaim-side backstop is untouched — it
+  > runs only once no committed rootfs row remains, so no live fetcher for that base can exist.
 - **Deterministic advisory lock** — to avoid the *redundant* multi-GiB download (make "written once" hold,
   not just "not corrupt"), the fetch takes a **session-scoped** `pg_advisory_lock` on its dedicated sync
   connection, held across check-and-download and released after `os.replace`, keyed via the repo's
@@ -240,7 +252,10 @@ lock:
   > and fails at `os.replace`, so the degradation is a **failed provision**, not only a redundant
   > download. Correctness is unaffected: no partial is ever shared and `dest` is never an unverified
   > base. The window was the gzip path's alone; #1520 extends it to identity, and bounding the sweep
-  > away from live partials is tracked in #1524.
+  > away from live partials is ~~tracked in~~ **closed by** #1524 /
+  > [ADR-0446](0446-flock-guarded-orphan-partial-sweep.md) — the sweep now skips any partial a live
+  > writer holds an `flock` on, so a lost session lock degrades to the redundant download this
+  > decision originally claimed, not to a failed provision.
 
   > *Amended (#1526 / [ADR-0443](0443-durable-rootfs-staging-and-reuse-recheck.md)).* The unique
   > partial plus `os.replace` is the correctness guarantee against a concurrent **reader**, not

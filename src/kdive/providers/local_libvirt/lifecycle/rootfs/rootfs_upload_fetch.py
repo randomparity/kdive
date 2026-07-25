@@ -27,19 +27,28 @@ Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
 partial — the correctness guarantee. A **session-scoped** ``pg_advisory_lock`` (keyed via
 ``db.locks._session_lock_key``, held on this call's dedicated sync connection across the download)
-collapses the redundant multi-GiB download; while it is held — so a live sibling partial is not
-expected — a crash-orphaned ``<token>.*.partial`` is glob-unlinked opportunistically. A lock lost
-mid-transfer breaks that expectation; see :func:`_unlink_orphan_partials`.
+collapses the redundant multi-GiB download, and a crash-orphaned ``<token>.*.partial`` is
+glob-unlinked opportunistically on the next fetch of that base.
+
+That sweep is gated on an ``flock``, not on the fetch lock (ADR-0446): a session lock belongs to a
+Postgres *connection*, which is idle for the whole download and can be reaped while its owner keeps
+writing, so a sibling could acquire the lock and unlink a **live** partial. Each fetcher instead
+holds an exclusive ``flock`` on its own partial (:func:`_flocked_partial`) and the sweep skips what
+it cannot lock — while the kernel's release-on-exit keeps a killed worker's orphan collectable with
+no timeout to wait out.
 """
 
 from __future__ import annotations
 
 import base64
+import errno
+import fcntl
 import hashlib
 import logging
 import os
 import stat
-from contextlib import AbstractContextManager, suppress
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -264,23 +273,99 @@ def _resolve_object(
 
 
 def _unlink_orphan_partials(dest: Path) -> None:
-    """Glob-unlink a crash-orphaned ``<token>.*.partial`` under the fetch lock (ADR-0441 §5).
+    """Glob-unlink each **unheld** crash-orphaned ``<token>.*.partial`` (ADR-0446).
 
-    Runs only while holding the fetch lock, which serializes downloads, so a *live* sibling partial
-    is not expected — a match is normally a killed worker's SENSITIVE orphan, bounded by this next
-    fetch rather than by full investigation reclaim.
+    A killed worker's ``.partial`` is a SENSITIVE multi-GiB leak no row owns, so ADR-0441 §5 has a
+    live fetcher collect it opportunistically — bounding it by the *next fetch* of that base rather
+    than by full investigation reclaim.
 
-    That premise holds only while the lock does. A lock lost mid-transfer (an idle-session timeout,
-    a recycled connection) lets this sweep unlink a *live* sibling's partial: that fetcher writes on
-    into the unlinked inode and fails at ``os.replace`` — a failed provision, never a corrupt
-    ``dest`` — while those blocks stay charged to ``df`` yet invisible to every path-matching tool,
-    so the disk pressure looks like a leak the sweeps missed. Bounding this glob away from live
-    partials is #1524; do not widen it (outside the lock, or over the whole uploads dir) on the
-    strength of the paragraph above.
+    What it must not collect is a partial some sibling is still writing. ADR-0441 §5 justified the
+    unconditional unlink on holding the fetch lock, "which serializes downloads so no *live* sibling
+    exists" — but that lock is a **session** ``pg_advisory_lock``, a property of a Postgres
+    connection rather than of the process that took it, and the connection sends nothing for the
+    whole multi-GiB download. An idle-connection reap or a terminated backend releases it while the
+    owner is still writing; a sibling then acquires it, swept here, and the first fetcher wrote on
+    into an unlinked inode and failed at ``os.replace`` — a failed provision, with the written
+    blocks charged to ``df`` yet invisible to every path-matching tool.
+
+    So liveness is asked of the kernel instead: a live writer holds an exclusive ``flock`` on its
+    own partial (:func:`_flocked_partial`), and a candidate this cannot lock is skipped. The gate
+    costs nothing in reach, because the kernel drops an ``flock`` when the holding descriptor is
+    closed — including on process exit, normal or ``SIGKILL`` — so a crash orphan is already
+    unlocked by the time any sibling sweeps it and needs no timeout to age out. Correctness no
+    longer depends on the fetch lock at all; do not re-derive it from the lock, and do not widen the
+    glob over the whole uploads dir.
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
-            orphan.unlink(missing_ok=True)
+            _unlink_if_unheld(orphan)
+
+
+def _unlink_if_unheld(orphan: Path) -> None:
+    """Unlink ``orphan`` only if no live fetcher holds its ``flock``; any ``OSError`` is a skip.
+
+    ``O_NONBLOCK`` is a no-op on a regular file and is there for the reason ADR-0443 §2 checks
+    ``S_ISREG`` before opening ``dest``: opening a FIFO for reading blocks until a writer appears,
+    and this sweep runs *holding* the fetch advisory lock, so a hang would wedge every sibling
+    System on that (investigation, checksum). Nothing in kdive creates a non-regular file at a
+    ``.partial`` path — this must simply not acquire a way to hang that it did not have before.
+
+    A candidate that vanishes between the glob and the ``open`` is the achieved post-state, not a
+    fault (the reclaim-side backstop sweeps the same directory), and a candidate that cannot be
+    opened at all is left for that backstop rather than failing a provision over a leak.
+    """
+    try:
+        fd = os.open(orphan, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return  # a live sibling is still writing this one
+        orphan.unlink(missing_ok=True)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _flocked_partial(partial: Path) -> Iterator[None]:
+    """Create this fetcher's partial and hold an exclusive ``flock`` on it while it stages.
+
+    The liveness marker :func:`_unlink_orphan_partials` reads. It is uncontended by construction —
+    partial names carry a ``uuid4``, so no two fetchers ever name the same file — and the descriptor
+    is held across the download, the verify, and :func:`_durable_replace`, which is exactly the
+    window in which a sweep must not touch the file.
+
+    The mode is ``0o666`` so umask application matches the ``partial.open("wb")`` this fronts, byte
+    for byte. That is load-bearing rather than tidy: ``os.replace`` carries the partial's mode onto
+    the published base, and QEMU reads that base as the unprivileged hypervisor user, so tightening
+    it to ``0o600`` — the reflex for a SENSITIVE file — would make every base staged after this
+    unreadable to the hypervisor. ``O_EXCL`` because a file already sitting at a ``uuid4`` path is
+    not something to write through silently.
+
+    ``open`` and ``flock`` are two syscalls, so a sweeper can in principle unlink the partial
+    between them. The ``st_nlink`` check closes that residue the only way that does not reintroduce
+    an uncollectable orphan (ADR-0446 §3): rather than streaming gigabytes into an inode no path
+    reaches, the fetcher raises, and the caller's ``except OSError`` renders it as the staging fault
+    it is.
+
+    Raises:
+        OSError: ``ENOENT`` if the partial was unlinked between its creation and the lock.
+    """
+    fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.fstat(fd).st_nlink == 0:
+            raise OSError(
+                errno.ENOENT,
+                "the staging partial was unlinked between its creation and its lock; a concurrent "
+                "orphan sweep won the window",
+                str(partial),
+            )
+        yield
+    finally:
+        os.close(fd)
 
 
 def stage_uploaded_rootfs(
@@ -301,8 +386,9 @@ def stage_uploaded_rootfs(
     the canonical base is qcow2-magic-validated and written atomically **and durably** (a
     ``<token>.<uuid>.partial`` temp, ``fsync``\\ ed, then ``os.replace``\\ d and the directory
     ``fsync``\\ ed — ADR-0443) so ``dest`` is only ever a verified base, survives a host crash, and
-    two concurrent fetchers never share a partial. The partial is unlinked in a ``finally``, so no
-    failure — typed or not — leaves one behind.
+    two concurrent fetchers never share a partial. The partial is held under an exclusive ``flock``
+    for its whole life (ADR-0446), so a sibling's orphan sweep cannot unlink it mid-download. It is
+    unlinked in a ``finally``, so no failure — typed or not — leaves one behind.
     """
     head = store.head(object_key)
     if head is None:
@@ -321,36 +407,37 @@ def stage_uploaded_rootfs(
     effective = normalize_encoding(encoding)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if effective is None:
-            _stage_identity(
-                store,
-                key=object_key,
-                checksum=head.checksum_sha256,
-                partial=partial,
-                system_id=system_id,
-            )
-        elif effective == GZIP_ENCODING:
-            _stage_gzip(
-                store,
-                key=object_key,
-                compressed_size=head.size_bytes,
-                checksum=head.checksum_sha256,
-                uncompressed_size=uncompressed_size,
-                partial=partial,
-                system_id=system_id,
-            )
-        else:
-            # Defence in depth: the declaration validator (ADR-0437) rejects an unknown codec, so
-            # this is unreachable with valid data — but naming the codec beats silently staging it
-            # as identity and failing with a misleading "not a qcow2" magic error.
-            raise CategorizedError(
-                f"uploaded rootfs declared an unsupported transport encoding {effective!r}; "
-                "only gzip is supported",
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                details={"system_id": str(system_id)},
-            )
-        _require_qcow2_magic(partial, system_id=str(system_id))
-        _durable_replace(partial, dest)
+        with _flocked_partial(partial):
+            if effective is None:
+                _stage_identity(
+                    store,
+                    key=object_key,
+                    checksum=head.checksum_sha256,
+                    partial=partial,
+                    system_id=system_id,
+                )
+            elif effective == GZIP_ENCODING:
+                _stage_gzip(
+                    store,
+                    key=object_key,
+                    compressed_size=head.size_bytes,
+                    checksum=head.checksum_sha256,
+                    uncompressed_size=uncompressed_size,
+                    partial=partial,
+                    system_id=system_id,
+                )
+            else:
+                # Defence in depth: the declaration validator (ADR-0437) rejects an unknown codec,
+                # so this is unreachable with valid data — but naming the codec beats silently
+                # staging it as identity and failing with a misleading "not a qcow2" magic error.
+                raise CategorizedError(
+                    f"uploaded rootfs declared an unsupported transport encoding {effective!r}; "
+                    "only gzip is supported",
+                    category=ErrorCategory.CONFIGURATION_ERROR,
+                    details={"system_id": str(system_id)},
+                )
+            _require_qcow2_magic(partial, system_id=str(system_id))
+            _durable_replace(partial, dest)
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
     finally:

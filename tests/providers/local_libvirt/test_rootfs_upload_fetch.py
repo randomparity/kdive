@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import gzip
 import hashlib
 import io
@@ -12,6 +13,7 @@ import multiprocessing as mp
 import os
 import stat
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -34,6 +36,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
     _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
+    _unlink_orphan_partials,
     fetch_uploaded_rootfs,
     stage_uploaded_rootfs,
 )
@@ -1052,3 +1055,251 @@ def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> 
 
     assert counter.read_text().count("1") == 1  # exactly one download served both Systems
     assert staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path).read_bytes() == _QCOW2
+
+
+# --- #1524: the orphan sweep is gated on an flock, not on the (losable) fetch lock ---------------
+
+
+@contextmanager
+def _held_partial(dest: Path, suffix: str = "live") -> Iterator[Path]:
+    """A ``<token>.<suffix>.partial`` held under an exclusive ``flock``, as a live fetcher holds it.
+
+    Stands in for the sibling whose session advisory lock was dropped mid-download while it kept
+    writing: from the sweeper's point of view the fetch lock is free and this file is present, which
+    is exactly the state ADR-0441 §5 assumed could not occur.
+    """
+    partial = dest.parent / f"{dest.stem}.{suffix}.partial"
+    partial.write_bytes(b"a live sibling is still writing this")
+    fd = os.open(partial, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield partial
+    finally:
+        os.close(fd)
+
+
+def test_sweep_skips_a_partial_a_live_sibling_still_holds(tmp_path: Path) -> None:
+    # #1524 acceptance, at the sweep itself: the fetch lock is not evidence of anything, so the
+    # sweep asks the kernel who is alive instead. Red before the fix -- the sweep glob-unlinked
+    # unconditionally, destroying a multi-GiB download that was still in flight.
+    dest = _dest(tmp_path)
+    with _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+        assert live.exists()
+        assert live.read_bytes() == b"a live sibling is still writing this"
+
+
+def test_sweep_unlinks_an_unheld_crash_orphan(tmp_path: Path) -> None:
+    # The behaviour the flock gate must not cost: a killed worker leaves an unlocked partial and it
+    # is still collected on the next fetch, rather than waiting for full investigation reclaim.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked by a killed worker")
+
+    _unlink_orphan_partials(dest)
+
+    assert not orphan.exists()
+
+
+def test_sweep_unlinks_only_the_orphan_when_a_live_partial_sits_beside_it(tmp_path: Path) -> None:
+    # Both cases in one directory, because the interesting failure is a gate that is all-or-nothing
+    # -- one that skips the whole sweep on the first locked candidate would leak the orphan, and one
+    # that ignores the lock would destroy the live partial.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked")
+
+    with _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+        assert live.exists()
+    assert not orphan.exists()
+
+
+def test_sweep_tolerates_a_candidate_that_vanishes_between_the_glob_and_the_open(
+    tmp_path: Path,
+) -> None:
+    # The reclaim-side backstop sweeps the same directory, so a candidate can be gone by the time
+    # this one opens it. That is the achieved post-state, not a fault: the sweep is best-effort and
+    # runs holding the fetch lock, so it must never raise into the provision.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked")
+    real_open = os.open
+
+    def vanishing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == orphan:
+            orphan.unlink()
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "open", vanishing_open)
+        _unlink_orphan_partials(dest)
+
+    assert not orphan.exists()
+
+
+def _hold_flock_child(path: str, locked: Any) -> None:  # pragma: no cover - child process
+    fd = os.open(path, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    locked.set()
+    time.sleep(300)
+
+
+def test_sweep_collects_a_partial_once_its_holder_process_dies(tmp_path: Path) -> None:
+    # The property that makes flock beat an mtime window, proven against a real process rather than
+    # asserted: the kernel drops the lock when the holding descriptor closes, and a SIGKILLed worker
+    # closes every descriptor. So a crash orphan needs no timeout to age out -- it is collectable
+    # the instant its holder is gone, while a live holder is protected for as long as it lives.
+    dest = _dest(tmp_path)
+    partial = dest.parent / f"{_TOKEN}.crashed.partial"
+    partial.write_bytes(b"mid-download when the worker was killed")
+    ctx = mp.get_context("spawn")
+    locked = ctx.Event()
+    proc = ctx.Process(target=_hold_flock_child, args=(str(partial), locked))
+    proc.start()
+    try:
+        assert locked.wait(timeout=60), "the child never took the flock"
+        _unlink_orphan_partials(dest)
+        assert partial.exists(), "a live holder's partial was swept"
+    finally:
+        proc.kill()
+        proc.join(timeout=60)
+    assert proc.exitcode is not None, "the flock holder did not exit"
+
+    _unlink_orphan_partials(dest)
+
+    assert not partial.exists()
+
+
+class _StallingReader:
+    """Serves the object in two halves, blocking before the tail until the test releases it.
+
+    The pause puts a *real* fetcher mid-download with its partial on disk and partly written, which
+    is the only state in which the sweep's guard means anything.
+    """
+
+    def __init__(self, data: bytes, reached: threading.Event, release: threading.Event) -> None:
+        self._chunks = [data[: len(data) // 2], data[len(data) // 2 :]]
+        self._served = False
+        self._reached = reached
+        self._release = release
+
+    def read(self, size: int = -1, /) -> bytes:
+        if not self._chunks:
+            return b""
+        if self._served:
+            self._reached.set()
+            assert self._release.wait(timeout=60), "the staging thread was never released"
+        self._served = True
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+class _StallingStore:
+    """An identity store whose body read stalls mid-object (see :class:`_StallingReader`)."""
+
+    def __init__(self, data: bytes, reached: threading.Event, release: threading.Event) -> None:
+        self._data = data
+        self._reached = reached
+        self._release = release
+
+    def head(self, key: str) -> HeadResult:
+        return HeadResult(
+            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+        )
+
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        reader = _StallingReader(self._data, self._reached, self._release)
+        try:
+            yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
+        finally:
+            reader.close()
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        return self._data[start : start + length]
+
+
+def test_a_staging_fetchers_own_partial_survives_a_concurrent_sweep(tmp_path: Path) -> None:
+    # End-to-end in the shape the bug takes: fetcher A is mid-download when the sweep runs, and the
+    # sweep must leave A's partial alone and let A publish. This pins that the writer takes the lock
+    # itself -- a guard applied only in the sweep's own tests would pass those and still lose here.
+    payload = _QCOW2 + b"\xa5" * 4096
+    reached, release = threading.Event(), threading.Event()
+    store = _StallingStore(payload, reached, release)
+    dest = _dest(tmp_path)
+    failure: list[BaseException] = []
+
+    def stage() -> None:
+        try:
+            stage_uploaded_rootfs(
+                store,
+                object_key="local/investigations/inv/rootfs-token",
+                dest=dest,
+                encoding=None,
+                uncompressed_size=None,
+                system_id=uuid4(),
+            )
+        except BaseException as err:  # noqa: BLE001 - re-raised in the main thread below
+            failure.append(err)
+
+    worker = threading.Thread(target=stage)
+    worker.start()
+    try:
+        assert reached.wait(timeout=60), "the staging thread never reached the stall"
+        partials = list(dest.parent.glob(f"{_TOKEN}.*.partial"))
+        assert len(partials) == 1, f"expected one in-flight partial, found {partials}"
+        _unlink_orphan_partials(dest)
+        assert partials[0].exists(), "the sweep destroyed a live fetcher's own partial"
+    finally:
+        release.set()
+        worker.join(timeout=60)
+
+    assert not failure, f"the staging thread failed: {failure}"
+    assert not worker.is_alive()
+    assert dest.read_bytes() == payload  # published despite the concurrent sweep
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_fetch_leaves_a_live_siblings_partial_and_still_publishes(tmp_path: Path) -> None:
+    # #1524 acceptance at the call site: the sweep runs from inside fetch_uploaded_rootfs while it
+    # holds the fetch lock, which is precisely where the lost-lock ordering puts it.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with _held_partial(dest) as live:
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+        assert live.exists(), "the fetch swept a live sibling's partial out from under it"
+
+    assert result == dest
+    assert dest.read_bytes() == _QCOW2
+
+
+def test_stage_fails_loud_when_its_partial_is_unlinked_in_the_create_lock_window(
+    tmp_path: Path,
+) -> None:
+    # ADR-0446 §3: creating the partial and locking it are two syscalls, and a sweeper that wins the
+    # gap would leave the fetcher streaming gigabytes into an inode no path reaches -- blocks
+    # charged to df and invisible to every path-matching tool. The nlink check turns that into a
+    # named failure that downloads nothing, rather than a silent leak.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_flock = fcntl.flock
+
+    def sweeping_flock(fd: Any, operation: int) -> None:
+        for partial in tmp_path.glob(f"{_TOKEN}.*.partial"):
+            partial.unlink()
+        real_flock(fd, operation)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", sweeping_flock)
+        with pytest.raises(CategorizedError) as error:
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert store.stream_calls == 0  # failed before spending the download
+    assert not _dest(tmp_path).exists()
