@@ -25,6 +25,12 @@ UploadOwnerKind = Literal["runs", "investigations"]
 RUN_UPLOAD_OWNER: UploadOwnerKind = "runs"
 INVESTIGATION_UPLOAD_OWNER: UploadOwnerKind = "investigations"
 
+#: The object-store tenant every upload window mints under. Defined here, beside the owner kinds,
+#: because the mint sites and the reconciler's orphan sweep (ADR-0455) must agree on the whole
+#: prefix: a sweep whose tenant drifts from the mint's lists an empty prefix and reports a healthy
+#: zero forever while the leak resumes.
+UPLOAD_TENANT = "local"
+
 
 class UploadManifest(NamedTuple):
     """A persisted manifest: the declared entries, the key prefix, and the deadline."""

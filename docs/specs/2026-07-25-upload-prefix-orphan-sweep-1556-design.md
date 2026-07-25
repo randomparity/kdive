@@ -23,8 +23,8 @@ in the tree. The leak is storage-cost only, and it accumulates monotonically.
 
 ## What makes it fixable
 
-The prefix survives the row. Upload keys are `owner_prefix(_TENANT, owner_kind, owner_id)` from a
-single mint site — `local/runs/<run_id>/` and `local/investigations/<investigation_id>/` — so a
+The prefix survives the row. Upload keys are `owner_prefix(UPLOAD_TENANT, owner_kind, owner_id)`
+from a single mint site — `local/runs/<run_id>/` and `local/investigations/<investigation_id>/` — so a
 leaked object's owner is recoverable **from the key itself**, not merely from the owner tables. That
 is the difference between an enumerable backlog and log archaeology.
 
@@ -34,11 +34,14 @@ is the difference between an enumerable backlog and log archaeology.
   row for its owner is reclaimed without operator action.
 - **AC-2** An object belonging to a live (or re-minted) upload window is never reclaimed.
 - **AC-3** A freshly written object is protected by a grace window compared in Postgres, never in
-  Python.
+  Python, and that window clears the upload-window TTL so a just-reaped window's bytes are not
+  reclaimed in the pass that reaped them.
 - **AC-4** An object with a committed `artifacts` row is never reclaimed, whatever its age.
 - **AC-5** A key that cannot be attributed to an owner is never reclaimed.
 - **AC-6** A store fault during the sweep loses nothing: the next pass re-derives the same
   candidates, and the fault is visible on the ADR-0190 group-E error counter.
+- **AC-7** A sweep scoped out of its own bucket by key-layout drift is distinguishable from a clean
+  one, rather than reporting the same zero.
 
 ## Design
 
@@ -47,8 +50,9 @@ is the difference between an enumerable backlog and log archaeology.
 A new reconciler repair, `repair_leaked_upload_objects`, in
 `src/kdive/reconciler/cleanup/upload_orphans.py`:
 
-1. LIST each upload root — `local/runs/` and `local/investigations/`, derived from the reaper's own
-   owner-kind table so the two cannot drift — with store mtimes.
+1. LIST each upload root — `local/runs/` and `local/investigations/`, both halves derived (kinds
+   from the reaper's table, tenant from the mint's shared constant) so neither can drift — with
+   store mtimes.
 2. Attribute each listed key to an owner by parsing it: exactly four `/`-separated components,
    `local/<kind>/<uuid>/<name>`, `<kind>` a known upload owner kind and `<uuid>` a parseable UUID.
    A key of any other shape is dropped, never deleted (AC-5).
@@ -70,24 +74,30 @@ WHERE c.last_modified < now() - %s
                   WHERE m.owner_kind = c.owner_kind AND m.owner_id = c.owner_id)
 ```
 
-Three independent fences, all evaluated in Postgres `now()`:
+Three fences, all evaluated in Postgres `now()` — and the third is not independent of the second:
 
 - **`artifacts`** — the object is registered and owned by the catalog (AC-4).
 - **`upload_manifests`** — the owner has *any* upload window, live or lapsed. A lapsed one is the
   reaper's to collect; a live or re-minted one owns these key names, because upload keys are
   owner-addressed (AC-2). The mint writes the manifest row before the presigned URL is issued, so
   no legitimate PUT can exist for a window whose row is absent.
-- **the mtime grace** — a presigned PUT may begin before the deadline and complete after it, which
-  is routine. An in-flight PUT is not listed at all; a just-completed one is protected for
-  `grace` past its completion (AC-3).
+- **the mtime threshold** — a presigned PUT may begin before the deadline and complete after it,
+  which is routine. An in-flight PUT is not listed at all; a just-completed one is protected past
+  its completion (AC-3).
 
-### The grace
+### The threshold is `orphan_grace + upload_ttl`
 
-`DEFAULT_UPLOAD_ORPHAN_GRACE = 24h`, a `ReconcileConfig` field, not an env setting — the same shape
-as `build_artifact_retention` and `dump_volume_grace`. 24h is far above every legitimate rowless
-interval this prefix has (a `capture_traffic` pcap PUT and its row share one transaction; a vmcore
-object is PUT minutes before `finalize_capture` inserts its rows), and the asymmetry is deliberate:
-leaking bytes for an extra day is a cost bug, deleting live bytes is a correctness bug.
+The manifest fence lapses exactly when the reaper deletes the row, one TTL after the mint. So an
+mtime threshold that merely equals `KDIVE_UPLOAD_TTL_SECONDS` leaves an object PUT promptly after
+its mint reclaimable within seconds of the reap, and a TTL raised above it leaves the object
+reclaimable *in the same pass that reaped it* — destroying ADR-0448's re-mint recovery, which
+depends on the bytes outliving the row. Both values are read from config per pass and summed, so the
+margin is a full orphan grace past the earliest possible reap at any TTL. Defaults: 24h each.
+
+`KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` is a real setting, mirroring the sibling image sweep's
+`KDIVE_IMAGE_PUBLISH_GRACE_SECONDS`, rather than a bare `ReconcileConfig` default. This repair
+deletes irreversibly from a prefix that also holds non-upload objects, so an operator who finds it
+removing live bytes needs a brake that is not a redeploy.
 
 ### The store method
 
@@ -95,6 +105,14 @@ leaking bytes for an extra day is a cost bug, deleting live bytes is a correctne
 `list_image_objects()` becomes a one-line delegate over `images/`, so the pagination loop exists
 once. `ImageSweepStore` keeps its narrow, prefix-free method deliberately: an image sweep should not
 gain the authority to list an arbitrary prefix.
+
+### Scoped-out detection
+
+Zero deleted is also the healthy steady state, so the one failure that scopes this sweep out without
+raising — a key layout the parser no longer recognizes — logs a WARNING naming the root and the
+count when a root listed objects and attributed none (AC-7). The likeliest cause is removed rather
+than only reported: both halves of the prefix are derived, the kinds from the reaper's table and the
+tenant from `upload_manifest.UPLOAD_TENANT`, which the mint sites now share.
 
 ### Failure handling
 
@@ -104,10 +122,17 @@ propagate gives `_run_repair_plan` the error counter and costs nothing (AC-6). T
 `repair_leaked_images`' treatment, and the reason it differs from the reaper is that the reaper's
 row delete has already committed by the time its sweep runs.
 
-### Cost
+### Cost, and what is deferred
 
-Steady state with no leak is one LIST per root plus one query per root per pass. That is strictly
-cheaper than `repair_leaked_images`, which issues a query **per listed object** every pass.
+Steady state with no leak is one LIST per root plus one query per root per pass, and each query runs
+in its own short transaction so no snapshot is pinned across the blocking store calls. That is
+cheaper *per object* than `repair_leaked_images`, which issues a query per listed object every pass
+— but the comparison does not carry, because `images/` is bounded by the image catalog while
+`local/runs/` grows for the life of the deployment. Two costs are therefore accepted here and filed
+rather than argued away: the sweep materializes each root's whole listing (paging it needs a
+paginating store API), and the `artifacts.object_key` anti-join has no usable index, because the
+only one is partial on `owner_kind = 'investigations'` (migration 0076), so the `local/runs/` root
+forces a table scan per classify.
 
 ## Non-goals
 

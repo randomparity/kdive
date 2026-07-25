@@ -23,26 +23,22 @@ from uuid import UUID
 from psycopg import AsyncConnection
 
 from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.upload_manifest import UPLOAD_TENANT
 from kdive.reconciler.cleanup.uploads import UPLOAD_OWNER_KINDS, UploadStore
 
 _log = logging.getLogger(__name__)
 
-# The tenant every upload window mints under (``mcp.tools.catalog.artifacts.uploads``). Other
-# tenants (``remote-libvirt``, ``fault-inject``) never hold an upload window, so they are out of
-# scope; see ADR-0455 §Consequences.
-_TENANT = "local"
+#: The object-store roots this sweep walks — one per upload owner kind, and both halves of the
+#: prefix derived rather than written out here: the tenant from the constant the mint sites share
+#: and the kinds from the reaper's own owner-kind table. A sweep whose prefix drifts from the
+#: mint's lists nothing and reports a healthy zero forever while the leak resumes, so neither half
+#: is a literal. Other tenants (``remote-libvirt``, ``fault-inject``) never hold an upload window.
+UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
+    f"{UPLOAD_TENANT}/{kind}/" for kind in UPLOAD_OWNER_KINDS
+)
 
-#: The object-store roots this sweep walks — one per upload owner kind, derived from the reaper's
-#: own owner-kind table so the sweep's scope cannot drift from what the reaper reaps.
-UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(f"{_TENANT}/{kind}/" for kind in UPLOAD_OWNER_KINDS)
-
-#: How long an unreferenced object under an upload root is protected from reclaim, measured from
-#: its store mtime. Required for correctness, not polish: a presigned PUT may begin before the
-#: window's deadline and complete after it, so deleting on prefix membership alone would destroy a
-#: live upload's bytes (ADR-0455 §2). Sized far above every legitimate rowless interval under these
-#: roots — a ``capture_traffic`` pcap's PUT and its row share one transaction, a vmcore object is
-#: PUT minutes before ``finalize_capture`` inserts its rows — because an extra day of leak is a
-#: cost bug and a deleted live object is a correctness bug.
+#: The default orphan grace, protecting an unreferenced object for this long past its store mtime
+#: **in addition to** the configured upload-window TTL (see :func:`repair_leaked_upload_objects`).
 DEFAULT_UPLOAD_ORPHAN_GRACE = timedelta(hours=24)
 
 # The number of ``/``-separated components in an upload object key: ``<tenant>/<kind>/<id>/<name>``.
@@ -86,7 +82,10 @@ class UploadOrphanCandidate:
 
 
 async def repair_leaked_upload_objects(
-    conn: AsyncConnection, store: UploadOrphanStore, grace: timedelta
+    conn: AsyncConnection,
+    store: UploadOrphanStore,
+    orphan_grace: timedelta,
+    upload_ttl: timedelta,
 ) -> int:
     """Delete objects under the upload roots that no ``artifacts`` or manifest row can reach.
 
@@ -95,10 +94,25 @@ async def repair_leaked_upload_objects(
     each reclaimable key immediately before deleting it — so a finalize or a re-mint that commits
     between the listing and the delete protects its object.
 
+    The reclaim threshold is ``orphan_grace + upload_ttl``, and the second term is not padding
+    (ADR-0455 §2). The manifest fence protects an object only until the reaper deletes its window's
+    row, which happens a TTL after the mint — so a threshold measured on the object's mtime alone
+    and merely *equal* to the TTL makes the bytes reclaimable within seconds of the reap, and one
+    above it makes them reclaimable in the very pass that reaped them. Summing the two puts the
+    threshold a full ``orphan_grace`` past the earliest reap of any window the object could have
+    belonged to, whatever the operator sets ``KDIVE_UPLOAD_TTL_SECONDS`` to.
+
     Nothing is caught. Unlike the reaper's phase 2 — which tolerates a failed key because its row
     delete has already committed and there is nothing left to retry — this sweep commits nothing,
     so a store fault costs one pass, re-derives the identical candidates on the next, and reaches
     the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures`` (ADR-0455 §4).
+
+    Args:
+        conn: An async connection. Each query runs in its own short transaction so no snapshot is
+            held across the blocking store calls.
+        store: The object store to list and delete through.
+        orphan_grace: How long past the earliest possible reap an object is protected.
+        upload_ttl: The configured upload-window TTL, added to ``orphan_grace``.
 
     Returns:
         The number of objects deleted; one INFO line per delete.
@@ -107,10 +121,12 @@ async def repair_leaked_upload_objects(
         CategorizedError: the store failed to list a root or delete an object
             (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`).
     """
+    grace = orphan_grace + upload_ttl
     deleted = 0
     for root in UPLOAD_ORPHAN_ROOTS:
         listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
         candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
+        _warn_if_wholly_unattributable(root, len(listings), len(candidates))
         reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
         # Deleting in listing order rather than in the classify query's row order keeps a partial
         # pass reproducible: the planner is free to reorder an anti-join's output, the store is not.
@@ -152,7 +168,10 @@ async def reclaimable_upload_keys(
     """
     if not candidates:
         return []
-    async with conn.cursor() as cur:
+    # Its own transaction: the connection is not autocommit, so without this the snapshot this
+    # read opens would be held across every following blocking LIST and delete, pinning one of the
+    # pool's ten slots idle-in-transaction for the length of an I/O-bound sweep.
+    async with conn.transaction(), conn.cursor() as cur:
         await cur.execute(
             _RECLAIMABLE_SQL,
             (
@@ -164,6 +183,24 @@ async def reclaimable_upload_keys(
             ),
         )
         return [row[0] for row in await cur.fetchall()]
+
+
+def _warn_if_wholly_unattributable(root: str, listed: int, attributed: int) -> None:
+    """Warn when a non-empty root yielded no attributable key — the key-layout drift signature.
+
+    A zero return from this sweep is also its healthy steady state, so a sweep silently scoped out
+    of the bucket it is meant to drain looks exactly like a clean one. The one condition that can
+    cause that without raising is a key layout this parser no longer recognizes, and it is
+    distinguishable: objects listed, none attributed.
+    """
+    if listed and not attributed:
+        _log.warning(
+            "reconciler: upload orphan sweep attributed none of %d object(s) under %s; the key "
+            "layout may have drifted from %s, and the sweep is reclaiming nothing",
+            listed,
+            root,
+            "<tenant>/<kind>/<uuid>/<name>",
+        )
 
 
 def _attribute(listing: ObjectListing) -> UploadOrphanCandidate | None:
@@ -178,7 +215,7 @@ def _attribute(listing: ObjectListing) -> UploadOrphanCandidate | None:
     if len(parts) != _KEY_COMPONENTS or not parts[3]:
         return None
     tenant, kind, owner_id = parts[0], parts[1], parts[2]
-    if tenant != _TENANT or kind not in UPLOAD_OWNER_KINDS:
+    if tenant != UPLOAD_TENANT or kind not in UPLOAD_OWNER_KINDS:
         return None
     try:
         parsed = UUID(owner_id)

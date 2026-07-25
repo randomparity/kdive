@@ -37,9 +37,11 @@ add; this ADR drains it.
 
 ### 1. A prefix sweep over the upload roots, attributing each key to its owner
 
-`repair_leaked_upload_objects` lists `local/runs/` and `local/investigations/` — the two roots
-derived from the reaper's own owner-kind table, so the sweep's scope cannot drift from what the
-reaper reaps — with store mtimes, and attributes each listed key by parsing it. A key qualifies only
+`repair_leaked_upload_objects` lists `local/runs/` and `local/investigations/` — both halves of
+each root derived rather than written out, the kinds from the reaper's own owner-kind table and the
+tenant from the constant the mint sites share, so the sweep's scope cannot drift from what the
+reaper reaps or from where the mint writes (§4) — with store mtimes, and attributes each listed key
+by parsing it. A key qualifies only
 if it splits into exactly four components, `local/<kind>/<uuid>/<name>`, with a known upload owner
 kind and a parseable UUID. Every other shape is dropped without a delete.
 
@@ -62,14 +64,26 @@ An object is reclaimable only if all three hold:
   on the recovery path rather than off it. It is a sound fence because the mint writes the manifest
   row before any presigned URL exists, so no legitimate PUT can be in flight for a window whose row
   is absent.
-- **The object's store mtime is older than a grace**, compared against `now() - grace` in Postgres.
+- **The object's store mtime is older than `orphan_grace + upload_ttl`**, compared against
+  `now() - threshold` in Postgres.
 
-The grace is required for correctness, not polish. A presigned PUT may **begin** before the window's
-deadline and **complete** after it; the reaper can therefore reap the row while bytes are still
-landing, and prefix membership alone would destroy a live upload. An in-flight PUT is not listed at
-all (S3 publishes the object on completion), and a just-completed one is protected for `grace` past
+The mtime fence is required for correctness, not polish. A presigned PUT may **begin** before the
+window's deadline and **complete** after it; the reaper can therefore reap the row while bytes are
+still landing, and prefix membership alone would destroy a live upload. An in-flight PUT is not
+listed at all (S3 publishes the object on completion), and a just-completed one is protected past
 its completion — during which the finalize registers its `artifacts` row, or the re-mint that
 authorized it re-arms the manifest fence.
+
+**The upload TTL is part of the threshold, not padding.** The manifest fence lapses exactly when
+the reaper deletes the row, a TTL after the mint — so the two fences are not independent, and a
+threshold that only *equals* `KDIVE_UPLOAD_TTL_SECONDS` gives an object PUT promptly after its mint
+a post-reap margin of seconds, while a TTL raised above it gives a *negative* margin: at the moment
+the reaper commits, `mtime < now() - grace` already holds, and this repair runs directly after the
+reaper in the same pass. That would reclaim a window's bytes in the pass that reaped them and
+destroy ADR-0448's documented re-mint recovery, which depends on the bytes outliving the row. Both
+values are read from config per pass and summed, so the margin is a full `orphan_grace` past the
+earliest reap of any window an object could have belonged to, at any TTL the operator sets. The
+defaults are 24h each.
 
 All three are one SQL statement over `unnest(...)` of the candidate arrays, and that same statement
 serves both the bulk classify and the per-key re-check. Two hand-kept copies of a
@@ -88,14 +102,35 @@ re-check and the `delete_object`, followed by a PUT landing on that key inside t
 deleted. That needs a re-mint to interleave inside a single check→delete gap for a key that has
 already been rowless and manifest-less for a full grace period.
 
-Bulk-then-recheck is also the cost decision. Steady state with no leak is one LIST and one query per
-root per pass; the per-key round trips are paid only for keys actually being deleted, which is
-normally none. `repair_leaked_images` issues a query per listed object on every pass, so this is
-strictly cheaper than the precedent it copies, and it stays inside the single `conn` the repair seam
-hands it — it opens no second connection and cannot press on the `max_size=10` pool the fleet
-snapshot shares.
+Bulk-then-recheck is also the cost decision, and the honest version of it is not "cheaper than the
+precedent". Steady state with no leak is one LIST and one query per root per pass; the per-key round
+trips are paid only for keys actually being deleted, which is normally none. `repair_leaked_images`
+issues a query per listed object every pass, so this is cheaper *per object* — but that comparison
+does not carry, because `images/` is bounded by the image catalog while `local/runs/` grows for the
+life of the deployment (a vmcore per crashing run, pcaps, chunk parts). This sweep materializes each
+root's whole listing and passes it as one array-valued parameter, so both scale linearly with a
+bucket that never shrinks, every 30 seconds. It is adequate at the scale this repair is being
+shipped into and it is not adequate forever; paging the sweep is filed as a follow-up rather than
+asserted away here. Each query does run in its own short transaction, so no snapshot is pinned
+across the blocking LISTs and deletes — but the repair seam still holds one of the `max_size=10`
+pool's slots checked out for the whole sweep, which is #1554's to restructure, not a property this
+change can claim.
 
-### 4. Nothing is caught
+### 4. A silently scoped-out sweep is distinguishable from a healthy one
+
+Zero deleted is this repair's healthy steady state, so a sweep that has been scoped out of the
+bucket it exists to drain reports exactly what a clean one reports. The condition that can cause
+that without raising is a key layout `_attribute` no longer recognizes, and it is distinguishable —
+objects listed, none attributed — so that case logs a WARNING naming the root and the count. It is
+not a general per-fence counter: the other fences declining a key is the sweep working.
+
+The same reasoning removes the more likely cause rather than only reporting it. Both halves of the
+swept prefix are derived: the owner kinds from the reaper's table, and the tenant from
+`upload_manifest.UPLOAD_TENANT`, which the two mint sites now share instead of each holding their
+own `_TENANT = "local"` literal. A fourth copy in this module would have been the drift this
+warning exists to catch.
+
+### 5. Nothing is caught
 
 A store fault propagates out of this repair. `_run_repair_plan` isolates it, logs it, and records it
 in `failures`, which is the sole input to the ADR-0190 group-E error counter — so a bucket policy
@@ -108,7 +143,7 @@ the candidates are re-derived from the store and the database on the next pass, 
 verdict — so aborting costs one pass and buys the alert. It is also `repair_leaked_images`'
 treatment, which this sweep is otherwise modelled on.
 
-### 5. One prefix-parameterised listing primitive; `ImageSweepStore` stays narrow
+### 6. One prefix-parameterised listing primitive; `ImageSweepStore` stays narrow
 
 `ObjectStore.list_prefix_with_mtime(prefix)` is the paginated key+mtime listing, and
 `list_image_objects()` becomes a one-line delegate over `images/` so the pagination loop exists
@@ -156,7 +191,19 @@ signal an operator watches lags the leak by a day.
 `fault-inject/` tenants, and `images/` are out of scope — the first two because no upload window
 ever mints into them, the rest because they are other tenants' or other sweeps' namespaces.
 
-No schema, no migration, no config setting, no MCP or RBAC surface, no change to either finalize
-path, and no change to the reaper. One new `repair_kind` (`leaked_upload_objects`) joins
-`ALL_REPAIR_KINDS` and so the ADR-0190 repairs counter; no new metric and no new report field. Not
-an AI surface.
+**The `artifacts.object_key` anti-join has no index to use.** The only index on that column is
+`artifacts_investigations_object_key_uniq`, which is *partial* — `WHERE owner_kind =
+'investigations'` (migration 0076) — so the `local/runs/` root, the larger and faster-growing of the
+two, forces Postgres to scan `artifacts` once per classify. That is a repeating scan of a table that
+grows with every run, on every pass, in steady state with zero leak. "No migration" is therefore a
+true statement about this diff and a misleading one about its cost; the index is filed as a
+follow-up. It is deliberately not taken here: the sweep is correct without it, and a schema change
+belongs in a change whose subject is the schema.
+
+No schema, no migration, no MCP or RBAC surface, no change to either finalize path, and no change to
+the reaper. One new setting, `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` — an exception to the
+`build_artifact_retention` precedent taken on purpose, because this repair deletes irreversibly from
+a prefix that holds non-upload objects and an operator who finds it removing live bytes needs a
+brake that is not a redeploy. It is the same shape `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS` already has
+for the sibling image sweep. One new `repair_kind` (`leaked_upload_objects`) joins `ALL_REPAIR_KINDS`
+and so the ADR-0190 repairs counter; no new metric and no new report field. Not an AI surface.

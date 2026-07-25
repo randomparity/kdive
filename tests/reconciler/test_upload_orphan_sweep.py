@@ -20,6 +20,7 @@ Seeding uses autocommit ``connect`` connections; repairs run through a real non-
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -48,6 +49,7 @@ from kdive.reconciler.cleanup.uploads import (
 from tests.reconciler.conftest import connect, run_repair, seed_run, seed_system
 
 _GRACE = timedelta(hours=1)
+_NO_TTL = timedelta(0)
 
 
 class _FakeUploadStore:
@@ -121,8 +123,14 @@ class _HookedStore(_FakeUploadStore):
         super().delete(key)
 
 
-def _sweep(store: _FakeUploadStore, grace: timedelta = _GRACE):
-    return lambda conn: _repair_leaked_upload_objects(conn, store, grace)
+def _sweep(
+    store: _FakeUploadStore,
+    grace: timedelta = _GRACE,
+    upload_ttl: timedelta = _NO_TTL,
+):
+    """The repair under test. ``upload_ttl`` defaults to zero so a test that is not *about* the
+    TTL stacking reads its threshold straight off ``grace``; the stacking has its own test."""
+    return lambda conn: _repair_leaked_upload_objects(conn, store, grace, upload_ttl)
 
 
 async def _seed_run_with_window(url: str, ttl: timedelta) -> tuple[UUID, str]:
@@ -492,3 +500,75 @@ def test_the_swept_roots_cover_both_upload_owner_kinds() -> None:
     """The scope is derived from the reaper's owner kinds, not hand-listed alongside them."""
     assert UPLOAD_ORPHAN_ROOTS == ("local/runs/", "local/investigations/")
     assert DEFAULT_UPLOAD_ORPHAN_GRACE.total_seconds() == 24 * 60 * 60
+
+
+def test_the_reclaim_threshold_stacks_the_orphan_grace_on_the_upload_ttl(
+    migrated_url: str,
+) -> None:
+    """ADR-0455 §2: the manifest fence lapses at the reap, so the grace must clear the TTL too.
+
+    An object PUT moments after its window is minted is rowless for the whole window, and the
+    manifest fence protects it only until the reaper deletes the row a TTL later. A threshold
+    measured on the object's mtime alone and merely *equal* to the TTL therefore expires within
+    seconds of the reap, and one above it expires before it — letting the sweep reclaim the bytes
+    in the very pass that reaped them, and destroying ADR-0448's re-mint recovery. Stacking the
+    two makes the margin a full orphan grace past the earliest possible reap, whatever the
+    operator sets ``KDIVE_UPLOAD_TTL_SECONDS`` to.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        ttl = timedelta(hours=24)
+        # Minted a TTL ago and reaped just now: past the bare grace, inside grace + ttl.
+        just_reaped = f"{prefix}just-reaped"
+        store = _FakeUploadStore({just_reaped: ttl + timedelta(minutes=1)})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store, _GRACE, ttl)) == 0
+            assert store.deleted == []
+            # A full orphan grace later it is reclaimable, so the fence is a threshold, not a veto.
+            older = _FakeUploadStore({just_reaped: ttl + _GRACE + timedelta(minutes=1)})
+            assert await run_repair(pool, _sweep(older, _GRACE, ttl)) == 1
+
+    asyncio.run(_run())
+
+
+def test_a_root_whose_keys_are_all_unattributable_is_reported(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0455 §4: a sweep scoped out of its own bucket must not look like a clean one.
+
+    Zero deleted is also the healthy steady state, so key-layout drift — the one failure that
+    scopes this sweep out without raising — would otherwise be invisible. It is distinguishable
+    because objects were listed and none were attributed.
+    """
+
+    async def _run() -> None:
+        store = _FakeUploadStore({"local/runs/not-a-uuid/kernel": _GRACE * 2})
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.upload_orphans"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _sweep(store)) == 0
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1  # only the root that listed something warns
+        assert "attributed none of 1 object(s) under local/runs/" in warnings[0]
+
+    asyncio.run(_run())
+
+
+def test_a_clean_sweep_logs_no_drift_warning(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The counterweight: the drift warning is conditional, not emitted on every empty pass."""
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        store = _FakeUploadStore({f"{prefix}kernel": _GRACE * 2})
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.upload_orphans"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _sweep(store)) == 1
+        assert caplog.records == []
+
+    asyncio.run(_run())

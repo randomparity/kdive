@@ -190,6 +190,20 @@ UPLOAD_TTL_SECONDS = Setting(
     help="Presigned upload-URL TTL in seconds.",
     suggest="an integer number of seconds, e.g. 86400",
 )
+UPLOAD_ORPHAN_GRACE = Setting(
+    name="KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS",
+    parse=_int,
+    default="86400",
+    group="upload",
+    processes=_DISCOVERY,
+    help=(
+        "Grace window in seconds protecting an unreferenced object under an upload prefix from "
+        "the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and "
+        "applied on top of KDIVE_UPLOAD_TTL_SECONDS, so an object is reclaimed only well after "
+        "the window it could have belonged to was reaped. Raise it to stall the sweep."
+    ),
+    suggest="an integer number of seconds, e.g. 86400",
+)
 MAX_UPLOAD_BYTES = Setting(
     name="KDIVE_MAX_UPLOAD_BYTES",
     parse=_int,
@@ -698,6 +712,7 @@ SETTINGS = [
     LEASE_MAX,
     PROVISION_PREMUTATION_TIMEOUT_S,
     UPLOAD_TTL_SECONDS,
+    UPLOAD_ORPHAN_GRACE,
     MAX_UPLOAD_BYTES,
     ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_DOWNLOAD_TTL_SECONDS,

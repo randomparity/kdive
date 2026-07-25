@@ -57,7 +57,7 @@ from kdive.store.objectstore import (
 
 _log = logging.getLogger(__name__)
 
-_TENANT = "local"
+_TENANT = upload_manifest.UPLOAD_TENANT
 # Literal upload tool names and accepted artifact-name vocabularies. Public so the
 # ``artifacts.expected_uploads`` discovery tool (ADR-0166) projects the same sets the
 # validator below enforces — the advertisement can never drift from the accepted names.

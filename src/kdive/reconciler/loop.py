@@ -27,7 +27,11 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
+from kdive.config.core_settings import (
+    IMAGE_PUBLISH_GRACE,
+    UPLOAD_ORPHAN_GRACE,
+    UPLOAD_TTL_SECONDS,
+)
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
@@ -155,6 +159,10 @@ DEFAULT_DEBUG_SESSION_STALE_AFTER = timedelta(minutes=2)
 # default is the same 3600s). A pending image row (or an orphan object with no row) is
 # protected from the leaked/dangling image sweeps until this window past pending_since/mtime.
 DEFAULT_IMAGE_PUBLISH_GRACE = timedelta(seconds=3600)
+# Fallback upload-window TTL when KDIVE_UPLOAD_TTL_SECONDS is unset (its declared default is the
+# same 86400s). The orphan sweep's reclaim threshold is stacked on top of this, so an object is
+# never reclaimed until a full grace past the earliest reap of a window it could belong to.
+DEFAULT_UPLOAD_WINDOW_TTL = timedelta(seconds=86400)
 
 type _RepairFn = Callable[[AsyncConnection], Awaitable[int]]
 
@@ -242,7 +250,7 @@ class ReconcileConfig:
     report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
     investigation_cleanup_grace: timedelta = DEFAULT_INVESTIGATION_CLEANUP_GRACE
     build_artifact_retention: timedelta = DEFAULT_BUILD_ARTIFACT_RETENTION
-    upload_orphan_grace: timedelta = DEFAULT_UPLOAD_ORPHAN_GRACE
+    upload_orphan_grace: timedelta = field(default_factory=lambda: _upload_orphan_grace())
     investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
@@ -291,7 +299,7 @@ def _leaked_upload_objects_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _repair_leaked_upload_objects(
-        conn, config.upload_store, config.upload_orphan_grace
+        conn, config.upload_store, config.upload_orphan_grace, _upload_window_ttl()
     )
 
 
@@ -406,8 +414,9 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         ),
     ),
     _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
-    # Runs after the reaper so a window reaped this pass is already row-less; the grace means it
-    # is not reclaimable yet either way (ADR-0455).
+    # Runs after the reaper so a window reaped this pass is already row-less. It is the reclaim
+    # threshold (orphan grace *plus* the upload TTL), not the ordering, that keeps a
+    # just-reaped window's bytes out of this same pass (ADR-0455 §2).
     _RepairCatalogEntry("leaked_upload_objects", _leaked_upload_objects_repair),
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
     _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
@@ -529,6 +538,27 @@ def _image_publish_grace() -> timedelta:
     seconds = config.get(IMAGE_PUBLISH_GRACE)
     if seconds is None:
         return DEFAULT_IMAGE_PUBLISH_GRACE
+    return timedelta(seconds=seconds)
+
+
+def _upload_orphan_grace() -> timedelta:
+    """Resolve the upload-orphan grace from config (ADR-0455 §5); the operator's brake."""
+    seconds = config.get(UPLOAD_ORPHAN_GRACE)
+    if seconds is None:
+        return DEFAULT_UPLOAD_ORPHAN_GRACE
+    return timedelta(seconds=seconds)
+
+
+def _upload_window_ttl() -> timedelta:
+    """Resolve the upload-window TTL the orphan grace is stacked on top of (ADR-0455 §2).
+
+    Read here rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
+    postpones every reap by the same amount, and an orphan grace that did not move with it would
+    let the sweep reclaim a window's bytes in the very pass that reaped them.
+    """
+    seconds = config.get(UPLOAD_TTL_SECONDS)
+    if seconds is None:
+        return DEFAULT_UPLOAD_WINDOW_TTL
     return timedelta(seconds=seconds)
 
 
