@@ -10,6 +10,8 @@ import io
 import logging
 import multiprocessing as mp
 import os
+import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -391,6 +393,11 @@ def test_stage_gzip_without_uncompressed_size_is_config_error(tmp_path: Path) ->
 # --- stage_uploaded_rootfs: crash durability of the publish (#1526) ------------------------------
 
 
+def _raise_eio(fd: int) -> None:
+    """An ``os.fsync`` stand-in for a disk that refuses the flush."""
+    raise OSError(errno.EIO, "Input/output error")
+
+
 def _trace_durability_syscalls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
     """Record every ``fsync``/``replace`` as ``(op, inode)``, in call order, and keep doing them.
 
@@ -455,6 +462,63 @@ def test_stage_gzip_also_syncs_the_partial_before_publishing(
     base_inode = dest.stat().st_ino
     assert trace.index(("fsync", base_inode)) < trace.index(("replace", base_inode))
     assert trace[-1] == ("fsync", dest.parent.stat().st_ino)
+
+
+def test_stage_partial_sync_failure_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An fsync of the partial can fail for real (EIO, ENOSPC, EROFS after an error remount). It runs
+    # before the rename, so the contract is that nothing is published and no partial is left.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    monkeypatch.setattr(os, "fsync", _raise_eio)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_directory_sync_failure_leaves_the_good_base_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The directory fsync runs AFTER the rename, so its failure is the one case where the provision
+    # fails with `dest` already published and intact. ADR-0443 section 1 states that outcome as
+    # deliberate -- "the bytes are fine, only their durability is unproven" -- and it holds only
+    # because the error path unlinks `partial` and never touches `dest`. Nothing but this test stops
+    # a future cleanup from adding a `dest.unlink()` there and turning a benign failure into the
+    # deletion of a base other Systems in the investigation may already be booting off.
+    dest = _dest(tmp_path)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_fsync = os.fsync
+
+    def fail_on_the_directory(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_on_the_directory)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+    # And the next fetch reuses it rather than re-downloading, which is what makes the outcome
+    # "honest" rather than merely survivable.
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    inv = uuid4()
+    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(dest.read_bytes())
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
+    assert reuse_store.stream_calls == 0
 
 
 def test_stage_does_not_sync_a_partial_it_is_about_to_discard(
@@ -684,6 +748,41 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     assert not any("a sibling published" in message for message in warnings), (
         f"{name}: blamed a sibling that never existed"
     )
+
+
+def test_fetch_restages_over_a_non_regular_file_without_hanging(tmp_path: Path) -> None:
+    # `dest.is_file()` rejected a non-regular file for free. The format probe `open`s instead, and
+    # opening a FIFO for reading BLOCKS until a writer appears -- so a probe that did not check the
+    # mode first would hang the provision thread forever, and the post-lock call site would hang
+    # while HOLDING the fetch advisory lock, wedging every sibling System on that (investigation,
+    # checksum). The connection is autocommit, so no idle_in_transaction_session_timeout breaks it.
+    #
+    # The fetch runs on a daemon thread with a bounded join rather than inline: without the S_ISREG
+    # gate an inline call would hang the whole suite instead of failing this one test, and the repo
+    # has no pytest-timeout to catch that.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    os.mkfifo(dest)
+    assert not dest.is_file() and dest.exists()  # the shape the old gate rejected for free
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    outcome: list[Path | BaseException] = []
+
+    def run() -> None:
+        try:
+            outcome.append(fetch_uploaded_rootfs(conn, store, _upload(tmp_path)))  # ty: ignore[invalid-argument-type]
+        except BaseException as exc:  # noqa: BLE001  # reported on the main thread below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+
+    assert not worker.is_alive(), "the reuse probe blocked on a non-regular file at the staged path"
+    assert len(outcome) == 1 and isinstance(outcome[0], Path)
+    assert outcome[0].read_bytes() == _QCOW2  # re-staged over it, as the old code did
+    assert store.stream_calls == 1
 
 
 def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
