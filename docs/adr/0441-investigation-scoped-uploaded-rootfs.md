@@ -189,11 +189,20 @@ token (base64url, path/key-safe); it is total and reversible.
 The fetch stages to `rootfs-uploads/<investigation_id>/<token>.qcow2`, still **outside**
 `allowed_roots` (ADR-0434 §3 no-escape, now at investigation granularity: a staged image is never a
 `local` staged-path candidate for any System). The verify (ADR-0434 §2 read-side SHA-256) and the
-ADR-0438 qcow2-magic gate are unchanged. A present verified file is **reused**, so the base is
+ADR-0438 qcow2-magic gate are unchanged. A present ~~verified~~ file is **reused**, so the base is
 downloaded **at most once per host per (investigation, checksum)** and shared by every System in the
 investigation — the reuse #1502 asks for. Dedup is deliberately scoped to the investigation, not the
 host: two investigations on one host that upload identical bytes each stage their own copy — isolation
 (decision 4) is chosen over cross-investigation dedup.
+
+> *Amended (#1526 / [ADR-0443](0443-durable-rootfs-staging-and-reuse-recheck.md)).* "A present
+> **verified** file is reused" overstated the reuse path, which was a bare `dest.is_file()` and
+> verified nothing — no checksum, no format probe, no size — so a base left corrupt by a crash
+> mid-stage backed every System in the investigation, with the checksum machinery skipped *because*
+> the file existed. The reuse path now re-applies the ADR-0438 qcow2-magic gate on **both** sides of
+> the fetch lock. Read that as a *partial re-validation*, not a verification: a checksum re-verify is
+> O(filesize) on every guest start and `uncompressed_size` is an upper bound (and NULL on the
+> identity path), so ADR-0443 §3 settles on magic-only and states what it does not catch.
 
 Because the staging path is now **shared** (per-(investigation, checksum), not per-System), two sibling
 Systems provisioning concurrently — the explicit goal, run as parallel worker **processes** — would both
@@ -203,7 +212,8 @@ lock:
 - **Unique per-fetcher `.partial`** — each download writes a `<token>.<uuid>.partial` and `os.replace`s it
   onto the shared `<token>.qcow2` only after the SHA-256 + qcow2-magic verify. Two concurrent downloaders
   therefore **never** share a partial, so neither can corrupt the other regardless of the lock. This is
-  the correctness guarantee. The fetcher unlinks its own `.partial` in a `finally` on any verify/download
+  the correctness guarantee — *against a concurrent reader; see the ADR-0443 amendment below for the
+  host-crash case.* The fetcher unlinks its own `.partial` in a `finally` on any verify/download
   failure. A **crash-orphaned** `.partial` (a killed worker) is a SENSITIVE multi-GiB leak that no row
   owns, collected on **two** paths: opportunistically, a live fetcher — holding the lock, which serializes
   downloads so no *live* sibling exists — glob-unlinks any other `<token>.*.partial` on the next fetch of
@@ -231,6 +241,15 @@ lock:
   > download. Correctness is unaffected: no partial is ever shared and `dest` is never an unverified
   > base. The window was the gzip path's alone; #1520 extends it to identity, and bounding the sweep
   > away from live partials is tracked in #1524.
+
+  > *Amended (#1526 / [ADR-0443](0443-durable-rootfs-staging-and-reuse-recheck.md)).* The unique
+  > partial plus `os.replace` is the correctness guarantee against a concurrent **reader**, not
+  > against a **host crash**: `os.replace` orders the directory entry, not the data behind it, so on
+  > a default ext4 mount the rename can become durable while the blocks are not, leaving a
+  > full-length `dest` of zeros or stale blocks that the (then unverified) reuse path handed back.
+  > The publish is now `fsync`(partial) → `os.replace` → `fsync`(staging directory), the sync placed
+  > at the publish point so no rejected partial pays for it. ADR-0443 §1 has the ordering argument
+  > and the stated exclusion for a newly created per-investigation directory.
 
 The fetch reads the object's `encoding`/`uncompressed_size` from the **durable `artifacts` row** (decision
 3), not the deleted manifest, and strips a gzip transport encoding exactly as ADR-0438 does.
