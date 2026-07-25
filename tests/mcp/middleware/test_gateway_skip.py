@@ -31,7 +31,11 @@ from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.usage_support import recording_must_not_fail, warm_pool
+from tests.mcp.usage_support import (
+    denial_audit_must_not_fail,
+    recording_must_not_fail,
+    warm_pool,
+)
 
 # ============================================================
 # Shared helpers
@@ -385,7 +389,12 @@ def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
 
             # Outer usage middleware processes tools.invoke.
             # After the fix: skips recording for tools.invoke.
-            with recording_must_not_fail(), contextlib.suppress(Exception):
+            # Both guards outside the suppress — see tests.mcp.usage_support on nesting.
+            with (
+                recording_must_not_fail(),
+                denial_audit_must_not_fail(),
+                contextlib.suppress(Exception),
+            ):
                 await usage_mw.on_call_tool(outer_ctx, outer_call_next)
 
             async with pool.connection() as conn:
