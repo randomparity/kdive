@@ -63,6 +63,20 @@ The `kernel` tar's boot/vmlinuz member is validated against the Run's build-prof
 does not match the declared arch is rejected. See artifacts.expected_uploads for the
 per-arch byte contract.
 
+Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
+chunked and single-PUT alike. A later call is rejected with
+`reason: "upload_window_expired"`, echoing that deadline and the server clock it is
+measured on; once the reaper has collected the lapsed window you get
+`reason: "no_upload_manifest"` instead. Both point back at
+`artifacts.create_run_upload`: re-mint, then finalize again. The object keys are derived
+from the Run and the artifact names, so a prompt re-mint of the same declaration reuses
+what you already uploaded — but the reaper deletes a lapsed window's uncommitted objects
+within a sweep, so assume you will have to re-upload unless the retry succeeds.
+
+Do not re-mint while a finalize is still running: re-minting replaces the window that
+finalize is validating, so it is rejected with `reason: "upload_window_replaced"`. Wait
+for the finalize to answer, then act on what it says.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `build_id` | string (nullable) | no | GNU build-id as hex (e.g. from `readelf -n vmlinux`); required iff a vmlinux was uploaded. Case-insensitive. |

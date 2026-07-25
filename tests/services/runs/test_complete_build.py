@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any, LiteralString, NoReturn
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -15,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
-from kdive.build_artifacts.results import BuildOutput
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -24,6 +25,7 @@ from kdive.security.audit import args_digest
 from kdive.services.runs import complete_build
 from kdive.services.runs.complete_build import (
     CompleteBuildConfigurationError,
+    CompleteBuildExpiredWindowError,
     CompleteBuildFinalizer,
 )
 from kdive.services.runs.steps import BuildStepResult
@@ -148,6 +150,20 @@ async def _complete_config_error(
     raise AssertionError("complete_build did not raise CompleteBuildConfigurationError")
 
 
+async def _complete_expired_window_error(
+    pool: AsyncConnectionPool,
+    run_id: Any,
+    finalizer: CompleteBuildFinalizer,
+) -> CompleteBuildExpiredWindowError:
+    run = await _run_by_id(pool, run_id)
+    async with pool.connection() as conn:
+        try:
+            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+        except CompleteBuildExpiredWindowError as exc:
+            return exc
+    raise AssertionError("complete_build did not raise CompleteBuildExpiredWindowError")
+
+
 def _output(run_id: Any) -> BuildOutput:
     return BuildOutput(f"local/runs/{run_id}/kernel", "", "build-id")
 
@@ -170,7 +186,186 @@ def test_complete_build_finalizer_rejects_missing_manifest(migrated_url: str) ->
 def test_complete_build_finalizer_rejects_expired_chunk_manifest(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            run_id = await seed_external_run(pool)
+            run_id = await seed_external_run_with_manifest(
+                pool, entries=[_CHUNKED_KERNEL], ttl=timedelta(seconds=-1)
+            )
+            store = _ChunkedStore()
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id)),
+                object_store_factory=lambda: store,
+            )
+            error = await _complete_expired_window_error(pool, run_id, finalizer)
+
+        assert error.stamp.deadline < error.stamp.server_time
+        assert store.events == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_rejects_expired_single_put_manifest(migrated_url: str) -> None:
+    """A non-chunked finalize past the deadline is rejected, not silently committed (#1534)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
+            validator = FakeValidator(_output(run_id))
+            error = await _complete_expired_window_error(
+                pool, run_id, CompleteBuildFinalizer(validate_complete_build=validator)
+            )
+            run = await _run_by_id(pool, run_id)
+            manifest_kept = await _manifest_present(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+
+        assert error.stamp.deadline < error.stamp.server_time
+        assert validator.calls == 0  # rejected before the payload is read
+        assert run.state is RunState.CREATED
+        assert manifest_kept  # left for the reaper, exactly as the chunked path leaves it
+        assert artifact_rows == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
+    migrated_url: str,
+) -> None:
+    """A window reaped while this finalize validated must not commit rows for deleted keys.
+
+    The validator seam stands in for the unlocked stretch: the reaper takes the same RUN lock,
+    deletes the uncommitted objects, and drops the manifest while the payload is being read.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+
+            def reap_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
+                with psycopg.connect(migrated_url) as reaper:
+                    reaper.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return FakeValidator(_output(run_id))(*args, **kwargs)
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=reap_then_validate),
+            )
+            run = await _run_by_id(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+            steps = await _fetchall(pool, "SELECT step FROM run_steps WHERE run_id = %s", (run_id,))
+
+        assert error.data == {"reason": "no_upload_manifest"}
+        assert run.state is RunState.CREATED
+        assert artifact_rows == []
+        assert steps == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_declines_when_the_window_is_reminted_mid_validation(
+    migrated_url: str,
+) -> None:
+    """Presence is not identity: a reap plus a re-mint must not commit the validated window.
+
+    The object keys are owner-addressed and identical across re-mints, so nothing downstream
+    would notice the swap — the commit would register rows carrying the deleted objects' etags.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+
+            def reap_and_remint_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
+                with psycopg.connect(migrated_url, autocommit=True) as other:
+                    other.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                    other.execute(
+                        "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, "
+                        "deadline) VALUES ('runs', %s, %s, %s, now() + interval '1 hour')",
+                        (
+                            run_id,
+                            f"local/runs/{run_id}/",
+                            Jsonb([{"name": "kernel", "sha256": "c", "size_bytes": 1}]),
+                        ),
+                    )
+                return FakeValidator(_output(run_id))(*args, **kwargs)
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=reap_and_remint_then_validate),
+            )
+            run = await _run_by_id(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+            remint_kept = await _manifest_present(pool, run_id)
+
+        assert error.data == {"reason": "upload_window_replaced"}
+        assert run.state is RunState.CREATED
+        assert artifact_rows == []
+        assert remint_kept  # the agent's fresh window is not deleted out from under it
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_declines_chunked_reassembly_of_a_reaped_window(
+    migrated_url: str,
+) -> None:
+    """A refresh that finds no row means the reaper collected it; do not reassemble (ADR-0448).
+
+    The store factory runs between the open-window check and the refresh, which is exactly the
+    gap the reaper can land in.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+
+            def reap_then_build_store() -> _ChunkedStore:
+                with psycopg.connect(migrated_url) as reaper:
+                    reaper.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return store
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=reap_then_build_store,
+                ),
+            )
+            run = await _run_by_id(pool, run_id)
+
+        assert error.data == {"reason": "no_upload_manifest"}
+        assert store.events == []  # no multipart copy against reaped chunk objects
+        assert run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_url: str) -> None:
+    """The advertised recovery: reject, re-mint, finalize — same keys, nothing re-uploaded."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id))
+            )
+            await _complete_expired_window_error(pool, run_id, finalizer)
+
             async with pool.connection() as conn:
                 await upload_manifest.replace_manifest(
                     conn,
@@ -178,19 +373,39 @@ def test_complete_build_finalizer_rejects_expired_chunk_manifest(migrated_url: s
                         owner_kind="runs",
                         owner_id=run_id,
                         prefix=f"local/runs/{run_id}/",
-                        entries=[_CHUNKED_KERNEL],
-                        ttl=timedelta(seconds=-1),
+                        entries=[ManifestEntry("kernel", "c", 1)],
+                        ttl=timedelta(hours=1),
                     ),
                 )
-            store = _ChunkedStore()
-            finalizer = CompleteBuildFinalizer(
-                validate_complete_build=FakeValidator(_output(run_id)),
-                object_store_factory=lambda: store,
+            result = await _complete(pool, run_id, finalizer)
+            keys = await _fetchall(
+                pool, "SELECT object_key FROM artifacts WHERE owner_id = %s", (run_id,)
             )
-            error = await _complete_config_error(pool, run_id, finalizer)
+            run = await _run_by_id(pool, run_id)
 
-        assert error.data == {"reason": "upload_window_expired"}
-        assert store.events == []
+        assert run.state is RunState.SUCCEEDED
+        # The re-mint addressed the very key the lapsed window used: no re-upload was needed.
+        assert keys == [(f"local/runs/{run_id}/kernel",)]
+        assert result.kernel_ref == f"local/runs/{run_id}/kernel"
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_accepts_single_put_inside_window(migrated_url: str) -> None:
+    """The deadline is a wall, not a floor: a still-open window finalizes (#1534)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=30))
+            result = await _complete(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=FakeValidator(_output(run_id))),
+            )
+            run = await _run_by_id(pool, run_id)
+
+        assert result.kernel_ref == f"local/runs/{run_id}/kernel"
+        assert run.state is RunState.SUCCEEDED
 
     asyncio.run(_run())
 

@@ -673,7 +673,9 @@ def test_complete_build_writes_effective_config_artifact(
 # --- Chunked reassembly at finalize (ADR-0104) ------------------------------------------
 
 from collections.abc import Sequence  # noqa: E402
-from datetime import timedelta  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+import psycopg  # noqa: E402
 
 from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
 from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
@@ -761,31 +763,152 @@ def test_chunked_complete_build_reassembles_and_succeeds(migrated_url: str) -> N
     asyncio.run(_run())
 
 
+def test_chunked_complete_build_still_extends_the_window_before_reassembly(
+    migrated_url: str,
+) -> None:
+    """The in-window chunked refresh survives the #1534 check: it still extends (ADR-0448 §3).
+
+    Observed through a finalize that reaches reassembly and then fails validation, so the
+    manifest is still there to read. This also pins the recorded residual — a failing retry
+    leaves a freshly extended window.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(
+                pool, entries=[_CHUNKED_KERNEL], ttl=timedelta(seconds=30)
+            )
+            async with pool.connection() as conn:
+                before = await upload_manifest.get_manifest(conn, "runs", run_id)
+            handlers = CompleteBuildHandlers(
+                validate_complete_build=_FakeValidator(
+                    CategorizedError("bad payload", category=ErrorCategory.CONFIGURATION_ERROR)
+                ),
+                object_store_factory=_ReassemblyStore,
+            )
+            resp = await handlers.complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )  # a chunked store plus a failing validator: neither factory covers this pair
+            async with pool.connection() as conn:
+                after = await upload_manifest.get_manifest(conn, "runs", run_id)
+        assert resp.status == "error"
+        assert before is not None and after is not None
+        assert after.deadline > before.deadline
+
+    asyncio.run(_run())
+
+
+def _assert_expiry_contract(resp: ToolResponse) -> None:
+    """Pin the self-correcting expiry payload: the wall, the clock, and the re-mint (#1534)."""
+    assert resp.status == "error"
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+    assert resp.data["reason"] == "upload_window_expired"
+    assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
+    deadline = datetime.fromisoformat(str(resp.data["manifest_deadline"]))
+    server_time = datetime.fromisoformat(str(resp.data["server_time"]))
+    assert deadline.tzinfo == UTC and server_time.tzinfo == UTC
+    assert deadline < server_time
+    assert resp.data["on_expiry"] == {
+        "tool": CREATE_RUN_UPLOAD_TOOL,
+        "effect": "re-mint replaces the manifest and resets the deadline",
+    }
+
+
 def test_complete_build_rejects_expired_window(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            run_id = await _seed_external_run(pool)
-            async with pool.connection() as conn:
-                await upload_manifest.replace_manifest(
-                    conn,
-                    upload_manifest.UploadManifestReplaceRequest(
-                        owner_kind="runs",
-                        owner_id=run_id,
-                        prefix=f"local/runs/{run_id}/",
-                        entries=[_CHUNKED_KERNEL],
-                        ttl=timedelta(seconds=-1),  # already expired
-                    ),
-                )
+            run_id = await _seed_external_run_with_manifest(
+                pool, entries=[_CHUNKED_KERNEL], ttl=timedelta(seconds=-1)
+            )
             store = _ReassemblyStore()
             resp = await _chunked_handlers(
                 store, BuildOutput(f"local/runs/{run_id}/kernel", "", "")
             ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, run_id)
+        _assert_expiry_contract(resp)
+        assert store.events == []  # no reassembly attempted
+        assert run is not None and run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
+def test_complete_build_missing_manifest_points_at_the_mint(migrated_url: str) -> None:
+    """The post-reap landing carries the same recovery pointer the expiry rejection does.
+
+    A finalize more than one reconciler sweep past the deadline sees `no_upload_manifest`, not
+    `upload_window_expired`, so leaving it bare would strand the common case (ADR-0448).
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run(pool)  # never minted a window
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-        assert resp.data["reason"] == "upload_window_expired"
-        assert store.events == []  # no reassembly attempted
+        assert resp.data["reason"] == "no_upload_manifest"
+        assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
+        assert resp.detail is not None
+
+    asyncio.run(_run())
+
+
+def test_complete_build_replaced_window_points_at_the_mint(migrated_url: str) -> None:
+    """A re-mint that lands mid-finalize is rejected through the envelope, not just the service."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool)
+
+            def remint_then_validate(*args: Any, **kwargs: Any):
+                with psycopg.connect(migrated_url, autocommit=True) as other:
+                    other.execute(
+                        "UPDATE upload_manifests SET deadline = now() + interval '2 hours' "
+                        "WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))(
+                    *args, **kwargs
+                )
+
+            resp = await _build_handlers(remint_then_validate).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+            keys = await _artifact_keys(pool, run_id)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "upload_window_replaced"
+        assert resp.detail
+        assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
+        assert keys == set()
+        assert run is not None and run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
+def test_complete_build_rejects_expired_single_put_window(migrated_url: str) -> None:
+    """The single-PUT path enforces the same deadline the chunked path does (#1534)."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+            keys = await _artifact_keys(pool, run_id)
+            kept = await _manifest_present(pool, run_id)
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, run_id)
+        _assert_expiry_contract(resp)
+        assert validator.calls == 0
+        assert keys == set()
+        assert kept  # left for the deadline-driven reaper
         assert run is not None and run.state is RunState.CREATED
 
     asyncio.run(_run())
