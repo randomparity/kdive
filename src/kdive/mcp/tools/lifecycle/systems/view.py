@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -35,15 +36,30 @@ from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.debug.sessions import active_session_ids_for_system
 
+_log = logging.getLogger(__name__)
+
 CUSTOM_SHAPE_SENTINEL = "__custom__"
 """The ``shape`` filter value selecting full-custom Systems (``shape IS NULL``)."""
 
 NO_JOB_SYSTEM_FAILURE_DETAIL = "System failed with no job recording a reason"
 """``detail`` for a ``failed`` System whose failing job recorded no reason (ADR-0454 §3).
 
-Used when no job could be attributed at all, and — the commoner case — when the attributed job
-carries an empty ``failure_context``. Names the condition and no project, host, or id, so it
-carries no resource-existence signal.
+Used when the attribution lookup ran and found no job, and — the commoner case — when the
+attributed job carries an empty ``failure_context``. It is a **positive claim about a fact that
+was checked**, so it is emitted only on a path that checked: the list path does not resolve a
+failing job and must stay silent rather than assert this. Names the condition and no project,
+host, or id, so it carries no resource-existence signal.
+"""
+
+UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL = (
+    "System failed for a reason this surface cannot report; read the System's jobs "
+    "(`jobs.list` with this system_id) for the failing job"
+)
+"""``detail`` for a ``failed`` System whose job carried a no-leak category (ADR-0454 §2a).
+
+Distinct from :data:`NO_JOB_SYSTEM_FAILURE_DETAIL` because a job *did* record a reason here — it
+is simply not one the System envelope may repeat — so claiming none exists would be false and
+would steer an agent away from the one place the verdict survives. Names no resource.
 """
 
 ABANDONED_JOB_SYSTEM_FAILURE_DETAIL = (
@@ -69,13 +85,31 @@ would actively mislead. Every other category arrives from a handler that normall
 message, and falls back to :data:`NO_JOB_SYSTEM_FAILURE_DETAIL`.
 """
 
-FAILED_SYSTEM_NEXT_ACTIONS = ["allocations.release", "allocations.request"]
+FAILED_SYSTEM_RECOVERY_ACTIONS = ["allocations.release", "allocations.request"]
 """Recovery actions for a ``failed`` System (ADR-0454 §5, matching ADR-0149's guidance).
 
 ``SystemState.FAILED`` is terminal — its outbound transition set is empty — so there is no
 System-scoped tool to retry with, whatever ``retryable`` says. The way forward is the one
 ``systems.provision`` already names on this System: release the allocation and request a fresh
 one. Static and unfiltered, like the success path's list in the same function.
+"""
+
+FAILED_SYSTEM_NEXT_ACTIONS = ["jobs.get", *FAILED_SYSTEM_RECOVERY_ACTIONS]
+"""Next actions when the envelope cites a ``failing_job_id`` (ADR-0454 §5).
+
+The diagnostic read leads: this envelope deliberately withholds the structured
+``failure_detail_*`` keys in favour of a pointer, so not naming the tool that follows the
+pointer would send an agent straight to releasing the allocation — and a non-retryable
+``configuration_error`` would then be re-hit on the fresh one, which is the loop #1550 exists to
+break.
+"""
+
+FAILED_SYSTEM_UNCITED_NEXT_ACTIONS = ["jobs.list", *FAILED_SYSTEM_RECOVERY_ACTIONS]
+"""Next actions when no ``failing_job_id`` is cited (ADR-0454 §2a, §3).
+
+``jobs.list`` takes a ``system_id`` filter, so it is the read that still works when the job was
+dropped for a no-leak category or when none was attributed — the concrete form of §2a's "the job
+stays readable" mitigation, said to the agent rather than only to the ADR's reader.
 """
 
 
@@ -101,6 +135,7 @@ def system_envelope(
     supports_snapshots: bool | None = None,
     supports_traffic_capture: bool | None = None,
     failing_job: Job | None = None,
+    failure_attributed: bool = False,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -113,6 +148,13 @@ def system_envelope(
     envelope reports its category and reason instead of assuming one for every ``failed``
     System. Like the other get-only arguments it is a per-row query, so ``systems.list`` passes
     none and keeps the ``infrastructure_failure`` default (ADR-0454 §4).
+
+    ``failure_attributed`` says the caller **ran** the lookup, which is not the same as it
+    returning a job — and the difference is load-bearing. Every derived reason here is a positive
+    claim about a fact that was checked, so the list path (which never looks) must stay silent
+    rather than tell an agent no job recorded a reason. Without this flag a bare `failing_job=None`
+    is ambiguous between "looked, found none" and "never looked", and the list path would assert
+    the former.
     """
     data: dict[str, JsonValue] = {
         "project": system.project,
@@ -142,7 +184,7 @@ def system_envelope(
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
     if system.state is SystemState.FAILED:
-        return _failed_system_envelope(system, failing_job, data)
+        return _failed_system_envelope(system, failing_job, data, attributed=failure_attributed)
     return ToolResponse.success(
         str(system.id),
         system.state.value,
@@ -152,7 +194,11 @@ def system_envelope(
 
 
 def _failed_system_envelope(
-    system: System, failing_job: Job | None, data: dict[str, JsonValue]
+    system: System,
+    failing_job: Job | None,
+    data: dict[str, JsonValue],
+    *,
+    attributed: bool,
 ) -> ToolResponse:
     """Build the ``failed`` System envelope from its failing job's verdict (ADR-0454).
 
@@ -166,6 +212,12 @@ def _failed_system_envelope(
     fallback on ``failing_job is None`` would leave that path a bare category, which is the
     surface #1550 set out to remove.
 
+    Every derived reason is nevertheless gated on ``attributed`` — did the caller run the lookup
+    at all — because each one is a positive claim about a fact that was *checked*. The list path
+    never looks, so it keeps its pre-existing silence; asserting "no job recorded a reason" there
+    would be a confident falsehood, and worse than a bare category, since it gives an agent a
+    reason **not** to call ``systems.get`` or ``jobs.list`` where the reason actually lives.
+
     A no-leak category (ADR-0123) is **not** forwarded at all. ``not_found`` and
     ``authorization_denied`` are reserved envelope-level meanings here — ``systems.get`` returns
     ``not_found`` for a System that is absent or invisible — so echoing a job's ``not_found``
@@ -173,34 +225,70 @@ def _failed_system_envelope(
     the same envelope carries its whole record. That is reachable: a `restore` job binding a
     System whose Resource row vanished dead-letters ``not_found`` without touching System state,
     and the reconciler then resolves the System to ``failed``. Such a job explains nothing the
-    System surface may repeat, so it degrades to the default category and the generic reason,
-    and its ``detail`` and ``failing_job_id`` are withheld — the job itself is still readable via
-    ``jobs.list``. ``suppressed_detail(category, None) is not None`` is true exactly for a
-    suppressed category (it returns the fixed constant even when ``raw`` is ``None``).
+    System surface may repeat, so it degrades to the default category and its own reason saying
+    the verdict is unreportable here — not the "no job recorded a reason" string, which would be
+    false — with ``failing_job_id`` withheld and ``jobs.list`` named instead.
+    ``suppressed_detail(category, None) is not None`` is true exactly for a suppressed category
+    (it returns the fixed constant even when ``raw`` is ``None``).
 
     The structured ``failure_detail_*`` keys are deliberately left on ``jobs.get`` rather than
-    duplicated here; ``failing_job_id`` is the pointer to them.
+    duplicated here; ``failing_job_id`` is the pointer to them, and the next actions name it.
     """
-    job_category = failing_job.error_category if failing_job else None
-    # A no-leak category is a statement the System envelope may not repeat (see above), so it is
-    # dropped rather than forwarded; the job is then not cited either.
-    if job_category is not None and suppressed_detail(job_category, None) is not None:
-        job_category = None
-        failing_job = None
-    category = job_category or ErrorCategory.INFRASTRUCTURE_FAILURE
+    category, failing_job, fallback = _resolve_failure_verdict(system, failing_job)
     failure_data: dict[str, JsonValue] = {"current_status": system.state.value, **data}
     detail = failing_job.failure_context.get("failure_message") if failing_job else None
     if not detail:
-        detail = _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
+        detail = fallback if attributed else None
     if failing_job is not None:
         failure_data["failing_job_id"] = str(failing_job.id)
+    actions = (
+        FAILED_SYSTEM_NEXT_ACTIONS
+        if failing_job is not None
+        else FAILED_SYSTEM_UNCITED_NEXT_ACTIONS
+    )
     return ToolResponse.failure(
         str(system.id),
         category,
         detail=detail,
-        suggested_next_actions=list(FAILED_SYSTEM_NEXT_ACTIONS),
+        suggested_next_actions=list(actions),
         data=failure_data,
     )
+
+
+def _resolve_failure_verdict(
+    system: System, failing_job: Job | None
+) -> tuple[ErrorCategory, Job | None, str]:
+    """Resolve ``(category, citable job, fallback reason)`` for a ``failed`` System (ADR-0454).
+
+    Each flattening to the default is logged, because #1550 is a bug that survived precisely
+    because the flattening was silent: an operator asking why a System still reads
+    ``infrastructure_failure`` otherwise cannot tell a lookup that found nothing from a
+    NULL-category row from a dropped no-leak verdict. Sibling degradations already log
+    (``ops/queue.py``, ADR-0450). The no-job case needs no line — it is the expected shape.
+    """
+    job_category = failing_job.error_category if failing_job else None
+    if job_category is not None and suppressed_detail(job_category, None) is not None:
+        # A no-leak category is a statement the System envelope may not repeat (see above), so
+        # the whole job is dropped rather than half-quoted.
+        _log.info(
+            "system %s: failing job %s carries no-leak category %s; reporting the default",
+            system.id,
+            failing_job.id if failing_job else None,
+            job_category.value,
+        )
+        return (
+            ErrorCategory.INFRASTRUCTURE_FAILURE,
+            None,
+            UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
+        )
+    if failing_job is not None and job_category is None:
+        _log.info(
+            "system %s: failing job %s has no error_category; degraded to infrastructure_failure",
+            system.id,
+            failing_job.id,
+        )
+    category = job_category or ErrorCategory.INFRASTRUCTURE_FAILURE
+    return category, failing_job, _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
 
 
 def defined_system_envelope(system: System) -> ToolResponse:
@@ -301,6 +389,7 @@ async def get_system(
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
             failing_job=failing_job,
+            failure_attributed=system.state is SystemState.FAILED,
         )
 
 

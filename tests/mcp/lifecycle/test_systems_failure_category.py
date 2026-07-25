@@ -30,7 +30,9 @@ from kdive.mcp.exposure import _REGISTERED_TOOLS
 from kdive.mcp.tools.lifecycle.systems.view import (
     ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
     FAILED_SYSTEM_NEXT_ACTIONS,
+    FAILED_SYSTEM_UNCITED_NEXT_ACTIONS,
     NO_JOB_SYSTEM_FAILURE_DETAIL,
+    UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
     SystemsListRequest,
     get_system,
     list_systems,
@@ -103,7 +105,7 @@ def test_failed_system_reports_the_jobs_category_not_infrastructure_failure() ->
     )
     job = _failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": message})
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.status == "error"
     assert resp.error_category == "configuration_error"
@@ -116,7 +118,7 @@ def test_failed_system_reports_the_jobs_category_not_infrastructure_failure() ->
 def test_failed_system_without_a_job_keeps_the_infrastructure_default() -> None:
     # The reconciler orphan (`repair_stalled_restoring_systems`) drives a System to `failed`
     # with no job to attribute it to; the default is what that path is for.
-    resp = system_envelope(_system(), failing_job=None)
+    resp = system_envelope(_system(), failing_job=None, failure_attributed=True)
 
     assert resp.error_category == "infrastructure_failure"
     assert resp.retryable is True
@@ -129,7 +131,7 @@ def test_failed_system_with_uncategorized_job_falls_back_to_the_default() -> Non
     # A job row whose `error_category` is NULL (never dead-lettered) answers nothing.
     job = _failed_job(None, {"failure_message": "half-written"})
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.error_category == "infrastructure_failure"
     assert resp.data["failing_job_id"] == str(job.id)
@@ -141,7 +143,7 @@ def test_failed_system_job_without_message_still_gets_a_reason() -> None:
     # #1550 exists to remove.
     job = _failed_job(ErrorCategory.PROVISIONING_FAILURE, {})
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.error_category == "provisioning_failure"
     assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
@@ -154,7 +156,7 @@ def test_failed_system_attributed_to_an_abandoned_job_says_so() -> None:
     # this, not "no job at all", is what a worker that died actually leaves behind.
     job = _failed_job(ErrorCategory.LEASE_EXPIRED, {}, kind=JobKind.RESTORE)
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.error_category == "lease_expired"
     assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
@@ -165,15 +167,24 @@ def test_failed_system_attributed_to_an_abandoned_job_says_so() -> None:
 def test_failed_system_offers_the_recovery_actions_not_a_dead_end() -> None:
     # `SystemState.FAILED` is terminal, so `retryable` names no System-scoped tool to retry
     # with; the way forward is the one `systems.provision` already names (ADR-0149).
-    resp = system_envelope(_system(), failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR))
+    resp = system_envelope(
+        _system(),
+        failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR),
+        failure_attributed=True,
+    )
 
-    assert resp.suggested_next_actions == ["allocations.release", "allocations.request"]
+    assert resp.suggested_next_actions == [
+        "jobs.get",
+        "allocations.release",
+        "allocations.request",
+    ]
 
 
 def test_failed_system_next_actions_name_registered_tools() -> None:
     # `visible_next_actions` raises on an unregistered breadcrumb (#1444); this envelope builds
     # its list unfiltered, so the registry check has to happen here.
-    assert all(name in _REGISTERED_TOOLS for name in FAILED_SYSTEM_NEXT_ACTIONS)
+    every_action = {*FAILED_SYSTEM_NEXT_ACTIONS, *FAILED_SYSTEM_UNCITED_NEXT_ACTIONS}
+    assert all(name in _REGISTERED_TOOLS for name in every_action)
 
 
 def test_failed_system_does_not_forward_a_no_leak_category_as_its_own_verdict() -> None:
@@ -187,10 +198,13 @@ def test_failed_system_does_not_forward_a_no_leak_category_as_its_own_verdict() 
         {"failure_message": "secret-host-name leaked here"},
     )
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.error_category == "infrastructure_failure"
-    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
+    # Not the "no job recorded a reason" string: a job did record one, it is simply not
+    # repeatable here — and the envelope points at where it survives.
+    assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.suggested_next_actions[0] == "jobs.list"
     assert "failing_job_id" not in resp.data
     assert "secret-host-name" not in str(resp.model_dump())
 
@@ -199,11 +213,24 @@ def test_failed_system_does_not_forward_authorization_denied_either() -> None:
     # The other no-leak category, for the same reason.
     job = _failed_job(ErrorCategory.AUTHORIZATION_DENIED, {"failure_message": "secret-project"})
 
-    resp = system_envelope(_system(), failing_job=job)
+    resp = system_envelope(_system(), failing_job=job, failure_attributed=True)
 
     assert resp.error_category == "infrastructure_failure"
+    assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
     assert "failing_job_id" not in resp.data
     assert "secret-project" not in str(resp.model_dump())
+
+
+def test_unattributed_failed_system_states_nothing_it_did_not_check() -> None:
+    # The list path never resolves a failing job. `failing_job=None` alone cannot mean "looked
+    # and found none" there, so no derived reason may be asserted — silence, as before #1550.
+    # Claiming "no job recorded a reason" would be a confident falsehood *and* would give an
+    # agent a reason not to call the two tools where the reason actually lives.
+    resp = system_envelope(_system(), resource_kind="local-libvirt", resource_id="res-1")
+
+    assert resp.error_category == "infrastructure_failure"
+    assert resp.detail is None
+    assert "failing_job_id" not in resp.data
 
 
 def test_non_failed_system_ignores_a_supplied_job() -> None:
@@ -582,5 +609,10 @@ def test_systems_list_keeps_the_flattened_category(migrated_url: str) -> None:
             )
         assert [item.object_id for item in resp.items] == [str(system_id)]
         assert resp.items[0].error_category == "infrastructure_failure"
+        # But it must not *claim* the reason does not exist — this System's job recorded an
+        # excellent one. The flattened category is the disclosed gap; a confident falsehood
+        # about it is not.
+        assert resp.items[0].detail is None
+        assert resp.items[0].detail != NO_JOB_SYSTEM_FAILURE_DETAIL
 
     asyncio.run(_run())

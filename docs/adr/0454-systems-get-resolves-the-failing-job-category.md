@@ -103,10 +103,16 @@ raises `NOT_FOUND` when the System's Resource row is missing. That escape never 
 and the reconciler then resolves it to `failed`.
 
 Such a job explains nothing the System surface may repeat, so it is dropped whole: the category
-degrades to the default, the reason to the generic constant, and `failing_job_id` is withheld
-(ADR-0123 already withheld the `detail`; forwarding the bare category was the one misleading thing
-left). The job stays readable via `jobs.list`. This subsumes the earlier gate, which asked only
-"may I show the job's extras?" and never "is this category coherent as the System's own verdict?".
+degrades to the default and `failing_job_id` is withheld (ADR-0123 already withheld the `detail`;
+forwarding the bare category was the one misleading thing left). This subsumes the earlier gate,
+which asked only "may I show the job's extras?" and never "is this category coherent as the
+System's own verdict?".
+
+The reason on this path is its **own** string, not the "no job recorded a reason" one: a job did
+record a reason here, so claiming none exists would be a second falsehood and would steer an agent
+away from the one place the verdict survives. `jobs.list` (which takes a `system_id` filter) leads
+the next actions instead of `jobs.get`, so "the job stays readable" is something the envelope says
+to the agent rather than something this ADR says to its reader.
 
 ### 3. The reason is derived from the resolved detail, not from the presence of a job
 
@@ -176,7 +182,14 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
 - `systems.get` issues one extra query on the `failed` path only — a sequential scan of `jobs`
   (§1). Every other state, and the whole of `systems.list`, is unchanged.
 - A `failed` System now carries `suggested_next_actions` where it carried none (§5). This is the
-  one behavior change that also reaches `systems.list`, since it needs no query.
+  only behavior change that also reaches `systems.list`, since it needs no query — and it is kept
+  to that by an explicit `failure_attributed` flag. Every derived `detail` is a positive claim
+  about a fact that was *checked*, and the list path never checks, so a bare `failing_job=None`
+  is not allowed to mean "looked and found none" there: the list path keeps its pre-existing
+  `detail=None` silence. Without that flag `systems.list` would have told an agent that no job
+  recorded a reason for **every** `failed` System, including ones whose job recorded an excellent
+  one — a confident falsehood, and one that gives an agent a positive reason not to call
+  `systems.get`. Both halves are pinned by tests.
 - **The two writes this attribution spans are not atomic, and the failure mode is durable, not
   transient.** `_run_handler` runs the handler on an autocommit connection, so
   `_record_system_failure`'s `SYSTEMS.update_state(..., FAILED)` commits at once; `queue.fail` then
@@ -200,8 +213,15 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
   declines. There is no jobs retention sweep, so a row's disappearance is not among the
   residuals.
 - `systems.list` keeps the flattened category (§4).
+- Each flattening to the default category is logged at INFO (a dropped no-leak verdict, a
+  NULL-`error_category` row). #1550 survived because the flattening was silent — it was found by a
+  human reading a live envelope — so shipping the fix with new silent flattening paths would
+  reproduce the blind spot. The no-job case is not logged: it is the expected shape, and the list
+  path never reaches the logging branches, so there is no per-row cost.
 - No schema, no migration, no config, no new dependency. No MCP tool schema, RBAC, or exposure
   change: the tool's arguments are untouched and only the failure envelope's contents differ.
+  `jobs.get`/`jobs.list` are `_VIEWER`, the same grant `systems.get` requires, so the added
+  breadcrumbs point at nothing the caller could not already reach.
 
 ## Considered & rejected
 
