@@ -171,6 +171,28 @@ def _stage(store: _FakeStore, tmp_path: Path, **kw: Any) -> Path:
     return dest
 
 
+def _ample_free_space(_path: Any) -> Any:
+    """A ``disk_usage`` stand-in with room for any payload in this module above the #1525 floor."""
+    ample = _STAGING_FREE_SPACE_MARGIN_BYTES + 64 * 1024**2
+    return types.SimpleNamespace(total=ample, used=0, free=ample)
+
+
+@pytest.fixture(autouse=True)
+def _staging_volume_has_room(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the staging filesystem ample for every test here, so none depends on the host's disk.
+
+    The free-space precheck runs on every ``stage_uploaded_rootfs`` call that knows its required
+    size — which is most of this module, not just the handful of tests that are *about* the
+    precheck. Without this pin, a runner whose pytest tmp filesystem sits under the 1 GiB floor
+    (a tmpfs ``/tmp`` in a small container is exactly that) would turn three dozen otherwise
+    deterministic tests red, and red with an unrelated "not enough free space" error rather than
+    the one each test asserts. The precheck's own tests call ``_pin_free_space`` from inside the
+    test body, i.e. after this fixture, and monkeypatch's later write wins — so they still choose
+    their own figure.
+    """
+    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _ample_free_space)
+
+
 # --- stage_uploaded_rootfs: identity path (checksum + qcow2-magic + unique partial) --------------
 
 
@@ -406,6 +428,10 @@ def _pin_free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> list[Path]:
     half the contract: the precheck must stat the directory the base actually lands in, not the
     process CWD or the overlay directory, or it would license a write onto a volume it never looked
     at.
+
+    Patches the module's own ``disk_usage`` name, which is why the module imports the function
+    rather than ``shutil``: patching ``rootfs_upload_fetch.shutil.disk_usage`` would reach the
+    stdlib module object itself and replace it for every importer in the process.
     """
     measured: list[Path] = []
 
@@ -413,7 +439,7 @@ def _pin_free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> list[Path]:
         measured.append(Path(path))
         return types.SimpleNamespace(total=free, used=0, free=free)
 
-    monkeypatch.setattr(rootfs_upload_fetch.shutil, "disk_usage", _usage)
+    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _usage)
     return measured
 
 
@@ -433,7 +459,9 @@ def test_stage_identity_precheck_rejects_an_object_that_cannot_fit(
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES) in str(error.value)
     assert str(len(_QCOW2) - 1) in str(error.value)
+    assert error.value.details["required_bytes"] == len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES
     assert error.value.details["free_bytes"] == len(_QCOW2) - 1
+    assert "does not fit at all" in str(error.value)
     assert store.stream_calls == 0  # refused before the download, not after it
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
@@ -455,6 +483,41 @@ def test_stage_precheck_requires_headroom_beyond_the_base_itself(
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert store.stream_calls == 0
+
+
+def test_stage_precheck_says_which_of_the_two_conditions_refused_the_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Because the floor is a fixed volume-wide reserve, most refusals are NOT "your object is too
+    # big": a 20-byte base against 900 MiB free would leave the volume almost untouched. A message
+    # that blamed the object either way would point the operator at the upload instead of at the
+    # floor that actually fired, so the two shapes must read differently.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=_STAGING_FREE_SPACE_MARGIN_BYTES - 1)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "the base itself fits; it is the floor that would be breached" in str(error.value)
+    assert "does not fit at all" not in str(error.value)
+
+
+def test_stage_precheck_reports_free_space_as_the_figure_df_shows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `shutil.disk_usage().free` is statvfs f_bavail -- space available to UNPRIVILEGED users,
+    # excluding the filesystem's reserved blocks. The staging worker often runs as root and could
+    # write into that reserve, so the conservative number is deliberate; what must not happen is
+    # reporting it as though it were the whole picture, leaving an operator unable to reconcile the
+    # error with the shell. Naming df's column is what makes the number checkable.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=0)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert "df's Avail column" in str(error.value)
 
 
 def test_stage_precheck_admits_a_base_that_fits_with_its_margin(
@@ -520,7 +583,7 @@ def test_stage_precheck_stages_anyway_when_the_filesystem_cannot_be_measured(
     def _raise(_path: object) -> object:
         raise OSError(errno.EACCES, "Permission denied")
 
-    monkeypatch.setattr(rootfs_upload_fetch.shutil, "disk_usage", _raise)
+    monkeypatch.setattr(rootfs_upload_fetch, "disk_usage", _raise)
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
     with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
@@ -1152,6 +1215,9 @@ class _CountingStore:
 def _fetch_child(
     url: str, upload_dir: str, system_id: str, checksum: str, counter: str, barrier: Any
 ) -> None:  # pragma: no cover - runs in a child process
+    # A spawned child re-imports the module fresh, so the parent's autouse free-space pin does not
+    # reach it. Pin it here too, or this test would depend on the runner's real free disk (#1525).
+    rootfs_upload_fetch.disk_usage = _ample_free_space  # ty: ignore[invalid-assignment]  # a stub
     store = _CountingStore(_QCOW2, Path(counter))
     upload = RootfsUploadContext("local", UUID(system_id), Path(upload_dir), checksum)
     barrier.wait(timeout=30)  # both children reach the fetch together, racing for the lock

@@ -53,12 +53,15 @@ import fcntl
 import hashlib
 import logging
 import os
-import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+# The function rather than the module, so a test's monkeypatch is scoped to this module instead of
+# replacing ``shutil.disk_usage`` process-wide for every other importer for the test's duration.
+from shutil import disk_usage
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -94,14 +97,17 @@ _QCOW2_MAGIC = b"QFI\xfb"
 # peak memory is this constant rather than the object size (up to the 5 GiB single-PUT ceiling).
 # Matches the gzip path's ranged-read window in ``transport_encoding``.
 _STREAM_CHUNK_BYTES = 4 * 1024 * 1024
-# Headroom the staging free-space precheck demands beyond the base itself (#1525). Fixed rather
-# than a fraction of the object: a percentage scales with the base, so 10% of the 50 GiB canonical
-# cap would demand 5 GiB of slack and refuse a stage on a volume that comfortably holds it. The
-# margin is what stops a *passing* check from meaning "this write ends the volume at exactly zero
-# bytes free" — which is the degraded state for the sibling overlays the precheck exists to
-# protect, not the avoidance of it. It is a judgment call sized to keep a volume usable, not a
-# measured overlay growth rate, and it is not a reservation: see
-# :func:`_require_staging_free_space`.
+# The floor the staging free-space precheck keeps free beyond the base itself (ADR-0450, #1525).
+# Fixed rather than a fraction of the object: a percentage scales with the base, so 10% of the
+# 50 GiB canonical cap would demand 5 GiB of slack and refuse a stage on a volume that comfortably
+# holds it. It is also a property of the *volume*, not of the base — capping it at the base size
+# would let a stream of small bases walk the volume to zero one step at a time, which is the same
+# harm arriving slower. The floor is what stops a *passing* check from meaning "this write ends the
+# volume at exactly zero bytes free", which is the degraded state for the sibling overlays the
+# precheck exists to protect, not the avoidance of it. A consequence worth knowing before tuning
+# it: a volume with less than this free refuses every uploaded-rootfs stage regardless of base
+# size. It is a judgment call sized to keep a volume usable, not a measured overlay growth rate,
+# and it is not a reservation — see :func:`_require_staging_free_space`.
 _STAGING_FREE_SPACE_MARGIN_BYTES = 1024**3
 
 
@@ -579,7 +585,7 @@ def _required_staging_bytes(
 
 
 def _require_staging_free_space(dest: Path, *, required: int | None, system_id: UUID) -> None:
-    """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (#1525).
+    """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (ADR-0450).
 
     Since the identity path started streaming (#1520) a **rejected** object — a failed checksum, a
     non-qcow2 base — is written in full and only then rejected. ``UPLOADS_DIR`` and ``ROOTFS_DIR``
@@ -589,19 +595,29 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
     rather than only failing its own provision. This measures ``dest.parent``'s own filesystem, so
     it is correct under either mount layout — only the blast radius differs.
 
-    **This is advisory and is not a reservation.** Free space can vanish between this ``statvfs``
-    and the write; the fetch lock is per-(investigation, checksum), so N distinct bases stage
-    concurrently and each passes its own check against the same free bytes; and a live guest's
-    overlay keeps growing throughout. What it buys is that the common case — one oversized or
-    invalid object against a volume that was never going to hold it — fails immediately and
-    attributably instead of after a multi-GiB write that takes the volume down with it. The real
-    ENOSPC guard remains :func:`_staging_fault`, and it is deliberately the *same*
-    ``INFRASTRUCTURE_FAILURE`` category: splitting the two would make an agent's handling of one
-    physical condition depend on which side of a race window it was observed from.
+    **What this does not cover.** It is advisory, not a reservation, and one case is worth naming
+    outright rather than leaving a reader to derive it: #1525's own worked example — two Systems in
+    different investigations staging 4 GiB bases onto a volume with 6 GiB free — is **not**
+    prevented. The fetch lock is per-(investigation, checksum), so nothing serializes them, and
+    each passes its own check against the same free bytes before either writes. Free space can also
+    vanish between this ``statvfs`` and the write, and a live guest's overlay keeps growing
+    throughout. What the check buys is the single-stager case: one oversized or invalid object
+    against a volume that was never going to hold it now fails immediately and attributably instead
+    of after a multi-GiB write that takes the volume down with it. ADR-0450 §4 records the
+    kernel-enforced alternative (``posix_fallocate`` on the partial) and why it is not taken here;
+    #1546 tracks it. The real ENOSPC guard therefore remains :func:`_staging_fault`, and this shares
+    its ``INFRASTRUCTURE_FAILURE`` category deliberately: splitting them would make an agent's
+    handling of one physical condition depend on which side of a race window it was observed from.
 
     ``required`` is ``None`` when the staged size is not knowable (see
     :func:`_required_staging_bytes`); there is nothing to compare against, so the check is skipped
     rather than guessed at, and the codec's own declaration error carries the failure.
+
+    The measured figure is ``statvfs``'s ``f_bavail`` — space available to unprivileged users,
+    which is ``df``'s ``Avail`` column and excludes the filesystem's reserved blocks. The staging
+    worker often runs as root and could write into that reserve, so this is deliberately the
+    conservative number: those blocks exist to keep a full volume usable, which is the same thing
+    this guard protects. The error text says which figure it is, so it reconciles with ``df``.
 
     A ``statvfs`` that *itself* faults degrades to staging with a warning rather than failing —
     ``EACCES`` under the worker/staging-user asymmetry ADR-0442 documents in this same subsystem,
@@ -610,16 +626,21 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
     availability for no safety, since the write stays guarded by the real ENOSPC either way.
 
     Raises:
-        CategorizedError: ``INFRASTRUCTURE_FAILURE`` naming the required and available bytes. It is
-            retryable on a bare re-invocation once an operator frees space, with no change by the
-            caller — which is what makes ``INFRASTRUCTURE_FAILURE`` right here and
-            ``CONFIGURATION_ERROR`` (non-retryable, "fix your declaration") wrong: the upload is
-            fine, the host is full.
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` naming the required and available bytes.
+            ``CONFIGURATION_ERROR`` would be wrong: the upload is fine, the host is full, and a
+            non-retryable category would tell the agent to re-declare something correct. One
+            consequence of failing *fast* on a retryable category: ``jobs.fail`` requeues with no
+            backoff, so a provision job now spends its three attempts in milliseconds and
+            dead-letters, where the pre-precheck ENOSPC spread them over three multi-GiB downloads.
+            The remedy is unchanged — free space, re-issue the provision — but it is re-issued
+            rather than picked up by a later attempt. Not marked ``terminal``: a sibling stage
+            finishing or the reclaim sweep can free space between attempts, so a retry is not
+            provably useless.
     """
     if required is None:
         return
     try:
-        free = shutil.disk_usage(dest.parent).free
+        free = disk_usage(dest.parent).free
     except OSError as err:
         _log.warning(
             "could not measure the free space on the rootfs staging filesystem at %s (%s); staging "
@@ -633,11 +654,13 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
     if free >= needed:
         return
     raise CategorizedError(
-        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: it needs {needed} "
-        f"bytes ({required} for the base plus a {_STAGING_FREE_SPACE_MARGIN_BYTES}-byte margin) "
-        f"and the filesystem holding {str(dest.parent)!r} has {free} free. Staging it anyway would "
-        "fill a volume that also holds running Systems' overlays; free space there and retry the "
-        "provision",
+        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: staging needs "
+        f"{needed} bytes free ({required} for the base, plus a "
+        f"{_STAGING_FREE_SPACE_MARGIN_BYTES}-byte floor kdive keeps for the running Systems whose "
+        f"overlays share this volume) and only {free} are available — "
+        f"{_shortfall_reason(required=required, free=free)}. That figure is the "
+        f"unprivileged-available space on the filesystem holding {str(dest.parent)!r} (df's Avail "
+        "column, which excludes the reserved blocks); free space there and re-issue the provision",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={
             "system_id": str(system_id),
@@ -646,6 +669,19 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
             "free_bytes": free,
         },
     )
+
+
+def _shortfall_reason(*, required: int, free: int) -> str:
+    """Which of the two conditions refused the stage — an operator acts on them differently.
+
+    Reported separately because the fixed floor means most refusals are *not* "your object is too
+    big": stage a 20 MiB base onto a volume with 900 MiB free and a message claiming the write
+    would fill the volume is simply false — it would leave 880 MiB — while pointing the operator at
+    the upload instead of at the volume-wide floor that actually fired.
+    """
+    if free < required:
+        return "the base does not fit at all"
+    return "the base itself fits; it is the floor that would be breached"
 
 
 def stage_uploaded_rootfs(
