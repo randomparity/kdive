@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Couple close with bound Systems + force teardown
 - Investigation-scoped uploaded-rootfs reclaim sweeps (#1502)
 - Count the usage-recording failures ADR-0148 swallows
+- Precheck staging free space before downloading
 
 ### Changed
 
@@ -56,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provision the second database via the conftest helpers
 - Share the reason strings, unfreeze the sibling errors
 - One envelope for the window rejections, scalar re-read
+- Rename _required_staging_bytes to _staging_budget
 
 ### Documentation
 
@@ -121,6 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record where the unlocked stretch actually is
 - Note the identity check in the ADR-0448 index row
 - Record the partial-reap hole the identity guard misses
+- Record the staging free-space precheck as ADR-0450
 
 ### Fixed
 
@@ -194,6 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-read the upload window under the RUN lock before commit
 - Check window identity, not presence, before committing
 - Attribute the expiry log and document the third reason
+- State the precheck's real scope and split its message
+- Name the gzip budget's provenance and decompose details
 
 ### Build
 
