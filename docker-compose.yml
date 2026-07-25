@@ -140,6 +140,10 @@ services:
   server:
     image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["server"]
+    # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
+    # lives here — without a restart policy a recreate during a backend outage would
+    # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
+    restart: unless-stopped
     environment:
       <<: *backends
       KDIVE_HTTP_HOST: 0.0.0.0
@@ -187,6 +191,10 @@ services:
   worker:
     image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["worker"]
+    # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
+    # lives here — without a restart policy a recreate during a backend outage would
+    # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
+    restart: unless-stopped
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
@@ -217,6 +225,10 @@ services:
   reconciler:
     image: ${KDIVE_IMAGE:-kdive:dev}
     command: ["reconciler"]
+    # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
+    # lives here — without a restart policy a recreate during a backend outage would
+    # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
+    restart: unless-stopped
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466

@@ -28,6 +28,14 @@ schema is rolled forward. The `migrate` one-shot itself waits on a healthy Postg
 worker's first artifact write never races a missing bucket. A non-zero `migrate` exit blocks
 app start. You do not order these services by hand — Compose does it from the graph.
 
+That graph orders the first bring-up only. Each app process also waits up to ten seconds at
+start for its own first database connection and exits if Postgres is unreachable, so the
+three app services carry `restart: unless-stopped` to cover every *later* recreate — a
+Postgres image bump, a bare `docker compose restart server`, or a host reboot that races the
+Postgres container. Without that policy such a recreate would leave the container in
+`Exited (1)`. With it, the container retries until the database answers; `docker compose ps`
+shows it restarting and `docker compose logs server` names the cause.
+
 ## Pointing an agent at the endpoint
 
 The server publishes the MCP endpoint over streamable HTTP. Point an agent at

@@ -98,6 +98,16 @@ def test_app_service_waits_for_migrate_completion(service: str) -> None:
 
 
 @pytest.mark.parametrize("service", _APP_SERVICES)
+def test_app_service_restarts_so_a_backend_outage_is_recoverable(service: str) -> None:
+    # ADR-0449 makes an unreachable database at start exit the process, and puts the retry
+    # in the supervisor. `depends_on` only orders the *first* `up`, so without a restart
+    # policy every later recreate during a backend outage — a postgres image bump, a bare
+    # `compose restart`, a host reboot that races the postgres container — leaves the app
+    # container Exited(1) permanently, where before it came up and recovered on its own.
+    assert _services()[service]["restart"] == "unless-stopped"
+
+
+@pytest.mark.parametrize("service", _APP_SERVICES)
 def test_app_service_waits_for_bucket_creation(service: str) -> None:
     # All three app processes do object-store I/O, so they wait for the minio-init
     # one-shot to complete — which transitively guarantees minio is healthy and the
