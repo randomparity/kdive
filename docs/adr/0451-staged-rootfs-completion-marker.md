@@ -291,9 +291,19 @@ that is better than implying the ordering solves it.
 - The staging directory holds two files per base instead of one. Both reclaim paths account for it,
   and the ADR-0452 §7 `rmdir` WARNING stays quiet on a normal drain — which is the check that this
   change did not silently reintroduce the leak ADR-0443 deferred it for.
-- `_sibling_already_published` can now publish over a sibling's marker-less base, orphaning an inode a
-  guest may hold open (ADR-0443 §2's accepted residue). Reachable only when the sibling died inside
-  its publish window; the alternative is an unbounded re-download loop.
+- **Publishing the base and marking it complete are no longer one atomic step**, and the window
+  between them is a state that did not exist before: `os.replace` used to make `dest` appear already
+  carrying everything the reuse gate checked. Two readers see it. A sibling's *pre-lock*
+  `_staged_base_rejection` runs outside the fetch lock, so it can observe base-present/marker-absent
+  and log the missing-marker WARNING about a publish three syscalls from finishing — which costs one
+  log line, since it then blocks on the fetch lock and re-checks clean, and which is why the prose
+  names a live sibling among its causes rather than asserting a crash. And
+  `_sibling_already_published`, under the lost-session-lock precondition ADR-0446 documents, can
+  publish over a base a sibling published moments ago and has not yet marked — so decision 4's
+  orphaned inode is reachable while that sibling is *alive* and still inside its window, not only
+  when it died there. The bytes are content-addressed and identical either way, so the cost is the
+  inode, not correctness. The window is inherent to writing the marker after the base, which is the
+  ordering decision 2 requires; only a claim that it cannot happen would be wrong.
 - The doomed-fetcher publish race (ADR-0452 §6) now covers the marker as well as the base: a fetcher
   whose partial an earlier pass skipped can publish both after its own reclaim, and the deferred pass
   collects both. Same bound, same fix — **#1558**.
