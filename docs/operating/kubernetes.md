@@ -63,9 +63,13 @@ write cannot get a database connection within its one-second budget, the row is 
 the call itself is never delayed or failed. `/metrics` on the server's aux port counts those
 drops as `kdive_mcp_usage_recording_failures`.
 
-A steady zero is the expected reading. A non-zero rate means usage data is incomplete, and
-the usual cause is the server pool having to open a fresh connection inside that one-second
-budget under concurrency. There is no setting to tune for this: the pool's minimum size is
-fixed in KDIVE's source. What the rate gives you is the evidence for raising it — report it
-on [#1535](https://github.com/randomparity/kdive/issues/1535) rather than treating a
-non-zero reading as something to configure your way out of.
+A steady zero is the expected reading. A non-zero rate means usage data is incomplete. Read
+the `reason` label before anything else: `pool_timeout` is the pool failing to hand out a
+connection inside that one-second budget, usually because it had to open a fresh one under
+concurrency; `other` is any other failure of the write — a database error or schema drift —
+and points at the accompanying WARNING rather than at pool capacity.
+
+There is no setting to tune for the `pool_timeout` case: the pool's minimum size is fixed in
+KDIVE's source. What the rate gives you is the evidence for raising it — report it on
+[#1535](https://github.com/randomparity/kdive/issues/1535) rather than treating a non-zero
+reading as something to configure your way out of.

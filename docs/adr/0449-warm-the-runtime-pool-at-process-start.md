@@ -134,12 +134,23 @@ complete. The counter is the smallest thing that makes the accepted loss measura
 The instrument is named and scoped like `mcp/middleware/exposure.py`'s
 `kdive_mcp_tool_exposure_fail_open` / `kdive_mcp_provider_schema_projection_failures` — its
 nearest precedent, and the same category of signal (a path that degraded silently by
-design) — including carrying **no attributes**. The obvious label would be the tool name,
-but that is the raw name off the client's `tools/call`: FastMCP resolves the tool *inside*
-`call_next`, so an unknown one reaches the `except` branch with arbitrary content, and the
-SDK enforces no cardinality limit. Labelling would let a single authenticated client grow
-the metric store without bound precisely while recording is already failing. The tool name
-is in the WARNING beside the increment, and in `tool_invocation.tool` for calls that land.
+design).
+
+It carries exactly one attribute, `reason`, with two server-derived values:
+`pool_timeout` and `other`. `_record`'s `except` clause spans its whole body — context
+lookup, digest, acquire, and the `INSERT` — so without that split the series could not
+distinguish "the pool could not hand out a connection in time", the loss mode this ADR
+defers a pool-sizing decision to, from a SQL or schema failure that argues for something
+else entirely. An unattributed counter would have made the promised data-driven follow-up
+unrunnable against its own signal.
+
+It is deliberately *not* labelled by tool name. That is the raw name off the client's
+`tools/call` — FastMCP resolves the tool *inside* `call_next`, so an unknown one reaches the
+`except` branch with arbitrary content, and the SDK enforces no cardinality limit — so
+labelling would let a single authenticated client grow the metric store without bound
+precisely while recording is already failing. `reason` carries none of that hazard: it is
+computed from the caught exception's type, not from input. The tool name is in the WARNING
+beside the increment, and in `tool_invocation.tool` for calls that land.
 
 The increment runs *after* the log and inside `contextlib.suppress(Exception)`. ADR-0148's
 swallow is unconditional, so the instrument observing a failure must not be able to become
@@ -171,11 +182,15 @@ data-driven follow-up promised below could not actually be run.
   It is *not* fixed here. Raising `min_size` would fix it, but pool sizing is a Postgres
   connection-budget decision across three process types with no bearing on the startup
   defect this ADR is about, and guessing a number is how one arrives at the wrong one.
-  Decision 3's counter is the instrument to size it against: `kdive_mcp_usage_recording_failures`
-  on a warm server measures exactly this residual, so the follow-up is data-driven rather
-  than speculative.
-- Every remaining loss mode — the growth residual above and the saturation ADR-0148 accepted
-  on its merits — now increments that counter.
+  Decision 3's counter is the instrument to size it against:
+  `kdive_mcp_usage_recording_failures{reason="pool_timeout"}` on a warm server measures this
+  residual, so the follow-up is data-driven rather than speculative. The `reason` split is
+  what makes that true — the unlabelled total also counts SQL and schema failures, which
+  argue for a different fix.
+- Every remaining loss mode now increments that counter: the growth residual above and the
+  saturation ADR-0148 accepted on its merits under `reason="pool_timeout"`, and everything
+  else `_record` swallows — a failed `INSERT`, schema drift, a malformed context — under
+  `reason="other"`.
 - **A Postgres outage at process start becomes a restart loop rather than a not-ready
   process.** Under systemd that is a retry every ~15s (`RestartSec=5` plus the 10s budget),
   which is what ADR-0114 §4 describes. Under Kubernetes it is `CrashLoopBackOff`, whose
@@ -188,8 +203,8 @@ data-driven follow-up promised below could not actually be run.
   supervisor" held for systemd and Kubernetes but not for `docker-compose.yml`, which
   declared no `restart:` policy on `server`/`worker`/`reconciler`. `depends_on` protects only
   the first `up`; every later recreate during a backend outage would have left the container
-  `Exited (1)` permanently, where before this change it came up and recovered on its own. The
-  every long-running service gains `restart: on-failure`, guarded by a test, and
+  `Exited (1)` permanently, where before this change it came up and recovered on its own.
+  Every long-running service gains `restart: on-failure`, guarded by a test, and
   `operating/docker-compose.md` gains the same startup paragraph the other two surfaces got.
   The backends (`postgres`, `minio`, `oidc`, and the obs-profile `prometheus`/`grafana`) are
   policed alongside the app tier, not just it: policing only the app services leaves them
