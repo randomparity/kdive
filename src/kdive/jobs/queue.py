@@ -25,6 +25,7 @@ from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import (
     DEFAULT_JOB_DISPATCH_LANE,
     RETIRED_JOB_KINDS,
+    SYSTEM_FAILING_JOB_KINDS,
     Job,
     JobAuthorizing,
     JobKind,
@@ -431,6 +432,47 @@ async def latest_succeeded_job_for_system(
             "SELECT * FROM jobs WHERE kind = %s AND payload->>'system_id' = %s "
             "AND state = %s ORDER BY created_at DESC, id DESC LIMIT 1",
             (kind.value, str(system_id), JobState.SUCCEEDED.value),
+        )
+        row = await cur.fetchone()
+    return Job.model_validate(row) if row is not None else None
+
+
+async def latest_failed_job_for_system(conn: AsyncConnection, system_id: UUID) -> Job | None:
+    """Return the job that most recently failed ``system_id``, or ``None`` (ADR-0454).
+
+    The ``systems`` table carries no failure category, so ``systems.get`` recovers one by
+    reading the job that put the System in ``failed``. Two predicates make that attribution
+    honest rather than merely convenient:
+
+    - ``kind = ANY(SYSTEM_FAILING_JOB_KINDS)`` — only the kinds whose handlers actually write
+      ``SystemState.FAILED``. A System also accumulates failed jobs of kinds that never touch
+      its state, and the newest failed job of *any* kind answers a different question.
+    - ``state = failed`` — :func:`fail` writes ``error_category`` only on the dead-letter
+      branch (a requeue clears ``failure_context`` and leaves the category NULL), so this is
+      matching exactly the row that carries the answer. Both writers set ``exc.terminal`` so
+      the correlated job dead-letters on its first attempt.
+
+    Matches on ``payload->>'system_id'``, the join key
+    :func:`latest_succeeded_job_for_system` and ``jobs.list`` already use. Newest first by
+    ``(created_at, id)``.
+
+    Args:
+        conn: The connection to read on.
+        system_id: The System whose failure is being attributed.
+
+    Returns:
+        The newest dead-lettered system-failing job, or ``None`` when none exists — the
+        reconciler-orphan case, where the caller applies its own default.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT * FROM jobs WHERE kind = ANY(%s::text[]) AND payload->>'system_id' = %s "
+            "AND state = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+            (
+                sorted(kind.value for kind in SYSTEM_FAILING_JOB_KINDS),
+                str(system_id),
+                JobState.FAILED.value,
+            ),
         )
         row = await cur.fetchone()
     return Job.model_validate(row) if row is not None else None

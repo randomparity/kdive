@@ -12,9 +12,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SYSTEMS
 from kdive.domain.capacity.state import RunState, SystemState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
 from kdive.domain.lifecycle.records import System
+from kdive.domain.operations.jobs import Job
 from kdive.domain.pcie import parse_match_spec
+from kdive.jobs import queue
 from kdive.log import bind_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
@@ -35,6 +37,14 @@ from kdive.services.debug.sessions import active_session_ids_for_system
 
 CUSTOM_SHAPE_SENTINEL = "__custom__"
 """The ``shape`` filter value selecting full-custom Systems (``shape IS NULL``)."""
+
+NO_JOB_SYSTEM_FAILURE_DETAIL = "System failed with no job recording a reason"
+"""``detail`` for a ``failed`` System with no failing job to attribute (ADR-0454 §3).
+
+The reconciler resolves a stalled ``restoring`` System to ``failed`` with no job behind it, so
+that path would otherwise surface a bare category. Names the condition and no project, host, or
+id, so it carries no resource-existence signal.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +68,7 @@ def system_envelope(
     active_run: dict[str, JsonValue] | None = None,
     supports_snapshots: bool | None = None,
     supports_traffic_capture: bool | None = None,
+    failing_job: Job | None = None,
 ) -> ToolResponse:
     """Render a System with recovery context; ``failed`` becomes a failure envelope.
 
@@ -65,6 +76,11 @@ def system_envelope(
     (ADR-0169/0180). The provisioning summary, ``allocation_id``, ``shape``, and timestamps
     come from the System row (no extra query, both paths). ``active_run`` and
     ``active_debug_session_ids`` are get-only (an N+1 on the list path), omitted otherwise.
+
+    ``failing_job`` is the job that put the System in ``failed`` (ADR-0454); the failure
+    envelope reports its category and reason instead of assuming one for every ``failed``
+    System. Like the other get-only arguments it is a per-row query, so ``systems.list`` passes
+    none and keeps the ``infrastructure_failure`` default (ADR-0454 §4).
     """
     data: dict[str, JsonValue] = {
         "project": system.project,
@@ -94,17 +110,41 @@ def system_envelope(
     if supports_traffic_capture is not None:
         data["supports_traffic_capture"] = supports_traffic_capture
     if system.state is SystemState.FAILED:
-        return ToolResponse.failure(
-            str(system.id),
-            ErrorCategory.INFRASTRUCTURE_FAILURE,
-            data={"current_status": system.state.value, **data},
-        )
+        return _failed_system_envelope(system, failing_job, data)
     return ToolResponse.success(
         str(system.id),
         system.state.value,
         suggested_next_actions=["systems.get", "systems.teardown"],
         data=data,
     )
+
+
+def _failed_system_envelope(
+    system: System, failing_job: Job | None, data: dict[str, JsonValue]
+) -> ToolResponse:
+    """Build the ``failed`` System envelope from its failing job's verdict (ADR-0454).
+
+    The category is the job's, defaulting to ``infrastructure_failure`` only when there is no
+    job to attribute (the reconciler orphan) or the job never recorded one.
+
+    The job-derived surface (``detail``, ``failing_job_id``) is suppressed entirely for a
+    no-leak category (ADR-0123): ``ToolResponse.failure`` already suppresses ``detail``, but the
+    ``data`` extra bypasses that seam, so it is gated here on the same rule.
+    ``suppressed_detail(category, None) is not None`` is true exactly for a suppressed category
+    (it returns the fixed constant even when ``raw`` is ``None``). The structured
+    ``failure_detail_*`` keys are deliberately left on ``jobs.get`` rather than duplicated here;
+    ``failing_job_id`` is the pointer to them.
+    """
+    category = (failing_job.error_category if failing_job else None) or (
+        ErrorCategory.INFRASTRUCTURE_FAILURE
+    )
+    failure_data: dict[str, JsonValue] = {"current_status": system.state.value, **data}
+    detail: str | None = NO_JOB_SYSTEM_FAILURE_DETAIL
+    if failing_job is not None:
+        detail = failing_job.failure_context.get("failure_message") or None
+        if suppressed_detail(category, None) is None:
+            failure_data["failing_job_id"] = str(failing_job.id)
+    return ToolResponse.failure(str(system.id), category, detail=detail, data=failure_data)
 
 
 def defined_system_envelope(system: System) -> ToolResponse:
@@ -187,6 +227,14 @@ async def get_system(
             except CategorizedError:
                 supports_snapshots = None
                 supports_traffic_capture = None
+            # The `systems` table carries no failure category, so a `failed` System's real
+            # reason is recovered from the job that failed it (ADR-0454). One indexed lookup,
+            # on the `failed` branch only — every other state pays nothing.
+            failing_job = (
+                await queue.latest_failed_job_for_system(conn, system.id)
+                if system.state is SystemState.FAILED
+                else None
+            )
         return system_envelope(
             system,
             resource_kind=resource_kind,
@@ -195,6 +243,7 @@ async def get_system(
             active_run=active_run,
             supports_snapshots=supports_snapshots,
             supports_traffic_capture=supports_traffic_capture,
+            failing_job=failing_job,
         )
 
 

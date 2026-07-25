@@ -67,6 +67,19 @@ destructive; ``reprovision`` became contributor leaseholder lifecycle (ADR-0326)
 the three is a valid ``destructive_ops`` token.
 """
 
+SYSTEM_FAILING_JOB_KINDS: frozenset[JobKind] = frozenset(
+    {JobKind.PROVISION, JobKind.REPROVISION, JobKind.RESTORE}
+)
+"""The job kinds whose handlers write ``SystemState.FAILED`` (ADR-0454 §2).
+
+``systems.get`` reads the newest dead-lettered job of one of these kinds to report *why* a
+System is ``failed``, since the ``systems`` table carries no failure category of its own. The
+set is deliberately narrow: a System also accumulates failed jobs of kinds that never touch its
+state (a failed ``check_ssh_reachable`` on a healthy System is routine), and reading one of
+those as the reason would be a confident mis-attribution. Adding a kind here is only correct
+alongside a handler that actually drives the System to ``failed``.
+"""
+
 CONTRIBUTOR_CANCELABLE_JOB_KINDS: frozenset[JobKind] = frozenset(
     {
         JobKind.PROVISION,
@@ -146,6 +159,7 @@ __all__ = [
     "DEFAULT_JOB_DISPATCH_LANE",
     "OPT_IN_DESTRUCTIVE_JOB_KINDS",
     "RETIRED_JOB_KINDS",
+    "SYSTEM_FAILING_JOB_KINDS",
     "Job",
     "JobAuthorizing",
     "JobKind",
