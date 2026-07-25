@@ -45,18 +45,36 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
    `unlink_partial_if_unheld`**, and both sweeps call it. It is provider-private today and
    `src/kdive/jobs/` imports nothing from `providers/local_libvirt/` — a job handler reaching into a
    provider's lifecycle package inverts the direction the layout encodes, while
-   `providers.shared.runtime_paths` is already imported by this very handler. Behaviour is
+   `providers.shared.runtime_paths` is already imported by this very handler. Behaviour is otherwise
    unchanged: `os.open(O_RDONLY|O_NONBLOCK)`, non-blocking `flock(LOCK_EX|LOCK_NB)`, `unlink`, with
    a `WARNING` on each of the skip branches and every fault handled **per candidate** so one
    unsweepable file cannot truncate a pass. A second implementation was rejected outright: two
    copies of a two-syscall liveness test drift, and the ADR-0446 derivation lives in that docstring.
 
-2. **`sweep_investigation_staging_dir` calls it per candidate** instead of
+2. **A filesystem that cannot `flock` at all is a caller decision, `unlink_when_unlockable`, with no
+   default.** ADR-0446 §4 put `ENOLCK` in the same "cannot evaluate" branch as `EACCES` and
+   `EMFILE`, and §5 justified that for the fetch side by "collection falls to the
+   investigation-reclaim sweep" — which was true only because that sweep unlinked unconditionally.
+   Sharing the helper unchanged would therefore have made the reclaim backstop skip **every**
+   candidate on precisely the hosts where the fetch-side gate had already degraded, and clear the
+   drain marker on the way out: the last collector for a SENSITIVE multi-GiB orphan, retired
+   silently, as a side effect of adding a guard. That is a different question from "this one
+   candidate resists evaluation" and it is answered per caller.
+
+   `False` on the fetch side, keeping ADR-0446 §4 exactly. `True` on the reclaim side, where it is
+   not a new risk but the **pre-ADR-0446 behaviour of that same sweep**, now confined to the case
+   where the kernel refuses to answer — the writer on such a host staged unguarded too, so the lock
+   protocol carries no information in either direction and skipping protects nothing. It also
+   restores the truth of `_flocked_partial`'s own operator-facing degrade `WARNING`, which already
+   tells an operator that "collection falls to the investigation-reclaim sweep". The argument has no
+   default because inheriting an answer to it is how the gap was created.
+
+3. **`sweep_investigation_staging_dir` calls it per candidate** instead of
    `partial.unlink(missing_ok=True)`. Its safety stops depending on row-state classification, which
    is the same move ADR-0446 made on the fetch side. The glob and the unlink-before-`rmdir` ordering
    are untouched.
 
-3. **The held-branch `WARNING` reports the observation, not a fetch-side inference.** Its text
+4. **The held-branch `WARNING` reports the observation, not a fetch-side inference.** Its text
    asserted that "this fetcher acquired the rootfs fetch lock while a sibling was still
    downloading — its Postgres session was lost mid-transfer, and this download is redundant", which
    is simply false on the reclaim path, where no fetch lock exists. It now states that a live writer
@@ -65,7 +83,7 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
    the observed state rather than the inferred cause, so a conditional is not written down as an
    invariant. Both derivations remain in the docstring and in the ADRs.
 
-4. **The drain marker is retained for a live-held skip, and only for that.**
+5. **The drain marker is retained for a live-held skip, and only for that.**
    `sweep_investigation_staging_dir` returns whether it skipped a partial because a live writer holds
    its `flock`; `_finish_drained_investigation` then skips the
    `rootfs_cleanup_pending_at = NULL` update in that one case, so the close-driven reconciler sweep
@@ -103,26 +121,36 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
 - **The guard is best-effort, and the residue is `_flocked_partial`'s documented degrade, not this
   gate.** On a filesystem that cannot lock at all — `ENOLCK` on an NFS mount whose lock manager is
   down, `EOPNOTSUPP` on some FUSE and 9p backends — the fetcher stages *unguarded* with a `WARNING`
-  (ADR-0446 §5), so this sweep finds nothing holding the partial and unlinks it. The outcome there is
+  (ADR-0446 §5) and this sweep unlinks its partial under decision 2. The outcome there is exactly
   the pre-ADR-0446 one, which is the point of degrading rather than failing an entire lane, and
-  `_require_still_linked`'s `_DOWNLOAD_WINDOW` message still names it. What this change removes from
-  that message's causes is the reclaim backstop, not the degrade. Claiming the live partial is now
-  safe unconditionally would be the same kind of derived invariant this ADR exists to delete.
-- **The pin-dropping classification is untouched.** `rootfs_base_reclaimable` still lets
-  `PROVISIONING -> TORN_DOWN` and `PROVISIONING -> FAILED` drop the pin and let the last rootfs row
-  be reclaimed under a live download. This change makes the sweep's safety independent of that
-  classification rather than correcting it. Correcting it is worth doing on its own and is filed as a
-  follow-up; it is not a substitute, because a sweep whose correctness rests on a state column is the
-  defect class both ADRs are removing.
+  `_require_still_linked`'s `_DOWNLOAD_WINDOW` message names it as the usual cause of a vanished
+  partial. Claiming the live partial is now safe unconditionally would be the same kind of derived
+  invariant this ADR exists to delete. `_DOWNLOAD_WINDOW` also stops *asserting* that cause: a lock
+  dropped by lock-manager recovery, or anything outside kdive removing the file, leaves the same
+  state, and asserting one cause in an error message is the defect decision 4 removes one file over.
+- **`ENOLCK` from kernel lock-record exhaustion is transient rather than a property of the
+  filesystem, and decision 2 does not distinguish the two.** A reclaim sweep that hits it would
+  unlink a live partial. That is the pre-ADR-0446 behaviour for a condition that is already rare and
+  already accompanied by the attributable `_DOWNLOAD_WINDOW` fault, and the alternative — skipping —
+  is the leak decision 2 exists to prevent. Named rather than left for a reader to derive.
+- **The pin-dropping classification is untouched, and the object delete still races the download.**
+  `rootfs_base_reclaimable` still lets `PROVISIONING -> TORN_DOWN` and `PROVISIONING -> FAILED` drop
+  the pin, so `_reclaim_one_checksum` still deletes the base, the object and the row while a
+  detached download streams. This gate preserves the partial's *bytes*; it does not preserve the
+  *fetch*, which on the gzip path then reads a deleted object through its ranged GETs and fails with
+  a store-shaped `INFRASTRUCTURE_FAILURE`. The drain tail's `WARNING` names that condition — which is
+  diagnosis, not prevention — and **#1558** carries the fix (run the same `flock` probe inside
+  `_reclaim_one_checksum` and defer the checksum). It is not a substitute for this change: a sweep
+  whose correctness rests on a state column is the defect class both ADRs are removing.
 - **A doomed fetcher can now publish a base nothing owns, and that shape is new.** Before this
   change the sweep destroyed the live partial, so the fetcher died at `_require_still_linked` and
   published nothing. Now it runs to completion and `os.replace`s onto `<token>.qcow2` whose
   `artifacts` row the reclaim already deleted — a staged base with no row, in a closed
   investigation, which no sweep reclaims. That trade is deliberate: the previous behaviour's "no
   leak" was an invisible-inode leak plus a failed provision, and a path-addressable file an operator
-  can find and an orphan-base sweep can later collect is the better of the two. It is filed as a
-  follow-up rather than fixed here, because collecting orphan *bases* is a different worklist from
-  collecting orphan partials.
+  can find and an orphan-base sweep can later collect is the better of the two. **#1559** carries it,
+  with the operator-side detection recipe in the meantime, because collecting orphan *bases* is a
+  different worklist from collecting orphan partials.
 - No schema, no migration, no config setting, no new dependency, no MCP/RBAC surface. Not an AI
   surface. `#1539` adds a sidecar completion marker to this same directory and this pass keeps the
   shape it needs: a second, non-`flock`ed glob added to the same function.
@@ -147,3 +175,8 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
 - **Clear the marker unconditionally and simply document the surviving directory.** Rejected. It is
   the smaller change and it silently removes the last collector for the very partial the new gate
   just decided to protect.
+- **Share the helper unchanged and let the reclaim sweep skip on a lock-less filesystem, recording
+  the leak as a residual.** Rejected. It is the smallest diff and it is a *regression*: on such a
+  host the sweep that unlinked unconditionally before this change would collect nothing at all,
+  clear the drain marker, and leave a SENSITIVE multi-GiB orphan with no collector — a strictly
+  worse outcome than the behaviour being replaced, shipped under a guard whose purpose is safety.

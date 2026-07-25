@@ -18,10 +18,16 @@ partial for the whole download-verify-publish window
 module is that test, shared rather than duplicated so the two sweeps cannot drift, and placed under
 ``providers.shared`` because one caller is a job handler and ``src/kdive/jobs/`` must not reach into
 a provider's lifecycle package.
+
+What a sweep does where the gate **cannot exist** — a filesystem that cannot ``flock`` at all, on
+which the writer also staged unguarded — is the callers' answer, not this module's, because the two
+differ: the fetch-side sweep is opportunistic and skipping there costs a bounded delay, while the
+reclaim-side one is the last collector and skipping there retires it outright.
 """
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import logging
 import os
@@ -30,11 +36,31 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 
-def unlink_partial_if_unheld(partial: Path) -> bool:
+#: The ``flock`` failures that say **this filesystem cannot lock at all**, as opposed to a fault on
+#: this one candidate. They are the premise of ``_flocked_partial``'s own degrade branch (ADR-0446
+#: §5), which names exactly these two: ``ENOLCK`` on an NFS mount whose lock manager is down, and
+#: ``EOPNOTSUPP`` (``ENOTSUP`` on Linux) on some FUSE and 9p backends. On such a host the writer
+#: staged unguarded, so the lock protocol carries no information in either direction and a sweep
+#: that skips is not being careful — it is collecting nothing at all.
+_UNLOCKABLE_FILESYSTEM_ERRNOS = frozenset({errno.ENOLCK, errno.EOPNOTSUPP})
+
+
+def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> bool:
     """Unlink ``partial`` unless a live writer holds its ``flock``; every skip is logged.
 
     Args:
         partial: The ``<token>.<uuid>.partial`` candidate a sweep found.
+        unlink_when_unlockable: What to do when the filesystem cannot ``flock`` at all
+            (:data:`_UNLOCKABLE_FILESYSTEM_ERRNOS`). Deliberately has **no default** and is
+            answered differently by the two callers, because the question is "what happens when
+            this gate cannot exist" and inheriting an answer is how the gap below was created.
+            ``False`` for the fetch-side opportunistic sweep, which keeps ADR-0446 §4's conservative
+            skip: it is bounded by the next fetch and something else collects. ``True`` for the
+            reclaim-side backstop, where nothing else collects — skipping there would silently
+            retire the last collector for a SENSITIVE multi-GiB orphan on exactly the hosts where
+            the fetch-side gate had already degraded, which is strictly worse than the
+            pre-ADR-0446 behaviour it would be replacing. ``True`` **is** that pre-ADR-0446
+            behaviour, unchanged, applied only where the kernel refuses to answer.
 
     Returns:
         ``True`` when a live writer's ``flock`` kept the file, ``False`` in every other case —
@@ -45,7 +71,7 @@ def unlink_partial_if_unheld(partial: Path) -> bool:
         it and clears the marker on everything else, so a permanently unsweepable file cannot pin an
         investigation forever.
 
-    Four outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
+    Five outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
 
     *Held.* ``EWOULDBLOCK`` means a writer is still staging this partial, and the skip is the
     correct action. It is also frequently the **only** externally visible symptom of the condition
@@ -60,13 +86,20 @@ def unlink_partial_if_unheld(partial: Path) -> bool:
     conditional down as an invariant, which is ``_release_fetch_lock``'s own stated principle in
     this same subsystem and the defect class both ADRs exist to remove.
 
-    *Cannot evaluate.* Any other ``OSError`` — ``EACCES`` under a uid asymmetry of the shape
-    ADR-0442 documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest
-    exactly when many stagings are in flight), ``ENOLCK`` where the filesystem cannot lock at all —
-    is a **narrowing** of the unconditional ``unlink`` this replaces, which needed only write and
-    execute on the *directory* and no permission on the file. A partial this process cannot even
-    open is one it cannot show is dead, and unlinking it anyway is the bug being fixed. ``WARNING``,
-    because on the reclaim side there is no further backstop behind this skip.
+    *Cannot evaluate this candidate.* ``EACCES`` under a uid asymmetry of the shape ADR-0442
+    documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest exactly when
+    many stagings are in flight), a transient ``EIO``. This is a **narrowing** of the unconditional
+    ``unlink`` it replaces, which needed only write and execute on the *directory* and no permission
+    on the file. A partial this process cannot even open is one it cannot show is dead, and
+    unlinking it anyway is the bug being fixed. ``WARNING``, because on the reclaim side there is no
+    further backstop behind this skip.
+
+    *Cannot lock at all.* :data:`_UNLOCKABLE_FILESYSTEM_ERRNOS` is a different condition from the
+    one above and must not be folded into it, which is the mistake this argument exists to prevent.
+    It is not "this candidate resists evaluation" but "no file on this filesystem can be evaluated,
+    including by the writer" — the exact premise ``_flocked_partial`` degrades on, staging *without*
+    a lock. Skipping there protects nothing and only decides which sweep stops collecting, so the
+    caller answers it via ``unlink_when_unlockable`` rather than inheriting a policy.
 
     *Absent.* A candidate that vanishes between the glob and the ``open`` is the achieved
     post-state, not a fault — the two sweeps walk the same directory.
@@ -106,13 +139,21 @@ def unlink_partial_if_unheld(partial: Path) -> bool:
             )
             return True
         except OSError as err:
+            if err.errno not in _UNLOCKABLE_FILESYSTEM_ERRNOS or not unlink_when_unlockable:
+                _log.warning(
+                    "could not test whether a live writer holds the staging partial %s (%s); "
+                    "leaving it in place rather than unlinking it unchecked",
+                    partial,
+                    err.strerror,
+                )
+                return False
             _log.warning(
-                "could not test whether a live writer holds the staging partial %s (%s); leaving "
-                "it in place rather than unlinking it unchecked",
+                "this host cannot flock the staging partial %s (%s), so no writer here holds one "
+                "either and the liveness gate cannot exist; unlinking it as this sweep did before "
+                "the gate was added, because it is the last collector for it",
                 partial,
                 err.strerror,
             )
-            return False
         try:
             partial.unlink(missing_ok=True)
         except OSError as err:

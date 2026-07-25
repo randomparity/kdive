@@ -299,9 +299,13 @@ hang that it did not have before.
   > `providers/shared/staging_partials.py` as `unlink_partial_if_unheld` — a job handler must not
   > import a provider-private helper — and its held-branch `WARNING` dropped the fetch-side causal
   > inference this ADR wrote into it ("its Postgres session was lost mid-transfer"), which is false
-  > at the new call site, for the observation. What remains open is not this sweep but the
-  > pin-dropping classification itself, and `_flocked_partial`'s `ENOLCK` degrade, under which
-  > neither sweep is gated at all.
+  > at the new call site, for the observation. §4's decision to fold `ENOLCK` into the "cannot
+  > evaluate" skip is **kept for this sweep and reversed for the reclaim one**: §5 justified the
+  > skip by "collection falls to the investigation-reclaim sweep", which held only while that sweep
+  > unlinked unconditionally, so sharing the helper unchanged would have retired the last collector
+  > on a lock-less host. The reclaim caller passes `unlink_when_unlockable=True` and keeps this
+  > sweep's degrade honest. What remains open is not either sweep but the pin-dropping
+  > classification itself (**#1558**) and the unowned base a doomed fetcher can publish (**#1559**).
 - No schema, no migration, no config setting, no new dependency (`fcntl` is stdlib), no MCP/RBAC
   surface. Not an AI surface.
 

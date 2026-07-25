@@ -75,9 +75,26 @@ fetcher reports the condition attributably; it just cannot survive it.
 
 `_unlink_if_unheld` is provider-private in `local_libvirt`, and `src/kdive/jobs/` imports nothing
 from that package (it does already import `kdive.providers.shared.runtime_paths`, so the shared
-direction is sanctioned). It moves verbatim in behaviour to
-`src/kdive/providers/shared/staging_partials.py` as `unlink_partial_if_unheld`, and
-`_unlink_orphan_partials` calls the shared name. Nothing else about the fetch side changes.
+direction is sanctioned). It moves to `src/kdive/providers/shared/staging_partials.py` as
+`unlink_partial_if_unheld`, and `_unlink_orphan_partials` calls the shared name.
+
+### A filesystem that cannot lock is answered per caller
+
+One behaviour cannot move verbatim. ADR-0446 §4 folds `ENOLCK`/`EOPNOTSUPP` — "this filesystem
+cannot `flock` at all" — into the same conservative skip as `EACCES` and `EMFILE`, and §5 justifies
+that for the fetch side with "collection falls to the investigation-reclaim sweep". That justification
+held only while the reclaim sweep unlinked unconditionally. Sharing the helper unchanged would make
+the backstop skip **every** candidate on exactly the hosts where `_flocked_partial` had already
+degraded to staging unguarded, and clear the drain marker on the way out — retiring the last
+collector for a SENSITIVE multi-GiB orphan as a side effect of adding a guard, which is worse than
+the behaviour being replaced.
+
+So `unlink_partial_if_unheld` takes `unlink_when_unlockable`, keyword-only with **no default**:
+`False` on the fetch side (ADR-0446 §4 unchanged), `True` on the reclaim side, where it is not a new
+risk but that sweep's own pre-ADR-0446 behaviour confined to the case where the kernel refuses to
+answer. On such a host the writer staged unguarded too, so the lock protocol carries no information
+in either direction and skipping protects nothing. No default, because inheriting an answer to
+"what happens when this gate cannot exist" is what created the gap.
 
 ### The log text becomes observation, not inference
 
@@ -124,19 +141,21 @@ next pass back to finish the job.
 - **The `flock` guard is best-effort, because `_flocked_partial` degrades.** On a filesystem that
   cannot lock (`ENOLCK` on an NFS mount whose lock manager is down, `EOPNOTSUPP` on some FUSE and 9p
   backends) the fetcher stages *unguarded* with a `WARNING` — the documented ADR-0446 §5 degrade —
-  and this sweep will then find nothing holding the partial and unlink it. The outcome there is the
-  pre-ADR-0446 one, which is the point of degrading rather than failing, and
-  `_require_still_linked`'s `_DOWNLOAD_WINDOW` message already names it as one of its two causes.
-  This change removes the reclaim path from that message's causes, not the degrade.
-- **The pin-dropping classification itself.** `rootfs_base_reclaimable` still lets
-  `PROVISIONING -> TORN_DOWN` / `-> FAILED` drop the pin. This change makes the sweep's safety
-  independent of that classification instead of correcting it, which is the same move ADR-0446 made
-  on the fetch side.
+  and this sweep unlinks its partial under `unlink_when_unlockable=True`. The outcome there is the
+  pre-ADR-0446 one, which is the point of degrading rather than failing, and it is deliberately not
+  narrowed further: `ENOLCK` from kernel lock-record exhaustion is transient rather than a property
+  of the filesystem, so a sweep hitting *that* unlinks a live partial. Rare, attributable through
+  `_require_still_linked`, and strictly better than the leak the alternative produces.
+- **The pin-dropping classification itself, and the object delete that races the download.**
+  `rootfs_base_reclaimable` still lets `PROVISIONING -> TORN_DOWN` / `-> FAILED` drop the pin, so
+  `_reclaim_one_checksum` still deletes the base, the object and the row under a live download. This
+  gate preserves the partial's bytes, not the fetch: on the gzip path the remaining ranged GETs then
+  404. The drain tail warns; **#1558** fixes it by running the same probe before the base unlink.
 - **A base a doomed fetcher publishes after the pin dropped.** If the live writer runs to
   completion it `os.replace`s its partial onto `<token>.qcow2` whose `artifacts` row the reclaim has
   already deleted, leaving a staged base nothing owns. That is a consequence of the pin-dropping
-  transition, not of this gate — but this change does alter its shape, and the ADR says so rather
-  than leaving it to be rediscovered. It is filed as a follow-up.
+  transition, not of this gate — but this change does alter its shape, so **#1559** carries it, with
+  an operator-side detection recipe in the meantime.
 
 ## Test plan
 
@@ -149,6 +168,7 @@ next pass back to finish the job.
 | R3 | The staging dir is removed once it drains; a dir still holding a base is left in place |
 | R5 | A live-held skip retains `rootfs_cleanup_pending_at`; a drained sweep clears it |
 | R5 | An *unopenable* partial (no `flock` held) clears the marker, so a permanent fault cannot pin it forever |
+| R2 | On a filesystem that cannot `flock` at all, the reclaim sweep still collects and still clears the marker, while the fetch-side sweep still skips |
 
 ## Alternatives considered
 

@@ -1835,6 +1835,29 @@ def test_sweep_warns_and_skips_a_candidate_it_cannot_open(
     )
 
 
+def test_the_fetch_side_sweep_still_skips_on_a_filesystem_that_cannot_lock(
+    tmp_path: Path,
+) -> None:
+    # The call-site half of ADR-0452 §2, which is what can silently regress. This sweep keeps
+    # ADR-0446 §4's conservative skip on ENOLCK/EOPNOTSUPP because it is opportunistic and the
+    # reclaim backstop collects; the reclaim sweep is the one that passes
+    # unlink_when_unlockable=True because nothing collects behind it. Flipping this call site would
+    # restore the pre-ADR-0446
+    # unconditional unlink on the path ADR-0446 exists to guard.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.unlockable.partial"
+    orphan.write_bytes(b"leaked on a host that cannot lock")
+
+    def unlockable_flock(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        _unlink_orphan_partials(dest)
+
+    assert orphan.exists()
+
+
 def test_stage_fails_loud_when_a_sweep_holds_the_lock_across_the_create_window(
     tmp_path: Path,
 ) -> None:
@@ -2146,10 +2169,11 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     # Named for the window it actually went in. "between its creation and its lock" would point the
     # operator at a sub-millisecond race that additionally needs a lost session lock, and away from
-    # the condition that really produces this -- which is most of what the check is here for. Both
-    # sweeps are flock-gated since ADR-0452, so an *unguarded* stage is the only remaining cause and
-    # the message says so instead of also naming the reclaim backstop.
+    # the condition that really produces this -- which is most of what the check is here for. It
+    # names the usual cause without *asserting* it: a lock dropped by lock-manager recovery, or an
+    # external remover, leaves the same state, and asserting one cause in an error is the defect
+    # ADR-0452 removes from the sweep's own WARNING.
     assert "concurrent orphan sweep" in str(error.value)
     assert "while it was being downloaded" in str(error.value)
-    assert "the filesystem could not flock the partial" in str(error.value)
+    assert "the usual cause is a stage the filesystem could not flock" in str(error.value)
     assert not dest.exists()

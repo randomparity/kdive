@@ -369,7 +369,7 @@ def _unlink_orphan_partials(dest: Path) -> None:
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
-            unlink_partial_if_unheld(orphan)
+            unlink_partial_if_unheld(orphan, unlink_when_unlockable=False)
 
 
 @contextmanager
@@ -465,12 +465,14 @@ def _require_still_linked(fd: int, partial: Path, *, window: str) -> None:
 #: What took the partial, per call site. The two are materially different conditions and an operator
 #: acts on them differently, so the fault names the one that applies rather than one fixed string:
 #: the creation window is a sub-millisecond race, while the download window points at an unguarded
-#: stage. Both sweeps are ``flock``-gated since ADR-0452, so a *guarded* stage cannot reach the
-#: second at all and the message names the one remaining cause rather than listing a fixed one.
+#: stage. Both sweeps are ``flock``-gated since ADR-0452, so a *guarded* stage is no longer taken by
+#: a sweep at all — but the message states the observation and names its likely cause rather than
+#: asserting one, which is the same principle ADR-0452 §3 applies to the sweep's own WARNING.
 _CREATION_WINDOW = "between its creation and its lock"
 _DOWNLOAD_WINDOW = (
-    "while it was being downloaded — this stage was unguarded, because the filesystem could not "
-    "flock the partial (ADR-0446 §5)"
+    "while it was being downloaded; the usual cause is a stage the filesystem could not flock "
+    "(ADR-0446 §5), on which neither sweep's gate exists — but a lock dropped by lock-manager "
+    "recovery, or anything outside kdive removing the file, leaves the same state"
 )
 
 
