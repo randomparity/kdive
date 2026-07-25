@@ -92,8 +92,9 @@ still_deleted` pins the behaviour so the residual has a reproducer.
 
 ### 3. A failed key strands nothing, and the pass reports it at the end
 
-Phase 2 catches `CategorizedError` per key, logs it at WARNING with the key, and continues; a
-non-zero failure count is then logged once at ERROR naming the owner and the counts. Raising *there*
+Phase 2 catches `CategorizedError` per key, logs it at WARNING with the key, and continues,
+returning how many it could not delete; `reap_one_owner` then logs a non-zero count once at ERROR
+naming the owner and the totals. Raising *there*
 would be worse on every axis: the row is already durably gone, so the owner *is* reaped and there is
 nothing to retry, and `repair_abandoned_uploads` has no per-candidate `try`, so one bad key would
 abandon every later owner in the pass. `CategorizedError` is caught specifically — the category the
@@ -133,8 +134,8 @@ seconds later with their rows and bytes intact.
 
 Those logs only cover the failure modes phase 2 can *observe*. The abort modes this ADR's Context
 names as motivating — cancellation at shutdown, a lost connection, a process kill — unwind past
-them, leaving no record that the claim happened at all. `reap_one_owner` therefore logs the prefix
-and the doomed key count at INFO **before** the sweep begins. What that buys is the *timestamp* and
+them, leaving no record that the claim happened at all. `_claim_abandoned_prefix` therefore logs
+the prefix and the doomed key count at INFO once its transaction commits — before the sweep begins. What that buys is the *timestamp* and
 the *count*: it is deliberately not claimed to rescue an otherwise-lost handle, because the prefix
 is `owner_prefix(_TENANT, owner_kind, owner_id)` from the single mint site and so stays derivable
 from the owner row, which outlives the reap (§Consequences records this, since #1556 needs it).

@@ -61,8 +61,9 @@ deadline while a reap fails partway — narrow, but reachable.
    the repair's existing group-E error signal survives the change. This does not extend to phase 1:
    a failing `list_prefix` ends the pass immediately, deliberately — see Design, "Failure handling".
 5. Object deletion holds neither the owner advisory lock nor a database transaction.
-6. The window's prefix is recorded before the first object is deleted, so an abort that skips the
-   sweep's own reporting still leaves the leaked bytes a derivable handle.
+6. The window's prefix and doomed key count are recorded before the first object is deleted, so an
+   abort that skips the sweep's own reporting still leaves a record of when the claim happened and
+   how much it doomed.
 7. The locked re-read still declines a manifest whose deadline was renewed since the candidate
    select, and an unknown owner kind still fails loud rather than locking under a guessed scope.
 
@@ -145,8 +146,8 @@ loop rather than inside it keeps requirement 4 true at the same time.
 
 Those logs only cover what phase 2 can observe. The abort modes in Problem above — cancellation at
 shutdown, a lost connection, a process kill — unwind past them, leaving no record that the claim
-happened at all. `reap_one_owner` therefore logs the prefix and the doomed key count at INFO
-**before** the sweep begins (requirement 6). What that buys is the *timestamp* and the *count*, and
+happened at all. `_claim_abandoned_prefix` therefore logs the prefix and the doomed key count at
+INFO once its transaction commits, before the sweep begins (requirement 6). What that buys is the *timestamp* and the *count*, and
 deliberately not a rescued handle: the prefix is `owner_prefix(_TENANT, owner_kind, owner_id)` from
 the single mint site (`mcp/tools/catalog/artifacts/uploads.py`, the only construction of
 `UploadManifestReplaceRequest` in `src/`), so it stays derivable from the owner row, which outlives
