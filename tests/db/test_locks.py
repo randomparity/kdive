@@ -402,8 +402,15 @@ def test_session_advisory_lock_held_ignores_a_holder_in_another_database(
             ) as elsewhere,
             await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
         ):
-            # Same key, other database: it acquires, proving the two never contend.
+            # Hold the key here first, so the other database's acquire proves genuine
+            # non-contention rather than merely finding it unclaimed. That premise is what
+            # the production filter rests on: if the two ever contended, scoping the scan
+            # to one database would hide a real leader.
+            here = SessionAdvisoryLock(observer, CONSOLE_HOSTING_LEADER)
+            assert await here.try_acquire() is True
             assert await SessionAdvisoryLock(elsewhere, CONSOLE_HOSTING_LEADER).try_acquire()
+            # Now only the other database holds it — which is not a leader of this one.
+            await here.release()
             assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
 
     with psycopg.connect(admin_url, autocommit=True) as admin:
