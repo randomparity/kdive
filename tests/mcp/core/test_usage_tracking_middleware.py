@@ -196,9 +196,8 @@ def test_swallowed_recording_failure_names_its_cause(monkeypatch: pytest.MonkeyP
 
 def test_warm_pool_has_a_connection_before_the_caller_acquires(migrated_url: str) -> None:
     # This is the whole of the #1527 fix: the connect must land *outside* the
-    # middleware's 1-second acquire budget. Pin it directly — every other test here
-    # passes just as well over a cold pool on an idle machine, so without this one a
-    # refactor back to the psycopg default would reopen the flake silently.
+    # middleware's 1-second acquire budget. Every other test here passes just as well
+    # over a cold pool on an idle machine, so name the contract explicitly.
     async def _run() -> int:
         async with warm_pool(migrated_url) as pool:
             return pool.get_stats()["pool_available"]
@@ -211,3 +210,17 @@ def test_recording_guard_ignores_unrelated_warnings() -> None:
     # logs must not be misreported as a lost usage row.
     with recording_must_not_fail():
         logging.getLogger(UsageTrackingMiddleware.__module__).warning("slow write, not a failure")
+
+
+def test_recording_guard_refuses_to_run_disarmed() -> None:
+    # A raised `logging.disable` floor would leave the guard capturing nothing, so it
+    # must fail rather than pass blindly — and must still restore the logger it touched.
+    logger = logging.getLogger(UsageTrackingMiddleware.__module__)
+    before = (logger.level, list(logger.handlers))
+    logging.disable(logging.WARNING)
+    try:
+        with pytest.raises(AssertionError, match="disarmed"), recording_must_not_fail():
+            pass  # pragma: no cover - the guard raises on entry
+    finally:
+        logging.disable(logging.NOTSET)
+    assert (logger.level, list(logger.handlers)) == before
