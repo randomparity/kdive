@@ -229,17 +229,30 @@ def _release_fetch_lock(conn: psycopg.Connection, lock_key: int) -> None:
     ``CategorizedError`` — a checksum mismatch, a non-qcow2 upload — to ``__context__`` behind a
     Postgres admin-shutdown message, on precisely the runs where the connection had since died.
 
-    Suppressing is the correct semantics rather than a convenience: a lock whose session is gone is
-    already released, and one whose session is alive is released by the statement that succeeds.
+    Suppressing every ``psycopg.Error`` is the correct semantics rather than a convenience — raising
+    out of a ``finally`` is the defect above. The *narration* is split, because the ``except`` is
+    wider than the two triggers: a role or database ``statement_timeout`` cancels this statement as
+    ``QueryCanceled`` on a session that is still open and **still holding the lock**. Reporting the
+    observed connection state rather than the inferred cause keeps this from writing down a
+    conditional as an invariant, which is the defect class this whole change exists to remove.
     """
     try:
         conn.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
     except psycopg.Error as err:
-        _log.warning(
-            "could not release the rootfs fetch advisory lock (%s); its Postgres session is gone, "
-            "which already released it — this fetch held the lock for less than it appeared to",
-            err,
-        )
+        if conn.closed:
+            _log.warning(
+                "could not release the rootfs fetch advisory lock (%s); its Postgres session is "
+                "gone, which already released it — this fetch held the lock for less than it "
+                "appeared to",
+                err,
+            )
+        else:
+            _log.warning(
+                "could not release the rootfs fetch advisory lock (%s), and its Postgres session "
+                "is still open — the lock may still be held, blocking every sibling fetch of this "
+                "base until that session closes",
+                err,
+            )
 
 
 def _resolve_investigation(conn: psycopg.Connection, system_id: UUID) -> UUID:
@@ -413,7 +426,7 @@ def _unlink_if_unheld(orphan: Path) -> None:
 
 
 @contextmanager
-def _flocked_partial(partial: Path) -> Iterator[None]:
+def _flocked_partial(partial: Path) -> Iterator[int]:
     """Create this fetcher's partial and hold an exclusive ``flock`` on it while it stages.
 
     The liveness marker :func:`_unlink_orphan_partials` reads. Two *writers* never contend, because
@@ -469,11 +482,32 @@ def _flocked_partial(partial: Path) -> Iterator[None]:
                 partial,
                 err.strerror,
             )
-        if os.fstat(fd).st_nlink == 0:
-            raise _swept_partial_error(partial)
-        yield
+        _require_still_linked(fd, partial)
+        yield fd
     finally:
         os.close(fd)
+
+
+def _require_still_linked(fd: int, partial: Path) -> None:
+    """Raise if the partial behind ``fd`` has been unlinked, so the fault names the sweep.
+
+    Called twice. At creation it closes the two-syscall window ADR-0446 §3 describes. After the
+    download it covers the :func:`_flocked_partial` degrade path, where the filesystem could not
+    lock and so nothing kept a sweeper out for the whole transfer — §5's symmetry argument
+    (a sweeper there cannot lock either) is evaluated at one instant and not maintained across
+    minutes, and a recovering ``lockd`` falsifies it mid-download.
+
+    The degrade path's outcome is then the pre-ADR-0446 one, which is the point of degrading rather
+    than failing. What this adds is the diagnosis: without it the fetcher streams on and dies at
+    ``os.replace`` with a bare ``ENOENT`` that :func:`_staging_fault` renders as "failed to stage",
+    pointing an operator at the object store over a purely local race — exactly the misattribution
+    §3 converts the ``EWOULDBLOCK`` interleaving away from.
+
+    Raises:
+        OSError: ``ENOENT`` when the partial no longer has a directory entry.
+    """
+    if os.fstat(fd).st_nlink == 0:
+        raise _swept_partial_error(partial)
 
 
 def _swept_partial_error(partial: Path) -> OSError:
@@ -529,7 +563,7 @@ def stage_uploaded_rootfs(
     effective = normalize_encoding(encoding)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with _flocked_partial(partial):
+        with _flocked_partial(partial) as guard_fd:
             if effective is None:
                 _stage_identity(
                     store,
@@ -558,6 +592,7 @@ def stage_uploaded_rootfs(
                     category=ErrorCategory.CONFIGURATION_ERROR,
                     details={"system_id": str(system_id)},
                 )
+            _require_still_linked(guard_fd, partial)
             _require_qcow2_magic(partial, system_id=str(system_id))
             if _sibling_already_published(dest):
                 # Only reachable on the lost-session-lock path: the caller checked ``dest`` twice

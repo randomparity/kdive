@@ -54,10 +54,14 @@ Both release the lock without the downloader noticing until its `pg_advisory_unl
   bind-mounts `/var/lib/kdive` onto NFS. (Linux emulates `flock` over NFS with whole-file POSIX
   locks and does propagate them between clients; under `-o local_lock=flock,all` it does not, but
   same-host processes still observe each other's locks in every mount configuration.)
-- **The reclaim-side backstop is out of scope.** `sweep_investigation_staging_dir`
-  (`jobs/handlers/artifacts/rootfs_reclaim.py`) runs only once no committed rootfs row remains for
-  the investigation, so no live fetcher for that base can exist. It is also the file #1539 will
-  edit; leaving it untouched keeps the serial queue on `rootfs_upload_fetch.py` clean.
+- **The reclaim-side backstop is out of scope, and carries the same defect.**
+  `sweep_investigation_staging_dir` (`jobs/handlers/artifacts/rootfs_reclaim.py`) still unlinks
+  every `*.partial` unconditionally. The reflex claim — it runs only once no committed rootfs row
+  remains, so no live fetcher can exist — is derived from `rootfs_base_reclaimable`'s **row-state**
+  classification, and `PROVISIONING -> TORN_DOWN` / `PROVISIONING -> FAILED` falsify it while the
+  detached `asyncio.to_thread` download keeps writing. Its file is #1539's and queued serially
+  behind this issue, so it is filed as #1544 rather than fixed here; ADR-0446's Consequences
+  record the real state instead of the invariant.
 
 ## Decision
 

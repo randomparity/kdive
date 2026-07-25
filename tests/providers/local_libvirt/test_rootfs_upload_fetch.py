@@ -601,6 +601,9 @@ class _FakeConn:
         self.queried_object_keys: list[str] = []
         self.lock_keys: list[int] = []
         self.unlock_keys: list[int] = []
+        # The release path reports the OBSERVED connection state rather than an inferred cause,
+        # so the fake carries the same flag a real psycopg connection exposes.
+        self.closed = False
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -1490,6 +1493,7 @@ def test_fetch_survives_a_dead_session_when_releasing_the_lock(
 
     def dying_execute(sql: str, params: Any = None) -> Any:
         if "pg_advisory_unlock" in sql:
+            conn.closed = True  # libpq marks a terminated connection BAD before the raise
             raise psycopg.OperationalError("terminating connection due to administrator command")
         return real_execute(sql, params)
 
@@ -1515,6 +1519,7 @@ def test_a_dead_session_does_not_mask_the_real_staging_error(tmp_path: Path) -> 
 
     def dying_execute(sql: str, params: Any = None) -> Any:
         if "pg_advisory_unlock" in sql:
+            conn.closed = True  # libpq marks a terminated connection BAD before the raise
             raise psycopg.OperationalError("terminating connection due to administrator command")
         return real_execute(sql, params)
 
@@ -1596,3 +1601,69 @@ def test_the_published_base_stays_readable_by_the_hypervisor(tmp_path: Path) -> 
 
     assert mode == 0o666 & ~0o022, f"the published base was staged {mode:o}, not 0o644"
     assert mode & (stat.S_IRGRP | stat.S_IROTH), "the hypervisor user cannot read the staged base"
+
+
+def test_a_failed_unlock_on_a_live_session_does_not_claim_the_lock_was_released(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # `except psycopg.Error` is wider than the two triggers ADR-0446 names. A role or database
+    # statement_timeout cancels the unlock as QueryCanceled on a session that is still open and
+    # STILL HOLDING the lock -- so the "its session is gone, which already released it" line would
+    # affirmatively deny the very condition an operator is staring at, while every sibling fetch of
+    # this base blocks. Suppressing stays right; narrating an unobserved cause does not.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    conn.closed = False
+    real_execute = conn.execute
+
+    def timing_out_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        return real_execute(sql, params)
+
+    conn.execute = timing_out_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2  # still not a failed provision
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "still open" in logged and "may still be held" in logged
+    assert "already released it" not in logged
+
+
+def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
+    tmp_path: Path,
+) -> None:
+    # On the ENOLCK degrade path nothing keeps a sweeper out for the whole transfer: ADR-0446 5's
+    # symmetry argument ("a sweeper there cannot lock either") holds at one instant, not across
+    # minutes, and a recovering lockd falsifies it mid-download. The outcome is then the
+    # pre-ADR-0446 one, which is the point of degrading rather than failing -- but the diagnosis
+    # must not be, because a bare ENOENT at os.replace reads as an object-store fault.
+    dest = _dest(tmp_path)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    def unlockable_flock(fd: Any, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    real_stream = store.get_artifact_stream
+
+    @contextmanager
+    def sweeping_stream(key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        with real_stream(key, etag) as fetched:
+            # A sibling sweeps once the lock manager is back, while this download is still running.
+            for partial in dest.parent.glob(f"{_TOKEN}.*.partial"):
+                partial.unlink()
+            yield fetched
+
+    store.get_artifact_stream = sweeping_stream  # ty: ignore[invalid-assignment]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        with pytest.raises(CategorizedError) as error:
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "concurrent orphan sweep" in str(error.value)
+    assert not dest.exists()

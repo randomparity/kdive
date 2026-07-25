@@ -264,10 +264,23 @@ hang that it did not have before.
   shortcoming: the process is alive and may still finish. An mtime window would have reclaimed it
   and destroyed the download. It is bounded by the reclaim-side backstop when the investigation
   drains.
-- The reclaim-side sweep (`sweep_investigation_staging_dir`) is deliberately **not** changed. It
-  runs only once no committed rootfs row remains for the investigation, so no live fetcher for that
-  base can exist and it needs no lock gate. Its file is also #1539's, and adding an unnecessary
-  coupling there would be a regression risk taken for nothing.
+- **The reclaim-side sweep (`sweep_investigation_staging_dir`) is left unchanged, and its safety
+  is weaker than this ADR first claimed.** The draft asserted that it "runs only once no committed
+  rootfs row remains, so no live fetcher for that base can exist" — a *derived* claim, and the
+  derivation does not hold. The row count reaches zero only because `rootfs_base_reclaimable`
+  classified the base as unpinned, and that gate reads the System's **state column** plus
+  overlay-file presence: `_ROOTFS_REFERENCERS_SQL` filters `torn_down` out entirely, and
+  `ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES` is `{defined, provisioning, reprovisioning, restoring}` —
+  so `failed` pins nothing either, a provisioning System having no overlay file yet.
+  `PROVISIONING -> TORN_DOWN` and `PROVISIONING -> FAILED` are both legal transitions, and the
+  download runs detached under `asyncio.to_thread`, which cannot be cancelled and keeps writing
+  whatever any other actor does to the row. Nothing serializes the two: the fetch takes only the
+  per-(investigation, checksum) lock, never the `INVESTIGATION` one reclaim holds. So a concurrent
+  teardown can drop the pin and let that sweep unlink a live partial — the same defect this ADR
+  fixes on the fetch side, on the path this ADR does not touch. It is filed as **#1544** rather than
+  fixed here because its file is #1539's and queued serially behind this one; the primitive it
+  needs (`_unlink_if_unheld`) already exists. Recording the false invariant would have been worse
+  than the gap, because it teaches the next reader exactly what this change disproved.
 - No schema, no migration, no config setting, no new dependency (`fcntl` is stdlib), no MCP/RBAC
   surface. Not an AI surface.
 
@@ -296,6 +309,18 @@ hang that it did not have before.
 - **Drop the opportunistic sweep and rely on reclaim alone.** Rejected: it would leave a SENSITIVE
   multi-GiB orphan on disk for the life of the investigation, which is the regression ADR-0441 §5
   introduced the sweep to avoid. The sweep is not the problem; its unconditional unlink is.
+- **`O_TMPFILE` + `linkat`, staging into an inode with no directory entry.** The one
+  alternative that attacks the premise instead of the symptom: a file no path names cannot be
+  globbed, so no sweep can reach a live download at all, and the kernel destroys the inode when
+  the last descriptor closes — which would collapse the crash-orphan class the sweep exists for
+  rather than gating a sweep over it. Rejected here on cost, not merit. It needs `O_TMPFILE`
+  support (absent on NFS, which the spec's constraints explicitly contemplate an operator
+  bind-mounting `/var/lib/kdive` onto) and `/proc` mounted for the `linkat` source, so a second
+  code path survives for every backend without it — and that fallback is the one carrying the
+  risk, so the lock protocol would still have to exist. `linkat` also cannot overwrite, so the
+  link-then-rename publish keeps a window of its own, and §7's sibling-published gate is
+  orthogonal and still required. The result is strictly more surface than the guard it would
+  replace, for a class of orphan the reclaim sweep already backstops.
 - **A PID or hostname sidecar naming the live writer.** Rejected: it needs liveness checking that is
   wrong across containers and PID namespaces, it does not self-clean on `SIGKILL`, and it is a
   second file in a directory whose `rmdir` is already load-bearing (#1539).
