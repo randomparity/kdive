@@ -97,20 +97,37 @@ def test_app_service_waits_for_migrate_completion(service: str) -> None:
     assert dep["migrate"]["condition"] == "service_completed_successfully"
 
 
-@pytest.mark.parametrize("service", (*_APP_SERVICES, "postgres", "minio", "oidc"))
+_LONG_RUNNING_SERVICES = (*_APP_SERVICES, "postgres", "minio", "oidc")
+
+
+@pytest.mark.parametrize("service", ("prometheus", "grafana"))
+def test_obs_profile_service_restarts_too(service: str) -> None:
+    # Same policy, rendered through the obs profile because these are absent from the
+    # default model. They are named separately rather than folded into the list below so
+    # this file keeps saying which services the default graph contains.
+    assert _services_with_obs_profile()[service]["restart"] == "on-failure"
+
+
+@pytest.mark.parametrize("service", _LONG_RUNNING_SERVICES)
 def test_long_running_service_restarts_so_an_outage_is_recoverable(service: str) -> None:
     # ADR-0449 makes an unreachable database at start exit the process, and puts the retry
     # in the supervisor. `depends_on` only orders the *first* `up`, so without a restart
     # policy every later recreate during a backend outage — a postgres image bump, a bare
-    # `compose restart`, a host reboot — leaves the app container Exited(1) permanently,
-    # where before it came up and recovered on its own.
+    # `compose restart` — leaves the app container Exited(1) permanently, where before it
+    # came up and recovered on its own.
     #
-    # The backends carry it too, and that is the load-bearing half: policing only the app
-    # tier makes a host reboot *worse* than no policy at all, because the app services come
-    # back and crash-loop forever against backends that stayed Exited — reading as transient
-    # while being permanently unable to progress. The `migrate` and `minio-init` one-shots
-    # are deliberately excluded: a restart policy would re-run them on every clean exit.
-    assert _services()[service]["restart"] == "unless-stopped"
+    # The backends carry it too: policing only the app tier leaves them restarting against a
+    # backend that can never answer, which reads as transient while being unable to progress.
+    #
+    # `on-failure`, not `unless-stopped`, on two counts. It is the policy ADR-0114 section 4
+    # documents and the systemd units ship, which is the contract ADR-0449 cites. And
+    # `unless-stopped` additionally starts a container on *daemon start*, which would make
+    # this stack's demo-credential MinIO and token-minting mock issuer — both published on
+    # host ports — come back on every reboot of any machine that ever ran the stack.
+    #
+    # The `migrate` and `minio-init` one-shots are deliberately excluded: they are meant to
+    # run once and exit, and `on-failure` would still re-run a genuinely failing one forever.
+    assert _services()[service]["restart"] == "on-failure"
 
 
 @pytest.mark.parametrize("service", _APP_SERVICES)

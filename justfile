@@ -204,7 +204,10 @@ stack-up:
     # `docker rmi kdive-mock-oidc:dev` to force a rebuild. Skipped entirely when
     # KDIVE_OIDC_IMAGE is set (that's the pull path, ADR-0358).
     if [ -z "${KDIVE_OIDC_IMAGE:-}" ]; then if docker image inspect kdive-mock-oidc:dev > /dev/null 2>&1; then echo "using cached kdive-mock-oidc:dev — run 'docker rmi kdive-mock-oidc:dev' to force a rebuild after editing deploy/mock-oidc"; else docker compose build oidc; fi; fi
-    docker compose up -d --wait postgres minio oidc
+    # --wait-timeout is required now the backends carry  (ADR-0449):
+    # a container that keeps failing cycles Exited -> Restarting instead of settling, so
+    # without a bound the convergence poll can block indefinitely rather than reporting.
+    docker compose up -d --wait --wait-timeout 120 postgres minio oidc
     docker compose run --rm minio-init
     ./scripts/live-stack/apply-migrations.sh
     @echo "Backends healthy and schema migrated."

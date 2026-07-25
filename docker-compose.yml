@@ -55,10 +55,11 @@ x-backends: &backends
 services:
   postgres:
     image: postgres:17
-    # Policed like the app tier: without this a host reboot or daemon restart brings the
-    # app services back (they have a policy) while this stays Exited, leaving them to
-    # crash-loop against a backend that can never answer.
-    restart: unless-stopped
+    # Policed like the app tier: without this, a recreate that outlives the backend leaves
+    # the app services restarting against something that can never answer. `on-failure`
+    # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
+    # section 4) and does not make this dev-credential backend boot-persistent.
+    restart: on-failure
     # max_connections sized for the test suite: when this backend is used as a test
     # override (KDIVE_TEST_PG_URL), ~18 xdist workers share one server (ADR-0400).
     command: ["postgres", "-c", "max_connections=500"]
@@ -76,10 +77,11 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    # Policed like the app tier: without this a host reboot or daemon restart brings the
-    # app services back (they have a policy) while this stays Exited, leaving them to
-    # crash-loop against a backend that can never answer.
-    restart: unless-stopped
+    # Policed like the app tier: without this, a recreate that outlives the backend leaves
+    # the app services restarting against something that can never answer. `on-failure`
+    # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
+    # section 4) and does not make this dev-credential backend boot-persistent.
+    restart: on-failure
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -120,10 +122,11 @@ services:
   # path — never both. The publish-mock-oidc workflow prints the digest to pin on each republish.
   oidc:
     image: ${KDIVE_OIDC_IMAGE:-kdive-mock-oidc:dev}
-    # Policed like the app tier: without this a host reboot or daemon restart brings the
-    # app services back (they have a policy) while this stays Exited, leaving them to
-    # crash-loop against a backend that can never answer.
-    restart: unless-stopped
+    # Policed like the app tier: without this, a recreate that outlives the backend leaves
+    # the app services restarting against something that can never answer. `on-failure`
+    # rather than `unless-stopped` — it matches the units' `Restart=on-failure` (ADR-0114
+    # section 4) and does not make this dev-credential backend boot-persistent.
+    restart: on-failure
     build: ./deploy/mock-oidc
     environment:
       # Bind the mock issuer to 0.0.0.0:8080 inside the container (published as 8090 on host).
@@ -155,7 +158,9 @@ services:
     # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
     # lives here — without a restart policy a recreate during a backend outage would
     # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
-    restart: unless-stopped
+    # `on-failure` mirrors the units' `Restart=on-failure` (ADR-0114 section 4): it covers
+    # the crash this ADR creates without restarting a container that exited cleanly.
+    restart: on-failure
     environment:
       <<: *backends
       KDIVE_HTTP_HOST: 0.0.0.0
@@ -206,7 +211,9 @@ services:
     # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
     # lives here — without a restart policy a recreate during a backend outage would
     # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
-    restart: unless-stopped
+    # `on-failure` mirrors the units' `Restart=on-failure` (ADR-0114 section 4): it covers
+    # the crash this ADR creates without restarting a container that exited cleanly.
+    restart: on-failure
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9465
@@ -240,7 +247,9 @@ services:
     # The process exits when Postgres is unreachable at start (ADR-0449), so the retry
     # lives here — without a restart policy a recreate during a backend outage would
     # leave the container Exited(1) permanently. `depends_on` only orders the first `up`.
-    restart: unless-stopped
+    # `on-failure` mirrors the units' `Restart=on-failure` (ADR-0114 section 4): it covers
+    # the crash this ADR creates without restarting a container that exited cleanly.
+    restart: on-failure
     environment:
       <<: *backends
       KDIVE_HEALTH_BIND_ADDR: 0.0.0.0:9466
@@ -271,6 +280,7 @@ services:
   # `docker compose down` drops history. Only the config is mounted (read-only).
   prometheus:
     image: prom/prometheus:v3.12.0
+    restart: on-failure
     profiles: ["obs"]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -286,6 +296,7 @@ services:
   # state is declarative on every start (no named volume).
   grafana:
     image: grafana/grafana:13.0.3
+    restart: on-failure
     profiles: ["obs"]
     depends_on:
       - prometheus
