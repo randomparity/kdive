@@ -136,7 +136,32 @@ restart_host_processes() {
   else
     KDIVE_KERNEL_SRC="$kernel_src" setsid nohup "$py" -m kdive worker >"${log_dir}/worker.log" 2>&1 </dev/null &
   fi
-  sleep 5
+  wait_for_daemons_to_settle
+}
+
+# Host processes have no supervisor — unlike the systemd units and the compose/Helm surfaces,
+# nothing restarts them. So bring-up has to outlast their own startup budget before it can call
+# the stack up: each daemon waits up to POOL_OPEN_TIMEOUT_SECONDS for its first database
+# connection and exits if it cannot get one, plus a bounded pool teardown (ADR-0449, ~11s total).
+# The former flat `sleep 5` returned while a doomed daemon was still in the process table, so
+# status.sh reported three healthy processes and up.sh exited 0 for a stack that vanished seconds
+# later. The most reachable trigger is the sudo-root-worker env footgun above: a KDIVE_DATABASE_URL
+# the root worker cannot reach now kills it outright instead of showing up as a not-ready /readyz.
+DAEMON_SETTLE_SECONDS=15
+DAEMON_COUNT=3
+
+wait_for_daemons_to_settle() {
+  local elapsed alive
+  for ((elapsed = 0; elapsed < DAEMON_SETTLE_SECONDS; elapsed++)); do
+    sleep 1
+    alive="$(daemon_pids | grep -c . || true)"
+    if ((alive < DAEMON_COUNT)); then
+      echo "kdive host processes exited during startup (${alive}/${DAEMON_COUNT} alive)" >&2
+      echo "check ${log_dir}/*.log — 'no database connection within' means the backend was" >&2
+      echo "unreachable, or its credentials or database name are wrong" >&2
+      return 1
+    fi
+  done
 }
 
 # worker-root.log is append-only, so report the LAST stamp of each service's own log.

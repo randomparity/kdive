@@ -109,7 +109,10 @@ fi
 # 4. Backends — Postgres, MinIO, mock-OIDC (host-published :5432 / :9000 / :8090), then the
 #    one-shot bucket creator. docker compose runs as the invoking user.
 step "backends (docker compose)"
-(cd "${repo_root}" && docker compose up -d --wait postgres minio oidc)
+# --wait-timeout matches the justfile recipe: the backends carry `restart: on-failure`
+# (ADR-0449), so a container that keeps failing cycles rather than settling Exited, and an
+# unbounded convergence poll would block here instead of reporting the broken backend.
+(cd "${repo_root}" && docker compose up -d --wait --wait-timeout 120 postgres minio oidc)
 (cd "${repo_root}" && docker compose run --rm minio-init)
 
 # 5. Schema.

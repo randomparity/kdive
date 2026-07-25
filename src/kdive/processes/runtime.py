@@ -8,7 +8,10 @@ import signal
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
+
+from kdive.config.core_settings import DATABASE_URL
+from kdive.domain.errors import CategorizedError, ErrorCategory
 
 if TYPE_CHECKING:
     from kdive.health.heartbeat import Heartbeat
@@ -18,6 +21,27 @@ if TYPE_CHECKING:
 
 HEARTBEAT_TICK_SECONDS = 1.0
 HEARTBEAT_STALE_SECONDS = 10.0
+
+# How long startup waits for the pool's first connection before giving up (ADR-0449).
+# Ten seconds sits in the gap between the two budgets that bound it: an order of magnitude
+# above the 1-second acquire budget `UsageTrackingMiddleware` uses, so a merely cold or
+# contended backend can no longer land inside it; and under the Helm chart's liveness
+# budget, which kills the container at t~=25s (`initialDelaySeconds: 5` then
+# `periodSeconds: 10` x the default `failureThreshold: 3` -> probes at t=5, 15, 25), so a
+# genuinely unreachable backend makes the process report its own failure rather than being
+# killed mid-open by a probe that cannot say why. Sizing this up means budgeting against
+# that 25s *minus* everything the process does before the open — interpreter start,
+# imports, `config.validate`, and `init_telemetry` — none of which this constant covers.
+POOL_OPEN_TIMEOUT_SECONDS = 10.0
+
+# How long teardown waits for the pool's background workers, overriding psycopg_pool's 5s
+# default. This sits on the *failure* path too: the startup error is raised inside the
+# runtime's `try`, so this close runs before the error reaches `__main__` and becomes an
+# operator-visible ERROR record. A worker blocked mid-connect never dequeues its stop
+# request — the shape a dropped-packet backend produces, where libpq waits on the OS TCP
+# timeout — so the default would add 5s to every time-to-diagnostic and to every crash-loop
+# cycle. One second keeps the worst case at ~11s, inside the 25s liveness budget above.
+POOL_CLOSE_TIMEOUT_SECONDS = 1.0
 
 type ProbeBuilder = Callable[[AsyncConnectionPool], HealthProbe]
 type ProcessBody = Callable[[AsyncConnectionPool, Heartbeat, HealthProbe], Awaitable[None]]
@@ -39,8 +63,8 @@ async def run_process_runtime(
     from kdive.health.heartbeat import Heartbeat
 
     tasks: list[asyncio.Task[None]] = []
-    await pool.open()
     try:
+        await open_pool_or_fail(pool)
         heartbeat = Heartbeat(stale_after=heartbeat_stale_after)
         probe = probe_builder(pool)
         aux_host, aux_port = resolve_health_bind(process)
@@ -54,7 +78,63 @@ async def run_process_runtime(
     finally:
         await cancel(*tasks)
         secret_registry.clear()
-        await pool.close()
+        await pool.close(timeout=POOL_CLOSE_TIMEOUT_SECONDS)
+
+
+async def open_pool_or_fail(pool: AsyncConnectionPool) -> None:
+    """Open ``pool`` with one connection established, or fail with a named cause.
+
+    ``open()`` returns before any connection exists and leaves the first connect to a
+    background task, which hands the process body a pool reporting zero available
+    connections — and the server's ``UsageTrackingMiddleware`` acquires with a 1-second
+    budget and swallows the resulting ``PoolTimeout`` into a WARNING, silently dropping the
+    row (#1535, #1527, ADR-0449). Acquiring one connection under the startup budget moves
+    that connect out of every caller's acquire budget.
+
+    Deliberately *one* connection rather than ``open(wait=True)``, which waits for the full
+    ``min_size``. The defect is a pool with **zero** connections; one removes it. Waiting for
+    ``min_size`` would additionally make the worker (``min_size=2``) hard-fail when Postgres
+    is reachable but at ``max_connections`` — a state it previously started and drained jobs
+    in — and each crash-loop restart would re-attempt connections against the already
+    saturated server. The background tasks still fill the pool to ``min_size`` as capacity
+    frees up, exactly as before.
+
+    An unreachable backend is a routine startup condition, not a bug, so it is translated
+    into a ``CategorizedError``: that is what ``__main__`` handles, and it is the difference
+    between an ERROR record on the structured log floor with a stable exit code (ADR-0090)
+    and a bare traceback that a deployment scraping JSON cannot see at all.
+
+    Raises:
+        CategorizedError: the pool had no connection within
+            :data:`POOL_OPEN_TIMEOUT_SECONDS` (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+    """
+    try:
+        await pool.open()
+        async with pool.connection(timeout=POOL_OPEN_TIMEOUT_SECONDS):
+            pass
+    except PoolTimeout as exc:
+        # Deliberately not "the database is down". `psycopg_pool` absorbs every connect-side
+        # error into its retry loop and re-raises its own `PoolTimeout` `from None`, so an
+        # unreachable host, a wrong password, and a missing database are indistinguishable
+        # here — the real `FATAL: ...` survives only as a `psycopg.pool` WARNING. The message
+        # is the one lever left, so it names all three rather than asserting the one that
+        # would send an operator down the wrong path.
+        raise CategorizedError(
+            f"no database connection within {POOL_OPEN_TIMEOUT_SECONDS:.0f}s of process "
+            f"start: Postgres unreachable, or the credentials or database name are wrong",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "timeout_seconds": POOL_OPEN_TIMEOUT_SECONDS,
+                "variable": DATABASE_URL.name,
+                # The conninfo carries a password; `database_url()` is not echoed here and
+                # the redactor covers the rest.
+                "suggest": (
+                    f"check that Postgres is reachable and that {DATABASE_URL.name} names "
+                    "the right host, database, and credentials; the preceding "
+                    "psycopg.pool warning carries the server's own error"
+                ),
+            },
+        ) from exc
 
 
 async def cancel(*tasks: asyncio.Task[None]) -> None:

@@ -140,8 +140,13 @@ async def seed_external_run_with_manifest(
     conn_pool: AsyncConnectionPool,
     entries: list[ManifestEntry] | None = None,
     build_profile: dict[str, Any] | None = None,
+    ttl: timedelta = timedelta(hours=1),
 ) -> UUID:
-    """A CREATED external Run plus a persisted upload manifest."""
+    """A CREATED external Run plus a persisted upload manifest.
+
+    A negative ``ttl`` seeds an already-lapsed upload window (the deadline is stamped
+    ``now() + ttl`` in Postgres), which is how the expiry rejections are exercised.
+    """
     run_id = await seed_external_run(conn_pool, build_profile)
     async with conn_pool.connection() as conn:
         await upload_manifest.replace_manifest(
@@ -151,7 +156,7 @@ async def seed_external_run_with_manifest(
                 owner_id=run_id,
                 prefix=f"local/runs/{run_id}/",
                 entries=entries or [ManifestEntry("kernel", "c", 1)],
-                ttl=timedelta(hours=1),
+                ttl=ttl,
             ),
         )
     return run_id

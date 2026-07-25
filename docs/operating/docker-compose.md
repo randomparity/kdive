@@ -28,6 +28,25 @@ schema is rolled forward. The `migrate` one-shot itself waits on a healthy Postg
 worker's first artifact write never races a missing bucket. A non-zero `migrate` exit blocks
 app start. You do not order these services by hand — Compose does it from the graph.
 
+That graph orders the first bring-up only. Each app process also waits up to ten seconds at
+start for its own first database connection and exits if Postgres is unreachable, so every
+long-running service — the three app processes and `postgres`, `minio`, `oidc` — carries
+`restart: on-failure` to cover each *later* recreate: a Postgres image bump, or a bare
+`docker compose restart server` while the database is down. Without it the container would
+sit in `Exited (1)`. With it, the container retries until the database answers;
+`docker compose ps` shows it restarting and `docker compose logs server` names the cause.
+
+The backends carry the policy for the same reason the app services do — policing only the
+app tier leaves them restarting against something that stayed stopped. The `migrate` and
+`minio-init` one-shots are deliberately unpoliced: they are meant to run once and exit.
+
+`on-failure` matches the systemd units' `Restart=on-failure` and, unlike `unless-stopped`,
+does not start containers when the Docker daemon does. That is deliberate for a stack whose
+MinIO uses root demo credentials and whose mock OIDC issuer mints accepted bearer tokens,
+both on published host ports: they should not come back on every reboot of a machine that
+once ran the stack. After a reboot, bring the stack up again explicitly with
+`docker compose up -d`.
+
 ## Pointing an agent at the endpoint
 
 The server publishes the MCP endpoint over streamable HTTP. Point an agent at
