@@ -172,10 +172,22 @@ exactly that. It is also the anchor for the pathological case: a base that keeps
 (a dying disk, a stray `cp`) presents as an unbounded loop of serialized re-downloads, and one log
 line is the difference between diagnosing that and staring at object-store egress.
 
-The two sites log distinguishably. A pre-lock rejection means a stale unusable base was already
-there; a post-lock one means a **sibling just published** something that does not verify, which is a
-materially louder condition. No metric is added — the log line carries the identifiers, and a
-counter with no dimension to slice by would not answer a question the line does not.
+The two sites log distinguishably, and the post-lock one is **gated on the base not having been
+there on arrival**. Nothing between the two checks repairs `dest`, so an ungated post-lock warning
+would fire on every ordinary stale-base rejection and attribute the commonest case to a racing
+fetcher that never existed — inverting the signal, since the louder message would then accompany the
+quieter condition and the genuinely concurrent case would be unidentifiable. As written, a pre-lock
+line means a stale unusable base was already there; the sibling line means one *appeared while we
+waited*, so a sibling just published something that does not verify. The re-verification itself
+still runs unconditionally on both sides; only the attribution is gated.
+
+No metric is added — the log line carries the identifiers, and a counter with no dimension to slice
+by would not answer a question the line does not.
+
+The reuse-read fault gets its own message rather than reusing `_staging_fault`. Nothing is being
+staged on that path, and "failed to stage the uploaded rootfs" would send an operator to the object
+store when the likeliest trigger is the ADR-0442 permission asymmetry and the actionable fix is the
+ownership of a file that is already present and probably intact.
 
 ## Consequences
 

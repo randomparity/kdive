@@ -673,11 +673,17 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
     # The rejection is the one event this change exists to detect, and the re-stage succeeds, so a
     # log line is the ONLY signal it ever fired. Without it the fix is unmeasurable in production.
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
-        "did not re-pass the qcow2 format gate" in record.message and str(dest) in record.message
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
+        "staged rootfs base at" in message and str(dest) in message for message in warnings
     ), f"{name}: rejected the base silently"
+    # And it must NOT claim a concurrent sibling. Nothing between the pre-lock and post-lock checks
+    # repairs `dest`, so an ungated post-lock warning would fire on every ordinary stale-base
+    # rejection -- attributing the commonest case to a racing fetcher that never existed, and
+    # making the genuinely concurrent case (the next test) indistinguishable from it.
+    assert not any("a sibling published" in message for message in warnings), (
+        f"{name}: blamed a sibling that never existed"
+    )
 
 
 def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
@@ -711,6 +717,11 @@ def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
     assert error.value.details["dest"] == str(dest)
     assert store.stream_calls == 0  # no re-download was attempted behind the operator's back
     assert dest.read_bytes() == _QCOW2  # and the good base was left exactly where it was
+    # The message must point at the present-but-unreadable file, not at a download that was never
+    # attempted: "failed to stage" would send an operator to the object store when the actionable
+    # fix is the mode bits on a file that is already there.
+    assert "present but could not be read" in str(error.value)
+    assert "failed to stage" not in str(error.value)
 
 
 class _SiblingStagesWhileWeWait(_FakeConn):
