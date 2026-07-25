@@ -77,7 +77,7 @@ marker.unlink(missing_ok=True)          # 2. any stale marker goes first
 _fsync_path(dest.parent, O_RDONLY)      # 3. ...and its absence is durable before the rename
 os.replace(partial, dest)               # 4. publish
 _fsync_path(dest.parent, O_RDONLY)      # 5. rename + partial unlink durable (ADR-0443 decision 1)
-_write_completion_marker(marker)        # 6. create + fsync the marker
+_write_completion_marker(marker)         # 6. create + fsync the marker
 _fsync_path(dest.parent, O_RDONLY)      # 7. the marker's link is durable
 ```
 
@@ -103,6 +103,24 @@ with fewer syscalls.
 
 Step 6 `fsync`s the marker itself even though a zero-length file has no data blocks. One syscall pair
 buys not having to reason about whether its inode is covered by the directory sync alone.
+
+**Steps 2 and 6 are the only steps that touch the marker's directory entry, and they get their own
+fault.** They carry failure modes the six syncs and the rename cannot produce — `ENOSPC`/`EDQUOT`
+from inode or directory-block exhaustion, which ADR-0450's block-reserving precheck does not
+prevent; `EROFS` after a remount-ro; `EMFILE`/`ENFILE`; `EISDIR` if anything occupies the marker
+path — and they leave *opposite* states, so `_marker_fault` names the marker in the message and in
+`details` and says which. A step-2 fault publishes nothing and blocks every stage of that base until
+the offending entry is removed. A step-6 fault leaves the base published, verified and durable, and
+only the marker missing, so the next fetch rejects that base and re-downloads it.
+
+A step-6 failure stays **fatal**. Swallowing it and returning would look kinder — the base *is*
+good — and would hand back a base the reuse gate rejects, so every later System in the investigation
+re-downloads and re-rejects it silently for as long as the fault lasts: the unbounded re-download
+loop ADR-0443 decision 2 exists to refuse, reached from the write side. Using `_staging_fault` for
+either would be the read side's own mistake: "failed to stage the uploaded rootfs to
+`<token>.qcow2`" names a multi-GiB file that is present and correct when the actionable file is the
+zero-byte marker beside it, which is exactly what threading `probed` through `_unreadable_base_fault`
+fixes one function over.
 
 Two directory syncs are added to a path that already pays one. They are paid once per investigation
 per checksum, never per System, and they are metadata syncs on a directory holding at most a handful
@@ -139,8 +157,11 @@ failed, so an operator is not sent to inspect the base when it was the marker th
 
 A directory sitting at the marker path answers `False` rather than raising: `stat` succeeds and
 `S_ISREG` is what rejects it. Nothing in kdive creates one, and a `FIFO` there is harmless because
-the marker is never opened — only `stat`ed — which is why this probe does not need ADR-0443 decision
-2's hang argument.
+the marker is never opened on this path — only `stat`ed — which is why this probe does not need
+ADR-0443 decision 2's hang argument. It is benign only for the *read*: the re-stage it triggers then
+fails at decision 2's step 2, since `unlink` on a directory raises `EISDIR`, so that base cannot be
+published until an operator removes the entry. That is why the step-2 fault names the marker path
+rather than reporting a failure to stage the base.
 
 ### 4. `_sibling_already_published` requires the marker too
 

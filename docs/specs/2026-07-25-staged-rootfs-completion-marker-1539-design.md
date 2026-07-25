@@ -204,8 +204,11 @@ residue; #1558 is what removes the race.
 - A base whose marker is present but whose magic fails is still rejected (the magic probe is kept).
 - Both fetch-lock sides: the sibling-appeared-during-the-lock-wait path rejects a marker-less base.
 - `_durable_replace` ordering: a recording `fsync`/`replace` spy pins unlink → dirsync → replace →
-  dirsync → marker → dirsync, and a crash simulated by faulting each step in turn never leaves
-  marker-over-unfinished-base.
+  dirsync → marker → dirsync. Faults are then armed on the partial sync, the pre-rename directory
+  sync, the post-rename directory sync, the marker write and the stale-marker unlink in turn; none
+  leaves a marker over a base this code did not finish, the two marker steps name the *marker* in
+  the fault rather than the base, and the marker write stays fatal rather than publishing an
+  unmarked base.
 - An unreadable marker raises `INFRASTRUCTURE_FAILURE`, not a cache miss.
 - `_sibling_already_published` publishes over a marker-less sibling base and skips a marked one.
 - `_unlink_staged_base` removes both, propagates a non-`ENOENT` fault from either, and a fault on the

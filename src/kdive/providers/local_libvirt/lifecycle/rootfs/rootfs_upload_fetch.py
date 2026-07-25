@@ -790,7 +790,7 @@ def stage_uploaded_rootfs(
                     system_id,
                 )
                 return
-            _durable_replace(partial, dest)
+            _durable_replace(partial, dest, system_id=system_id)
     except OSError as err:
         raise _staging_fault(dest, err, system_id=str(system_id)) from err
     finally:
@@ -941,7 +941,8 @@ _REJECTION_PROSE = {
     _NOT_A_REGULAR_FILE: "is not a regular file",
     _NO_COMPLETION_MARKER: (
         "has no completion marker, so nothing attests that its stage ever finished durably — "
-        "expected once per base when upgrading past ADR-0451, and otherwise a crash mid-stage"
+        "expected once per base when upgrading past ADR-0451, and otherwise a crash mid-stage or a "
+        "publish whose marker write itself faulted"
     ),
     _FAILED_FORMAT_GATE: "did not re-pass the qcow2 format gate",
 }
@@ -1136,7 +1137,7 @@ def _fsync_path(path: Path, flags: int) -> None:
         os.close(fd)
 
 
-def _durable_replace(partial: Path, dest: Path) -> None:
+def _durable_replace(partial: Path, dest: Path, *, system_id: UUID) -> None:
     """Publish the verified partial onto ``dest`` and mark it complete, durably (ADR-0443/0451).
 
     ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
@@ -1178,15 +1179,33 @@ def _durable_replace(partial: Path, dest: Path) -> None:
     """
     marker = staged_rootfs_marker_path(dest)
     _fsync_path(partial, os.O_WRONLY)
-    marker.unlink(missing_ok=True)
+    _clear_completion_marker(marker, dest, system_id=system_id)
     _fsync_path(dest.parent, os.O_RDONLY)
     os.replace(partial, dest)
     _fsync_path(dest.parent, os.O_RDONLY)
-    _write_completion_marker(marker)
+    _write_completion_marker(marker, dest, system_id=system_id)
     _fsync_path(dest.parent, os.O_RDONLY)
 
 
-def _write_completion_marker(marker: Path) -> None:
+def _clear_completion_marker(marker: Path, dest: Path, *, system_id: UUID) -> None:
+    """Remove any stale completion marker before the rename publishes a new base (ADR-0451 §2)."""
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as err:
+        raise _marker_fault(
+            marker,
+            dest,
+            err,
+            system_id=str(system_id),
+            consequence=(
+                f"nothing was published, so the base at {str(dest)!r} is unchanged; until this "
+                "marker can be removed no stage of this base can be published, because a marker "
+                "left over the rename would attest to a base this stage had already rejected"
+            ),
+        ) from err
+
+
+def _write_completion_marker(marker: Path, dest: Path, *, system_id: UUID) -> None:
     """Create the zero-byte completion marker and ``fsync`` it (ADR-0451 §1/§2).
 
     ``O_TRUNC`` rather than ``O_EXCL`` because :func:`_durable_replace` has just unlinked any stale
@@ -1198,12 +1217,55 @@ def _write_completion_marker(marker: Path) -> None:
     deployments ADR-0442 documents. The ``fsync`` flushes only an inode, since the file has no data
     blocks; it costs one syscall pair and removes the need to reason about whether a zero-length
     file's inode is covered by the directory sync that follows.
+
+    This is the one step of the publish that **creates a directory entry**, so it carries failure
+    modes none of the six around it can produce: ``ENOSPC``/``EDQUOT`` from inode or directory-block
+    exhaustion — ADR-0450's precheck reserves *blocks*, so its floor does not prevent it —
+    ``EROFS`` after a remount-ro on a disk that is already faulting, ``EMFILE``/``ENFILE`` under
+    the descriptor exhaustion :func:`_unreadable_base_fault` already names as realistic, and
+    ``EISDIR``
+    if anything ever occupies the marker path. It must stay **fatal**: succeeding with a marker-less
+    base would hide the re-download loop below rather than report it.
     """
-    fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o666)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o666)
+    except OSError as err:
+        raise _marker_fault(
+            marker,
+            dest,
+            err,
+            system_id=str(system_id),
+            consequence=(
+                f"the base at {str(dest)!r} is published, verified and durable — only this "
+                "marker is missing, so the next fetch rejects that base and re-downloads the "
+                "whole object; a persistent fault here re-downloads it on every attempt"
+            ),
+        ) from err
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _marker_fault(
+    marker: Path, dest: Path, err: OSError, *, system_id: str, consequence: str
+) -> CategorizedError:
+    """The ``INFRASTRUCTURE_FAILURE`` for a completion marker that could not be written or removed.
+
+    Deliberately *not* :func:`_staging_fault`, for the reason :func:`_unreadable_base_fault` gives
+    on the read side of this same pair: "failed to stage the uploaded rootfs to ``<token>.qcow2``"
+    names a multi-GiB base that is present, complete and — past the rename — durable, when the
+    actionable
+    file is the zero-byte marker beside it. Both the message and ``details`` carry the marker, and
+    the ``consequence`` says what state the caller is left in, because the two sites leave opposite
+    ones: before the rename nothing was published, and after it a good base was.
+    """
+    return CategorizedError(
+        f"failed to update the staged rootfs completion marker {str(marker)!r} "
+        f"({err.strerror}); {consequence}",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"system_id": system_id, "dest": str(dest), "marker": str(marker)},
+    )
 
 
 def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:

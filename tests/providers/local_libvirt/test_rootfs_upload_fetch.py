@@ -1021,6 +1021,105 @@ def test_stage_directory_sync_failure_after_the_rename_leaves_the_good_base_in_p
     assert staged_rootfs_marker_path(staged).is_file()  # and the re-stage completed it
 
 
+def test_stage_marker_write_fault_names_the_marker_and_keeps_the_published_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Step 6 is the one step of the publish that CREATES a directory entry, so it carries failure
+    # modes none of the six around it can produce: ENOSPC/EDQUOT from inode or directory-block
+    # exhaustion (ADR-0450's precheck reserves blocks, so its floor does not prevent it), EROFS
+    # after a remount-ro, EMFILE/ENFILE, EISDIR if anything occupies the marker path.
+    #
+    # Two things must hold. The base stays published and durable -- the download, the checksum, the
+    # magic gate and the rename all succeeded and must not be thrown away or rolled back. And the
+    # fault must name the MARKER, not the base: `_staging_fault` would render "failed to stage the
+    # uploaded rootfs to <token>.qcow2" and point the operator at a multi-GiB file that is present,
+    # complete and correct, which is exactly the misattribution this same diff fixed on the read
+    # side by threading `probed` through `_unreadable_base_fault`.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    real_open = os.open
+
+    def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == marker:
+            raise OSError(errno.EROFS, "Read-only file system", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert error.value.details["dest"] == str(dest)
+    assert str(marker) in str(error.value)
+    assert "failed to stage" not in str(error.value)
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert not marker.exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_marker_write_fault_stays_fatal_rather_than_publishing_unmarked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The tempting softening -- swallow the marker fault and return, since the base is good -- is
+    # wrong and this pins it. A marker-less base is one the reuse gate REJECTS, so a "successful"
+    # provision would hand back a base that every later System in the investigation re-downloads and
+    # re-rejects, silently, for as long as the fault lasts. That is the unbounded re-download loop
+    # ADR-0443 decision 2 exists to refuse, reached from the write side instead of the read side, so
+    # it must surface as a failed provision instead.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    real_open = os.open
+
+    def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == marker:
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    with pytest.raises(CategorizedError):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    # And the next fetch does not quietly adopt what the failed stage left behind.
+    monkeypatch.setattr(os, "open", real_open)
+    inv = uuid4()
+    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(dest.read_bytes())
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
+    assert reuse_store.stream_calls == 1  # re-downloaded rather than reused
+    assert staged_rootfs_marker_path(staged).is_file()
+
+
+def test_stage_cannot_publish_while_a_stale_marker_refuses_to_be_removed(tmp_path: Path) -> None:
+    # Step 2's complement, and the case ADR-0451 section 3 used to describe as benign: a directory
+    # (or any unremovable file) at the marker path makes the READ gate answer "not reusable" without
+    # raising, but the re-stage that follows then dies here. The base must not be published, because
+    # a marker surviving the rename would attest to a base this stage had already rejected -- and
+    # the fault must say which file is in the way, or the operator is sent to the base.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(b"\x00" * len(_QCOW2))  # the torn base being re-staged over
+    marker = staged_rootfs_marker_path(dest)
+    marker.mkdir()  # unlink() on a directory raises EISDIR
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert str(marker) in str(error.value)
+    assert dest.read_bytes() == b"\x00" * len(_QCOW2)  # nothing published
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
 def test_stage_directory_sync_failure_before_the_rename_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
