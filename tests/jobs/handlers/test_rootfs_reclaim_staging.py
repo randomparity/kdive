@@ -278,6 +278,92 @@ def test_a_held_partial_does_not_suppress_the_unowned_base_collection(
     assert inv_dir.exists()  # the held partial still keeps the dir, so the marker is retained
 
 
+def test_a_completion_marker_does_not_keep_the_staging_dir_alive(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ADR-0451 section 6, and the whole reason ADR-0443 deferred the marker. A sidecar matching
+    # neither *.partial nor *.qcow2 is invisible to both existing globs, so the rmdir below fails
+    # ENOTEMPTY on EVERY drained investigation that ever staged a base -- leaking one directory
+    # apiece. Since ADR-0452 section 7 it would also do it LOUDLY, firing the unexplained-survivor
+    # WARNING on every ordinary drain and training an operator to ignore the one line that reports a
+    # genuinely unreadable staging tree.
+    inv, inv_dir = _inv_dir(tmp_path)
+    marker = inv_dir / f"{_TOKEN}.ready"
+    marker.touch()
+
+    with caplog.at_level(logging.WARNING):
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+
+    assert not marker.exists()
+    assert not inv_dir.exists()
+    assert not any(
+        "survived its investigation's drain" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+
+def test_the_marker_sweep_is_not_gated_on_an_flock(tmp_path: Path) -> None:
+    # ADR-0451 section 6's load-bearing negative. `unlink_partial_if_unheld` answers ONE question --
+    # is a live writer still holding this multi-GiB partial across a download -- and its True is the
+    # only outcome ADR-0452 section 5 established is provably transient, which is why the caller
+    # retains the drain marker on it and on nothing else. Routing the zero-byte completion marker
+    # through it "for consistency" would let a marker pin an investigation's drain and would make a
+    # leaked marker indistinguishable from a held partial at the rmdir. A marker whose flock is
+    # already held by someone else must therefore still be collected.
+    inv, inv_dir = _inv_dir(tmp_path)
+    marker = inv_dir / f"{_TOKEN}.ready"
+    marker.touch()
+    fd = os.open(marker, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+    finally:
+        os.close(fd)
+
+    assert not marker.exists()
+    assert not inv_dir.exists()
+
+
+def test_a_marker_that_cannot_be_unlinked_is_warned_not_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Per candidate, like both loops beside it: one bad file must not abort the pass or raise into
+    # the handler, which would fail a job whose reclaim already succeeded. And it is logged, because
+    # this pass is the last collector -- ADR-0452 section 7's "no step is silent".
+    inv, inv_dir = _inv_dir(tmp_path)
+    marker = inv_dir / f"{_TOKEN}.ready"
+    marker.touch()
+    real_unlink = os.unlink
+
+    def refusing_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == marker:
+            raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+        real_unlink(path, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "unlink", refusing_unlink)
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+
+    assert marker.exists()
+    assert any("completion marker" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_a_held_partial_still_reports_live_with_a_marker_beside_it(tmp_path: Path) -> None:
+    # The marker sweep must not perturb the flag the drain marker is keyed on. A held partial is
+    # still the answer, the directory still survives, and collecting the marker in the same pass
+    # neither flips the flag nor -- the opposite refactor -- makes an ordinary leaked marker report
+    # as a live writer and pin rootfs_cleanup_pending_at on nothing.
+    inv, inv_dir = _inv_dir(tmp_path)
+    marker = inv_dir / f"{_TOKEN}.ready"
+    marker.touch()
+
+    with _held_partial(inv_dir) as live:
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert live.exists()
+
+    assert not marker.exists()
+    assert inv_dir.exists()  # kept by the held partial alone
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory regardless")
 def test_a_staging_dir_the_sweep_cannot_read_is_named_rather_than_read_as_drained(
     tmp_path: Path, caplog: pytest.LogCaptureFixture

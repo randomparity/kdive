@@ -15,12 +15,17 @@ read from that durable ``artifacts`` row (finalize deletes the manifest), and a 
 streamed-decompressed to the staged base; an identity upload stages verbatim. Either way the
 canonical base is qcow2-magic-validated before it backs an overlay.
 
-Durability (ADR-0443): the partial is ``fsync``\\ ed before the ``os.replace`` publishes it and the
-staging directory ``fsync``\\ ed after, so a host crash cannot leave a durable rename over
-non-durable data; and the reuse fast path re-applies the qcow2-magic gate rather than trusting a
-present file, so a base torn by a crash that predates this cannot back an overlay. A rejection is
-logged — the re-stage succeeds, so the log line is the only evidence it ever fired — while a base
-that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
+Durability (ADR-0443, ADR-0451): the partial is ``fsync``\\ ed before the ``os.replace`` publishes
+it and the staging directory ``fsync``\\ ed after, so a host crash cannot leave a durable rename
+over non-durable data; and the reuse fast path re-verifies rather than trusting a present file, so a
+base torn by a crash that predates this cannot back an overlay. That re-verification is a zero-byte
+``<token>.ready`` completion marker written and synced *after* the base is durable, **plus** the
+qcow2-magic gate. The marker is what catches the expected crash-torn shape — head-intact and
+tail-zeroed, which the magic gate passes (ADR-0443 §3) — because a crash before the marker write
+leaves no marker whatever the base looks like. The magic gate is kept beside it because the marker
+witnesses *completion*, not *integrity*, and says nothing about damage arriving after the publish. A
+rejection is logged — the re-stage succeeds, so the log line is the only evidence it ever fired —
+while a base that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
 
 Capacity (#1525): a stage the staging filesystem plainly cannot hold is refused before its first
 byte (:func:`_require_staging_free_space`). Since the identity path started streaming (#1520) a
@@ -85,6 +90,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     UploadFetch,
     staged_rootfs_path,
 )
+from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
 from kdive.store.objectstore import artifact_key, object_store_from_env
 
@@ -934,24 +940,31 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     (``strip_gzip_to_writer`` caps output at it and accepts less) and is NULL on the identity path,
     so an equality gate would false-reject a good base and re-download it on every provision.
 
-    **Do not read this as a crash-torn-base detector** (ADR-0443 §3). Damage past the first four
-    bytes passes, and the rename follows the *completed* write — so writeback has already flushed
-    most of a multi-GiB base by then and the dirty residue at crash time is its **tail**. The
-    expected large crash survivor is head-intact and tail-zeroed, and it passes here. That is why
-    the write side syncs (:func:`_durable_replace`) rather than relying on this gate: the sync
-    removes the crash window going forward, while this gate is a *partial* net for a base staged by
-    code that predates it, or corrupted by some other means. #1539 tracks closing the residue.
+    **The magic probe alone is not a crash-torn-base detector** (ADR-0443 §3), which is why
+    ADR-0451 added the completion marker above it. Damage past the first four bytes passes the
+    probe, and the rename follows the *completed* write — so writeback has already flushed most of a
+    multi-GiB base by then and the dirty residue at crash time is its **tail**. The expected large
+    crash survivor is head-intact and tail-zeroed, and it passes the probe. The marker is what
+    rejects it: a crash before :func:`_durable_replace` reaches its marker write leaves no marker
+    regardless of what the base looks like.
+
+    **The magic probe is nonetheless kept, not replaced.** The marker is a *completion* witness, not
+    an *integrity* one — it says a stage ran to a durable finish, and says nothing about damage
+    arriving after the publish. A dying disk, a stray ``cp``, a half-restored backup: ADR-0443 §3's
+    second population, for which the probe is still the only net on this path. It costs a 4-byte
+    read on a path that opens the base for ``qemu-img`` moments later regardless.
 
     Not reusable, without reading anything: the path is absent, a non-directory sits on its parent
-    path, a directory sits on its own, or what is there is **not a regular file**. The last is why
-    the mode is checked before the ``open`` rather than left to the error taxonomy — opening a FIFO
-    for reading blocks until a writer appears, so a probe that skipped the ``S_ISREG`` test would
-    hang the provision thread forever, and the post-lock call site would hang *holding* the fetch
-    advisory lock, wedging every sibling System on that (investigation, checksum). Nothing in kdive
-    creates a non-regular file here, but ``dest.is_file()`` rejected one for free and this must not
-    regress into a hang.
+    path, a directory sits on its own, what is there is **not a regular file**, or the marker is
+    missing. The regular-file test is why the mode is checked before the ``open`` rather than left
+    to the error taxonomy — opening a FIFO for reading blocks until a writer appears, so a probe
+    that skipped the ``S_ISREG`` test would hang the provision thread forever, and the post-lock
+    call site would hang *holding* the fetch advisory lock, wedging every sibling System on that
+    (investigation, checksum). Nothing in kdive creates a non-regular file here, but
+    ``dest.is_file()`` rejected one for free and this must not regress into a hang. The marker needs
+    no such argument because it is only ever ``stat``\\ ed, never opened.
 
-    Every other ``OSError`` — from the ``stat`` or the ``open`` — is raised as an
+    Every other ``OSError`` — from either ``stat`` or the ``open`` — is raised as an
     ``INFRASTRUCTURE_FAILURE``: a base that is present but unreadable (``EACCES`` under a
     worker/staging-user asymmetry of the shape ADR-0442 documents, ``EMFILE`` under descriptor
     exhaustion, a transient ``EIO``) is an operator-visible fault, **not** a cache miss. This is the
@@ -963,11 +976,36 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     try:
         if not stat.S_ISREG(dest.stat().st_mode):
             return False
+        if not _completion_marker_present(dest, system_id=system_id):
+            return False
         return _starts_with_qcow2_magic(dest)
     except FileNotFoundError, NotADirectoryError, IsADirectoryError:
         return False
     except OSError as err:
-        raise _unreadable_base_fault(dest, err, system_id=str(system_id)) from err
+        raise _unreadable_base_fault(dest, err, system_id=str(system_id), probed=dest) from err
+
+
+def _completion_marker_present(dest: Path, *, system_id: UUID) -> bool:
+    """Whether ``dest``'s completion marker attests that a stage of it finished durably (ADR-0451).
+
+    Handles its own errors rather than deferring to the caller's ladder so the raised fault names
+    the path that actually failed: an operator sent to inspect the multi-GiB base when it was the
+    zero-byte marker beside it that could not be ``stat``\\ ed has been given the wrong file.
+
+    The taxonomy is otherwise :func:`_reusable_staged_base`'s, for its reasons. An absent marker
+    (or an absent parent) means *there is no completed stage at this path* and is a cache miss; a
+    marker that cannot be ``stat``\\ ed at all is the ADR-0442 uid asymmetry or a transient ``EIO``,
+    and answering that as a cache miss would produce the silent, perpetual, fetch-lock-serialized
+    re-download loop ADR-0443 decision 2 exists to refuse. A *directory* at the marker path is
+    rejected by ``S_ISREG`` rather than raising; nothing in kdive creates one.
+    """
+    marker = staged_rootfs_marker_path(dest)
+    try:
+        return stat.S_ISREG(marker.stat().st_mode)
+    except FileNotFoundError, NotADirectoryError:
+        return False
+    except OSError as err:
+        raise _unreadable_base_fault(dest, err, system_id=str(system_id), probed=marker) from err
 
 
 def _sibling_already_published(dest: Path) -> bool:
@@ -988,14 +1026,27 @@ def _sibling_already_published(dest: Path) -> bool:
     publish anyway, because :func:`_durable_replace` needs a descriptor of its own and fails first.
     That leaves a transient ``EIO``, where publishing costs at most ADR-0443 §2's already-accepted
     inode orphan; ADR-0446 §7 records it as a residue rather than claiming the gate is airtight.
+
+    **The completion marker is required here too** (ADR-0451 §4). Under the reuse gate a marker-less
+    base is one every future fetch will *reject*, so skipping the publish on one would hand the
+    investigation a base that is re-downloaded and re-rejected for as long as it lives — trading a
+    bounded orphan inode for an unbounded re-download loop, which is the wrong direction. That is
+    reachable only when a sibling died between its ``os.replace`` and its marker write, and
+    publishing is what completes the base instead of stranding it.
     """
     try:
-        return stat.S_ISREG(dest.stat().st_mode) and _starts_with_qcow2_magic(dest)
+        return (
+            stat.S_ISREG(dest.stat().st_mode)
+            and stat.S_ISREG(staged_rootfs_marker_path(dest).stat().st_mode)
+            and _starts_with_qcow2_magic(dest)
+        )
     except OSError:
         return False
 
 
-def _unreadable_base_fault(dest: Path, err: OSError, *, system_id: str) -> CategorizedError:
+def _unreadable_base_fault(
+    dest: Path, err: OSError, *, system_id: str, probed: Path
+) -> CategorizedError:
     """The ``INFRASTRUCTURE_FAILURE`` for a staged base that is present but cannot be read.
 
     Deliberately *not* :func:`_staging_fault`. Nothing is being staged on this path — no lock taken,
@@ -1003,13 +1054,19 @@ def _unreadable_base_fault(dest: Path, err: OSError, *, system_id: str) -> Categ
     operator at the download and the object store. The likeliest trigger is the worker/staging-user
     permission asymmetry ADR-0442 documents in this same subsystem, where the actionable fix is the
     ownership of a file that is already present and probably intact.
+
+    ``probed`` is the file the fault actually came from — the base, or the completion marker beside
+    it (ADR-0451 §3). The two have different remedies and are owned by the same code, so naming the
+    base while the marker is what failed sends an operator to inspect the wrong one; it is carried
+    in ``details`` as well as in the message, because ``_failure_context`` copies those scalars into
+    the job row an operator triages from.
     """
     return CategorizedError(
         f"the staged uploaded rootfs base at {str(dest)!r} is present but could not be read "
-        f"({err.strerror}); it is not treated as a cache miss, because silently re-downloading it "
-        "would supersede a base that may still be backing running guests",
+        f"({err.strerror} on {str(probed)!r}); it is not treated as a cache miss, because silently "
+        "re-downloading it would supersede a base that may still be backing running guests",
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-        details={"system_id": system_id, "dest": str(dest)},
+        details={"system_id": system_id, "dest": str(dest), "probed": str(probed)},
     )
 
 
@@ -1029,7 +1086,7 @@ def _fsync_path(path: Path, flags: int) -> None:
 
 
 def _durable_replace(partial: Path, dest: Path) -> None:
-    """Sync the verified partial, publish it onto ``dest``, then sync the directory (ADR-0443).
+    """Publish the verified partial onto ``dest`` and mark it complete, durably (ADR-0443/0451).
 
     ``os.replace`` is atomic with respect to concurrent *readers*, not with respect to a host crash
     or power loss: on a default ext4 mount the rename can become durable while the data blocks
@@ -1047,10 +1104,55 @@ def _durable_replace(partial: Path, dest: Path) -> None:
     survived. That alone is benign — an absent ``dest`` is re-staged — but the same directory entry
     carries the partial's unlink, so a lost rename can resurrect the partial as an orphan. Both
     halves are made durable together, at the cost of one metadata sync per staged base.
+
+    **The completion marker is written last and any stale one removed first** (ADR-0451 §2). The
+    ordering is the whole guarantee, so it is stated as one sequence rather than left to a reader:
+
+    1. ``fsync`` the partial — the base's data is durable.
+    2. unlink any stale marker, and
+    3. ``fsync`` the directory, so its *absence* is durable before the rename.
+    4. ``os.replace`` publishes.
+    5. ``fsync`` the directory — the rename and the partial's unlink are durable.
+    6. create and ``fsync`` the marker, and
+    7. ``fsync`` the directory so the marker's link is durable.
+
+    Every crash point leaves one of two states, and both are correct: **no marker**, so the next
+    fetch re-stages; or a **marker over a base whose data was made durable at step 1**, so the next
+    fetch reuses it. Steps 2–3 are the re-stage case, and they are not decoration: the token is a
+    content address, so a re-stage can begin with a marker already present, and without them the
+    recovered state could be the *previous* base under a marker attesting to one this pass had
+    already rejected. Ordering the removal's durability ahead of the rename removes that state
+    outright rather than reasoning about a particular filesystem's metadata ordering — the derived
+    invariant ADR-0446 and ADR-0452 exist to delete.
     """
+    marker = staged_rootfs_marker_path(dest)
     _fsync_path(partial, os.O_WRONLY)
+    marker.unlink(missing_ok=True)
+    _fsync_path(dest.parent, os.O_RDONLY)
     os.replace(partial, dest)
     _fsync_path(dest.parent, os.O_RDONLY)
+    _write_completion_marker(marker)
+    _fsync_path(dest.parent, os.O_RDONLY)
+
+
+def _write_completion_marker(marker: Path) -> None:
+    """Create the zero-byte completion marker and ``fsync`` it (ADR-0451 §1/§2).
+
+    ``O_TRUNC`` rather than ``O_EXCL`` because :func:`_durable_replace` has just unlinked any stale
+    marker and a race there would be a second fetcher publishing the same content-addressed base;
+    failing the provision over it would be a worse answer than converging on the same empty file.
+
+    The mode is ``0o666`` — umask applied — matching the partial that becomes the base, so the
+    marker cannot acquire a permission asymmetry with the file it attests to under the mixed-uid
+    deployments ADR-0442 documents. The ``fsync`` flushes only an inode, since the file has no data
+    blocks; it costs one syscall pair and removes the need to reason about whether a zero-length
+    file's inode is covered by the directory sync that follows.
+    """
+    fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o666)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _require_qcow2_magic(staged: Path, *, system_id: str) -> None:
