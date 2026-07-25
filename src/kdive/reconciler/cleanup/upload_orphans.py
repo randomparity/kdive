@@ -111,13 +111,14 @@ async def repair_leaked_upload_objects(
     without ``KDIVE_UPLOAD_TTL_SECONDS`` while the minting server raises it is deployment skew the
     code cannot see, and is the one way the margin can still go negative (ADR-0455 §2).
 
-    A failed key is logged, counted, and skipped, and the pass raises once at the end (ADR-0455
-    §5); each root gets its own work budget (§6). Aborting at the first failure would let one
-    permanently undeletable object — an S3 Object Lock hold, a per-key deny — starve every
-    candidate behind it and the whole second root, on every pass forever, which is the leak this
-    repair exists to drain. Raising at the end still reaches the ADR-0190 group-E error counter via
-    ``_run_repair_plan``'s ``failures``, and nothing is lost by either path: this sweep commits
-    nothing, so the next pass re-derives the identical candidates.
+    A failed key — and equally a failed *root listing* — is logged, counted, and skipped, and the
+    pass raises once at the end (ADR-0455 §5); each root gets its own work budget (§6). Aborting at
+    the first failure would let one permanently undeletable object — an S3 Object Lock hold, a
+    per-key deny — or one unlistable prefix starve every candidate behind it and the whole second
+    root, on every pass forever, which is the leak this repair exists to drain. Raising at the end
+    still reaches the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures``, and
+    nothing is lost by either path: this sweep commits nothing, so the next pass re-derives the
+    identical candidates.
 
     Args:
         conn: An async connection. Each query runs in its own short transaction so no snapshot is
@@ -201,14 +202,31 @@ async def _sweep_root(
     The budget is **per root**, not per pass, so a persistent fault under `local/runs/` — an object
     lock over a prefix, a scoped ``s3:DeleteObject`` deny — cannot consume the whole allowance on
     failures and leave `local/investigations/` unlisted on every pass forever, which is the
-    starvation §5's skip-and-count exists to prevent (ADR-0455 §6).
+    starvation §5's skip-and-count exists to prevent (ADR-0455 §6). A failing *listing* is skipped
+    and counted for that same reason: a scoped ``s3:ListBucket`` deny would otherwise starve the
+    sibling root by aborting the pass before it was ever reached.
 
     It charges every candidate that reaches the re-read, not only the ones deleted: a declined
     re-check costs the same LIST and query as a delete, and two overlapping passes (the daemon loop
     and an on-demand ``ops.reconcile``) see exactly that — the second finds every object already
     gone and would otherwise re-read the whole backlog uncapped.
     """
-    listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
+    try:
+        listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
+    except CategorizedError as exc:
+        # Skip-and-count, for the same reason a failed delete is skipped and counted: a scoped
+        # `s3:ListBucket` deny is the list-side twin of the per-prefix `s3:DeleteObject` deny this
+        # budget is per root to survive, and aborting here would leave the sibling root — whose
+        # candidate set is wholly independent — unlisted on every pass for as long as the fault
+        # persists. The failure still reaches the end-of-pass raise through the tally (§5).
+        tally.failed += 1
+        _log.warning(
+            "reconciler: upload orphan sweep could not list %s: %s; the remaining roots are still "
+            "swept this pass, which still raises at the end",
+            root,
+            exc,
+        )
+        return
     candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
     _warn_if_wholly_unattributable(root, len(listings), len(candidates))
     reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))

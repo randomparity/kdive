@@ -171,11 +171,19 @@ So the failed key is logged and skipped, the count travels to the end of the pas
 raises once — `repair_abandoned_uploads`' shape, adopted for a different reason than the reaper has
 for it. The reaper *must* tolerate because its row delete has already committed and there is nothing
 to retry; this sweep commits nothing and could safely abort, but abort is what turns one stuck
-object into a permanent leak. A failing `list_prefix_with_mtime` still ends the pass immediately:
-without a listing there is no candidate set to be partial about — but it ends it *through the same
-count-logging path*, because by the second root the first may already have deleted irreversibly.
-That path catches every abort, not only a store one: a dropped pool connection out of the classify
-and cancellation at shutdown arrive the same way and cost the same record.
+object into a permanent leak. A failing `list_prefix_with_mtime` ends **that root** immediately —
+without a listing there is no candidate set to be partial about — but it is skipped and counted like
+a failed key rather than ending the pass. The rationale for abandoning the root does not reach the
+sibling: the two roots' candidate sets are wholly independent, and a scoped `s3:ListBucket` deny is
+the list-side twin of the per-prefix `s3:DeleteObject` deny §6 makes the budget per root to survive.
+Aborting would leave `local/investigations/` — the rootfs upload lane's root — unlisted on every
+pass for as long as the fault persisted, which is the starvation this whole section exists to
+prevent, arriving by the one path the budget does not cover.
+
+A fault that is *not* root-scoped still ends the pass, and ends it *through the same count-logging
+path*, because by then a root may already have deleted irreversibly: that path catches every abort,
+not only a store one, so a dropped pool connection out of the classify and cancellation at shutdown
+arrive the same way and cost the same record.
 
 Raising forfeits the pass's reclaimed count: `_run_repair_plan` records a count only for a repair
 that *returns*, so a pass that deleted 500 objects and then hit one object-lock hold reports zero on

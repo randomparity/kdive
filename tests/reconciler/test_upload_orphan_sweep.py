@@ -787,14 +787,47 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_a_listing_failure_on_the_first_root_does_not_starve_the_second(
+    migrated_url: str,
+) -> None:
+    """ADR-0455 §5: a scoped list deny is the twin of the delete deny the budget is per root for.
+
+    An IAM ``s3:prefix`` condition is the standard way to scope list authority, so a deny covering
+    ``local/runs/`` alone is the same class of misconfiguration as the per-prefix
+    ``s3:DeleteObject`` deny §6 makes the budget per root to survive. Aborting the pass on it would
+    leave ``local/investigations/`` — the rootfs upload lane's root — unlisted on *every* pass for
+    as long as the fault persisted, resuming exactly the leak this repair drains. The failing root
+    is skipped and counted instead, and the pass still raises at the end so the fault is not silent.
+    """
+
+    async def _run() -> None:
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        rootfs = f"{inv_prefix}rootfs-abc"
+        store = _FailingListStore({rootfs: _GRACE * 2}, fail_list_prefixes={"local/runs/"})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _sweep(store))
+        # The unlistable root did not stop the sibling from draining...
+        assert store.deleted == [rootfs]
+        # ...and the fault is still reported, counted as the one failure of the pass.
+        assert "could not reclaim 1 object(s); 1 were reclaimed" in str(caught.value)
+
+    asyncio.run(_run())
+
+
 def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_deletes(
     migrated_url: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """ADR-0455 §5: a raising pass reports no count, so the count has to reach the log.
 
-    A listing fault aborts the pass deliberately — without a listing there is no candidate set to
-    be partial about — but by the second root the first may already have deleted irreversibly, and
-    those deletes would otherwise leave no trace on the repairs gauge or anywhere else.
+    A listing fault ends that root deliberately — without a listing there is no candidate set to be
+    partial about — and the pass still raises at the end, but by then the first root may already
+    have deleted irreversibly, and those deletes would otherwise leave no trace on the repairs gauge
+    or anywhere else.
     """
 
     async def _run() -> None:
