@@ -112,6 +112,13 @@ detect a one-sided rollout. The cost if that happens is a forced re-upload, not 
 deletes irreversibly from a prefix that also holds non-upload objects, so an operator who finds it
 removing live bytes needs a brake that is not a redeploy.
 
+Both terms therefore declare `server` **and** `reconciler`. The reconciler runs this repair on its
+loop, but it is an unconditional catalog entry, and `ops.reconcile_now` runs a full `reconcile_once`
+in the *server* process — so the server executes the same irreversible deletes. `processes` does not
+gate resolution, but it gates `config validate` and the generated operator reference, which is what
+each process's environment is provisioned from; a brake declared for only one of the two leaves the
+other sweeping at the default at the moment the brake is reached for.
+
 ### The store method
 
 `ObjectStore.list_prefix_with_mtime(prefix)` returns `list[ObjectListing]`.

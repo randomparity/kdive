@@ -131,7 +131,11 @@ async def repair_leaked_upload_objects(
 
     Raises:
         CategorizedError: the store failed to list a root or delete an object
-            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`).
+            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`). Any *other* fault
+            that ends the pass — a dropped pool connection or a statement timeout out of the
+            classify, cancellation at shutdown — propagates unchanged, and takes the same
+            count-logging path on the way out, because it arrives after the same irreversible
+            deletes (ADR-0455 §5).
     """
     grace = orphan_grace + upload_ttl
     tally = _Tally()

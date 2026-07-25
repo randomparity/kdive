@@ -234,8 +234,9 @@ The threshold's two terms are both real settings resolved per pass —
 §Consequences records why that exception is taken. Both declare **`server` and `reconciler`**: the
 reconciler runs the sweep on its loop and the server runs a full `reconcile_once` on demand via
 `ops.reconcile_now`, so a brake an operator raises on only one of them leaves the other deleting at
-the default — which for an irreversible delete is the brake failing exactly when it is reached for. Per pass matters as much as configurable does: a
-brake that needed a reconciler restart to engage would be no better than the redeploy it replaces.
+the default — which for an irreversible delete is the brake failing exactly when it is reached for.
+Per pass matters as much as configurable does: a brake that needed a reconciler restart to engage
+would be no better than the redeploy it replaces.
 48h at the defaults sits far above every legitimate rowless interval under these roots, and the
 asymmetry is chosen: an extra day of leak is a cost bug, a deleted live object is a correctness bug.
 
