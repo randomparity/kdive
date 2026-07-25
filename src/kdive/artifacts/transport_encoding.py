@@ -89,9 +89,20 @@ def _transport_error(detail: str) -> CategorizedError:
     failure outcomes, so the checksum mismatch inherited the object-defect category by proximity
     and disagreed with the identity staging path over the byte-identical failure (#1523). One
     observation, two modes: transient GET-side transport corruption, which a bare retry clears,
-    and permanent post-PUT bit rot, which it does not. Reporting it retryable costs the queue's
-    bounded ``max_attempts`` on the permanent mode and saves an otherwise-recoverable provision on
-    the transient one.
+    and permanent post-PUT bit rot, which it does not.
+
+    What the category controls is the **agent-visible** ``retryable`` boolean
+    ``mcp/responses.py`` derives from it, and the remediation the message gives — not any
+    automatic re-attempt. A staging failure reaches the queue through the provision handler, which
+    sets ``terminal`` on the error before re-raising (``jobs/handlers/systems.py``), so the job
+    dead-letters on the first attempt under *either* category and nothing is re-downloaded. The
+    retry this advises is the agent's own, against a System that is already terminally failed.
+
+    **Reach (ADR-0445 §5).** On this path the hash comparison is the *last* gate, and zlib's gzip
+    framing catches most damage first: a flipped bit in the deflate body or the CRC/ISIZE trailer,
+    or a post-PUT truncation, raises :func:`_object_error` before the digest is ever compared. So
+    convergence with the identity path holds only for damage that leaves the gzip framing intact.
+    #1548 tracks closing that residual by consulting the digest before declaring an object defect.
     """
     return CategorizedError(detail, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
@@ -111,8 +122,13 @@ def strip_gzip_to_writer(
     split apart: a bomb or a corrupt/truncated/multi-member stream is a defect in the uploaded
     object (``CONFIGURATION_ERROR``, terminal), while a hash mismatch says the bytes read back are
     not the bytes signed at PUT (``INFRASTRUCTURE_FAILURE``, retryable — the same category the
-    identity staging path and the catalog digest check use for it). The caller owns atomic staging,
-    so a raised error discards the partial output already written.
+    identity staging path and the catalog digest check use for it). Note the gate *order*: the hash
+    is compared last, after the framing checks, so damaged stored bytes that also break the gzip
+    framing report the object-defect category (ADR-0445 §5, residual tracked in #1548). The caller
+    owns atomic staging, so a raised error discards the partial output already written.
+
+    The raised errors carry no ``details``; a caller that has identifying context (the
+    uploaded-rootfs fetch attaches its ``system_id``) annotates them on the way out.
 
     Args:
         store: A ranged-read store over the compressed object.

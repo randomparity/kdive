@@ -60,16 +60,24 @@ Transport corruption on the *GET* is transient, and it is precisely what a bare 
 clears. Two failure modes share one observation, and only one of them is permanent.
 
 ADR-0118 biases terminal when transience is ambiguous, on the grounds that the flag exists to stop
-an agent hammering a permanent failure. That bias does not decide this case, because the asymmetry
-of consequences runs the other way here and the hammering is already bounded: a retryable verdict
-on a permanently damaged object costs the queue's `max_attempts` re-attempts and then fails
-terminally regardless, while a terminal verdict on a transient GET corruption fails a provision
-that one retry would have completed — and tells the agent to re-upload a multi-GiB object that was
-never actually wrong.
+an agent hammering a permanent failure. That bias does not decide this case, because there is no
+hammering to stop. **The category buys no automatic re-attempt at all.** Staging runs inside the
+provision call, and the provision handler sets `terminal` on any `CategorizedError` before
+re-raising it (`jobs/handlers/systems.py`), so the job dead-letters on the *first* attempt under
+either category — `queue.py` dead-letters on `terminal or attempt >= max_attempts`. Nothing is
+re-downloaded, and no in-flight provision is resumed; the System is already terminally `failed`
+and the agent's retry is a fresh provision.
+
+What the category controls is therefore exactly one thing: what the calling **agent is told**.
+Under the terminal reading an agent that hit transient GET-side corruption is told the failure is
+permanent and is pointed at re-uploading a multi-GiB object that was never wrong. Under the
+retryable reading an agent that hit real bit rot re-provisions once, fails the same way, and is
+told by the message to re-upload. The second error is cheap and self-correcting; the first is not.
 
 A third precedent already sat on this side: the catalog path (`images/rootfs/fetch.py`) raises
 `infrastructure_failure` when downloaded bytes do not match the registered row's digest. With this
-change, every integrity check over object-store bytes in the tree reports one category.
+change, every *checksum-gate* rejection in the tree reports one category — subject to the reach
+limit §5 records, which is narrower than that sentence alone suggests.
 
 The same principle was reached independently in ADR-0450 (#1525) for the staging free-space
 precheck: one physical condition should not report two categories depending on which side of a
@@ -102,6 +110,15 @@ damaged and must be re-uploaded. That is the honest rendering of two failure mod
 observation, and it is what the agent needs in order to act — the `retryable` flag alone cannot
 express "retry once, then re-upload".
 
+### 3. The gzip path attaches the caller's `system_id`
+
+`strip_gzip_to_writer` is consumer-agnostic and raises with empty `details`, while every raise in
+the uploaded-rootfs fetch carries `details={"system_id": ...}` — the field `worker.py` lifts into
+the job row's `failure_context` and the one an operator pivots on to correlate a staging failure
+to a System. A gzip failure therefore landed with only a message where the byte-identical identity
+failure landed with the id. `_stage_gzip` annotates on the way out rather than the shared utility
+growing a consumer-specific field, which keeps the module's seam intact.
+
 ### 4. Gate precedence is unchanged
 
 ADR-0441 §5 and ADR-0438 §3 put the checksum comparison ahead of the qcow2-magic gate, so
@@ -110,18 +127,43 @@ as a format failure. That ordering is untouched; only the category the checksum 
 changes on the gzip side. What changes downstream is that a corrupt object now surfaces as
 retryable rather than as a wrong-format `configuration_error` on either path.
 
+### 5. The convergence's reach is narrower than §1 alone reads
+
+On the gzip path the hash comparison is the **last** gate, and zlib's own gzip framing trips
+first. Probed against the shipped code with a correct signed checksum and damaged stored bytes:
+deflate-body bit rot, trailer CRC/ISIZE bit rot, and post-PUT truncation all raise
+`_object_error` (`configuration_error`) before the digest is compared; only damage confined to the
+gzip header — MTIME/XFL/OS, some ten bytes of a multi-GiB object — reaches `_transport_error`. The
+identity path, having no framing to trip, reports every one of those as `infrastructure_failure`.
+
+So the codec still decides the verdict for the dominant corruption shapes. §1 is the decision this
+ADR makes and is correct as far as the gate order lets it reach; it is **not** yet true that an
+agent gets the same advice regardless of codec for arbitrary damage.
+
+Closing the residual means consulting the transport hash *before* declaring an object defect —
+those branches assert "the uploaded object is defective", a claim that is unfounded when the bytes
+read back are not the bytes signed at PUT. That follows from §2's own principle, and on the
+truncated branch it costs nothing (the hasher has already absorbed every stored byte). It is out of
+scope here only because it changes the corrupt/truncated branch's category in a subset of cases,
+which #1523's brief ruled out. **#1548** carries it, and
+`test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` pins the current behavior
+so the gap is visible rather than silent.
+
 ## Consequences
 
 - An agent that hits a rootfs checksum mismatch on a gzip-encoded upload is now told
-  `retryable: true` and gets the same advice it would have got for the same object uploaded
-  identity-encoded.
-- A genuinely damaged stored object costs the queue's bounded `max_attempts` re-downloads before
-  failing terminally, where it previously failed on the first attempt. On the gzip path those
-  retries are ranged GETs writing the decompressed stream to staging; ADR-0450's free-space
-  precheck refuses a stage the volume cannot hold before its first byte, which bounds the disk
-  cost. Nothing here changes `max_attempts`.
-- No schema change, no migration, no MCP tool-surface change. The only externally visible change is
-  the `retryable` boolean and the message text on one failure path.
+  `retryable: true`, and gets the same advice it would have got identity-encoded **for damage that
+  leaves the gzip framing intact** (§5).
+- No re-download is added. The provision handler marks a staging `CategorizedError` `terminal`, so
+  the job dead-letters on the first attempt under either category; the change is to what the agent
+  is told, not to how many times anything is fetched. `max_attempts` is untouched.
+- The checksum branch now increments the `infrastructure_failure` bucket of
+  `telemetry.record_job_failure(category)` rather than `configuration_error`. Anything alerting on
+  that label sees a damaged agent upload as an infrastructure failure.
+- A gzip staging failure now carries `system_id` in its `failure_context`, as the identity path
+  already did (§3).
+- No schema change, no migration, no MCP tool-surface change. The only externally visible changes
+  are the `retryable` boolean, the message text, and the added detail field on one failure path.
 - `artifacts/transport_encoding.py` is a shared module, but `strip_gzip_to_writer` has exactly one
   production consumer (the local-libvirt uploaded-rootfs fetch); the upload-declaration validator
   imports only the codec constants. No other caller depended on the old category.

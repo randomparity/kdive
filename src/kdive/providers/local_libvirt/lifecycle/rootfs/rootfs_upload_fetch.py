@@ -912,7 +912,13 @@ def _stage_gzip(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified."""
+    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified.
+
+    ``strip_gzip_to_writer`` is consumer-agnostic and raises with empty ``details``, so its errors
+    are annotated with the ``system_id`` every other raise in this module carries — otherwise a
+    gzip staging failure lands in the job row without the one field an operator pivots on to
+    correlate it to a System, while the byte-identical identity failure lands with it (ADR-0445 §3).
+    """
     if uncompressed_size is None:
         raise CategorizedError(
             "uploaded rootfs declared a gzip encoding without an uncompressed_size; re-declare the "
@@ -926,8 +932,12 @@ def _stage_gzip(
         expected_sha256=checksum,
         uncompressed_size=uncompressed_size,
     )
-    with partial.open("wb") as writer:
-        strip_gzip_to_writer(store, request, writer)
+    try:
+        with partial.open("wb") as writer:
+            strip_gzip_to_writer(store, request, writer)
+    except CategorizedError as exc:
+        exc.details.setdefault("system_id", str(system_id))
+        raise
 
 
 def _starts_with_qcow2_magic(staged: Path) -> bool:

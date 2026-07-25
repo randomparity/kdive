@@ -246,6 +246,32 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     assert "checksum" in str(error.value)
     # Aligned remediation: the flag alone cannot say "retry once, then re-upload".
     assert "retry, and if it persists the stored object is damaged" in str(error.value)
+    assert error.value.details["system_id"]  # the operator's correlation field, on both paths
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(tmp_path: Path) -> None:
+    # ADR-0445 §5 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
+    # silent. The test above declares a wrong checksum over a *well-formed* gzip, which reaches the
+    # end-of-stream hash comparison. Damage the STORED BYTES instead and zlib's own framing trips
+    # first: the deflate CRC fails inside the decompress loop and the object-defect branch fires
+    # before the digest is ever compared. The identity path reports this same damage as
+    # INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the codec still decides the
+    # verdict here. #1523 could not close this — its brief forbade changing the corrupt-stream
+    # category — so #1548 carries it.
+    canonical = _QCOW2 + b"z" * 512
+    stored = bytearray(gzip.compress(canonical))
+    pristine_checksum = _sha256_b64(bytes(stored))
+    stored[20] ^= 0xFF  # a flipped bit in the deflate body, post-PUT
+    store = _FakeStore(bytes(stored), checksum=pristine_checksum)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
+    assert "corrupt" in str(error.value)
+    assert error.value.details["system_id"]
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
