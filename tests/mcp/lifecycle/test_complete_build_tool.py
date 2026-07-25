@@ -788,7 +788,7 @@ def test_chunked_complete_build_still_extends_the_window_before_reassembly(
             )
             resp = await handlers.complete_build(
                 pool, _ctx(), str(run_id), build_id=None, cmdline="x"
-            )
+            )  # a chunked store plus a failing validator: neither factory covers this pair
             async with pool.connection() as conn:
                 after = await upload_manifest.get_manifest(conn, "runs", run_id)
         assert resp.status == "error"
@@ -874,9 +874,9 @@ def test_complete_build_replaced_window_points_at_the_mint(migrated_url: str) ->
                     *args, **kwargs
                 )
 
-            resp = await CompleteBuildHandlers(
-                validate_complete_build=remint_then_validate
-            ).complete_build(pool, _ctx(), str(run_id), build_id=None, cmdline="x")
+            resp = await _build_handlers(remint_then_validate).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
             keys = await _artifact_keys(pool, run_id)
             async with pool.connection() as conn:
                 run = await RUNS.get(conn, run_id)

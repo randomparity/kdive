@@ -164,6 +164,34 @@ async def deadline_stamp(conn: AsyncConnection, manifest: UploadManifest) -> Man
     return ManifestStamp(server_time=row[0], deadline=manifest.deadline)
 
 
+async def window_deadline(
+    conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID
+) -> datetime | None:
+    """Return just the owner's manifest deadline, or ``None`` if no row exists.
+
+    The scalar twin of :func:`get_manifest` for callers that only need the window's identity
+    (ADR-0448 §2). ``get_manifest`` pulls the whole ``manifest`` JSONB and rebuilds a
+    :class:`ManifestEntry` per artifact — thousands of :class:`ChunkEntry` tuples for a chunked
+    multi-GiB upload — which is wasted work when the caller compares one timestamp, and the run
+    finalize's comparison happens inside the ``RUN`` advisory lock.
+
+    Args:
+        conn: An async connection.
+        owner_kind: The owning table name — ``'runs'`` or ``'investigations'``.
+        owner_id: The owning row's primary key.
+
+    Returns:
+        The window's deadline, or ``None`` if no manifest is recorded for this owner.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT deadline FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
+            (owner_kind, owner_id),
+        )
+        row = await cur.fetchone()
+    return None if row is None else row[0]
+
+
 async def get_manifest(
     conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID
 ) -> UploadManifest | None:

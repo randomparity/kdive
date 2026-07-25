@@ -78,6 +78,14 @@ NO_UPLOAD_MANIFEST = "no_upload_manifest"
 UPLOAD_WINDOW_REPLACED = "upload_window_replaced"
 """A re-mint replaced the window this finalize validated (ADR-0448 §2)."""
 
+UPLOAD_WINDOW_EXPIRED = "upload_window_expired"
+"""The window's deadline had passed when this finalize arrived (ADR-0448 §1).
+
+Raised as :class:`CompleteBuildExpiredWindowError` rather than through
+:class:`CompleteBuildConfigurationError`, because the response layer needs the clock pair to
+render the self-correcting payload; the reason string is shared from here all the same.
+"""
+
 # Every exception below is `eq=False` and unfrozen, deliberately. `contextlib` assigns
 # `__traceback__` to an exception it re-raises out of an async context manager, so a *frozen*
 # dataclass exception raised anywhere inside `advisory_xact_lock` dies with `FrozenInstanceError`
@@ -425,13 +433,13 @@ async def _require_unreaped_window(
         CompleteBuildConfigurationError: The window was reaped or replaced; the caller must
             re-mint and finalize against the window it actually uploaded to.
     """
-    current = await upload_manifest.get_manifest(conn, "runs", run_id)
+    current = await upload_manifest.window_deadline(conn, "runs", run_id)
     if current is None:
         _log.info(
             "runs.complete_build rejected: upload window reaped mid-finalize (run %s)", run_id
         )
         raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
-    if current.deadline != expected_deadline:
+    if current != expected_deadline:
         _log.info(
             "runs.complete_build rejected: upload window replaced mid-finalize (run %s)", run_id
         )
@@ -523,6 +531,7 @@ async def _cleanup_chunks_and_manifest(
 
 __all__ = [
     "NO_UPLOAD_MANIFEST",
+    "UPLOAD_WINDOW_EXPIRED",
     "UPLOAD_WINDOW_REPLACED",
     "CompleteBuildConfigurationError",
     "CompleteBuildExpiredWindowError",
