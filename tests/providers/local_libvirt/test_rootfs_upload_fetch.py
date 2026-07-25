@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.storage import HeadResult, StreamedArtifact
+from kdive.artifacts.transport_encoding import StripDecodeRequest, strip_gzip_to_writer
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -223,7 +224,7 @@ def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("encoding", [None, "gzip"], ids=["identity", "gzip"])
 def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
-    tmp_path: Path, encoding: str | None
+    tmp_path: Path, encoding: str | None, caplog: pytest.LogCaptureFixture
 ) -> None:
     # ADR-0445 (#1523). Both staging paths end by comparing a hash they recomputed over the bytes
     # they read against the checksum the signed PUT bound. The object is byte-identically as
@@ -234,7 +235,7 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     stored = gzip.compress(canonical) if encoding == "gzip" else canonical
     store = _FakeStore(stored, checksum=_sha256_b64(b"a-different-object"))
 
-    with pytest.raises(CategorizedError) as error:
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
         _stage(
             store,
             tmp_path,
@@ -247,26 +248,63 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     # Aligned remediation: the flag alone cannot say "retry once, then re-upload".
     assert "retry, and if it persists the stored object is damaged" in str(error.value)
     assert error.value.details["system_id"]  # the operator's correlation field, on both paths
+    # The host-side signal. INFRASTRUCTURE_FAILURE is this tree's catch-all bucket, so after
+    # ADR-0445 the category no longer separates stored-object damage from routine infra noise;
+    # this log line is what does, on both paths (same reasoning as the free-space warning above).
+    assert "failed checksum verification while staging" in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
+_RESIDUAL_CANONICAL = _QCOW2 + b"z" * 512
+# The probe below only cares which branch raises, never what decodes, so its output is discarded.
+NULL_IO = cast(IO[bytes], io.BytesIO())
+
+
+def _flip_reaching(message: str) -> tuple[int, int]:
+    """Find the first (byte, xor-mask) in the deflate body whose damage raises ``message``.
+
+    The offsets are **derived, not pinned**. Which branch a given flip reaches is a property of the
+    exact deflate encoding, and that is chosen by the linked compressor — this interpreter links
+    zlib-ng, and a stock-zlib build can emit a different (even differently sized) stream for the
+    same input. A hardcoded offset would leave a maintainer on another runner staring at a red test
+    with no way to tell whether the residual moved or the compressor did.
+    """
+    pristine = gzip.compress(_RESIDUAL_CANONICAL)
+    for index in range(10, len(pristine) - 8):  # the deflate body: past the header, before the CRC
+        for mask in (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF):
+            candidate = bytearray(pristine)
+            candidate[index] ^= mask
+            request = StripDecodeRequest(
+                key="k",
+                compressed_size=len(candidate),
+                expected_sha256=_sha256_b64(pristine),  # the checksum of the UNdamaged object
+                uncompressed_size=len(_RESIDUAL_CANONICAL),
+            )
+            try:
+                strip_gzip_to_writer(_FakeStore(bytes(candidate), checksum=None), request, NULL_IO)
+            except CategorizedError as probe:
+                if message in str(probe):
+                    return index, mask
+    pytest.skip(f"no deflate-body flip reaches {message!r} for this zlib build")
+
+
 @pytest.mark.parametrize(
-    ("flip", "damage", "expected_message"),
-    # Two shapes of deflate-body damage reaching two different object-defect branches: byte 24 fails
-    # the deflate CRC, while one bit of byte 38 desynchronises the Huffman decode so the output cap
-    # trips first. Which branch fires is a property of the damage, not of anything the agent did.
-    # An exhaustive single-bit sweep of this fixture's deflate body splits 225 corrupt-stream / 13
-    # bomb bound / 10 checksum gate of 248 flips -- so the bomb branch is a real share of
-    # stored-byte corruption rather than a curiosity, and it is the shape whose message is
-    # affirmatively WRONG: it blames a declared uncompressed_size that was correct. ADR-0450 reads
-    # that same field as the gzip path's free-space budget, so an agent that follows the advice and
-    # re-declares upward can have its next provision refused for a base the volume can hold.
-    [(24, 0xFF, "corrupt"), (38, 0x01, "exceeds the declared uncompressed_size bound")],
+    "expected_message",
+    # Two shapes of deflate-body damage reaching two different object-defect branches: one fails the
+    # deflate CRC, one desynchronises the Huffman decode so the output cap trips first. Which branch
+    # fires is a property of the damage, not of anything the agent did. An exhaustive single-bit
+    # sweep of this fixture's deflate body under zlib-ng 1.3.1 splits 225 corrupt-stream / 13 bomb
+    # bound / 10 checksum gate of 248 flips -- so the bomb branch is a real share of stored-byte
+    # corruption rather than a curiosity, and it is the shape whose message is affirmatively WRONG:
+    # it blames a declared uncompressed_size that was correct. ADR-0450 reads that same field as the
+    # gzip path's free-space budget, so an agent that follows the advice and re-declares upward can
+    # have its next provision refused for a base the volume can hold.
+    ["corrupt", "exceeds the declared uncompressed_size bound"],
     ids=["deflate-crc", "bomb-bound"],
 )
 def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
-    tmp_path: Path, flip: int, damage: int, expected_message: str
+    tmp_path: Path, expected_message: str
 ) -> None:
     # ADR-0445 §6 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
     # silent. The test above declares a wrong checksum over a *well-formed* gzip, which reaches the
@@ -275,15 +313,15 @@ def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
     # reports this same damage as INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the
     # codec still decides the verdict here. #1523 could not close this — its brief forbade changing
     # the bomb and corrupt-stream categories — so #1548 carries it.
-    canonical = _QCOW2 + b"z" * 512
-    stored = bytearray(gzip.compress(canonical))
+    index, mask = _flip_reaching(expected_message)
+    stored = bytearray(gzip.compress(_RESIDUAL_CANONICAL))
     pristine_checksum = _sha256_b64(bytes(stored))
-    stored[flip] ^= damage  # damaged post-PUT; the declared checksum is still the pristine one
+    stored[index] ^= mask  # damaged post-PUT; the declared checksum is still the pristine one
 
     store = _FakeStore(bytes(stored), checksum=pristine_checksum)
 
     with pytest.raises(CategorizedError) as error:
-        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(_RESIDUAL_CANONICAL))
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
     assert expected_message in str(error.value)

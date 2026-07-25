@@ -82,9 +82,16 @@ Trailer CRC/ISIZE rot and post-PUT truncation also report `CONFIGURATION_ERROR`.
 reports all of these as `INFRASTRUCTURE_FAILURE`.
 
 What *does* reach the digest is damage leaving the decoded stream and framing intact: gzip header
-fields (MTIME/XFL/OS), deflate padding bits after the final end-of-block code, and a wholesale
-out-of-band replacement by a different well-formed gzip under the declared bound — so the
-"out-of-band overwrite" mode the problem statement names does converge.
+fields (MTIME/XFL/OS) and deflate padding bits after the final end-of-block code.
+
+An **out-of-band overwrite does not reach this gate at all**, on either path. `_stage_uploaded_object`
+re-`HEAD`s at provision time and compares against `head.checksum_sha256` — read off the *live*
+object — not against the declared content address the key is derived from (that comparison exists
+only in `complete_rootfs_upload`). An API-level re-`PUT` updates the stored checksum along with the
+bytes, so both match and the gate passes. Only a storage-layer substitution that leaves S3's
+recorded checksum stale is caught, which is the same mechanism as bit rot. Closing that properly
+means comparing the declared content address at stage time — a new gate, not a category question,
+and out of scope here.
 
 The bomb branch is the worst case: besides the category, its message blames the declared
 `uncompressed_size` when the declaration was right, and ADR-0450 reads that same field as the gzip
@@ -105,6 +112,8 @@ silent.
   persists, the stored object is damaged and must be re-uploaded.
 - **R6** — No schema change, no migration, no MCP tool-surface change.
 - **R7** — A gzip staging failure carries `system_id` in its `details`, as the identity path does.
+- **R8** — A checksum mismatch is logged at `WARNING` on both paths, since the category no longer
+  distinguishes it from routine infrastructure noise.
 
 ## Options considered
 
@@ -153,7 +162,10 @@ existing `"checksum verification"` substring is preserved).
 
 `_stage_gzip` catches `CategorizedError` around `strip_gzip_to_writer` and `setdefault`s
 `details["system_id"]` before re-raising, so both paths land in the job row's `failure_context`
-with the field an operator correlates on (R7).
+with the field an operator correlates on (R7). It also routes an `INFRASTRUCTURE_FAILURE` — the
+utility's only retryable branch, so the category identifies the checksum mismatch without
+re-matching message text — into the shared `_log_checksum_mismatch` the identity path calls
+directly (R8).
 
 The same stale cross-reference in
 `tests/.../test_rootfs_upload_fetch.py::test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate`

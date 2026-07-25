@@ -52,9 +52,10 @@ and it took its category from the helper it sat next to. The gzip path never *ch
 this ADR removes.
 
 The substantive argument for the terminal reading is that `head.checksum_sha256` is the value S3
-itself verified at PUT, so a mismatch proves the stored bytes changed *after* the PUT — bit rot,
-tampering, an out-of-band overwrite — and no retry of the same key fixes any of those. That is
-sound but partial. ADR-0434 §2's own stated rationale for recomputing at all is that it "catches
+itself verified at PUT, so a mismatch proves the stored bytes changed *after* the PUT — bit rot or
+tampering below the store's own checksum accounting — and no retry of the same key fixes either.
+(An API-level overwrite is **not** in that set: it re-records the checksum, so it never reaches
+this gate at all. See §6.) That is sound but partial. ADR-0434 §2's own stated rationale for recomputing at all is that it "catches
 **transport corruption** and post-PUT bit-rot that the PUT-time signature alone does not".
 Transport corruption on the *GET* is transient, and it is precisely what a bare re-invocation
 clears. Two failure modes share one observation, and only one of them is permanent.
@@ -124,8 +125,10 @@ growing a consumer-specific field, which keeps the module's seam intact.
 ADR-0441 §5 and ADR-0438 §3 put the checksum comparison ahead of the qcow2-magic gate, so
 store-side corruption that also destroys the magic is reported as the checksum failure rather than
 as a format failure. That ordering is untouched; only the category the checksum gate reports
-changes on the gzip side. What changes downstream is that a corrupt object now surfaces as
-retryable rather than as a wrong-format `configuration_error` on either path.
+changes on the gzip side. What changes downstream is that a **checksum-gate** rejection now
+surfaces as retryable on the gzip path, as it already did on identity — for the damage that
+actually reaches that gate. Framing-breaking damage still surfaces as `configuration_error` on the
+gzip path; §6 measures how much that is.
 
 ### 6. The convergence's reach is narrower than §1 alone reads
 
@@ -147,11 +150,20 @@ the decision this ADR makes and is correct as far as the gate order lets it reac
 yet true that an agent gets the same advice regardless of codec for arbitrary damage.
 
 What *does* reach the digest is damage that leaves the decoded stream and its framing intact: gzip
-header fields (MTIME/XFL/OS), deflate padding bits after the final end-of-block code (the 10/248
-above — a flip there decodes byte-identically, so only the digest catches it), and a wholesale
-out-of-band replacement of the key by a different well-formed gzip under the declared bound. That
-last is worth noting because §1 names an out-of-band overwrite as a motivating mode, and it *does*
-converge.
+header fields (MTIME/XFL/OS) and deflate padding bits after the final end-of-block code (the
+10/248 above — a flip there decodes byte-identically, so only the digest catches it).
+
+An **out-of-band overwrite does not generally reach this gate at all**, on either path, and §1's
+listing of it alongside bit rot conflates two mechanisms. The checksum compared here is not the
+declared content address: `_stage_uploaded_object` re-`HEAD`s at provision time and passes
+`head.checksum_sha256` down, which the store reads off the *live* object. An actor with bucket
+credentials who re-`PUT`s a different object to the key updates that metadata too, so the new bytes
+match the new object's own checksum and the gate passes. (The declared-vs-stored comparison exists
+only at commit time, in `complete_rootfs_upload`.) What converges is a *storage-layer* substitution
+that edits the backing bytes while leaving S3's recorded checksum stale — which is the same
+mechanism as bit rot, not a distinct one. Closing the overwrite hole properly means comparing the
+declared content address at stage time, which is a new gate rather than a category question and is
+not attempted here.
 
 The **bomb branch is the worst of the three**, and not only for its category. Its message reads
 "the object is not a valid gzip of that size (a gzip bomb or a wrong `uncompressed_size`);
@@ -180,8 +192,13 @@ and bomb shapes so the gap is visible rather than silent.
   the job dead-letters on the first attempt under either category; the change is to what the agent
   is told, not to how many times anything is fetched. `max_attempts` is untouched.
 - The checksum branch now increments the `infrastructure_failure` bucket of
-  `telemetry.record_job_failure(category)` rather than `configuration_error`. Anything alerting on
-  that label sees a damaged agent upload as an infrastructure failure.
+  `telemetry.record_job_failure(category)` rather than `configuration_error` — this tree's
+  catch-all for every store, libvirt, disk and capacity fault. Since the category no longer
+  distinguishes stored-object damage from routine infra noise, both staging paths now emit a
+  `WARNING` naming the object key, System and encoding; that log, not the category, is what lets an
+  operator see the bit-rot mode §1 names. Same reasoning as `_require_staging_free_space`'s warning
+  in the same module, and it matters more here because the agent is *told* to retry, so without it
+  the first observable consequence of real damage would be a silent extra multi-GiB download.
 - A gzip staging failure now carries `system_id` in its `failure_context`, as the identity path
   already did (§3).
 - No schema change, no migration, no MCP tool-surface change. The only externally visible changes

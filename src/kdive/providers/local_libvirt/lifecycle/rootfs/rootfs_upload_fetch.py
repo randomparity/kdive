@@ -893,6 +893,7 @@ def _stage_identity(
             hasher.update(chunk)
             writer.write(chunk)
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
+        _log_checksum_mismatch(key, system_id=system_id, encoding="identity")
         raise CategorizedError(
             "uploaded rootfs object failed checksum verification: the stored bytes do not match "
             "the checksum signed at upload; retry, and if it persists the stored object is "
@@ -900,6 +901,30 @@ def _stage_identity(
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
+
+
+def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
+    """Log an object-store integrity failure, which the category alone no longer distinguishes.
+
+    Same reasoning as :func:`_require_staging_free_space`'s warning, for the same reason: ADR-0445
+    moved this condition out of the small ``CONFIGURATION_ERROR`` bucket and into
+    ``INFRASTRUCTURE_FAILURE``, which in this tree is the catch-all for every store, libvirt, disk
+    and capacity fault. Without this line an operator watching for stored-object damage — the
+    permanent bit-rot mode ADR-0445 §1 names — cannot separate it from routine transient infra
+    noise in ``record_job_failure`` without pulling each job's ``failure_context`` back through MCP.
+
+    The retryable verdict makes that worse, not better: the agent is now *told* to retry, so the
+    first observable consequence of real damage would otherwise be a silent extra multi-GiB
+    download and a second dead-lettered job, with nothing in the host logs naming the condition.
+    """
+    _log.warning(
+        "uploaded rootfs object %s failed checksum verification while staging for system %s "
+        "(%s encoding): the stored bytes do not hash to the checksum signed at upload — transient "
+        "read corruption clears on retry, a persistent mismatch means the stored object is damaged",
+        key,
+        system_id,
+        encoding,
+    )
 
 
 def _stage_gzip(
@@ -937,6 +962,10 @@ def _stage_gzip(
             strip_gzip_to_writer(store, request, writer)
     except CategorizedError as exc:
         exc.details.setdefault("system_id", str(system_id))
+        # The utility's *only* retryable branch is the transport-hash comparison (ADR-0445 §2), so
+        # the category identifies the checksum mismatch without re-matching the message text.
+        if exc.category is ErrorCategory.INFRASTRUCTURE_FAILURE:
+            _log_checksum_mismatch(key, system_id=system_id, encoding=GZIP_ENCODING)
         raise
 
 
