@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any, LiteralString, NoReturn
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -15,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
-from kdive.build_artifacts.results import BuildOutput
+from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -222,6 +223,121 @@ def test_complete_build_finalizer_rejects_expired_single_put_manifest(migrated_u
         assert run.state is RunState.CREATED
         assert manifest_kept  # left for the reaper, exactly as the chunked path leaves it
         assert artifact_rows == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_declines_when_reaper_wins_mid_validation(
+    migrated_url: str,
+) -> None:
+    """A window reaped while this finalize validated must not commit rows for deleted keys.
+
+    The validator seam stands in for the unlocked stretch: the reaper takes the same RUN lock,
+    deletes the uncommitted objects, and drops the manifest while the payload is being read.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool)
+
+            def reap_then_validate(*args: Any, **kwargs: Any) -> ValidatedUpload:
+                with psycopg.connect(migrated_url) as reaper:
+                    reaper.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return FakeValidator(_output(run_id))(*args, **kwargs)
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(validate_complete_build=reap_then_validate),
+            )
+            run = await _run_by_id(pool, run_id)
+            artifact_rows = await _fetchall(
+                pool, "SELECT id FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+            steps = await _fetchall(pool, "SELECT step FROM run_steps WHERE run_id = %s", (run_id,))
+
+        assert error.data == {"reason": "no_upload_manifest"}
+        assert run.state is RunState.CREATED
+        assert artifact_rows == []
+        assert steps == []
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_declines_chunked_reassembly_of_a_reaped_window(
+    migrated_url: str,
+) -> None:
+    """A refresh that finds no row means the reaper collected it; do not reassemble (ADR-0448).
+
+    The store factory runs between the open-window check and the refresh, which is exactly the
+    gap the reaper can land in.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            store = _ChunkedStore()
+
+            def reap_then_build_store() -> _ChunkedStore:
+                with psycopg.connect(migrated_url) as reaper:
+                    reaper.execute(
+                        "DELETE FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+                        (run_id,),
+                    )
+                return store
+
+            error = await _complete_config_error(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=reap_then_build_store,
+                ),
+            )
+            run = await _run_by_id(pool, run_id)
+
+        assert error.data == {"reason": "no_upload_manifest"}
+        assert store.events == []  # no multipart copy against reaped chunk objects
+        assert run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
+def test_complete_build_finalizer_recovers_on_remint_without_reupload(migrated_url: str) -> None:
+    """The advertised recovery: reject, re-mint, finalize — same keys, nothing re-uploaded."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, ttl=timedelta(seconds=-1))
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id))
+            )
+            await _complete_expired_window_error(pool, run_id, finalizer)
+
+            async with pool.connection() as conn:
+                await upload_manifest.replace_manifest(
+                    conn,
+                    upload_manifest.UploadManifestReplaceRequest(
+                        owner_kind="runs",
+                        owner_id=run_id,
+                        prefix=f"local/runs/{run_id}/",
+                        entries=[ManifestEntry("kernel", "c", 1)],
+                        ttl=timedelta(hours=1),
+                    ),
+                )
+            result = await _complete(pool, run_id, finalizer)
+            keys = await _fetchall(
+                pool, "SELECT object_key FROM artifacts WHERE owner_id = %s", (run_id,)
+            )
+            run = await _run_by_id(pool, run_id)
+
+        assert run.state is RunState.SUCCEEDED
+        # The re-mint addressed the very key the lapsed window used: no re-upload was needed.
+        assert keys == [(f"local/runs/{run_id}/kernel",)]
+        assert result.kernel_ref == f"local/runs/{run_id}/kernel"
 
     asyncio.run(_run())
 

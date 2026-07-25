@@ -73,9 +73,15 @@ class CompleteBuildValidation(Protocol):
 type ObjectStoreFactory = Callable[[], ExternalBuildStore]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CompleteBuildConfigurationError(Exception):
-    """Caller-correctable configuration rejection data for the MCP envelope."""
+    """Caller-correctable configuration rejection data for the MCP envelope.
+
+    Deliberately not ``frozen``, unlike its siblings: this is the only one of these raised from
+    inside ``advisory_xact_lock``, and ``contextlib`` assigns ``__traceback__`` on an exception
+    it re-raises out of an async context manager — which a frozen dataclass rejects with
+    ``FrozenInstanceError``, masking the real rejection.
+    """
 
     data: dict[str, JsonValue]
 
@@ -236,12 +242,18 @@ async def _require_open_window(
 ) -> None:
     """Reject a finalize past the manifest deadline; return while the window is open (ADR-0448).
 
-    Sited here so it covers the single-PUT and chunked paths from one place — the asymmetry #1534
-    reported was two paths reading (or not reading) the same field independently. The deadline is
-    measured against the Postgres clock that stamped it and that the upload reaper measures
-    against, so finalize and the reaper cannot reach opposite verdicts on one manifest. ``now()``
-    is the transaction's start, so a request that arrived inside the window is never rejected for
-    time it spent queueing behind the ``RUN`` lock.
+    Sited in ``_prepare`` so it governs the single-PUT and chunked paths from one place — the
+    asymmetry #1534 reported was two paths reading (or not reading) the same field independently.
+    The deadline is measured against the Postgres clock that stamped it and that the upload reaper
+    measures against, never a Python-side ``datetime.now()``, so the two cannot reach opposite
+    verdicts on one manifest under clock skew.
+
+    ``now()`` is ``transaction_timestamp()`` and the whole request runs inside one transaction, so
+    this is a verdict on the request's *arrival*: a finalize that arrived inside the window is not
+    rejected for the time it then spends reading a multi-GiB payload. Arrival is not sufficient on
+    its own — the reaper can collect the window during that read — so the authoritative guard is
+    ``_finalize_external_build``'s re-read of the manifest under the ``RUN`` lock, and this check
+    is the fail-fast that keeps a lapsed window from being read at all.
 
     Raises:
         CompleteBuildExpiredWindowError: The window closed before this finalize arrived.
@@ -261,22 +273,18 @@ async def _reassemble_chunked_artifacts(
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
         refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, ttl)
-    if refreshed:
-        try:
-            await _reassemble_artifacts(manifest_row, store)
-        except CategorizedError as exc:
-            recorded = await _existing_build_result(conn, uid)
-            if recorded is not None:
-                raise _CompleteBuildAlreadyRecorded(recorded) from exc
-            raise
-        return
-    # `_require_open_window` already passed, so a declined refresh means the row was reaped or
-    # its deadline lapsed between the two reads. Re-read to tell those apart, and report the
-    # observed clock pair rather than a bare reason, so both paths raise one payload.
-    current = await upload_manifest.get_manifest(conn, "runs", uid)
-    if current is None:
+    if not refreshed:
+        # `_require_open_window` passed on this transaction's clock, and `now()` is
+        # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
+        # a declined refresh here means the row is gone, reaped between the two reads.
         raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
-    raise CompleteBuildExpiredWindowError(await upload_manifest.deadline_stamp(conn, current))
+    try:
+        await _reassemble_artifacts(manifest_row, store)
+    except CategorizedError as exc:
+        recorded = await _existing_build_result(conn, uid)
+        if recorded is not None:
+            raise _CompleteBuildAlreadyRecorded(recorded) from exc
+        raise
 
 
 async def _reassemble_artifacts(
@@ -344,6 +352,7 @@ async def _finalize_external_build(
             return await _existing_build_result(conn, run.id) or result
         if state is not RunState.CREATED:
             raise CompleteBuildConfigurationError({"current_status": state.value})
+        await _require_unreaped_window(conn, run.id)
         await _insert_artifact_rows(conn, run.id, finalization)
         await _record_build_step(conn, run.id, result)
         await _mark_run_succeeded(conn, run.id, finalization.output)
@@ -359,6 +368,26 @@ async def _finalize_external_build(
             finalization.prefix,
         )
     return result
+
+
+async def _require_unreaped_window(conn: AsyncConnection, run_id: UUID) -> None:
+    """Refuse to commit against a window the reaper collected mid-finalize (ADR-0448).
+
+    ``_require_open_window`` judges the request's arrival, but validation between the two reads
+    is an unlocked stretch long enough for the 30-second upload reaper to take this same ``RUN``
+    lock, delete every still-uncommitted object under the Run's prefix, and drop the manifest.
+    Committing after that would register ``artifacts`` rows against keys that no longer exist and
+    mark the Run ``succeeded``. Re-reading the manifest here — inside the lock, immediately before
+    the writes — is what actually serializes the two, in both orders: a finalize that wins the
+    lock deletes the manifest and the reaper then finds no row, and a reaper that wins is seen
+    here. The deadline is deliberately not re-compared: ``now()`` is frozen for this transaction,
+    so the arrival verdict ``_require_open_window`` reached is the one that stands.
+
+    Raises:
+        CompleteBuildConfigurationError: The window is gone; the caller must re-mint.
+    """
+    if await upload_manifest.get_manifest(conn, "runs", run_id) is None:
+        raise CompleteBuildConfigurationError({"reason": "no_upload_manifest"})
 
 
 async def _insert_artifact_rows(

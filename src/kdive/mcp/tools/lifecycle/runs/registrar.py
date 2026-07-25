@@ -477,10 +477,12 @@ def _register_runs_complete_build(
         Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
         chunked and single-PUT alike. A later call is rejected with
         `reason: "upload_window_expired"`, echoing that deadline and the server clock it is
-        measured on. To recover, re-mint the window with that tool and call this again: the object
-        keys are derived from the Run and the artifact names, so re-upload only if the retry
-        reports a missing object (the lapsed upload was reclaimed) or you are declaring a
-        different checksum.
+        measured on; once the reaper has collected the lapsed window you get
+        `reason: "no_upload_manifest"` instead. Both point back at
+        `artifacts.create_run_upload`: re-mint, then finalize again. The object keys are derived
+        from the Run and the artifact names, so a prompt re-mint of the same declaration reuses
+        what you already uploaded — but the reaper deletes a lapsed window's uncommitted objects
+        within a sweep, so assume you will have to re-upload unless the retry succeeds.
         """
         ctx = current_context()
         return await with_runtime_for_run_target_kind(

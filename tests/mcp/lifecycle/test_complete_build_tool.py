@@ -831,6 +831,29 @@ def test_complete_build_rejects_expired_window(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_complete_build_missing_manifest_points_at_the_mint(migrated_url: str) -> None:
+    """The post-reap landing carries the same recovery pointer the expiry rejection does.
+
+    A finalize more than one reconciler sweep past the deadline sees `no_upload_manifest`, not
+    `upload_window_expired`, so leaving it bare would strand the common case (ADR-0448).
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await _seed_external_run(pool)  # never minted a window
+            validator = _FakeValidator(BuildOutput(f"local/runs/{run_id}/kernel", "", ""))
+            resp = await _build_handlers(validator).complete_build(
+                pool, _ctx(), str(run_id), build_id=None, cmdline="x"
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+        assert resp.data["reason"] == "no_upload_manifest"
+        assert resp.suggested_next_actions == [CREATE_RUN_UPLOAD_TOOL]
+        assert resp.detail is not None
+
+    asyncio.run(_run())
+
+
 def test_complete_build_rejects_expired_single_put_window(migrated_url: str) -> None:
     """The single-PUT path enforces the same deadline the chunked path does (#1534)."""
 
