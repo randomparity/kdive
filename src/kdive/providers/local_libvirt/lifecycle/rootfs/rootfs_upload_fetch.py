@@ -22,6 +22,13 @@ present file, so a base torn by a crash that predates this cannot back an overla
 logged — the re-stage succeeds, so the log line is the only evidence it ever fired — while a base
 that is present but *unreadable* is an ``INFRASTRUCTURE_FAILURE``, never a cache miss.
 
+Capacity (#1525): a stage the staging filesystem plainly cannot hold is refused before its first
+byte (:func:`_require_staging_free_space`). Since the identity path started streaming (#1520) a
+*rejected* object is written in full and only then rejected, onto a filesystem that by default also
+holds every live System's overlay — so the cost of a bad upload was paid by running guests. The
+check is advisory, not a reservation: concurrent siblings each pass their own, and free space can
+vanish before the write, so the real ENOSPC guard is still :func:`_staging_fault`.
+
 Concurrency (ADR-0441 §5): the shared per-(investigation, checksum) staging path means two sibling
 Systems can provision at once. Each fetcher writes a **unique** ``<token>.<uuid>.partial`` and
 ``os.replace``s it onto ``<token>.qcow2`` only after verify, so no two downloaders share a
@@ -46,6 +53,7 @@ import fcntl
 import hashlib
 import logging
 import os
+import shutil
 import stat
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
@@ -86,6 +94,15 @@ _QCOW2_MAGIC = b"QFI\xfb"
 # peak memory is this constant rather than the object size (up to the 5 GiB single-PUT ceiling).
 # Matches the gzip path's ranged-read window in ``transport_encoding``.
 _STREAM_CHUNK_BYTES = 4 * 1024 * 1024
+# Headroom the staging free-space precheck demands beyond the base itself (#1525). Fixed rather
+# than a fraction of the object: a percentage scales with the base, so 10% of the 50 GiB canonical
+# cap would demand 5 GiB of slack and refuse a stage on a volume that comfortably holds it. The
+# margin is what stops a *passing* check from meaning "this write ends the volume at exactly zero
+# bytes free" — which is the degraded state for the sibling overlays the precheck exists to
+# protect, not the avoidance of it. It is a judgment call sized to keep a volume usable, not a
+# measured overlay growth rate, and it is not a reservation: see
+# :func:`_require_staging_free_space`.
+_STAGING_FREE_SPACE_MARGIN_BYTES = 1024**3
 
 
 class UploadObjectStore(Protocol):
@@ -534,6 +551,103 @@ def _swept_partial_error(partial: Path, *, window: str) -> OSError:
     )
 
 
+def _required_staging_bytes(
+    effective: str | None, *, object_size: int, uncompressed_size: int | None
+) -> int | None:
+    """How many bytes the staged base will occupy, or ``None`` when that is not knowable up front.
+
+    Identity stages the stored object verbatim, so its size is **exact**. The gzip path never writes
+    the stored object at all — it is read through ranged GETs — and what lands on disk is the
+    *decompressed* output, which the stored size understates by the whole compression ratio. Its
+    budget is therefore ``uncompressed_size``, the declared **upper bound** on that output
+    (``strip_gzip_to_writer`` caps decompression there and accepts less), so budgeting it
+    over-reserves at worst — the safe direction for a precheck, and the reason this is not "the
+    size" on either path in the same sense.
+
+    A gzip declaration carrying no ``uncompressed_size`` has no knowable requirement, and returns
+    ``None`` rather than falling back to the stored size — that fallback would under-reserve by
+    construction, which is the exact failure the precheck exists to prevent. :func:`_stage_gzip`
+    then rejects the declaration with the actionable ``CONFIGURATION_ERROR``, which is the error an
+    agent can act on; a free-space message computed from a number nobody knows would bury it.
+    ``None`` is likewise returned for an unsupported codec, whose own rejection is the right one.
+    """
+    if effective is None:
+        return object_size
+    if effective == GZIP_ENCODING:
+        return uncompressed_size
+    return None
+
+
+def _require_staging_free_space(dest: Path, *, required: int | None, system_id: UUID) -> None:
+    """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (#1525).
+
+    Since the identity path started streaming (#1520) a **rejected** object — a failed checksum, a
+    non-qcow2 base — is written in full and only then rejected. ``UPLOADS_DIR`` and ``ROOTFS_DIR``
+    are hardcoded siblings under ``/var/lib/kdive`` with no provider-side knob to relocate either,
+    so unless an operator separately mounts one of them, those discarded bytes land on the same
+    filesystem as every live System's qcow2 overlay: an oversized upload degrades *running guests*
+    rather than only failing its own provision. This measures ``dest.parent``'s own filesystem, so
+    it is correct under either mount layout — only the blast radius differs.
+
+    **This is advisory and is not a reservation.** Free space can vanish between this ``statvfs``
+    and the write; the fetch lock is per-(investigation, checksum), so N distinct bases stage
+    concurrently and each passes its own check against the same free bytes; and a live guest's
+    overlay keeps growing throughout. What it buys is that the common case — one oversized or
+    invalid object against a volume that was never going to hold it — fails immediately and
+    attributably instead of after a multi-GiB write that takes the volume down with it. The real
+    ENOSPC guard remains :func:`_staging_fault`, and it is deliberately the *same*
+    ``INFRASTRUCTURE_FAILURE`` category: splitting the two would make an agent's handling of one
+    physical condition depend on which side of a race window it was observed from.
+
+    ``required`` is ``None`` when the staged size is not knowable (see
+    :func:`_required_staging_bytes`); there is nothing to compare against, so the check is skipped
+    rather than guessed at, and the codec's own declaration error carries the failure.
+
+    A ``statvfs`` that *itself* faults degrades to staging with a warning rather than failing —
+    ``EACCES`` under the worker/staging-user asymmetry ADR-0442 documents in this same subsystem,
+    a transient ``EIO``. This is :func:`_flocked_partial`'s ``ENOLCK`` precedent: turning a host
+    quirk that only disables an *advisory* check into a total uploaded-rootfs outage costs
+    availability for no safety, since the write stays guarded by the real ENOSPC either way.
+
+    Raises:
+        CategorizedError: ``INFRASTRUCTURE_FAILURE`` naming the required and available bytes. It is
+            retryable on a bare re-invocation once an operator frees space, with no change by the
+            caller — which is what makes ``INFRASTRUCTURE_FAILURE`` right here and
+            ``CONFIGURATION_ERROR`` (non-retryable, "fix your declaration") wrong: the upload is
+            fine, the host is full.
+    """
+    if required is None:
+        return
+    try:
+        free = shutil.disk_usage(dest.parent).free
+    except OSError as err:
+        _log.warning(
+            "could not measure the free space on the rootfs staging filesystem at %s (%s); staging "
+            "without the precheck, so an oversized base is caught mid-write by ENOSPC instead — "
+            "the behavior before the precheck existed",
+            dest.parent,
+            err.strerror,
+        )
+        return
+    needed = required + _STAGING_FREE_SPACE_MARGIN_BYTES
+    if free >= needed:
+        return
+    raise CategorizedError(
+        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: it needs {needed} "
+        f"bytes ({required} for the base plus a {_STAGING_FREE_SPACE_MARGIN_BYTES}-byte margin) "
+        f"and the filesystem holding {str(dest.parent)!r} has {free} free. Staging it anyway would "
+        "fill a volume that also holds running Systems' overlays; free space there and retry the "
+        "provision",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={
+            "system_id": str(system_id),
+            "dest": str(dest),
+            "required_bytes": needed,
+            "free_bytes": free,
+        },
+    )
+
+
 def stage_uploaded_rootfs(
     store: UploadObjectStore,
     *,
@@ -546,7 +660,10 @@ def stage_uploaded_rootfs(
     """Download + verify the object and stage it to ``dest`` via a unique per-fetcher ``.partial``.
 
     HEAD the object (absent → ``CONFIGURATION_ERROR``; no stored checksum →
-    ``INFRASTRUCTURE_FAILURE``). When ``encoding`` is ``gzip`` the object is streamed-decompressed
+    ``INFRASTRUCTURE_FAILURE``), then refuse the stage outright if the staging filesystem cannot
+    hold the base plus a margin (:func:`_require_staging_free_space`, #1525) — an advisory check,
+    ordered behind the HEAD because the size it budgets comes from there. When ``encoding`` is
+    ``gzip`` the object is streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
     streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
     the canonical base is qcow2-magic-validated and written atomically **and durably** (a
@@ -575,8 +692,14 @@ def stage_uploaded_rootfs(
         )
     partial = dest.parent / f"{dest.stem}.{uuid4().hex}.partial"
     effective = normalize_encoding(encoding)
+    required = _required_staging_bytes(
+        effective, object_size=head.size_bytes, uncompressed_size=uncompressed_size
+    )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        # After the mkdir (there is no filesystem to measure until the staging directory exists)
+        # and before the partial is created, so a refused stage leaves nothing at all behind.
+        _require_staging_free_space(dest, required=required, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
             if effective is None:
                 _stage_identity(

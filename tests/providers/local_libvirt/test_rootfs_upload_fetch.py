@@ -14,6 +14,7 @@ import os
 import stat
 import threading
 import time
+import types
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +36,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     staged_rootfs_path,
 )
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
+    _STAGING_FREE_SPACE_MARGIN_BYTES,
     _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
     _unlink_orphan_partials,
@@ -392,6 +394,158 @@ def test_stage_gzip_without_uncompressed_size_is_config_error(tmp_path: Path) ->
         _stage(store, tmp_path, encoding="gzip", uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "uncompressed_size" in str(error.value)
+
+
+# --- stage_uploaded_rootfs: the staging free-space precheck (#1525) ------------------------------
+
+
+def _pin_free_space(monkeypatch: pytest.MonkeyPatch, free: int) -> list[Path]:
+    """Pin the staging filesystem's free bytes; return the paths the precheck measured.
+
+    The measured paths are returned rather than discarded because *which* filesystem is asked is
+    half the contract: the precheck must stat the directory the base actually lands in, not the
+    process CWD or the overlay directory, or it would license a write onto a volume it never looked
+    at.
+    """
+    measured: list[Path] = []
+
+    def _usage(path: Any) -> Any:
+        measured.append(Path(path))
+        return types.SimpleNamespace(total=free, used=0, free=free)
+
+    monkeypatch.setattr(rootfs_upload_fetch.shutil, "disk_usage", _usage)
+    return measured
+
+
+def test_stage_identity_precheck_rejects_an_object_that_cannot_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Since streaming landed (#1520) a rejected object is written in FULL before anything rejects
+    # it, onto a filesystem that by default also holds every live System's overlay. So the object
+    # must be refused before the first byte, and the refusal must name both numbers an operator
+    # acts on -- how much is needed and how much is there.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    measured = _pin_free_space(monkeypatch, free=len(_QCOW2) - 1)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES) in str(error.value)
+    assert str(len(_QCOW2) - 1) in str(error.value)
+    assert error.value.details["free_bytes"] == len(_QCOW2) - 1
+    assert store.stream_calls == 0  # refused before the download, not after it
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+    assert measured == [tmp_path]  # the directory the base lands in
+
+
+def test_stage_precheck_requires_headroom_beyond_the_base_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A check that admitted `free == size` would permit filling the volume to exactly zero bytes
+    # free -- which is the degraded state for the sibling overlays this guard exists to protect,
+    # not the avoidance of it. The margin is therefore load-bearing, and pinned here so it cannot
+    # be quietly dropped to an exact-fit comparison.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=len(_QCOW2))
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert store.stream_calls == 0
+
+
+def test_stage_precheck_admits_a_base_that_fits_with_its_margin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other edge of the same boundary: exactly enough must pass. Without this the precheck
+    # could be "fixed" into rejecting everything and the rejection tests above would still be green.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES)
+
+    dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+
+
+def test_stage_gzip_precheck_budgets_the_decompressed_bound_not_the_stored_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The compressed object is read through ranged GETs and never lands on disk; what occupies the
+    # staging filesystem is the DECOMPRESSED output. Budgeting `head.size_bytes` on this path would
+    # under-reserve by the whole compression ratio, so a volume with room for the stored object but
+    # not for the canonical one must still be refused.
+    canonical = _QCOW2 + b"\x00" * (4 * 1024 * 1024)
+    compressed = gzip.compress(canonical)
+    assert len(compressed) < len(canonical) // 8  # the ratio an under-reservation would hide
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+    _pin_free_space(monkeypatch, free=len(compressed) + _STAGING_FREE_SPACE_MARGIN_BYTES)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(len(canonical) + _STAGING_FREE_SPACE_MARGIN_BYTES) in str(error.value)
+    assert store.range_calls == 0
+    assert not _dest(tmp_path).exists()
+
+
+def test_stage_precheck_defers_to_the_declaration_error_when_the_size_is_unknowable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `uncompressed_size` is the only size the gzip path can budget, so a declaration without it
+    # leaves the requirement genuinely unknown. The precheck must skip rather than substitute the
+    # stored size -- which under-reserves by construction -- and the actionable declaration error
+    # must survive instead of being pre-empted by a free-space message about a number nobody knows.
+    compressed = gzip.compress(_QCOW2)
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+    _pin_free_space(monkeypatch, free=0)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "uncompressed_size" in str(error.value)
+
+
+def test_stage_precheck_stages_anyway_when_the_filesystem_cannot_be_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The precheck is advisory, so a precheck that cannot RUN must not become an outage: `statvfs`
+    # can fail under the worker/staging-user asymmetry ADR-0442 documents in this same subsystem,
+    # and refusing to stage then buys no safety at all -- the write is still guarded by the real
+    # ENOSPC. This is the `_flocked_partial` ENOLCK precedent: degrade loudly to the prior behavior.
+    def _raise(_path: object) -> object:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(rootfs_upload_fetch.shutil, "disk_usage", _raise)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__):
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert "could not measure the free space" in caplog.text
+    assert "Permission denied" in caplog.text
+
+
+def test_stage_precheck_does_not_run_before_the_object_is_known_to_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ordering: an absent object has no size to budget, so the precheck must sit behind the HEAD.
+    # A zero-free filesystem must still report "never uploaded" -- the agent's actionable fault --
+    # rather than an operator-facing disk message for a download that was never going to happen.
+    store = _FakeStore(None, checksum=None)
+    measured = _pin_free_space(monkeypatch, free=0)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "never uploaded" in str(error.value)
+    assert measured == []
 
 
 # --- stage_uploaded_rootfs: crash durability of the publish (#1526) ------------------------------
