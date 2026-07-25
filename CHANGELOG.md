@@ -124,6 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Note the identity check in the ADR-0448 index row
 - Record the partial-reap hole the identity guard misses
 - Record the staging free-space precheck as ADR-0450
+- Add the bomb branch to the disclosed residual
 
 ### Fixed
 
@@ -199,6 +200,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Attribute the expiry log and document the third reason
 - State the precheck's real scope and split its message
 - Name the gzip budget's provenance and decompose details
+- Report a checksum mismatch retryably on both paths
+- Record the convergence's real reach and add system_id
+- Log the checksum mismatch the category no longer isolates
+- Key the mismatch log on the gate, not the category
 
 ### Build
 
