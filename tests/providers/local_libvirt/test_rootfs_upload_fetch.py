@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import gzip
 import hashlib
 import io
@@ -12,6 +13,7 @@ import multiprocessing as mp
 import os
 import stat
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,6 +29,7 @@ from kdive.artifacts.storage import HeadResult, StreamedArtifact
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.providers.local_libvirt.lifecycle.rootfs import rootfs_upload_fetch
 from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     RootfsUploadContext,
     staged_rootfs_path,
@@ -34,6 +37,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
 from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
     _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
+    _unlink_orphan_partials,
     fetch_uploaded_rootfs,
     stage_uploaded_rootfs,
 )
@@ -597,6 +601,9 @@ class _FakeConn:
         self.queried_object_keys: list[str] = []
         self.lock_keys: list[int] = []
         self.unlock_keys: list[int] = []
+        # The release path reports the OBSERVED connection state rather than an inferred cause,
+        # so the fake carries the same flag a real psycopg connection exposes.
+        self.closed = False
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -1052,3 +1059,616 @@ def test_two_processes_share_one_download(migrated_url: str, tmp_path: Path) -> 
 
     assert counter.read_text().count("1") == 1  # exactly one download served both Systems
     assert staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path).read_bytes() == _QCOW2
+
+
+# --- #1524: the orphan sweep is gated on an flock, not on the (losable) fetch lock ---------------
+
+
+@contextmanager
+def _held_partial(dest: Path, suffix: str = "live") -> Iterator[Path]:
+    """A ``<token>.<suffix>.partial`` held under an exclusive ``flock``, as a live fetcher holds it.
+
+    Stands in for the sibling whose session advisory lock was dropped mid-download while it kept
+    writing: from the sweeper's point of view the fetch lock is free and this file is present, which
+    is exactly the state ADR-0441 §5 assumed could not occur.
+    """
+    partial = dest.parent / f"{dest.stem}.{suffix}.partial"
+    partial.write_bytes(b"a live sibling is still writing this")
+    fd = os.open(partial, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield partial
+    finally:
+        os.close(fd)
+
+
+def test_sweep_skips_a_partial_a_live_sibling_still_holds(tmp_path: Path) -> None:
+    # #1524 acceptance, at the sweep itself: the fetch lock is not evidence of anything, so the
+    # sweep asks the kernel who is alive instead. Red before the fix -- the sweep glob-unlinked
+    # unconditionally, destroying a multi-GiB download that was still in flight.
+    dest = _dest(tmp_path)
+    with _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+        assert live.exists()
+        assert live.read_bytes() == b"a live sibling is still writing this"
+
+
+def test_sweep_unlinks_an_unheld_crash_orphan(tmp_path: Path) -> None:
+    # The behaviour the flock gate must not cost: a killed worker leaves an unlocked partial and it
+    # is still collected on the next fetch, rather than waiting for full investigation reclaim.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked by a killed worker")
+
+    _unlink_orphan_partials(dest)
+
+    assert not orphan.exists()
+
+
+def test_sweep_unlinks_only_the_orphan_when_a_live_partial_sits_beside_it(tmp_path: Path) -> None:
+    # Both cases in one directory, because the interesting failure is a gate that is all-or-nothing
+    # -- one that skips the whole sweep on the first locked candidate would leak the orphan, and one
+    # that ignores the lock would destroy the live partial.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked")
+
+    with _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+        assert live.exists()
+    assert not orphan.exists()
+
+
+def test_sweep_tolerates_a_candidate_that_vanishes_between_the_glob_and_the_open(
+    tmp_path: Path,
+) -> None:
+    # The reclaim-side backstop sweeps the same directory, so a candidate can be gone by the time
+    # this one opens it. That is the achieved post-state, not a fault: the sweep is best-effort and
+    # runs holding the fetch lock, so it must never raise into the provision.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked")
+    real_open = os.open
+
+    def vanishing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == orphan:
+            orphan.unlink()
+        return real_open(path, flags, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "open", vanishing_open)
+        _unlink_orphan_partials(dest)
+
+    assert not orphan.exists()
+
+
+def _hold_flock_child(path: str, locked: Any) -> None:  # pragma: no cover - child process
+    fd = os.open(path, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    locked.set()
+    time.sleep(300)
+
+
+def test_sweep_collects_a_partial_once_its_holder_process_dies(tmp_path: Path) -> None:
+    # The property that makes flock beat an mtime window, proven against a real process rather than
+    # asserted: the kernel drops the lock when the holding descriptor closes, and a SIGKILLed worker
+    # closes every descriptor. So a crash orphan needs no timeout to age out -- it is collectable
+    # the instant its holder is gone, while a live holder is protected for as long as it lives.
+    dest = _dest(tmp_path)
+    partial = dest.parent / f"{_TOKEN}.crashed.partial"
+    partial.write_bytes(b"mid-download when the worker was killed")
+    ctx = mp.get_context("spawn")
+    locked = ctx.Event()
+    proc = ctx.Process(target=_hold_flock_child, args=(str(partial), locked))
+    proc.start()
+    try:
+        assert locked.wait(timeout=60), "the child never took the flock"
+        _unlink_orphan_partials(dest)
+        assert partial.exists(), "a live holder's partial was swept"
+    finally:
+        proc.kill()
+        proc.join(timeout=60)
+    assert proc.exitcode is not None, "the flock holder did not exit"
+
+    _unlink_orphan_partials(dest)
+
+    assert not partial.exists()
+
+
+class _StallingReader:
+    """Serves the object in two halves, blocking before the tail until the test releases it.
+
+    The pause puts a *real* fetcher mid-download with its partial on disk and partly written, which
+    is the only state in which the sweep's guard means anything.
+    """
+
+    def __init__(self, data: bytes, reached: threading.Event, release: threading.Event) -> None:
+        self._chunks = [data[: len(data) // 2], data[len(data) // 2 :]]
+        self._served = False
+        self._reached = reached
+        self._release = release
+
+    def read(self, size: int = -1, /) -> bytes:
+        if not self._chunks:
+            return b""
+        if self._served:
+            self._reached.set()
+            assert self._release.wait(timeout=60), "the staging thread was never released"
+        self._served = True
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+class _StallingStore:
+    """An identity store whose body read stalls mid-object (see :class:`_StallingReader`)."""
+
+    def __init__(self, data: bytes, reached: threading.Event, release: threading.Event) -> None:
+        self._data = data
+        self._reached = reached
+        self._release = release
+
+    def head(self, key: str) -> HeadResult:
+        return HeadResult(
+            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+        )
+
+    @contextmanager
+    def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        reader = _StallingReader(self._data, self._reached, self._release)
+        try:
+            yield StreamedArtifact(cast(IO[bytes], reader), Sensitivity.SENSITIVE, "rootfs")
+        finally:
+            reader.close()
+
+    def get_range(self, key: str, *, start: int, length: int) -> bytes:
+        return self._data[start : start + length]
+
+
+def test_a_staging_fetchers_own_partial_survives_a_concurrent_sweep(tmp_path: Path) -> None:
+    # End-to-end in the shape the bug takes: fetcher A is mid-download when the sweep runs, and the
+    # sweep must leave A's partial alone and let A publish. This pins that the writer takes the lock
+    # itself -- a guard applied only in the sweep's own tests would pass those and still lose here.
+    payload = _QCOW2 + b"\xa5" * 4096
+    reached, release = threading.Event(), threading.Event()
+    store = _StallingStore(payload, reached, release)
+    dest = _dest(tmp_path)
+    failure: list[BaseException] = []
+
+    def stage() -> None:
+        try:
+            stage_uploaded_rootfs(
+                store,
+                object_key="local/investigations/inv/rootfs-token",
+                dest=dest,
+                encoding=None,
+                uncompressed_size=None,
+                system_id=uuid4(),
+            )
+        except BaseException as err:  # noqa: BLE001 - re-raised in the main thread below
+            failure.append(err)
+
+    worker = threading.Thread(target=stage)
+    worker.start()
+    try:
+        assert reached.wait(timeout=60), "the staging thread never reached the stall"
+        partials = list(dest.parent.glob(f"{_TOKEN}.*.partial"))
+        assert len(partials) == 1, f"expected one in-flight partial, found {partials}"
+        _unlink_orphan_partials(dest)
+        assert partials[0].exists(), "the sweep destroyed a live fetcher's own partial"
+    finally:
+        release.set()
+        worker.join(timeout=60)
+
+    assert not failure, f"the staging thread failed: {failure}"
+    assert not worker.is_alive()
+    assert dest.read_bytes() == payload  # published despite the concurrent sweep
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_fetch_leaves_a_live_siblings_partial_and_still_publishes(tmp_path: Path) -> None:
+    # #1524 acceptance at the call site: the sweep runs from inside fetch_uploaded_rootfs while it
+    # holds the fetch lock, which is precisely where the lost-lock ordering puts it.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with _held_partial(dest) as live:
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+        assert live.exists(), "the fetch swept a live sibling's partial out from under it"
+
+    assert result == dest
+    assert dest.read_bytes() == _QCOW2
+
+
+def test_stage_fails_loud_when_its_partial_is_unlinked_in_the_create_lock_window(
+    tmp_path: Path,
+) -> None:
+    # ADR-0446 §3: creating the partial and locking it are two syscalls, and a sweeper that wins the
+    # gap would leave the fetcher streaming gigabytes into an inode no path reaches -- blocks
+    # charged to df and invisible to every path-matching tool. The nlink check turns that into a
+    # named failure that downloads nothing, rather than a silent leak.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_flock = fcntl.flock
+
+    def sweeping_flock(fd: Any, operation: int) -> None:
+        for partial in tmp_path.glob(f"{_TOKEN}.*.partial"):
+            partial.unlink()
+        real_flock(fd, operation)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", sweeping_flock)
+        with pytest.raises(CategorizedError) as error:
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "took the staging partial between its creation and its lock" in str(error.value)
+    assert store.stream_calls == 0  # failed before spending the download
+    assert not _dest(tmp_path).exists()
+
+
+def test_sweep_warns_when_it_skips_a_partial_a_live_sibling_holds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The skip is correct and also the only externally visible symptom of the lost session lock: its
+    # other consequence is a redundant multi-GiB download that reads as ordinary slowness. Silent,
+    # the condition this change exists to survive would be undiagnosable.
+    dest = _dest(tmp_path)
+    with caplog.at_level(logging.WARNING), _held_partial(dest) as live:
+        _unlink_orphan_partials(dest)
+
+    assert live.exists()
+    assert any(
+        str(live) in r.getMessage() and "still holds it" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+    ), caplog.text
+
+
+def test_sweep_warns_and_skips_a_candidate_it_cannot_open(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A narrowing of the unconditional unlink this replaces, which needed only write+execute on the
+    # DIRECTORY and no permission on the file -- so a partial that can be unlinked but not opened
+    # was collected before and is not now. It is deliberate (a partial this process cannot open is
+    # one it cannot show is dead, and unlinking it blind is the bug being fixed) and it must be
+    # loud, because an ENOLCK-style filesystem would otherwise retire the sweep in total silence.
+    dest = _dest(tmp_path)
+    orphan = dest.parent / f"{_TOKEN}.unreadable.partial"
+    orphan.write_bytes(b"leaked")
+    real_open = os.open
+
+    def denying_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == orphan:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "open", denying_open)
+        _unlink_orphan_partials(dest)
+
+    assert orphan.exists()  # left for the reclaim backstop, not unlinked unchecked
+    assert any("could not open the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_stage_fails_loud_when_a_sweep_holds_the_lock_across_the_create_window(
+    tmp_path: Path,
+) -> None:
+    # The second create-then-lock interleaving. If the sweep is still holding its own lock when the
+    # writer tries, the writer gets EWOULDBLOCK before the st_nlink check can run -- which would
+    # otherwise surface as "failed to stage ...: Resource temporarily unavailable" and point an
+    # operator at the object store over a purely local race. Both interleavings must name the sweep.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_open = os.open
+    held: list[int] = []
+
+    def racing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path).endswith(".partial") and flags & os.O_CREAT:
+            rival = real_open(path, os.O_RDONLY)  # the sweep, mid-unlink, still holding its lock
+            fcntl.flock(rival, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(rival)
+        return fd
+
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "open", racing_open)
+            with pytest.raises(CategorizedError) as error:
+                _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+    finally:
+        for fd in held:
+            os.close(fd)
+
+    assert held, "the test never took the rival lock, so the window was not exercised"
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "took the staging partial between its creation and its lock" in str(error.value)
+    assert store.stream_calls == 0  # failed before spending the download
+
+
+def test_the_partial_stays_locked_after_the_stagers_writer_closes(tmp_path: Path) -> None:
+    # The guard is correct only because fcntl.flock is BSD flock(2), whose lock belongs to the open
+    # file DESCRIPTION and so survives the stager's own "wb" handle being closed underneath it.
+    # POSIX record locks (fcntl.lockf / F_SETLK) drop a process's locks when ANY descriptor on the
+    # file closes, so a swap to the "more portable" API would silently unprotect exactly the
+    # verify-and-publish window -- and every other test here would still pass. This one sweeps in
+    # that window, after the stager returned and before the publish.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    swept: list[list[Path]] = []
+    real_require = rootfs_upload_fetch._require_qcow2_magic
+
+    def sweeping_require(staged: Path, *, system_id: str) -> None:
+        _unlink_orphan_partials(dest)  # a sibling sweeps between the writer close and the publish
+        swept.append(list(dest.parent.glob(f"{_TOKEN}.*.partial")))
+        real_require(staged, system_id=system_id)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(rootfs_upload_fetch, "_require_qcow2_magic", sweeping_require)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert swept and swept[0], "the sweep unlinked the partial after the stager closed its writer"
+    assert dest.read_bytes() == _QCOW2
+
+
+def test_stage_keeps_a_base_a_sibling_published_during_the_download(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The far end of the same lost-lock scenario. Now that the losing fetcher survives its sweep, it
+    # reaches the publish -- and the sibling that held the lock has by then normally published dest
+    # and had a guest's overlay created against it. The bytes are identical (content-addressed), so
+    # replacing it is not corruption; it would orphan an inode of up to the 50 GiB cap behind that
+    # guest's open descriptor, re-creating the invisible-blocks symptom this change removes.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(_QCOW2)
+    published_inode = dest.stat().st_ino
+
+    with caplog.at_level(logging.WARNING):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.stat().st_ino == published_inode, "the sibling's published base was replaced"
+    assert dest.read_bytes() == _QCOW2
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []  # our copy discarded
+    assert any("a sibling published" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None:
+    # The complement, and the reason the guard is a format probe rather than a bare exists(): a
+    # present dest that does not pass the qcow2 gate is not a base worth keeping, so the freshly
+    # verified download must still publish over it (ADR-0443's torn-base shape).
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(b"\x00" * len(_QCOW2))
+    torn_inode = dest.stat().st_ino
+
+    _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert dest.stat().st_ino != torn_inode
+
+
+def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path: Path) -> None:
+    # Polarity is the opposite of _reusable_staged_base's, which raises on an unreadable dest to
+    # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS
+    # an unreadable dest, a rename needing permission on the directory rather than the file --
+    # so an OSError must never turn a download that already succeeded into a failure. The trade
+    # is deliberate: skipping would hand back a base this process could not evaluate at all,
+    # which is worse than the inode orphan it avoids when a verified copy of the same
+    # content-addressed bytes is in hand (ADR-0446 section 7 records the residue).
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(_QCOW2)
+    real_stat = Path.stat
+
+    def faulting_stat(self: Path, **kwargs: Any) -> Any:
+        if self == dest:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_stat(self, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "stat", faulting_stat)
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_fetch_survives_a_dead_session_when_releasing_the_lock(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The flock guard saves the fetcher from the sweep, and then the `finally` released the lock on
+    # the very connection whose loss is the whole premise -- raising, and failing the provision one
+    # line later. A `finally` also REPLACES an in-flight exception, so an actionable
+    # CategorizedError would reach the operator as a bare Postgres error. A terminated backend
+    # has already
+    # released the lock, so suppressing is the correct semantics, not a convenience.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    real_execute = conn.execute
+
+    def dying_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            conn.closed = True  # libpq marks a terminated connection BAD before the raise
+            raise psycopg.OperationalError("terminating connection due to administrator command")
+        return real_execute(sql, params)
+
+    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2  # published, not a failed provision
+    assert any(
+        "could not release the rootfs fetch advisory lock" in r.getMessage() for r in caplog.records
+    ), caplog.text
+
+
+def test_a_dead_session_does_not_mask_the_real_staging_error(tmp_path: Path) -> None:
+    # The second-order half: the unlock ran in a `finally`, so on a connection that had since died
+    # it replaced whatever the fetch was already raising. A checksum mismatch has to stay a checksum
+    # mismatch, not become an admin-shutdown message with the actionable text in __context__.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    real_execute = conn.execute
+
+    def dying_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            conn.closed = True  # libpq marks a terminated connection BAD before the raise
+            raise psycopg.OperationalError("terminating connection due to administrator command")
+        return real_execute(sql, params)
+
+    conn.execute = dying_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
+
+    with pytest.raises(CategorizedError) as error:
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert "checksum verification" in str(error.value)
+
+
+def test_stage_completes_unguarded_where_the_filesystem_cannot_flock(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ENOLCK on an NFS mount whose lock manager is down, EOPNOTSUPP on some FUSE and 9p backends.
+    # Staging unguarded is exactly the pre-ADR-0446 behaviour and no worse -- a sweep on that same
+    # filesystem cannot lock either, so it skips every candidate. Failing instead would turn a
+    # filesystem without lock support into a total uploaded-rootfs outage.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    def unlockable_flock(fd: Any, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.read_bytes() == _QCOW2
+    assert any("cannot flock the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_sweep_warns_and_continues_when_one_candidate_cannot_be_unlinked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The fourth sweep outcome, and the likeliest to matter: EPERM under a sticky-bit or foreign-uid
+    # staging directory -- the ADR-0442 ownership asymmetry this subsystem was already bitten by.
+    # Left to escape, it landed in the caller's suppress() around the whole loop, so it emitted
+    # nothing AND abandoned every remaining orphan of that base on that pass.
+    dest = _dest(tmp_path)
+    stuck = dest.parent / f"{_TOKEN}.0000stuck.partial"
+    collectable = dest.parent / f"{_TOKEN}.9999free.partial"
+    for path in (stuck, collectable):
+        path.write_bytes(b"leaked")
+    real_unlink = Path.unlink
+
+    def sticky_unlink(self: Path, **kwargs: Any) -> None:
+        if self == stuck:
+            raise PermissionError(errno.EPERM, "Operation not permitted", str(self))
+        real_unlink(self, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "unlink", sticky_unlink)
+        _unlink_orphan_partials(dest)
+
+    assert stuck.exists()
+    assert not collectable.exists(), "one unsweepable candidate truncated the rest of the pass"
+    assert any("could not unlink the staging partial" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_the_published_base_stays_readable_by_the_hypervisor(tmp_path: Path) -> None:
+    # The partial's mode is carried onto the published base by os.replace, and QEMU reads that base
+    # as the unprivileged hypervisor user -- so the explicit 0o666 in _flocked_partial is NOT
+    # free to tighten to the 0o600 a SENSITIVE file invites. Nothing else in this suite would
+    # notice: every other test asserts bytes, and a 0o600 base fails only at guest boot on a real
+    # host. Same canary role as the lockf test above.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    previous = os.umask(0o022)
+    try:
+        dest = _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+        mode = stat.S_IMODE(dest.stat().st_mode)
+    finally:
+        os.umask(previous)
+
+    assert mode == 0o666 & ~0o022, f"the published base was staged {mode:o}, not 0o644"
+    assert mode & (stat.S_IRGRP | stat.S_IROTH), "the hypervisor user cannot read the staged base"
+
+
+def test_a_failed_unlock_on_a_live_session_does_not_claim_the_lock_was_released(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # `except psycopg.Error` is wider than the two triggers ADR-0446 names. A role or database
+    # statement_timeout cancels the unlock as QueryCanceled on a session that is still open and
+    # STILL HOLDING the lock -- so the "its session is gone, which already released it" line would
+    # affirmatively deny the very condition an operator is staring at, while every sibling fetch of
+    # this base blocks. Suppressing stays right; narrating an unobserved cause does not.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    conn.closed = False
+    real_execute = conn.execute
+
+    def timing_out_execute(sql: str, params: Any = None) -> Any:
+        if "pg_advisory_unlock" in sql:
+            raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        return real_execute(sql, params)
+
+    conn.execute = timing_out_execute  # ty: ignore[invalid-assignment]
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2  # still not a failed provision
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "still open" in logged and "may still be held" in logged
+    assert "already released it" not in logged
+
+
+def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
+    tmp_path: Path,
+) -> None:
+    # On the ENOLCK degrade path nothing keeps a sweeper out for the whole transfer: ADR-0446 5's
+    # symmetry argument ("a sweeper there cannot lock either") holds at one instant, not across
+    # minutes, and a recovering lockd falsifies it mid-download. The outcome is then the
+    # pre-ADR-0446 one, which is the point of degrading rather than failing -- but the diagnosis
+    # must not be, because a bare ENOENT at os.replace reads as an object-store fault.
+    dest = _dest(tmp_path)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    def unlockable_flock(fd: Any, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    real_stream = store.get_artifact_stream
+
+    @contextmanager
+    def sweeping_stream(key: str, etag: str | None) -> Iterator[StreamedArtifact]:
+        with real_stream(key, etag) as fetched:
+            # A sibling sweeps once the lock manager is back, while this download is still running.
+            for partial in dest.parent.glob(f"{_TOKEN}.*.partial"):
+                partial.unlink()
+            yield fetched
+
+    store.get_artifact_stream = sweeping_stream  # ty: ignore[invalid-assignment]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        with pytest.raises(CategorizedError) as error:
+            _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    # Named for the window it actually went in. "between its creation and its lock" would point the
+    # operator at a sub-millisecond race that additionally needs a lost session lock, and away from
+    # the two conditions that really produce this -- which is most of what the check is here for.
+    assert "concurrent orphan sweep" in str(error.value)
+    assert "while it was being downloaded" in str(error.value)
+    assert "#1544" in str(error.value)
+    assert not dest.exists()
