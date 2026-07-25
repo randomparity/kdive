@@ -794,3 +794,37 @@ def test_an_unopenable_partial_still_clears_the_marker(migrated_url: str, tmp_pa
             await check.close()
 
     asyncio.run(_run())
+
+
+def test_a_base_published_after_its_row_was_reclaimed_is_collected(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # ADR-0452 §6, at the handler. The deferred pass that runs once the live writer is gone finds
+    # the base it published onto a path whose artifacts row this reclaim already deleted, collects
+    # it, removes the drained directory, and only then clears the marker. Without this the flock
+    # gate would trade a destroyed download for a permanent SENSITIVE base nothing else reclaims.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        orphan_base = _stage(uploads, inv)  # no artifacts row owns it
+
+        assert await _run_handler(
+            migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads
+        ) == ("0")
+
+        assert not orphan_base.exists()
+        assert not (uploads / str(inv)).exists()
+        check = await connect(migrated_url)
+        try:
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
