@@ -536,7 +536,7 @@ def _image_publish_grace() -> timedelta:
 
 
 def _upload_orphan_grace() -> timedelta:
-    """Resolve the upload-orphan grace from config (ADR-0455 §7); the operator's brake.
+    """Resolve the upload-orphan grace from config (ADR-0455 §8); the operator's brake.
 
     Resolved per pass, not once at ``ReconcileConfig`` construction, because the brake exists for
     an operator who has just found the sweep removing live bytes — one that needed a reconciler

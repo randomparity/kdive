@@ -82,8 +82,17 @@ the reaper commits, `mtime < now() - grace` already holds, and this repair runs 
 reaper in the same pass. That would reclaim a window's bytes in the pass that reaped them and
 destroy ADR-0448's documented re-mint recovery, which depends on the bytes outliving the row. Both
 values are read from config per pass and summed, so the margin is a full `orphan_grace` past the
-earliest reap of any window an object could have belonged to, at any TTL the operator sets. The
-defaults are 24h each.
+earliest reap of any window an object could have belonged to, at any TTL **this process is
+configured with**. The defaults are 24h each.
+
+That last qualifier is the guarantee's real boundary and is not a code property. The TTL that
+governs when a row is actually reaped is the one the *server* minted with; the reconciler reads its
+own environment, and the setting's default means an unset variable is indistinguishable from a
+deliberate 86400. So a partial rollout that raises the server's TTL to 7 days and leaves the
+reconciler's environment alone puts the margin back underwater. Declaring `reconciler` on
+`KDIVE_UPLOAD_TTL_SECONDS` is what surfaces that in `config validate` and in the generated operator
+reference an environment is provisioned from; it cannot detect the skew. The cost when it happens is
+a forced re-upload, not corruption — a finalize against a reaped window is already rejected.
 
 All three are one SQL statement over `unnest(...)` of the candidate arrays, and that same statement
 serves both the bulk classify and the per-key re-check. Two hand-kept copies of a
@@ -161,7 +170,8 @@ raises once — `repair_abandoned_uploads`' shape, adopted for a different reaso
 for it. The reaper *must* tolerate because its row delete has already committed and there is nothing
 to retry; this sweep commits nothing and could safely abort, but abort is what turns one stuck
 object into a permanent leak. A failing `list_prefix_with_mtime` still ends the pass immediately:
-without a listing there is no candidate set to be partial about.
+without a listing there is no candidate set to be partial about — but it ends it *through the same
+count-logging path*, because by the second root the first may already have deleted irreversibly.
 
 Raising forfeits the pass's reclaimed count: `_run_repair_plan` records a count only for a repair
 that *returns*, so a pass that deleted 500 objects and then hit one object-lock hold reports zero on
@@ -173,21 +183,38 @@ key would pin a working drain's gauge at zero indefinitely, and it is the opposi
 and the alert is the one a permanent leak needs, so the count is written to the log as an ERROR
 immediately before the raise instead of being lost with it.
 
-### 6. One pass reclaims at most `MAX_RECLAIMS_PER_PASS`
+### 6. Each root examines at most `MAX_RECLAIMS_PER_ROOT` candidates
 
-Each reclaim costs a LIST, a query, and a delete, and the query is the unindexed `artifacts`
-anti-join filed as #1570 — so the cost is per key, not per pass, and the disclosure in §Consequences
-that prices the steady state does not price a drain. The reconciler runs its catalog strictly
-sequentially on one connection with no per-pass deadline, so an unbounded drain would hold
-allocation expiry, orphaned-System repair, dead-session reaping, and domain reaping behind it for
-however long it took. The first pass after this ships is the largest this code will ever run,
-against a backlog accumulating since ADR-0453.
+Each examined candidate costs a LIST and a query whatever its outcome, and that query is the
+unindexed `artifacts` anti-join filed as #1570 — so the cost is per key, not per pass, and the
+disclosure in §Consequences that prices the steady state does not price a drain. The reconciler runs
+its catalog strictly sequentially on one connection with no per-pass deadline, so an unbounded drain
+would hold allocation expiry, orphaned-System repair, dead-session reaping, and domain reaping
+behind it for however long it took. The first pass after this ships is the largest this code will
+ever run, against a backlog accumulating since ADR-0453. The threshold is no substitute: it decides
+*which* keys become candidates, not how many are processed once they do, and raising it does not
+shorten a pass already in flight. ADR-0453 §4 put this brake on the reap side, capping a degraded
+pass at one owner's leak; this is the same brake on the drain side.
 
-The grace is not a substitute: it decides *which* keys become candidates, not how many are processed
-once they do, and raising it does not shorten a pass already in flight. ADR-0453 §4 put exactly this
-brake on the reap side, capping a degraded pass at one owner's leak; this is the same brake on the
-drain side. The remainder is reclaimed 30 seconds later, and the cap is a module constant rather
-than a setting because it bounds a loop rather than expressing a policy.
+Two details of the budget are load-bearing rather than incidental.
+
+**It is per root, not per pass**, because a budget spent on *failures* would otherwise re-open the
+starvation §5 exists to prevent. A scoped persistent fault — an object lock over a prefix, a
+per-prefix `s3:DeleteObject` deny — covering a budget's worth of keys under `local/runs/` would
+consume a per-pass budget entirely, on every pass forever, and `local/investigations/` would never
+be listed at all. Per root, the stuck root spends its own allowance and the other still drains.
+
+**It charges every candidate that reaches the re-read**, not only the ones deleted. A declined
+re-check costs the same LIST and query as a delete, and two overlapping passes produce exactly that:
+`ops.reconcile_now` builds its own config and runs a full `reconcile_once` while the daemon loop is
+running, so whichever finishes second finds every object already gone and would re-read the entire
+backlog for nothing.
+
+What the budget still cannot fix is ordering *within* a root: a persistent fault on keys that sort
+early defers that root's tail on every pass until the fault is cleared. The stuck keys' own bytes
+are already leaked by the fault itself, so what this costs is the deferral of the keys behind them,
+and §5's raise fires every pass while it lasts. The budget is a module constant rather than a
+setting because it bounds a loop rather than expressing a policy.
 
 ### 7. One prefix-parameterised listing primitive; `ImageSweepStore` stays narrow
 
@@ -196,6 +223,8 @@ than a setting because it bounds a loop rather than expressing a policy.
 once. The `ImageSweepStore` **port** deliberately keeps its prefix-free method: an image sweep has
 no business being able to list an arbitrary prefix, and widening the port to avoid one delegating
 line would trade a real authority bound for a cosmetic one.
+
+### 8. Both threshold terms are settings, resolved per pass
 
 The threshold's two terms are both real settings resolved per pass —
 `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` and `KDIVE_UPLOAD_TTL_SECONDS`, 86400s each — rather than

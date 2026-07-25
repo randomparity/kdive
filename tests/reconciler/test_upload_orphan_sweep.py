@@ -36,7 +36,7 @@ from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.upload_orphans import (
-    MAX_RECLAIMS_PER_PASS,
+    MAX_RECLAIMS_PER_ROOT,
     UPLOAD_ORPHAN_ROOTS,
     UploadOrphanCandidate,
     reclaimable_upload_keys,
@@ -107,6 +107,22 @@ class _FailingDeleteStore(_FakeUploadStore):
                 f"delete_object failed for {key}", category=ErrorCategory.INFRASTRUCTURE_FAILURE
             )
         super().delete(key)
+
+
+class _FailingListStore(_FakeUploadStore):
+    """Raises ``CategorizedError`` from ``list_prefix_with_mtime`` for the named root prefixes."""
+
+    def __init__(self, objects: dict[str, timedelta], *, fail_list_prefixes: set[str]) -> None:
+        super().__init__(objects)
+        self._fail_list_prefixes = fail_list_prefixes
+
+    def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]:
+        if prefix in self._fail_list_prefixes:
+            raise CategorizedError(
+                f"list_objects_v2 failed for {prefix}",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            )
+        return super().list_prefix_with_mtime(prefix)
 
 
 class _HookedStore(_FakeUploadStore):
@@ -429,7 +445,7 @@ def test_a_row_committed_between_the_classify_and_the_delete_protects_the_object
 
 
 def test_a_delete_failure_propagates_and_costs_only_the_pass(migrated_url: str) -> None:
-    """AC-6, and the deliberate asymmetry with the reaper (ADR-0455 §4).
+    """AC-6, and the deliberate asymmetry with the reaper (ADR-0455 §5).
 
     The reaper tolerates a failed key because its row delete has already committed and there is
     nothing to retry. Here nothing is committed at all, so a fault propagates: ``_run_repair_plan``
@@ -507,7 +523,7 @@ def test_the_swept_roots_cover_both_upload_owner_kinds() -> None:
 
 
 def test_both_threshold_terms_are_reconciler_readable_settings() -> None:
-    """ADR-0455 §2/§7: the stacked threshold only tracks the operator's TTL if the reconciler is
+    """ADR-0455 §2/§8: the stacked threshold only tracks the operator's TTL if the reconciler is
     told to read it, and the grace is only a brake if the reconciler is told to read that.
 
     ``processes`` does not gate ``Registry.get``, but it does gate ``config validate`` and the
@@ -689,7 +705,7 @@ def test_one_undeletable_key_does_not_starve_the_keys_behind_it(migrated_url: st
     asyncio.run(_run())
 
 
-def test_one_pass_reclaims_at_most_the_per_pass_cap(migrated_url: str) -> None:
+def test_one_pass_reclaims_at_most_the_per_root_budget(migrated_url: str) -> None:
     """ADR-0455 §6: an unbounded drain would stall every other repair behind it.
 
     The reconciler runs its catalog sequentially on one connection with no per-pass deadline, and
@@ -702,10 +718,10 @@ def test_one_pass_reclaims_at_most_the_per_pass_cap(migrated_url: str) -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
-        over = MAX_RECLAIMS_PER_PASS + 5
+        over = MAX_RECLAIMS_PER_ROOT + 5
         store = _FakeUploadStore({f"{prefix}orphan-{i:04d}": _GRACE * 2 for i in range(over)})
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            assert await run_repair(pool, _sweep(store)) == MAX_RECLAIMS_PER_PASS
+            assert await run_repair(pool, _sweep(store)) == MAX_RECLAIMS_PER_ROOT
             assert len(store.present) == 5
             # The next pass picks the remainder up; nothing is stranded by the cap.
             assert await run_repair(pool, _sweep(store)) == 5
@@ -714,23 +730,86 @@ def test_one_pass_reclaims_at_most_the_per_pass_cap(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_the_per_pass_cap_counts_failed_keys_too(migrated_url: str) -> None:
-    """The cap bounds *work*, not successes.
+def test_the_per_root_budget_counts_every_examined_candidate(migrated_url: str) -> None:
+    """The budget bounds *work*, not successes.
 
-    A failed key still costs the re-read LIST and the re-check query, so a cap that only counted
-    deletes would leave a pass against a wholly undeletable backlog unbounded again — which is the
-    degraded mode the cap exists for, not an exotic one.
+    A failed key — and equally a key whose re-check declines — still costs the re-read LIST and the
+    re-check query, so a budget that only counted deletes would leave a pass against a wholly
+    undeletable backlog, or a pass overlapping another that already deleted everything, unbounded
+    again. Those are the degraded modes the budget exists for, not exotic ones.
     """
 
     async def _run() -> None:
         run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
-        keys = [f"{prefix}orphan-{i:04d}" for i in range(MAX_RECLAIMS_PER_PASS + 5)]
+        keys = [f"{prefix}orphan-{i:04d}" for i in range(MAX_RECLAIMS_PER_ROOT + 5)]
         store = _FailingDeleteStore(dict.fromkeys(keys, _GRACE * 2), fail_keys=set(keys))
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             with pytest.raises(CategorizedError):
                 await run_repair(pool, _sweep(store))
-        assert len(store.attempted) == MAX_RECLAIMS_PER_PASS
+        assert len(store.attempted) == MAX_RECLAIMS_PER_ROOT
+
+    asyncio.run(_run())
+
+
+def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str) -> None:
+    """ADR-0455 §6: the work budget is per root, which is what keeps §5's guarantee true at scale.
+
+    A per-*pass* budget that counted failures would be consumed entirely by a scoped persistent
+    fault — an object lock over a prefix, a per-prefix ``s3:DeleteObject`` deny — covering a whole
+    budget's worth of keys under ``local/runs/``. ``local/investigations/`` would then never even be
+    listed, on any pass, and its leak would resume unbounded behind the stuck batch: exactly the
+    starvation the skip-and-count design was chosen to avoid.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        locked = [f"{prefix}locked-{i:04d}" for i in range(MAX_RECLAIMS_PER_ROOT + 5)]
+        rootfs = f"{inv_prefix}rootfs-abc"
+        store = _FailingDeleteStore(
+            dict.fromkeys([*locked, rootfs], _GRACE * 2), fail_keys=set(locked)
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _sweep(store))
+        # The stuck root spent its own budget; the investigations root still got swept.
+        assert store.deleted == [rootfs]
+        assert f"{MAX_RECLAIMS_PER_ROOT} object(s); 1 were reclaimed" in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_a_listing_failure_on_the_second_root_still_records_the_first_root_s_deletes(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-0455 §5: a raising pass reports no count, so the count has to reach the log.
+
+    A listing fault aborts the pass deliberately — without a listing there is no candidate set to
+    be partial about — but by the second root the first may already have deleted irreversibly, and
+    those deletes would otherwise leave no trace on the repairs gauge or anywhere else.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        store = _FailingListStore(
+            {f"{prefix}orphan": _GRACE * 2}, fail_list_prefixes={"local/investigations/"}
+        )
+        with caplog.at_level(logging.ERROR, logger="kdive.reconciler.cleanup.upload_orphans"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                with pytest.raises(CategorizedError):
+                    await run_repair(pool, _sweep(store))
+        assert store.deleted == [f"{prefix}orphan"]  # the first root's delete really happened
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "reclaimed 1 object(s)" in errors[0]
 
     asyncio.run(_run())

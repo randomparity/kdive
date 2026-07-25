@@ -38,14 +38,15 @@ UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
     f"{UPLOAD_TENANT}/{kind}/" for kind in UPLOAD_OWNER_KINDS
 )
 
-#: How many objects one pass may reclaim. The reconciler runs its catalog strictly sequentially on
-#: one connection with no per-pass deadline, so an unbounded drain — and the first pass after this
-#: ships is the largest this code will ever run, against a backlog that has accumulated since
-#: ADR-0453 — would stall allocation expiry, orphaned-System repair, and domain reaping behind it
-#: for as long as it took. Each reclaim costs a LIST, a query, and a delete, and the query is the
-#: unindexed anti-join of #1570, so the cost is per key rather than per pass. The cap is the drain
-#: side of the brake ADR-0453 §4 put on the reap side; the remainder is reclaimed 30 seconds later.
-MAX_RECLAIMS_PER_PASS = 200
+#: How many candidates one pass may examine **per root**. The reconciler runs its catalog strictly
+#: sequentially on one connection with no per-pass deadline, so an unbounded drain — and the first
+#: pass after this ships is the largest this code will ever run, against a backlog accumulating
+#: since ADR-0453 — would stall allocation expiry, orphaned-System repair, and domain reaping behind
+#: it for as long as it took. Each examined candidate costs a LIST and a query whatever its outcome,
+#: and that query is the unindexed anti-join of #1570, so the cost is per key rather than per pass.
+#: The budget is the drain side of the brake ADR-0453 §4 put on the reap side; the remainder is
+#: reclaimed 30 seconds later.
+MAX_RECLAIMS_PER_ROOT = 200
 
 # The number of ``/``-separated components in an upload object key: ``<tenant>/<kind>/<id>/<name>``.
 # ``validate_key_component`` rejects ``/`` in every component, so a well-formed key has exactly
@@ -106,15 +107,17 @@ async def repair_leaked_upload_objects(
     and merely *equal* to the TTL makes the bytes reclaimable within seconds of the reap, and one
     above it makes them reclaimable in the very pass that reaped them. Summing the two puts the
     threshold a full ``orphan_grace`` past the earliest reap of any window the object could have
-    belonged to, whatever the operator sets ``KDIVE_UPLOAD_TTL_SECONDS`` to.
+    belonged to, at whatever TTL **this process** is configured with — a reconciler provisioned
+    without ``KDIVE_UPLOAD_TTL_SECONDS`` while the minting server raises it is deployment skew the
+    code cannot see, and is the one way the margin can still go negative (ADR-0455 §2).
 
     A failed key is logged, counted, and skipped, and the pass raises once at the end (ADR-0455
-    §5). Aborting at the first failure would let one permanently undeletable object — an S3 Object
-    Lock hold, a per-key deny — starve every candidate behind it and the whole second root, on
-    every pass forever, which is the leak this repair exists to drain. Raising at the end still
-    reaches the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures``, and nothing
-    is lost by either path: this sweep commits nothing, so the next pass re-derives the identical
-    candidates.
+    §5); each root gets its own work budget (§6). Aborting at the first failure would let one
+    permanently undeletable object — an S3 Object Lock hold, a per-key deny — starve every
+    candidate behind it and the whole second root, on every pass forever, which is the leak this
+    repair exists to drain. Raising at the end still reaches the ADR-0190 group-E error counter via
+    ``_run_repair_plan``'s ``failures``, and nothing is lost by either path: this sweep commits
+    nothing, so the next pass re-derives the identical candidates.
 
     Args:
         conn: An async connection. Each query runs in its own short transaction so no snapshot is
@@ -131,59 +134,100 @@ async def repair_leaked_upload_objects(
             (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`).
     """
     grace = orphan_grace + upload_ttl
-    deleted = 0
-    failed = 0
-    for root in UPLOAD_ORPHAN_ROOTS:
-        listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
-        candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
-        _warn_if_wholly_unattributable(root, len(listings), len(candidates))
-        reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
-        # Deleting in listing order rather than in the classify query's row order keeps a partial
-        # pass reproducible: the planner is free to reorder an anti-join's output, the store is not.
-        for candidate in candidates:
-            if candidate.key not in reclaimable:
-                continue
-            if deleted + failed >= MAX_RECLAIMS_PER_PASS:
-                _log.info(
-                    "reconciler: upload orphan sweep stopped at its %d-object per-pass cap; the "
-                    "remaining backlog is reclaimed by the following passes",
-                    MAX_RECLAIMS_PER_PASS,
-                )
-                return _reported(deleted, failed)
-            try:
-                deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
-            except CategorizedError as exc:
-                failed += 1
-                _log.warning(
-                    "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
-                )
-    return _reported(deleted, failed)
+    tally = _Tally()
+    try:
+        for root in UPLOAD_ORPHAN_ROOTS:
+            await _sweep_root(conn, store, root, grace, tally)
+    except CategorizedError:
+        # A listing fault aborts the pass, and by the second root the first may already have
+        # deleted irreversibly. Put the counts on the record before the exception carries them off.
+        tally.log()
+        raise
+    return tally.reported()
 
 
-def _reported(deleted: int, failed: int) -> int:
-    """Return the reclaimed count, or raise if any key failed — logging the count either way.
+@dataclass
+class _Tally:
+    """One pass's outcome counts, and the per-root work budget the cap spends."""
 
-    ``_run_repair_plan`` records a count only for a repair that returns, so a pass that deleted
-    irreversibly and *then* hit one undeletable key reports zero on the ADR-0190 repairs counter.
-    That is the trade ADR-0453 §3 already made for the reaper — the count is a gauge, the raise is
-    the alert, and a key failing every pass is a permanent leak that has to alert — but here it can
-    pin a working drain's gauge at zero, so the count goes on the record as a log line before the
-    raise rather than being lost with it.
+    deleted: int = 0
+    failed: int = 0
+
+    def log(self) -> None:
+        """Put the counts on the record, because a raising repair reports none.
+
+        ``_run_repair_plan`` records a count only for a repair that *returns*, so a pass that
+        deleted irreversibly and then raised shows zero on the ADR-0190 repairs counter. That is
+        the trade ADR-0453 §3 already made for the reaper — the count is a gauge, the raise is the
+        alert — but here it can pin a working drain's gauge at zero, so the count goes to the log
+        rather than being lost with the exception.
+        """
+        _log.error(
+            "reconciler: upload orphan sweep reclaimed %d object(s) and could not reclaim %d; the "
+            "reclaimed count is not reported to the repairs counter because this pass raises",
+            self.deleted,
+            self.failed,
+        )
+
+    def reported(self) -> int:
+        """Return the reclaimed count, or log it and raise if any key failed."""
+        if not self.failed:
+            return self.deleted
+        self.log()
+        raise CategorizedError(
+            f"upload orphan sweep could not reclaim {self.failed} object(s); {self.deleted} were "
+            "reclaimed this pass. Nothing is lost — the next pass re-derives the same candidates "
+            "— but a key that fails every pass (an object-lock hold, a per-key deny) leaks until "
+            "it is cleared.",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        )
+
+
+async def _sweep_root(
+    conn: AsyncConnection,
+    store: UploadOrphanStore,
+    root: str,
+    grace: timedelta,
+    tally: _Tally,
+) -> None:
+    """Reclaim one root's orphans, spending at most ``MAX_RECLAIMS_PER_ROOT`` units of work.
+
+    The budget is **per root**, not per pass, so a persistent fault under `local/runs/` — an object
+    lock over a prefix, a scoped ``s3:DeleteObject`` deny — cannot consume the whole allowance on
+    failures and leave `local/investigations/` unlisted on every pass forever, which is the
+    starvation §5's skip-and-count exists to prevent (ADR-0455 §6).
+
+    It charges every candidate that reaches the re-read, not only the ones deleted: a declined
+    re-check costs the same LIST and query as a delete, and two overlapping passes (the daemon loop
+    and an on-demand ``ops.reconcile``) see exactly that — the second finds every object already
+    gone and would otherwise re-read the whole backlog uncapped.
     """
-    if not failed:
-        return deleted
-    _log.error(
-        "reconciler: upload orphan sweep reclaimed %d object(s) and could not reclaim %d; the "
-        "reclaimed count is not reported to the repairs counter because this pass raises",
-        deleted,
-        failed,
-    )
-    raise CategorizedError(
-        f"upload orphan sweep could not reclaim {failed} object(s); {deleted} were reclaimed this "
-        "pass. Nothing is lost — the next pass re-derives the same candidates — but a key that "
-        "fails every pass (an object-lock hold, a per-key deny) leaks until it is cleared.",
-        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
-    )
+    listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
+    candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
+    _warn_if_wholly_unattributable(root, len(listings), len(candidates))
+    reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
+    examined = 0
+    # Deleting in listing order rather than in the classify query's row order keeps a partial
+    # pass reproducible: the planner is free to reorder an anti-join's output, the store is not.
+    for candidate in candidates:
+        if candidate.key not in reclaimable:
+            continue
+        if examined >= MAX_RECLAIMS_PER_ROOT:
+            _log.info(
+                "reconciler: upload orphan sweep stopped at its %d-object budget for %s; the "
+                "remaining backlog is reclaimed by the following passes",
+                MAX_RECLAIMS_PER_ROOT,
+                root,
+            )
+            return
+        examined += 1
+        try:
+            tally.deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
+        except CategorizedError as exc:
+            tally.failed += 1
+            _log.warning(
+                "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
+            )
 
 
 async def _delete_if_still_reclaimable(

@@ -62,7 +62,7 @@ A new reconciler repair, `repair_leaked_upload_objects`, in
 4. For each reclaimable key, re-read its store mtime (a LIST scoped to the exact key) and re-run
    the *same* query for that key alone, immediately before the delete; delete only if it still
    classifies. Log one INFO per delete. A failed delete is logged, counted, and skipped; the pass
-   raises once at the end. At most `MAX_RECLAIMS_PER_PASS` keys are processed per pass.
+   raises once at the end. Each root examines at most `MAX_RECLAIMS_PER_ROOT` candidates.
 
 ### The predicate
 
@@ -98,7 +98,14 @@ mtime threshold that merely equals `KDIVE_UPLOAD_TTL_SECONDS` leaves an object P
 its mint reclaimable within seconds of the reap, and a TTL raised above it leaves the object
 reclaimable *in the same pass that reaped it* — destroying ADR-0448's re-mint recovery, which
 depends on the bytes outliving the row. Both values are read from config per pass and summed, so the
-margin is a full orphan grace past the earliest possible reap at any TTL. Defaults: 24h each.
+margin is a full orphan grace past the earliest possible reap at any TTL **this process is
+configured with**. Defaults: 24h each.
+
+That qualifier is the boundary: the TTL that governs when a row is reaped is the one the *server*
+minted with, and the reconciler reads its own environment, where the setting's default makes an
+unset variable indistinguishable from a deliberate 86400. Declaring `reconciler` on
+`KDIVE_UPLOAD_TTL_SECONDS` surfaces it in `config validate` and the generated reference; it cannot
+detect a one-sided rollout. The cost if that happens is a forced re-upload, not corruption.
 
 `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` is a real setting, mirroring the sibling image sweep's
 `KDIVE_IMAGE_PUBLISH_GRACE_SECONDS`, rather than a bare `ReconcileConfig` default. This repair
@@ -133,10 +140,17 @@ pass re-derives the identical candidates.
 
 ### Bounding one pass
 
-`MAX_RECLAIMS_PER_PASS` caps how many keys one pass reclaims (AC-8). The reconciler runs its catalog
-sequentially on one connection with no per-pass deadline, and each reclaim costs a LIST, a query,
-and a delete — so an unbounded drain of the backlog accumulated since ADR-0453 would hold every
-other repair behind it. This is the drain-side counterpart of ADR-0453 §4's cap on the reap side.
+`MAX_RECLAIMS_PER_ROOT` bounds how many candidates one pass examines per root (AC-8). The
+reconciler runs its catalog sequentially on one connection with no per-pass deadline, and every
+examined candidate costs a LIST and a query whatever its outcome — so an unbounded drain of the
+backlog accumulated since ADR-0453 would hold every other repair behind it. This is the drain-side
+counterpart of ADR-0453 §4's cap on the reap side.
+
+Two details matter. The budget is **per root** so a persistent fault under `local/runs/` cannot
+spend a whole per-pass allowance on failures and leave `local/investigations/` unlisted forever. And
+it charges every candidate that reaches the re-read, not only the deletes, because a declined
+re-check costs the same two round trips — which is what two overlapping passes produce, the daemon
+loop and an on-demand `ops.reconcile_now` both walking the same backlog.
 
 ### Cost, and what is deferred
 
