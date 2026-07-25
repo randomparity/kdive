@@ -171,14 +171,23 @@ So the failed key is logged and skipped, the count travels to the end of the pas
 raises once — `repair_abandoned_uploads`' shape, adopted for a different reason than the reaper has
 for it. The reaper *must* tolerate because its row delete has already committed and there is nothing
 to retry; this sweep commits nothing and could safely abort, but abort is what turns one stuck
-object into a permanent leak. A failing `list_prefix_with_mtime` ends **that root** immediately —
-without a listing there is no candidate set to be partial about — but it is skipped and counted like
-a failed key rather than ending the pass. The rationale for abandoning the root does not reach the
-sibling: the two roots' candidate sets are wholly independent, and a scoped `s3:ListBucket` deny is
-the list-side twin of the per-prefix `s3:DeleteObject` deny §6 makes the budget per root to survive.
-Aborting would leave `local/investigations/` — the rootfs upload lane's root — unlisted on every
-pass for as long as the fault persisted, which is the starvation this whole section exists to
-prevent, arriving by the one path the budget does not cover.
+A root has three failure sites, and all three are skipped and counted rather than allowed to end the
+pass. Besides the per-key delete, a failing `list_prefix_with_mtime` and a failing bulk classify each
+end **that root** immediately — with no listing there is no candidate set to be partial about, with
+no classify nothing is known to be safe to delete — but the rationale for abandoning the root does
+not reach the sibling, whose candidate set is wholly independent.
+
+Both are root-correlated in practice, which is what makes aborting on them a permanent starvation
+rather than a transient one. Root order is fixed at import with `local/runs/` first. A scoped
+`s3:ListBucket` deny is the list-side twin of the per-prefix `s3:DeleteObject` deny §6 makes the
+budget per root to survive. The classify is the sharper case: `local/runs/` is the larger,
+faster-growing root, its `artifacts` anti-join has no usable index (#1570) and its whole listing goes
+in as one array parameter (#1569), so a role-level `statement_timeout` fires on that root's scan and
+not on the smaller root's — the root most likely to fail is structurally the one gating the other,
+and the two deferred cost items make that more likely over time. Aborting would leave
+`local/investigations/` — the rootfs upload lane's root — unswept on every pass for as long as the
+fault persisted, which is the starvation this whole section exists to prevent, arriving by the two
+paths the budget does not cover.
 
 A fault that is *not* root-scoped still ends the pass, and ends it *through the same count-logging
 path*, because by then a root may already have deleted irreversibly: that path catches every abort,

@@ -35,6 +35,7 @@ from kdive.artifacts.uploads import ManifestEntry
 from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.reconciler.cleanup import upload_orphans
 from kdive.reconciler.cleanup.upload_orphans import (
     MAX_RECLAIMS_PER_ROOT,
     UPLOAD_ORPHAN_ROOTS,
@@ -783,6 +784,45 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
         # The stuck root spent its own budget; the investigations root still got swept.
         assert store.deleted == [rootfs]
         assert f"{MAX_RECLAIMS_PER_ROOT} object(s); 1 were reclaimed" in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0455 §5: the classify is the third failure site, and it is the root-correlated one.
+
+    ``local/runs/`` is the larger, faster-growing root, its ``artifacts`` anti-join has no usable
+    index (#1570) and its whole listing goes in as one array parameter (#1569) — so a role-level
+    ``statement_timeout`` fires on *that* root's scan and not on the smaller root's. Aborting the
+    pass on it would leave ``local/investigations/`` unswept on every pass while the condition held,
+    and the two deferred cost items make that more likely over time, not less.
+    """
+    real_classify = upload_orphans.reclaimable_upload_keys
+
+    async def _classify(conn, candidates, grace):  # type: ignore[no-untyped-def]
+        if any(c.key.startswith("local/runs/") for c in candidates):
+            raise psycopg.OperationalError("statement timeout on the runs anti-join")
+        return await real_classify(conn, candidates, grace)
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        inv_id, inv_prefix = await _seed_investigation_with_window(
+            migrated_url, timedelta(seconds=-1)
+        )
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+            await upload_manifest.delete_manifest(seed, "investigations", inv_id)
+        rootfs = f"{inv_prefix}rootfs-abc"
+        store = _FakeUploadStore({f"{prefix}orphan": _GRACE * 2, rootfs: _GRACE * 2})
+        monkeypatch.setattr(upload_orphans, "reclaimable_upload_keys", _classify)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as caught:
+                await run_repair(pool, _sweep(store))
+        # The root whose classify raised was skipped; the sibling still drained.
+        assert store.deleted == [rootfs]
+        assert "could not reclaim 1 object(s); 1 were reclaimed" in str(caught.value)
 
     asyncio.run(_run())
 

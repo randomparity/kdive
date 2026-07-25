@@ -145,13 +145,17 @@ starve every candidate behind it and the whole second root on every pass forever
 this repair exists to drain. Nothing is lost either way: this sweep commits nothing, so the next
 pass re-derives the identical candidates.
 
-A failed **root listing** takes the same path, for the same reason. It ends that root — with no
-listing there is no candidate set to be partial about — but not the pass: the roots' candidate sets
-are independent, and a scoped `s3:ListBucket` deny is the list-side twin of the per-prefix
-`s3:DeleteObject` deny the per-root budget exists to survive. Aborting would leave
-`local/investigations/` unlisted on every pass while the fault lasted, reaching the same starvation
-by the one path the budget does not cover. A fault that is *not* root-scoped — a dropped pool
-connection, cancellation at shutdown — still ends the pass, through the count-logging path.
+A root's other two failure sites — its **listing** and its **bulk classify** — take the same path,
+for the same reason. Each ends that root but not the pass: the roots' candidate sets are independent.
+Both are also root-correlated, which is what would make an abort permanent. A scoped `s3:ListBucket`
+deny is the list-side twin of the per-prefix `s3:DeleteObject` deny the per-root budget exists to
+survive; and a role-level `statement_timeout` fires on `local/runs/`'s unindexed anti-join over its
+whole materialized listing (#1570, #1569) and not on the smaller root's, so the root that fails is
+the one that gates the other — root order is fixed at import, `local/runs/` first. Aborting would
+leave `local/investigations/` unswept on every pass while the fault lasted, reaching the same
+starvation by the two paths the budget does not cover. A fault that is *not* root-scoped — a
+dropped pool connection, cancellation at shutdown — still ends the pass, through the count-logging
+path, and that path now says so rather than reporting a failure count it does not have.
 
 ### Bounding one pass
 

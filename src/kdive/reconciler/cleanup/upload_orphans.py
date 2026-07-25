@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
+import psycopg
 from psycopg import AsyncConnection
 
 from kdive.artifacts.storage import ObjectListing
@@ -111,11 +112,12 @@ async def repair_leaked_upload_objects(
     without ``KDIVE_UPLOAD_TTL_SECONDS`` while the minting server raises it is deployment skew the
     code cannot see, and is the one way the margin can still go negative (ADR-0455 §2).
 
-    A failed key — and equally a failed *root listing* — is logged, counted, and skipped, and the
-    pass raises once at the end (ADR-0455 §5); each root gets its own work budget (§6). Aborting at
-    the first failure would let one permanently undeletable object — an S3 Object Lock hold, a
-    per-key deny — or one unlistable prefix starve every candidate behind it and the whole second
-    root, on every pass forever, which is the leak this repair exists to drain. Raising at the end
+    A root has three failure sites — its listing, its bulk classify, and each per-key delete — and
+    all three are logged, counted, and skipped, with the pass raising once at the end (ADR-0455 §5);
+    each root gets its own work budget (§6). Aborting at the first failure would let one
+    permanently undeletable object — an S3 Object Lock hold, a per-key deny — or one unlistable or
+    unclassifiable prefix starve every candidate behind it and the whole second root, on every pass
+    forever, which is the leak this repair exists to drain. Raising at the end
     still reaches the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures``, and
     nothing is lost by either path: this sweep commits nothing, so the next pass re-derives the
     identical candidates.
@@ -131,12 +133,12 @@ async def repair_leaked_upload_objects(
         The number of objects deleted; one INFO line per delete.
 
     Raises:
-        CategorizedError: the store failed to list a root or delete an object
-            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`). Any *other* fault
-            that ends the pass — a dropped pool connection or a statement timeout out of the
-            classify, cancellation at shutdown — propagates unchanged, and takes the same
-            count-logging path on the way out, because it arrives after the same irreversible
-            deletes (ADR-0455 §5).
+        CategorizedError: at least one root or key could not be swept
+            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`), raised once after
+            the last root. Any fault that ends the pass *outright* instead — cancellation at
+            shutdown, a bug in this module — propagates unchanged, and takes the same count-logging
+            path on the way out, because it arrives after the same irreversible deletes
+            (ADR-0455 §5).
     """
     grace = orphan_grace + upload_ttl
     tally = _Tally()
@@ -148,7 +150,7 @@ async def repair_leaked_upload_objects(
         # at shutdown — can arrive after this pass has already deleted irreversibly, and
         # ``_run_repair_plan`` records no count for a repair that raises. Put the counts on the
         # record before the exception carries them off (ADR-0455 §5).
-        tally.log()
+        tally.log_abort()
         raise
     return tally.reported()
 
@@ -159,6 +161,22 @@ class _Tally:
 
     deleted: int = 0
     failed: int = 0
+
+    def log_abort(self) -> None:
+        """Put the counts on the record for a pass that ended before its last root.
+
+        Distinct from :meth:`log` because ``failed`` is normally **zero** here: the faults this
+        sweep counts are the ones it recovers from, and an abort is by definition one it did not.
+        Reporting "could not reclaim 0" in that state reads as a clean pass, which is the opposite
+        of what happened — at least one root was never swept at all.
+        """
+        _log.error(
+            "reconciler: upload orphan sweep aborted before its last root; it had reclaimed %d "
+            "object(s) and counted %d it could not reclaim. Neither count reaches the repairs "
+            "counter because this pass raises, and a root it had not reached was not swept.",
+            self.deleted,
+            self.failed,
+        )
 
     def log(self) -> None:
         """Put the counts on the record, because a raising repair reports none.
@@ -202,40 +220,19 @@ async def _sweep_root(
     The budget is **per root**, not per pass, so a persistent fault under `local/runs/` — an object
     lock over a prefix, a scoped ``s3:DeleteObject`` deny — cannot consume the whole allowance on
     failures and leave `local/investigations/` unlisted on every pass forever, which is the
-    starvation §5's skip-and-count exists to prevent (ADR-0455 §6). A failing *listing* is skipped
-    and counted for that same reason: a scoped ``s3:ListBucket`` deny would otherwise starve the
-    sibling root by aborting the pass before it was ever reached.
+    starvation §5's skip-and-count exists to prevent (ADR-0455 §6). The two faults that end a root
+    outright — its listing and its classify — are skipped and counted for that same reason; see
+    :func:`_reclaimable_in_listing_order`.
 
     It charges every candidate that reaches the re-read, not only the ones deleted: a declined
     re-check costs the same LIST and query as a delete, and two overlapping passes (the daemon loop
     and an on-demand ``ops.reconcile``) see exactly that — the second finds every object already
     gone and would otherwise re-read the whole backlog uncapped.
     """
-    try:
-        listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
-    except CategorizedError as exc:
-        # Skip-and-count, for the same reason a failed delete is skipped and counted: a scoped
-        # `s3:ListBucket` deny is the list-side twin of the per-prefix `s3:DeleteObject` deny this
-        # budget is per root to survive, and aborting here would leave the sibling root — whose
-        # candidate set is wholly independent — unlisted on every pass for as long as the fault
-        # persists. The failure still reaches the end-of-pass raise through the tally (§5).
-        tally.failed += 1
-        _log.warning(
-            "reconciler: upload orphan sweep could not list %s: %s; the remaining roots are still "
-            "swept this pass, which still raises at the end",
-            root,
-            exc,
-        )
+    candidates = await _reclaimable_in_listing_order(conn, store, root, grace, tally)
+    if candidates is None:
         return
-    candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
-    _warn_if_wholly_unattributable(root, len(listings), len(candidates))
-    reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
-    examined = 0
-    # Deleting in listing order rather than in the classify query's row order keeps a partial
-    # pass reproducible: the planner is free to reorder an anti-join's output, the store is not.
-    for candidate in candidates:
-        if candidate.key not in reclaimable:
-            continue
+    for examined, candidate in enumerate(candidates):
         if examined >= MAX_RECLAIMS_PER_ROOT:
             _log.info(
                 "reconciler: upload orphan sweep stopped at its %d-object budget for %s; the "
@@ -244,7 +241,6 @@ async def _sweep_root(
                 root,
             )
             return
-        examined += 1
         try:
             tally.deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
         except CategorizedError as exc:
@@ -252,6 +248,75 @@ async def _sweep_root(
             _log.warning(
                 "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
             )
+
+
+async def _reclaimable_in_listing_order(
+    conn: AsyncConnection,
+    store: UploadOrphanStore,
+    root: str,
+    grace: timedelta,
+    tally: _Tally,
+) -> list[UploadOrphanCandidate] | None:
+    """List one root and classify it, or count the fault and return ``None`` to skip the root.
+
+    These are the two faults that end a root outright, and neither ends the **pass**. The roots'
+    candidate sets are wholly independent, so the rationale for abandoning one — with no listing
+    there is nothing to be partial about, with no classify nothing is known to be safe — says
+    nothing about the sibling. Aborting instead would leave `local/investigations/`, the rootfs
+    upload lane's root, unswept on every pass for as long as the fault lasted: the starvation
+    ADR-0455 §5 skips-and-counts to prevent and §6 makes the budget per root to prevent, arriving by
+    the two paths neither one covers.
+
+    Both faults are also **root-correlated in practice**, which is what would make that starvation
+    permanent rather than transient. Root order is fixed at import with `local/runs/` first, and a
+    scoped ``s3:ListBucket`` deny is the list-side twin of the per-prefix ``s3:DeleteObject`` deny
+    the budget already survives. The classify is the sharper case: `local/runs/` is the larger,
+    faster-growing root, its ``artifacts`` anti-join has no usable index (#1570) and its whole
+    listing goes in as one array parameter (#1569), so a role-level ``statement_timeout`` fires on
+    *that* root's scan and not on the smaller root's. The root most likely to fail is structurally
+    the one gating the other.
+
+    Only the database's own error class is caught for the classify — a bug in this module should
+    still abort the pass — and ``asyncio.CancelledError`` is not a ``psycopg.Error``, so shutdown
+    still ends the pass through the count-logging path.
+
+    Args:
+        conn: An async connection; the classify runs in its own short transaction.
+        store: The object store to list through.
+        root: The prefix to sweep.
+        grace: How long past its store mtime an object is protected.
+        tally: The pass's counts, incremented on a fault so the pass still raises at the end.
+
+    Returns:
+        The reclaimable candidates in **listing** order, or ``None`` if this root faulted. Listing
+        order rather than the classify query's row order keeps a partial pass reproducible: the
+        planner is free to reorder an anti-join's output, the store is not.
+    """
+    try:
+        listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
+    except CategorizedError as exc:
+        _count_root_fault(root, tally, "list", exc)
+        return None
+    candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
+    _warn_if_wholly_unattributable(root, len(listings), len(candidates))
+    try:
+        reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
+    except psycopg.Error as exc:
+        _count_root_fault(root, tally, "classify", exc)
+        return None
+    return [c for c in candidates if c.key in reclaimable]
+
+
+def _count_root_fault(root: str, tally: _Tally, step: str, exc: Exception) -> None:
+    """Count a root-scoped fault so the pass still raises, and keep sweeping the sibling roots."""
+    tally.failed += 1
+    _log.warning(
+        "reconciler: upload orphan sweep could not %s %s: %s; the remaining roots are still swept "
+        "this pass, which still raises at the end",
+        step,
+        root,
+        exc,
+    )
 
 
 async def _delete_if_still_reclaimable(
