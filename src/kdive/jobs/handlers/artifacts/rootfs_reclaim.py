@@ -200,7 +200,7 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
     held = False
     with suppress(OSError):
         for partial in inv_dir.glob("*.partial"):
-            if unlink_partial_if_unheld(partial):
+            if unlink_partial_if_unheld(partial, unlink_when_unlockable=True):
                 held = True
     with suppress(OSError):
         inv_dir.rmdir()
@@ -296,9 +296,18 @@ async def _finish_drained_investigation(
             sweep_investigation_staging_dir, uploads_dir, investigation_id
         )
         if held:
-            _log.info(
-                "investigation %s drained its rootfs rows but a live writer still holds a staging "
-                "partial; keeping rootfs_cleanup_pending_at so a later reclaim collects it",
+            # WARNING, not INFO, and worded for what was *observed* rather than for the UPDATE
+            # below — which is a no-op on the TTL path, whose investigations are ``open``/``active``
+            # with a NULL marker, so an "the marker is kept" line would be false exactly there. The
+            # observation itself is the actionable part: every rootfs row, object and staged base of
+            # this investigation is now gone while a writer is still staging into its directory, so
+            # that fetch is going to fail against a deleted object (the pin-dropping window ADR-0452
+            # leaves open). Without this line that failure surfaces only as a store-shaped
+            # ``INFRASTRUCTURE_FAILURE`` on the provision side, with nothing naming the reclaim.
+            _log.warning(
+                "investigation %s has no rootfs rows left, but a live writer still holds a staging "
+                "partial under its staging directory; its staging dir is kept and its fetch will "
+                "fail against the object this reclaim deleted",
                 investigation_id,
             )
             return

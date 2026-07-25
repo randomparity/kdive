@@ -13,6 +13,7 @@ marker.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import multiprocessing as mp
 import os
@@ -197,6 +198,29 @@ def test_sweep_collects_a_partial_once_its_holder_process_dies(tmp_path: Path) -
     assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
 
     assert not partial.exists()
+    assert not inv_dir.exists()
+
+
+@pytest.mark.parametrize("lock_errno", [errno.ENOLCK, errno.EOPNOTSUPP])
+def test_a_lockless_filesystem_still_collects_and_still_drains(
+    tmp_path: Path, lock_errno: int
+) -> None:
+    # ADR-0452 §2. On a filesystem that cannot flock, _flocked_partial stages *unguarded*, so no
+    # writer holds a lock and the gate carries no information. Skipping here would make this sweep
+    # -- the last collector -- collect nothing at all and still clear the drain marker, which is a
+    # regression against the unconditional unlink it replaces rather than a safety improvement.
+    inv, inv_dir = _inv_dir(tmp_path)
+    orphan = inv_dir / f"{_TOKEN}.deadbeef.partial"
+    orphan.write_bytes(b"leaked on a host that cannot lock")
+
+    def unlockable_flock(fd: int, operation: int) -> None:
+        raise OSError(lock_errno, os.strerror(lock_errno))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fcntl, "flock", unlockable_flock)
+        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+
+    assert not orphan.exists()
     assert not inv_dir.exists()
 
 
