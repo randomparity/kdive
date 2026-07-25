@@ -9,7 +9,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import RUNS
-from kdive.domain.errors import CategorizedError
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
 from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
 from kdive.log import bind_context
@@ -20,12 +20,19 @@ from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_
 from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
     FEATURE_CONFIG_REQUIREMENTS_TOOL,
 )
-from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
+from kdive.mcp.tools.catalog.artifacts.uploads import (
+    CREATE_RUN_UPLOAD_TOOL,
+    upload_expiry_contract,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
 from kdive.services.runs.complete_build import (
+    NO_UPLOAD_MANIFEST,
+    UPLOAD_WINDOW_EXPIRED,
+    UPLOAD_WINDOW_REPLACED,
     CompleteBuildConfigurationError,
+    CompleteBuildExpiredWindowError,
     CompleteBuildFinalizer,
     CompleteBuildValidation,
     CompleteBuildValidationError,
@@ -114,7 +121,19 @@ class CompleteBuildHandlers:
                 cmdline=cmdline,
                 source_provenance=source_provenance,
             )
+        except CompleteBuildExpiredWindowError as exc:
+            return _remint_error(
+                run_id,
+                "the build upload window has expired; re-mint it and finalize again",
+                {
+                    "reason": UPLOAD_WINDOW_EXPIRED,
+                    **upload_expiry_contract(exc.stamp, remint_tool=CREATE_RUN_UPLOAD_TOOL),
+                },
+            )
         except CompleteBuildConfigurationError as exc:
+            detail = _WINDOW_GONE_DETAIL.get(str(exc.data.get("reason")))
+            if detail is not None:
+                return _remint_error(run_id, detail, exc.data)
             return _config_error(run_id, data=exc.data)
         except CompleteBuildValidationError as exc:
             return ToolResponse.failure_from_error(
@@ -138,6 +157,36 @@ class CompleteBuildHandlers:
         warning = await rootfs_mount_warning(conn, uid)
         nudge = None if warning is not None else await missing_effective_config_nudge(conn, uid)
         return _complete_envelope(uid, result, warning=warning, nudge=nudge)
+
+
+def _remint_error(run_id: str, detail: str, data: dict[str, JsonValue]) -> ToolResponse:
+    """Reject a finalize whose upload window is gone, pointing at the one call that re-opens one.
+
+    The single envelope for all three of those rejections (ADR-0448), so the category and the
+    recovery action cannot drift apart between them. The expiry variant carries the mint's own
+    `upload_expiry_contract` fields on top, which is what makes it self-correcting: the wall the
+    agent was told about and the wall it is held to are rendered by one function. Recovery is
+    always a re-mint and usually also a re-upload — see the `runs.complete_build` docstring, which
+    is the copy agents actually read.
+    """
+    return ToolResponse.failure(
+        run_id,
+        ErrorCategory.CONFIGURATION_ERROR,
+        detail=detail,
+        suggested_next_actions=[CREATE_RUN_UPLOAD_TOOL],
+        data=data,
+    )
+
+
+_WINDOW_GONE_DETAIL = {
+    # `no_upload_manifest` is the *more common* post-expiry landing — the reaper fires on the same
+    # `deadline < now()` the expiry rejection does — so leaving it bare, as it was, stranded the
+    # majority case. Keyed off the service's own constants: a rename there is then an import error
+    # here, not a silent downgrade to a bare `configuration_error`.
+    NO_UPLOAD_MANIFEST: "this Run has no open upload window; mint one and upload before finalizing",
+    UPLOAD_WINDOW_REPLACED: "the upload window this finalize validated was replaced by a "
+    "re-mint; upload against the current window and finalize again",
+}
 
 
 def _complete_envelope(

@@ -112,21 +112,33 @@ async def replace_manifest(
 
 async def refresh_deadline(
     conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID, ttl: timedelta
-) -> bool:
-    """Set ``deadline = now() + ttl`` if a non-expired manifest exists; report whether it did.
+) -> datetime | None:
+    """Set ``deadline = now() + ttl`` if a non-expired manifest exists; return the new deadline.
 
-    Returns ``False`` when no row exists OR the current deadline is already past — the caller
-    treats the latter as an expired upload window (ADR-0104 §6 step A). Refreshing the deadline
-    under the per-Run lock the reaper also takes is what stops the reaper from reclaiming an
-    in-flight reassembly's chunk objects.
+    Refreshing the deadline under the per-Run lock the reaper also takes is what stops the reaper
+    from reclaiming an in-flight reassembly's chunk objects (ADR-0104 §6 step A).
+
+    ``None`` means the ``UPDATE`` matched nothing: either no row exists or its deadline is already
+    past. **The caller must have established that the window is open before calling** — the sole
+    caller, ``runs.complete_build``, does so via ``_require_open_window`` earlier in the same
+    transaction, and ``now()`` is ``transaction_timestamp()``, so the ``deadline >= now()`` arm
+    cannot flip in between and a ``None`` there means the row was reaped. A caller without that
+    precondition cannot tell the two apart from the return value alone and must re-read the row.
+
+    The stamped deadline is returned, not just a success flag, so the caller can carry it as the
+    identity of the window it is committing against (ADR-0448 §2): a later re-read that finds a
+    different deadline is a manifest some other call replaced, not the one this finalize
+    validated.
     """
     async with conn.cursor() as cur:
         await cur.execute(
             "UPDATE upload_manifests SET deadline = now() + %s "
-            "WHERE owner_kind = %s AND owner_id = %s AND deadline >= now()",
+            "WHERE owner_kind = %s AND owner_id = %s AND deadline >= now() "
+            "RETURNING deadline",
             (ttl, owner_kind, owner_id),
         )
-        return cur.rowcount == 1
+        row = await cur.fetchone()
+    return None if row is None else row[0]
 
 
 async def deadline_stamp(conn: AsyncConnection, manifest: UploadManifest) -> ManifestStamp:
@@ -150,6 +162,34 @@ async def deadline_stamp(conn: AsyncConnection, manifest: UploadManifest) -> Man
     if row is None:  # a bare SELECT always yields one row; fail loud if it ever does not
         raise RuntimeError("deadline_stamp could not read the database reference clock")
     return ManifestStamp(server_time=row[0], deadline=manifest.deadline)
+
+
+async def window_deadline(
+    conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID
+) -> datetime | None:
+    """Return just the owner's manifest deadline, or ``None`` if no row exists.
+
+    The scalar twin of :func:`get_manifest` for callers that only need the window's identity
+    (ADR-0448 §2). ``get_manifest`` pulls the whole ``manifest`` JSONB and rebuilds a
+    :class:`ManifestEntry` per artifact — thousands of :class:`ChunkEntry` tuples for a chunked
+    multi-GiB upload — which is wasted work when the caller compares one timestamp, and the run
+    finalize's comparison happens inside the ``RUN`` advisory lock.
+
+    Args:
+        conn: An async connection.
+        owner_kind: The owning table name — ``'runs'`` or ``'investigations'``.
+        owner_id: The owning row's primary key.
+
+    Returns:
+        The window's deadline, or ``None`` if no manifest is recorded for this owner.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT deadline FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
+            (owner_kind, owner_id),
+        )
+        row = await cur.fetchone()
+    return None if row is None else row[0]
 
 
 async def get_manifest(
