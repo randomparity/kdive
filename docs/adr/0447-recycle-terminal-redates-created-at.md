@@ -45,11 +45,30 @@ asymmetry live in the primitive for the next caller to rediscover — which the 
 The recycle `UPDATE` sets `created_at = now()` alongside the fields it already resets. A revived
 job takes its place at the **back** of its lane.
 
-`now()` is `transaction_timestamp()`, the same clock the `INSERT`'s `DEFAULT now()` uses and the
-same clock `dequeue` compares leases against, so the insert and recycle paths stay consistent and
-no worker clocks need to agree. The `WHERE dedup_key = … AND state = ANY(…)` fence is unchanged, so
-re-dating reaches only rows the recycle already resets: a just-inserted row is `queued` and does not
-match, and an in-flight or (absent `recycle_canceled`) `canceled` row is untouched.
+The stamp is **`clock_timestamp()`, not `now()`.** `now()` is `transaction_timestamp()`, fixed when
+the enclosing transaction begins — and `enqueue` never opens a top-level transaction of its own in
+production. The re-stage (`runs/steps.py`) and the snapshot tools (`systems/snapshot.py`) open
+`conn.transaction()` and then *block* on an `advisory_xact_lock` before enqueuing, and
+`control.watch_for_crash` runs on a pooled connection (autocommit off) whose implicit transaction
+opened several reads earlier. Stamping the transaction's start would date the revived job to before
+the lock wait, so everything another connection enqueued *during* that wait would still sort behind
+it — the preemption this ADR exists to end, returning precisely under the contention that makes
+head-of-line blocking matter. `clock_timestamp()` is the same database clock (so no worker clocks
+need to agree) and is always at or after `transaction_timestamp()`, which additionally makes
+`created_at` monotonic **by construction** — the property the keyset-cursor argument below rests on.
+`tests/jobs/test_queue.py::test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue` drives
+the recycle on a non-autocommit connection in one explicit transaction and fails under `now()`.
+
+The `WHERE dedup_key = … AND state = ANY(…)` fence is unchanged, so re-dating reaches only rows the
+recycle already resets: a just-inserted row is `queued` and does not match, and an in-flight or
+(absent `recycle_canceled`) `canceled` row is untouched.
+
+`authorizing`, `max_attempts`, `kind` and `dispatch_lane` are deliberately **not** reset. They
+describe the job's slot, not the attempt; `authorizing` in particular stays with the principal who
+first enqueued the job, so a re-dated `created_at` must not be read as the recycling principal's
+action time. (A caller that needs the new principal on the record audits its own tool invocation.)
+This asymmetry is pre-existing; it is recorded here because re-dating `created_at` is what makes the
+timestamp and the attribution describe different events.
 
 `recycle_terminal` thereby becomes equivalent to the delete-and-re-insert a caller would otherwise
 hand-roll — minus the row churn, and minus losing the row id that `jobs.get` and the tool trail
@@ -71,6 +90,15 @@ neither the audit log nor accounting joins it. Of the readers that exist:
 - `latest_succeeded_job_for_system` filters `state = 'succeeded'` and so never sees a recycled row.
 
 `updated_at` stays trigger-maintained and, with the audit trail, remains the change-history record.
+
+There is a real observability **loss**, not only improvement. An old `created_at` was the last
+in-row evidence that a job had been recycled at all: `attempt` is already reset, the failure fields
+and `result_ref` cleared, the payload overwritten. Re-dated, a row that has churned a hundred times
+is indistinguishable from a first enqueue, and nothing counts recycles (`kdive_job_retries_total` is
+the non-terminal-requeue counter, ADR-0191 §I, and does not fire here). The recycle `UPDATE`
+therefore gains `RETURNING id` and logs one `INFO` line per actual recycle (job id, kind,
+`dedup_key`) — no schema, no new metric, and a thrashing `dedup_key` says so in the log rather than
+only in the lane-depth gauge.
 
 ## Alternatives considered
 
@@ -95,6 +123,17 @@ SKIP LOCKED` keeps a tie making progress.
 
 - A repeatedly-recycled job can no longer starve its lane; it is re-queued behind the work admitted
   while it was settled, and is still claimed.
+- **The three callers that exist pay a latency cost.** All of them are interactive retries, and the
+  lane is FIFO across kinds, so a re-staged install now queues behind everything admitted while the
+  run was settled — possibly a long `build` — where before it was serviced next. This is worth
+  stating plainly because the hazard argued above is sharpest for a *timer-driven* caller, and the
+  one component with that shape (#1522's reclaim sweep) deliberately does not use the primitive and
+  still will not. The trade is accepted on two grounds: the cost is bounded and usually small (a
+  re-stage's original `created_at` is recent, so the job was not jumping far ahead to begin with),
+  and it is the correct direction — an agent that retries in a loop should not be able to outrank
+  work that has been waiting longer, which is the same fairness rule ADR-0018 already sets for
+  first-time enqueues. Scoping the re-date to an opt-in keyword was rejected: it is a speculative
+  flag for a caller that does not exist, and it leaves the footgun armed for the one that will.
 - `jobs.created_at` is an attempt-queued timestamp, not a first-insertion timestamp. Any future
   reader wanting first-insertion provenance needs the `queued_at` split above.
 - `gc.py`'s delete-and-re-insert stays, now justified solely by its retry backoff; its stale

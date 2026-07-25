@@ -11,6 +11,7 @@ connection, and all assume READ COMMITTED (psycopg's default).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -34,6 +35,8 @@ from kdive.jobs.payloads import (
     dump_authorizing,
     dump_payload,
 )
+
+_log = logging.getLogger(__name__)
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LEASE = timedelta(minutes=5)
@@ -72,7 +75,25 @@ async def enqueue(
     ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
     inserted; ``updated_at`` (trigger-maintained) and the audit trail carry change history, and
     the worker's ``time_to_claim`` telemetry (``heartbeat_at - created_at``) is measuring queue
-    wait, so re-dating is what it wants. Overwriting the payload matters for a re-stage
+    wait, so re-dating is what it wants.
+
+    The re-date reads ``clock_timestamp()``, **not** ``now()``. ``now()`` is
+    ``transaction_timestamp()``, and no production caller reaches here in a transaction of its
+    own: the re-stage and the snapshot tools open ``conn.transaction()`` and then *block* on an
+    ``advisory_xact_lock`` before enqueuing, and ``control.watch_for_crash`` runs on a pooled
+    connection whose implicit transaction opened several reads earlier. Stamping the transaction's
+    start would therefore date the revived job to before the lock wait, leaving it ahead of
+    everything another connection enqueued during that wait — the preemption this is meant to end,
+    reappearing exactly under the contention that makes it matter. ``clock_timestamp()`` is the
+    same database clock and is always at or after the transaction's, so it also makes
+    ``created_at`` monotonic by construction, which is what lets ``jobs.list``'s ``(created_at,
+    id)`` keyset cursor only ever *skip* a re-dated row rather than return it twice.
+
+    ``authorizing``, ``max_attempts``, ``kind`` and ``dispatch_lane`` are deliberately **not**
+    reset: they describe the job's slot, not the attempt, and ``authorizing`` in particular stays
+    with the principal who first enqueued it, so a re-dated ``created_at`` must not be read as the
+    recycling principal's action time. A caller that needs the new principal on the record audits
+    its own tool invocation. Overwriting the payload matters for a re-stage
     (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
     the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
     case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
@@ -124,8 +145,10 @@ async def enqueue(
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
-                "    result_ref = NULL, failure_context = '{}'::jsonb, created_at = now() "
-                "WHERE dedup_key = %s AND state = ANY(%s)",
+                "    result_ref = NULL, failure_context = '{}'::jsonb, "
+                "    created_at = clock_timestamp() "
+                "WHERE dedup_key = %s AND state = ANY(%s) "
+                "RETURNING id",
                 (
                     JobState.QUEUED.value,
                     Jsonb(payload_json),
@@ -133,6 +156,17 @@ async def enqueue(
                     recyclable,
                 ),
             )
+            # The reset leaves a recycled row indistinguishable from a first enqueue (attempt 0,
+            # failure fields cleared, payload overwritten, and now created_at fresh), so this line
+            # is the only record that a dedup_key is churning. One per recycle, so a lane that is
+            # thrashing says so in the log rather than only in a lane-depth gauge.
+            if (recycled := await cur.fetchone()) is not None:
+                _log.info(
+                    "recycled terminal job %s (kind %s, dedup_key %s) to a fresh queued attempt",
+                    recycled["id"],
+                    kind.value,
+                    dedup_key,
+                )
         await cur.execute("SELECT * FROM jobs WHERE dedup_key = %s", (dedup_key,))
         row = await cur.fetchone()
     if row is None:  # Invariant: we just inserted the row, or it already existed.

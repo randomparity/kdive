@@ -272,6 +272,50 @@ def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue(migrated_url: str) -> None:
+    # Every production caller reaches `enqueue` inside a transaction its own caller opened, after
+    # blocking on an advisory lock — so `now()` (= transaction_timestamp) would stamp the revived
+    # job at the transaction's *start*, leaving it ahead of everything enqueued during the wait.
+    # `clock_timestamp()` re-dates at the recycle itself. This drives the recycle on a
+    # non-autocommit connection in one explicit transaction, with the competing job admitted by a
+    # separate connection after that transaction opened.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as setup:
+            stale = await _terminal_failed_job(setup, "dk-txn-stale")
+
+        recycler = await psycopg.AsyncConnection.connect(migrated_url)  # autocommit off
+        try:
+            async with recycler.transaction():
+                # Open the transaction — and so fix its transaction_timestamp — before the
+                # competing enqueue, the way an advisory-lock wait does.
+                await recycler.execute("SELECT 1")
+
+                async with await _connect(migrated_url) as other:
+                    newer = await queue.enqueue(
+                        other, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-txn-newer"
+                    )
+
+                recycled = await queue.enqueue(
+                    recycler,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-txn-stale",
+                    recycle_terminal=True,
+                )
+                assert recycled.id == stale.id
+                assert recycled.created_at > newer.created_at
+        finally:
+            await recycler.close()
+
+        async with await _connect(migrated_url) as reader:
+            first = await queue.dequeue(reader, "w-txn")
+            assert first is not None
+            assert first.id == newer.id  # not preempted by the job recycled after it
+
+    asyncio.run(_run())
+
+
 def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

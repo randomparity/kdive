@@ -74,7 +74,7 @@ neither the audit log nor accounting joins it.
 | `dequeue` — `ORDER BY created_at` | The fix target. FIFO becomes "by when the attempt was queued". |
 | `worker.py` `record_time_to_claim` — `heartbeat_at - created_at` | **Improved.** The metric measures queue wait; today a recycled job reports a bogus wait spanning its entire prior lifetime. |
 | `all_recent_jobs` — `ops.jobs_list`, `ORDER BY created_at DESC, id DESC` | A recycled job floats to the top of the operator's newest-first list, which is where a just-requeued job belongs. |
-| `recent_jobs` — `jobs.list`, same order plus the `(created_at, id)` keyset cursor | A recycled row can move forward past a page boundary and be missed for the rest of that pagination. `created_at` only ever moves forward, so a row can be skipped but never duplicated — the same behavior a fresh insert or the sanctioned delete-and-re-insert already produces mid-pagination. The cursor is a boundary, not a snapshot. |
+| `recent_jobs` — `jobs.list`, same order plus the `(created_at, id)` keyset cursor | A recycled row can move forward past a page boundary and be missed for the rest of that pagination. `clock_timestamp()` makes `created_at` monotonic by construction, so a row can be skipped but never duplicated — the same behavior a fresh insert or the sanctioned delete-and-re-insert already produces mid-pagination. The cursor is a boundary, not a snapshot. |
 | `latest_succeeded_job_for_system` — newest `succeeded` by `(created_at, id)` | Unaffected: it filters `state = 'succeeded'`, and a recycled job is `queued`. |
 
 `updated_at` is trigger-maintained (`jobs_set_updated_at`) and unaffected; it, plus the audit
@@ -82,16 +82,42 @@ trail, remains the change-history record.
 
 ## Design
 
-Add `created_at = now()` to the recycle `UPDATE`. `now()` is `transaction_timestamp()`, the same
-clock the `INSERT`'s `DEFAULT now()` uses and the same clock `dequeue` compares leases against, so
-no worker clocks need to agree and the insert and recycle paths stay consistent.
+Add `created_at = clock_timestamp()` to the recycle `UPDATE`.
+
+**Why `clock_timestamp()` and not `now()`.** `now()` is `transaction_timestamp()`, fixed when the
+enclosing transaction begins, and `enqueue` never opens a top-level transaction of its own in
+production: `runs/steps.py` and `systems/snapshot.py` open `conn.transaction()` and then block on an
+`advisory_xact_lock` before enqueuing, and `control.watch_for_crash` runs on a pooled connection
+(autocommit off) whose implicit transaction opened several reads earlier. `now()` would date the
+revived job to *before* the lock wait, leaving it ahead of everything another connection enqueued
+during that wait — R1 violated exactly under contention. `clock_timestamp()` is the same database
+clock, always at or after `transaction_timestamp()`, so it also makes `created_at` monotonic by
+construction (the property the keyset-cursor row above depends on). No worker clocks need to agree
+either way.
 
 The `WHERE dedup_key = %s AND state = ANY(%s)` fence is unchanged, so the re-dating reaches only
 rows the recycle already resets: a row that was just inserted is `queued` and does not match, and
 an in-flight or (absent `recycle_canceled`) `canceled` row is left alone.
 
+The `UPDATE` gains `RETURNING id`, and a matched row logs one `INFO` line. Re-dating removes the
+last in-row evidence that a job has been recycled (`attempt` is already reset, failure fields and
+`result_ref` cleared, payload overwritten), so without this a churning `dedup_key` is invisible;
+nothing else counts recycles.
+
+`authorizing`, `max_attempts`, `kind` and `dispatch_lane` stay untouched — they describe the slot,
+not the attempt. That asymmetry is pre-existing, but re-dating is what makes the timestamp and the
+attribution describe different events, so it is now documented in the `enqueue` docstring.
+
 The net effect is that `recycle_terminal` becomes equivalent to the delete-and-re-insert a caller
 would otherwise hand-roll, minus the row churn and minus losing the row id.
+
+## Accepted cost
+
+All three callers are interactive retries, and the lane is FIFO across kinds, so a re-staged install
+now queues behind everything admitted while the run was settled — possibly a long `build`. Accepted:
+the delta is bounded and usually small (a re-stage's original `created_at` is recent), and it is the
+correct direction — a retrying agent should not outrank work that has waited longer. An opt-in
+keyword was rejected as a speculative flag that leaves the footgun armed.
 
 ## Test plan
 
@@ -103,6 +129,12 @@ regression test:
 3. Recycle the first; assert its `created_at` is now past the second's, and that it is the same row.
 4. `dequeue` claims the **newer** job first (R1), and a second `dequeue` claims the recycled one
    (R2 — behind, not starved).
+
+`tests/jobs/test_queue.py::test_enqueue_recycle_terminal_redates_past_a_concurrent_enqueue` covers
+the production transaction shape the first test cannot: the recycle runs on a **non-autocommit**
+connection inside one explicit `conn.transaction()` opened *before* a second connection enqueues the
+competing job. It passes under `clock_timestamp()` and fails under `now()`, which is what pins the
+clock choice.
 
 The existing `recycle_terminal` tests (reset-in-place, in-flight preserved, succeeded-with-new-payload,
 canceled-only-when-opted-in) cover R3 and are unchanged.
