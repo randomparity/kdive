@@ -183,6 +183,14 @@ From a source checkout, run the convenience wrapper:
 scripts/live-stack/up.sh
 ```
 
+These host processes have no supervisor — nothing restarts them if they exit, unlike the systemd
+units and the compose and Helm surfaces. Each waits up to ten seconds at start for its first
+database connection and exits if it cannot get one, so `up.sh` waits past that budget and fails
+if any of the three is gone by the end of it. A bring-up that reports success has three daemons
+that have already cleared their database check. If it fails, read `logs/*.log` under the stack
+directory: `no database connection within` there means the backend was unreachable, or its
+credentials or database name are wrong. Recovery is re-running `up.sh` once the backend answers.
+
 `up.sh` is idempotent and also ensures the backends and libvirt are up; for a no-VM, no-sudo
 API-only loop use `KDIVE_WORKER_AS_ROOT=0 scripts/live-stack/up.sh --skip-libvirt`. It also runs
 one synchronous `reconcile-systems` pass before starting the host processes, so a completed `up.sh`
