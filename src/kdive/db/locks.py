@@ -146,8 +146,8 @@ async def session_advisory_lock_held(conn: AsyncConnection, name: str) -> bool:
     backends in different databases of one cluster take the same key without contending, so a
     holder elsewhere on the cluster is not a leader of *this* deployment and must not read as
     one. ``pg_locks`` is cluster-wide and exposes every database's rows, so the filter is
-    required — without it a second kdive deployment (or, in the suite, a sibling xdist worker
-    on its own per-worker database) reports as a live leader here.
+    required — without it a second kdive deployment on the same cluster reports as a live
+    leader here.
 
     ``False`` therefore means no live holder in this database as of the probe. It is not an
     instantaneous read of the holder's liveness: Postgres frees the lock when the holding
