@@ -55,8 +55,9 @@ The substantive argument for the terminal reading is that `head.checksum_sha256`
 itself verified at PUT, so a mismatch proves the stored bytes changed *after* the PUT — bit rot or
 tampering below the store's own checksum accounting — and no retry of the same key fixes either.
 (An API-level overwrite is **not** in that set: it re-records the checksum, so it never reaches
-this gate at all. See §6.) That is sound but partial. ADR-0434 §2's own stated rationale for recomputing at all is that it "catches
-**transport corruption** and post-PUT bit-rot that the PUT-time signature alone does not".
+this gate at all. See §6.) That is sound but partial. ADR-0434 §2's own stated rationale for
+recomputing at all is that it "catches **transport corruption** and post-PUT bit-rot that the
+PUT-time signature alone does not".
 Transport corruption on the *GET* is transient, and it is precisely what a bare re-invocation
 clears. Two failure modes share one observation, and only one of them is permanent.
 
@@ -111,14 +112,23 @@ damaged and must be re-uploaded. That is the honest rendering of two failure mod
 observation, and it is what the agent needs in order to act — the `retryable` flag alone cannot
 express "retry once, then re-upload".
 
-### 4. The gzip path attaches the caller's `system_id`
+### 4. The gzip path annotates on the way out, and the checksum gate is marked
 
-`strip_gzip_to_writer` is consumer-agnostic and raises with empty `details`, while every raise in
-the uploaded-rootfs fetch carries `details={"system_id": ...}` — the field `worker.py` lifts into
-the job row's `failure_context` and the one an operator pivots on to correlate a staging failure
-to a System. A gzip failure therefore landed with only a message where the byte-identical identity
-failure landed with the id. `_stage_gzip` annotates on the way out rather than the shared utility
-growing a consumer-specific field, which keeps the module's seam intact.
+`strip_gzip_to_writer` is consumer-agnostic, while every raise in the uploaded-rootfs fetch carries
+`details={"system_id": ...}` — the field `worker.py` lifts into the job row's `failure_context` and
+the one an operator pivots on to correlate a staging failure to a System. A gzip failure therefore
+landed with only a message where the byte-identical identity failure landed with the id.
+`_stage_gzip` annotates on the way out rather than the shared utility growing a consumer-specific
+field, which keeps the module's seam intact.
+
+The utility does own one marker, though: a checksum rejection carries
+`details["gate"] = TRANSPORT_CHECKSUM_GATE`. A consumer cannot identify that gate from the category,
+because `strip_gzip_to_writer` calls `store.get_range` **uncaught** and the store raises its own
+`infrastructure_failure` for a connection reset — on a path that issues hundreds of ranged GETs for
+a multi-GiB object, by far the likeliest failure there is. Keying the operator log on the category
+would have reported every transport blip as stored-object damage, destroying the exact
+discrimination the log exists to provide. The marker is a property of the gate, so the utility owns
+it; `system_id` is a property of the caller, so the caller attaches it.
 
 ### 5. Gate precedence is unchanged
 
@@ -198,9 +208,15 @@ and bomb shapes so the gap is visible rather than silent.
   `WARNING` naming the object key, System and encoding; that log, not the category, is what lets an
   operator see the bit-rot mode §1 names. Same reasoning as `_require_staging_free_space`'s warning
   in the same module, and it matters more here because the agent is *told* to retry, so without it
-  the first observable consequence of real damage would be a silent extra multi-GiB download.
+  the first observable consequence of real damage would be a silent extra multi-GiB download. The
+  log is keyed on the *gate*, not the category — the store's own faults from `get_range` propagate
+  through the decode utility as `infrastructure_failure` too, and a connection reset on one of the
+  hundreds of ranged GETs a multi-GiB stage issues must not be reported as stored-object damage.
+  **On the gzip path the log inherits §6's reach exactly**: framing-first damage raises an
+  object-defect error and logs nothing, so absence of the line is not evidence of an intact object
+  for a gzip upload. #1548 widens the log along with the category.
 - A gzip staging failure now carries `system_id` in its `failure_context`, as the identity path
-  already did (§3).
+  already did (§4).
 - No schema change, no migration, no MCP tool-surface change. The only externally visible changes
   are the `retryable` boolean, the message text, and the added detail field on one failure path.
 - `artifacts/transport_encoding.py` is a shared module, but `strip_gzip_to_writer` has exactly one

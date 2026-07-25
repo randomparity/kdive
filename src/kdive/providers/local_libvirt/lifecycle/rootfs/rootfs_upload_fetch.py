@@ -72,6 +72,7 @@ from kdive.artifacts import storage as artifact_types
 from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.transport_encoding import (
     GZIP_ENCODING,
+    TRANSPORT_CHECKSUM_GATE,
     StripDecodeRequest,
     normalize_encoding,
     strip_gzip_to_writer,
@@ -916,6 +917,11 @@ def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
     The retryable verdict makes that worse, not better: the agent is now *told* to retry, so the
     first observable consequence of real damage would otherwise be a silent extra multi-GiB
     download and a second dead-lettered job, with nothing in the host logs naming the condition.
+
+    **Reach, on the gzip path only** (ADR-0445 §6): this fires exactly where the checksum gate
+    fires, so the framing-first damage that never reaches that gate logs nothing here either.
+    Absence of this line is not evidence of an intact object for a gzip upload; #1548 widens both
+    together.
     """
     _log.warning(
         "uploaded rootfs object %s failed checksum verification while staging for system %s "
@@ -962,9 +968,12 @@ def _stage_gzip(
             strip_gzip_to_writer(store, request, writer)
     except CategorizedError as exc:
         exc.details.setdefault("system_id", str(system_id))
-        # The utility's *only* retryable branch is the transport-hash comparison (ADR-0445 §2), so
-        # the category identifies the checksum mismatch without re-matching the message text.
-        if exc.category is ErrorCategory.INFRASTRUCTURE_FAILURE:
+        # Keyed on the gate marker, NOT on the category. ``strip_gzip_to_writer`` calls
+        # ``get_range`` uncaught, so the store's own ``INFRASTRUCTURE_FAILURE`` — a connection reset
+        # on any of the hundreds of ranged GETs a multi-GiB stage issues, by far the likeliest
+        # failure on this path — propagates through it. A category test would log every such blip as
+        # stored-object damage, which is exactly the discrimination this log exists to provide.
+        if exc.details.get("gate") == TRANSPORT_CHECKSUM_GATE:
             _log_checksum_mismatch(key, system_id=system_id, encoding=GZIP_ENCODING)
         raise
 

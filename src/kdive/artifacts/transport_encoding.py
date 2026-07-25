@@ -76,6 +76,14 @@ class StripDecodeResult(NamedTuple):
     uncompressed_bytes: int
 
 
+# The ``details["gate"]`` marker on a transport-checksum rejection. A consumer cannot identify that
+# gate from the category alone: the store's own ``get_range`` faults (a connection reset on any of
+# the hundreds of ranged GETs a multi-GiB stage issues) propagate through this module as
+# ``INFRASTRUCTURE_FAILURE`` too, so a category test would mistake a transport blip for
+# stored-object damage. Exported because the uploaded-rootfs fetch logs on this gate (ADR-0445 §4).
+TRANSPORT_CHECKSUM_GATE = "transport_checksum"
+
+
 def _object_error(detail: str) -> CategorizedError:
     """A defect in the object the agent uploaded: retrying the same key re-reads the same defect."""
     return CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
@@ -108,7 +116,11 @@ def _transport_error(detail: str) -> CategorizedError:
     well-formed gzip under the bound. #1548 tracks closing the residual by consulting the digest
     before declaring an object defect.
     """
-    return CategorizedError(detail, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+    return CategorizedError(
+        detail,
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"gate": TRANSPORT_CHECKSUM_GATE},
+    )
 
 
 def strip_gzip_to_writer(
@@ -131,8 +143,15 @@ def strip_gzip_to_writer(
     the gzip framing report the object-defect category (ADR-0445 §6, residual tracked in #1548).
     The caller owns atomic staging, so a raised error discards the partial output already written.
 
-    The raised errors carry no ``details``; a caller that has identifying context (the
+    A checksum rejection carries ``details["gate"] == TRANSPORT_CHECKSUM_GATE``; the object-defect
+    rejections carry no ``details`` at all. A caller that has identifying context (the
     uploaded-rootfs fetch attaches its ``system_id``) annotates them on the way out.
+
+    Note that ``store.get_range`` is called **uncaught** in the read loop, so the store's own
+    faults propagate through unchanged — including ``INFRASTRUCTURE_FAILURE`` for a connection
+    reset on any of the hundreds of ranged GETs a multi-GiB object takes. That is why the gate
+    marker exists: a consumer that distinguished the checksum rejection by *category* would report
+    every transport blip as stored-object damage.
 
     Args:
         store: A ranged-read store over the compressed object.
@@ -144,7 +163,9 @@ def strip_gzip_to_writer(
 
     Raises:
         CategorizedError: ``CONFIGURATION_ERROR`` on a gzip bomb or a corrupt, truncated, or
-            multi-member gzip stream; ``INFRASTRUCTURE_FAILURE`` on a transport-checksum mismatch.
+            multi-member gzip stream; ``INFRASTRUCTURE_FAILURE`` (with the
+            ``TRANSPORT_CHECKSUM_GATE`` marker) on a transport-checksum mismatch. The store's own
+            errors from ``get_range`` propagate unchanged, and carry no marker.
     """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     hasher = hashlib.sha256()

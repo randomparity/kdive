@@ -162,10 +162,14 @@ existing `"checksum verification"` substring is preserved).
 
 `_stage_gzip` catches `CategorizedError` around `strip_gzip_to_writer` and `setdefault`s
 `details["system_id"]` before re-raising, so both paths land in the job row's `failure_context`
-with the field an operator correlates on (R7). It also routes an `INFRASTRUCTURE_FAILURE` — the
-utility's only retryable branch, so the category identifies the checksum mismatch without
-re-matching message text — into the shared `_log_checksum_mismatch` the identity path calls
-directly (R8).
+with the field an operator correlates on (R7). It also routes a checksum rejection into the shared
+`_log_checksum_mismatch` the identity path calls directly (R8) — keyed on
+`details["gate"] == TRANSPORT_CHECKSUM_GATE`, a marker `_transport_error` sets, **not** on the
+category. `strip_gzip_to_writer` calls `get_range` uncaught, so the store's own
+`INFRASTRUCTURE_FAILURE` for a connection reset propagates through it; on a path issuing hundreds
+of ranged GETs that is the likeliest failure, and a category test would log every blip as
+stored-object damage. On the gzip path the log has the same reach as the category convergence, so
+its absence is not evidence of an intact object.
 
 The same stale cross-reference in
 `tests/.../test_rootfs_upload_fetch.py::test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate`

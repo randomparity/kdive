@@ -126,6 +126,8 @@ class _FakeStore:
         self.range_calls = 0
         self.stream_calls = 0
         self.readers: list[_RecordingReader] = []
+        # Raised from the first ``get_range``, standing in for the store's own typed faults.
+        self.range_fault: BaseException | None = None
 
     def head(self, key: str) -> HeadResult | None:
         self.head_calls += 1
@@ -146,6 +148,8 @@ class _FakeStore:
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         self.range_calls += 1
+        if self.range_fault is not None:
+            raise self.range_fault
         assert self._data is not None
         return self._data[start : start + length]
 
@@ -326,6 +330,32 @@ def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
     assert expected_message in str(error.value)
     assert error.value.details["system_id"]
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_gzip_store_fault_is_not_logged_as_stored_object_damage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The checksum WARNING must key off the GATE, not the category. `strip_gzip_to_writer` calls
+    # `get_range` uncaught, and the store raises its own INFRASTRUCTURE_FAILURE for a connection
+    # reset — by far the likeliest failure on a path that issues hundreds of ranged GETs for a
+    # multi-GiB object. A category test would log every such blip as "the stored object is damaged",
+    # destroying the one discrimination ADR-0445's Consequences promises an operator.
+    canonical = _QCOW2 + b"z" * 512
+    compressed = gzip.compress(canonical)
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+    fault = CategorizedError(
+        "get_range on 'k' failed: ConnectionClosedError",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+    store.range_fault = fault
+
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+
+    assert error.value is fault
+    assert "failed checksum verification" not in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
