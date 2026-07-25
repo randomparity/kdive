@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Share the reason strings, unfreeze the sibling errors
 - One envelope for the window rejections, scalar re-read
 - Rename _required_staging_bytes to _staging_budget
+- Reuse the manifest helpers and fold the test stores
 
 ### Documentation
 
@@ -204,6 +205,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the convergence's real reach and add system_id
 - Log the checksum mismatch the category no longer isolates
 - Key the mismatch log on the gate, not the category
+- Commit the upload manifest-row delete before its objects
+- Record the upload reap's prefix before the sweep starts
+- Report a failed upload sweep as a failed pass
+- Stop the upload pass when a whole owner's sweep is refused
 - Flock-gate the reclaim-side staging sweep
 - Decide the lock-less degrade per sweep, not by default
 - Collect the unowned base the gate lets a fetcher publish
