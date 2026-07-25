@@ -34,7 +34,7 @@ from kdive.reconciler.loop import (
     ALL_REPAIR_KINDS,
     ReconcileConfig,
     ReconcileReport,
-    UploadStore,
+    UploadOrphanStore,
     reconcile_once,
 )
 from kdive.security import audit
@@ -57,7 +57,7 @@ class ReconcileRepairPorts:
     """Repair dependencies used by one on-demand reconcile pass."""
 
     reaper: InfraReaper
-    upload_store: UploadStore
+    upload_store: UploadOrphanStore
     image_store: ImageSweepStore
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
 

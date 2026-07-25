@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from kdive.reconciler.cleanup.uploads import UploadStore
+from kdive.reconciler.cleanup.upload_orphans import UploadOrphanStore
 from kdive.reconciler.loop import ReconcileConfig
 from kdive.services.images.retention import ImageSweepStore
 
@@ -34,6 +34,9 @@ class _NullUploadStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return []
 
+    def list_prefix_with_mtime(self, prefix: str) -> list[Any]:
+        return []
+
     def delete(self, key: str) -> None:
         return None
 
@@ -46,7 +49,7 @@ def null_image_store() -> ImageSweepStore:
 def make_reconcile_config(**overrides: Any) -> ReconcileConfig:
     """Build a ``ReconcileConfig`` with inert default stores for store-agnostic tests."""
     defaults: dict[str, Any] = {
-        "upload_store": cast(UploadStore, _NullUploadStore()),
+        "upload_store": cast(UploadOrphanStore, _NullUploadStore()),
         "image_store": cast(ImageSweepStore, _NullImageStore()),
     }
     defaults.update(overrides)

@@ -53,6 +53,13 @@ from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
 from kdive.reconciler.cleanup.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
 )
+from kdive.reconciler.cleanup.upload_orphans import (
+    DEFAULT_UPLOAD_ORPHAN_GRACE,
+    UploadOrphanStore,
+)
+from kdive.reconciler.cleanup.upload_orphans import (
+    repair_leaked_upload_objects as _repair_leaked_upload_objects,
+)
 from kdive.reconciler.cleanup.uploads import (
     UploadStore,
 )
@@ -115,6 +122,8 @@ __all__ = [
     "ReconcileConfig",
     "ReconcileReport",
     "Reconciler",
+    "UploadOrphanStore",
+    "UploadStore",
     "reconcile_once",
 ]
 
@@ -221,7 +230,7 @@ class ReconcileConfig:
     ADR-0337) without reordering the defaulted fields.
     """
 
-    upload_store: UploadStore
+    upload_store: UploadOrphanStore
     image_store: ImageSweepStore
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
@@ -233,6 +242,7 @@ class ReconcileConfig:
     report_artifact_retention: timedelta = DEFAULT_REPORT_ARTIFACT_RETENTION
     investigation_cleanup_grace: timedelta = DEFAULT_INVESTIGATION_CLEANUP_GRACE
     build_artifact_retention: timedelta = DEFAULT_BUILD_ARTIFACT_RETENTION
+    upload_orphan_grace: timedelta = DEFAULT_UPLOAD_ORPHAN_GRACE
     investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
@@ -275,6 +285,14 @@ def _abandoned_uploads_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _repair_abandoned_uploads(conn, config.upload_store)
+
+
+def _leaked_upload_objects_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _repair_leaked_upload_objects(
+        conn, config.upload_store, config.upload_orphan_grace
+    )
 
 
 def _report_artifacts_gc_repair(
@@ -388,6 +406,9 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         ),
     ),
     _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
+    # Runs after the reaper so a window reaped this pass is already row-less; the grace means it
+    # is not reclaimable yet either way (ADR-0455).
+    _RepairCatalogEntry("leaked_upload_objects", _leaked_upload_objects_repair),
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
     _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
     _RepairCatalogEntry("expired_build_artifacts_gc_count", _expired_build_artifacts_gc_repair),

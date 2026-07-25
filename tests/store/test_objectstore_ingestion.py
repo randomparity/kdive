@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
-from kdive.artifacts.storage import HeadResult, PresignedUpload, PresignPutRequest
+from kdive.artifacts.storage import (
+    HeadResult,
+    ObjectListing,
+    PresignedUpload,
+    PresignPutRequest,
+)
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import (
@@ -241,4 +248,67 @@ def test_delete_maps_transport_error_to_infrastructure_failure() -> None:
     store = ObjectStore(_FailingDeleteClient(), "bucket")
     with pytest.raises(CategorizedError) as excinfo:
         store.delete("p/a")
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+class _MtimeListClient:
+    """A paginating list client that records the ``Prefix`` each paginate call was given."""
+
+    def __init__(self, pages: list[dict[str, object]]) -> None:
+        self._pages = pages
+        self.prefixes: list[str] = []
+
+    def get_paginator(self, op: str) -> object:
+        assert op == "list_objects_v2"
+        pages, prefixes = self._pages, self.prefixes
+
+        class _Paginator:
+            def paginate(self, **kwargs: object):
+                prefixes.append(str(kwargs["Prefix"]))
+                yield from pages
+
+        return _Paginator()
+
+
+def _mtime_pages() -> list[dict[str, object]]:
+    return [
+        {
+            "Contents": [
+                {"Key": "local/runs/r1/kernel", "LastModified": datetime(2026, 1, 1, tzinfo=UTC)},
+            ]
+        },
+        {
+            "Contents": [
+                {"Key": "local/runs/r1/stray", "LastModified": datetime(2026, 1, 2, tzinfo=UTC)},
+            ]
+        },
+        {},  # empty page (no Contents) tolerated
+    ]
+
+
+def test_list_prefix_with_mtime_flattens_pages_and_scopes_to_the_prefix() -> None:
+    # ADR-0455: the orphan sweeps compare an unreferenced object's store mtime against a grace in
+    # Postgres, so the listing must carry LastModified and honour an arbitrary caller prefix.
+    client = _MtimeListClient(_mtime_pages())
+    store = ObjectStore(client, "bucket")
+    assert store.list_prefix_with_mtime("local/runs/") == [
+        ObjectListing(key="local/runs/r1/kernel", last_modified=datetime(2026, 1, 1, tzinfo=UTC)),
+        ObjectListing(key="local/runs/r1/stray", last_modified=datetime(2026, 1, 2, tzinfo=UTC)),
+    ]
+    assert client.prefixes == ["local/runs/"]
+
+
+def test_list_image_objects_delegates_to_the_image_prefix() -> None:
+    # The ImageSweepStore port stays prefix-free on purpose: an image sweep must not gain the
+    # authority to list an arbitrary prefix, so the prefix is bound here rather than passed in.
+    client = _MtimeListClient(_mtime_pages())
+    store = ObjectStore(client, "bucket")
+    assert len(store.list_image_objects()) == 2
+    assert client.prefixes == ["images/"]
+
+
+def test_list_prefix_with_mtime_maps_transport_error_to_infrastructure_failure() -> None:
+    store = ObjectStore(_FailingListClient(), "bucket")
+    with pytest.raises(CategorizedError) as excinfo:
+        store.list_prefix_with_mtime("local/runs/")
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
