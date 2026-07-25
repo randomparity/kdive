@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from psycopg import sql
 
 from kdive.db.locks import (
     CONSOLE_HOSTING_LEADER,
@@ -18,8 +17,8 @@ from kdive.db.locks import (
     advisory_xact_lock,
     session_advisory_lock_held,
 )
+from tests.db import conftest as db_conftest
 from tests.db_waits import wait_until_backend_waiting, wait_until_session_lock_released
-from tests.support.xdist_backend import with_database_name
 
 _KEY = UUID("11111111-1111-1111-1111-111111111111")
 
@@ -392,14 +391,14 @@ def test_session_advisory_lock_held_ignores_a_holder_in_another_database(
     mis-report is what the suite's own topology triggers: one shared Postgres container
     with a database per xdist worker, several of which claim CONSOLE_HOSTING_LEADER.
     """
-    other_db = f"kdive_test_other_db_{uuid4().hex[:12]}"
-    admin_url = with_database_name(postgres_url, "postgres")
+    other_db = f"kdive_test_other_{uuid4().hex[:12]}"
+    # Provisioned through the conftest helpers so this database is created, reclaimed and
+    # dropped by the same rules as every other test database (ADR-0401).
+    other_url, _ = db_conftest._provision_worker_db(postgres_url, dbname=other_db)
 
     async def _run() -> None:
         async with (
-            await psycopg.AsyncConnection.connect(
-                with_database_name(postgres_url, other_db), autocommit=True
-            ) as elsewhere,
+            await psycopg.AsyncConnection.connect(other_url, autocommit=True) as elsewhere,
             await psycopg.AsyncConnection.connect(postgres_url, autocommit=True) as observer,
         ):
             # Hold the key here first, so the other database's acquire proves genuine
@@ -413,12 +412,7 @@ def test_session_advisory_lock_held_ignores_a_holder_in_another_database(
             await here.release()
             assert await session_advisory_lock_held(observer, CONSOLE_HOSTING_LEADER) is False
 
-    with psycopg.connect(admin_url, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(other_db)))
     try:
         asyncio.run(_run())
     finally:
-        with psycopg.connect(admin_url, autocommit=True) as admin:
-            admin.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(other_db))
-            )
+        db_conftest._drop_worker_db(postgres_url, other_db)
