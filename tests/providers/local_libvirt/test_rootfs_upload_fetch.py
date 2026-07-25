@@ -459,13 +459,34 @@ def test_stage_identity_precheck_rejects_an_object_that_cannot_fit(
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert str(len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES) in str(error.value)
     assert str(len(_QCOW2) - 1) in str(error.value)
-    assert error.value.details["required_bytes"] == len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES
-    assert error.value.details["free_bytes"] == len(_QCOW2) - 1
     assert "does not fit at all" in str(error.value)
     assert store.stream_calls == 0  # refused before the download, not after it
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
     assert measured == [tmp_path]  # the directory the base lands in
+
+
+def test_stage_precheck_details_decompose_the_figures_the_message_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `details` is what a dashboard, a triage script, or an agent reads instead of the English --
+    # the worker copies these scalars into the job's `failure_context`. A bare "needs N, has M"
+    # would re-derive exactly the misattribution the split message exists to remove, since N folds
+    # the 1 GiB floor into what reads as the object's size. Every figure in the prose has a key,
+    # and the `reason` slug must agree with the branch the prose took.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=len(_QCOW2) - 1)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    details = error.value.details
+    assert details["base_bytes"] == len(_QCOW2)  # the object, NOT the object plus the floor
+    assert details["floor_bytes"] == _STAGING_FREE_SPACE_MARGIN_BYTES
+    assert details["needed_bytes"] == len(_QCOW2) + _STAGING_FREE_SPACE_MARGIN_BYTES
+    assert details["free_bytes"] == len(_QCOW2) - 1
+    assert details["reason"] == "base_does_not_fit"
+    assert details["budget_source"] == "object_size"  # an exact size, not a declared bound
 
 
 def test_stage_precheck_requires_headroom_beyond_the_base_itself(
@@ -501,6 +522,67 @@ def test_stage_precheck_says_which_of_the_two_conditions_refused_the_stage(
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
     assert "the base itself fits; it is the floor that would be breached" in str(error.value)
     assert "does not fit at all" not in str(error.value)
+    assert error.value.details["reason"] == "floor_breached"  # the slug tracks the prose branch
+
+
+def test_stage_gzip_precheck_says_its_figure_is_a_declared_bound_not_a_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing checks `uncompressed_size` against the real decompressed length: the declaration
+    # validator enforces only "positive, under the 50 GiB cap", `strip_gzip_to_writer` accepts less
+    # than the bound, and the agent-facing schema calls it "the gzip-bomb bound" -- language that
+    # invites rounding it up, since over-stating a bomb bound is safe everywhere else. Over-
+    # reserving is free for a reservation and NOT free for a refusal, so an agent that declared
+    # 40 GiB for a 2 GiB image must not be told the host is out of disk with no hint of why.
+    canonical = _QCOW2 + b"\x00" * 4096
+    compressed = gzip.compress(canonical)
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+    overstated = 40 * 1024**3
+    _pin_free_space(monkeypatch, free=8 * 1024**3)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=overstated)
+
+    assert error.value.details["budget_source"] == "uncompressed_size_bound"
+    assert error.value.details["base_bytes"] == overstated
+    assert "declared uncompressed_size upper bound rather than a measured size" in str(error.value)
+    assert "re-declare the upload with the real decompressed size" in str(error.value)
+
+
+def test_stage_identity_precheck_does_not_blame_a_declaration_it_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The converse of the test above: the identity figure IS a measurement (the object's stored
+    # size), so telling the operator to re-declare it would send them after a field the declaration
+    # validator rejects outright on this path.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=0)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert "uncompressed_size" not in str(error.value)
+
+
+def test_stage_precheck_logs_the_refusal_on_the_host_that_must_act_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The remedy is entirely host-side, but the raised error reaches an operator only as one more
+    # INFRASTRUCTURE_FAILURE among many -- so without a log line, someone watching a filling volume
+    # cannot tell "provisions are being refused for capacity" from any other infra fault without
+    # pulling each job's failure_context back through MCP.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=0)
+
+    with (
+        caplog.at_level(logging.WARNING, logger=rootfs_upload_fetch.__name__),
+        pytest.raises(CategorizedError),
+    ):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert "refusing to stage an uploaded rootfs" in caplog.text
+    assert str(tmp_path) in caplog.text
+    assert "base_does_not_fit" in caplog.text
 
 
 def test_stage_precheck_reports_free_space_as_the_figure_df_shows(
@@ -571,6 +653,24 @@ def test_stage_precheck_defers_to_the_declaration_error_when_the_size_is_unknowa
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "uncompressed_size" in str(error.value)
+
+
+def test_stage_precheck_defers_to_the_declaration_error_for_an_unsupported_codec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same "no knowable requirement" rule as the gzip case above, on the branch an agent reaches
+    # by declaring a codec nothing implements. Free space is pinned to zero so a budget derived from
+    # the stored size -- the tempting fallback -- would refuse here and mask the codec error, which
+    # is the one an agent can act on. The module's ample-space fixture would hide that regression,
+    # so the pin is what makes this branch's contract enforceable at all.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    _pin_free_space(monkeypatch, free=0)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="zstd", uncompressed_size=999)
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert "unsupported transport encoding" in str(error.value)
 
 
 def test_stage_precheck_stages_anyway_when_the_filesystem_cannot_be_measured(
@@ -919,6 +1019,28 @@ def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> Non
 
 
 # --- fetch_uploaded_rootfs: the reuse fast path re-verifies before handing a base back (#1526) ---
+
+
+def test_fetch_reuses_a_staged_base_without_consulting_free_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0450 claims the precheck "does not run on the reuse fast path at all", which is what keeps
+    # a per-System provision hot path free of a `statvfs` and -- far more important -- keeps a full
+    # volume from blocking Systems that need no space, because the base they want is already staged.
+    # A volume with zero bytes free must still serve the reuse hit.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_QCOW2)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    measured = _pin_free_space(monkeypatch, free=0)
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result == dest and result.read_bytes() == _QCOW2
+    assert store.stream_calls == 0  # nothing was staged, so nothing needed space
+    assert measured == []  # and the filesystem was never even asked
 
 
 @pytest.mark.parametrize(

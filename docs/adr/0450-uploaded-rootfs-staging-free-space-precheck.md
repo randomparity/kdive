@@ -56,9 +56,22 @@ leaves no file, no lock, and no stream open.
 - **gzip.** The stored object is read through ranged GETs and never lands on disk; what occupies
   the filesystem is the *decompressed* output. Its budget is `uncompressed_size`, which ADR-0443
   establishes is an upper **bound** rather than a size — `strip_gzip_to_writer` caps decompression
-  there and accepts less. Budgeting it therefore over-reserves at worst, which is the safe
-  direction. Budgeting `head.size_bytes` here would *under*-reserve by the whole compression ratio
-  and is the specific mistake this section exists to prevent.
+  there and accepts less. Budgeting `head.size_bytes` here would *under*-reserve by the whole
+  compression ratio and is the specific mistake this section exists to prevent.
+
+  **"Over-reserves at worst, which is the safe direction" does not hold unqualified for a gate that
+  refuses.** Nothing validates the declared bound against reality: ADR-0437's validator enforces
+  only "positive integer, under the 50 GiB cap", `_stage_gzip` discards the byte count
+  `strip_gzip_to_writer` returns, and the agent-facing schema calls the field "the gzip-bomb bound"
+  — language that invites rounding it up, since over-stating a bomb bound is the safe direction
+  everywhere else in the system. An agent that declares 40 GiB for a 2 GiB image is then refused on
+  a host with plenty of disk, told to free space, and (§5) dead-letters. Refusing is still correct
+  — the bound is the only figure available, and honouring an under-stated one is the failure this
+  guard exists to prevent — but the refusal must not attribute a declaration fault to host capacity
+  silently. So the budget carries its provenance (`_StagingBudget.source`), the message names the
+  figure as the declared bound and says to re-declare if it was rounded up, and `details` surfaces
+  `budget_source`. The identity path says none of this, because its figure is a measurement and
+  `uncompressed_size` is rejected outright on that path.
 - **Neither.** A gzip declaration carrying no `uncompressed_size` has no knowable requirement. The
   check is skipped rather than falling back to the stored size — that fallback is precisely the
   under-reservation above — and `_stage_gzip`'s existing `CONFIGURATION_ERROR` ("re-declare with
@@ -153,6 +166,20 @@ those blocks exist to keep a full volume usable, which is the same thing this gu
 error text says which figure it is, so an operator can reconcile it with the shell rather than
 seeing a number that appears to contradict `df`.
 
+The same decomposition goes into `details`, not only into the prose: `base_bytes`, `floor_bytes`,
+`needed_bytes`, `free_bytes`, `budget_source`, and a `reason` slug (`base_does_not_fit` /
+`floor_breached`) derived from the same predicate the prose branches on. `jobs/worker.py`'s
+`_failure_context` copies these scalars into the job row, so a dashboard, a triage script, or an
+agent reading `details` rather than parsing English would otherwise see only "needs N, has M" — and
+re-derive exactly the misattribution the split message was written to remove, since N folds the
+1 GiB floor into what reads as the object's size.
+
+The refusal also logs one `WARNING` on the host before it raises. Every other notable outcome in
+this module logs, and this is the one whose remedy is entirely host-side; the raised error reaches
+an operator only as one more `INFRASTRUCTURE_FAILURE` in `record_job_failure`, so without the line
+someone watching a filling volume cannot distinguish "provisions are being refused for capacity"
+from any other infrastructure fault without pulling each job's `failure_context` back through MCP.
+
 ### 7. A `statvfs` that itself faults degrades to staging, loudly
 
 `EACCES` under the worker/staging-user asymmetry ADR-0442 documents in this same subsystem, a
@@ -174,10 +201,12 @@ safety at all, since the write stays guarded by the real ENOSPC either way.
 - A provision job's three attempts are consumed in milliseconds rather than over three downloads,
   so the job dead-letters and the provision is re-issued rather than retried into freed space (§5).
 - The gzip path over-reserves by the gap between `uncompressed_size` and the actual decompressed
-  length. That is the safe direction and the only one available, since the exact length is not
-  known until the decode finishes.
-- One `statvfs` per staged base. Negligible against a multi-GiB download, and it does not run on
-  the reuse fast path at all — the caller returns a present, verified base before reaching here.
+  length — the only figure available, since the exact length is not known until the decode
+  finishes. An over-stated declaration is refused on a host with disk to spare; §2 is why that is
+  accepted and how the refusal says so rather than blaming capacity.
+- One `statvfs` per staged base, and one `WARNING` per refusal. Negligible against a multi-GiB
+  download, and neither runs on the reuse fast path — the caller returns a present, verified base
+  before reaching here, so a full volume still serves every System whose base is already staged.
 - The module imports `disk_usage` from `shutil` rather than importing `shutil`, so a test's
   monkeypatch is scoped to this module instead of replacing `shutil.disk_usage` process-wide. An
   autouse fixture pins ample free space for the whole test module, so the three dozen staging tests

@@ -557,18 +557,51 @@ def _swept_partial_error(partial: Path, *, window: str) -> OSError:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _StagingBudget:
+    """The bytes a stage will occupy, and where that figure came from.
+
+    The provenance is load-bearing rather than diagnostic colour. On the identity path the figure is
+    the stored object's **exact** size. On the gzip path it is the agent's declared
+    ``uncompressed_size``, which nothing validates against the real decompressed length: ADR-0437's
+    validator enforces only "positive integer, under the 50 GiB cap", ``strip_gzip_to_writer``
+    accepts less than the bound without complaint, and the agent-facing schema calls the field "the
+    gzip-bomb bound" — language that positively invites rounding it up, because over-stating a bomb
+    bound is the safe direction everywhere else in the system. Over-reserving is free for a
+    *reservation* and is not free for a *refusal*, so an over-stated declaration must not be
+    reported as a host that is out of disk with no hint of where the number came from (ADR-0450 §2).
+    """
+
+    required: int
+    source: str
+
+
+#: The provenance of a :class:`_StagingBudget`, and the ``budget_source`` detail it surfaces.
+_OBJECT_SIZE = "object_size"
+_UNCOMPRESSED_SIZE_BOUND = "uncompressed_size_bound"
+
+#: Which of the two conditions refused a stage. Slugs rather than only prose because the structured
+#: ``details`` reach a dashboard or a triage script that never sees the message, and "needs N, has
+#: M" alone re-derives exactly the misattribution the split message exists to prevent.
+_BASE_DOES_NOT_FIT = "base_does_not_fit"
+_FLOOR_BREACHED = "floor_breached"
+_SHORTFALL_PROSE = {
+    _BASE_DOES_NOT_FIT: "the base does not fit at all",
+    _FLOOR_BREACHED: "the base itself fits; it is the floor that would be breached",
+}
+
+
 def _required_staging_bytes(
     effective: str | None, *, object_size: int, uncompressed_size: int | None
-) -> int | None:
-    """How many bytes the staged base will occupy, or ``None`` when that is not knowable up front.
+) -> _StagingBudget | None:
+    """The staged base's budget, or ``None`` when the occupied size is not knowable up front.
 
-    Identity stages the stored object verbatim, so its size is **exact**. The gzip path never writes
-    the stored object at all — it is read through ranged GETs — and what lands on disk is the
+    Identity stages the stored object verbatim, so its size is exact. The gzip path never writes the
+    stored object at all — it is read through ranged GETs — and what lands on disk is the
     *decompressed* output, which the stored size understates by the whole compression ratio. Its
-    budget is therefore ``uncompressed_size``, the declared **upper bound** on that output
-    (``strip_gzip_to_writer`` caps decompression there and accepts less), so budgeting it
-    over-reserves at worst — the safe direction for a precheck, and the reason this is not "the
-    size" on either path in the same sense.
+    budget is therefore ``uncompressed_size``, the declared upper bound on that output; budgeting
+    the stored size instead would under-reserve by exactly the compression ratio. What that bound
+    costs when it is over-stated is :class:`_StagingBudget`'s subject.
 
     A gzip declaration carrying no ``uncompressed_size`` has no knowable requirement, and returns
     ``None`` rather than falling back to the stored size — that fallback would under-reserve by
@@ -578,13 +611,15 @@ def _required_staging_bytes(
     ``None`` is likewise returned for an unsupported codec, whose own rejection is the right one.
     """
     if effective is None:
-        return object_size
-    if effective == GZIP_ENCODING:
-        return uncompressed_size
+        return _StagingBudget(object_size, _OBJECT_SIZE)
+    if effective == GZIP_ENCODING and uncompressed_size is not None:
+        return _StagingBudget(uncompressed_size, _UNCOMPRESSED_SIZE_BOUND)
     return None
 
 
-def _require_staging_free_space(dest: Path, *, required: int | None, system_id: UUID) -> None:
+def _require_staging_free_space(
+    dest: Path, *, budget: _StagingBudget | None, system_id: UUID
+) -> None:
     """Refuse a stage the staging filesystem plainly cannot hold, before the first byte (ADR-0450).
 
     Since the identity path started streaming (#1520) a **rejected** object — a failed checksum, a
@@ -609,7 +644,7 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
     its ``INFRASTRUCTURE_FAILURE`` category deliberately: splitting them would make an agent's
     handling of one physical condition depend on which side of a race window it was observed from.
 
-    ``required`` is ``None`` when the staged size is not knowable (see
+    ``budget`` is ``None`` when the staged size is not knowable (see
     :func:`_required_staging_bytes`); there is nothing to compare against, so the check is skipped
     rather than guessed at, and the codec's own declaration error carries the failure.
 
@@ -637,7 +672,7 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
             finishing or the reclaim sweep can free space between attempts, so a retry is not
             provably useless.
     """
-    if required is None:
+    if budget is None:
         return
     try:
         free = disk_usage(dest.parent).free
@@ -650,38 +685,72 @@ def _require_staging_free_space(dest: Path, *, required: int | None, system_id: 
             err.strerror,
         )
         return
-    needed = required + _STAGING_FREE_SPACE_MARGIN_BYTES
+    needed = budget.required + _STAGING_FREE_SPACE_MARGIN_BYTES
     if free >= needed:
         return
+    reason = _BASE_DOES_NOT_FIT if free < budget.required else _FLOOR_BREACHED
+    # Logged as well as raised, unlike every other refusal in this module, because this one's whole
+    # remedy is host-side. The raised error reaches the operator only as one more
+    # `INFRASTRUCTURE_FAILURE` among many in `record_job_failure`, so without this an operator
+    # watching a filling volume cannot tell "provisions are being refused for capacity" from any
+    # other infrastructure fault without pulling each job's failure_context back through MCP.
+    _log.warning(
+        "refusing to stage an uploaded rootfs under %s: it needs %d bytes free (%d for the base, "
+        "from %s, plus a %d-byte floor) and only %d are available — %s",
+        dest.parent,
+        needed,
+        budget.required,
+        budget.source,
+        _STAGING_FREE_SPACE_MARGIN_BYTES,
+        free,
+        reason,
+    )
     raise CategorizedError(
-        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: staging needs "
-        f"{needed} bytes free ({required} for the base, plus a "
-        f"{_STAGING_FREE_SPACE_MARGIN_BYTES}-byte floor kdive keeps for the running Systems whose "
-        f"overlays share this volume) and only {free} are available — "
-        f"{_shortfall_reason(required=required, free=free)}. That figure is the "
-        f"unprivileged-available space on the filesystem holding {str(dest.parent)!r} (df's Avail "
-        "column, which excludes the reserved blocks); free space there and re-issue the provision",
+        _shortfall_message(dest, budget=budget, free=free, needed=needed, reason=reason),
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={
             "system_id": str(system_id),
             "dest": str(dest),
-            "required_bytes": needed,
+            "needed_bytes": needed,
+            "base_bytes": budget.required,
+            "floor_bytes": _STAGING_FREE_SPACE_MARGIN_BYTES,
             "free_bytes": free,
+            "budget_source": budget.source,
+            "reason": reason,
         },
     )
 
 
-def _shortfall_reason(*, required: int, free: int) -> str:
-    """Which of the two conditions refused the stage — an operator acts on them differently.
+def _shortfall_message(
+    dest: Path, *, budget: _StagingBudget, free: int, needed: int, reason: str
+) -> str:
+    """The refusal text, naming which condition fired and where each of its two figures came from.
 
-    Reported separately because the fixed floor means most refusals are *not* "your object is too
-    big": stage a 20 MiB base onto a volume with 900 MiB free and a message claiming the write
+    The condition is reported because the fixed floor means most refusals are *not* "your object is
+    too big": stage a 20 MiB base onto a volume with 900 MiB free and a message claiming the write
     would fill the volume is simply false — it would leave 880 MiB — while pointing the operator at
     the upload instead of at the volume-wide floor that actually fired.
+
+    The base figure's provenance is reported on the gzip path for the reason :class:`_StagingBudget`
+    gives: nothing checks the declared bound against the real decompressed size, so an agent that
+    rounded it up is refused as though the host were full. Without this sentence that refusal names
+    a host-side remedy for a declaration fault and the real cause is surfaced nowhere.
     """
-    if free < required:
-        return "the base does not fit at all"
-    return "the base itself fits; it is the floor that would be breached"
+    provenance = (
+        " That base figure is the declared uncompressed_size upper bound rather than a measured "
+        "size; if it was rounded up, re-declare the upload with the real decompressed size."
+        if budget.source == _UNCOMPRESSED_SIZE_BOUND
+        else ""
+    )
+    return (
+        f"not enough free space to stage the uploaded rootfs at {str(dest)!r}: staging needs "
+        f"{needed} bytes free ({budget.required} for the base, plus a "
+        f"{_STAGING_FREE_SPACE_MARGIN_BYTES}-byte floor kdive keeps for the running Systems whose "
+        f"overlays share this volume) and only {free} are available — {_SHORTFALL_PROSE[reason]}. "
+        f"The available figure is the unprivileged-available space on the filesystem holding "
+        f"{str(dest.parent)!r} (df's Avail column, which excludes the reserved blocks); free space "
+        f"there and re-issue the provision.{provenance}"
+    )
 
 
 def stage_uploaded_rootfs(
@@ -728,14 +797,14 @@ def stage_uploaded_rootfs(
         )
     partial = dest.parent / f"{dest.stem}.{uuid4().hex}.partial"
     effective = normalize_encoding(encoding)
-    required = _required_staging_bytes(
+    budget = _required_staging_bytes(
         effective, object_size=head.size_bytes, uncompressed_size=uncompressed_size
     )
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         # After the mkdir (there is no filesystem to measure until the staging directory exists)
         # and before the partial is created, so a refused stage leaves nothing at all behind.
-        _require_staging_free_space(dest, required=required, system_id=system_id)
+        _require_staging_free_space(dest, budget=budget, system_id=system_id)
         with _flocked_partial(partial) as guard_fd:
             if effective is None:
                 _stage_identity(
