@@ -159,11 +159,12 @@ def fetch_uploaded_rootfs(
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
     if _reusable_staged_base(dest, system_id=upload.system_id):
         return dest
-    if dest.exists():
-        # The signal this change exists to produce. A base that is present but does not re-pass the
-        # format gate is the durability bug firing (or a base corrupted by some other means), and
-        # it is otherwise invisible: the re-stage below succeeds, so no error is ever raised and the
-        # only symptom is a provision that took a multi-GiB download longer than it should have.
+    # The signal this change exists to produce. A base that is present but does not re-pass the
+    # format gate is the durability bug firing (or a base corrupted by some other means), and it is
+    # otherwise invisible: the re-stage below succeeds, so no error is ever raised and the only
+    # symptom is a provision that took a multi-GiB download longer than it should have.
+    stale_on_arrival = dest.exists()
+    if stale_on_arrival:
         _log.warning(
             "staged rootfs base at %s did not re-pass the qcow2 format gate; re-staging it "
             "(investigation=%s system=%s)",
@@ -176,10 +177,12 @@ def fetch_uploaded_rootfs(
     try:
         if _reusable_staged_base(dest, system_id=upload.system_id):
             return dest  # a sibling fetcher finished while we waited on the lock
-        if dest.exists():
-            # Distinct from the pre-lock line above: something appeared at ``dest`` *while we
-            # waited*, which means a sibling fetcher just published a base that does not verify —
-            # a materially louder signal than finding a stale one on arrival.
+        if dest.exists() and not stale_on_arrival:
+            # Gated on ``stale_on_arrival`` because nothing between the two checks repairs ``dest``:
+            # without it, the ordinary stale-base rejection would emit this line too and assert a
+            # racing sibling that never existed. Reaching it means ``dest`` really did appear *while
+            # we waited* — a sibling just published a base that does not verify, which is a
+            # materially louder condition than finding a stale one on arrival.
             _log.warning(
                 "a sibling published a staged rootfs base at %s that does not re-pass the qcow2 "
                 "format gate; re-staging it (investigation=%s system=%s)",
@@ -449,9 +452,9 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     so an equality gate would false-reject a good base and re-download it on every provision.
 
     A base corrupted only in its interior therefore still passes here. That residue is why the
-    write side syncs (:func:`_durable_partial_writer`) rather than relying on this gate: the sync
-    removes the crash window that produces such a base, and this gate is the net for one staged by
-    code that predates it, or corrupted by some other means.
+    write side syncs (:func:`_durable_replace`) rather than relying on this gate: the sync removes
+    the crash window that produces such a base, and this gate is the net for one staged by code that
+    predates it, or corrupted by some other means.
 
     Only the errors that mean *there is no usable base at this path* — it is absent, or a
     non-directory sits on its parent path, or a directory sits on its own — read as not reusable,
@@ -467,7 +470,25 @@ def _reusable_staged_base(dest: Path, *, system_id: UUID) -> bool:
     except FileNotFoundError, NotADirectoryError, IsADirectoryError:
         return False
     except OSError as err:
-        raise _staging_fault(dest, err, system_id=str(system_id)) from err
+        raise _unreadable_base_fault(dest, err, system_id=str(system_id)) from err
+
+
+def _unreadable_base_fault(dest: Path, err: OSError, *, system_id: str) -> CategorizedError:
+    """The ``INFRASTRUCTURE_FAILURE`` for a staged base that is present but cannot be read.
+
+    Deliberately *not* :func:`_staging_fault`. Nothing is being staged on this path — no lock taken,
+    no object HEADed, no stream opened — so "failed to stage the uploaded rootfs" would point an
+    operator at the download and the object store. The likeliest trigger is the worker/staging-user
+    permission asymmetry ADR-0442 documents in this same subsystem, where the actionable fix is the
+    ownership of a file that is already present and probably intact.
+    """
+    return CategorizedError(
+        f"the staged uploaded rootfs base at {str(dest)!r} is present but could not be read "
+        f"({err.strerror}); it is not treated as a cache miss, because silently re-downloading it "
+        "would supersede a base that may still be backing running guests",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"system_id": system_id, "dest": str(dest)},
+    )
 
 
 def _fsync_path(path: Path, flags: int) -> None:

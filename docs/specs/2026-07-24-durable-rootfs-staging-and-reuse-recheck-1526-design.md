@@ -89,8 +89,15 @@ reachable and none of them means the base is corrupt.
 
 The module gains `_log = logging.getLogger(__name__)` (the package convention) and each rejection
 site emits a `WARNING` naming `dest`, the investigation, and the System. The re-stage succeeds, so
-the log line is the *only* evidence the durability bug ever fired. The pre-lock and post-lock sites
-log distinguishably: the latter means a sibling just published something unverifiable.
+the log line is the *only* evidence the durability bug ever fired.
+
+The post-lock site is gated on `not stale_on_arrival` — the pre-lock `dest.exists()`. Nothing
+between the two checks repairs `dest`, so an ungated sibling-attributed line would fire on every
+ordinary stale-base rejection and blame a race that never happened. The re-verification runs
+unconditionally on both sides; only the attribution is gated.
+
+The reuse-read fault (`_unreadable_base_fault`) is separate from `_staging_fault`: nothing is being
+staged, so the message names a present-but-unreadable file rather than a failed download.
 
 The magic read is a 4-byte read (R4) and is exactly what the staging path already asserted about
 the same bytes, so it cannot false-reject a base this code produced (R5).
@@ -119,6 +126,8 @@ Two alternatives are ruled out by the data rather than by preference:
 - **AC-5** — The reuse check reads a bounded number of bytes of the base, not the whole file.
 - **AC-6** — A valid present base is still a cache hit that takes neither the lock nor the store.
 - **AC-7** — A present base the probe cannot read (`EACCES`) raises `INFRASTRUCTURE_FAILURE` naming
-  `dest`, attempts no download, and leaves the base untouched.
-- **AC-8** — Every reuse rejection emits a `WARNING` naming `dest`, and the post-lock site's line is
-  distinguishable from the pre-lock one.
+  `dest`, attempts no download, leaves the base untouched, and says it could not *read* the base
+  rather than that it failed to stage one.
+- **AC-8** — Every reuse rejection emits a `WARNING` naming `dest`. The sibling-attributed line is
+  emitted **only** when the base appeared during the lock wait, and never on an ordinary stale-base
+  rejection.
