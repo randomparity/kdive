@@ -61,8 +61,18 @@ async def enqueue(
 
     When ``recycle_terminal`` is set, a **terminal** (``failed`` or ``succeeded``) job for
     ``dedup_key`` is reset in place to a fresh ``queued`` attempt before the fetch:
-    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, **and the payload
-    overwritten with the newly-supplied one**. Overwriting the payload matters for a re-stage
+    ``attempt = 0``, lease/worker/failure cleared, ``result_ref`` cleared, ``created_at`` re-dated
+    to the recycle, **and the payload overwritten with the newly-supplied one**. Re-dating
+    ``created_at`` is what keeps the recycle fair (ADR-0447): :func:`dequeue` orders by
+    ``created_at`` and the reset ``attempt`` makes the row eligible again, so a job left at its
+    original creation would sort ahead of everything enqueued since and win every claim — a job
+    that keeps failing and keeps being recycled would head-of-line-block its lane. Re-dated, the
+    revived job takes its place at the back, which makes the recycle equivalent to the
+    delete-and-re-insert a caller would otherwise hand-roll (ADR-0442 §6). The cost is that
+    ``jobs.created_at`` means *when this attempt was queued*, not when the row was first
+    inserted; ``updated_at`` (trigger-maintained) and the audit trail carry change history, and
+    the worker's ``time_to_claim`` telemetry (``heartbeat_at - created_at``) is measuring queue
+    wait, so re-dating is what it wants. Overwriting the payload matters for a re-stage
     (ADR-0299): the new ``runs.install`` cmdline must reach the recycled job, otherwise it re-runs
     the prior cmdline. The failed case is the transient install/boot retry (ADR-0185); the succeeded
     case is the ledger-driven re-stage (the caller deletes the ``run_steps`` row first, so an absent
@@ -114,7 +124,7 @@ async def enqueue(
             await cur.execute(
                 "UPDATE jobs SET state = %s, payload = %s, attempt = 0, worker_id = NULL, "
                 "    lease_expires_at = NULL, heartbeat_at = NULL, error_category = NULL, "
-                "    result_ref = NULL, failure_context = '{}'::jsonb "
+                "    result_ref = NULL, failure_context = '{}'::jsonb, created_at = now() "
                 "WHERE dedup_key = %s AND state = ANY(%s)",
                 (
                     JobState.QUEUED.value,
@@ -162,6 +172,10 @@ async def dequeue(
     ``accepted_lanes`` is the worker's explicit dispatch boundary. A worker claims only
     queued/lapsed jobs whose persisted lane is in this set, so provider- or pool-specific
     workers do not acquire work they cannot execute.
+
+    ``ORDER BY created_at`` is FIFO over *when the attempt was queued*, not when the row was first
+    inserted: :func:`enqueue`'s ``recycle_terminal`` re-dates ``created_at`` (ADR-0447), so a
+    revived job queues behind the work admitted while it was settled instead of preempting it.
 
     Returns:
         The claimed :class:`Job`, or ``None`` when nothing is eligible for the accepted lanes.

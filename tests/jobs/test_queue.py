@@ -232,6 +232,46 @@ def test_enqueue_recycle_terminal_resets_failed_job(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
+def test_enqueue_recycle_terminal_does_not_preempt_newer_work(migrated_url: str) -> None:
+    # ADR-0447 (#1528): `dequeue` orders by `created_at`, so a recycle that left `created_at` at
+    # the original creation put the revived job ahead of everything enqueued since — and because
+    # the recycle also resets `attempt`, a job that kept failing kept winning the claim, blocking
+    # the lane head. A recycled job takes its place at the back of the lane instead.
+    async def _run() -> None:
+        async with await _connect(migrated_url) as conn:
+            stale = await _terminal_failed_job(conn, "dk-stale")
+            await conn.execute(
+                "UPDATE jobs SET created_at = now() - interval '1 hour' WHERE id = %s",
+                (stale.id,),
+            )
+
+            # Enqueued after the recycled job's *original* creation, before the recycle.
+            newer = await queue.enqueue(
+                conn, JobKind.INSTALL, _build_payload(), _AUTHORIZING, "dk-newer"
+            )
+
+            recycled = await queue.enqueue(
+                conn,
+                JobKind.INSTALL,
+                _build_payload(),
+                _AUTHORIZING,
+                "dk-stale",
+                recycle_terminal=True,
+            )
+            assert recycled.id == stale.id  # still reset in place, not replaced
+            assert recycled.created_at > newer.created_at  # re-dated to the recycle
+
+            first = await queue.dequeue(conn, "w-order")
+            assert first is not None
+            assert first.id == newer.id  # the newer job is not starved
+
+            second = await queue.dequeue(conn, "w-order")
+            assert second is not None
+            assert second.id == stale.id  # the recycled job still runs, just behind
+
+    asyncio.run(_run())
+
+
 def test_enqueue_recycle_terminal_preserves_in_flight(migrated_url: str) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:
