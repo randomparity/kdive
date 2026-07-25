@@ -19,6 +19,15 @@ if TYPE_CHECKING:
 HEARTBEAT_TICK_SECONDS = 1.0
 HEARTBEAT_STALE_SECONDS = 10.0
 
+# How long startup waits for the pool's first connection before giving up (ADR-0449).
+# Ten seconds sits in the gap between the two budgets that bound it: an order of magnitude
+# above the 1-second acquire budget `UsageTrackingMiddleware` uses, so a merely cold or
+# contended backend can no longer land inside it; and well under the Helm chart's liveness
+# budget (`initialDelaySeconds: 5` + 3 x `periodSeconds: 10` = 35s), so a genuinely
+# unreachable backend makes the process report its own failure rather than being killed
+# mid-open by a probe that cannot say why.
+POOL_OPEN_TIMEOUT_SECONDS = 10.0
+
 type ProbeBuilder = Callable[[AsyncConnectionPool], HealthProbe]
 type ProcessBody = Callable[[AsyncConnectionPool, Heartbeat, HealthProbe], Awaitable[None]]
 
@@ -39,8 +48,14 @@ async def run_process_runtime(
     from kdive.health.heartbeat import Heartbeat
 
     tasks: list[asyncio.Task[None]] = []
-    await pool.open()
     try:
+        # `wait=True` so the first connect completes here rather than in a background task
+        # (ADR-0449). `open()`'s default returns before any connection exists, which hands
+        # `body` a pool reporting zero available connections — and the server's
+        # `UsageTrackingMiddleware` acquires with a 1-second budget and swallows the
+        # resulting `PoolTimeout` into a WARNING, silently dropping the row (#1535, #1527).
+        # Inside the `try` so an unreachable backend still runs the teardown below.
+        await pool.open(wait=True, timeout=POOL_OPEN_TIMEOUT_SECONDS)
         heartbeat = Heartbeat(stale_after=heartbeat_stale_after)
         probe = probe_builder(pool)
         aux_host, aux_port = resolve_health_bind(process)

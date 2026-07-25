@@ -36,7 +36,10 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     events: list[str] = []
 
     class _FakePool:
-        async def open(self) -> None:
+        # Signature mirrors `AsyncConnectionPool.open`; the runtime warms the pool with
+        # `wait=True` at start (ADR-0449).
+        async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+            del wait, timeout
             events.append("open")
 
         async def close(self) -> None:

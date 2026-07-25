@@ -6,15 +6,21 @@ import asyncio
 from collections.abc import Callable
 
 import pytest
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from kdive.processes import runtime
+
+# A loopback port nothing listens on: connect is refused immediately, so the pool retries
+# until its open budget expires rather than hanging on an unroutable address.
+_UNREACHABLE_DB = "postgresql://kdive@127.0.0.1:1/kdive?connect_timeout=1"
 
 
 class FakePool:
     def __init__(self) -> None:
         self.events: list[str] = []
 
-    async def open(self) -> None:
+    async def open(self, wait: bool = False, timeout: float = 30.0) -> None:
+        del wait, timeout
         self.events.append("open")
 
     async def close(self) -> None:
@@ -72,6 +78,87 @@ def _probe_builder(expected_pool: FakePool) -> tuple[object, Callable[[object], 
         return probe
 
     return probe, build
+
+
+def test_runtime_body_receives_a_pool_with_a_live_connection(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body must never be handed a pool whose first connect is still pending (#1535).
+
+    ``AsyncConnectionPool.open()`` defaults to ``wait=False``: it returns before any
+    connection exists and leaves the first connect to a background task. The body it hands
+    that pool to builds the MCP app, whose ``UsageTrackingMiddleware`` acquires with a
+    1-second budget and swallows every failure (ADR-0148) — so a first connect that lands
+    inside that budget drops a ``tool_invocation`` row with only a WARNING.
+
+    Asserting on ``pool_available`` rather than replaying that race: it is deterministically
+    0 after a cold open and >= 1 after a warm one (#1527's evidence), so this pins the
+    condition itself instead of a timing window that only reproduces under load.
+    """
+
+    async def run() -> None:
+        harness = AuxHarness()
+        _install_aux_harness(monkeypatch, harness)
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        available: list[int] = []
+
+        async def body(body_pool: object, _heartbeat: object, _probe: object) -> None:
+            assert isinstance(body_pool, AsyncConnectionPool)
+            available.append(body_pool.get_stats()["pool_available"])
+
+        await runtime.run_process_runtime(
+            process="worker",
+            pool=pool,
+            secret_registry=FakeSecretRegistry(),  # ty: ignore[invalid-argument-type]
+            telemetry=FakeTelemetry(),  # ty: ignore[invalid-argument-type]
+            heartbeat_stale_after=5.0,
+            probe_builder=lambda _pool: object(),  # ty: ignore[invalid-argument-type]
+            body=body,
+        )
+
+        assert available and available[0] >= 1, "runtime opened the pool cold — see #1535"
+
+    asyncio.run(run())
+
+
+def test_runtime_unreachable_database_fails_before_the_body_and_still_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A database that never answers must end the process, not start a body it cannot serve.
+
+    This is the cost side of ADR-0449's fail-fast choice, so pin it: the open raises rather
+    than degrading, the body never runs, and the ``finally`` still clears the secret registry
+    — which only holds because the open moved *inside* the ``try``.
+    """
+
+    async def run() -> None:
+        harness = AuxHarness()
+        _install_aux_harness(monkeypatch, harness)
+        monkeypatch.setattr(runtime, "POOL_OPEN_TIMEOUT_SECONDS", 0.5)
+        registry = FakeSecretRegistry()
+        pool = AsyncConnectionPool(_UNREACHABLE_DB, min_size=1, max_size=2, open=False)
+        started = False
+
+        async def body(_pool: object, _heartbeat: object, _probe: object) -> None:
+            nonlocal started
+            started = True
+
+        with pytest.raises(PoolTimeout):
+            await runtime.run_process_runtime(
+                process="worker",
+                pool=pool,
+                secret_registry=registry,  # ty: ignore[invalid-argument-type]
+                telemetry=FakeTelemetry(),  # ty: ignore[invalid-argument-type]
+                heartbeat_stale_after=5.0,
+                probe_builder=lambda _pool: object(),  # ty: ignore[invalid-argument-type]
+                body=body,
+            )
+
+        assert not started
+        assert registry.cleared
+        assert not harness.started.is_set(), "aux listener started despite an unopened pool"
+
+    asyncio.run(run())
 
 
 def test_runtime_success_closes_clears_and_cancels_aux_task(

@@ -32,3 +32,23 @@ chart's README documents which values map to which keys and how the secret is mo
 
 The `migrate` Job runs the schema forward before the app workloads start, so the processes
 never reach the database ahead of the migration.
+
+## Startup and database reachability
+
+Each process waits up to ten seconds at start for its first database connection before it
+begins serving. If Postgres is unreachable it logs a `pool initialization incomplete`
+timeout and exits, so the pod restarts — a database outage surfaces as `CrashLoopBackOff`
+on all three Deployments rather than as pods that are Running and permanently not-Ready.
+Check the pod logs for that timeout before looking at the KDIVE processes themselves; the
+usual cause is the database, its credentials, or a NetworkPolicy, not the chart.
+
+Because Kubernetes backs a crash loop off to a five-minute ceiling, a pod can lag the
+database's own recovery by up to that long. `kubectl rollout restart` on the affected
+Deployment clears the backoff once Postgres is answering again.
+
+The ten-second wait is chosen to stay inside the chart's liveness budget
+(`initialDelaySeconds: 5`, `periodSeconds: 10` against `/livez`), so a failing process
+reports its own error rather than being killed by the probe. If you lower those probe
+values, keep the first probe later than the wait or the kubelet will kill a container that
+is merely starting slowly. The aux endpoints (`/livez`, `/readyz`, `/metrics`) come up
+after the pool opens, so they are unavailable for that window.
