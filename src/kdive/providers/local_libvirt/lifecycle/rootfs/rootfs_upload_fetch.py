@@ -85,6 +85,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     UploadFetch,
     staged_rootfs_path,
 )
+from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
 from kdive.store.objectstore import artifact_key, object_store_from_env
 
 _log = logging.getLogger(__name__)
@@ -360,93 +361,15 @@ def _unlink_orphan_partials(dest: Path) -> None:
     glob over the whole uploads dir.
 
     The ``suppress`` covers the directory walk only — every per-candidate fault is handled inside
-    :func:`_unlink_if_unheld`, so a single unsweepable file cannot truncate the pass.
+    :func:`~kdive.providers.shared.staging_partials.unlink_partial_if_unheld`, so a single
+    unsweepable file cannot truncate the pass. Its "held" answer is discarded here: this sweep is
+    opportunistic and bounded by the next fetch, so a skip needs no follow-up. The reclaim-side
+    backstop consumes it, because there the skip decides whether the investigation's drain marker
+    clears (ADR-0452 §4).
     """
     with suppress(OSError):
         for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
-            _unlink_if_unheld(orphan)
-
-
-def _unlink_if_unheld(orphan: Path) -> None:
-    """Unlink ``orphan`` unless a live fetcher holds its ``flock``; every skip is logged.
-
-    Three outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
-
-    *Held.* ``EWOULDBLOCK`` means a sibling is still writing this partial — which, by this change's
-    own reasoning, can only happen because this fetcher holds a fetch lock that a still-downloading
-    process believes it holds. The skip is the correct action and also the **only** externally
-    visible symptom of that lost session lock: its other consequence is a redundant multi-GiB
-    download that reads as ordinary slowness. It is logged for the same reason ADR-0443 §4 logs a
-    rejected base — the operation succeeds, so the log line is the only evidence it ever fired.
-
-    *Cannot evaluate.* Any other ``OSError`` — ``EACCES`` under a uid asymmetry of the shape
-    ADR-0442 documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest
-    exactly when many stagings are in flight), ``ENOLCK`` where the filesystem cannot lock at all —
-    is a **narrowing** of the unconditional ``unlink`` this replaces, which needed only write and
-    execute on the *directory* and no permission on the file. Those orphans are left to the reclaim
-    backstop rather than unlinked blind, because a partial this process cannot even open is one it
-    cannot show is dead, and unlinking it anyway is the bug being fixed. ``WARNING``, because
-    ``ENOLCK`` would otherwise silently retire the opportunistic sweep altogether.
-
-    *Absent.* A candidate that vanishes between the glob and the ``open`` is the achieved
-    post-state, not a fault — the reclaim-side backstop sweeps the same directory.
-
-    ``O_NONBLOCK`` is a no-op on a regular file and is there for the reason ADR-0443 §2 checks
-    ``S_ISREG`` before opening ``dest``: opening a FIFO for reading blocks until a writer appears,
-    and this sweep runs *holding* the fetch advisory lock, so a hang would wedge every sibling
-    System on that (investigation, checksum). Nothing in kdive creates a non-regular file at a
-    ``.partial`` path — this must simply not acquire a way to hang that it did not have before.
-
-    Every fault is handled **per candidate**, including the ``unlink``'s own, so one unsweepable
-    file cannot abort the pass and leave the rest of that base's orphans uncollected.
-    """
-    try:
-        fd = os.open(orphan, os.O_RDONLY | os.O_NONBLOCK)
-    except FileNotFoundError:
-        return
-    except OSError as err:
-        _log.warning(
-            "could not open the staging partial %s to test whether a live fetcher holds it (%s); "
-            "leaving it for the investigation-reclaim sweep rather than unlinking it unchecked",
-            orphan,
-            err.strerror,
-        )
-        return
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            _log.warning(
-                "skipping the staging partial %s: a live fetcher still holds it, so this fetcher "
-                "acquired the rootfs fetch lock while a sibling was still downloading — its "
-                "Postgres session was lost mid-transfer, and this download is redundant",
-                orphan,
-            )
-            return
-        except OSError as err:
-            _log.warning(
-                "could not test whether a live fetcher holds the staging partial %s (%s); leaving "
-                "it for the investigation-reclaim sweep rather than unlinking it unchecked",
-                orphan,
-                err.strerror,
-            )
-            return
-        try:
-            orphan.unlink(missing_ok=True)
-        except OSError as err:
-            # The fourth outcome, and the one likeliest to matter: ``EPERM`` under a sticky-bit or
-            # foreign-uid staging directory — the ADR-0442 ownership asymmetry this same subsystem
-            # was bitten by — plus ``EROFS`` and ``EIO``. Handled per candidate so one bad file
-            # cannot abort the rest of the pass, which is what letting it reach the caller's
-            # ``suppress`` used to do.
-            _log.warning(
-                "could not unlink the staging partial %s (%s); leaving it for the "
-                "investigation-reclaim sweep",
-                orphan,
-                err.strerror,
-            )
-    finally:
-        os.close(fd)
+            unlink_partial_if_unheld(orphan)
 
 
 @contextmanager
@@ -518,12 +441,13 @@ def _require_still_linked(fd: int, partial: Path, *, window: str) -> None:
     Called twice, with a different ``window`` each time because the two mean different things to
     an operator — nothing can take a partial "between its creation and its lock" minutes after
     that lock succeeded. At creation it closes the two-syscall window ADR-0446 §3 describes.
-    After the download the causes are two, and neither is that window. First, the
-    :func:`_flocked_partial` degrade path, where the filesystem could not lock and so nothing kept a
-    sweeper out for the whole transfer — §5's symmetry argument (a sweeper there cannot lock either)
-    is evaluated at one instant and not maintained across minutes, and a recovering ``lockd``
-    falsifies it mid-download. Second, the reclaim-side backstop sweep, which is gated on nothing at
-    all and is the open #1544.
+    After the download the cause is one, and it is not that window: the :func:`_flocked_partial`
+    degrade path, where the filesystem could not lock and so nothing kept a sweeper out for the
+    whole transfer — §5's symmetry argument (a sweeper there cannot lock either) is evaluated at one
+    instant and not maintained across minutes, and a recovering ``lockd`` falsifies it mid-download.
+    Either sweep can then take the partial: the reclaim-side backstop was a *second, independent*
+    cause until ADR-0452 (#1544) gave it the same ``flock`` gate, and it is now reachable only
+    through this same degrade.
 
     The degrade path's outcome is then the pre-ADR-0446 one, which is the point of degrading rather
     than failing. What this adds is the diagnosis: without it the fetcher streams on and dies at
@@ -541,11 +465,12 @@ def _require_still_linked(fd: int, partial: Path, *, window: str) -> None:
 #: What took the partial, per call site. The two are materially different conditions and an operator
 #: acts on them differently, so the fault names the one that applies rather than one fixed string:
 #: the creation window is a sub-millisecond race, while the download window points at an unguarded
-#: stage or the reclaim-side backstop.
+#: stage. Both sweeps are ``flock``-gated since ADR-0452, so a *guarded* stage cannot reach the
+#: second at all and the message names the one remaining cause rather than listing a fixed one.
 _CREATION_WINDOW = "between its creation and its lock"
 _DOWNLOAD_WINDOW = (
-    "while it was being downloaded — this stage was unguarded (the filesystem could not flock), or "
-    "the investigation-reclaim backstop sweep took it (#1544)"
+    "while it was being downloaded — this stage was unguarded, because the filesystem could not "
+    "flock the partial (ADR-0446 §5)"
 )
 
 

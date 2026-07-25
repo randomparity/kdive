@@ -293,6 +293,15 @@ hang that it did not have before.
   fixed here because its file is #1539's and queued serially behind this one; the primitive it
   needs (`_unlink_if_unheld`) already exists. Recording the false invariant would have been worse
   than the gap, because it teaches the next reader exactly what this change disproved.
+
+  > *Resolved (#1544 / [ADR-0452](0452-flock-guarded-reclaim-staging-sweep.md)).* The reclaim-side
+  > sweep now runs the same gate. `_unlink_if_unheld` moved to
+  > `providers/shared/staging_partials.py` as `unlink_partial_if_unheld` — a job handler must not
+  > import a provider-private helper — and its held-branch `WARNING` dropped the fetch-side causal
+  > inference this ADR wrote into it ("its Postgres session was lost mid-transfer"), which is false
+  > at the new call site, for the observation. What remains open is not this sweep but the
+  > pin-dropping classification itself, and `_flocked_partial`'s `ENOLCK` degrade, under which
+  > neither sweep is gated at all.
 - No schema, no migration, no config setting, no new dependency (`fcntl` is stdlib), no MCP/RBAC
   surface. Not an AI surface.
 
