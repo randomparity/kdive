@@ -73,15 +73,27 @@ before its first byte. The category question is decided on what the failure *is*
 ## Reach of the convergence
 
 The gate order limits how far R1 actually reaches, and this is recorded rather than papered over.
-On the gzip path the hash comparison is the last gate; zlib's framing trips first. Probed against
-the implementation with a correct signed checksum and damaged stored bytes: deflate-body bit rot,
-trailer CRC/ISIZE bit rot, and post-PUT truncation all report `CONFIGURATION_ERROR`, and only
-header-confined damage (MTIME/XFL/OS) reaches `INFRASTRUCTURE_FAILURE`. The identity path reports
-all four as `INFRASTRUCTURE_FAILURE`.
+On the gzip path the hash comparison is the last gate; zlib's framing trips first. An exhaustive
+single-bit sweep of the deflate body of the residual test's fixture, with a correct signed
+checksum, splits three ways: 225/248 corrupt-stream (`zlib.error`), **13/248 the gzip-bomb
+bound**, 10/248 the checksum gate — content-dependent in the exact ratio, but the digest is
+always reached by a small minority.
+Trailer CRC/ISIZE rot and post-PUT truncation also report `CONFIGURATION_ERROR`. The identity path
+reports all of these as `INFRASTRUCTURE_FAILURE`.
 
-Closing that residual means consulting the digest before declaring an object defect, which changes
-the corrupt/truncated branch's category in a subset of cases — outside this issue's brief. **#1548**
-carries it; a test here pins the current behavior so the gap is not silent.
+What *does* reach the digest is damage leaving the decoded stream and framing intact: gzip header
+fields (MTIME/XFL/OS), deflate padding bits after the final end-of-block code, and a wholesale
+out-of-band replacement by a different well-formed gzip under the declared bound — so the
+"out-of-band overwrite" mode the problem statement names does converge.
+
+The bomb branch is the worst case: besides the category, its message blames the declared
+`uncompressed_size` when the declaration was right, and ADR-0450 reads that same field as the gzip
+path's free-space budget, so following the advice can get the next provision refused.
+
+Closing the residual means consulting the digest before declaring an object defect, which changes
+the bomb and corrupt/truncated branches' categories in a subset of cases — outside this issue's
+brief. **#1548** carries it; tests here pin both the `zlib.error` and bomb shapes so the gap is not
+silent.
 
 ## Requirements
 
@@ -164,10 +176,12 @@ checksum that does not match, both raise `INFRASTRUCTURE_FAILURE` carrying `syst
 nothing and leaving no `.partial`. Asserted as *one* parametrised claim over both codecs so that
 re-diverging the two paths cannot pass.
 
-Plus one test pinning the **limit**: a gzip object whose *stored bytes* are corrupted (a flipped
-bit in the deflate body, pristine declared checksum) still reports `CONFIGURATION_ERROR`, because
-zlib's framing trips before the digest is compared. Named as a known residual against #1548, so the
-gap is asserted rather than merely absent from the suite.
+Plus a test pinning the **limit**, parametrised over the two shapes body corruption reaches: a
+flipped bit that fails the deflate CRC, and one that desynchronises the Huffman decode into the
+gzip-bomb bound. Both keep a pristine declared checksum and both still report
+`CONFIGURATION_ERROR`, because zlib's framing and the output cap trip before the digest is
+compared. Named as a known residual against #1548, so the gap is asserted rather than merely absent
+from the suite.
 
 Mutation check: collapsing the split back to a single category must redden a test. Reverting the
 checksum branch to `CONFIGURATION_ERROR` reddens the mismatch tests on both files; widening

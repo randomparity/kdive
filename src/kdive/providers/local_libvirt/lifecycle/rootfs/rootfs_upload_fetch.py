@@ -917,7 +917,7 @@ def _stage_gzip(
     ``strip_gzip_to_writer`` is consumer-agnostic and raises with empty ``details``, so its errors
     are annotated with the ``system_id`` every other raise in this module carries — otherwise a
     gzip staging failure lands in the job row without the one field an operator pivots on to
-    correlate it to a System, while the byte-identical identity failure lands with it (ADR-0445 §3).
+    correlate it to a System, while the byte-identical identity failure lands with it (ADR-0445 §4).
     """
     if uncompressed_size is None:
         raise CategorizedError(

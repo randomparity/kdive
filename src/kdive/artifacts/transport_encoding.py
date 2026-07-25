@@ -98,11 +98,15 @@ def _transport_error(detail: str) -> CategorizedError:
     dead-letters on the first attempt under *either* category and nothing is re-downloaded. The
     retry this advises is the agent's own, against a System that is already terminally failed.
 
-    **Reach (ADR-0445 §5).** On this path the hash comparison is the *last* gate, and zlib's gzip
+    **Reach (ADR-0445 §6).** On this path the hash comparison is the *last* gate, and zlib's gzip
     framing catches most damage first: a flipped bit in the deflate body or the CRC/ISIZE trailer,
-    or a post-PUT truncation, raises :func:`_object_error` before the digest is ever compared. So
-    convergence with the identity path holds only for damage that leaves the gzip framing intact.
-    #1548 tracks closing that residual by consulting the digest before declaring an object defect.
+    or a post-PUT truncation, raises :func:`_object_error` before the digest is ever compared —
+    body corruption lands on the corrupt-stream branch or, in a content-dependent minority where it
+    desynchronises the Huffman decode, on the bomb bound, whose message then wrongly blames the
+    declared ``uncompressed_size``. What reaches the digest is damage leaving the decoded stream
+    and framing intact: header fields, deflate padding bits, or a wholesale replacement by another
+    well-formed gzip under the bound. #1548 tracks closing the residual by consulting the digest
+    before declaring an object defect.
     """
     return CategorizedError(detail, category=ErrorCategory.INFRASTRUCTURE_FAILURE)
 
@@ -123,9 +127,9 @@ def strip_gzip_to_writer(
     object (``CONFIGURATION_ERROR``, terminal), while a hash mismatch says the bytes read back are
     not the bytes signed at PUT (``INFRASTRUCTURE_FAILURE``, retryable — the same category the
     identity staging path and the catalog digest check use for it). Note the gate *order*: the hash
-    is compared last, after the framing checks, so damaged stored bytes that also break the gzip
-    framing report the object-defect category (ADR-0445 §5, residual tracked in #1548). The caller
-    owns atomic staging, so a raised error discards the partial output already written.
+    is compared last, after the framing and bound checks, so damaged stored bytes that also break
+    the gzip framing report the object-defect category (ADR-0445 §6, residual tracked in #1548).
+    The caller owns atomic staging, so a raised error discards the partial output already written.
 
     The raised errors carry no ``details``; a caller that has identifying context (the
     uploaded-rootfs fetch attaches its ``system_id``) annotates them on the way out.

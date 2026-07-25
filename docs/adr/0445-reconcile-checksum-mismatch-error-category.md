@@ -77,7 +77,7 @@ told by the message to re-upload. The second error is cheap and self-correcting;
 A third precedent already sat on this side: the catalog path (`images/rootfs/fetch.py`) raises
 `infrastructure_failure` when downloaded bytes do not match the registered row's digest. With this
 change, every *checksum-gate* rejection in the tree reports one category — subject to the reach
-limit §5 records, which is narrower than that sentence alone suggests.
+limit §6 records, which is narrower than that sentence alone suggests.
 
 The same principle was reached independently in ADR-0450 (#1525) for the staging free-space
 precheck: one physical condition should not report two categories depending on which side of a
@@ -110,7 +110,7 @@ damaged and must be re-uploaded. That is the honest rendering of two failure mod
 observation, and it is what the agent needs in order to act — the `retryable` flag alone cannot
 express "retry once, then re-upload".
 
-### 3. The gzip path attaches the caller's `system_id`
+### 4. The gzip path attaches the caller's `system_id`
 
 `strip_gzip_to_writer` is consumer-agnostic and raises with empty `details`, while every raise in
 the uploaded-rootfs fetch carries `details={"system_id": ...}` — the field `worker.py` lifts into
@@ -119,7 +119,7 @@ to a System. A gzip failure therefore landed with only a message where the byte-
 failure landed with the id. `_stage_gzip` annotates on the way out rather than the shared utility
 growing a consumer-specific field, which keeps the module's seam intact.
 
-### 4. Gate precedence is unchanged
+### 5. Gate precedence is unchanged
 
 ADR-0441 §5 and ADR-0438 §3 put the checksum comparison ahead of the qcow2-magic gate, so
 store-side corruption that also destroys the magic is reported as the checksum failure rather than
@@ -127,33 +127,55 @@ as a format failure. That ordering is untouched; only the category the checksum 
 changes on the gzip side. What changes downstream is that a corrupt object now surfaces as
 retryable rather than as a wrong-format `configuration_error` on either path.
 
-### 5. The convergence's reach is narrower than §1 alone reads
+### 6. The convergence's reach is narrower than §1 alone reads
 
-On the gzip path the hash comparison is the **last** gate, and zlib's own gzip framing trips
-first. Probed against the shipped code with a correct signed checksum and damaged stored bytes:
-deflate-body bit rot, trailer CRC/ISIZE bit rot, and post-PUT truncation all raise
-`_object_error` (`configuration_error`) before the digest is compared; only damage confined to the
-gzip header — MTIME/XFL/OS, some ten bytes of a multi-GiB object — reaches `_transport_error`. The
-identity path, having no framing to trip, reports every one of those as `infrastructure_failure`.
+On the gzip path the hash comparison is the **last** gate, and zlib's own framing trips first, so
+damaged stored bytes usually never reach it. An exhaustive single-bit sweep of the deflate body of
+the residual test's fixture, with a correct signed checksum, lands on three different branches:
 
-So the codec still decides the verdict for the dominant corruption shapes. §1 is the decision this
-ADR makes and is correct as far as the gate order lets it reach; it is **not** yet true that an
-agent gets the same advice regardless of codec for arbitrary damage.
+| branch reached | share | category |
+|---|---|---|
+| corrupt deflate stream (`zlib.error`) | 225/248 | `configuration_error` |
+| **gzip-bomb bound** (`_drain`'s output cap) | 13/248 | `configuration_error` |
+| transport checksum mismatch | 10/248 | `infrastructure_failure` |
+
+The exact split is a property of the object's content, not a constant — but the shape holds: the
+digest is reached by a small minority. Trailer CRC/ISIZE rot and post-PUT truncation likewise
+report `configuration_error`. The identity path, having no framing to trip, reports every one of
+these as `infrastructure_failure`. So the codec still decides the verdict for most damage. §1 is
+the decision this ADR makes and is correct as far as the gate order lets it reach; it is **not**
+yet true that an agent gets the same advice regardless of codec for arbitrary damage.
+
+What *does* reach the digest is damage that leaves the decoded stream and its framing intact: gzip
+header fields (MTIME/XFL/OS), deflate padding bits after the final end-of-block code (the 10/248
+above — a flip there decodes byte-identically, so only the digest catches it), and a wholesale
+out-of-band replacement of the key by a different well-formed gzip under the declared bound. That
+last is worth noting because §1 names an out-of-band overwrite as a motivating mode, and it *does*
+converge.
+
+The **bomb branch is the worst of the three**, and not only for its category. Its message reads
+"the object is not a valid gzip of that size (a gzip bomb or a wrong `uncompressed_size`);
+re-declare with the correct `uncompressed_size`" — affirmatively wrong advice when the declaration
+was right and the stored bytes rotted. It also compounds: ADR-0450 makes `uncompressed_size` the
+gzip path's free-space budget, so an agent that follows the advice and re-declares upward can have
+its next provision refused by the free-space precheck for a base the volume can hold. §3's whole
+bar is that the message says the right thing, and this is the one branch where it does not.
 
 Closing the residual means consulting the transport hash *before* declaring an object defect —
 those branches assert "the uploaded object is defective", a claim that is unfounded when the bytes
 read back are not the bytes signed at PUT. That follows from §2's own principle, and on the
-truncated branch it costs nothing (the hasher has already absorbed every stored byte). It is out of
-scope here only because it changes the corrupt/truncated branch's category in a subset of cases,
-which #1523's brief ruled out. **#1548** carries it, and
-`test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` pins the current behavior
-so the gap is visible rather than silent.
+truncated branch it costs nothing (the hasher has already absorbed every stored byte); the
+`zlib.error` and bomb branches need the remaining ranges drained hash-only first. It is out of
+scope here only because it changes the bomb and corrupt/truncated branches' categories in a subset
+of cases, which #1523's brief ruled out. **#1548** carries it, and
+`test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual` pins both the `zlib.error`
+and bomb shapes so the gap is visible rather than silent.
 
 ## Consequences
 
 - An agent that hits a rootfs checksum mismatch on a gzip-encoded upload is now told
   `retryable: true`, and gets the same advice it would have got identity-encoded **for damage that
-  leaves the gzip framing intact** (§5).
+  leaves the decoded stream and its framing intact** (§6).
 - No re-download is added. The provision handler marks a staging `CategorizedError` `terminal`, so
   the job dead-letters on the first attempt under either category; the change is to what the agent
   is told, not to how many times anything is fetched. `max_attempts` is untouched.

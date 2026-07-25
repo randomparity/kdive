@@ -251,26 +251,42 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
-def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(tmp_path: Path) -> None:
-    # ADR-0445 §5 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
+@pytest.mark.parametrize(
+    ("flip", "damage", "expected_message"),
+    # Two shapes of deflate-body damage reaching two different object-defect branches: byte 24 fails
+    # the deflate CRC, while one bit of byte 38 desynchronises the Huffman decode so the output cap
+    # trips first. Which branch fires is a property of the damage, not of anything the agent did.
+    # An exhaustive single-bit sweep of this fixture's deflate body splits 225 corrupt-stream / 13
+    # bomb bound / 10 checksum gate of 248 flips -- so the bomb branch is a real share of
+    # stored-byte corruption rather than a curiosity, and it is the shape whose message is
+    # affirmatively WRONG: it blames a declared uncompressed_size that was correct. ADR-0450 reads
+    # that same field as the gzip path's free-space budget, so an agent that follows the advice and
+    # re-declares upward can have its next provision refused for a base the volume can hold.
+    [(24, 0xFF, "corrupt"), (38, 0x01, "exceeds the declared uncompressed_size bound")],
+    ids=["deflate-crc", "bomb-bound"],
+)
+def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
+    tmp_path: Path, flip: int, damage: int, expected_message: str
+) -> None:
+    # ADR-0445 §6 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
     # silent. The test above declares a wrong checksum over a *well-formed* gzip, which reaches the
     # end-of-stream hash comparison. Damage the STORED BYTES instead and zlib's own framing trips
-    # first: the deflate CRC fails inside the decompress loop and the object-defect branch fires
-    # before the digest is ever compared. The identity path reports this same damage as
-    # INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the codec still decides the
-    # verdict here. #1523 could not close this — its brief forbade changing the corrupt-stream
-    # category — so #1548 carries it.
+    # first, so an object-defect branch fires before the digest is ever compared. The identity path
+    # reports this same damage as INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the
+    # codec still decides the verdict here. #1523 could not close this — its brief forbade changing
+    # the bomb and corrupt-stream categories — so #1548 carries it.
     canonical = _QCOW2 + b"z" * 512
     stored = bytearray(gzip.compress(canonical))
     pristine_checksum = _sha256_b64(bytes(stored))
-    stored[20] ^= 0xFF  # a flipped bit in the deflate body, post-PUT
+    stored[flip] ^= damage  # damaged post-PUT; the declared checksum is still the pristine one
+
     store = _FakeStore(bytes(stored), checksum=pristine_checksum)
 
     with pytest.raises(CategorizedError) as error:
         _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
 
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
-    assert "corrupt" in str(error.value)
+    assert expected_message in str(error.value)
     assert error.value.details["system_id"]
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
