@@ -116,6 +116,34 @@ def staged_rootfs_path(investigation_id: UUID | str, token: str, *, upload_dir: 
     return upload_dir / str(investigation_id) / f"{token}.qcow2"
 
 
+#: The suffix of the sidecar completion marker written beside a staged uploaded-rootfs base
+#: (ADR-0451). Named here, beside :func:`staged_rootfs_path`, because four call sites derive from
+#: it — the publish that writes it, the reuse gate that requires it, the per-row reclaim unlink, and
+#: the drain-tail sweep's glob — and a duplicated derivation is how the ELF-magic guard of
+#: #1383/ADR-0412 became a dead check.
+STAGED_ROOTFS_MARKER_SUFFIX = ".ready"
+
+
+def staged_rootfs_marker_path(base: Path) -> Path:
+    """The completion marker sibling of the staged base at ``base`` (ADR-0451).
+
+    A zero-byte ``<token>.ready`` beside ``<token>.qcow2``, written and ``fsync``\\ ed only after
+    the base itself is durable. Its *existence* is the whole signal — that a stage of this base ran
+    to a durable finish — so it carries no content for a reader to be tempted to trust.
+
+    Derived from the base **path** rather than from ``(investigation_id, token)`` a second time:
+    the publish site holds only ``dest``, and a parallel overload would be another derivation to
+    keep in step for no caller that needs one.
+
+    Args:
+        base: The staged base path :func:`staged_rootfs_path` returned.
+
+    Returns:
+        The marker path, differing from ``base`` only in its suffix.
+    """
+    return base.with_suffix(STAGED_ROOTFS_MARKER_SUFFIX)
+
+
 def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
 

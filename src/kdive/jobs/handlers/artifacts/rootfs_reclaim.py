@@ -35,8 +35,10 @@ from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload, load_payload
 from kdive.providers.shared.runtime_paths import (
     ROOTFS_DIR,
+    STAGED_ROOTFS_MARKER_SUFFIX,
     UPLOADS_DIR,
     overlay_name,
+    staged_rootfs_marker_path,
     staged_rootfs_path,
 )
 from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
@@ -150,13 +152,21 @@ def _rootfs_token_from_key(object_key: str) -> str:
 
 
 def _unlink_staged_base(uploads_dir: str, investigation_id: UUID, token: str) -> None:
-    """Unlink the staged base for ``(investigation, token)``; ``ENOENT`` is the achieved post-state.
+    """Unlink the staged base and its completion marker; ``ENOENT`` is the achieved post-state.
 
-    Any **other** ``OSError`` propagates so the caller defers the whole checksum before deleting the
-    object or the row (ADR-0442 §4): neither SENSITIVE copy may be dropped while the local base
-    survives.
+    Any **other** ``OSError`` propagates — from either unlink, which is why they share one region —
+    so the caller defers the whole checksum before deleting the object or the row (ADR-0442 §4):
+    neither SENSITIVE copy may be dropped while the local base survives.
+
+    The marker (ADR-0451) goes **first**, which is the conservative order. Interrupted after it,
+    this leaves "base without marker", which the reuse gate rejects and the next fetch re-stages:
+    correct, at the cost of one download. The opposite order would leave "marker without the base it
+    attests to" — harmless today only because the gate also requires the base to be a regular file,
+    and there is no reason to create a state whose safety rests on a second condition holding.
     """
     dest = staged_rootfs_path(investigation_id, token, upload_dir=Path(uploads_dir))
+    with suppress(FileNotFoundError):
+        staged_rootfs_marker_path(dest).unlink()
     with suppress(FileNotFoundError):
         dest.unlink()
 
@@ -192,6 +202,19 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
     worse one: the writer it now protects can run to completion and publish onto ``<token>.qcow2``
     whose row this reclaim already deleted, and nothing else in the tree collects a row-less base.
 
+    A third glob collects the ADR-0451 completion markers (:func:`_unlink_completion_markers`), and
+    it is deliberately **not** run through the ``flock`` gate above. That gate answers one
+    question — is a live writer still holding this multi-GiB partial across a download — and its
+    ``True`` is the one outcome ADR-0452 §5 established is *provably* transient, which is why the
+    caller retains the
+    drain marker on it and on nothing else. A zero-byte marker is created and closed in
+    microseconds and no writer holds one across anything, so gating it would let a marker's
+    ``EACCES`` pin an investigation's drain and would make a leaked marker indistinguishable from a
+    held partial at the ``rmdir`` — collapsing the very distinction the returned flag exists to
+    preserve. It runs last, adjacent to the ``rmdir``, which minimises but cannot close the window
+    in which the doomed fetcher above publishes between the base sweep and the marker sweep; #1558
+    removes that race.
+
     Returns:
         Whether a live writer's ``flock`` left a partial behind. That partial also keeps ``inv_dir``
         non-empty, so the ``rmdir`` fails with ``ENOTEMPTY`` — the deliberate post-state of a
@@ -207,6 +230,7 @@ def sweep_investigation_staging_dir(uploads_dir: str, investigation_id: UUID) ->
     inv_dir = Path(uploads_dir) / str(investigation_id)
     held = _unlink_unheld_partials(inv_dir)
     _collect_unowned_bases(inv_dir)
+    _unlink_completion_markers(inv_dir)
     _remove_drained_dir(inv_dir, held=held)
     return held
 
@@ -243,6 +267,42 @@ def _collect_unowned_bases(inv_dir: Path) -> None:
         _log.warning(
             "could not walk the rootfs staging directory %s for staged bases (%s); anything it "
             "holds is left uncollected",
+            inv_dir,
+            err.strerror,
+        )
+
+
+def _unlink_completion_markers(inv_dir: Path) -> None:
+    """Collect every ADR-0451 completion marker left in a drained investigation's staging dir.
+
+    Without this the ``rmdir`` below fails ``ENOTEMPTY`` on **every** drained investigation that
+    ever staged a base, leaking one directory apiece — and, since ADR-0452 §7, doing it loudly: the
+    unexplained-survivor ``WARNING`` would fire on every ordinary drain and train an operator to
+    ignore the one line that reports a genuinely unreadable staging tree.
+
+    Ungated, per :func:`sweep_investigation_staging_dir`. A successful collection is deliberately
+    silent: :func:`_unlink_unowned_base` already ``WARNING``\\ s for the publish-after-reclaim
+    condition that is the only way either file survives to here, and a marker beside a collected
+    base would only double that line. A per-candidate unlink *fault* is logged, because this pass is
+    the last collector, and the walk is logged for ADR-0452 §7's reason: ``Path.glob`` yields
+    nothing for
+    a directory it cannot enumerate rather than raising.
+    """
+    try:
+        for marker in inv_dir.glob(f"*{STAGED_ROOTFS_MARKER_SUFFIX}"):
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError as err:
+                _log.warning(
+                    "could not unlink the staged rootfs completion marker %s (%s); it will keep "
+                    "this investigation's staging directory from being removed",
+                    marker,
+                    err.strerror,
+                )
+    except OSError as err:
+        _log.warning(
+            "could not walk the rootfs staging directory %s for completion markers (%s); anything "
+            "it holds is left uncollected",
             inv_dir,
             err.strerror,
         )

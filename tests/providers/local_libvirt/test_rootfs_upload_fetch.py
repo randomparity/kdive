@@ -40,10 +40,12 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
     _STAGING_FREE_SPACE_MARGIN_BYTES,
     _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
+    _starts_with_qcow2_magic,
     _unlink_orphan_partials,
     fetch_uploaded_rootfs,
     stage_uploaded_rootfs,
 )
+from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from kdive.store.objectstore import artifact_key
 
 # A minimal canonical qcow2 base: the magic followed by arbitrary body bytes.
@@ -162,6 +164,19 @@ def _store_failing_mid_stream(error: BaseException) -> _FakeStore:
 
 def _dest(tmp_path: Path) -> Path:
     return tmp_path / f"{_TOKEN}.qcow2"
+
+
+def _publish(dest: Path, content: bytes) -> Path:
+    """Put a base at ``dest`` the way a completed stage leaves it: bytes plus a completion marker.
+
+    Every reuse-path test needs both, because ADR-0451's gate is marker AND regular file AND magic.
+    Writing the base alone is a *pre-#1539* base and is now a deliberate cache miss, so tests that
+    mean "a good base is already staged" say so through this rather than by writing a file.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    staged_rootfs_marker_path(dest).touch()
+    return dest
 
 
 def _stage(store: _FakeStore, tmp_path: Path, **kw: Any) -> Path:
@@ -895,10 +910,23 @@ def test_stage_syncs_the_partial_before_publishing_then_syncs_the_directory(
 
     assert dest.read_bytes() == _QCOW2
     base_inode = dest.stat().st_ino  # the rename preserved the partial's inode
+    dir_inode = dest.parent.stat().st_ino
+    marker_inode = staged_rootfs_marker_path(dest).stat().st_ino
+    # ADR-0451 extends the sequence rather than replacing it, and the ORDER is the whole guarantee:
+    # every crash point must leave either no marker (re-stage) or a marker over data that was
+    # already durable (reuse). The two directory syncs the marker adds are what pin that. The one
+    # BEFORE the rename makes a stale marker's removal durable first, so a re-stage of the same
+    # content-addressed token cannot recover as "previous base under a marker attesting to it". The
+    # one AFTER the rename and before the marker write is why the marker cannot simply share the
+    # final sync: a lost rename with a durable marker would mark the OLD base -- the one this pass
+    # rejected -- as complete, which is precisely the bug.
     assert trace == [
         ("fsync", base_inode),  # the staged bytes are on the disk ...
-        ("replace", base_inode),  # ... before the rename makes them reachable ...
-        ("fsync", dest.parent.stat().st_ino),  # ... and the rename itself is then durable
+        ("fsync", dir_inode),  # ... any stale marker is durably gone ...
+        ("replace", base_inode),  # ... before the rename makes the bytes reachable ...
+        ("fsync", dir_inode),  # ... the rename itself is durable ...
+        ("fsync", marker_inode),  # ... and only THEN is the base declared complete ...
+        ("fsync", dir_inode),  # ... with the marker's own link made durable last.
     ]
 
 
@@ -936,16 +964,220 @@ def test_stage_partial_sync_failure_publishes_nothing(
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
-def test_stage_directory_sync_failure_leaves_the_good_base_in_place(
+def test_stage_directory_sync_failure_after_the_rename_leaves_the_good_base_in_place(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The directory fsync runs AFTER the rename, so its failure is the one case where the provision
-    # fails with `dest` already published and intact. ADR-0443 section 1 states that outcome as
-    # deliberate -- "the bytes are fine, only their durability is unproven" -- and it holds only
-    # because the error path unlinks `partial` and never touches `dest`. Nothing but this test stops
-    # a future cleanup from adding a `dest.unlink()` there and turning a benign failure into the
-    # deletion of a base other Systems in the investigation may already be booting off.
+    # A directory fsync that runs AFTER the rename is the one case where the provision fails with
+    # `dest` already published and intact. ADR-0443 section 1 states that outcome as deliberate --
+    # "the bytes are fine, only their durability is unproven" -- and it holds only because the error
+    # path unlinks `partial` and never touches `dest`. Nothing but this test stops a future cleanup
+    # from adding a `dest.unlink()` there and turning a benign failure into the deletion of a base
+    # other Systems in the investigation may already be booting off.
+    #
+    # ADR-0451 puts a directory sync BEFORE the rename too, so the fault is armed on the post-rename
+    # ones only; failing the first would abort before publishing anything, which is a different
+    # (also safe) outcome covered by the next test.
     dest = _dest(tmp_path)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_fsync, real_replace = os.fsync, os.replace
+    published = False
+
+    def note_publish(src: Any, dst: Any, **kwargs: Any) -> None:
+        nonlocal published
+        real_replace(src, dst, **kwargs)
+        published = True
+
+    def fail_on_the_directory(fd: int) -> None:
+        if published and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "replace", note_publish)
+    monkeypatch.setattr(os, "fsync", fail_on_the_directory)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+    # The next fetch RE-STAGES it rather than reusing it, and that is the ADR-0451 change to
+    # ADR-0443 section 1's stated outcome: the sync that failed is the one that would have made the
+    # completion marker durable, so the base is correctly reported as one whose stage never
+    # finished. One extra download on a genuinely faulting disk, in exchange for never reusing a
+    # base whose durability is unproven -- the direction this whole change moves in.
+    monkeypatch.setattr(os, "fsync", real_fsync)
+    monkeypatch.setattr(os, "replace", real_replace)
+    inv = uuid4()
+    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(dest.read_bytes())
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
+    assert reuse_store.stream_calls == 1
+    assert staged_rootfs_marker_path(staged).is_file()  # and the re-stage completed it
+
+
+def test_stage_marker_write_fault_names_the_marker_and_keeps_the_published_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Step 6 is the one step of the publish that CREATES a directory entry, so it carries failure
+    # modes none of the six around it can produce: ENOSPC/EDQUOT from inode or directory-block
+    # exhaustion (ADR-0450's precheck reserves blocks, so its floor does not prevent it), EROFS
+    # after a remount-ro, EMFILE/ENFILE, EISDIR if anything occupies the marker path.
+    #
+    # Two things must hold. The base stays published and durable -- the download, the checksum, the
+    # magic gate and the rename all succeeded and must not be thrown away or rolled back. And the
+    # fault must name the MARKER, not the base: `_staging_fault` would render "failed to stage the
+    # uploaded rootfs to <token>.qcow2" and point the operator at a multi-GiB file that is present,
+    # complete and correct, which is exactly the misattribution this same diff fixed on the read
+    # side by threading `probed` through `_unreadable_base_fault`.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    real_open = os.open
+
+    def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == marker:
+            raise OSError(errno.EROFS, "Read-only file system", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert error.value.details["dest"] == str(dest)
+    assert str(marker) in str(error.value)
+    assert "failed to stage" not in str(error.value)
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert not marker.exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_marker_fsync_fault_also_names_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The `fsync` and the `close` must be inside the fault region too, not just the `open`. fsync is
+    # where Linux surfaces a DEFERRED writeback error (errseq_t), so EIO here is the normal
+    # reporting point on exactly the failing-disk host the open branch is written for -- and close
+    # reports it on some filesystems. Left outside, both would unwind into
+    # `stage_uploaded_rootfs`'s blanket `except OSError` and come out as "failed to stage the
+    # uploaded rootfs to <token>.qcow2", naming a base that is published and correct.
+    #
+    # The state here differs from the open branch and the message says so: the marker EXISTS, only
+    # its durability is unproven, so a crash before the next writeback loses it and the next fetch
+    # re-stages -- the safe direction.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    marker_fds: list[int] = []
+    real_open, real_fsync = os.open, os.fsync
+
+    def noting_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == marker:
+            marker_fds.append(fd)
+        return fd
+
+    def faulting_fsync(fd: int) -> None:
+        if fd in marker_fds:
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", noting_open)
+    monkeypatch.setattr(os, "fsync", faulting_fsync)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert marker_fds, "the marker was never opened, so this test faulted nothing"
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert str(marker) in str(error.value)
+    assert "failed to stage" not in str(error.value)
+    assert "durability is unproven" in str(error.value)  # not the marker-absent wording
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert marker.is_file()  # created; only its durability failed
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_marker_write_fault_stays_fatal_rather_than_publishing_unmarked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The tempting softening -- swallow the marker fault and return, since the base is good -- is
+    # wrong and this pins it. A marker-less base is one the reuse gate REJECTS, so a "successful"
+    # provision would hand back a base that every later System in the investigation re-downloads and
+    # re-rejects, silently, for as long as the fault lasts. That is the unbounded re-download loop
+    # ADR-0443 decision 2 exists to refuse, reached from the write side instead of the read side, so
+    # it must surface as a failed provision instead.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    real_open = os.open
+
+    def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == marker:
+            raise OSError(errno.ENOSPC, "No space left on device", str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
+
+    with pytest.raises(CategorizedError):
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    # And the next fetch does not quietly adopt what the failed stage left behind.
+    monkeypatch.setattr(os, "open", real_open)
+    inv = uuid4()
+    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(dest.read_bytes())
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
+    assert reuse_store.stream_calls == 1  # re-downloaded rather than reused
+    assert staged_rootfs_marker_path(staged).is_file()
+
+
+def test_stage_cannot_publish_while_a_stale_marker_refuses_to_be_removed(tmp_path: Path) -> None:
+    # Step 2's complement, and the case ADR-0451 section 3 used to describe as benign: a directory
+    # (or any unremovable file) at the marker path makes the READ gate answer "not reusable" without
+    # raising, but the re-stage that follows then dies here. The base must not be published, because
+    # a marker surviving the rename would attest to a base this stage had already rejected -- and
+    # the fault must say which file is in the way, or the operator is sent to the base.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(b"\x00" * len(_QCOW2))  # the torn base being re-staged over
+    marker = staged_rootfs_marker_path(dest)
+    marker.mkdir()  # unlink() on a directory raises EISDIR
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert str(marker) in str(error.value)
+    assert dest.read_bytes() == b"\x00" * len(_QCOW2)  # nothing published
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_directory_sync_failure_before_the_rename_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0451's first directory sync makes a stale marker's REMOVAL durable, and it runs before the
+    # rename -- so its failure must abort with nothing published and no partial left, exactly like
+    # the partial's own sync. The marker of a previous stage must also still be gone: leaving it
+    # while the rename never happened would attest to a base this pass had already rejected.
+    dest = _dest(tmp_path)
+    dest.write_bytes(b"\x00" * len(_QCOW2))  # the torn base being re-staged over
+    marker = staged_rootfs_marker_path(dest)
+    marker.touch()
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     real_fsync = os.fsync
 
@@ -960,21 +1192,9 @@ def test_stage_directory_sync_failure_leaves_the_good_base_in_place(
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
 
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert dest.read_bytes() == b"\x00" * len(_QCOW2)  # nothing was published
+    assert not marker.exists(), "the stale marker outlived the base it was written for"
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
-
-    # And the next fetch reuses it rather than re-downloading, which is what makes the outcome
-    # "honest" rather than merely survivable.
-    monkeypatch.setattr(os, "fsync", real_fsync)
-    inv = uuid4()
-    staged = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    staged.parent.mkdir(parents=True)
-    staged.write_bytes(dest.read_bytes())
-    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
-    reuse_store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-
-    assert fetch_uploaded_rootfs(conn, reuse_store, _upload(tmp_path)) == staged  # ty: ignore[invalid-argument-type]
-    assert reuse_store.stream_calls == 0
 
 
 def test_stage_does_not_sync_a_partial_it_is_about_to_discard(
@@ -1140,9 +1360,9 @@ def test_fetch_reads_gzip_encoding_from_the_resolved_row(tmp_path: Path) -> None
 def test_fetch_reuses_present_file_without_touching_store(tmp_path: Path) -> None:
     # AC-1 (sequential): a present verified base is a cache hit; the store is never read again.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(_QCOW2 + b"-already-staged")
+    dest = _publish(
+        staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), _QCOW2 + b"-already-staged"
+    )
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
@@ -1164,9 +1384,7 @@ def test_fetch_reuses_a_staged_base_without_consulting_free_space(
     # volume from blocking Systems that need no space, because the base they want is already staged.
     # A volume with zero bytes free must still serve the reuse hit.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(_QCOW2)
+    dest = _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), _QCOW2)
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     measured = _pin_free_space(monkeypatch, free=0)
@@ -1203,9 +1421,9 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     # contract is that such a base never reaches the caller: it is re-fetched from the object store
     # and replaced, not returned.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(content)
+    # Published WITH a marker, so what is under test is still the magic gate: a marker-less base is
+    # rejected one gate earlier and these shapes would never reach the probe they are named for.
+    dest = _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), content)
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
 
@@ -1218,10 +1436,13 @@ def test_fetch_rejects_an_unverifiable_staged_base_and_restages_it(
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []
     # The rejection is the one event this change exists to detect, and the re-stage succeeds, so a
     # log line is the ONLY signal it ever fired. Without it the fix is unmeasurable in production.
-    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
         "staged rootfs base at" in message and str(dest) in message for message in warnings
     ), f"{name}: rejected the base silently"
+    # And it names the gate that actually rejected it, so the operator is not sent to look for a
+    # missing marker on a base whose stage plainly finished.
+    assert any("qcow2 format gate" in message for message in warnings), f"{name}: {warnings}"
     # And it must NOT claim a concurrent sibling. Nothing between the pre-lock and post-lock checks
     # repairs `dest`, so an ungated post-lock warning would fire on every ordinary stale-base
     # rejection -- attributing the commonest case to a racing fetcher that never existed, and
@@ -1276,9 +1497,7 @@ def test_fetch_reports_an_unreadable_staged_base_instead_of_re_downloading_it(
     # multi-GiB base out from under any guest holding it open and re-download it on every single
     # provision for as long as the fault lasts -- silently. It must surface instead.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(_QCOW2)
+    dest = _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), _QCOW2)
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     real_open = Path.open
@@ -1310,18 +1529,29 @@ class _SiblingStagesWhileWeWait(_FakeConn):
     The pre-lock and post-lock reuse checks are separate call sites, so a re-check wired into only
     the first one would still hand back whatever the wait produced. Writing ``content`` at
     ``pg_advisory_lock`` reproduces exactly that window.
+
+    ``completed`` is what the sibling got as far as: ``True`` writes the base and its completion
+    marker, the way a finished ``_durable_replace`` leaves them; ``False`` writes only the base,
+    which is what a host crash mid-stage leaves behind.
     """
 
-    def __init__(self, *, dest: Path, content: bytes, **kwargs: Any) -> None:
+    def __init__(
+        self, *, dest: Path, content: bytes, completed: bool = True, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._dest = dest
         self._content = content
+        self._completed = completed
 
     def execute(self, sql: str, params: tuple[Any, ...]) -> None:
         super().execute(sql, params)
-        if "pg_advisory_lock" in sql:
-            self._dest.parent.mkdir(parents=True, exist_ok=True)
-            self._dest.write_bytes(self._content)
+        if "pg_advisory_lock" not in sql:
+            return
+        if self._completed:
+            _publish(self._dest, self._content)
+            return
+        self._dest.parent.mkdir(parents=True, exist_ok=True)
+        self._dest.write_bytes(self._content)
 
 
 def test_fetch_reuses_a_sibling_staged_base_that_appeared_during_the_lock_wait(
@@ -1377,9 +1607,9 @@ def test_fetch_reuse_check_does_not_rescan_the_whole_base(tmp_path: Path) -> Non
     # stay O(1). A full checksum re-verify -- the obvious correct-but-unaffordable alternative --
     # would read the whole file, which this bounds directly rather than by inspecting the code.
     inv = uuid4()
-    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(_QCOW2 + b"\xa5" * (8 * 1024 * 1024))
+    dest = _publish(
+        staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), _QCOW2 + b"\xa5" * (8 * 1024 * 1024)
+    )
     conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
     reads: list[int] = []
@@ -1404,6 +1634,174 @@ def test_fetch_reuse_check_does_not_rescan_the_whole_base(tmp_path: Path) -> Non
 
     assert result == dest and store.stream_calls == 0  # reused
     assert sum(reads) <= 64, f"the reuse check read {sum(reads)} bytes of the base"
+
+
+# --- the completion marker: the crash-torn shape the magic gate cannot see (#1539, ADR-0451) -----
+
+# ADR-0443 section 3's derivation, reproduced as bytes. The rename follows the COMPLETED write --
+# the stagers stream the whole object through a buffered writer and close it, and only then does the
+# magic gate run and the rename happen. A multi-GiB download takes minutes, over which
+# dirty_background_ratio and dirty_expire_centisecs force continuous writeback, so by rename time
+# most of the file is allocated and on disk and what is still dirty is the TAIL. ext4 delayed
+# allocation leaves the post-crash survivor at its full length with zeros behind the part that made
+# it out. Head intact, tail zeroed -- the EXPECTED shape, not a contrived one.
+_CRASH_TORN_HEAD = _QCOW2 + b"\xa5" * (64 * 1024)
+_CRASH_TORN = _CRASH_TORN_HEAD + bytes(192 * 1024)
+
+
+def test_fetch_rejects_the_crash_torn_base_the_magic_gate_accepts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # THE acceptance criterion of #1539. ADR-0443 shipped the qcow2-magic re-check as the net for
+    # bases staged by code predating its fsync, and its own section 3 concedes the net is mostly
+    # hole: the shape it catches (whole-file zeroes) is the SMALL-object case, where the entire
+    # write fit inside the dirty window, while the large-base survivor starts with QFI\xfb and sails
+    # through. Under ADR-0441's content-addressed reuse that base then backs every System in the
+    # investigation until it closes, with the checksum machinery bypassed BECAUSE the file exists.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_CRASH_TORN)  # no marker: the crash landed before one could be written
+
+    # (a) The defect itself, pinned rather than restated. The pre-#1539 predicate was exactly
+    # `S_ISREG(dest)` and `_starts_with_qcow2_magic(dest)`, and it ACCEPTS this file -- so the test
+    # below is proving a real rejection rather than re-describing the fix. If a future change ever
+    # makes the magic probe catch this shape on its own, this assert fails first and says so.
+    assert stat.S_ISREG(dest.stat().st_mode)
+    assert _starts_with_qcow2_magic(dest), "the crash-torn shape no longer passes the magic gate"
+    assert dest.stat().st_size == len(_CRASH_TORN)  # full length: not a truncation either
+    assert dest.read_bytes()[-1024:] == bytes(1024)  # ... and genuinely tail-zeroed
+
+    # (b) The gate that also requires the completion marker rejects it, goes back to the object
+    # store, and leaves a base that is complete this time.
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result == dest
+    assert dest.read_bytes() == _QCOW2, "the crash-torn base was handed back to the provision"
+    assert store.stream_calls == 1, "it never went back to the object store"
+    assert staged_rootfs_marker_path(dest).is_file()
+    # The rejection stays observable for ADR-0443 section 4's reason: the re-stage succeeds, so the
+    # log line is the only evidence the durability bug ever fired.
+    assert any(
+        "staged rootfs base at" in r.getMessage() and str(dest) in r.getMessage()
+        for r in caplog.records
+    ), caplog.text
+
+
+def test_fetch_rejects_the_crash_torn_base_that_appeared_during_the_lock_wait(
+    tmp_path: Path,
+) -> None:
+    # The same shape on the post-lock call site. A marker check wired into the pre-lock gate alone
+    # would leave the hole open for exactly the fetchers that queued -- and a sibling crashing
+    # mid-stage is what produces both the torn base and the queue.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    conn = _SiblingStagesWhileWeWait(
+        dest=dest,
+        content=_CRASH_TORN,
+        completed=False,  # the sibling crashed before it could mark the base complete
+        investigation_id=inv,
+        owned_object_key=_owned_key(inv),
+    )
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2
+    assert store.stream_calls == 1
+
+
+def test_fetch_restages_a_pre_marker_base_even_though_its_magic_is_intact(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The upgrade population, stated as behaviour rather than left as a surprise: every base staged
+    # before this change carries no marker, so each surviving (investigation, token) pays ONE full
+    # re-download. That is the cost of the fix, not a bug -- a pre-marker base cannot be shown
+    # intact by anything cheaper than re-staging it -- and it is bounded, because the re-stage
+    # completes the base and no later provision repeats it.
+    inv = uuid4()
+    dest = staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(_QCOW2)  # a perfectly good pre-#1539 base
+    pre_marker_inode = dest.stat().st_ino
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with caplog.at_level(logging.WARNING):
+        assert fetch_uploaded_rootfs(conn, store, _upload(tmp_path)) == dest  # ty: ignore[invalid-argument-type]
+
+    assert store.stream_calls == 1  # re-staged once ...
+    assert staged_rootfs_marker_path(dest).is_file()
+    # Pinned, not incidental: the re-stage REPLACES the inode, so any QEMU holding the old base as a
+    # backing file keeps that inode alive with zero links until it exits (ADR-0443 §2's residue,
+    # escalated by ADR-0451 from a rare race to once per base at upgrade). Nothing else in the suite
+    # observes it, and a reader of `_sibling_already_published` could reasonably assume the
+    # magic-passing base was adopted rather than superseded.
+    assert dest.stat().st_ino != pre_marker_inode
+    # And the WARNING must say the marker was missing, NOT that the format gate failed. On upgrade
+    # every base in the tree takes this path, so a message keyed on the wrong gate turns the
+    # one-time cost into a fleet-wide "the durability bug fired" alarm about intact bases -- the
+    # defect the two commits before this branch removed one gate over.
+    rejections = [
+        r.getMessage() for r in caplog.records if "staged rootfs base at" in r.getMessage()
+    ]
+    assert rejections, caplog.text
+    assert all("completion marker" in message for message in rejections), rejections
+    assert not any("qcow2 format gate" in message for message in rejections), rejections
+
+    second = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    assert fetch_uploaded_rootfs(conn, second, _upload(tmp_path)) == dest  # ty: ignore[invalid-argument-type]
+    assert second.stream_calls == 0  # ... and only once
+
+
+def test_fetch_still_rejects_a_marked_base_whose_magic_fails(tmp_path: Path) -> None:
+    # The marker is a COMPLETION witness, not an INTEGRITY one: it says a stage ran to a durable
+    # finish and says nothing about damage arriving afterwards -- a dying disk, a stray `cp`, a
+    # half-restored backup, which is ADR-0443 section 3's second population. So the magic probe is
+    # kept BESIDE the marker rather than replaced by it. Gating on the marker alone (the issue's own
+    # phrasing) would trade one residue for another; this is what stops that regression.
+    inv = uuid4()
+    _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), b"\x00" * len(_QCOW2))
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    assert fetch_uploaded_rootfs(conn, store, _upload(tmp_path)).read_bytes() == _QCOW2  # ty: ignore[invalid-argument-type]
+    assert store.stream_calls == 1
+
+
+def test_fetch_reports_an_unreadable_completion_marker_and_names_it(tmp_path: Path) -> None:
+    # "I cannot stat the marker" is not "there is no completed stage", for _staged_base_rejection's
+    # own reason: answering it as a cache miss produces a silent, perpetual, fetch-lock-serialized
+    # multi-GiB re-download loop. And the fault must name the MARKER -- sending an operator to
+    # inspect a 50 GiB base when the zero-byte file beside it is what could not be read is the wrong
+    # file, and `_failure_context` copies these scalars into the job row they triage from.
+    inv = uuid4()
+    dest = _publish(staged_rootfs_path(inv, _TOKEN, upload_dir=tmp_path), _QCOW2)
+    marker = staged_rootfs_marker_path(dest)
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_stat = Path.stat
+
+    def refusing_stat(self: Path, **kwargs: Any) -> Any:
+        if self == marker:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real_stat(self, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "stat", refusing_stat)
+        with pytest.raises(CategorizedError) as error:
+            fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["probed"] == str(marker)
+    assert error.value.details["dest"] == str(dest)
+    assert str(marker) in str(error.value)
+    assert store.stream_calls == 0  # no re-download behind the operator's back
+    assert dest.read_bytes() == _QCOW2  # and the good base left where it was
 
 
 def test_fetch_uses_deterministic_session_lock_key_not_hash(tmp_path: Path) -> None:
@@ -1926,8 +2324,7 @@ def test_stage_keeps_a_base_a_sibling_published_during_the_download(
     # replacing it is not corruption; it would orphan an inode of up to the 50 GiB cap behind that
     # guest's open descriptor, re-creating the invisible-blocks symptom this change removes.
     store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
-    dest = _dest(tmp_path)
-    dest.write_bytes(_QCOW2)
+    dest = _publish(_dest(tmp_path), _QCOW2)
     published_inode = dest.stat().st_ino
 
     with caplog.at_level(logging.WARNING):
@@ -1937,6 +2334,24 @@ def test_stage_keeps_a_base_a_sibling_published_during_the_download(
     assert dest.read_bytes() == _QCOW2
     assert list(dest.parent.glob(f"{_TOKEN}.*.partial")) == []  # our copy discarded
     assert any("a sibling published" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_stage_publishes_over_a_sibling_base_that_has_no_completion_marker(tmp_path: Path) -> None:
+    # ADR-0451 section 4. A sibling that died between its `os.replace` and its marker write leaves a
+    # base the reuse gate will REJECT forever. Skipping the publish on it -- which the pre-#1539
+    # probe did, since it asked only for the magic -- would strand the investigation on a base every
+    # future fetch re-downloads and re-rejects: a bounded orphan inode traded for an unbounded
+    # re-download loop. Publishing completes it instead, and the marker proves the trade landed.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    dest.write_bytes(_QCOW2)  # deliberately NOT via _publish: no marker
+    stranded_inode = dest.stat().st_ino
+
+    _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert dest.stat().st_ino != stranded_inode, "the marker-less base was left stranded"
+    assert dest.read_bytes() == _QCOW2
+    assert staged_rootfs_marker_path(dest).is_file()
 
 
 def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None:
@@ -1955,7 +2370,7 @@ def test_stage_publishes_over_a_torn_base_a_sibling_left(tmp_path: Path) -> None
 
 
 def test_stage_publishes_when_the_published_base_check_cannot_read_dest(tmp_path: Path) -> None:
-    # Polarity is the opposite of _reusable_staged_base's, which raises on an unreadable dest to
+    # Polarity is the opposite of _staged_base_rejection's, which raises on an unreadable dest to
     # avoid a silent perpetual re-download. Here a False costs one os.replace -- which REPAIRS
     # an unreadable dest, a rename needing permission on the directory rather than the file --
     # so an OSError must never turn a download that already succeeded into a failure. The trade

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import fcntl
 import hashlib
 import json
@@ -39,6 +40,7 @@ from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
     reclaim_investigation_rootfs_handler,
 )
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
+from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from tests.reconciler.conftest import connect
 
 _FROZEN = datetime(2026, 7, 24, 0, 0, tzinfo=UTC)
@@ -126,9 +128,16 @@ async def _seed_rootfs_row(
 
 
 def _stage(uploads_dir: Path, inv: UUID) -> Path:
+    """A staged base as a completed publish leaves it: the qcow2 plus its ADR-0451 marker.
+
+    Both, because a reclaim that removed only the base would leave the marker keeping the staging
+    directory non-empty forever — the leak ADR-0443 deferred the marker for. Every test here that
+    asserts the directory drains is therefore also asserting the marker was collected.
+    """
     staged = uploads_dir / str(inv) / f"{_TOKEN}.qcow2"
     staged.parent.mkdir(parents=True, exist_ok=True)
     staged.write_bytes(b"base")
+    staged_rootfs_marker_path(staged).touch()
     return staged
 
 
@@ -271,6 +280,56 @@ def test_unlink_permission_fault_never_deletes_the_object_or_row(
         assert await _run_handler(migrated_url, inv, [artifact_id], ok_store, rootfs_dir, uploads)
         assert ok_store.deleted == [_object_key(inv)]
         assert not staged.exists()
+
+    asyncio.run(_run())
+
+
+def test_a_marker_unlink_fault_defers_the_whole_checksum(migrated_url: str, tmp_path: Path) -> None:
+    # ADR-0451 section 5 / ADR-0442 section 4. The completion marker is unlinked in the SAME
+    # OSError-propagating region as the base, so a fault on it stops the checksum before the object
+    # or the row is deleted. A marker unlink wrapped in its own `suppress(OSError)` -- the reflex
+    # for a "best effort" sidecar -- would let the reclaim march on and delete the last recoverable
+    # copy
+    # of a SENSITIVE base while the local one is still sitting there, which is #1522 verbatim.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        marker = staged_rootfs_marker_path(staged)
+        store = _RecordingStore()
+        real_unlink = os.unlink
+
+        def refusing_unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+            if Path(path) == marker:
+                raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+            real_unlink(path, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "unlink", refusing_unlink)
+            with pytest.raises(CategorizedError):
+                await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+
+        assert store.deleted == []  # nothing dropped while the local base is still there
+        assert staged.exists()  # and the marker went FIRST, so the base is untouched
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is not None  # still on the worklist
+        finally:
+            await check.close()
+
+        # The retry converges once the fault clears, with no manual repair.
+        ok_store = _RecordingStore()
+        assert await _run_handler(migrated_url, inv, [artifact_id], ok_store, rootfs_dir, uploads)
+        assert not staged.exists() and not marker.exists()
 
     asyncio.run(_run())
 
