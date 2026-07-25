@@ -44,10 +44,13 @@ ADR-0444's read-side `upload_manifest.deadline_stamp` and rejects when `deadline
 
 The comparison is against the **Postgres** clock — the one that stamped `deadline = now() + ttl` and
 the one the reaper measures against. No Python-side `datetime.now()` enters it, so a session-TZ or
-host-clock disagreement cannot make finalize and the reaper reach opposite verdicts on one manifest.
-(`now()` is `transaction_timestamp()`: the finalize transaction's start, not the instant the row is
-read, so a request that arrived inside the window is never penalized for time spent queueing behind
-the `RUN` advisory lock.)
+host-clock disagreement cannot make finalize and the reaper disagree about one manifest.
+
+`now()` is `transaction_timestamp()`, and the whole request runs inside the one implicit transaction
+psycopg opens on the pooled (non-autocommit) connection at the handler's first statement. So this
+check is a verdict on the request's **arrival**, not on the instant of the read: a finalize that
+arrived inside the window is not then rejected for the seconds it spends HEADing and range-reading a
+multi-GiB payload. That is the conservative direction, and it is the same property ADR-0444 named.
 
 The rejection keeps `reason="upload_window_expired"` — the reason this tool already raised on its
 chunked path and the one `investigations.complete_rootfs_upload` adopted in ADR-0444, so all three
@@ -57,15 +60,44 @@ sites speak one vocabulary — and becomes **self-correcting**: it carries `mani
 `suggested_next_actions`. The agent is told the wall it hit, the clock the wall is measured on, and
 the one call that re-mints.
 
-Recovery is **re-mint, not re-upload**, and holds for a different reason than in the investigation
-lane. There the object key is content-addressed, so re-minting the same declaration addresses the
-same object. Here the key is `owner_prefix("local", "runs", <run_id>) + <entry name>` —
-*owner*-addressed — which is equally stable across re-mints of the same Run and artifact name. A
-re-mint plus a second finalize therefore recovers without re-uploading a byte, provided the reaper
-has not already collected the object and the re-mint declares the same name with the same `sha256`
-(a changed checksum leaves the stale object in place and fails validation, which is a re-upload).
+Recovery is **always a re-mint**; whether it also needs a re-upload is a timing question, and the
+honest answer differs from the investigation lane's. There the object key is content-addressed, so
+re-minting the same declaration addresses the same object. Here the key is
+`owner_prefix("local", "runs", <run_id>) + <entry name>` — *owner*-addressed — which is equally
+stable across re-mints of the same Run and artifact name, so a re-mint plus a second finalize can
+recover without re-uploading a byte.
 
-### 2. Rendering stays in the response layer; the shared helper is reused
+It usually will not, and the surface says so rather than promising otherwise. `deadline < now()` is
+also the upload reaper's candidate predicate, and the reconciler sweeps every 30 seconds
+(`reconciler.loop.DEFAULT_INTERVAL`), deleting a lapsed window's uncommitted objects and its
+manifest. So the `upload_window_expired` rejection is reachable only inside roughly one sweep of the
+deadline; past that a finalize lands on `no_upload_manifest` with the bytes already gone. Both
+rejections therefore point at `artifacts.create_run_upload` (see decision 2), and the agent-facing
+wording tells the agent to expect a re-upload unless the retry succeeds.
+
+### 2. A second, authoritative check under the `RUN` lock makes enforcement atomic with the commit
+
+Arrival alone is not enough, and the first draft of this change assumed it was. Between `_prepare`
+and the commit sits `_validate_uploads`, which HEADs every artifact and range-reads up to 128 MiB of
+the kernel tar off S3 — seconds to tens of seconds on **no lock at all**. The upload reaper runs
+every 30 seconds, takes the very `RUN` advisory lock finalize has not yet acquired, deletes every
+object under the Run's prefix that has no `artifacts` row (there is none — finalize has not
+committed), and drops the manifest. Finalize would then take the freed lock, re-read only
+`runs.state`, and commit `artifacts` rows against just-deleted keys plus a `succeeded` Run.
+
+So `_finalize_external_build` re-reads the manifest inside the transaction it already opens under
+`advisory_xact_lock(conn, LockScope.RUN, run.id)`, immediately before the writes, and rejects with
+`no_upload_manifest` if it is gone. That is one query inside an existing locked transaction, and it
+is what actually serializes finalize with the reaper — in both orders, which is the property the
+investigation lane gets from doing its whole finalize inside the `INVESTIGATION` lock. The deadline
+is deliberately **not** re-compared there: `now()` is frozen for the transaction, so the arrival
+verdict decision 1 reached is the one that stands, and a second comparison would be dead code.
+
+The `_prepare` check is therefore the fail-fast — it keeps a lapsed window from being read at all,
+and it is what produces the self-correcting `upload_window_expired` payload — and the locked re-read
+is the guard that makes the commit safe.
+
+### 3. Rendering stays in the response layer; the shared helper is reused
 
 `src/kdive/services/**` imports nothing from `kdive.mcp` today, and this change does not invert
 that. The service raises a new `CompleteBuildExpiredWindowError` carrying the raw `ManifestStamp`,
@@ -73,13 +105,16 @@ and the MCP handler renders the envelope with the **existing** `upload_expiry_co
 function the mint and the investigation finalize call. One renderer for the wall an agent is told
 about and the wall it is later held to; no parallel implementation.
 
-The chunked path's `refresh_deadline`-returned-`False` branch keeps its `no_upload_manifest` /
-`upload_window_expired` split but raises the same enriched error, so one condition has one payload
-regardless of which path observed it. That branch is now a narrow-race backstop rather than the
-enforcement point — the deadline can still lapse between `_prepare`'s check and the refresh — and is
-retained for exactly that.
+The chunked path's `refresh_deadline`-returned-`False` branch collapses to a single
+`no_upload_manifest` raise. It cannot mean "expired": `_require_open_window`'s `SELECT now()` and
+`refresh_deadline`'s `deadline >= now()` execute in the same transaction (`conn.transaction()` is a
+savepoint when one is already open), and `now()` is `transaction_timestamp()`, so the predicate
+cannot flip on time between them. A declined refresh means the row is gone, reaped in between — and
+the branch is now covered by a test that deletes the manifest through the object-store factory, the
+one seam that runs between the two reads. Emitting an "expired" payload there would be dead code
+that also lied.
 
-### 3. The chunked path's refresh is kept, and its residual is recorded not fixed
+### 4. The chunked path's refresh is kept, and its residual is recorded not fixed
 
 `refresh_deadline` is called from **one** place in the codebase: this finalize, once, before
 server-side reassembly. It is not a per-chunk refresh — chunk PUTs go straight to S3 through
@@ -104,7 +139,7 @@ retention. Bounding it (refreshing by a reassembly-sized slack instead of a full
 cumulative extension) is a separate change with its own contract question, filed as a follow-up
 rather than smuggled in here.
 
-### 4. Nothing else changes
+### 5. Nothing else changes
 
 No schema change and no migration: the check reads `upload_manifests.deadline`, which exists. No
 reaper change: the `runs` branch already reaps on the deadline alone for every Run state, and its
@@ -125,14 +160,31 @@ reach never depended on finalize's blindness. No metric, for the same reason ADR
   existing tests that asserted the bare `{"reason": ...}` dict are updated.
 - **The agent-facing wrapper docstring changes.** FastMCP serializes only the `@app.tool` wrapper
   docstring and `Field(...)` text, so the rejection is stated there, not only in the handler.
+- **`no_upload_manifest` gains a recovery pointer.** It is the *more common* post-expiry landing —
+  the reaper's candidate predicate is the same `deadline < now()` — so it now carries a `detail`
+  and `suggested_next_actions: [artifacts.create_run_upload]`, matching what ADR-0444 did for the
+  investigation lane's `_no_manifest_error`. Every "your window is gone" path routes to one call.
+- **A latent bug fixed in passing.** `CompleteBuildConfigurationError` was a `frozen` dataclass, and
+  `contextlib` assigns `__traceback__` to an exception it re-raises out of an async context manager,
+  so *any* raise of it inside `advisory_xact_lock` died with `FrozenInstanceError` instead of the
+  intended rejection. Two such raises already existed, both untested; the new locked re-read is a
+  third. The class is no longer frozen.
 - **A recorded, unfixed residual** — unbounded deadline extension by repeated failing chunked
-  finalizes (decision 3).
+  finalizes (decision 4).
 
 ## Considered & rejected
 
 - **Check the deadline only in the MCP handler.** It would need a second `get_manifest` read to see
   the deadline the service has already fetched, racing the service's own read for no benefit. The
   service is where the manifest is in hand.
+- **The `_prepare` check alone, with no locked re-read** (this change's first draft). It enforces
+  the deadline on arrival and reads well, but it is not atomic with the commit: the reaper can
+  collect the window during validation and the Run still commits `succeeded` against deleted keys.
+  Decision 2.
+- **Move the whole finalize inside the `RUN` lock**, as the investigation lane does. That lane's
+  finalize is a HEAD and a row write; this one range-reads up to 128 MiB off S3, so holding the
+  advisory lock across it would serialize unrelated work on the same Run behind a slow object-store
+  read. Re-reading one row at the end buys the same safety for one query.
 - **Compare in Python against `datetime.now(UTC)`.** Simpler to read, and wrong for the same reason
   ADR-0444 rejected it: it puts finalize on a different clock from the reaper's `now()`, so the two
   can disagree on one manifest under clock skew. The DB clock is the single reference the contract
@@ -143,7 +195,7 @@ reach never depended on finalize's blindness. No metric, for the same reason ADR
   this ADR exists to close. This is ADR-0444's own rejection of the pattern for short finalizes.
 - **Remove the chunked refresh in favor of the plain check** (the issue's open question). It would
   hand the reaper a live window to reap during a multi-GiB server-side reassembly the agent has
-  already committed to — the failure the refresh was added to prevent. Decision 3.
+  already committed to — the failure the refresh was added to prevent. Decision 4.
 - **Render the contract fields in the service layer.** It would make `kdive.services` import
   `kdive.mcp`, inverting a boundary the tree holds today, to save passing a two-field named tuple.
 - **Reject with a new `reason`** (e.g. `run_upload_window_expired`). A third spelling for one
