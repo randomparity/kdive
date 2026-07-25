@@ -264,10 +264,9 @@ def test_a_settled_job_holds_its_slot_through_the_backoff(migrated_url: str) -> 
 def test_a_settled_job_past_the_backoff_is_reissued_with_a_fresh_created_at(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `dequeue` claims by ORDER BY created_at, so re-issuing in place (queue's recycle_terminal)
-    # would keep the original timestamp and let a repeatedly-failing background reclaim
-    # head-of-line-block every job enqueued after it. The sweep drops the settled row and inserts
-    # a fresh one, carrying this pass's due set.
+    # The sweep drops the settled row and inserts a fresh one, so the reclaim is re-dated to the
+    # pass that decided it is due and carries that pass's due set. (`recycle_terminal` re-dates
+    # `created_at` too since ADR-0447; what keeps the delete-and-insert here is the backoff.)
     monkeypatch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
 
     async def _run() -> None:
