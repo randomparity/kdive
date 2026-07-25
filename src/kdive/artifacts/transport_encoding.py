@@ -76,8 +76,51 @@ class StripDecodeResult(NamedTuple):
     uncompressed_bytes: int
 
 
-def _decode_error(detail: str) -> CategorizedError:
+# The ``details["gate"]`` marker on a transport-checksum rejection. A consumer cannot identify that
+# gate from the category alone: the store's own ``get_range`` faults (a connection reset on any of
+# the hundreds of ranged GETs a multi-GiB stage issues) propagate through this module as
+# ``INFRASTRUCTURE_FAILURE`` too, so a category test would mistake a transport blip for
+# stored-object damage. Exported because the uploaded-rootfs fetch logs on this gate (ADR-0445 §4).
+TRANSPORT_CHECKSUM_GATE = "transport_checksum"
+
+
+def _object_error(detail: str) -> CategorizedError:
+    """A defect in the object the agent uploaded: retrying the same key re-reads the same defect."""
     return CategorizedError(detail, category=ErrorCategory.CONFIGURATION_ERROR)
+
+
+def _transport_error(detail: str) -> CategorizedError:
+    """The bytes read back are not the bytes the signed PUT bound: retryable (ADR-0445).
+
+    The two constructors exist so the category follows from *what is being asserted* rather than
+    from which helper is nearest. A single ``_decode_error`` covered all three of this module's
+    failure outcomes, so the checksum mismatch inherited the object-defect category by proximity
+    and disagreed with the identity staging path over the byte-identical failure (#1523). One
+    observation, two modes: transient GET-side transport corruption, which a bare retry clears,
+    and permanent post-PUT bit rot, which it does not.
+
+    What the category controls is the **agent-visible** ``retryable`` boolean
+    ``mcp/responses.py`` derives from it, and the remediation the message gives — not any
+    automatic re-attempt. A staging failure reaches the queue through the provision handler, which
+    sets ``terminal`` on the error before re-raising (``jobs/handlers/systems.py``), so the job
+    dead-letters on the first attempt under *either* category and nothing is re-downloaded. The
+    retry this advises is the agent's own, against a System that is already terminally failed.
+
+    **Reach (ADR-0445 §6).** On this path the hash comparison is the *last* gate, and zlib's gzip
+    framing catches most damage first: a flipped bit in the deflate body or the CRC/ISIZE trailer,
+    or a post-PUT truncation, raises :func:`_object_error` before the digest is ever compared —
+    body corruption lands on the corrupt-stream branch or, in a content-dependent minority where it
+    desynchronises the Huffman decode, on the bomb bound, whose message then wrongly blames the
+    declared ``uncompressed_size``. What reaches the digest is damage leaving the decoded stream
+    and framing intact: header fields, deflate padding bits, or a wholesale replacement by another
+    well-formed gzip under the bound. #1548 tracks closing the residual by consulting the digest
+    before declaring an object defect.
+    """
+    return CategorizedError(
+        detail,
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+        details={"gate": TRANSPORT_CHECKSUM_GATE},
+    )
 
 
 def strip_gzip_to_writer(
@@ -90,10 +133,25 @@ def strip_gzip_to_writer(
     Decompressed output is capped at ``request.uncompressed_size`` — the instant it would exceed the
     bound the call fails closed (gzip bomb), so a bomb is never expanded. At end-of-stream the gzip
     trailer must have been reached (``zlib`` verifies its CRC/ISIZE) and the compressed hash must
-    match ``request.expected_sha256`` (transport verify). Any of a bomb, a corrupt/truncated gzip
-    stream, or a hash mismatch raises a ``CONFIGURATION_ERROR`` ``CategorizedError`` with a
-    self-correcting message; the caller owns atomic staging so a raised error discards the partial
-    output already written.
+    match ``request.expected_sha256`` (transport verify). Every failure raises a
+    ``CategorizedError`` with a self-correcting message, under one of the two categories ADR-0445
+    split apart: a bomb or a corrupt/truncated/multi-member stream is a defect in the uploaded
+    object (``CONFIGURATION_ERROR``, terminal), while a hash mismatch says the bytes read back are
+    not the bytes signed at PUT (``INFRASTRUCTURE_FAILURE``, retryable — the same category the
+    identity staging path and the catalog digest check use for it). Note the gate *order*: the hash
+    is compared last, after the framing and bound checks, so damaged stored bytes that also break
+    the gzip framing report the object-defect category (ADR-0445 §6, residual tracked in #1548).
+    The caller owns atomic staging, so a raised error discards the partial output already written.
+
+    A checksum rejection carries ``details["gate"] == TRANSPORT_CHECKSUM_GATE``; the object-defect
+    rejections carry no ``details`` at all. A caller that has identifying context (the
+    uploaded-rootfs fetch attaches its ``system_id``) annotates them on the way out.
+
+    Note that ``store.get_range`` is called **uncaught** in the read loop, so the store's own
+    faults propagate through unchanged — including ``INFRASTRUCTURE_FAILURE`` for a connection
+    reset on any of the hundreds of ranged GETs a multi-GiB object takes. That is why the gate
+    marker exists: a consumer that distinguished the checksum rejection by *category* would report
+    every transport blip as stored-object damage.
 
     Args:
         store: A ranged-read store over the compressed object.
@@ -104,8 +162,10 @@ def strip_gzip_to_writer(
         A :class:`StripDecodeResult` with the number of decompressed bytes written.
 
     Raises:
-        CategorizedError: ``CONFIGURATION_ERROR`` on a gzip bomb, a corrupt or truncated gzip
-            stream, or a transport-checksum mismatch.
+        CategorizedError: ``CONFIGURATION_ERROR`` on a gzip bomb or a corrupt, truncated, or
+            multi-member gzip stream; ``INFRASTRUCTURE_FAILURE`` (with the
+            ``TRANSPORT_CHECKSUM_GATE`` marker) on a transport-checksum mismatch. The store's own
+            errors from ``get_range`` propagate unchanged, and carry no marker.
     """
     decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 + MAX_WBITS selects gzip framing
     hasher = hashlib.sha256()
@@ -121,7 +181,7 @@ def strip_gzip_to_writer(
         hasher.update(chunk)
         written = _drain(decompressor, chunk, writer, bound=bound, written=written)
     if not decompressor.eof:
-        raise _decode_error(
+        raise _object_error(
             "gzip transport stream is truncated: it ended before the gzip trailer, so the "
             "canonical object is incomplete; re-upload the full object"
         )
@@ -130,17 +190,19 @@ def strip_gzip_to_writer(
         # after the member within a read range (``unused_data``) or in an unread range once ``eof``
         # stopped the loop early. That is a concatenated/multi-member gzip or garbage after the
         # stream; we strip one gzip member only, so fail closed with a clear message rather than the
-        # checksum-mismatch branch below.
-        raise _decode_error(
+        # checksum-mismatch branch below. Since ADR-0445 that ordering also decides the category:
+        # this is an object defect (terminal), where falling through would report it retryable.
+        raise _object_error(
             "trailing data after the gzip stream: the stored object is not a single gzip member "
             "(concatenated/multi-member gzip is not supported); re-upload a single gzip of the "
             "canonical object"
         )
     actual = base64.b64encode(hasher.digest()).decode("ascii")
     if actual != request.expected_sha256:
-        raise _decode_error(
-            "transport checksum mismatch: the stored object's SHA-256 does not match the signed "
-            "upload; re-upload the object (do not retry the same corrupt bytes)"
+        raise _transport_error(
+            "transport checksum mismatch: the stored object's SHA-256 does not match the checksum "
+            "signed at upload; retry, and if it persists the stored object is damaged and must be "
+            "re-uploaded"
         )
     return StripDecodeResult(uncompressed_bytes=written)
 
@@ -164,14 +226,14 @@ def _drain(
         try:
             produced = decompressor.decompress(data, max_len)
         except zlib.error as exc:
-            raise _decode_error(
+            raise _object_error(
                 "gzip transport stream is corrupt: decompression failed; re-upload the object"
             ) from exc
         if produced:
             writer.write(produced)
             written += len(produced)
             if written > bound:
-                raise _decode_error(
+                raise _object_error(
                     "decompressed output exceeds the declared uncompressed_size bound "
                     f"({bound} bytes): the object is not a valid gzip of that size (a gzip bomb "
                     "or a wrong uncompressed_size); re-declare with the correct uncompressed_size "

@@ -72,6 +72,7 @@ from kdive.artifacts import storage as artifact_types
 from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.transport_encoding import (
     GZIP_ENCODING,
+    TRANSPORT_CHECKSUM_GATE,
     StripDecodeRequest,
     normalize_encoding,
     strip_gzip_to_writer,
@@ -881,9 +882,11 @@ def _stage_identity(
 
     The checksum is verified here, before the caller's shared qcow2-magic gate, which is the order
     ADR-0438 §3 and ADR-0441 §5 specify: a mismatch keeps ADR-0434 §2's ``INFRASTRUCTURE_FAILURE``
-    rather than being reported by whichever gate a corrupt object happens to trip first. (Whether
-    that category is the right one is unsettled — the gzip path raises ``CONFIGURATION_ERROR`` for
-    the byte-identical failure — and is tracked in #1523.)
+    rather than being reported by whichever gate a corrupt object happens to trip first. ADR-0445
+    settled that category, which the gzip path used to answer differently for the byte-identical
+    failure (#1523): it is retryable on both paths, because the recomputed hash covers transient
+    GET-side transport corruption as well as permanent post-PUT bit rot, and the message says so
+    in the same words ``strip_gzip_to_writer`` uses.
     """
     hasher = hashlib.sha256()
     with store.get_artifact_stream(key, None) as fetched, partial.open("wb") as writer:
@@ -891,11 +894,43 @@ def _stage_identity(
             hasher.update(chunk)
             writer.write(chunk)
     if base64.b64encode(hasher.digest()).decode("ascii") != checksum:
+        _log_checksum_mismatch(key, system_id=system_id, encoding="identity")
         raise CategorizedError(
-            "uploaded rootfs object failed checksum verification",
+            "uploaded rootfs object failed checksum verification: the stored bytes do not match "
+            "the checksum signed at upload; retry, and if it persists the stored object is "
+            "damaged and must be re-uploaded",
             category=ErrorCategory.INFRASTRUCTURE_FAILURE,
             details={"system_id": str(system_id)},
         )
+
+
+def _log_checksum_mismatch(key: str, *, system_id: UUID, encoding: str) -> None:
+    """Log an object-store integrity failure, which the category alone no longer distinguishes.
+
+    Same reasoning as :func:`_require_staging_free_space`'s warning, for the same reason: ADR-0445
+    moved this condition out of the small ``CONFIGURATION_ERROR`` bucket and into
+    ``INFRASTRUCTURE_FAILURE``, which in this tree is the catch-all for every store, libvirt, disk
+    and capacity fault. Without this line an operator watching for stored-object damage — the
+    permanent bit-rot mode ADR-0445 §1 names — cannot separate it from routine transient infra
+    noise in ``record_job_failure`` without pulling each job's ``failure_context`` back through MCP.
+
+    The retryable verdict makes that worse, not better: the agent is now *told* to retry, so the
+    first observable consequence of real damage would otherwise be a silent extra multi-GiB
+    download and a second dead-lettered job, with nothing in the host logs naming the condition.
+
+    **Reach, on the gzip path only** (ADR-0445 §6): this fires exactly where the checksum gate
+    fires, so the framing-first damage that never reaches that gate logs nothing here either.
+    Absence of this line is not evidence of an intact object for a gzip upload; #1548 widens both
+    together.
+    """
+    _log.warning(
+        "uploaded rootfs object %s failed checksum verification while staging for system %s "
+        "(%s encoding): the stored bytes do not hash to the checksum signed at upload — transient "
+        "read corruption clears on retry, a persistent mismatch means the stored object is damaged",
+        key,
+        system_id,
+        encoding,
+    )
 
 
 def _stage_gzip(
@@ -908,7 +943,13 @@ def _stage_gzip(
     partial: Path,
     system_id: UUID,
 ) -> None:
-    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified."""
+    """Stream-gunzip a gzip transport object to the partial, bounded and transport-hash verified.
+
+    ``strip_gzip_to_writer`` is consumer-agnostic and raises with empty ``details``, so its errors
+    are annotated with the ``system_id`` every other raise in this module carries — otherwise a
+    gzip staging failure lands in the job row without the one field an operator pivots on to
+    correlate it to a System, while the byte-identical identity failure lands with it (ADR-0445 §4).
+    """
     if uncompressed_size is None:
         raise CategorizedError(
             "uploaded rootfs declared a gzip encoding without an uncompressed_size; re-declare the "
@@ -922,8 +963,19 @@ def _stage_gzip(
         expected_sha256=checksum,
         uncompressed_size=uncompressed_size,
     )
-    with partial.open("wb") as writer:
-        strip_gzip_to_writer(store, request, writer)
+    try:
+        with partial.open("wb") as writer:
+            strip_gzip_to_writer(store, request, writer)
+    except CategorizedError as exc:
+        exc.details.setdefault("system_id", str(system_id))
+        # Keyed on the gate marker, NOT on the category. ``strip_gzip_to_writer`` calls
+        # ``get_range`` uncaught, so the store's own ``INFRASTRUCTURE_FAILURE`` — a connection reset
+        # on any of the hundreds of ranged GETs a multi-GiB stage issues, by far the likeliest
+        # failure on this path — propagates through it. A category test would log every such blip as
+        # stored-object damage, which is exactly the discrimination this log exists to provide.
+        if exc.details.get("gate") == TRANSPORT_CHECKSUM_GATE:
+            _log_checksum_mismatch(key, system_id=system_id, encoding=GZIP_ENCODING)
+        raise
 
 
 def _starts_with_qcow2_magic(staged: Path) -> bool:

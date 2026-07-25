@@ -27,6 +27,7 @@ from psycopg.types.json import Jsonb
 
 from kdive.artifacts.content_address import rootfs_object_name, rootfs_object_token
 from kdive.artifacts.storage import HeadResult, StreamedArtifact
+from kdive.artifacts.transport_encoding import StripDecodeRequest, strip_gzip_to_writer
 from kdive.db.locks import _session_lock_key
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -125,6 +126,8 @@ class _FakeStore:
         self.range_calls = 0
         self.stream_calls = 0
         self.readers: list[_RecordingReader] = []
+        # Raised from the first ``get_range``, standing in for the store's own typed faults.
+        self.range_fault: BaseException | None = None
 
     def head(self, key: str) -> HeadResult | None:
         self.head_calls += 1
@@ -145,6 +148,8 @@ class _FakeStore:
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         self.range_calls += 1
+        if self.range_fault is not None:
+            raise self.range_fault
         assert self._data is not None
         return self._data[start : start + length]
 
@@ -221,12 +226,136 @@ def test_stage_object_without_checksum_is_rejected(tmp_path: Path) -> None:
     assert store.stream_calls == 0
 
 
-def test_stage_checksum_mismatch_is_infra_error_and_stages_nothing(tmp_path: Path) -> None:
-    store = _FakeStore(b"actual-bytes", checksum=_sha256_b64(b"different-bytes"))
-    with pytest.raises(CategorizedError) as error:
-        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+@pytest.mark.parametrize("encoding", [None, "gzip"], ids=["identity", "gzip"])
+def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
+    tmp_path: Path, encoding: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ADR-0445 (#1523). Both staging paths end by comparing a hash they recomputed over the bytes
+    # they read against the checksum the signed PUT bound. The object is byte-identically as
+    # damaged either way, so the transport codec must not decide the category — and therefore must
+    # not decide the agent-visible `retryable` boolean `_RETRYABLE_BY_CATEGORY` derives from it.
+    # Parametrised on purpose: two separate tests would let the paths re-diverge and stay green.
+    canonical = _QCOW2 + b"z" * 512
+    stored = gzip.compress(canonical) if encoding == "gzip" else canonical
+    store = _FakeStore(stored, checksum=_sha256_b64(b"a-different-object"))
+
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
+        _stage(
+            store,
+            tmp_path,
+            encoding=encoding,
+            uncompressed_size=len(canonical) if encoding == "gzip" else None,
+        )
+
     assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
-    assert "checksum verification" in str(error.value)
+    assert "checksum" in str(error.value)
+    # Aligned remediation: the flag alone cannot say "retry once, then re-upload".
+    assert "retry, and if it persists the stored object is damaged" in str(error.value)
+    assert error.value.details["system_id"]  # the operator's correlation field, on both paths
+    # The host-side signal. INFRASTRUCTURE_FAILURE is this tree's catch-all bucket, so after
+    # ADR-0445 the category no longer separates stored-object damage from routine infra noise;
+    # this log line is what does, on both paths (same reasoning as the free-space warning above).
+    assert "failed checksum verification while staging" in caplog.text
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+_RESIDUAL_CANONICAL = _QCOW2 + b"z" * 512
+# The probe below only cares which branch raises, never what decodes, so its output is discarded.
+NULL_IO = cast(IO[bytes], io.BytesIO())
+
+
+def _flip_reaching(message: str) -> tuple[int, int]:
+    """Find the first (byte, xor-mask) in the deflate body whose damage raises ``message``.
+
+    The offsets are **derived, not pinned**. Which branch a given flip reaches is a property of the
+    exact deflate encoding, and that is chosen by the linked compressor — this interpreter links
+    zlib-ng, and a stock-zlib build can emit a different (even differently sized) stream for the
+    same input. A hardcoded offset would leave a maintainer on another runner staring at a red test
+    with no way to tell whether the residual moved or the compressor did.
+    """
+    pristine = gzip.compress(_RESIDUAL_CANONICAL)
+    for index in range(10, len(pristine) - 8):  # the deflate body: past the header, before the CRC
+        for mask in (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0xFF):
+            candidate = bytearray(pristine)
+            candidate[index] ^= mask
+            request = StripDecodeRequest(
+                key="k",
+                compressed_size=len(candidate),
+                expected_sha256=_sha256_b64(pristine),  # the checksum of the UNdamaged object
+                uncompressed_size=len(_RESIDUAL_CANONICAL),
+            )
+            try:
+                strip_gzip_to_writer(_FakeStore(bytes(candidate), checksum=None), request, NULL_IO)
+            except CategorizedError as probe:
+                if message in str(probe):
+                    return index, mask
+    pytest.skip(f"no deflate-body flip reaches {message!r} for this zlib build")
+
+
+@pytest.mark.parametrize(
+    "expected_message",
+    # Two shapes of deflate-body damage reaching two different object-defect branches: one fails the
+    # deflate CRC, one desynchronises the Huffman decode so the output cap trips first. Which branch
+    # fires is a property of the damage, not of anything the agent did. An exhaustive single-bit
+    # sweep of this fixture's deflate body under zlib-ng 1.3.1 splits 225 corrupt-stream / 13 bomb
+    # bound / 10 checksum gate of 248 flips -- so the bomb branch is a real share of stored-byte
+    # corruption rather than a curiosity, and it is the shape whose message is affirmatively WRONG:
+    # it blames a declared uncompressed_size that was correct. ADR-0450 reads that same field as the
+    # gzip path's free-space budget, so an agent that follows the advice and re-declares upward can
+    # have its next provision refused for a base the volume can hold.
+    ["corrupt", "exceeds the declared uncompressed_size bound"],
+    ids=["deflate-crc", "bomb-bound"],
+)
+def test_stage_checksum_mismatch_on_gzip_corrupt_bytes_is_a_known_residual(
+    tmp_path: Path, expected_message: str
+) -> None:
+    # ADR-0445 §6 / #1548 — pins the LIMIT of the convergence above, so it is visible rather than
+    # silent. The test above declares a wrong checksum over a *well-formed* gzip, which reaches the
+    # end-of-stream hash comparison. Damage the STORED BYTES instead and zlib's own framing trips
+    # first, so an object-defect branch fires before the digest is ever compared. The identity path
+    # reports this same damage as INFRASTRUCTURE_FAILURE (see the corrupt-object test below), so the
+    # codec still decides the verdict here. #1523 could not close this — its brief forbade changing
+    # the bomb and corrupt-stream categories — so #1548 carries it.
+    index, mask = _flip_reaching(expected_message)
+    stored = bytearray(gzip.compress(_RESIDUAL_CANONICAL))
+    pristine_checksum = _sha256_b64(bytes(stored))
+    stored[index] ^= mask  # damaged post-PUT; the declared checksum is still the pristine one
+
+    store = _FakeStore(bytes(stored), checksum=pristine_checksum)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(_RESIDUAL_CANONICAL))
+
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR  # NOT yet the identity verdict
+    assert expected_message in str(error.value)
+    assert error.value.details["system_id"]
+    assert not _dest(tmp_path).exists()
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
+def test_stage_gzip_store_fault_is_not_logged_as_stored_object_damage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The checksum WARNING must key off the GATE, not the category. `strip_gzip_to_writer` calls
+    # `get_range` uncaught, and the store raises its own INFRASTRUCTURE_FAILURE for a connection
+    # reset — by far the likeliest failure on a path that issues hundreds of ranged GETs for a
+    # multi-GiB object. A category test would log every such blip as "the stored object is damaged",
+    # destroying the one discrimination ADR-0445's Consequences promises an operator.
+    canonical = _QCOW2 + b"z" * 512
+    compressed = gzip.compress(canonical)
+    store = _FakeStore(compressed, checksum=_sha256_b64(compressed))
+    fault = CategorizedError(
+        "get_range on 'k' failed: ConnectionClosedError",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+    )
+    store.range_fault = fault
+
+    with pytest.raises(CategorizedError) as error, caplog.at_level(logging.WARNING):
+        _stage(store, tmp_path, encoding="gzip", uncompressed_size=len(canonical))
+
+    assert error.value is fault
+    assert "failed checksum verification" not in caplog.text
     assert not _dest(tmp_path).exists()
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
@@ -236,8 +365,8 @@ def test_stage_corrupt_object_reports_the_checksum_gate_not_the_format_gate(tmp_
     # magic too, so gating on the unauthenticated first chunk would report this as the *format*
     # gate ("upload a qcow2 image", CONFIGURATION_ERROR) instead of the checksum gate. The checksum
     # is compared first, so the object is fully drained and the failure keeps the category
-    # ADR-0434 §2 decided for it. This pins the gate that fires, not the wider retryability
-    # question the gzip path answers differently (#1523).
+    # ADR-0434 §2 decided for it and ADR-0445 extended to every staging path. This pins the gate
+    # that fires; the convergence itself is pinned above, parametrised over both codecs.
     payload = b"\x00\x00\x00\x00corrupted-head" + b"\xa5" * 500
     store = _FakeStore(payload, checksum=_sha256_b64(b"the-uncorrupted-object"), max_chunk=8)
 
