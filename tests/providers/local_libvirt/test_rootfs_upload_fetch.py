@@ -1060,6 +1060,53 @@ def test_stage_marker_write_fault_names_the_marker_and_keeps_the_published_base(
     assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
 
 
+def test_stage_marker_fsync_fault_also_names_the_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The `fsync` and the `close` must be inside the fault region too, not just the `open`. fsync is
+    # where Linux surfaces a DEFERRED writeback error (errseq_t), so EIO here is the normal
+    # reporting point on exactly the failing-disk host the open branch is written for -- and close
+    # reports it on some filesystems. Left outside, both would unwind into
+    # `stage_uploaded_rootfs`'s blanket `except OSError` and come out as "failed to stage the
+    # uploaded rootfs to <token>.qcow2", naming a base that is published and correct.
+    #
+    # The state here differs from the open branch and the message says so: the marker EXISTS, only
+    # its durability is unproven, so a crash before the next writeback loses it and the next fetch
+    # re-stages -- the safe direction.
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    dest = _dest(tmp_path)
+    marker = staged_rootfs_marker_path(dest)
+    marker_fds: list[int] = []
+    real_open, real_fsync = os.open, os.fsync
+
+    def noting_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == marker:
+            marker_fds.append(fd)
+        return fd
+
+    def faulting_fsync(fd: int) -> None:
+        if fd in marker_fds:
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "open", noting_open)
+    monkeypatch.setattr(os, "fsync", faulting_fsync)
+
+    with pytest.raises(CategorizedError) as error:
+        _stage(store, tmp_path, encoding=None, uncompressed_size=None)
+
+    assert marker_fds, "the marker was never opened, so this test faulted nothing"
+    assert error.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert error.value.details["marker"] == str(marker)
+    assert str(marker) in str(error.value)
+    assert "failed to stage" not in str(error.value)
+    assert "durability is unproven" in str(error.value)  # not the marker-absent wording
+    assert dest.read_bytes() == _QCOW2  # published, intact, NOT rolled back
+    assert marker.is_file()  # created; only its durability failed
+    assert list(tmp_path.glob(f"{_TOKEN}.*.partial")) == []
+
+
 def test_stage_marker_write_fault_stays_fatal_rather_than_publishing_unmarked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

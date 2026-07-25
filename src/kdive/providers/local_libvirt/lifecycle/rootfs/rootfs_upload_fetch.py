@@ -941,7 +941,8 @@ _REJECTION_PROSE = {
     _NOT_A_REGULAR_FILE: "is not a regular file",
     _NO_COMPLETION_MARKER: (
         "has no completion marker, so nothing attests that its stage ever finished durably — "
-        "expected once per base when upgrading past ADR-0451, and otherwise a crash mid-stage or a "
+        "expected once per base when upgrading past ADR-0451, and otherwise a sibling publishing "
+        "this base right now (between its rename and its marker write), a crash mid-stage, or a "
         "publish whose marker write itself faulted"
     ),
     _FAILED_FORMAT_GATE: "did not re-pass the qcow2 format gate",
@@ -1226,6 +1227,13 @@ def _write_completion_marker(marker: Path, dest: Path, *, system_id: UUID) -> No
     ``EISDIR``
     if anything ever occupies the marker path. It must stay **fatal**: succeeding with a marker-less
     base would hide the re-download loop below rather than report it.
+
+    **All three syscalls are inside the fault region, not just the ``open``.** ``fsync`` is where
+    Linux surfaces a *deferred* writeback error (``errseq_t``), so ``EIO`` here is the normal
+    reporting point on exactly the failing-disk host this docstring already names — and ``close``
+    reports it too on some filesystems. Leaving either outside would send them through
+    :func:`_staging_fault` and name the published base, which is the misattribution this whole pair
+    of helpers exists to remove. The two arms leave different states and say so.
     """
     try:
         fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o666)
@@ -1242,9 +1250,22 @@ def _write_completion_marker(marker: Path, dest: Path, *, system_id: UUID) -> No
             ),
         ) from err
     try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as err:
+        raise _marker_fault(
+            marker,
+            dest,
+            err,
+            system_id=str(system_id),
+            consequence=(
+                f"the base at {str(dest)!r} is published, verified and durable and this marker "
+                "exists, but its durability is unproven — a crash before the next writeback loses "
+                "it and the next fetch re-stages the base, which is the safe direction"
+            ),
+        ) from err
 
 
 def _marker_fault(
