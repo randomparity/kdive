@@ -50,9 +50,9 @@ not touch the queue. The delete-and-re-insert landed in **PR #1529** for #1522, 
 
 ## Options considered
 
-**(a) Re-date `created_at` in the recycle `UPDATE`** — chosen. One clause, no migration. The cost
-is that `jobs.created_at` means "when this attempt was queued", not "when the row was first
-inserted".
+**(a) Re-date `created_at` in the recycle `UPDATE`** — chosen. One clause, no migration (review
+added a matching stamp on the `INSERT` so both branches share one clock; see Design). The cost is
+that `jobs.created_at` means "when this attempt was queued", not "when the row was first inserted".
 
 **(b) Add a `queued_at` (or priority) column that `dequeue` orders by, keeping `created_at` as
 provenance** — semantically cleanest, but needs a migration, which this campaign does not sanction.
@@ -74,11 +74,11 @@ neither the audit log nor accounting joins it.
 | `dequeue` — `ORDER BY created_at` | The fix target. FIFO becomes "by when the attempt was queued". |
 | `worker.py` `record_time_to_claim` — `heartbeat_at - created_at` | **Improved.** The metric measures queue wait; today a recycled job reports a bogus wait spanning its entire prior lifetime. |
 | `all_recent_jobs` — `ops.jobs_list`, `ORDER BY created_at DESC, id DESC` | A recycled job floats to the top of the operator's newest-first list, which is where a just-requeued job belongs. |
-| `recent_jobs` — `jobs.list`, same order plus the `(created_at, id)` keyset cursor | A recycled row can move forward past a page boundary and be missed for the rest of that pagination. `clock_timestamp()` makes `created_at` monotonic by construction, so a row can be skipped but never duplicated — the same behavior a fresh insert or the sanctioned delete-and-re-insert already produces mid-pagination. The cursor is a boundary, not a snapshot. |
+| `recent_jobs` — `jobs.list`, same order plus the `(created_at, id)` keyset cursor | A recycled row can move forward past a page boundary and be missed for the rest of that pagination. `clock_timestamp()` makes a given row's `created_at` move only forward, so a row can be skipped but never duplicated — the same behavior a fresh insert or the sanctioned delete-and-re-insert already produces mid-pagination. The cursor is a boundary, not a snapshot. |
 | `latest_succeeded_job_for_system` — newest `succeeded` by `(created_at, id)` | Unaffected: it filters `state = 'succeeded'`, and a recycled job is `queued`. |
 
-`updated_at` is trigger-maintained (`jobs_set_updated_at`) and unaffected; it, plus the audit
-trail, remains the change-history record.
+`updated_at` is trigger-maintained (`jobs_set_updated_at`) and no consumer reads it, but it is
+**not** a fallback record of the recycle — see the Design section below.
 
 ## Design
 
@@ -135,7 +135,7 @@ For `systems.restore` the wait is **state-fenced**, not merely perceived: it set
 `default` lane, and nothing times out a queued job — so a retried restore can sit behind a long
 `build` with the System fenced. Accepted here and filed as a follow-up: giving the state-fenced
 kinds their own `dispatch_lane` needs no migration (the column and `accepted_lanes` already exist)
-and is orthogonal to the ordering bug, so it should not ride on this change.
+and is orthogonal to the ordering bug, so it should not ride on this change (#1538).
 
 ## Test plan
 

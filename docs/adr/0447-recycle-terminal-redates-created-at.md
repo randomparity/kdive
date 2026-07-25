@@ -155,7 +155,7 @@ SKIP LOCKED` keeps a tie making progress.
   lapsed lease). A retried restore can therefore sit behind a long `build` with the System fenced.
   This is accepted here rather than fixed, because the fix is orthogonal to the ordering bug and
   should not ride on it: putting the state-fenced kinds on their own `dispatch_lane` needs no
-  migration (the column and `accepted_lanes` already exist) and is filed as a follow-up.
+  migration (the column and `accepted_lanes` already exist) and is filed as [#1538](https://github.com/randomparity/kdive/issues/1538).
 - `jobs.created_at` is an attempt-queued timestamp, not a first-insertion timestamp. Any future
   reader wanting first-insertion provenance needs the `queued_at` split above.
 - `gc.py`'s delete-and-re-insert stays, now justified solely by its retry backoff; its stale
