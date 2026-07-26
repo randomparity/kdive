@@ -27,7 +27,11 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
-from kdive.config.core_settings import IMAGE_PUBLISH_GRACE
+from kdive.config.core_settings import (
+    IMAGE_PUBLISH_GRACE,
+    UPLOAD_ORPHAN_GRACE,
+    UPLOAD_TTL_SECONDS,
+)
 from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.core.transport_reset import NullResetter, TransportResetter
 from kdive.providers.infra.console_hosting import CollectorRegistry
@@ -52,6 +56,12 @@ from kdive.reconciler.cleanup.provider_reaping import (
 from kdive.reconciler.cleanup.runtime_resources import ResourceProbe
 from kdive.reconciler.cleanup.runtime_resources import (
     reap_expired_runtime_resources as _reap_expired_runtime_resources,
+)
+from kdive.reconciler.cleanup.upload_orphans import (
+    UploadOrphanStore,
+)
+from kdive.reconciler.cleanup.upload_orphans import (
+    repair_leaked_upload_objects as _repair_leaked_upload_objects,
 )
 from kdive.reconciler.cleanup.uploads import (
     UploadStore,
@@ -115,6 +125,8 @@ __all__ = [
     "ReconcileConfig",
     "ReconcileReport",
     "Reconciler",
+    "UploadOrphanStore",
+    "UploadStore",
     "reconcile_once",
 ]
 
@@ -221,7 +233,7 @@ class ReconcileConfig:
     ADR-0337) without reordering the defaulted fields.
     """
 
-    upload_store: UploadStore
+    upload_store: UploadOrphanStore
     image_store: ImageSweepStore
     resetter: TransportResetter = _NULL_RESETTER
     dump_volume_reaper: DumpVolumeReaper = _NULL_DUMP_VOLUME_REAPER
@@ -275,6 +287,14 @@ def _abandoned_uploads_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
     return lambda conn: _repair_abandoned_uploads(conn, config.upload_store)
+
+
+def _leaked_upload_objects_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _repair_leaked_upload_objects(
+        conn, config.upload_store, _upload_orphan_grace(), _upload_window_ttl()
+    )
 
 
 def _report_artifacts_gc_repair(
@@ -388,6 +408,10 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         ),
     ),
     _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
+    # Runs after the reaper so a window reaped this pass is already row-less. It is the reclaim
+    # threshold (orphan grace *plus* the upload TTL), not the ordering, that keeps a
+    # just-reaped window's bytes out of this same pass (ADR-0455 §2).
+    _RepairCatalogEntry("leaked_upload_objects", _leaked_upload_objects_repair),
     _RepairCatalogEntry("report_artifacts_gc_count", _report_artifacts_gc_repair),
     _RepairCatalogEntry("investigation_artifacts_gc_count", _investigation_artifacts_gc_repair),
     _RepairCatalogEntry("expired_build_artifacts_gc_count", _expired_build_artifacts_gc_repair),
@@ -509,6 +533,30 @@ def _image_publish_grace() -> timedelta:
     if seconds is None:
         return DEFAULT_IMAGE_PUBLISH_GRACE
     return timedelta(seconds=seconds)
+
+
+def _upload_orphan_grace() -> timedelta:
+    """Resolve the upload-orphan grace from config (ADR-0455 §8); the operator's brake.
+
+    A **restart** engages it, not a redeploy: ``Registry.load`` snapshots ``KDIVE_*`` once at the
+    bootstrap in ``__main__``, so this reads the same frozen value on every pass, and an outside
+    operator cannot mutate a running process's environment anyway. Resolving here rather than at
+    ``ReconcileConfig`` construction keeps both threshold terms in one place and out of the
+    provider-shaped config object; it does not make the brake live. ``require`` rather than
+    ``get``: the setting declares a default, so there is no unset case to fall back for.
+    """
+    return timedelta(seconds=config.require(UPLOAD_ORPHAN_GRACE))
+
+
+def _upload_window_ttl() -> timedelta:
+    """Resolve the upload-window TTL the orphan grace is stacked on top of (ADR-0455 §2).
+
+    Read from config rather than baked into a constant because raising ``KDIVE_UPLOAD_TTL_SECONDS``
+    postpones every reap by the same amount, and an orphan grace that did not move with it would
+    let the sweep reclaim a window's bytes in the very pass that reaped them. Like the grace, the
+    value is a process-start snapshot; a change engages on restart.
+    """
+    return timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
 
 
 async def _run_repair_plan(

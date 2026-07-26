@@ -189,7 +189,8 @@
 |----------|-----------|---------|----------|-------|
 | `KDIVE_MAX_INVENTORY_EXPORT_BYTES` | server | `262144` | no | Maximum accepted systems.toml document size in bytes for ops.export_systems_toml (persist/writeback). A whole live inventory is a few KiB; the cap bounds a hostile or accidental large document. |
 | `KDIVE_MAX_UPLOAD_BYTES` | server | `53687091200` | no | Maximum accepted per-artifact upload size in bytes. A single-PUT artifact still binds at the 5 GiB S3 single-PUT ceiling; this cap governs a chunked artifact's total (ADR-0104). |
-| `KDIVE_UPLOAD_TTL_SECONDS` | server | `86400` | no | Presigned upload-URL TTL in seconds. |
+| `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` | reconciler, server | `86400` | no | Grace window in seconds protecting an unreferenced object under an upload prefix from the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and applied on top of KDIVE_UPLOAD_TTL_SECONDS, so an object is reclaimed only well after the window it could have belonged to was reaped. Raise it to stall the sweep — on the server as well as the reconciler, since ops.reconcile_now runs the sweep too. Takes effect when the process restarts; config is snapshotted at startup. |
+| `KDIVE_UPLOAD_TTL_SECONDS` | reconciler, server | `86400` | no | Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455). |
 
 # Test, tooling, and guest-helper variables
 

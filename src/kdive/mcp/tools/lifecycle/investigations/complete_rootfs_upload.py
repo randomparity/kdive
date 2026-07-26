@@ -50,7 +50,7 @@ from kdive.store.objectstore import object_store_from_env
 
 _log = logging.getLogger(__name__)
 
-_TENANT = "local"
+_TENANT = upload_manifest.UPLOAD_TENANT
 _OWNER_KIND = "investigations"
 _ROOTFS_RETENTION_CLASS = "rootfs"
 _ACCEPTING_STATES = frozenset({InvestigationState.OPEN, InvestigationState.ACTIVE})

@@ -1298,7 +1298,7 @@ def test_all_repair_kinds_matches_a_fully_populated_plan() -> None:
     declared bound must stay in lock-step with the plan or the cardinality guard drifts.
     """
     config = make_reconcile_config(
-        upload_store=cast(loop.UploadStore, object()),
+        upload_store=cast(loop.UploadOrphanStore, object()),
         image_store=cast(loop.ImageSweepStore, object()),
         console_registry=cast(loop.CollectorRegistry, object()),
         resource_probe=cast(loop.ResourceProbe, object()),

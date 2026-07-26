@@ -23,6 +23,10 @@ _LOCK_SCOPES: dict[upload_manifest.UploadOwnerKind, LockScope] = {
     upload_manifest.INVESTIGATION_UPLOAD_OWNER: LockScope.INVESTIGATION,
 }
 
+#: The owner kinds an upload window can be minted for, in reap order. The orphan sweep (ADR-0455)
+#: derives the object-store roots it walks from this, so its scope cannot drift from the reaper's.
+UPLOAD_OWNER_KINDS: tuple[upload_manifest.UploadOwnerKind, ...] = tuple(_LOCK_SCOPES)
+
 
 @runtime_checkable
 class UploadStore(Protocol):

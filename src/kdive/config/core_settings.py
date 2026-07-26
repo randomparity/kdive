@@ -21,6 +21,15 @@ _SERVER = frozenset({"server"})
 _STORE_USERS = frozenset({"server", "worker", "reconciler"})
 _WORKER = frozenset({"worker"})
 _DISCOVERY = frozenset({"worker", "reconciler"})
+# The upload-orphan sweep's two knobs are read by both processes (ADR-0455 §2, §8): the reconciler
+# runs the sweep on its loop, and the server runs a full `reconcile_once` on demand via
+# `ops.reconcile_now` — so a brake set on only one of them still lets the other delete. The TTL is
+# additionally *set* by the server at mint time and merely read by the reconciler. ``processes``
+# does not gate resolution — ``Registry.get`` reads the environment regardless — so declaring both
+# here buys two things: ``config validate`` checks a malformed value at startup instead of raising
+# from inside a repair on every pass, and the generated operator reference tells whoever provisions
+# each process's environment that it needs these variables.
+_UPLOAD_RECLAIM_READERS = frozenset({"server", "reconciler"})
 # Processes that read the on-disk provider fixture catalog: the worker/reconciler build paths
 # plus the server's fixtures.validate read (ADR-0120).
 _CATALOG_READERS = frozenset({"server", "worker", "reconciler"})
@@ -52,6 +61,14 @@ def _positive_float(raw: str) -> float:
     value = float(raw)
     if value <= 0.0:
         raise ValueError(f"must be > 0, got {value}")
+    return value
+
+
+def _nonnegative_int(raw: str) -> int:
+    """Parse a grace window, rejecting a negative that would invert it into an immediate delete."""
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"must be >= 0, got {value}")
     return value
 
 
@@ -183,12 +200,40 @@ PROVISION_PREMUTATION_TIMEOUT_S = Setting(
 
 UPLOAD_TTL_SECONDS = Setting(
     name="KDIVE_UPLOAD_TTL_SECONDS",
-    parse=_int,
+    # Bounded for the same reason as its twin below, and it needs saying separately because the
+    # threshold is their *sum*: a negative TTL cancels the grace and pushes the mtime cutoff into
+    # the future just as effectively. A negative presigned-URL TTL is nonsense on the server too,
+    # so nothing is given up by rejecting it in both processes.
+    parse=_nonnegative_int,
     default="86400",
     group="upload",
-    processes=_SERVER,
-    help="Presigned upload-URL TTL in seconds.",
-    suggest="an integer number of seconds, e.g. 86400",
+    # Read by the reconciler as well as *set* by the minting server: the orphan sweep's reclaim
+    # threshold is stacked on top of it (ADR-0455 §2), so a reconciler provisioned without this
+    # variable falls back to the default and reclaims a window's bytes in the pass that reaped them.
+    processes=_UPLOAD_RECLAIM_READERS,
+    help="Presigned upload-URL TTL in seconds. Also read by the reconciler (ADR-0455).",
+    suggest="a non-negative integer number of seconds, e.g. 86400",
+)
+UPLOAD_ORPHAN_GRACE = Setting(
+    name="KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS",
+    # Not ``_int``: this is the only brake on a repair that deletes irreversibly, and a negative
+    # value moves the cutoff into the future, making every rowless object under both roots
+    # reclaimable on the next pass — including one whose PUT landed seconds ago. The per-key
+    # re-read cannot catch it, because it re-evaluates the same inverted predicate. Rejecting it
+    # in the parser puts the failure at `config validate` instead of at the first delete.
+    parse=_nonnegative_int,
+    default="86400",
+    group="upload",
+    processes=_UPLOAD_RECLAIM_READERS,
+    help=(
+        "Grace window in seconds protecting an unreferenced object under an upload prefix from "
+        "the reconciler's orphan sweep (ADR-0455). Measured from the object's store mtime and "
+        "applied on top of KDIVE_UPLOAD_TTL_SECONDS, so an object is reclaimed only well after "
+        "the window it could have belonged to was reaped. Raise it to stall the sweep — on the "
+        "server as well as the reconciler, since ops.reconcile_now runs the sweep too. Takes "
+        "effect when the process restarts; config is snapshotted at startup."
+    ),
+    suggest="a non-negative integer number of seconds, e.g. 86400",
 )
 MAX_UPLOAD_BYTES = Setting(
     name="KDIVE_MAX_UPLOAD_BYTES",
@@ -698,6 +743,7 @@ SETTINGS = [
     LEASE_MAX,
     PROVISION_PREMUTATION_TIMEOUT_S,
     UPLOAD_TTL_SECONDS,
+    UPLOAD_ORPHAN_GRACE,
     MAX_UPLOAD_BYTES,
     ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_DOWNLOAD_TTL_SECONDS,

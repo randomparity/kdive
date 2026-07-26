@@ -39,6 +39,9 @@ S3Client = Any
 
 _DEFAULT_REGION = "us-east-1"
 
+# The image catalog's object namespace; the one prefix ``list_image_objects`` may list.
+_IMAGE_PREFIX = "images/"
+
 # A missing object (404) and an etag mismatch (412) are the one stale_handle case.
 _STALE_STATUSES = frozenset({404, 412})
 
@@ -521,11 +524,12 @@ class ObjectStore:
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("delete_object", key, err) from err
 
-    def list_image_objects(self) -> list[artifact_types.ObjectListing]:
-        """Return every object under the ``images/`` prefix with its store mtime (paginated).
+    def list_prefix_with_mtime(self, prefix: str) -> list[artifact_types.ObjectListing]:
+        """Return every object under ``prefix`` with its store mtime (paginated), or ``[]``.
 
-        Backs the reconciler's leaked-image sweep: the mtime lets the sweep compare an
-        orphan object's age against the publish grace in Postgres ``now()``.
+        The mtime-bearing twin of :meth:`list_prefix`. It backs every orphan sweep that must
+        compare an unreferenced object's age against a grace window in Postgres ``now()`` before
+        deleting it — the leaked-image sweep (ADR-0092) and the upload-prefix sweep (ADR-0455).
 
         Raises:
             CategorizedError: the listing fails
@@ -534,7 +538,7 @@ class ObjectStore:
         listings: list[artifact_types.ObjectListing] = []
         try:
             paginator = self._client.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self._bucket, Prefix="images/"):
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     listings.append(
                         artifact_types.ObjectListing(
@@ -542,8 +546,21 @@ class ObjectStore:
                         )
                     )
         except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("list_objects_v2", "images/", err) from err
+            raise _infrastructure_error("list_objects_v2", prefix, err) from err
         return listings
+
+    def list_image_objects(self) -> list[artifact_types.ObjectListing]:
+        """Return every object under the ``images/`` prefix with its store mtime.
+
+        The prefix is bound here rather than passed by the caller: ``ImageSweepStore`` is a port
+        for the image sweeps, and an image sweep has no business being able to list an arbitrary
+        prefix.
+
+        Raises:
+            CategorizedError: the listing fails
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        return self.list_prefix_with_mtime(_IMAGE_PREFIX)
 
     def head_present(self, key: str) -> bool:
         """Return whether an object exists at ``key`` (a HEAD presence check).

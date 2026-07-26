@@ -22,13 +22,14 @@ object-HEAD-gated s3 image).
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.storage import ObjectListing
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.providers.infra.reaping import NullReaper
@@ -77,7 +78,7 @@ class _RecordingImageStore:
 
 
 class _RecordingUploadStore:
-    """A structural ``UploadStore``: lists a prefix (abandoned reaper) and records deletes (GC)."""
+    """A structural upload store: lists a prefix (reaper/orphan sweep), records deletes (GC)."""
 
     def __init__(self, prefixed: dict[str, list[str]]) -> None:
         self._prefixed = prefixed
@@ -85,6 +86,17 @@ class _RecordingUploadStore:
 
     def list_prefix(self, prefix: str) -> list[str]:
         return list(self._prefixed.get(prefix, []))
+
+    def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]:
+        # Freshly written, so the ADR-0455 grace protects every object from the orphan sweep and
+        # this test's assertions stay about the reaper and the GC sweeps.
+        now = datetime.now(UTC)
+        return [
+            ObjectListing(key=key, last_modified=now)
+            for keys in self._prefixed.values()
+            for key in keys
+            if key.startswith(prefix)
+        ]
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)
