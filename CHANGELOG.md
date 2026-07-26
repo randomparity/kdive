@@ -127,7 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the partial-reap hole the identity guard misses
 - Record the staging free-space precheck as ADR-0450
 - Add the bomb branch to the disclosed residual
+- Correct the _Tally docstring
 - Reconcile the 1539 spec with ADR-0451's residues
+- Record the server-side sweep in the spec too
+- Give ADR-0455's deferrals their tracking issues
 
 ### Fixed
 
@@ -219,10 +222,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the upload reap's prefix before the sweep starts
 - Report a failed upload sweep as a failed pass
 - Stop the upload pass when a whole owner's sweep is refused
+- Sweep the upload prefix for objects no row can reach
+- Stack the orphan grace on the upload window TTL
+- Re-read the object mtime before an orphan delete
+- Bound one orphan-sweep pass and correct the ADR record
+- Budget the orphan sweep per root, by work examined
+- Declare the orphan-sweep knobs for the server too
 - Gate staged-base reuse on a completion marker
 - Key the reuse rejection log on the gate that fired
 - Give the marker steps a fault that names the marker
 - Put the marker fsync and close inside the marker fault
+- Skip a root the sweep cannot list, don't end the pass
+- Skip a root the sweep cannot classify, as with its list
+- Bound the orphan grace and correct the brake's claim
+- Bound both terms of the orphan-sweep threshold
 
 ### Build
 
