@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Count the usage-recording failures ADR-0148 swallows
 - Precheck staging free space before downloading
 - Publish agent-safe build contracts
+- Resolve agent and operator tool-exposure profiles
+- Default the agent profile to the tool gateway
 
 ### Changed
 
