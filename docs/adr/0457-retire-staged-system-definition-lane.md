@@ -130,22 +130,24 @@ it holds a `max_concurrent_systems` slot and an `active` Allocation, `systems.pr
 advance it, and the tool its error message names no longer exists.
 
 Retirement therefore **requires** a data migration that resolves every pre-existing `defined` row,
-shipped in the same change as the tool removal. Choosing between the available resolutions
-(transition to `torn_down`, releasing the slot and allocation; or advance to `provisioning`) is
-implementation work with its own consequences for the Allocation state and audit trail, and is
-delegated to the implementation issue. What this ADR fixes is that the migration is **mandatory
-and not optional**: removing the enum value without it leaves rows carrying a state the code cannot
-read.
+shipped in the same change as the tool removal. A migration cannot enqueue a provision job, so the
+row must be resolved to a terminal state that releases the quota slot and lets the allocation
+repair reclaim its Allocation. The mechanics — which terminal state, whether the Allocation is
+reverted or left for `reap_orphaned_active_allocations`, and what audit rows the transition
+writes — are implementation work with their own consequences, delegated to the implementation issue.
+What this ADR fixes is that the migration is **mandatory and not optional**: removing the enum
+value without it leaves rows carrying a state the code cannot read.
 
 ADR-0441's "pre-1.0, fresh DBs, no backfill" reasoning does **not** license skipping it here. That
 argument applied to *artifacts* nothing would strand; here the stranded object holds live capacity
 and blocks its Allocation.
 
-### 4. The three non-tool `DEFINED` consumers must be reclassified, not deleted
+### 4. The three non-tool `DEFINED` consumers each need a re-read, not a blind delete
 
-Each is a state classification that some other decision's safety rests on. Removing `DEFINED` from
-them is correct only because the state ceases to exist; each site must be re-read to confirm the
-surrounding invariant still holds without it.
+Each of the three is a state classification that some other decision's safety rests on. The
+constants themselves stay; `DEFINED` leaves each set, which is correct only because the state
+ceases to exist. Each site must be re-read to confirm the surrounding invariant still holds without
+it.
 
 - `ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES` (`src/kdive/domain/capacity/state.py:100`) — ADR-0441 §6
   condition (b). Its guard `test_reclaim_classification_is_exhaustive` will redden if the set and
