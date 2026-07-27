@@ -91,10 +91,13 @@ def test_force_teardown_calls_breakglass_tool(monkeypatch: pytest.MonkeyPatch, c
     assert client.calls == [("ops.force_teardown", {"system_id": "sys-1", "reason": "wedged"})]
 
 
-def test_cordon_calls_resources_cordon(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+@pytest.mark.parametrize("state", ["cordoned", "schedulable"])
+def test_set_scheduling_passes_state_through(
+    monkeypatch: pytest.MonkeyPatch, capsys, state: str
+) -> None:
     client = _install_session(monkeypatch)
-    asyncio.run(mutations.resources_cordon(_args(resource_id="host-1")))
-    assert client.calls == [("resources.cordon", {"resource_id": "host-1"})]
+    asyncio.run(mutations.resources_set_scheduling(_args(resource_id="host-1", state=state)))
+    assert client.calls == [("resources.set_scheduling", {"resource_id": "host-1", "state": state})]
 
 
 def test_drain_calls_resources_drain(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -147,7 +150,7 @@ def test_preflight_reads_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
         mutations, "_session_factory", lambda: _FakeSession(client, token="tok-123")
     )
     monkeypatch.setattr(mutations, "ensure_token_valid", _capture)
-    asyncio.run(mutations.resources_cordon(_args(resource_id="host-1")))
+    asyncio.run(mutations.resources_set_scheduling(_args(resource_id="host-1", state="cordoned")))
     assert seen == ["tok-123"]
 
 
@@ -155,7 +158,7 @@ def test_mutating_verbs_are_registered_and_not_read_only() -> None:
     mutating_tools = {
         "ops.force_release",
         "ops.force_teardown",
-        "resources.cordon",
+        "resources.set_scheduling",
         "resources.drain",
     }
     registered = {verb.tool for verb in REGISTRY if not verb.read_only}

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.capacity.state import AllocationState, SystemState
 from kdive.domain.catalog.resources import ManagedBy, ResourceKind
@@ -18,9 +19,18 @@ from kdive.inventory.reconcile.prune import (
     prune_or_cordon_resource,
 )
 from kdive.inventory.reconcile.records import PruneOutcome
+from kdive.mcp.tools.ops.resources.host_ops import set_resource_scheduling
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import PlatformRole
 
 _KIND = ResourceKind.LOCAL_LIBVIRT
 _LEASE = datetime(2026, 1, 1, tzinfo=UTC)
+_OPERATOR = RequestContext(
+    principal="op-1",
+    agent_session="s",
+    projects=(),
+    platform_roles=frozenset({PlatformRole.PLATFORM_OPERATOR}),
+)
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
@@ -282,6 +292,46 @@ def test_removed_resource_without_allocations_deletes(migrated_url: str) -> None
             assert outcome.pruned is True
             assert outcome.cordoned is False
             assert await _resource_row(conn, resource_id) is None
+
+    asyncio.run(_run())
+
+
+def test_reconcile_recordons_a_removed_resource_set_schedulable(migrated_url: str) -> None:
+    """The override ledger, not `resources.set_scheduling`, has the last word on a `removed` row.
+
+    Pre-existing ADR-0199 behavior, pinned because the setter is now the only agent-facing write
+    to `cordoned` (ADR-0460): the reconciler writes the column directly, never through an MCP
+    tool, so setting a ledger-`removed` host `schedulable` succeeds and the next pass cordons it
+    again. Collapsing two tools into one setter does not change which side wins.
+    """
+
+    async def _run() -> None:
+        name = f"removed-then-schedulable-{uuid4()}"
+        async with await _connect(migrated_url) as conn:
+            resource_id = await _insert_resource(conn, name=name, lease_expires_at=_LEASE)
+            await _insert_allocation(conn, resource_id, AllocationState.RELEASED)
+            await prune_or_cordon_removed_resource(conn, resource_id, name, kind=_KIND)
+            after_reconcile = await _resource_row(conn, resource_id)
+
+        pool = AsyncConnectionPool(migrated_url, min_size=1, max_size=2, open=False)
+        await pool.open()
+        try:
+            resp = await set_resource_scheduling(
+                pool, _OPERATOR, resource_id=str(resource_id), state="schedulable"
+            )
+        finally:
+            await pool.close()
+
+        async with await _connect(migrated_url) as conn:
+            after_setter = await _resource_row(conn, resource_id)
+            outcome = await prune_or_cordon_removed_resource(conn, resource_id, name, kind=_KIND)
+            after_next_pass = await _resource_row(conn, resource_id)
+
+        assert after_reconcile is not None and after_reconcile["cordoned"] is True
+        assert resp.status != "error"
+        assert after_setter is not None and after_setter["cordoned"] is False
+        assert outcome.cordoned is True  # the pass that flipped it back
+        assert after_next_pass is not None and after_next_pass["cordoned"] is True
 
     asyncio.run(_run())
 

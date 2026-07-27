@@ -307,7 +307,9 @@ def test_catalog_resource_wrappers_roundtrip_through_fastmcp(
             async with Client(app) as client:
                 listed = await _call_tool(client, "resources.list")
                 cordoned = await _call_tool(
-                    client, "resources.cordon", {"resource_id": resource_id}
+                    client,
+                    "resources.set_scheduling",
+                    {"resource_id": resource_id, "state": "cordoned"},
                 )
             async with pool.connection() as conn:
                 row = await conn.execute(
