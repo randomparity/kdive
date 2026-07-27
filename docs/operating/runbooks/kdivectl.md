@@ -225,7 +225,7 @@ cross-project oversight view, use a `platform_auditor` token.
 | `allocations list/get`, `systems list/get`, `runs get`, `jobs list/get`, `accounting usage-project` (`accounting.usage_project`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage-project` / `accounting.usage_project`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
 | cross-project `inventory list` (`inventory.list`), `accounting.report` (all-projects), `audit.query` (cross-project) | `platform_auditor` (satisfied by `platform_admin`) | a project-member token holding no platform role |
 | `secrets list`, `doctor` | `platform_operator` | any token lacking `platform_operator` |
-| `resources list/get`, `fixtures list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
+| `resources list/get`, `images list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
 
 Note `inventory list` is the **cross-project auditor** read (it maps to the `inventory.list`
 tool, gated `platform_auditor`), not a per-project read — it is the one read verb where a
@@ -258,17 +258,25 @@ non-amplifying). (3) A **member** whose role ranks below the required floor reac
 which surfaces `authorization_denied` (**exit `3`**) **and** is audited as a member-over-reach
 denial.
 
-### Secret-presence and fixture reads
+### Secret-presence and baseline-catalog reads
 
 Two reads surface catalog presence without exposing values. `secrets list` is
-platform-role gated; `fixtures list` is a plain authenticated read:
+platform-role gated; `images list` is a plain authenticated read:
 
 ```bash
-kdivectl secrets list                       # secret *presence* (refs only), platform-gated
-kdivectl fixtures list                       # available fixtures, plain authenticated read
+kdivectl secrets list                                # secret *presence* (refs only), platform-gated
+kdivectl images list --scope public_baseline         # baseline rootfs images, plain authenticated read
 ```
 
 `secrets list` reports presence/refs only — it never returns secret values.
+
+`images list` replaces the removed `fixtures list` verb. Its `--scope` flag selects the rows:
+`visible` (the server default, applied when the flag is omitted) returns the public images plus the
+private images owned by projects you can view, and `public_baseline` returns the public baseline
+rootfs images alone — the set `fixtures list` used to print. The response shape is the same for both
+scopes, and it is the full image row (publish state, capabilities, OS identity, default kernel), not
+the four-column fixture projection. An unrecognized scope is rejected by the server as a
+`configuration_error` (exit `2`), not by argument parsing (ADR-0465).
 
 ## Diagnostics (`doctor`)
 

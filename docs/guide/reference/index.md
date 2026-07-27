@@ -52,7 +52,6 @@
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
 | [`debug.step`](debug.md#debugstep) | `implemented` |
 | [`debug.step_instruction`](debug.md#debugstep_instruction) | `implemented` |
-| [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.describe`](images.md#imagesdescribe) | `implemented` |

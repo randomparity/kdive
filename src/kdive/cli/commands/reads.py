@@ -136,8 +136,8 @@ async def jobs_get(args: argparse.Namespace) -> int:
 def _data_list(envelope: Mapping[str, object], key: str) -> list[object]:
     """Return the list a ``data``-shaped read tool puts under ``data[key]``.
 
-    ``secrets.list``/``fixtures.list`` carry their rows in the envelope's ``data`` (not the
-    nested ``items`` a collection envelope uses), so they flatten from ``data`` here.
+    ``secrets.list`` carries its rows in the envelope's ``data`` (not the nested ``items`` a
+    collection envelope uses), so it flattens from ``data`` here.
     """
     raw = envelope.get("data")
     if not isinstance(raw, Mapping):
@@ -152,18 +152,6 @@ async def secrets_list(args: argparse.Namespace) -> int:
     envelope = await _fetch("secrets.list", {})
     refs = [{"ref": str(ref)} for ref in _data_list(envelope, "secrets")]
     emit(envelope, lambda: render(refs, columns=["ref"]), as_json=args.json)
-    return exit_code_for_envelope(envelope)
-
-
-async def fixtures_list(args: argparse.Namespace) -> int:
-    """List rootfs fixture catalog entries (provider, name, arch). Requires a valid token."""
-    envelope = await _fetch("fixtures.list", {})
-    rows = [
-        {str(k): v for k, v in row.items()}
-        for row in _data_list(envelope, "fixtures")
-        if isinstance(row, Mapping)
-    ]
-    emit(envelope, lambda: render(rows, columns=["provider", "name", "arch"]), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
 

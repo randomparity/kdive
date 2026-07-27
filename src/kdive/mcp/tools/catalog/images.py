@@ -7,11 +7,17 @@ the viewer-authorized set) so an unauthorized private row never leaves the datab
 :func:`kdive.images.cataloging.catalog.resolve_rootfs` (which returns only the one bootable
 ``registered`` row), the operator list surfaces every state — a ``defined`` baseline and a
 ``pending`` publish included — so the operator can see in-flight and seeded images.
+
+``images.list`` also serves the public baseline projection the retired ``fixtures.list`` used to
+own (ADR-0465): ``scope="public_baseline"`` swaps the row predicate for ``visibility = 'public'``
+and changes nothing else — same natural-key ordering, same keyset pagination, same collection
+envelope, same per-row fields.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from enum import StrEnum
+from typing import Annotated, Any, LiteralString
 
 from fastmcp import FastMCP
 from psycopg.rows import dict_row
@@ -50,21 +56,60 @@ _LIST_TOOL = "images.list"
 _LIST_TAG = "images.list"
 _DESCRIBE_TOOL = "images.describe"
 
-_LIST_SQL = """
+
+class ImageListScope(StrEnum):
+    """Which ``image_catalog`` rows ``images.list`` returns (ADR-0465).
+
+    ``visible`` is the caller-scoped default: every ``public`` row plus the ``private`` rows owned
+    by a project the caller can view. ``public_baseline`` narrows to the public rows alone — the
+    curated baseline images every project may provision without registering one of its own, the
+    projection the retired ``fixtures.list`` served. The narrowing is over **rows only**: both
+    scopes return the same collection envelope with the same per-row fields.
+    """
+
+    VISIBLE = "visible"
+    PUBLIC_BASELINE = "public_baseline"
+
+
+# The scope discriminator picks the row predicate; the projection, the keyset window, and the
+# ordering around it are shared, so the two statements below differ by one clause and cannot
+# drift apart (ADR-0465). ``public_baseline`` needs no owner branch: ``visibility`` is two-valued
+# and the ``image_private_owner`` CHECK in ``0023_image_catalog.sql`` asserts
+# ``(visibility = 'private') = (owner IS NOT NULL)``, so the public rows are exactly the
+# owner-less rows and ``visibility = 'public'`` already excludes every project-scoped image.
+_LIST_SQL_HEAD = """
     SELECT *
     FROM image_catalog
-    WHERE (visibility = %(public)s
-           OR (visibility = %(private)s AND owner = ANY(%(projects)s)))
+    WHERE """
+_LIST_SQL_TAIL = """
       AND (%(after)s::boolean IS FALSE
            OR (provider, name, arch) > (%(p)s, %(n)s, %(a)s))
     ORDER BY provider, name, arch
     LIMIT %(limit)s
 """
+_VISIBLE_PREDICATE = (
+    "(visibility = %(public)s OR (visibility = %(private)s AND owner = ANY(%(projects)s)))"
+)
+_PUBLIC_BASELINE_PREDICATE = "visibility = %(public)s"
+
+_LIST_SQL: dict[ImageListScope, LiteralString] = {
+    ImageListScope.VISIBLE: _LIST_SQL_HEAD + _VISIBLE_PREDICATE + _LIST_SQL_TAIL,
+    ImageListScope.PUBLIC_BASELINE: _LIST_SQL_HEAD + _PUBLIC_BASELINE_PREDICATE + _LIST_SQL_TAIL,
+}
 
 
 class _ImagesListPayload(ToolPayload):
-    """Public payload for ``images.list`` pagination."""
+    """Public payload for ``images.list`` scope selection and pagination."""
 
+    scope: ImageListScope = Field(
+        default=ImageListScope.VISIBLE,
+        description=(
+            "Which catalog rows to return. 'visible' (the default) returns every public image "
+            "plus the private images owned by projects you can view. 'public_baseline' returns "
+            "only the public baseline images any project may provision without registering its "
+            "own. The response shape is identical for both scopes; only the row set differs."
+        ),
+    )
     limit: int = Field(
         default=DEFAULT_LIST_LIMIT,
         description=f"Maximum rows returned (capped at {MAX_LIST_LIMIT}).",
@@ -125,15 +170,20 @@ async def list_images(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
+    scope: ImageListScope = ImageListScope.VISIBLE,
     limit: int = DEFAULT_LIST_LIMIT,
     cursor: str | None = None,
 ) -> ToolResponse:
-    """List the public catalog images plus the caller's projects' private images.
+    """List catalog images for ``scope``, keyset-paginated over the natural key.
 
-    The private filter is parameterized on the caller's viewer-authorized project set, so a
-    private row owned by an unauthorized project is never selected. Keyset-paginated over the
-    ``(provider, name, arch)`` natural key (ADR-0192): fetches one row past ``limit`` to set
-    ``data.truncated`` / ``data.next_cursor`` from the last kept row's key.
+    ``visible`` (the default) returns the public images plus the caller's projects' private
+    images; its private filter is parameterized on the caller's viewer-authorized project set, so
+    a private row owned by an unauthorized project is never selected. ``public_baseline`` narrows
+    the predicate to the public rows alone (ADR-0465) and leaves every other behaviour — the
+    ordering, the projection, the envelope — untouched.
+
+    Keyset-paginated over the ``(provider, name, arch)`` natural key (ADR-0192): fetches one row
+    past ``limit`` to set ``data.truncated`` / ``data.next_cursor`` from the last kept row's key.
     """
     capped = _clamp_list_limit(limit)
     after_parts: list[str] | None = None
@@ -143,6 +193,8 @@ async def list_images(
         except InvalidCursor:
             return _invalid_cursor_error("images")
     with bind_context(principal=ctx.principal):
+        # ``private``/``projects`` are referenced only by the ``visible`` predicate; psycopg
+        # ignores the surplus keys when ``public_baseline`` selects the narrower one.
         params = {
             "public": ImageVisibility.PUBLIC.value,
             "private": ImageVisibility.PRIVATE.value,
@@ -154,7 +206,7 @@ async def list_images(
             "limit": capped + 1,
         }
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_LIST_SQL, params)
+            await cur.execute(_LIST_SQL[scope], params)
             rows = await cur.fetchall()
     kept, truncated = _paginate(rows, capped)
     items = [_row_envelope(ImageCatalogEntry.model_validate(row)) for row in kept]
@@ -281,7 +333,13 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
             Field(description="Image list pagination request; omit for the first page."),
         ] = None,
     ) -> ToolResponse:
-        """List visible image catalog entries across publish states.
+        """List image catalog entries across publish states, in the requested row scope.
+
+        ``request.scope`` selects which rows come back. ``visible`` (the default) returns every
+        public image plus the private images owned by projects you can view. ``public_baseline``
+        returns only the public baseline rootfs images every project may provision without
+        registering its own — the curated fixture set. Both scopes return the identical envelope
+        and per-row fields; only the row set differs.
 
         Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
         identity, ``data.default_kernel_version`` (the kernel the image ships and boots by
@@ -290,11 +348,16 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         do not call ``images.kernel_config`` on a ``false`` row) so an agent can compare images on
         merit — distro, version, default kernel — in one call. The publish state appears as the item
         envelope ``status`` and as ``data.state``. Keyset-paginated: when ``data.truncated`` is
-        true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
+        true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page. A cursor is
+        tied to this tool, not to a scope.
         """
         payload = request or _ImagesListPayload()
         return await list_images(
-            pool, current_context(), limit=payload.limit, cursor=payload.cursor
+            pool,
+            current_context(),
+            scope=payload.scope,
+            limit=payload.limit,
+            cursor=payload.cursor,
         )
 
     @app.tool(

@@ -70,8 +70,9 @@ def test_valid_catalog_reports_profiles(tmp_path: Path) -> None:
     assert ("local-libvirt", "console-ready_x86_64", "x86_64") in triples
     assert ("local-libvirt", "console-ready_ppc64le", "ppc64le") in triples
     assert data_str(resp, "path") == str(dest)
-    # On success the verb points the operator at the listing of the same catalog.
-    assert resp.suggested_next_actions == ["fixtures.list"]
+    # On success the verb points the operator at the catalog listing, which is now
+    # ``images.list`` — ``fixtures.list`` was folded into it (ADR-0465).
+    assert resp.suggested_next_actions == ["images.list"]
 
 
 def test_profiles_are_sorted_by_provider_name_arch(tmp_path: Path) -> None:

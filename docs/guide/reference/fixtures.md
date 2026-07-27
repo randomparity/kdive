@@ -2,29 +2,6 @@
 
 # `fixtures` tools
 
-## `fixtures.list`
-
-`implemented` · `read-only`
-
-List rootfs fixture catalog entries (provider, name, arch). Requires a valid token.
-
-Fixtures are the **public baseline subset of images** — the curated rootfs images
-every project may provision without registering its own. For the full image catalog
-(including private and project-scoped images) and per-image capabilities, use
-``images.list`` / ``images.describe``.
-
-Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` back as
-``request.cursor`` for the next page.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `request` | object (nullable) | no | Fixture list pagination request; omit for the first page. |
-
-`request` fields:
-
-- `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
-- `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
-
 ## `fixtures.validate`
 
 `implemented` · `read-only`

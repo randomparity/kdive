@@ -99,7 +99,8 @@ ALLOWED_FILES = frozenset(
         # M2.2 admin-CLI net-new read tools (#252, ADR-0089 §6): two provider-agnostic
         # platform reads on the agnostic core. secrets.list reports secret *presence* (the
         # scope_refs projection on SecretRegistry — never values), platform-operator gated;
-        # fixtures.list is a plain authenticated rootfs-catalog read. Their app.py registrar
+        # the fixtures module is a plain authenticated catalog read (its rootfs listing folded
+        # into images.list, ADR-0465; fixtures.validate remains). Their app.py registrar
         # wiring and the value-free scope_refs accessor carry no provider-specific logic.
         "src/kdive/mcp/tools/ops/secrets.py",
         "src/kdive/mcp/tools/catalog/fixtures.py",

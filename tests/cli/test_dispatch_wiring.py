@@ -86,10 +86,19 @@ def test_inventory_project_filter_stays_optional() -> None:
     assert args.project is None
 
 
-def test_fixtures_list_has_no_project_flag() -> None:
-    # ``fixtures.list`` takes no project argument; the flag must not exist.
+def test_secrets_list_has_no_project_flag() -> None:
+    # ``secrets.list`` takes no project argument; the flag must not exist.
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["fixtures", "list", "--project", "proj-a"])
+        build_parser().parse_args(["secrets", "list", "--project", "proj-a"])
+
+
+def test_images_list_carries_the_scope_flag() -> None:
+    # ``images list`` is CURATED, so it overrides the generated shape at its path — the scope
+    # flag exists only because the curated verb declares it. It is the operator replacement for
+    # the removed ``fixtures list`` verb (ADR-0465), so parse it from real argv.
+    args = build_parser().parse_args(["images", "list", "--scope", "public_baseline"])
+    assert args.scope == "public_baseline"
+    assert build_parser().parse_args(["images", "list"]).scope is None
 
 
 def test_dispatch_routes_curated_verb_to_run_verb(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -283,7 +283,6 @@ CORE_TOOLS: frozenset[str] = frozenset(
 #: hiding it would be wrong. ``CLASSIFIED_TOOLS | PUBLIC_TOOLS`` must equal the live registry.
 PUBLIC_TOOLS: frozenset[str] = frozenset(
     {
-        "fixtures.list",
         "fixtures.validate",
         "images.describe",
         "images.kernel_config",

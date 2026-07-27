@@ -28,7 +28,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "audit": "Audit log queries across operations",
     "control": "In-guest power cycling and crash injection (NMI / panic)",
     "debug": "Live GDB-based kernel debugging sessions (breakpoints, registers, memory)",
-    "fixtures": "Test fixture profile listing and validation",
+    "fixtures": "Test fixture profile validation",
     "images": "Kernel and rootfs image lifecycle (build, publish, expire)",
     "introspect": "drgn kernel introspection — live attach and vmcore offline analysis",
     "inventory": "Resource inventory listing and override management",
@@ -225,6 +225,23 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "artifacts.create_investigation_upload": frozenset(
         {"upload", "artifact", "investigation", "rootfs", "create"}
     ),
+    # catalog images — `images.list` absorbed the public-baseline projection `fixtures.list`
+    # served (ADR-0465), so the fixture/baseline intent vocabulary must rank it.
+    "images.list": frozenset(
+        {
+            "images",
+            "list",
+            "catalog",
+            "rootfs",
+            "baseline",
+            "public",
+            "fixture",
+            "fixtures",
+            "test",
+            "scope",
+            "available",
+        }
+    ),
     # systems
     "systems.get": frozenset({"system", "get", "status", "fetch"}),
     "systems.list": frozenset({"systems", "list", "filter"}),
@@ -270,6 +287,7 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
     "artifacts.find": "artifacts.get",
+    "fixtures.list": "images.list",
     "images.build": "images.publish",
     "ops.queue_pause": "ops.set_queue_paused",
     "ops.queue_resume": "ops.set_queue_paused",
