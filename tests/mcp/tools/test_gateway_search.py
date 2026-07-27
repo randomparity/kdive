@@ -230,6 +230,31 @@ def test_postmortem_triage_vocabulary_finds_postmortem_crash(
     assert "postmortem.crash" in _match_names(content)
 
 
+@pytest.mark.parametrize("query", ["resources.cordon", "resources.uncordon", "cordon", "uncordon"])
+def test_cordon_vocabulary_finds_resources_set_scheduling(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """Both retired names and the bare `cordon`/`uncordon` intent words rank the setter.
+
+    `uncordon` is the harder half: it appears nowhere in the live tool's name, description, or
+    schema, so only the retired-name vocabulary can surface it (ADR-0460).
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "resources.set_scheduling" in _match_names(content)
+
+
 # ---------------------------------------------------------------------------
 # Test 4: RBAC filter hides admin-only tools from a viewer
 # ---------------------------------------------------------------------------

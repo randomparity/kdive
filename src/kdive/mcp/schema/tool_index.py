@@ -38,7 +38,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "postmortem": "Crash analysis and triage from vmcore or console evidence",
     "projects": "Project listing",
     "reports": "Generated usage and accounting report retrieval",
-    "resources": "Physical resource registration, availability, and cordon/drain",
+    "resources": "Physical resource registration, availability, scheduling, and drain",
     "runs": "Kernel test run lifecycle (build, install, boot, cancel, bind)",
     "secrets": "Secret listing",  # pragma: allowlist secret
     "session": "Session identity (whoami)",
@@ -235,6 +235,8 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
     "postmortem.triage": "postmortem.crash",
+    "resources.cordon": "resources.set_scheduling",
+    "resources.uncordon": "resources.set_scheduling",
 }
 
 
