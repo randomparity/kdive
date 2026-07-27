@@ -3,8 +3,8 @@
 Handlers are called directly with an injected pool + RequestContext (the repo's unit
 contract). Coverage maps to the #138 acceptance bullets:
 
-* ``ops.queue_pause`` / ``ops.queue_resume`` toggle ``queue_paused``; ``platform_operator``
-  gating enforced; success and (role-holding) denial audited.
+* ``ops.set_queue_paused`` writes ``queue_paused`` to the requested state (ADR-0459);
+  ``platform_operator`` gating enforced; success and (role-holding) denial audited.
 * ``ops.jobs_list`` returns cross-project queue depth + per-job state; ``platform_operator``
   gating enforced; a state filter is validated.
 """
@@ -76,7 +76,8 @@ async def _paused(url: str) -> bool:
 async def _platform_audit_rows(url: str) -> list[tuple[object, ...]]:
     async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
         cur = await conn.execute(
-            "SELECT principal, platform_role, tool, scope FROM platform_audit_log ORDER BY ts"
+            "SELECT principal, platform_role, tool, scope, args_digest "
+            "FROM platform_audit_log ORDER BY ts"
         )
         return list(await cur.fetchall())
 
@@ -89,21 +90,23 @@ async def _count_platform_audit(url: str) -> int:
     return int(row[0])
 
 
-def test_pause_sets_flag_and_audits(migrated_url: str) -> None:
+def test_set_paused_true_sets_flag_and_audits(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await ops_queue.queue_pause(pool, _ctx(platform_roles=_OPERATOR))
+            resp = await ops_queue.set_queue_paused(
+                pool, _ctx(platform_roles=_OPERATOR), paused=True
+            )
         assert resp.status == "paused"
         assert resp.data["queue_paused"] is True
         assert await _paused(migrated_url) is True
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
-        assert rows[0][1] == "platform_operator" and rows[0][2] == "ops.queue_pause"
+        assert rows[0][1] == "platform_operator" and rows[0][2] == "ops.set_queue_paused"
 
     asyncio.run(_run())
 
 
-def test_pause_flag_and_audit_commit_atomically(
+def test_set_paused_flag_and_audit_commit_atomically(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A failed audit write must roll back the flag flip: never a paused queue with no row.
@@ -114,30 +117,58 @@ def test_pause_flag_and_audit_commit_atomically(
         monkeypatch.setattr(ops_queue.audit, "record_platform", boom)
         async with _pool(migrated_url) as pool:
             with pytest.raises(RuntimeError, match="audit db error"):
-                await ops_queue.queue_pause(pool, _ctx(platform_roles=_OPERATOR))
+                await ops_queue.set_queue_paused(pool, _ctx(platform_roles=_OPERATOR), paused=True)
         assert await _paused(migrated_url) is False  # rolled back with the audit
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())
 
 
-def test_resume_clears_flag_and_audits(migrated_url: str) -> None:
+def test_set_paused_false_clears_flag_and_audits(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            await ops_queue.queue_pause(pool, _ctx(platform_roles=_OPERATOR))
-            resp = await ops_queue.queue_resume(pool, _ctx(platform_roles=_OPERATOR))
+            await ops_queue.set_queue_paused(pool, _ctx(platform_roles=_OPERATOR), paused=True)
+            resp = await ops_queue.set_queue_paused(
+                pool, _ctx(platform_roles=_OPERATOR), paused=False
+            )
         assert resp.status == "running"
+        assert resp.data["queue_paused"] is False
         assert await _paused(migrated_url) is False
         rows = await _platform_audit_rows(migrated_url)
-        assert [r[2] for r in rows] == ["ops.queue_pause", "ops.queue_resume"]
+        assert [r[2] for r in rows] == ["ops.set_queue_paused"] * 2
+        # One tool name now covers both directions, so the audit trail can only tell a
+        # pause from a resume by its recorded args.
+        assert rows[0][4] != rows[1][4]
 
     asyncio.run(_run())
 
 
-def test_pause_denied_for_project_only_token_unaudited(migrated_url: str) -> None:
+@pytest.mark.parametrize("paused", [True, False])
+def test_set_paused_is_idempotent_in_the_target_state(migrated_url: str, paused: bool) -> None:
+    # A target-state write, not a toggle: re-asserting the state a second time leaves the
+    # flag where the first call put it, and audits the operator's intent both times.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await ops_queue.queue_pause(pool, _ctx(projects=("proj-a",)))
+            first = await ops_queue.set_queue_paused(
+                pool, _ctx(platform_roles=_OPERATOR), paused=paused
+            )
+            second = await ops_queue.set_queue_paused(
+                pool, _ctx(platform_roles=_OPERATOR), paused=paused
+            )
+        assert first.status == second.status
+        assert second.data["queue_paused"] is paused
+        assert await _paused(migrated_url) is paused
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 2  # a no-op re-assert is still the operator's intent
+        assert rows[0][4] == rows[1][4]
+
+    asyncio.run(_run())
+
+
+def test_set_paused_denied_for_project_only_token_unaudited(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await ops_queue.set_queue_paused(pool, _ctx(projects=("proj-a",)), paused=True)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         assert await _paused(migrated_url) is False  # flag untouched
@@ -146,16 +177,20 @@ def test_pause_denied_for_project_only_token_unaudited(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
-def test_pause_denied_for_auditor_is_audited(migrated_url: str) -> None:
+@pytest.mark.parametrize("paused", [True, False])
+def test_set_paused_denied_for_auditor_is_audited(migrated_url: str, paused: bool) -> None:
     # platform_auditor does NOT satisfy the operator gate, but holds a platform role.
+    # Neither branch of `paused` is privileged: both deny at the same shared gate.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
-            resp = await ops_queue.queue_pause(pool, ctx)
+            resp = await ops_queue.set_queue_paused(pool, ctx, paused=paused)
         assert resp.status == "error"
+        assert resp.suggested_next_actions == ["ops.set_queue_paused"]
         assert await _paused(migrated_url) is False
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1 and rows[0][1] == "platform_auditor"
+        assert rows[0][2] == "ops.set_queue_paused"
 
     asyncio.run(_run())
 
@@ -306,7 +341,7 @@ def test_admin_satisfies_operator_gate(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_ADMIN}))
-            resp = await ops_queue.queue_pause(pool, ctx)
+            resp = await ops_queue.set_queue_paused(pool, ctx, paused=True)
         assert resp.status == "error"  # operator gate not satisfied by admin
 
     asyncio.run(_run())

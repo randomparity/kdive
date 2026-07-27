@@ -62,8 +62,8 @@ def _required_argv_for_generated(verb: GeneratedVerb) -> list[str]:
     for flag in verb.flags:
         if not flag.required:
             continue
-        if flag.action == "store_true":
-            argv.append(flag.name)
+        if flag.action in {"store_true", "bool_optional"}:
+            argv.append(flag.name)  # both are valueless; bool_optional also accepts --no-<flag>
         else:
             argv += [flag.name, _value_for_flag(flag)]
     return argv
@@ -90,3 +90,19 @@ def test_generated_flag_named_like_a_routing_key_does_not_clobber_routing() -> N
     )
     assert args.command == "control" and args.subcommand == "diagnostic-sysrq"
     assert args.genarg_command == "s"
+
+
+def test_required_boolean_flag_parses_both_states() -> None:
+    # ``ops.set_queue_paused`` is the only required boolean; ``store_true`` would leave the
+    # false state — resuming the queue — unreachable from the CLI, so it uses --flag/--no-flag.
+    parser = build_parser()
+    paused = parser.parse_args(["ops", "set-queue-paused", "--paused"])
+    resumed = parser.parse_args(["ops", "set-queue-paused", "--no-paused"])
+    assert paused.genarg_paused is True
+    assert resumed.genarg_paused is False
+
+
+def test_required_boolean_flag_must_be_given() -> None:
+    # Required means required: an omitted target state is a parse error, not a silent default.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["ops", "set-queue-paused"])

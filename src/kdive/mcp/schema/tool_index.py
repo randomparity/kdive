@@ -234,6 +234,8 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # ``tests/mcp/test_tool_index.py`` asserts each key is absent from the live registry and each
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
+    "ops.queue_pause": "ops.set_queue_paused",
+    "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",
 }
 

@@ -1,13 +1,13 @@
-"""Queue-control `ops.*` MCP tools (ADR-0062).
+"""Queue-control `ops.*` MCP tools (ADR-0062, ADR-0459).
 
-``ops.queue_pause`` / ``ops.queue_resume`` toggle the single-row ``ops_control``
-``queue_paused`` flag the worker reads before each ``dequeue``; pausing freezes the
-worker's claim loop only (the reconciler keeps enqueuing, and those jobs wait for
-resume — a processing freeze, not a control-plane freeze). ``ops.jobs_list`` is the
-platform view of ``jobs.list``: a read-only, cross-project queue-depth / per-job-state
-inspection. All three gate on ``require_platform_role(PLATFORM_OPERATOR)`` and audit to
-``platform_audit_log``; the handlers take an injected pool + context so they are tested
-directly without MCP transport.
+``ops.set_queue_paused`` writes the single-row ``ops_control`` ``queue_paused`` flag the
+worker reads before each ``dequeue``; pausing freezes the worker's claim loop only (the
+reconciler keeps enqueuing, and those jobs wait for the resume write — a processing
+freeze, not a control-plane freeze). ``ops.jobs_list`` is the platform view of
+``jobs.list``: a read-only, cross-project queue-depth / per-job-state inspection. Both
+gate on ``require_platform_role(PLATFORM_OPERATOR)`` and audit to ``platform_audit_log``;
+the handlers take an injected pool + context so they are tested directly without MCP
+transport.
 """
 
 from __future__ import annotations
@@ -39,8 +39,7 @@ _log = logging.getLogger(__name__)
 
 _QUEUE_OBJECT_ID = "queue"
 _JOBS_OBJECT_ID = "jobs"
-_PAUSE_TOOL = "ops.queue_pause"
-_RESUME_TOOL = "ops.queue_resume"
+_SET_PAUSED_TOOL = "ops.set_queue_paused"
 _JOBS_LIST_TOOL = "ops.jobs_list"
 
 
@@ -57,29 +56,25 @@ class _OpsJobsListPayload(ToolPayload):
     )
 
 
-async def queue_pause(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
-    """Pause the worker's claim loop; ``platform_operator``, audited (ADR-0062)."""
-    return await _set_paused(pool, ctx, paused=True, tool=_PAUSE_TOOL)
-
-
-async def queue_resume(pool: AsyncConnectionPool, ctx: RequestContext) -> ToolResponse:
-    """Resume the worker's claim loop; ``platform_operator``, audited (ADR-0062)."""
-    return await _set_paused(pool, ctx, paused=False, tool=_RESUME_TOOL)
-
-
-async def _set_paused(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, paused: bool, tool: str
+async def set_queue_paused(
+    pool: AsyncConnectionPool, ctx: RequestContext, *, paused: bool
 ) -> ToolResponse:
-    """Gate ``platform_operator``, toggle ``queue_paused``, audit (denials too)."""
+    """Write the target ``queue_paused`` state; ``platform_operator``, audited (ADR-0459).
+
+    The write is to a target state, not a toggle, so repeating a call is idempotent: the
+    flag ends at ``paused`` whatever it held before. Each accepted call audits, including
+    a no-op re-assert, because the audit trail records the operator's intent rather than
+    the observed transition.
+    """
     with bind_context(principal=ctx.principal):
         try:
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
-            await audit_platform_denial(pool, ctx, tool=tool, scope="queue")
+            await audit_platform_denial(pool, ctx, tool=_SET_PAUSED_TOOL, scope="queue")
             return ToolResponse.failure(
                 _QUEUE_OBJECT_ID,
                 ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[tool],
+                suggested_next_actions=[_SET_PAUSED_TOOL],
             )
         # One transaction: the flag flip and its audit row commit together or neither
         # does, so a failed audit write can never leave a paused/resumed queue unaudited
@@ -92,7 +87,7 @@ async def _set_paused(
                 principal=ctx.principal,
                 agent_session=ctx.agent_session,
                 event=audit.PlatformAuditEvent(
-                    tool=tool,
+                    tool=_SET_PAUSED_TOOL,
                     scope="queue",
                     args={"queue_paused": paused},
                     platform_role=held_platform_roles(ctx),
@@ -196,7 +191,7 @@ def _jobs_response(depth: dict[str, int], jobs: list[Job]) -> ToolResponse:
         _JOBS_OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=[_PAUSE_TOOL, _RESUME_TOOL],
+        suggested_next_actions=[_SET_PAUSED_TOOL],
         data={f"depth_{state}": count for state, count in sorted(depth.items())},
     )
 
@@ -241,22 +236,29 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register the queue-control `ops.*` tools on ``app``, bound to ``pool``."""
 
     @app.tool(
-        name=_PAUSE_TOOL,
+        name=_SET_PAUSED_TOOL,
         annotations=_docmeta.mutating(),
         meta={"maturity": "implemented"},
     )
-    async def ops_queue_pause() -> ToolResponse:
-        """Pause the worker's claim loop (jobs in flight finish). Requires platform operator."""
-        return await queue_pause(pool, current_context())
+    async def ops_set_queue_paused(
+        paused: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Target state of the worker's claim loop: true pauses it (jobs already "
+                    "in flight finish, and the reconciler keeps enqueuing work that waits), "
+                    "false resumes claiming. Writes the target state, so repeating a call "
+                    "leaves the queue in the same state."
+                )
+            ),
+        ],
+    ) -> ToolResponse:
+        """Pause or resume the worker's claim loop. Requires platform operator.
 
-    @app.tool(
-        name=_RESUME_TOOL,
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def ops_queue_resume() -> ToolResponse:
-        """Resume the worker's claim loop. Requires platform operator."""
-        return await queue_resume(pool, current_context())
+        Sets the queue to the requested state rather than toggling it, so it is safe to
+        re-assert. Use `ops.jobs_list` to read queue depth and per-job state.
+        """
+        return await set_queue_paused(pool, current_context(), paused=paused)
 
     @app.tool(
         name=_JOBS_LIST_TOOL,
