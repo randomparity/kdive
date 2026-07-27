@@ -155,7 +155,7 @@ resolved independently of the working directory — there is no repo-relative
 For an MCP agent with **no host shell**, `KDIVE_GUEST_IMAGE` is not enough on its own: that
 host path is not visible from the MCP surface, so an agent cannot discover what to provision
 with. Declaring a `staged-path` `[[image]]` (below) registers that local file in the catalog
-so `fixtures.list` / `systems.profile_examples` surface it and the agent provisions with a
+so `images.list` / `systems.profile_examples` surface it and the agent provisions with a
 `catalog` reference — no host `ls` (ADR-0228).
 
 If you want to declaratively pin host config, prices, or build fragments, create
@@ -178,7 +178,7 @@ cost_class = "local"
 # pool = "default"                # optional; group interchangeable hosts for by-pool allocation
 
 # RECOMMENDED: register the local-disk rootfs `build-fs` wrote as a catalog image, so an
-# MCP agent can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
+# MCP agent can DISCOVER it (`images.list` / `systems.profile_examples`) and provision with
 # `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}` —
 # no host `ls` and no `KDIVE_GUEST_IMAGE` needed. A `staged-path` source (ADR-0228) points at
 # the host file directly: it seeds `registered` (bootable) immediately, with no object-store

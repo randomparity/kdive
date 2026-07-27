@@ -345,6 +345,42 @@ def test_image_build_vocabulary_finds_images_publish(
 @pytest.mark.parametrize(
     "query",
     [
+        "fixtures.list",
+        "list test fixture images",
+        "baseline public images",
+        "public_baseline",
+    ],
+)
+def test_fixtures_list_vocabulary_finds_images_list(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The retired name and the fixture/baseline intent phrases rank images.list (ADR-0465).
+
+    `fixtures.list` became `images.list(scope="public_baseline")`, so an agent that knows only
+    the old name — or that describes the intent in fixture vocabulary the surviving tool's own
+    name never spells — must still reach the replacement.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "images.list" in names, f"query {query!r} did not surface images.list: {names}"
+    assert "fixtures.list" not in names
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
         "resources.register_remote_libvirt",
         "resources.register_local_libvirt",
         "resources.register_fault_inject",

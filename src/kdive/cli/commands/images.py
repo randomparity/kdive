@@ -11,6 +11,10 @@ exit ``3``.
 
 ``images publish`` is not curated: it takes the schema-generated verb, so its flags and payload
 come from the live ``images.publish`` schema (ADR-0423, ADR-0461).
+
+``images list`` carries ``--scope``, the operator path to the public baseline catalog that the
+removed ``fixtures list`` verb used to print (ADR-0465). A curated verb overrides the generated
+shape at its path, so the flag has to be declared here to exist at all.
 """
 
 from __future__ import annotations
@@ -24,7 +28,15 @@ from kdive.cli.render import emit, render
 
 
 async def images_list(args: argparse.Namespace) -> int:
-    envelope = await fetch_collection_envelope("images.list", {})
+    """List catalog images; ``--scope public_baseline`` narrows to the baseline set (ADR-0465).
+
+    An omitted ``--scope`` sends no ``request`` at all, leaving the server's ``visible`` default
+    authoritative rather than restating it here. An unrecognized value is rejected server-side
+    as a ``configuration_error``.
+    """
+    scope = getattr(args, "scope", None)
+    arguments: dict[str, object] = {} if scope is None else {"request": {"scope": scope}}
+    envelope = await fetch_collection_envelope("images.list", arguments)
     columns = ["id", "name", "arch", "visibility", "owner", "state"]
     emit(envelope, lambda: render(collection_rows(envelope), columns=columns), as_json=args.json)
     return exit_code_for_envelope(envelope)

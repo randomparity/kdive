@@ -3,6 +3,11 @@
 The read tool is the ``kdivectl images list`` server seam. A caller sees every public
 catalog image plus the private images owned by the projects granted to their token, and
 never another project's private image (the isolation the spec's exit criterion 3 asserts).
+
+The ``scope`` discriminator (ADR-0465) also carries the public-baseline projection the retired
+``fixtures.list`` served: ``public_baseline`` narrows the rows to ``visibility = 'public'`` and
+changes nothing else. The scope tests below assert both halves — the narrowing, and that the
+envelope and per-row field set stay identical.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.tools.catalog import images as catalog_images
+from kdive.mcp.tools.catalog.images import ImageListScope
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
 
@@ -363,5 +369,133 @@ def test_list_row_omits_os_and_empties_description_when_unset(migrated_url: str)
         assert data["os"] == {}
         assert data["default_kernel_version"] == ""
         assert data["description"] == ""
+
+    asyncio.run(_run())
+
+
+# --- scope="public_baseline" (ADR-0465, the folded fixtures.list projection) -------------------
+
+
+def test_public_baseline_scope_drops_a_private_row_the_caller_can_see(migrated_url: str) -> None:
+    # The narrowing that makes the scope worth having: the same caller, the same call, minus
+    # every private row they are otherwise authorized to read.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert(pool, name="fedora", visibility="public", owner=None)
+            await _insert(pool, name="mine", visibility="private", owner="proj-a")
+            visible = await catalog_images.list_images(pool, _ctx("proj-a"))
+            baseline = await catalog_images.list_images(
+                pool, _ctx("proj-a"), scope=ImageListScope.PUBLIC_BASELINE
+            )
+        assert _names(visible) == {"fedora", "mine"}
+        assert _names(baseline) == {"fedora"}, "a private image is never a baseline fixture"
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_keeps_the_collection_envelope_and_row_fields(migrated_url: str) -> None:
+    # The fold narrows ROWS, not SHAPE: the same collection envelope and the same twelve per-row
+    # fields, so a caller moving off fixtures.list gains fields and loses none.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_characterized(
+                pool,
+                name="fedora-kdive-ready-43",
+                capabilities=["kdump"],
+                provenance={"os_release": {"id": "fedora", "version_id": "43"}},
+                description="baseline",
+            )
+            visible = await catalog_images.list_images(pool, _ctx())
+            baseline = await catalog_images.list_images(
+                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+            )
+        assert baseline.status == "ok"
+        assert baseline.object_id == "images"
+        assert "fixtures" not in baseline.data, "the flat fixtures[] body is gone"
+        assert set(baseline.data) == set(visible.data) == {"count", "truncated", "next_cursor"}
+        row = _item(baseline, "fedora-kdive-ready-43").data
+        assert set(row) == set(_item(visible, "fedora-kdive-ready-43").data)
+        assert row["capabilities"] == ["kdump"]
+        assert row["os"] == {"id": "fedora", "version_id": "43"}
+        assert row["visibility"] == "public"
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_default_scope_is_visible(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert(pool, name="mine", visibility="private", owner="proj-a")
+            resp = await catalog_images.list_images(pool, _ctx("proj-a"))
+        assert _names(resp) == {"mine"}, "omitting scope must not narrow to the baseline"
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_surfaces_staged_rows_without_leaking_path(migrated_url: str) -> None:
+    secret = "/var/lib/kdive/rootfs/secret-local.qcow2"
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _insert_staged_path(pool, name="local-rootfs", path=secret)
+            await _insert_staged(pool, name="fedora-remote", volume="fedora-remote.qcow2")
+            resp = await catalog_images.list_images(
+                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+            )
+        assert _names(resp) == {"local-rootfs", "fedora-remote"}
+        assert _volume_of(resp, "fedora-remote") == "fedora-remote.qcow2"
+        assert "path" not in _item(resp, "local-rootfs").data
+        assert secret not in str(resp.model_dump())
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_empty_catalog_yields_no_items(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await catalog_images.list_images(
+                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE
+            )
+        assert resp.status == "ok"
+        assert resp.items == []
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_paginates_with_natural_key_cursor(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            for i in range(5):
+                await _insert(pool, name=f"fixture-{i}", visibility="public", owner=None)
+            await _insert(pool, name="mine", visibility="private", owner="proj-a")
+            seen: set[str] = set()
+            cursor: str | None = None
+            for _ in range(10):
+                page = await catalog_images.list_images(
+                    pool,
+                    _ctx("proj-a"),
+                    scope=ImageListScope.PUBLIC_BASELINE,
+                    limit=2,
+                    cursor=cursor,
+                )
+                seen |= _names(page)
+                if not page.data["truncated"]:
+                    break
+                nxt = page.data["next_cursor"]
+                assert isinstance(nxt, str)
+                cursor = nxt
+        assert seen == {f"fixture-{i}" for i in range(5)}
+
+    asyncio.run(_run())
+
+
+def test_public_baseline_malformed_cursor_is_config_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await catalog_images.list_images(
+                pool, _ctx(), scope=ImageListScope.PUBLIC_BASELINE, cursor="!!!"
+            )
+        assert resp.status == "error"
+        assert resp.data["reason"] == "invalid_cursor"
 
     asyncio.run(_run())

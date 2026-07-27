@@ -93,6 +93,22 @@ def test_list_calls_images_list_read_tool(monkeypatch: pytest.MonkeyPatch, capsy
     assert "fedora" in capsys.readouterr().out
 
 
+def test_list_scope_reaches_the_tool_inside_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ``--scope public_baseline`` is the operator replacement for the removed ``fixtures list``
+    # verb (ADR-0465); images.list takes a ``request`` wrapper, so the scope travels inside it.
+    client = _install(monkeypatch, _collection([]))
+    code = asyncio.run(images.images_list(_args(scope="public_baseline")))
+    assert code == 0
+    assert client.calls == [("images.list", {"request": {"scope": "public_baseline"}})]
+
+
+def test_list_without_scope_sends_no_request_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An omitted scope must not restate the server default on the wire — the server owns it.
+    client = _install(monkeypatch, _collection([]))
+    assert asyncio.run(images.images_list(_args(scope=None))) == 0
+    assert client.calls == [("images.list", {})]
+
+
 def test_get_calls_images_describe_read_tool(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(
         monkeypatch, {"object_id": "img-1", "status": "registered", "data": {"name": "fedora"}}

@@ -244,7 +244,7 @@ converges on the next reconciler pass.
 The image is declared with a **`staged-path`** source (ADR-0228): the source is the rootfs FILE on
 local disk (the path `build-fs` writes to in Step 6), so its catalog row seeds **`registered`**
 (bootable) immediately — no object-store upload. That makes it discoverable from the MCP surface
-alone: `fixtures.list` / `systems.profile_examples` list it, and a System can be provisioned with a
+alone: `images.list` / `systems.profile_examples` list it, and a System can be provisioned with a
 `catalog` reference (`{kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`)
 rather than a host path (Step 6). The file need not exist yet at reconcile time (declared, not
 probed) — provisioning re-validates it against the provider `allowed_roots`, so build it before you
@@ -431,7 +431,7 @@ extracts and boots the rootfs's own baseline kernel via direct-kernel boot). `di
 the allocation's (ADR-0205).
 
 **Recommended — provision by `catalog` reference** (what a host-shell-free agent does: discover the
-name via `fixtures.list` / `systems.profile_examples`, then paste it):
+name via `images.list` / `systems.profile_examples`, then paste it):
 
 ```text
 systems.provision allocation_id=<granted id> profile={

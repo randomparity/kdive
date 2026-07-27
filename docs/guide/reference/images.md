@@ -87,7 +87,13 @@ image, or one whose ``/boot`` lacked a single kernel/config) returns a
 
 `implemented` · `read-only`
 
-List visible image catalog entries across publish states.
+List image catalog entries across publish states, in the requested row scope.
+
+``request.scope`` selects which rows come back. ``visible`` (the default) returns every
+public image plus the private images owned by projects you can view. ``public_baseline``
+returns only the public baseline rootfs images every project may provision without
+registering its own — the curated fixture set. Both scopes return the identical envelope
+and per-row fields; only the row set differs.
 
 Each row carries the build-fact ``data.capabilities``, a compact verified ``data.os``
 identity, ``data.default_kernel_version`` (the kernel the image ships and boots by
@@ -96,7 +102,8 @@ offers a downloadable ``/boot/config-<ver>`` starting point, ``false`` when it h
 do not call ``images.kernel_config`` on a ``false`` row) so an agent can compare images on
 merit — distro, version, default kernel — in one call. The publish state appears as the item
 envelope ``status`` and as ``data.state``. Keyset-paginated: when ``data.truncated`` is
-true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
+true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page. A cursor is
+tied to this tool, not to a scope.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -104,6 +111,7 @@ true, pass ``data.next_cursor`` back as ``request.cursor`` for the next page.
 
 `request` fields:
 
+- `scope` (``visible`, `public_baseline``, optional) — Which catalog rows to return. 'visible' (the default) returns every public image plus the private images owned by projects you can view. 'public_baseline' returns only the public baseline images any project may provision without registering its own. The response shape is identical for both scopes; only the row set differs.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 

@@ -378,3 +378,14 @@ def test_destructive_generated_verb_defaults_yes_false() -> None:
 def test_read_only_generated_verb_rejects_yes() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(["accounting", "estimate", "--project", "p", "--yes"])
+
+
+# --- `fixtures list` is gone from every verb surface (ADR-0465) -------------------------------
+
+
+def test_fixtures_list_verb_no_longer_parses() -> None:
+    # `fixtures.list` is gone from the registry, so neither a curated nor a generated verb
+    # sits at that path; `fixtures validate` still does.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["fixtures", "list"])
+    assert build_parser().parse_args(["fixtures", "validate"]).subcommand == "validate"

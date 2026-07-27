@@ -180,36 +180,6 @@ def test_secrets_list_json_mode_emits_whole_envelope(
     assert json.loads(capsys.readouterr().out) == envelope
 
 
-def test_fixtures_list_renders_rows_from_data(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    client = _install_session(
-        monkeypatch,
-        _data_envelope({"fixtures": [{"provider": "local-libvirt", "name": "base", "arch": "x"}]}),
-    )
-    code = asyncio.run(reads.fixtures_list(_args()))
-    assert code == 0
-    assert client.calls == [("fixtures.list", {})]
-    out = capsys.readouterr().out
-    assert "local-libvirt" in out and "base" in out
-
-
-def test_data_shaped_lists_ignore_malformed_rows(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install_session(
-        monkeypatch,
-        _data_envelope(
-            {
-                "fixtures": [
-                    {"provider": "local-libvirt", "name": "base", "arch": "x86_64"},
-                    "not-a-row",
-                ]
-            }
-        ),
-    )
-    asyncio.run(reads.fixtures_list(_args()))
-    out = capsys.readouterr().out
-    assert "local-libvirt" in out
-    assert "not-a-row" not in out
-
-
 def test_data_shaped_lists_ignore_missing_list_data(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -302,14 +272,6 @@ def test_record_verb_denial_exits_authorization_denied(
     assert code == 3
 
 
-def test_fixtures_list_denial_exits_authorization_denied(
-    monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    _install_session(monkeypatch, _denied("fixtures"))
-    code = asyncio.run(reads.fixtures_list(_args()))
-    assert code == 3
-
-
 def test_list_verb_json_emits_whole_envelope_with_next_actions(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -352,15 +314,6 @@ def test_inventory_show_json_emits_whole_envelope_and_passes_project_filter(
     client = _install_session(monkeypatch, envelope)
     asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
     assert client.calls == [("inventory.list", {"project": "proj-a"})]
-    assert json.loads(capsys.readouterr().out) == envelope
-
-
-def test_fixtures_list_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    envelope = _data_envelope(
-        {"fixtures": [{"provider": "local-libvirt", "name": "base", "arch": "x"}]}
-    )
-    _install_session(monkeypatch, envelope)
-    asyncio.run(reads.fixtures_list(argparse.Namespace(json=True)))
     assert json.loads(capsys.readouterr().out) == envelope
 
 
