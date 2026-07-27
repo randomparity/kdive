@@ -15,7 +15,7 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
-from kdive.mcp.schema.tool_index import TOOL_KEYWORDS
+from kdive.mcp.schema.tool_index import RETIRED_TOOL_NAMES, TOOL_KEYWORDS, retired_names_for
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER
 
@@ -54,6 +54,34 @@ def test_tool_keywords_keys_are_live_tool_names() -> None:
         f"TOOL_KEYWORDS has stale entries (not in live registry): {stale}\n"
         "Remove or rename them so the index stays in sync with the registered tools."
     )
+
+
+def test_retired_tool_names_retire_a_name_and_name_a_live_replacement() -> None:
+    """Each RETIRED_TOOL_NAMES key is gone from the registry; each value is a live tool.
+
+    Both halves matter (ADR-0456 §3): a key that is still registered means the consolidation
+    never removed the old wrapper, and a value that is not registered means the vocabulary
+    points agents at a tool they cannot invoke.
+    """
+    registered = _registered_tool_names()
+    problems = []
+    for retired, replacement in sorted(RETIRED_TOOL_NAMES.items()):
+        if retired in registered:
+            problems.append(f"{retired!r} is still registered; a retired name must be removed")
+        if replacement not in registered:
+            problems.append(f"{retired!r} points at {replacement!r}, which is not a live tool")
+    assert not problems, (
+        f"RETIRED_TOOL_NAMES is out of sync with the live registry: {problems}\n"
+        "Fix the entry in src/kdive/mcp/schema/tool_index.py."
+    )
+
+
+def test_every_retired_name_is_reachable_from_its_replacement() -> None:
+    """The inverted map used by ``tools.search`` scoring covers every retired name."""
+    for retired, replacement in RETIRED_TOOL_NAMES.items():
+        assert retired in retired_names_for(replacement), (
+            f"{retired!r} is not reachable from {replacement!r} via retired_names_for()"
+        )
 
 
 def test_instructions_cover_every_live_namespace() -> None:

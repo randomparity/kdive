@@ -34,7 +34,6 @@ from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_ta
 from kdive.mcp.tools.lifecycle.vmcore.view import (
     console_crash_redirect,
     postmortem_success_response,
-    triage_response,
     vmcore_collection,
 )
 from kdive.profiles.provisioning import ProvisioningProfile
@@ -47,7 +46,9 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.artifacts.listing import list_redacted_run_artifacts
 
-_TRIAGE_COMMANDS: tuple[str, ...] = ("log", "bt")
+# The standard first-pass crash(8) batch `postmortem.crash` runs when the caller omits
+# `commands` — the panic reason and the faulting context, and nothing else.
+DEFAULT_CRASH_COMMANDS: tuple[str, ...] = ("log", "bt")
 
 # Idempotency-store kind for vmcore.fetch (the registered tool name); ADR-0193.
 _VMCORE_FETCH_KIND = "vmcore.fetch"
@@ -97,8 +98,10 @@ class VmcoreHandlers:
         ctx: RequestContext,
         *,
         run_id: str,
-        commands: list[str],
+        commands: list[str] | None = None,
     ) -> ToolResponse:
+        """Run ``commands`` over the Run's core, or ``DEFAULT_CRASH_COMMANDS`` when omitted."""
+        batch = list(DEFAULT_CRASH_COMMANDS) if commands is None else commands
         return await self._with_postmortem_crash_port(
             pool,
             ctx,
@@ -107,23 +110,7 @@ class VmcoreHandlers:
                 pool,
                 ctx,
                 run_id=run_id,
-                commands=commands,
-                crash=crash,
-                secret_registry=secret_registry,
-            ),
-        )
-
-    async def postmortem_triage(
-        self, pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
-    ) -> ToolResponse:
-        return await self._with_postmortem_crash_port(
-            pool,
-            ctx,
-            run_id,
-            lambda crash, secret_registry: _postmortem_triage(
-                pool,
-                ctx,
-                run_id=run_id,
+                commands=batch,
                 crash=crash,
                 secret_registry=secret_registry,
             ),
@@ -345,25 +332,3 @@ async def _postmortem_crash(
             truncated=output.truncated,
             secret_registry=secret_registry,
         )
-
-
-async def _postmortem_triage(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    *,
-    run_id: str,
-    crash: CrashPostmortem,
-    secret_registry: SecretRegistry,
-) -> ToolResponse:
-    """Run the fixed triage command batch and return the redacted report."""
-    resp = await _postmortem_crash(
-        pool,
-        ctx,
-        run_id=run_id,
-        commands=list(_TRIAGE_COMMANDS),
-        crash=crash,
-        secret_registry=secret_registry,
-    )
-    if resp.status == "error":
-        return resp
-    return triage_response(resp)

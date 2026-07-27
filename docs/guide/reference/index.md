@@ -95,7 +95,6 @@
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
 | [`ops.tool_trail`](ops.md#opstool_trail) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `implemented` |
-| [`postmortem.triage`](postmortem.md#postmortemtriage) | `implemented` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |
 | [`reports.generate_all_projects`](reports.md#reportsgenerate_all_projects) | `implemented` |
 | [`reports.generate_granted_set`](reports.md#reportsgenerate_granted_set) | `implemented` |

@@ -1108,30 +1108,30 @@ def test_postmortem_crash_provenance_mismatch_is_config_error(migrated_url: str)
     asyncio.run(_run())
 
 
-def test_postmortem_triage_runs_and_relabels_actions(migrated_url: str) -> None:
+def test_postmortem_crash_omitted_commands_runs_first_pass_batch(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _crashed_with_built_run(pool)
             crash = _FakeCrash()
-            resp = await _vmcore_handlers(crash).postmortem_triage(pool, _ctx(), run_id=run_id)
+            resp = await _vmcore_handlers(crash).postmortem_crash(pool, _ctx(), run_id=run_id)
         assert resp.status != "error"
         assert "hunter2" not in data_str(resp, "transcript")
-        assert resp.suggested_next_actions == ["postmortem.triage", "artifacts.list"]
-        assert crash.kwargs["commands"] == ["log", "bt"]  # the fixed triage batch
+        assert resp.suggested_next_actions == ["postmortem.crash", "artifacts.list"]
+        assert crash.kwargs["commands"] == ["log", "bt"]  # the standard first-pass batch
 
     asyncio.run(_run())
 
 
-def test_postmortem_triage_never_booted_reports_no_vmcore(migrated_url: str) -> None:
+def test_postmortem_crash_never_booted_reports_no_vmcore(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id = await seed_crashed_system(pool)
             run_id = await seed_run_on_system(pool, sys_id, debuginfo_ref=None, build_id=None)
-            resp = await _vmcore_handlers().postmortem_triage(pool, _ctx(), run_id=run_id)
+            resp = await _vmcore_handlers().postmortem_crash(pool, _ctx(), run_id=run_id)
         assert resp.status == "error" and resp.error_category == "not_found"
-        # A never-booted run lacks debuginfo, build, AND a captured core. Triage is vmcore-centric,
-        # so the operative gap (no_vmcore) surfaces first, not the earliest-unmet build precondition
-        # (#553, ADR-0165). The next action points at the capture entry.
+        # A never-booted run lacks debuginfo, build, AND a captured core. Postmortem is
+        # vmcore-centric, so the operative gap (no_vmcore) surfaces first, not the earliest-unmet
+        # build precondition (#553, ADR-0165). The next action points at the capture entry.
         assert resp.data["reason"] == "no_vmcore"
         assert resp.suggested_next_actions == ["vmcore.fetch", "runs.get"]
         # The non-console-crash no_vmcore envelope carries no expected_boot_failure key — pinning
@@ -1160,46 +1160,35 @@ def test_console_crash_guidance_constant_pins_meaning() -> None:
     assert "console" in vmcore_view.CONSOLE_CRASH_GUIDANCE
 
 
-def test_postmortem_triage_console_crash_redirects_to_console(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            run_id = await _console_crash_run_no_core(pool)
-            resp = await _vmcore_handlers().postmortem_triage(pool, _ctx(), run_id=run_id)
-        # A console_crash run resolves to no vmcore by design (crash precedes kexec). Triage
-        # redirects to the console with a non-suppressed configuration_error detail (#734).
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "expected_console_crash"
-        assert resp.data["expected_boot_failure"] == "console_crash"
-        assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
-        assert resp.detail == vmcore_view.CONSOLE_CRASH_GUIDANCE
-
-    asyncio.run(_run())
-
-
 def test_postmortem_crash_console_crash_redirects_to_console(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _console_crash_run_no_core(pool)
-            resp = await _vmcore_handlers().postmortem_crash(
+            explicit = await _vmcore_handlers().postmortem_crash(
                 pool, _ctx(), run_id=run_id, commands=["log"]
             )
-        # postmortem.crash surfaces the same redirect (triage delegates to it; #734).
-        assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "expected_console_crash"
-        assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
-        assert resp.detail == vmcore_view.CONSOLE_CRASH_GUIDANCE
+            defaulted = await _vmcore_handlers().postmortem_crash(pool, _ctx(), run_id=run_id)
+        # A console_crash run resolves to no vmcore by design (crash precedes kexec), so the
+        # tool redirects to the console with a non-suppressed configuration_error detail (#734).
+        # The default batch takes the same path as an explicit command list.
+        for resp in (explicit, defaulted):
+            assert resp.status == "error" and resp.error_category == "configuration_error"
+            assert resp.data["reason"] == "expected_console_crash"
+            assert resp.data["expected_boot_failure"] == "console_crash"
+            assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
+            assert resp.detail == vmcore_view.CONSOLE_CRASH_GUIDANCE
 
     asyncio.run(_run())
 
 
-def test_postmortem_triage_console_crash_requires_viewer(migrated_url: str) -> None:
+def test_postmortem_crash_console_crash_requires_viewer(migrated_url: str) -> None:
     # The redirect is reachable only through the caught precondition error; a non-viewer is
     # rejected by the resolver's AuthorizationError first, so the redirect never weakens authz.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _console_crash_run_no_core(pool)
             with pytest.raises(AuthorizationError):
-                await _vmcore_handlers().postmortem_triage(pool, _ctx(role=None), run_id=run_id)
+                await _vmcore_handlers().postmortem_crash(pool, _ctx(role=None), run_id=run_id)
 
     asyncio.run(_run())
 

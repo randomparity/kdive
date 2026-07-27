@@ -83,7 +83,7 @@ _GOLDEN_PATH: tuple[tuple[int, str, frozenset[str]], ...] = (
     (
         9,
         "control.force_crash",
-        frozenset({"control.force_crash", "vmcore.fetch", "postmortem.triage"}),
+        frozenset({"control.force_crash", "vmcore.fetch", "postmortem.crash"}),
     ),
     (
         10,

@@ -90,10 +90,3 @@ def postmortem_success_response(
             "truncated": truncated,
         },
     )
-
-
-def triage_response(resp: ToolResponse) -> ToolResponse:
-    """Relabel a successful crash response as the fixed triage workflow."""
-    return resp.model_copy(
-        update={"suggested_next_actions": ["postmortem.triage", "artifacts.list"]}
-    )

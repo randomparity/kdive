@@ -7,6 +7,10 @@ name + description + these keywords and counts matches against the caller's quer
 Every key **must** be a live registered tool name — the completeness guard in
 ``tests/mcp/test_tool_index.py`` asserts this so stale entries trip CI.
 
+``RETIRED_TOOL_NAMES`` carries the opposite half: names that a consolidation removed
+from the registry, each pointing at the tool that replaced it.  They are search
+vocabulary only, never callable aliases (ADR-0456 §3).
+
 ``NAMESPACE_TOC`` maps each live tool namespace (the prefix before the first ``.``)
 to a one-line description.  ``build_instructions()`` renders these into the server
 ``instructions`` string that an agent receives at session start.
@@ -68,12 +72,13 @@ def build_instructions(gateway_enabled: bool) -> str:
     The instructions must match the surface the agent actually sees, which depends on
     whether the core-set tool gateway is enabled (ADR-0268, #1034):
 
-    - Gateway off (the default): the full RBAC catalog is listed directly, so the text
-      names the direct ``mcp__kdive__*`` tools as the primary surface and the gateway as
-      the fallback for any capability that is not a callable tool in the client — including
-      lazy-loading hosts that materialize only a subset of the tools.
-    - Gateway on: ``list_tools`` is clipped to the core set, so the text describes the
-      ``tools.search`` / ``tools.invoke`` discovery pattern first.
+    - Gateway on (the default, ADR-0456 / #1582): ``list_tools`` is clipped to the core
+      set, so the text describes the ``tools.search`` / ``tools.invoke`` discovery pattern
+      first.
+    - Gateway off: the full RBAC catalog is listed directly, so the text names the direct
+      ``mcp__kdive__*`` tools as the primary surface and the gateway as the fallback for any
+      capability that is not a callable tool in the client — including lazy-loading hosts
+      that materialize only a subset of the tools.
 
     Both variants end with a namespace table of contents so agents can orient themselves
     without calling ``tools.search`` for every operation.
@@ -173,7 +178,6 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "vmcore.list": frozenset({"vmcore", "list", "dumps", "crash"}),
     # postmortem
     "postmortem.crash": frozenset({"postmortem", "crash", "analysis", "vmcore", "triage"}),
-    "postmortem.triage": frozenset({"triage", "postmortem", "crash", "analysis"}),
     # allocations
     "allocations.request": frozenset({"allocate", "request", "capacity", "reserve", "system"}),
     "allocations.release": frozenset({"release", "free", "deallocate", "allocation"}),
@@ -221,3 +225,32 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "investigations.get": frozenset({"investigation", "get", "status", "fetch"}),
     "investigations.list": frozenset({"investigations", "list", "filter"}),
 }
+
+
+# Tool names a consolidation removed, mapped to the live tool that replaced them (ADR-0456 §3).
+# These are ``tools.search`` vocabulary, not compatibility aliases: the old name is gone from the
+# registry, so an agent that knows only the old name must be able to find the new entry point.
+# Because search matches substrings, a dotted name here also matches its bare parts. The guard in
+# ``tests/mcp/test_tool_index.py`` asserts each key is absent from the live registry and each
+# value is present, so a typo or a name that was never actually removed trips CI.
+RETIRED_TOOL_NAMES: dict[str, str] = {
+    "postmortem.triage": "postmortem.crash",
+}
+
+
+def _invert_retired_names(mapping: dict[str, str]) -> dict[str, frozenset[str]]:
+    """Group retired names by the replacement they point at."""
+    grouped: dict[str, set[str]] = {}
+    for retired, replacement in mapping.items():
+        grouped.setdefault(replacement, set()).add(retired)
+    return {replacement: frozenset(names) for replacement, names in grouped.items()}
+
+
+# Precomputed so ``tools.search`` scoring is an O(1) lookup per candidate tool rather than a
+# rescan of RETIRED_TOOL_NAMES for every tool in the catalog.
+_RETIRED_BY_REPLACEMENT: dict[str, frozenset[str]] = _invert_retired_names(RETIRED_TOOL_NAMES)
+
+
+def retired_names_for(tool_name: str) -> frozenset[str]:
+    """Return the retired tool names that ``tool_name`` replaced, or an empty set."""
+    return _RETIRED_BY_REPLACEMENT.get(tool_name, frozenset())

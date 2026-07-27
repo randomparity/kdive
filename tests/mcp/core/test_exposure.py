@@ -221,7 +221,6 @@ _CONTRIBUTOR_LOOP = frozenset(
         "debug.read_memory",
         "debug.list_breakpoints",  # shares the engine-op runtime gate → contributor, not viewer
         "postmortem.crash",
-        "postmortem.triage",
         "vmcore.fetch",
         "allocations.request",
         "investigations.open",

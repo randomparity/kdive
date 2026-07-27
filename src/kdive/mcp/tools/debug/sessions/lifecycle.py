@@ -593,8 +593,8 @@ async def _attach_preconditions(
     boot_outcome = parse_boot_outcome(boot_result.get("boot_outcome"))
     if boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
         # An expected console_crash leaves the System READY, so vmcore.fetch always rejects and
-        # postmortem.triage only self-corrects back to the console (#759). Point straight at the
-        # console artifact and reuse postmortem.triage's shared CONSOLE_CRASH_GUIDANCE so the two
+        # postmortem.crash only self-corrects back to the console (#759). Point straight at the
+        # console artifact and reuse postmortem.crash's shared CONSOLE_CRASH_GUIDANCE so the two
         # surfaces cannot drift.
         return ToolResponse.failure(
             str(run.id),

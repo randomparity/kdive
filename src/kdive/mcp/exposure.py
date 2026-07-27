@@ -222,7 +222,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.reconcile_systems": _PLAT_ADMIN,
     # postmortem
     "postmortem.crash": _CONTRIBUTOR,
-    "postmortem.triage": _CONTRIBUTOR,
     # resources (drain is dual: operator or admin)
     "resources.cordon": _PLAT_OP,
     "resources.uncordon": _PLAT_OP,

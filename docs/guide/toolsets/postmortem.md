@@ -13,10 +13,10 @@ return schema, read each tool's own description.
 
 ## Analyzing the core
 
-- `postmortem.triage` — auto-triage a captured core: a fast first-pass verdict (the panic
-  reason and the faulting context) without you writing any crash commands.
-- `postmortem.crash` — run allowlisted read-only crash(8) commands against the captured core
-  when you need to go past the triage summary.
+- `postmortem.crash` — read a captured core with crash(8). Omit `commands` for the standard
+  first-pass batch: a fast verdict (the panic reason and the faulting context) without you
+  writing any crash commands. Pass your own allowlisted read-only commands when you need to go
+  past that summary.
 
 For programmable, scripted analysis of the same core, `introspect.from_vmcore` (see the
 introspect guide) runs drgn against it instead of crash(8).

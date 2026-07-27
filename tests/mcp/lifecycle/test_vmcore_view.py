@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._vmcore_targets import (
     CONSOLE_CRASH,
     EXPECTED_CONSOLE_CRASH,
@@ -16,7 +15,6 @@ from kdive.mcp.tools.lifecycle.vmcore.view import (
     CONSOLE_CRASH_GUIDANCE,
     console_crash_redirect,
     postmortem_success_response,
-    triage_response,
     vmcore_collection,
 )
 from kdive.security.secrets.redaction import REDACTION
@@ -103,19 +101,3 @@ def test_postmortem_success_response_redacts_transcript_and_preserves_truncation
     assert resp.suggested_next_actions == ["postmortem.crash", "artifacts.list"]
     assert resp.data["transcript"] == f"panic log {REDACTION}"
     assert resp.data["truncated"] is True
-
-
-def test_triage_response_relabels_success_next_actions() -> None:
-    resp = ToolResponse.success(
-        "run-id",
-        "succeeded",
-        suggested_next_actions=["postmortem.crash"],
-        data={"transcript": "ok", "truncated": False},
-    )
-
-    triaged = triage_response(resp)
-
-    assert triaged.object_id == resp.object_id
-    assert triaged.status == resp.status
-    assert triaged.data == resp.data
-    assert triaged.suggested_next_actions == ["postmortem.triage", "artifacts.list"]
