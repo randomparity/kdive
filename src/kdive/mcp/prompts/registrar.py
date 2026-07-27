@@ -139,7 +139,8 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
         summary=(
             "Build a kernel, boot it, and attach a live debug session. Build the kernel "
             "yourself and upload it (ADR-0234): upload a prebuilt artifact via "
-            "artifacts.expected_uploads -> artifacts.create_run_upload -> runs.complete_build. "
+            "resource://kdive/contracts/external-build -> artifacts.create_run_upload -> "
+            "runs.complete_build. "
             "Prerequisite: an open investigation and a defined, allocated system "
             "(see start_investigation)."
         ),
@@ -150,13 +151,8 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
                 provides=("run",),
             ),
             Step(
-                "artifacts.expected_uploads",
-                "learn the exact artifact bytes to produce",
-                requires=("run",),
-            ),
-            Step(
                 "artifacts.create_run_upload",
-                "upload the prebuilt kernel artifact",
+                "declare and upload the prebuilt kernel artifact",
                 requires=("run",),
             ),
             Step(

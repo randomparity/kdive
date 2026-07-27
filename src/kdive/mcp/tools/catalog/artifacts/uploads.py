@@ -58,9 +58,9 @@ from kdive.store.objectstore import (
 _log = logging.getLogger(__name__)
 
 _TENANT = upload_manifest.UPLOAD_TENANT
-# Literal upload tool names and accepted artifact-name vocabularies. Public so the
-# ``artifacts.expected_uploads`` discovery tool (ADR-0166) projects the same sets the
-# validator below enforces — the advertisement can never drift from the accepted names.
+# Literal upload tool names and accepted artifact-name vocabularies. Public so
+# ``resource://kdive/contracts/external-build`` (ADR-0166/#1579) projects the same sets the
+# validator below enforces — the resource can never drift from the accepted names.
 CREATE_RUN_UPLOAD_TOOL = "artifacts.create_run_upload"
 CREATE_INVESTIGATION_UPLOAD_TOOL = "artifacts.create_investigation_upload"
 COMPLETE_INVESTIGATION_ROOTFS_TOOL = "investigations.complete_rootfs_upload"
@@ -119,7 +119,9 @@ UPLOAD_DECLARATION_ITEM_SCHEMA: dict[str, JsonValue] = {
     "properties": {
         "name": {
             "type": "string",
-            "description": "Accepted artifact name (see artifacts.expected_uploads).",
+            "description": (
+                "Accepted artifact name (see resource://kdive/contracts/external-build)."
+            ),
         },
         "sha256": {
             "type": "string",

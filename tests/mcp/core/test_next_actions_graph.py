@@ -71,7 +71,6 @@ _GOLDEN_PATH: tuple[tuple[int, str, frozenset[str]], ...] = (
         frozenset(
             {
                 "runs.create",
-                "artifacts.expected_uploads",
                 "artifacts.create_run_upload",
                 "runs.complete_build",
             }

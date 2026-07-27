@@ -325,7 +325,7 @@ async def diagnostic_sysrq_handler(
                 "reason": "no_console_output",
                 "remediation": (
                     "build the guest kernel with CONFIG_MAGIC_SYSRQ=y (see "
-                    "artifacts.feature_config_requirements) and a PS/2 keyboard driver "
+                    "resource://kdive/contracts/external-build) and a PS/2 keyboard driver "
                     "(i8042/atkbd), and enable kernel.sysrq in the guest for this command"
                 ),
             },

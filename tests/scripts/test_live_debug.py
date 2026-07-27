@@ -314,13 +314,17 @@ def test_upload_kernel_drives_declare_put_complete(
     kernel_tar.write_bytes(b"kernel-bytes")
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     put_calls: list[tuple[dict[str, Any], Path]] = []
+    contract = {"upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["kernel"]}}}
+
+    class FakeClient:
+        async def read_text_resource(self, uri: str) -> str:
+            assert uri == live_debug.EXTERNAL_BUILD_CONTRACT_URI
+            return json.dumps(contract)
 
     async def fake_call(
         _client: object, tool: str, args: dict[str, Any], _schemas: dict[str, Any]
     ) -> dict[str, Any]:
         tool_calls.append((tool, args))
-        if tool == "artifacts.expected_uploads":
-            return {"items": [{"data": {"owner_kind": "run", "accepted_names": ["kernel"]}}]}
         if tool == "artifacts.create_run_upload":
             return {
                 "items": [{"refs": {"upload_url": "http://s3/kernel"}, "data": {"name": "kernel"}}]
@@ -333,40 +337,36 @@ def test_upload_kernel_drives_declare_put_complete(
     monkeypatch.setattr(live_debug, "_call", fake_call)
     monkeypatch.setattr(live_debug, "_put_presigned", fake_put)
 
-    asyncio.run(live_debug._upload_kernel(object(), {}, run_id="r1", kernel_tar=kernel_tar))
+    asyncio.run(live_debug._upload_kernel(FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar))
 
     names = [tool for tool, _ in tool_calls]
     assert names == [
-        "artifacts.expected_uploads",
         "artifacts.create_run_upload",
         "runs.complete_build",
     ]
-    decl = tool_calls[1][1]["artifacts"][0]
+    decl = tool_calls[0][1]["artifacts"][0]
     assert decl["name"] == "kernel"
     assert decl["size_bytes"] == len(b"kernel-bytes")
     assert decl["sha256"] == live_debug._sha256_b64(kernel_tar)
-    assert tool_calls[2][1] == {"run_id": "r1"}
+    assert tool_calls[1][1] == {"run_id": "r1"}
     assert len(put_calls) == 1
     assert put_calls[0][0]["refs"]["upload_url"] == "http://s3/kernel"
     assert put_calls[0][1] == kernel_tar
 
 
-def test_upload_kernel_rejects_missing_kernel_contract(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
     live_debug = _load_live_debug()
     kernel_tar = tmp_path / "kernel.tar.gz"
     kernel_tar.write_bytes(b"k")
+    contract = {"upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["rootfs"]}}}
 
-    async def fake_call(
-        _client: object, _tool: str, _args: dict[str, Any], _schemas: dict[str, Any]
-    ) -> dict[str, Any]:
-        return {"items": [{"data": {"owner_kind": "run", "accepted_names": ["rootfs"]}}]}
-
-    monkeypatch.setattr(live_debug, "_call", fake_call)
+    class FakeClient:
+        async def read_text_resource(self, uri: str) -> str:
+            assert uri == live_debug.EXTERNAL_BUILD_CONTRACT_URI
+            return json.dumps(contract)
 
     with pytest.raises(RuntimeError, match="no longer accepts a 'kernel'"):
-        asyncio.run(live_debug._upload_kernel(object(), {}, run_id="r1", kernel_tar=kernel_tar))
+        asyncio.run(live_debug._upload_kernel(FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar))
 
 
 def test_transcript_renders_records(

@@ -1985,10 +1985,9 @@ def test_created_response_chains_to_the_upload_loop() -> None:
     assert resp.status == "created"
     assert resp.suggested_next_actions == [
         "runs.get",
-        "artifacts.expected_uploads",
-        "artifacts.feature_config_requirements",
         "artifacts.create_run_upload",
     ]
+    assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
 
 
 def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
@@ -2008,10 +2007,9 @@ def test_create_external_run_chains_to_upload_loop(migrated_url: str) -> None:
         assert resp.status == "created"
         assert resp.suggested_next_actions == [
             "runs.get",
-            "artifacts.expected_uploads",
-            "artifacts.feature_config_requirements",
             "artifacts.create_run_upload",
         ]
+        assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
 
     asyncio.run(_run())
 
@@ -2227,7 +2225,7 @@ def test_create_unbound_run_succeeds(migrated_url: str) -> None:
         assert row["target_kind"] == "local-libvirt"
         assert resp.data["system_id"] is None
         assert resp.data["target_kind"] == "local-libvirt"
-        assert "artifacts.expected_uploads" in resp.suggested_next_actions
+        assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
         assert inv is not None and inv["state"] == "active"
 
     asyncio.run(_run())

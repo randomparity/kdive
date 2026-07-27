@@ -35,10 +35,11 @@ class BuildProfile(BaseModel):
 
     It carries its schema version and the target ``arch`` (default ``x86_64``, validated against
     ``arch_traits.SUPPORTED_ARCHES``); the artifact set is delivered through the upload lane
-    (``artifacts.expected_uploads`` -> ``artifacts.create_run_upload`` -> ``runs.complete_build``),
-    not named here. It remains the persisted ``build_profile`` jsonb envelope, and :meth:`parse`
-    is the boundary that maps a structural ``ValidationError`` onto ``configuration_error`` and
-    scrubs submitted values from the error detail (ADR-0029) — a bare ``model_validate`` would not.
+    (``resource://kdive/contracts/external-build`` -> ``artifacts.create_run_upload`` ->
+    ``runs.complete_build``), not named here. It remains the persisted ``build_profile`` jsonb
+    envelope, and :meth:`parse` is the boundary that maps a structural ``ValidationError`` onto
+    ``configuration_error`` and scrubs submitted values from the error detail (ADR-0029) — a bare
+    ``model_validate`` would not.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

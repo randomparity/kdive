@@ -20,14 +20,19 @@ from pathlib import Path
 from typing import Literal
 
 from fastmcp import FastMCP
-from fastmcp.resources import TextResource
+from fastmcp.resources import FunctionResource, TextResource
 from pydantic import AnyUrl
 
 from kdive.domain.catalog.resources import ResourceKind
+from kdive.mcp.resources.external_build_contract import (
+    EXTERNAL_BUILD_CONTRACT_URI,
+    external_build_contract_json,
+)
 from kdive.providers.core.resolver import ProviderResolver
 
 _CONTENT_DIR = Path(__file__).parent / "_content"
 _MARKDOWN = "text/markdown"
+_JSON = "application/json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +80,7 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
             "artifacts: the combined kernel+modules gzip tar (boot/vmlinuz bzImage + "
             "lib/modules/<release>/), the exact tar recipe, and the optional "
             "vmlinux/effective_config/initrd. Cited by the runs.create build_profile schema "
-            "and artifacts.expected_uploads."
+            "and resource://kdive/contracts/external-build."
         ),
     ),
     DocResource(
@@ -257,7 +262,9 @@ def audience_by_uri() -> dict[str, str]:
     request URI are, so the audience lookup and the resource store share one normalization —
     a doc whose raw URI is not ``AnyUrl``-idempotent cannot then default to ``"all"`` and leak.
     """
-    return {str(AnyUrl(entry.uri)): entry.audience for entry in DOC_RESOURCES}
+    audiences: dict[str, str] = {str(AnyUrl(entry.uri)): entry.audience for entry in DOC_RESOURCES}
+    audiences[str(AnyUrl(EXTERNAL_BUILD_CONTRACT_URI))] = "all"
+    return audiences
 
 
 def register(app: FastMCP, *, resolver: ProviderResolver) -> int:
@@ -302,4 +309,18 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> int:
             )
         )
         registered += 1
+    app.add_resource(
+        FunctionResource(
+            uri=AnyUrl(EXTERNAL_BUILD_CONTRACT_URI),
+            name="external-build-contract",
+            title="External-build requirements",
+            description=(
+                "Generated JSON contract for the external-build lane: accepted upload artifact "
+                "names and byte layouts, plus advisory feature CONFIG requirements."
+            ),
+            mime_type=_JSON,
+            fn=external_build_contract_json,
+        )
+    )
+    registered += 1
     return registered

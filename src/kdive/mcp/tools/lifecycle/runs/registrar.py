@@ -227,10 +227,11 @@ def _register_runs_create(
                     "(default x86_64) is the target CPU architecture and selects the boot/vmlinuz "
                     "upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The "
                     "kernel is built locally and uploaded, so no source tree or config is named "
-                    "here. After runs.create, call artifacts.expected_uploads to learn the exact "
-                    "bytes to produce and artifacts.feature_config_requirements to learn which "
-                    "CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, "
-                    "then runs.complete_build (where you may also record the optional "
+                    "here. After runs.create, read "
+                    "resource://kdive/contracts/external-build to learn the exact bytes to "
+                    "produce and which CONFIG_* each debug feature needs, call "
+                    "artifacts.create_run_upload to upload, then runs.complete_build "
+                    "(where you may also record the optional "
                     "source_label/source_ref provenance of the tree you built from - an "
                     "unverified client claim, surfaced in runs.get data.build_provenance). Extra "
                     "kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the "
@@ -305,9 +306,9 @@ def _register_runs_create(
     ) -> ToolResponse:
         """Create a run, bound to a system or unbound against a target_kind.
 
-        After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then
-        runs.complete_build. Extra kernel cmdline args are passed later as the `cmdline` field on
-        runs.complete_build.
+        After runs.create, read resource://kdive/contracts/external-build, call
+        artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are
+        passed later as the `cmdline` field on runs.complete_build.
         """
         return await _create_run(
             pool,
@@ -471,8 +472,8 @@ def _register_runs_complete_build(
 
         The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
         (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
-        does not match the declared arch is rejected. See artifacts.expected_uploads for the
-        per-arch byte contract.
+        does not match the declared arch is rejected. See
+        resource://kdive/contracts/external-build for the per-arch byte contract.
 
         Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
         chunked and single-PUT alike. A later call is rejected with

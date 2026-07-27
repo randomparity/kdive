@@ -39,6 +39,7 @@ from kdive.domain.lifecycle.run_steps import (
 )
 from kdive.kernel_config.gate import debuginfo_warning
 from kdive.log import bind_context
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import ConfigErrorReason
 from kdive.mcp.tools._common import as_uuid as _as_uuid
@@ -660,10 +661,11 @@ def _render_attach_result(
     if isinstance(result, debug_lifecycle.DebugSessionRejected):
         return _render_rejection(result)
     data: dict[str, JsonValue] = {"project": result.project}
+    refs: dict[str, str] = {}
     actions = []
     if result.missing_debuginfo is not None:
         data["missing_debuginfo"] = result.missing_debuginfo
-        actions.append("artifacts.feature_config_requirements")
+        refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
     if transport == _DRGN_LIVE:
         actions.extend(["introspect.run", "introspect.script"])
     actions.append("debug.end_session")
@@ -671,6 +673,7 @@ def _render_attach_result(
         str(result.session_id),
         "live",
         suggested_next_actions=actions,
+        refs=refs,
         data=data,
     )
 

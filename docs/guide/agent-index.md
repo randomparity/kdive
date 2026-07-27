@@ -34,10 +34,10 @@ the first tool to call.
    then `investigations.complete_rootfs_upload` into your open investigation, and reference it
    by `checksum_sha256` in the profile with the system bound to that investigation — one upload
    serves many systems. See the images guide.
-4. **Build** — `runs.create` on the external lane, then declare and upload the prebuilt
-   kernel with `artifacts.expected_uploads` to see what is required, `artifacts.create_run_upload`
-   per artifact to get a presigned PUT URL, and the presigned PUT itself; once every expected
-   artifact is uploaded, call `runs.complete_build`. See the runs guide and the build lane
+4. **Build** — `runs.create` on the external lane, then read
+   `resource://kdive/contracts/external-build` to see what is required,
+   call `artifacts.create_run_upload` per artifact to get a presigned PUT URL, and PUT each
+   object; once every expected artifact is uploaded, call `runs.complete_build`. See the runs guide and the build lane
    (resource://kdive/docs/operating/external-build-upload.md). If you build for a non-x86 target,
    read the per-arch build hints first (resource://kdive/docs/guide/kernel-build-per-arch.md):
    the `boot/vmlinuz` member differs by arch (a bzImage on x86_64, a stripped ELF `vmlinux` on

@@ -31,11 +31,65 @@ _log = logging.getLogger(__name__)
 
 # Hard cap on search results — prevents one broad query from re-emitting the full catalog.
 _SEARCH_LIMIT_MAX = 50
+_SCHEMA_TERM_LIMIT = 200
+_SCHEMA_DEPTH_LIMIT = 8
+_SCHEMA_TEXT_KEYS = frozenset(
+    {
+        "description",
+        "title",
+        "const",
+        "default",
+        "format",
+        "pattern",
+        "propertyName",
+        "type",
+    }
+)
+
+
+def _append_schema_terms(value: object, terms: list[str], *, depth: int = 0) -> None:
+    """Collect bounded searchable text from a JSON Schema-like object."""
+    if len(terms) >= _SCHEMA_TERM_LIMIT or depth > _SCHEMA_DEPTH_LIMIT:
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if len(terms) >= _SCHEMA_TERM_LIMIT:
+                return
+            if key == "properties" and isinstance(child, dict):
+                for prop_name, prop_schema in child.items():
+                    terms.append(str(prop_name))
+                    _append_schema_terms(prop_schema, terms, depth=depth + 1)
+                continue
+            if key in {"required", "enum"} and isinstance(child, list):
+                terms.extend(str(item) for item in child[: _SCHEMA_TERM_LIMIT - len(terms)])
+                continue
+            if key in {"$defs", "definitions", "mapping"} and isinstance(child, dict):
+                terms.extend(str(name) for name in child)
+                _append_schema_terms(child, terms, depth=depth + 1)
+                continue
+            if key == "discriminator" and isinstance(child, dict):
+                terms.append("discriminator")
+                _append_schema_terms(child, terms, depth=depth + 1)
+                continue
+            if key in _SCHEMA_TEXT_KEYS and isinstance(child, str | int | float | bool):
+                terms.append(str(child))
+                continue
+            _append_schema_terms(child, terms, depth=depth + 1)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _append_schema_terms(item, terms, depth=depth + 1)
+
+
+def _schema_terms(tool: Tool) -> list[str]:
+    terms: list[str] = []
+    _append_schema_terms(tool.parameters, terms)
+    return terms
 
 
 def _score(tool: Tool, tokens: list[str]) -> int:
     extras = TOOL_KEYWORDS.get(tool.name, frozenset())
-    haystack = " ".join([tool.name, tool.description or "", *extras]).lower()
+    haystack = " ".join([tool.name, tool.description or "", *extras, *_schema_terms(tool)]).lower()
     return sum(1 for tok in tokens if tok in haystack)
 
 
@@ -79,14 +133,21 @@ def _project_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -
 
 
 def describe_tool(tool: Tool, kinds: frozenset[ResourceKind] | None) -> dict[str, JsonValue]:
-    """Serialise a Tool into the ``{name, description, input_schema}`` match shape,
+    """Serialise a Tool into the ``tools.search`` match shape,
     narrowing the input schema to the composed ``kinds`` (ADR-0269)."""
+    annotations = {}
+    raw_annotations = getattr(tool, "annotations", None)
+    if raw_annotations is not None:
+        annotations = raw_annotations.model_dump(mode="json", exclude_none=True)
+    meta = getattr(tool, "meta", None) or {}
     return cast(
         "dict[str, JsonValue]",
         {
             "name": tool.name,
             "description": tool.description or "",
             "input_schema": _project_or_passthrough(tool, kinds).parameters,
+            "annotations": annotations,
+            "maturity": meta.get("maturity"),
         },
     )
 
@@ -184,14 +245,15 @@ def register(app: FastMCP, *, resolver: ProviderResolver) -> None:
         """Find tools by capability phrase or namespace; returns full schemas for tools.invoke.
 
         Two modes:
-        - ``query``: lexical ranking over name + description + curated keywords; returns tools
+        - ``query``: lexical ranking over name, description, curated keywords, and bounded schema
+          text (property names/descriptions, enum values, and discriminators); returns tools
           matching the query, highest-scoring first.
         - ``namespace``: enumerate all tools in one plane (e.g. ``"debug"``); returns them
           sorted by name. Use this as a safety net when a query misses.
 
         Results are RBAC-filtered to only tools the caller could invoke. Each match carries
-        ``name``, ``description``, and ``input_schema`` so you can immediately call
-        ``tools.invoke`` with the right arguments.
+        ``name``, ``description``, ``input_schema``, ``annotations``, and ``maturity`` so you can
+        immediately call ``tools.invoke`` with the right arguments and safety tier.
 
         ``truncated: true`` signals that more results exist beyond the returned ``limit``.
         When ``query`` produces zero results, the miss is logged for keyword curation.

@@ -17,12 +17,6 @@ from kdive.mcp.tools._common import MAX_LIST_LIMIT as _MAX_LIST_LIMIT
 from kdive.mcp.tools.catalog.artifacts import raw_fetch as artifact_raw_fetch
 from kdive.mcp.tools.catalog.artifacts import reads as artifact_reads
 from kdive.mcp.tools.catalog.artifacts import uploads as artifact_uploads
-from kdive.mcp.tools.catalog.artifacts.expected_uploads import (
-    expected_uploads as _expected_uploads,
-)
-from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
-    feature_config_requirements as _feature_config_requirements,
-)
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.serialization import JsonValue
 
@@ -55,8 +49,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     _register_artifacts_fetch_raw(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_investigation_upload(app, pool, resolver)
-    _register_artifacts_expected_uploads(app)
-    _register_artifacts_feature_config_requirements(app)
 
 
 def _register_artifacts_list(app: FastMCP, pool: AsyncConnectionPool) -> None:
@@ -326,39 +318,3 @@ def _register_artifacts_create_investigation_upload(
             artifacts=artifacts,
             resolver=resolver,
         )
-
-
-def _register_artifacts_expected_uploads(app: FastMCP) -> None:
-    @app.tool(
-        name="artifacts.expected_uploads",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def artifacts_expected_uploads() -> ToolResponse:
-        """Return the accepted upload-artifact names per owner-kind. Requires a token."""
-        # Auth-only (ADR-0117): the verifier already gated the transport; enforce token
-        # presence as defence-in-depth. No platform/project gate, no audit — the
-        # projection is the public upload-name vocabulary only (ADR-0166).
-        current_context()
-        return _expected_uploads()
-
-
-def _register_artifacts_feature_config_requirements(app: FastMCP) -> None:
-    @app.tool(
-        name="artifacts.feature_config_requirements",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def artifacts_feature_config_requirements() -> ToolResponse:
-        """Advisory map of each debug/platform feature to the kernel ``CONFIG_*`` it needs.
-
-        Read this before building a kernel to upload. Each ``data.features`` entry lists the
-        ``feature``, a ``summary``, ``gated`` (whether kdive refuses to arm it without the
-        config), and ``requirements`` (OR-groups of ``CONFIG_*`` — any symbol in a group
-        satisfies it). Advisory only: kdive never validates your config; skip any feature you do
-        not need. Requires a token.
-        """
-        # Auth-only (ADR-0117), like artifacts.expected_uploads: the manifest is a static public
-        # vocabulary, so enforce token presence only — no platform/project gate, no audit.
-        current_context()
-        return _feature_config_requirements()

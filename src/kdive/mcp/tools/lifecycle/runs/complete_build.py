@@ -13,13 +13,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
 from kdive.kernel_config.gate import missing_effective_config_nudge, rootfs_mount_warning
 from kdive.log import bind_context
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import config_error as _config_error
-from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
-from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
-    FEATURE_CONFIG_REQUIREMENTS_TOOL,
-)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     CREATE_RUN_UPLOAD_TOOL,
     upload_expiry_contract,
@@ -136,11 +133,13 @@ class CompleteBuildHandlers:
                 return _remint_error(run_id, detail, exc.data)
             return _config_error(run_id, data=exc.data)
         except CompleteBuildValidationError as exc:
-            return ToolResponse.failure_from_error(
+            response = ToolResponse.failure_from_error(
                 run_id,
                 exc.error,
-                suggested_next_actions=[EXPECTED_UPLOADS_TOOL, CREATE_RUN_UPLOAD_TOOL],
+                suggested_next_actions=[CREATE_RUN_UPLOAD_TOOL],
             )
+            response.refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
+            return response
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(run_id, exc)
         return await self._success_envelope(conn, uid, result)
@@ -198,14 +197,16 @@ def _complete_envelope(
 ) -> ToolResponse:
     data: dict[str, JsonValue] = {}
     actions = ["runs.get"]
+    refs = dict(result.refs())
     if warning is not None:
         data["missing_boot_config"] = warning
-        actions = [FEATURE_CONFIG_REQUIREMENTS_TOOL, "runs.get"]
+        refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
     elif nudge is not None:
         data["missing_effective_config"] = nudge
         actions = [CREATE_RUN_UPLOAD_TOOL, "runs.get"]
+        refs["external_build_contract"] = EXTERNAL_BUILD_CONTRACT_URI
     return ToolResponse.success(
-        str(run_id), "succeeded", suggested_next_actions=actions, refs=result.refs(), data=data
+        str(run_id), "succeeded", suggested_next_actions=actions, refs=refs, data=data
     )
 
 

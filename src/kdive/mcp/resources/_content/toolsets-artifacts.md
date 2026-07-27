@@ -16,10 +16,8 @@ read each tool's own description.
 
 ## Uploading a build
 
-- `artifacts.expected_uploads` — learn the exact artifacts and byte layout a run expects
-  before you upload.
-- `artifacts.feature_config_requirements` — advisory map of each debug feature to the
-  kernel `CONFIG_*` it needs, so you can build them in before uploading.
+- `resource://kdive/contracts/external-build` — learn the exact artifacts, byte layout, and
+  advisory feature `CONFIG_*` requirements before you upload.
 - `artifacts.create_run_upload` — mint presigned PUTs for a run's build artifacts.
 - `artifacts.create_investigation_upload` — mint a presigned PUT for an investigation-scoped
   rootfs, reusable across every system bound to that investigation.

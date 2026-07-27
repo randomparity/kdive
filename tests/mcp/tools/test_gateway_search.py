@@ -206,7 +206,7 @@ def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> No
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
 
     async def _run() -> Any:
-        return await app.call_tool("tools.search", {"query": "get a run"})
+        return await app.call_tool("tools.search", {"query": "get a run", "limit": 50})
 
     result = asyncio.run(_run())
     content = _call_result(result)
@@ -217,6 +217,66 @@ def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> No
     assert "run_id" in str(runs_get["input_schema"]), (
         f"run_id not in input_schema: {runs_get['input_schema']}"
     )
+    assert runs_get["annotations"]["readOnlyHint"] is True
+    assert runs_get["maturity"] == "implemented"
+
+
+def test_query_indexes_parameter_names_and_descriptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": "sha256 size_bytes"})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "artifacts.create_run_upload" in _match_names(content)
+
+
+def test_legacy_static_artifact_tool_names_find_upload_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run(query: str) -> Any:
+        return await app.call_tool("tools.search", {"query": query})
+
+    for query in ("artifacts.expected_uploads", "artifacts.feature_config_requirements"):
+        result = asyncio.run(_run(query))
+        content = _call_result(result)
+        assert content["status"] == "ok", f"expected ok, got {content}"
+        assert "artifacts.create_run_upload" in _match_names(content)
+
+
+def test_result_includes_mutating_safety_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": "power reset"})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    control_power = next(m for m in content["data"]["matches"] if m["name"] == "control.power")
+    assert control_power["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+    }
+    assert control_power["maturity"] == "implemented"
 
 
 def test_resolver_failure_keeps_search_usable_and_rbac_filtered(

@@ -36,14 +36,15 @@ caught and converted to ``configuration_error`` envelopes.
 Find tools by capability phrase or namespace; returns full schemas for tools.invoke.
 
 Two modes:
-- ``query``: lexical ranking over name + description + curated keywords; returns tools
+- ``query``: lexical ranking over name, description, curated keywords, and bounded schema
+  text (property names/descriptions, enum values, and discriminators); returns tools
   matching the query, highest-scoring first.
 - ``namespace``: enumerate all tools in one plane (e.g. ``"debug"``); returns them
   sorted by name. Use this as a safety net when a query misses.
 
 Results are RBAC-filtered to only tools the caller could invoke. Each match carries
-``name``, ``description``, and ``input_schema`` so you can immediately call
-``tools.invoke`` with the right arguments.
+``name``, ``description``, ``input_schema``, ``annotations``, and ``maturity`` so you can
+immediately call ``tools.invoke`` with the right arguments and safety tier.
 
 ``truncated: true`` signals that more results exist beyond the returned ``limit``.
 When ``query`` produces zero results, the miss is logged for keyword curation.

@@ -10,11 +10,8 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import JsonValue
 
 from kdive.domain.errors import CategorizedError
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.catalog.artifacts.expected_uploads import EXPECTED_UPLOADS_TOOL
-from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
-    FEATURE_CONFIG_REQUIREMENTS_TOOL,
-)
 from kdive.mcp.tools.catalog.artifacts.uploads import CREATE_RUN_UPLOAD_TOOL
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
@@ -130,17 +127,16 @@ def _created_response(result: RunCreateResult) -> ToolResponse:
     }
     if result.expected_boot_failure_kind is not None:
         data["expected_boot_failure"] = result.expected_boot_failure_kind
-    # Every run uploads prebuilt artifacts; point it at the format advisory + upload tool so the
-    # loop is self-describing (ADR-0234 §5).
+    # Every run uploads prebuilt artifacts; point it at the generated contract + upload tool so
+    # the loop is self-describing (ADR-0234 §5).
     return ToolResponse.success(
         str(result.run_id),
         "created",
         suggested_next_actions=[
             "runs.get",
-            EXPECTED_UPLOADS_TOOL,
-            FEATURE_CONFIG_REQUIREMENTS_TOOL,
             CREATE_RUN_UPLOAD_TOOL,
         ],
+        refs={"external_build_contract": EXTERNAL_BUILD_CONTRACT_URI},
         data=data,
     )
 

@@ -24,10 +24,8 @@ from kdive.domain.capacity.state import RunState
 from kdive.kernel_config.gate import MISSING_BOOT_CONFIG_REASON
 from kdive.kernel_config.parse import KernelConfig, parse_kernel_config
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
-from kdive.mcp.tools.catalog.artifacts.feature_requirements import (
-    FEATURE_CONFIG_REQUIREMENTS_TOOL,
-)
 from kdive.mcp.tools.catalog.artifacts.uploads import (
     ArtifactDeclaration,
 )
@@ -219,7 +217,8 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
         warning = cast("dict[str, Any]", resp.data["missing_boot_config"])
         assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
         assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK"]
-        assert resp.suggested_next_actions[0] == FEATURE_CONFIG_REQUIREMENTS_TOOL
+        assert resp.suggested_next_actions == ["runs.get"]
+        assert resp.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
 
     asyncio.run(_run())
 

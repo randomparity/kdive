@@ -33,22 +33,22 @@ from kdive.kernel_config.support import (
 )
 from kdive.serialization import JsonValue
 
+_EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
+
 CRASH_CONFIG_REASON = "kernel_missing_crash_config"
-_REMEDIATION = (
-    "rebuild the kernel with the missing CONFIG_* (see artifacts.feature_config_requirements)"
-)
+_REMEDIATION = f"rebuild the kernel with the missing CONFIG_* (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 
 MISSING_BOOT_CONFIG_REASON = "kernel_missing_boot_config"
 _ROOTFS_REMEDIATION = (
     "rebuild the kernel with the missing CONFIG_* so the guest can mount its ext4 root filesystem "
-    "and boot (see artifacts.feature_config_requirements)"
+    f"and boot (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 NO_EFFECTIVE_CONFIG_REASON = "no_effective_config_uploaded"
 _NO_EFFECTIVE_CONFIG_REMEDIATION = (
     "upload the built kernel's effective_config alongside the build (artifacts.create_run_upload) "
     "so runs.complete_build can check the boot-critical EXT4_FS/VIRTIO_BLK symbols the guest needs "
-    "to mount its root filesystem (see artifacts.feature_config_requirements)"
+    f"to mount its root filesystem (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
@@ -59,7 +59,7 @@ MISSING_DEBUGINFO_REASON = "missing_debuginfo"
 _BTF_SYMBOL = "DEBUG_INFO_BTF"
 _DEBUGINFO_REMEDIATION = (
     "enable CONFIG_DEBUG_INFO_BTF (in-guest drgn reads BTF from /sys/kernel/btf), or upload a "
-    "matching vmlinux, so drgn can resolve symbols (see artifacts.feature_config_requirements)"
+    f"matching vmlinux, so drgn can resolve symbols (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 # The static config check above proves BTF is *advertised*, not that the running guest's drgn can
@@ -69,7 +69,7 @@ DEBUGINFO_UNLOADABLE_REASON = "debuginfo_unloadable"
 _DEBUGINFO_UNLOADABLE_REMEDIATION = (
     "the in-guest drgn could not load the running kernel's BTF even though the config advertised "
     "it (a known limitation of some guest drgn builds); boot a BTF-capable guest image with a "
-    "newer drgn, or upload a matching vmlinux (see artifacts.feature_config_requirements)"
+    f"newer drgn, or upload a matching vmlinux (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 

@@ -132,7 +132,7 @@ class ArtifactContract:
 
 
 # The per-arch boot/vmlinuz member format (#1145, ADR-0343): the single source both the validator
-# and the expected_uploads advertisement read, so they cannot drift. x86_64 is the bzImage HdrS
+# and the external-build contract resource, so they cannot drift. x86_64 is the bzImage HdrS
 # magic; ppc64le (powerpc has no bzImage) is an ELF64-LE kernel pinned to EM_PPC64 at e_machine so
 # a non-ppc64 ELF64-LE (x86_64/aarch64 vmlinux, same \x7fELF\x02\x01 prefix) cannot leak in.
 BOOT_MEMBER_FORMATS: Mapping[str, FormatContract] = {
@@ -235,7 +235,8 @@ EXTERNAL_BUILD_CONTRACTS: Mapping[str, ArtifactContract] = {
             "Optional and never rejected: kdive stores the .config verbatim and completing a build "
             "never fails over it. If you upload one, kdive does read it to emit a non-blocking "
             "advisory when it provably lacks the symbols needed to mount the root filesystem and "
-            "boot (root=/dev/vda ext4 on virtio-blk); see artifacts.feature_config_requirements.",
+            "boot (root=/dev/vda ext4 on virtio-blk); see "
+            "resource://kdive/contracts/external-build.",
         ),
     ),
 }

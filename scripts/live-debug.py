@@ -50,6 +50,7 @@ from kdive.mcp.dev_harness import (
     mint_token,
     oidc_issuer_from_env,
 )
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -315,13 +316,12 @@ async def _upload_kernel(
     kernel_tar: Path,
 ) -> None:
     """Drive the external-upload lane for one Run: discover -> declare -> PUT -> complete_build."""
-    contract = await _call(client, "artifacts.expected_uploads", {}, schemas)
-    accepted: set[str] = set()
-    for item in contract.get("items", []):
-        data = item.get("data") or {}
-        if data.get("owner_kind") == "run":
-            accepted = set(data.get("accepted_names", []))
-            break
+    contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
+    upload_contracts = contract.get("upload_contracts", {})
+    run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
+    accepted = (
+        set(run_contract.get("accepted_names", [])) if isinstance(run_contract, dict) else set()
+    )
     if "kernel" not in accepted:
         raise RuntimeError(f"upload contract no longer accepts a 'kernel' run artifact: {accepted}")
     decls = [
