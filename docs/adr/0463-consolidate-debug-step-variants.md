@@ -40,7 +40,7 @@ indefinitely rather than to a bounded stop. Neither is one more value of "how fa
 `mode` is a closed enum — `into`, `over`, `instruction`, `out` — mapped by `_ADVANCE_CALLS` to
 `engine.step`, `engine.next`, `engine.step_instruction`, and `engine.finish` respectively. All
 four old wrappers and all four names are removed in this change; there is no alias and no
-deprecation period. The registry drops from 133 tools to 130.
+deprecation period. The registry drops from 132 tools to 129.
 
 The mode names describe the *unit of advance* rather than restating the gdb command names. `into`
 and `over` say what distinguishes them (whether calls are entered), which the old `step`/`next`
@@ -132,7 +132,7 @@ all rank `debug.advance`.
 
 ## Consequences
 
-- The `debug` namespace goes from 24 tools to 21; the live registry from 133 to 130.
+- The `debug` namespace goes from 24 tools to 21; the live registry from 132 to 129.
 - `kdivectl debug step|next|step-instruction|finish` become
   `kdivectl debug advance --session-id <id> --mode <into|over|instruction|out>`. The generated
   verb descriptors are regenerated, not hand-edited; `--mode` derives argparse `choices` from the

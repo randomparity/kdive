@@ -105,7 +105,7 @@ def test_items_are_sorted_and_duplicates_collapse() -> None:
 
 
 def test_platform_roles_serializes_as_a_json_list() -> None:
-    # A list-valued data field is JSON-safe (fixtures.list precedent) and survives the
+    # A list-valued data field is JSON-safe (secrets.list precedent) and survives the
     # envelope's structured serialization as an actual array.
     ctx = _platform_ctx(PlatformRole.PLATFORM_ADMIN, PlatformRole.PLATFORM_AUDITOR)
     resp = whoami(ctx)

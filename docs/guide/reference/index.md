@@ -49,7 +49,6 @@
 | [`debug.set_breakpoint`](debug.md#debugset_breakpoint) | `implemented` |
 | [`debug.set_watchpoint`](debug.md#debugset_watchpoint) | `implemented` |
 | [`debug.start_session`](debug.md#debugstart_session) | `implemented` |
-| [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.describe`](images.md#imagesdescribe) | `implemented` |

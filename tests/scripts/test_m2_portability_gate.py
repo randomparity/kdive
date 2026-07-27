@@ -104,7 +104,7 @@ def test_allowlist_is_exactly_the_named_touch_points() -> None:
     # The ADR-0076 set plus the ADR-0085 drgn-live routing touch, the ADR-0086 dead-worker
     # gdbstub reconciler reset, the ADR-0087 config-registry migration of the agnostic-core
     # readers, the ADR-0089 operator-CLI audit-attribution touch, and the ADR-0089 §6 M2.2
-    # admin-CLI net-new read tools (secrets.list/fixtures.list + their app wiring and the
+    # admin-CLI net-new read tools (secrets.list/fixtures.* + their app wiring and the
     # value-free scope_refs accessor), the ADR-0090 §5 server telemetry middleware, and the
     # ADR-0090 §5 worker/reconciler telemetry + aux health gate (#267: worker.py, the two
     # *_telemetry modules, queue.count_claimable), and the ADR-0092 M2.4 publish/register +

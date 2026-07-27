@@ -25,7 +25,7 @@ schema_version = 2
 # Declared `staged-path` (ADR-0228): the source is the qcow2 FILE on local disk (the path
 # `build-fs` writes to in Step 6), under the provider allowed_roots (`/var/lib/kdive/rootfs`). It
 # seeds `registered` (bootable) immediately — no object-store upload — so an MCP agent with no host
-# shell can DISCOVER it (`fixtures.list` / `systems.profile_examples`) and provision with
+# shell can DISCOVER it (`images.list` / `systems.profile_examples`) and provision with
 # `rootfs = {kind = "catalog", provider = "local-libvirt", name = "fedora-kdive-ready-44"}`. The
 # path must be absolute, under allowed_roots, and the image `public` (a private staged-path image is
 # rejected at load). The file need not exist yet at reconcile time (declared, not probed) —

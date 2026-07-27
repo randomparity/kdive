@@ -105,7 +105,6 @@ REGISTRY: tuple[Verb, ...] = (
     ),
     Verb("inventory", "list", reads.inventory_show, "inventory.list", options=("project",)),
     Verb("secrets", "list", reads.secrets_list, "secrets.list"),
-    Verb("fixtures", "list", reads.fixtures_list, "fixtures.list"),
     Verb(
         "ops",
         "force-teardown",
@@ -143,7 +142,7 @@ REGISTRY: tuple[Verb, ...] = (
         options=("mode", "reason"),
         read_only=False,
     ),
-    Verb("images", "list", images.images_list, "images.list"),
+    Verb("images", "list", images.images_list, "images.list", options=("scope",)),
     Verb(
         "images",
         "describe",
