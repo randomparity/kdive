@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index retired tool names for tools.search
 - Retire cordon/uncordon into search vocabulary
 - Express required boolean params as --flag/--no-flag
+- Fold artifact text search back into artifacts.get
 
 ### Changed
 
@@ -146,6 +147,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tighten ADR-0457 migration and consumer wording
 - Record ADR-0460 resource scheduling setter
 - Record the single queue state setter
+- Record ADR-0462 restoring the folded jump cursor
+- Record the cold-start proof for the artifacts.get find fold
+- State the post-0461 registry delta in ADR-0462
 
 ### Fixed
 
