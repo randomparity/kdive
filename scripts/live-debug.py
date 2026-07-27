@@ -308,37 +308,68 @@ async def _put_presigned(item: dict[str, Any], path: Path) -> None:
         resp.raise_for_status()
 
 
+def _elf_build_id(vmlinux: Path) -> str:
+    """The GNU build-id note of ``vmlinux``, as ``runs.complete_build`` requires it.
+
+    Raises:
+        RuntimeError: ``readelf`` prints no build-id note for ``vmlinux``.
+    """
+    out = subprocess.run(  # noqa: S603 - fixed argv, no shell  # nosec B603
+        [_required_executable("readelf"), "-n", str(vmlinux)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_ARCHIVE_STEP_TIMEOUT_S,
+    ).stdout
+    for line in out.splitlines():
+        if "Build ID:" in line:
+            return line.split("Build ID:", 1)[1].strip()
+    raise RuntimeError(f"no GNU build-id note in {vmlinux}; rebuild with CONFIG_DEBUG_INFO=y")
+
+
 async def _upload_kernel(
     client: LiveStackClient,
     schemas: dict[str, dict[str, Any]],
     *,
     run_id: str,
     kernel_tar: Path,
+    vmlinux: Path,
 ) -> None:
-    """Drive the external-upload lane for one Run: discover -> declare -> PUT -> complete_build."""
+    """Drive the external-upload lane for one Run: discover -> declare -> PUT -> complete_build.
+
+    Uploads the combined ``kernel`` tar **and** the uncompressed ``vmlinux`` ELF. The vmlinux is
+    what publishes the Run's ``debuginfo_ref``; without it every gdb-MI op short-circuits with
+    ``no_debuginfo``, so the stepping proof cannot run at all.
+    """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     upload_contracts = contract.get("upload_contracts", {})
     run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
     accepted = (
         set(run_contract.get("accepted_names", [])) if isinstance(run_contract, dict) else set()
     )
-    if "kernel" not in accepted:
-        raise RuntimeError(f"upload contract no longer accepts a 'kernel' run artifact: {accepted}")
+    missing = {"kernel", "vmlinux"} - accepted
+    if missing:
+        raise RuntimeError(f"upload contract no longer accepts run artifact(s) {missing}")
+    sources = {"kernel": kernel_tar, "vmlinux": vmlinux}
     decls = [
-        {
-            "name": "kernel",
-            "sha256": _sha256_b64(kernel_tar),
-            "size_bytes": kernel_tar.stat().st_size,
-        }
+        {"name": name, "sha256": _sha256_b64(path), "size_bytes": path.stat().st_size}
+        for name, path in sources.items()
     ]
     upload = await _call(
         client, "artifacts.create_run_upload", {"run_id": run_id, "artifacts": decls}, schemas
     )
     items = {(it.get("data") or {}).get("name"): it for it in upload.get("items", [])}
-    if "kernel" not in items:
-        raise RuntimeError("create_run_upload returned no 'kernel' upload item")
-    await _put_presigned(items["kernel"], kernel_tar)
-    await _call(client, "runs.complete_build", {"run_id": run_id}, schemas)
+    for name, path in sources.items():
+        if name not in items:
+            raise RuntimeError(f"create_run_upload returned no {name!r} upload item")
+        await _put_presigned(items[name], path)
+    # A declared vmlinux is rejected unless complete_build carries its matching ELF build-id.
+    await _call(
+        client,
+        "runs.complete_build",
+        {"run_id": run_id, "build_id": _elf_build_id(vmlinux)},
+        schemas,
+    )
 
 
 # --- lifecycle to a stopped session --------------------------------------------------------
@@ -381,11 +412,9 @@ async def _provision_boot_run(
         "allocations.request",
         {
             "project": project,
-            "request": {
-                "shape": "medium",
-                "window": 24,
-                "resource": {"mode": "id", "resource_id": resource_id},
-            },
+            "shape": "medium",
+            "window": 24,
+            "resource": {"mode": "id", "resource_id": resource_id},
         },
         schemas,
     )
@@ -425,19 +454,27 @@ async def _provision_boot_run(
         client,
         "runs.create",
         {
-            "request": {
-                "investigation_id": inv_id,
-                "system_id": system_id,
-                "build_profile": {"schema_version": 1, "arch": "x86_64"},
-            }
+            "investigation_id": inv_id,
+            "system_id": system_id,
+            "build_profile": {"schema_version": 1, "arch": "x86_64"},
         },
         schemas,
     )
     run_id = run["object_id"]
     with tempfile.TemporaryDirectory(prefix="kdive-live-debug-") as scratch:
         kernel_tar = _combined_kernel_tar(KERNEL_SRC, Path(scratch))
-        print(f"  uploading {kernel_tar.name} ({kernel_tar.stat().st_size} bytes)", file=sys.stderr)
-        await _upload_kernel(client, schemas, run_id=run_id, kernel_tar=kernel_tar)
+        vmlinux = KERNEL_SRC / "vmlinux"
+        if not vmlinux.is_file():
+            raise RuntimeError(
+                f"no vmlinux at {vmlinux}; the debug tier needs the uncompressed ELF with DWARF "
+                "(build the tree with CONFIG_DEBUG_INFO=y)"
+            )
+        print(
+            f"  uploading {kernel_tar.name} ({kernel_tar.stat().st_size} bytes) "
+            f"+ vmlinux ({vmlinux.stat().st_size} bytes)",
+            file=sys.stderr,
+        )
+        await _upload_kernel(client, schemas, run_id=run_id, kernel_tar=kernel_tar, vmlinux=vmlinux)
     for step, terminal in (("runs.install", 600), ("runs.boot", 600)):
         kind = step.split(".")[1]
         await _call(client, step, {"run_id": run_id}, schemas)
@@ -504,12 +541,18 @@ async def _step(args: argparse.Namespace) -> int:
         await _call(
             client, "debug.continue", {"session_id": session_id, "timeout_sec": 30}, schemas
         )
+        # A degraded attach (no published vmlinux) answers every op with an error envelope
+        # instead of a breakpoint number; say so here rather than dying on a KeyError below.
+        number = (bp.get("data") or {}).get("number")
+        if number is None:
+            print(f"  FAIL set_breakpoint returned no number: {bp}", file=sys.stderr)
+            return 1
         print(f"  stopped at {args.symbol}", file=sys.stderr)
         # Clear the breakpoint so it does not re-fire mid-walk and mask a step's own stop.
         await _call(
             client,
             "debug.clear_breakpoint",
-            {"session_id": session_id, "number": (bp.get("data") or {})["number"]},
+            {"session_id": session_id, "number": number},
             schemas,
         )
         # instruction/over/into must each advance rip (deterministic on a returnable frame).
