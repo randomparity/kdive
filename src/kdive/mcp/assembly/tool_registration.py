@@ -252,7 +252,7 @@ def build_plane_registrars(assembly: AppAssembly) -> tuple[PlaneRegistrar, ...]:
         ),
         _reconcile_systems_tools_registrar(assembly.object_stores),
         _pool_only_plane_registrar(ops_resource_host_tools.register),
-        _pool_only_plane_registrar(ops_resource_mutation_tools.register),
+        _resolver_tools_registrar(ops_resource_mutation_tools.register, assembly.resolver),
         _resolver_tools_registrar(allocations_tools.register, assembly.resolver),
         _pool_only_plane_registrar(ops_breakglass_tools.register),
         _resolver_tools_registrar(systems_tools.register, assembly.resolver),

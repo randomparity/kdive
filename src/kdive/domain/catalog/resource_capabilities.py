@@ -187,7 +187,7 @@ class ResourceCapabilities:
                 f"host {label} advertises no {missing_key} size ceiling; this is a "
                 "host-registration gap, not a problem with your request. Re-register the host "
                 f"with a {missing_key} value (remote-libvirt/fault-inject declare it in "
-                "systems.toml or resources.register_*; local-libvirt gets it from discovery).",
+                "systems.toml or resources.register; local-libvirt gets it from discovery).",
                 category=ErrorCategory.CONFIGURATION_ERROR,
                 details={
                     "resource_id": str(resource_id),

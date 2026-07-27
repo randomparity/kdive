@@ -165,9 +165,7 @@ def test_resource_mutations_visible_to_platform_admin_only() -> None:
     tools = {
         "resources.deregister",
         "resources.renew",
-        "resources.register_local_libvirt",
-        "resources.register_remote_libvirt",
-        "resources.register_fault_inject",
+        "resources.register",
     }
 
     for tool in tools:

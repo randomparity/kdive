@@ -1,4 +1,4 @@
-"""``resources.register_*`` / ``deregister`` / ``renew`` runtime-mutation tools (M2.6 #396).
+"""``resources.register`` / ``deregister`` / ``renew`` runtime-mutation tools (M2.6 #396).
 
 Handlers are driven directly with an injected pool + RequestContext and an injected probe /
 secrets root, so the per-kind preflight and authz gates are exercised deterministically without
@@ -11,8 +11,11 @@ Coverage:
 * register defaults owner_project to the single registering project; ``'*'`` → global (NULL)
 * register rejects a name already owned by a ``config`` row → ``conflict``
 * register duplicate runtime name → ``conflict``
-* per-kind preflight: remote_libvirt needs reachability + secret refs + a registered
-  base_image; fault_inject needs only the secret ref (no reachability, no base_image)
+* per-kind branch contract (ADR-0464): remote-libvirt needs host_uri + base_image,
+  local-libvirt needs host_uri, fault-inject needs neither, and an inapplicable field is
+  rejected rather than ignored
+* per-kind preflight: the libvirt kinds run the bounded TCP reachability probe and
+  remote-libvirt additionally needs a registered base_image; fault-inject never probes
 * deregister rejects a ``config``/``discovery`` row → ``conflict``; absent id → ``not_found``
 * deregister of a resource with a live allocation requires ``force=True``
 * renew is keyed to ``resource_id`` (a different session/principal renews it — handoff)
@@ -45,24 +48,16 @@ from kdive.mcp.tools.ops.resources import register as register_module
 from kdive.mcp.tools.ops.resources import registrar as resources_registrar
 from kdive.mcp.tools.ops.resources._common import (
     DEREGISTER_TOOL,
-    REGISTER_FAULT_INJECT_TOOL,
-    REGISTER_LOCAL_LIBVIRT_TOOL,
-    REGISTER_REMOTE_LIBVIRT_TOOL,
+    REGISTER_TOOL,
     RENEW_TOOL,
     ResourceProbe,
     TcpResourceProbe,
     _host_port,
 )
 from kdive.mcp.tools.ops.resources.deregister import deregister_resource
-from kdive.mcp.tools.ops.resources.register import (
-    FaultInjectResourceRegistration,
-    LocalLibvirtResourceRegistration,
-    RemoteLibvirtResourceRegistration,
-    register_fault_inject_resource,
-    register_local_libvirt_resource,
-    register_remote_libvirt_resource,
-)
+from kdive.mcp.tools.ops.resources.register import ResourceRegistration, register_resource
 from kdive.mcp.tools.ops.resources.renew import renew_resource
+from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole
 
@@ -131,6 +126,18 @@ class _Unreachable:
 
     async def probe(self, host_uri: str) -> bool:
         return False
+
+
+class _Recording:
+    """A probe that records every host URI it was asked about, so a *skipped* probe is visible."""
+
+    def __init__(self, *, reachable: bool) -> None:
+        self.reachable = reachable
+        self.probed: list[str] = []
+
+    async def probe(self, host_uri: str) -> bool:
+        self.probed.append(host_uri)
+        return self.reachable
 
 
 def _secrets_root(tmp_path: Path, *refs: str) -> Path:
@@ -242,6 +249,15 @@ async def _insert_terminal_allocation(pool: AsyncConnectionPool, resource_id: UU
     return row[0]
 
 
+def _all_kinds_resolver() -> ProviderResolver:
+    """A resolver reporting every ResourceKind composed, so the ADR-0269 guard never fires.
+
+    The guard only reads ``registered_kinds()``, so a placeholder runtime is sufficient; the
+    non-composed rejection itself is covered in tests/mcp/lifecycle/test_call_time_kind_guard.py.
+    """
+    return ProviderResolver({kind: cast(Any, object()) for kind in ResourceKind})
+
+
 def _destructive_hint(tool: object) -> bool | None:
     annotations = getattr(tool, "annotations", None)
     value = getattr(annotations, "destructiveHint", None)
@@ -255,8 +271,11 @@ def _fault_request(
     concurrent_allocation_cap: int = 1,
     secret_refs: tuple[str, ...] = (),
     owner_project: str | None = None,
-) -> FaultInjectResourceRegistration:
-    return FaultInjectResourceRegistration(
+    host_uri: str | None = None,
+    base_image: str | None = None,
+) -> ResourceRegistration:
+    return ResourceRegistration(
+        kind=ResourceKind.FAULT_INJECT,
         name=name,
         cost_class=cost_class,
         concurrent_allocation_cap=concurrent_allocation_cap,
@@ -264,6 +283,8 @@ def _fault_request(
         memory_mb=16384,
         secret_refs=secret_refs,
         owner_project=owner_project,
+        host_uri=host_uri,
+        base_image=base_image,
     )
 
 
@@ -271,13 +292,14 @@ def _remote_request(
     name: str,
     *,
     cost_class: str = "standard",
-    host_uri: str = "qemu+tls://host/system",
-    base_image: str = "base-img",
+    host_uri: str | None = "qemu+tls://host/system",
+    base_image: str | None = "base-img",
     concurrent_allocation_cap: int = 1,
     secret_refs: tuple[str, ...] = (),
     owner_project: str | None = None,
-) -> RemoteLibvirtResourceRegistration:
-    return RemoteLibvirtResourceRegistration(
+) -> ResourceRegistration:
+    return ResourceRegistration(
+        kind=ResourceKind.REMOTE_LIBVIRT,
         name=name,
         cost_class=cost_class,
         host_uri=host_uri,
@@ -294,15 +316,18 @@ def _local_request(
     name: str,
     *,
     cost_class: str = "standard",
-    host_uri: str = "qemu+tcp://localhost/system",
+    host_uri: str | None = "qemu+tcp://localhost/system",
+    base_image: str | None = None,
     concurrent_allocation_cap: int = 1,
     secret_refs: tuple[str, ...] = (),
     owner_project: str | None = None,
-) -> LocalLibvirtResourceRegistration:
-    return LocalLibvirtResourceRegistration(
+) -> ResourceRegistration:
+    return ResourceRegistration(
+        kind=ResourceKind.LOCAL_LIBVIRT,
         name=name,
         cost_class=cost_class,
         host_uri=host_uri,
+        base_image=base_image,
         concurrent_allocation_cap=concurrent_allocation_cap,
         vcpus=8,
         memory_mb=16384,
@@ -321,50 +346,64 @@ async def _call_registered_tool(tool: object, *args: object, **kwargs: object) -
 # --- registrar boundary ---
 
 
-def test_registrar_exposes_annotations_and_invokes_wrappers(
+@pytest.mark.parametrize(
+    ("kind", "extra", "expected"),
+    [
+        (ResourceKind.FAULT_INJECT, {}, _fault_request),
+        (
+            ResourceKind.LOCAL_LIBVIRT,
+            {"host_uri": "qemu+tcp://localhost/system"},
+            _local_request,
+        ),
+        (
+            ResourceKind.REMOTE_LIBVIRT,
+            {"host_uri": "qemu+tls://host/system", "base_image": "base-img"},
+            _remote_request,
+        ),
+    ],
+)
+def test_registrar_forwards_every_kind_to_the_one_handler(
     monkeypatch: pytest.MonkeyPatch,
+    kind: ResourceKind,
+    extra: dict[str, str],
+    expected: Any,
 ) -> None:
-    calls: list[tuple[object, RequestContext, FaultInjectResourceRegistration]] = []
+    """The single wrapper passes `kind` and its branch fields straight through (ADR-0464)."""
+    calls: list[tuple[object, RequestContext, ResourceRegistration]] = []
     pool = cast(AsyncConnectionPool, object())
     ctx = _admin_ctx(principal="registrar-admin", projects=("registrar-team",))
 
-    async def fake_register_fault_inject(
+    async def fake_register(
         bound_pool: AsyncConnectionPool,
         bound_ctx: RequestContext,
-        request: FaultInjectResourceRegistration,
+        request: ResourceRegistration,
     ) -> ToolResponse:
         calls.append((bound_pool, bound_ctx, request))
-        return ToolResponse.success("resource:fi-registrar", "registered")
+        return ToolResponse.success("resource:reg", "registered")
 
     async def _run() -> None:
         monkeypatch.setattr(resources_registrar, "current_context", lambda: ctx)
-        monkeypatch.setattr(
-            resources_registrar, "register_fault_inject_resource", fake_register_fault_inject
-        )
+        monkeypatch.setattr(resources_registrar, "register_resource", fake_register)
         app = FastMCP("resources-registrar-test")
-        resources_registrar.register(app, pool)
+        resources_registrar.register(app, pool, resolver=_all_kinds_resolver())
         tools = {tool.name: tool for tool in await app.list_tools()}
 
-        assert set(tools) == {
-            REGISTER_REMOTE_LIBVIRT_TOOL,
-            REGISTER_LOCAL_LIBVIRT_TOOL,
-            REGISTER_FAULT_INJECT_TOOL,
-            DEREGISTER_TOOL,
-            RENEW_TOOL,
-        }
-        assert _destructive_hint(tools[REGISTER_FAULT_INJECT_TOOL]) is False
+        assert set(tools) == {REGISTER_TOOL, DEREGISTER_TOOL, RENEW_TOOL}
+        assert _destructive_hint(tools[REGISTER_TOOL]) is False
         assert _destructive_hint(tools[RENEW_TOOL]) is False
         assert _destructive_hint(tools[DEREGISTER_TOOL]) is True
 
         resp = await _call_registered_tool(
-            tools[REGISTER_FAULT_INJECT_TOOL],
-            name="fi-registrar",
+            tools[REGISTER_TOOL],
+            kind=kind,
+            name="reg-1",
             cost_class="standard",
             vcpus=8,
             memory_mb=16384,
             concurrent_allocation_cap=4,
             secret_refs=("ref-a", "ref-b"),
             owner_project="*",
+            **extra,
         )
 
         assert resp.status == "registered"
@@ -372,11 +411,12 @@ def test_registrar_exposes_annotations_and_invokes_wrappers(
             (
                 pool,
                 ctx,
-                _fault_request(
-                    "fi-registrar",
+                expected(
+                    "reg-1",
                     concurrent_allocation_cap=4,
                     secret_refs=("ref-a", "ref-b"),
                     owner_project="*",
+                    **extra,
                 ),
             )
         ]
@@ -431,7 +471,7 @@ def test_host_ops_registrar_exposes_annotations_and_invokes_wrappers(
 def test_non_admin_register_denied(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _non_admin_ctx(),
                 _fault_request("fi-1"),
@@ -460,7 +500,7 @@ def test_non_admin_deregister_and_renew_denied(migrated_url: str) -> None:
 def test_platform_auditor_overreach_denied_and_audited(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _auditor_ctx(),
                 _fault_request("fi-aud", owner_project="*"),
@@ -469,9 +509,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str, tmp_pa
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         rows = await _audit_rows(migrated_url)
-        assert any(
-            r[2] == "resources.register_fault_inject" and "denied" in str(r[3]) for r in rows
-        )
+        assert any(r[2] == REGISTER_TOOL and "denied" in str(r[3]) for r in rows)
 
     asyncio.run(_run())
 
@@ -482,7 +520,7 @@ def test_platform_auditor_overreach_denied_and_audited(migrated_url: str, tmp_pa
 def test_register_allocate_renew_deregister_round_trip(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            reg = await register_fault_inject_resource(
+            reg = await register_resource(
                 pool,
                 _admin_ctx(),
                 _fault_request("fi-roundtrip"),
@@ -547,14 +585,14 @@ def test_register_defaults_owner_to_single_project_and_star_is_global(
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            scoped = await register_fault_inject_resource(
+            scoped = await register_resource(
                 pool,
                 _admin_ctx(projects=("only-proj",)),
                 _fault_request("fi-scoped"),
                 probe=_Reachable(),
                 secrets_root=_secrets_root(tmp_path),
             )
-            glob = await register_fault_inject_resource(
+            glob = await register_resource(
                 pool,
                 _admin_ctx(projects=("only-proj",)),
                 _fault_request("fi-global", owner_project="*"),
@@ -572,7 +610,7 @@ def test_register_defaults_owner_to_single_project_and_star_is_global(
 def test_register_ambiguous_project_requires_explicit(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(projects=("a", "b")),
                 _fault_request("fi-amb"),
@@ -597,7 +635,7 @@ def test_register_rejects_config_name_collision(migrated_url: str, tmp_path: Pat
                 managed_by=ManagedBy.CONFIG.value,
                 host_uri="fault-inject://local",
             )
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _fault_request("fi-config"),
@@ -615,7 +653,7 @@ def test_register_duplicate_runtime_name_conflict(migrated_url: str, tmp_path: P
             root = _secrets_root(tmp_path)
 
             async def _reg() -> ToolResponse:
-                return await register_fault_inject_resource(
+                return await register_resource(
                     pool,
                     _admin_ctx(),
                     _fault_request("fi-dup"),
@@ -641,7 +679,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
         async with _pool(migrated_url) as pool:
             await _seed_registered_image(pool, name="base-img", provider="remote-libvirt")
             root = _secrets_root(tmp_path, "client.pem", "client.key", "ca.pem")
-            ok = await register_remote_libvirt_resource(
+            ok = await register_resource(
                 pool,
                 _admin_ctx(),
                 _remote_request(
@@ -654,7 +692,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             )
             assert ok.status == "registered", ok.model_dump()
 
-            unreachable = await register_remote_libvirt_resource(
+            unreachable = await register_resource(
                 pool,
                 _admin_ctx(),
                 _remote_request("rl-unreach", secret_refs=("client.pem",), owner_project="*"),
@@ -663,7 +701,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             )
             assert unreachable.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
-            missing_secret = await register_remote_libvirt_resource(
+            missing_secret = await register_resource(
                 pool,
                 _admin_ctx(),
                 _remote_request("rl-nosecret", secret_refs=("absent.pem",), owner_project="*"),
@@ -672,7 +710,7 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
             )
             assert missing_secret.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
-            no_image = await register_remote_libvirt_resource(
+            no_image = await register_resource(
                 pool,
                 _admin_ctx(),
                 _remote_request(
@@ -689,25 +727,147 @@ def test_remote_libvirt_register_requires_reachable_secrets_and_registered_base_
     asyncio.run(_run())
 
 
-def test_fault_inject_register_ignores_base_image_and_reachability(
-    migrated_url: str, tmp_path: Path
-) -> None:
+def test_fault_inject_register_never_probes_reachability(migrated_url: str, tmp_path: Path) -> None:
+    """fault-inject is synthetic: no base_image, no registered image, and no outbound probe.
+
+    The probe is the one branch-dependent *side effect* of registration (a bounded TCP connect
+    to the host URI), so an unreachable probe that never gets called is the assertion: a
+    fault-inject register must neither reach out nor fail on unreachability.
+    """
+
     async def _run() -> None:
+        probe = _Recording(reachable=False)
         async with _pool(migrated_url) as pool:
-            # No base_image, an unreachable probe, no registered image: a fault-inject register
-            # must still succeed (synthetic — preflight is secret-ref only).
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _fault_request("fi-synthetic", owner_project="*"),
-                probe=_Unreachable(),
+                probe=probe,
                 secrets_root=_secrets_root(tmp_path),
             )
         assert resp.status == "registered", resp.model_dump()
+        assert probe.probed == []
         row = await _resource_row(migrated_url, str(resp.data["id"]))
         assert row is not None
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("build", "host_uri"),
+    [(_remote_request, "qemu+tls://host/system"), (_local_request, "qemu+tcp://localhost/system")],
+)
+def test_libvirt_kinds_probe_their_host_uri(
+    migrated_url: str, tmp_path: Path, build: Any, host_uri: str
+) -> None:
+    """Both libvirt kinds TCP-probe exactly the host_uri they were given, before the insert."""
+
+    async def _run() -> None:
+        probe = _Recording(reachable=True)
+        async with _pool(migrated_url) as pool:
+            await _seed_registered_image(pool, name="base-img", provider="remote-libvirt")
+            resp = await register_resource(
+                pool,
+                _admin_ctx(),
+                build("probe-target", owner_project="*"),
+                probe=probe,
+                secrets_root=_secrets_root(tmp_path),
+            )
+        assert resp.status == "registered", resp.model_dump()
+        assert probe.probed == [host_uri]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("kind", "host_uri", "base_image", "expected_reason"),
+    [
+        # required-but-missing (blank counts as missing)
+        (ResourceKind.REMOTE_LIBVIRT, "qemu+tls://host/system", None, "requires base_image"),
+        (ResourceKind.REMOTE_LIBVIRT, "qemu+tls://host/system", "  ", "requires base_image"),
+        (ResourceKind.REMOTE_LIBVIRT, None, "base-img", "requires host_uri"),
+        (ResourceKind.REMOTE_LIBVIRT, "   ", "base-img", "requires host_uri"),
+        (ResourceKind.LOCAL_LIBVIRT, None, None, "requires host_uri"),
+        (ResourceKind.LOCAL_LIBVIRT, "   ", None, "requires host_uri"),
+        # supplied-but-inapplicable: silently ignoring these would hide a real caller mistake
+        (
+            ResourceKind.LOCAL_LIBVIRT,
+            "qemu+tcp://localhost/system",
+            "base-img",
+            "base_image does not apply",
+        ),
+        (ResourceKind.FAULT_INJECT, "qemu+tls://host/system", None, "host_uri does not apply"),
+        (ResourceKind.FAULT_INJECT, None, "base-img", "base_image does not apply"),
+    ],
+)
+def test_register_branch_contract_rejects_wrong_fields_per_kind(
+    migrated_url: str,
+    tmp_path: Path,
+    kind: ResourceKind,
+    host_uri: str | None,
+    base_image: str | None,
+    expected_reason: str,
+) -> None:
+    """Branch required-ness is a handler contract, not JSON Schema (ADR-0464).
+
+    A discriminated `request` union could encode this in the schema, but ADR-0372 forbids a
+    `request` wrapper on a mutation tool and the CLI generator cannot emit flags for a union.
+    So every branch rule is enforced here and must return `configuration_error`.
+    """
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            return await register_resource(
+                pool,
+                _admin_ctx(),
+                ResourceRegistration(
+                    kind=kind,
+                    name="branch-1",
+                    cost_class="standard",
+                    vcpus=8,
+                    memory_mb=16384,
+                    host_uri=host_uri,
+                    base_image=base_image,
+                    owner_project="*",
+                ),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value, resp.model_dump()
+    assert expected_reason in str(resp.data["reason"])
+
+
+@pytest.mark.parametrize(
+    ("build", "extra"),
+    [
+        (_fault_request, {}),
+        (_local_request, {}),
+        (_remote_request, {}),
+    ],
+)
+def test_register_denial_outranks_a_malformed_branch(
+    migrated_url: str, tmp_path: Path, build: Any, extra: dict[str, object]
+) -> None:
+    """A non-admin gets `authorization_denied`, never a branch hint about a field they set.
+
+    The authorization gate runs before branch validation, so a caller with no platform_admin
+    learns nothing about which provider fields the server wanted.
+    """
+
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            return await register_resource(
+                pool,
+                _non_admin_ctx(),
+                build("branch-denied", host_uri=None, base_image=None, **extra),
+                probe=_Reachable(),
+                secrets_root=_secrets_root(tmp_path),
+            )
+
+    resp = asyncio.run(_run())
+    assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
 
 
 def test_fault_inject_register_fails_on_unresolvable_secret(
@@ -715,7 +875,7 @@ def test_fault_inject_register_fails_on_unresolvable_secret(
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _fault_request("fi-badsecret", secret_refs=("absent.key",), owner_project="*"),
@@ -987,7 +1147,7 @@ def test_no_secret_bytes_in_audit_or_envelope(migrated_url: str, tmp_path: Path)
         async with _pool(migrated_url) as pool:
             await _seed_registered_image(pool, name="leak-img", provider="remote-libvirt")
             root = _secrets_root(tmp_path, "client.pem")
-            resp = await register_remote_libvirt_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _remote_request(
@@ -1089,40 +1249,10 @@ def test_tcp_probe_hostless_uri_returns_false() -> None:
 # --- register.py error branches not reached by the per-kind preflight tests above ---
 
 
-def test_remote_libvirt_register_rejects_blank_host_uri(migrated_url: str, tmp_path: Path) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await register_remote_libvirt_resource(
-                pool,
-                _admin_ctx(),
-                _remote_request("rl-blank", host_uri="   "),
-                probe=_Reachable(),
-                secrets_root=_secrets_root(tmp_path),
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-
-    asyncio.run(_run())
-
-
-def test_local_libvirt_register_rejects_blank_host_uri(migrated_url: str, tmp_path: Path) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await register_local_libvirt_resource(
-                pool,
-                _admin_ctx(),
-                _local_request("ll-blank", host_uri="   "),
-                probe=_Reachable(),
-                secrets_root=_secrets_root(tmp_path),
-            )
-        assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
-
-    asyncio.run(_run())
-
-
 def test_local_libvirt_register_succeeds(migrated_url: str, tmp_path: Path) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_local_libvirt_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _local_request("ll-ok", owner_project="*"),
@@ -1141,7 +1271,7 @@ def test_register_rejects_non_positive_concurrent_allocation_cap(
 ) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await register_fault_inject_resource(
+            resp = await register_resource(
                 pool,
                 _admin_ctx(),
                 _fault_request("fi-cap0", concurrent_allocation_cap=0),
