@@ -95,9 +95,9 @@ second tool name, because the jump matcher is no longer separately callable.
 
 ## Consequences
 
-- The live registry loses one tool. It measured 137 -> 136 at the time of writing; sibling
-  consolidations in this epic land in parallel, so the absolute count on `main` moves
-  independently of this change.
+- The live registry loses one tool: **136 -> 135** as this lands. (It measured 137 -> 136 when
+  written; ADR-0461 removed `images.build` from `main` first. Sibling consolidations in this epic
+  land in parallel, so the absolute pair moves with them — the durable claim is the delta of one.)
 - Breaking for `artifacts.find` callers, twice over: the tool is gone and the parameter is renamed
   `query` → `find`. ADR-0283 accepted this class of break as pre-first-release, and the epic
   forbids aliases.
