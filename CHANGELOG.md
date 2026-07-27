@@ -69,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fold postmortem.triage into postmortem.crash
 - Replace cordon/uncordon with a scheduling setter
 - Replace queue pause/resume with one state setter
+- Remove the duplicate images.build tool
 
 ### Documentation
 
@@ -250,6 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skip a root the sweep cannot classify, as with its list
 - Bound the orphan grace and correct the brake's claim
 - Bound both terms of the orphan-sweep threshold
+- Drop curated image build/publish verbs
 
 ### Build
 
