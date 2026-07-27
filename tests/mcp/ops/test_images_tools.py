@@ -3,10 +3,10 @@
 Handlers are driven directly with an injected pool + RequestContext (the repo unit
 contract). Coverage maps to the issue's falsifiable acceptance:
 
-* ``images.build``/``images.publish`` authorize as ``platform_operator`` (NOT
-  ``platform_admin`` — the role order is not a total hierarchy) and audit to
-  ``platform_audit_log``; a non-operator (including a bare ``platform_admin``) is denied
-  and audited before any pool mutation;
+* ``images.publish`` — the one build/publish tool (ADR-0461) — authorizes as
+  ``platform_operator`` (NOT ``platform_admin`` — the role order is not a total hierarchy)
+  and audits to ``platform_audit_log``; a non-operator (including a bare ``platform_admin``)
+  is denied and audited before any pool mutation;
 * ``images.delete`` is project-scoped (an ``operator`` on the image's owning project);
   a member-over-reach caller is denied and audited; a non-member is denied without writing
   an audit row under an ungranted project, and the catalog row survives;
@@ -50,7 +50,7 @@ from kdive.mcp.tools.ops.images._common import (
     PRUNE_TOOL,
     UPLOAD_TOOL,
 )
-from kdive.mcp.tools.ops.images.build_publish import BUILD_TOOL, PUBLISH_TOOL
+from kdive.mcp.tools.ops.images.build_publish import PUBLISH_TOOL
 from kdive.reconciler.cleanup.images import ImageMtime
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
@@ -246,17 +246,6 @@ async def _call_registered_tool(tool: object, *args: object) -> ToolResponse:
     return result
 
 
-def _build(pool: AsyncConnectionPool, ctx: RequestContext):
-    return image_build_publish.build(
-        pool,
-        ctx,
-        payload=ImageBuildPayload(
-            provider="local-libvirt",
-            name="fedora-kdive-ready-44",
-        ),
-    )
-
-
 def _publish(pool: AsyncConnectionPool, ctx: RequestContext):
     return image_build_publish.publish(
         pool,
@@ -288,18 +277,17 @@ def test_images_registrar_exposes_annotations_and_invokes_wrappers(
             tools = {tool.name: tool for tool in await app.list_tools()}
 
             assert set(tools) == {
-                BUILD_TOOL,
                 PUBLISH_TOOL,
                 UPLOAD_TOOL,
                 DELETE_TOOL,
                 PRUNE_TOOL,
                 EXTEND_TOOL,
             }
-            assert _destructive_hint(tools[BUILD_TOOL]) is False
+            assert _destructive_hint(tools[PUBLISH_TOOL]) is False
             assert _destructive_hint(tools[PRUNE_TOOL]) is True
 
             build_resp = await _call_registered_tool(
-                tools[BUILD_TOOL], "local-libvirt", "fedora-kdive-ready-44"
+                tools[PUBLISH_TOOL], "local-libvirt", "fedora-kdive-ready-44"
             )
             ctx["value"] = _admin_ctx()
             prune_resp = await _call_registered_tool(tools[PRUNE_TOOL], "registrar boundary")
@@ -311,13 +299,13 @@ def test_images_registrar_exposes_annotations_and_invokes_wrappers(
     asyncio.run(_run())
 
 
-# --- build / publish: platform_operator gate ------------------------------------------------
+# --- publish: platform_operator gate --------------------------------------------------------
 
 
-def test_build_operator_enqueues_image_build_and_audits(migrated_url: str) -> None:
+def test_publish_operator_enqueues_image_build_and_audits(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _build(pool, _operator_ctx())
+            resp = await _publish(pool, _operator_ctx())
         assert resp.status not in {"error", "failed"}
         jobs = await _job_rows(migrated_url)
         assert [kind for kind, _ in jobs] == ["image_build"]
@@ -326,7 +314,7 @@ def test_build_operator_enqueues_image_build_and_audits(migrated_url: str) -> No
             (
                 "ops-operator",
                 "platform_operator",
-                "images.build",
+                "images.publish",
                 "local-libvirt:fedora-kdive-ready-44",
             )
         ]
@@ -334,25 +322,25 @@ def test_build_operator_enqueues_image_build_and_audits(migrated_url: str) -> No
     asyncio.run(_run())
 
 
-def test_build_admin_without_operator_is_denied_and_audited(migrated_url: str) -> None:
-    # platform_admin does NOT imply platform_operator: the build gate must reject it.
+def test_publish_admin_without_operator_is_denied_and_audited(migrated_url: str) -> None:
+    # platform_admin does NOT imply platform_operator: the publish gate must reject it.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _build(pool, _admin_ctx())
+            resp = await _publish(pool, _admin_ctx())
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert await _job_rows(migrated_url) == []
         audit = await _platform_audit_rows(migrated_url)
         assert audit == [
-            ("ops-admin", "platform_admin", "images.build", "denied:fedora-kdive-ready-44")
+            ("ops-admin", "platform_admin", "images.publish", "denied:fedora-kdive-ready-44")
         ]
 
     asyncio.run(_run())
 
 
-def test_build_unprivileged_denied_audited_no_pool_mutation(migrated_url: str) -> None:
+def test_publish_unprivileged_denied_audited_no_pool_mutation(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _build(pool, _member_ctx())
+            resp = await _publish(pool, _member_ctx())
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert await _job_rows(migrated_url) == []
         # A project-only token holds no platform role, so the platform-denial recorder
@@ -362,24 +350,15 @@ def test_build_unprivileged_denied_audited_no_pool_mutation(migrated_url: str) -
     asyncio.run(_run())
 
 
-def test_publish_operator_enqueues_image_build_and_audits(migrated_url: str) -> None:
+def test_republish_is_idempotent_on_the_shared_dedup_key(migrated_url: str) -> None:
+    # Build and publish collapsed into one tool (ADR-0461), and the dedup key is the image
+    # identity, so a second call returns the first job instead of enqueuing a duplicate.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await _publish(pool, _operator_ctx())
-        assert resp.status not in {"error", "failed"}
+            first = await _publish(pool, _operator_ctx())
+            second = await _publish(pool, _operator_ctx())
+        assert first.object_id == second.object_id
         assert [kind for kind, _ in await _job_rows(migrated_url)] == ["image_build"]
-        audit = await _platform_audit_rows(migrated_url)
-        assert audit[0][2] == "images.publish"
-
-    asyncio.run(_run())
-
-
-def test_publish_operator_denied_for_admin(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _publish(pool, _admin_ctx())
-        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-        assert await _job_rows(migrated_url) == []
 
     asyncio.run(_run())
 

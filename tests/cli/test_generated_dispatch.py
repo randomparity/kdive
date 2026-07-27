@@ -183,7 +183,7 @@ def test_payload_bool_optional_sends_both_states() -> None:
 
 def test_payload_append_flag_included_when_present() -> None:
     pkgs = GeneratedFlag(name="--pkg", dest="pkg", required=False, help="", action="append")
-    verb = _verb("images.build", flags=(pkgs,))
+    verb = _verb("resources.set_status", flags=(pkgs,))
     assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("pkg"): ["a", "b"]})) == {
         "pkg": ["a", "b"]
     }

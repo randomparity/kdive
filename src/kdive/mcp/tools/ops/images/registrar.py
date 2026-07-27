@@ -2,7 +2,8 @@
 
 Each workflow owns its authorization and audit shape:
 
-* ``build_publish``: platform-operator public image build/publish job admission.
+* ``build_publish``: platform-operator public image build/publish job admission
+  (one tool, ``images.publish`` — ADR-0461).
 * ``upload``: project-scoped private image registration from quarantine.
 * ``delete``: project-scoped private image deletion with the shared reference guard.
 * ``retention``: platform-admin break-glass prune/extend operations.
@@ -26,7 +27,7 @@ from kdive.mcp.tools.ops.images._common import (
     PRUNE_TOOL,
     UPLOAD_TOOL,
 )
-from kdive.mcp.tools.ops.images.build_publish import BUILD_TOOL, PUBLISH_TOOL, build, publish
+from kdive.mcp.tools.ops.images.build_publish import PUBLISH_TOOL, publish
 from kdive.mcp.tools.ops.images.delete import delete
 from kdive.mcp.tools.ops.images.retention import extend, prune_expired
 from kdive.mcp.tools.ops.images.upload import ImageUploadRequest, upload
@@ -42,7 +43,6 @@ def register(
     upload_store: UploadObjectStore,
 ) -> None:
     """Register the ``images.*`` operator/admin tools on ``app``, bound to ``pool``."""
-    _register_images_build(app, pool)
     _register_images_publish(app, pool)
     _register_images_upload(app, pool, upload_store)
     _register_images_delete(app, pool)
@@ -50,36 +50,11 @@ def register(
     _register_images_extend(app, pool)
 
 
-def _register_images_build(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    @app.tool(name=BUILD_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
-    async def images_build(
-        provider: Annotated[
-            str, Field(description="The provider whose plane builds or built the image.")
-        ],
-        name: Annotated[str, Field(description="The catalog image name.")],
-        packages: Annotated[
-            tuple[str, ...],
-            Field(
-                default=(),
-                description="Optional package override; omitted uses the provider catalog default.",
-            ),
-        ] = (),
-    ) -> ToolResponse:
-        """Enqueue an image build job."""
-        return await build(
-            pool,
-            current_context(),
-            payload=ImageBuildPayload(provider=provider, name=name, packages=packages),
-        )
-
-
 def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(name=PUBLISH_TOOL, annotations=_docmeta.mutating(), meta={"maturity": "implemented"})
     async def images_publish(
-        provider: Annotated[
-            str, Field(description="The provider whose plane builds or built the image.")
-        ],
-        name: Annotated[str, Field(description="The catalog image name.")],
+        provider: Annotated[str, Field(description="The provider whose plane builds the image.")],
+        name: Annotated[str, Field(description="The catalog image name to build and publish.")],
         packages: Annotated[
             tuple[str, ...],
             Field(
@@ -88,7 +63,12 @@ def _register_images_publish(app: FastMCP, pool: AsyncConnectionPool) -> None:
             ),
         ] = (),
     ) -> ToolResponse:
-        """Publish a built image into the catalog."""
+        """Enqueue an image build job that publishes the built image to the catalog.
+
+        One job covers build, validation, and catalog publication, so this is also the entry
+        point for promoting an already-realized ``defined`` baseline. Re-issuing it for the same
+        ``provider``/``name`` returns the existing job rather than enqueuing a second one.
+        """
         return await publish(
             pool,
             current_context(),
