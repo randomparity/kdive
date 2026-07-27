@@ -79,24 +79,27 @@ _AUDITED_OPS: frozenset[str] = frozenset(
         "debug.clear_watchpoint",
         "debug.continue",
         "debug.interrupt",
-        "debug.step",
-        "debug.next",
-        "debug.step_instruction",
-        "debug.finish",
+        "debug.advance",
         "debug.load_module_symbols",
     }
 )
 
 
-def _op_audit(tool: str, **args: object) -> _OpAudit | None:
+def _op_audit(tool: str, transition: str | None = None, /, **args: object) -> _OpAudit | None:
     """Return the audit descriptor for an audited ``tool``, or None to skip auditing.
 
-    ``transition`` is the bare op name (``tool`` sans the ``debug.`` prefix); ``args`` are the
-    op parameters recorded for ``args_digest`` correlation (never raw memory bytes).
+    ``transition`` defaults to the bare op name (``tool`` sans the ``debug.`` prefix); ``args``
+    are the op parameters recorded for ``args_digest`` correlation (never raw memory bytes).
+
+    A tool that folds several distinct operations behind one name passes an explicit
+    ``transition`` so the audit trail keeps one row per operation rather than collapsing them:
+    ``debug.advance`` records ``advance:into`` / ``advance:over`` / ``advance:instruction`` /
+    ``advance:out`` (ADR-0463 §3). It is positional-only so it can never collide with an audited
+    op parameter in ``args``.
     """
     if tool not in _AUDITED_OPS:
         return None
-    return _OpAudit(tool=tool, transition=tool.removeprefix("debug."), args=args)
+    return _OpAudit(tool=tool, transition=transition or tool.removeprefix("debug."), args=args)
 
 
 def _gdbmi_maturity() -> dict[str, object]:

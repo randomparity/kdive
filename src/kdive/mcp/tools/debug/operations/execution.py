@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from collections.abc import Callable
+from typing import Annotated, Literal
 
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 from pydantic import Field
 
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
@@ -18,21 +20,40 @@ from kdive.mcp.tools.debug.operations.runtime import (
     _op_audit,
     run_engine_op_with_resolver,
 )
-from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine
+from kdive.providers.ports.debug import GdbMiAttachment, GdbMiEngine, GdbStopRecord
 from kdive.serialization import JsonValue
+
+_ADVANCE_TOOL = "debug.advance"
+
+AdvanceMode = Literal["into", "over", "instruction", "out"]
+
+_AdvanceCall = Callable[[GdbMiEngine, GdbMiAttachment, float], GdbStopRecord]
+
+# Each mode dispatches one gdb-MI engine call. All four share a signature, response shape,
+# authorization, and annotations, which is what lets them ride one tool (ADR-0463 §2).
+_ADVANCE_CALLS: dict[str, _AdvanceCall] = {
+    "into": lambda engine, att, timeout: engine.step(att, timeout_sec=timeout),
+    "over": lambda engine, att, timeout: engine.next(att, timeout_sec=timeout),
+    "instruction": lambda engine, att, timeout: engine.step_instruction(att, timeout_sec=timeout),
+    "out": lambda engine, att, timeout: engine.finish(att, timeout_sec=timeout),
+}
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver) -> None:
     _register_debug_continue(app, pool, runtime)
     _register_debug_interrupt(app, pool, runtime)
-    _register_debug_step(app, pool, runtime)
-    _register_debug_next(app, pool, runtime)
-    _register_debug_step_instruction(app, pool, runtime)
-    _register_debug_finish(app, pool, runtime)
+    _register_debug_advance(app, pool, runtime)
 
 
-# After a single-step or finish the agent inspects where it landed, then steps again or resumes.
-_STEP_NEXT_ACTIONS = ["debug.read_registers", "debug.backtrace", "debug.step", "debug.continue"]
+# After any advance the agent inspects where it landed, then advances again or resumes. One list
+# for every mode: an `out` lands in the caller frame, which is as steppable as any other stop
+# (ADR-0463 §4).
+_ADVANCE_NEXT_ACTIONS = [
+    "debug.read_registers",
+    "debug.backtrace",
+    _ADVANCE_TOOL,
+    "debug.continue",
+]
 
 
 def _continue_op(session_id: str, timeout_sec: float) -> _EngineOp:
@@ -73,52 +94,22 @@ def _stop_data(reason: str | None, timed_out: bool) -> dict[str, JsonValue]:
     return data
 
 
-def _step_op(session_id: str, timeout_sec: float) -> _EngineOp:
+def _advance_op(session_id: str, mode: str, timeout_sec: float) -> _EngineOp:
     def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
-        stop = engine.step(attachment, timeout_sec=timeout_sec)
+        call = _ADVANCE_CALLS.get(mode)
+        if call is None:
+            # Unreachable through MCP (the schema enum rejects it first); this keeps a direct
+            # in-process caller on the failure-envelope path instead of a bare KeyError.
+            raise CategorizedError(
+                f"unknown advance mode {mode!r}; expected one of {sorted(_ADVANCE_CALLS)}",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"field": "mode", "value": mode},
+            )
+        stop = call(engine, attachment, timeout_sec)
         return ToolResponse.success(
             session_id,
             "stopped",
-            suggested_next_actions=_STEP_NEXT_ACTIONS,
-            data=_stop_data(stop.reason, stop.timed_out),
-        )
-
-    return op
-
-
-def _next_op(session_id: str, timeout_sec: float) -> _EngineOp:
-    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
-        stop = engine.next(attachment, timeout_sec=timeout_sec)
-        return ToolResponse.success(
-            session_id,
-            "stopped",
-            suggested_next_actions=_STEP_NEXT_ACTIONS,
-            data=_stop_data(stop.reason, stop.timed_out),
-        )
-
-    return op
-
-
-def _step_instruction_op(session_id: str, timeout_sec: float) -> _EngineOp:
-    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
-        stop = engine.step_instruction(attachment, timeout_sec=timeout_sec)
-        return ToolResponse.success(
-            session_id,
-            "stopped",
-            suggested_next_actions=_STEP_NEXT_ACTIONS,
-            data=_stop_data(stop.reason, stop.timed_out),
-        )
-
-    return op
-
-
-def _finish_op(session_id: str, timeout_sec: float) -> _EngineOp:
-    def op(engine: GdbMiEngine, attachment: GdbMiAttachment) -> ToolResponse:
-        stop = engine.finish(attachment, timeout_sec=timeout_sec)
-        return ToolResponse.success(
-            session_id,
-            "stopped",
-            suggested_next_actions=["debug.read_registers", "debug.backtrace", "debug.continue"],
+            suggested_next_actions=_ADVANCE_NEXT_ACTIONS,
             data=_stop_data(stop.reason, stop.timed_out),
         )
 
@@ -180,92 +171,41 @@ def _register_debug_interrupt(
         )
 
 
-def _register_debug_step(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
-) -> None:
-    @app.tool(name="debug.step", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
-    async def debug_step(
-        session_id: Annotated[str, _session_id_field("step into calls on")],
-        timeout_sec: Annotated[float, _timeout_field()] = 0.0,
-    ) -> ToolResponse:
-        """Step one source line, into called functions, on a live DebugSession, and wait for the
-        stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
-        to step from. In a region with no debug symbols this returns timed_out=True or a
-        debug_attach_failure ("Cannot find bounds of current function"); use
-        debug.step_instruction there. Requires contributor."""
-        return await run_engine_op_with_resolver(
-            pool,
-            current_context(),
-            session_id,
-            runtime,
-            _step_op(session_id, timeout_sec),
-            audit=_op_audit("debug.step", timeout_sec=timeout_sec),
+def _mode_field() -> object:
+    return Field(
+        description=(
+            "How far to advance: 'into' runs one source line and enters called functions; "
+            "'over' runs one source line and steps past called functions; 'instruction' runs "
+            "one machine instruction and is the fallback where the code has no debug symbols; "
+            "'out' resumes until the current (innermost) frame returns, so it needs a frame "
+            "that can return."
         )
-
-
-def _register_debug_next(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
-) -> None:
-    @app.tool(name="debug.next", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
-    async def debug_next(
-        session_id: Annotated[str, _session_id_field("step over calls on")],
-        timeout_sec: Annotated[float, _timeout_field()] = 0.0,
-    ) -> ToolResponse:
-        """Step one source line, over called functions, on a live DebugSession, and wait for the
-        stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
-        to step from. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
-        current code has no debug symbols). Requires contributor."""
-        return await run_engine_op_with_resolver(
-            pool,
-            current_context(),
-            session_id,
-            runtime,
-            _next_op(session_id, timeout_sec),
-            audit=_op_audit("debug.next", timeout_sec=timeout_sec),
-        )
-
-
-def _register_debug_step_instruction(
-    app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
-) -> None:
-    @app.tool(
-        name="debug.step_instruction", annotations=_docmeta.mutating(), meta=_gdbmi_maturity()
     )
-    async def debug_step_instruction(
-        session_id: Annotated[str, _session_id_field("step one instruction on")],
-        timeout_sec: Annotated[float, _timeout_field()] = 0.0,
-    ) -> ToolResponse:
-        """Step one machine instruction on a live DebugSession, and wait for the stop. The target
-        must already be stopped (halt it with debug.interrupt or hit a breakpoint) to step from.
-        Works without debug symbols, so it is the fallback for stepping in symbol-poor regions.
-        Requires contributor."""
-        return await run_engine_op_with_resolver(
-            pool,
-            current_context(),
-            session_id,
-            runtime,
-            _step_instruction_op(session_id, timeout_sec),
-            audit=_op_audit("debug.step_instruction", timeout_sec=timeout_sec),
-        )
 
 
-def _register_debug_finish(
+def _register_debug_advance(
     app: FastMCP, pool: AsyncConnectionPool, runtime: DebugRuntimeResolver
 ) -> None:
-    @app.tool(name="debug.finish", annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
-    async def debug_finish(
-        session_id: Annotated[str, _session_id_field("resume until the current frame returns on")],
+    @app.tool(name=_ADVANCE_TOOL, annotations=_docmeta.mutating(), meta=_gdbmi_maturity())
+    async def debug_advance(
+        session_id: Annotated[str, _session_id_field("advance execution on")],
+        mode: Annotated[AdvanceMode, _mode_field()],
         timeout_sec: Annotated[float, _timeout_field()] = 0.0,
     ) -> ToolResponse:
-        """Resume a live DebugSession until the current (innermost) frame returns, and wait for
-        the stop. The target must already be stopped (halt it with debug.interrupt or hit a
-        breakpoint) to resume from. A frame that does not return within the wait interrupts back
-        with timed_out=True. Requires contributor."""
+        """Advance a stopped live DebugSession by one step and wait for the stop. Requires
+        contributor. The target must already be stopped (halt it with debug.interrupt or hit a
+        breakpoint) to advance from. mode='into' steps one source line into called functions,
+        'over' steps one source line over them, 'instruction' steps one machine instruction, and
+        'out' resumes until the current frame returns. In a region with no debug symbols 'into'
+        and 'over' return timed_out=True or a debug_attach_failure ("Cannot find bounds of
+        current function"); use 'instruction' there. 'out' needs a frame that can return — in the
+        outermost frame it fails with debug_attach_failure — and a frame that does not return
+        within the wait interrupts back with timed_out=True."""
         return await run_engine_op_with_resolver(
             pool,
             current_context(),
             session_id,
             runtime,
-            _finish_op(session_id, timeout_sec),
-            audit=_op_audit("debug.finish", timeout_sec=timeout_sec),
+            _advance_op(session_id, mode, timeout_sec),
+            audit=_op_audit(_ADVANCE_TOOL, f"advance:{mode}", mode=mode, timeout_sec=timeout_sec),
         )
