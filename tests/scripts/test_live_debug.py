@@ -9,7 +9,7 @@ import json
 import urllib.error
 from email.message import Message
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -312,9 +312,13 @@ def test_upload_kernel_drives_declare_put_complete(
     live_debug = _load_live_debug()
     kernel_tar = tmp_path / "kernel.tar.gz"
     kernel_tar.write_bytes(b"kernel-bytes")
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"\x7fELF-bytes")
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     put_calls: list[tuple[dict[str, Any], Path]] = []
-    contract = {"upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["kernel"]}}}
+    contract = {
+        "upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["kernel", "vmlinux"]}}
+    }
 
     class FakeClient:
         async def read_text_resource(self, uri: str) -> str:
@@ -327,7 +331,10 @@ def test_upload_kernel_drives_declare_put_complete(
         tool_calls.append((tool, args))
         if tool == "artifacts.create_run_upload":
             return {
-                "items": [{"refs": {"upload_url": "http://s3/kernel"}, "data": {"name": "kernel"}}]
+                "items": [
+                    {"refs": {"upload_url": f"http://s3/{name}"}, "data": {"name": name}}
+                    for name in ("kernel", "vmlinux")
+                ]
             }
         return {"object_id": tool}
 
@@ -336,37 +343,91 @@ def test_upload_kernel_drives_declare_put_complete(
 
     monkeypatch.setattr(live_debug, "_call", fake_call)
     monkeypatch.setattr(live_debug, "_put_presigned", fake_put)
+    monkeypatch.setattr(live_debug, "_elf_build_id", lambda _path: "deadbeef")
 
-    asyncio.run(live_debug._upload_kernel(FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar))
+    asyncio.run(
+        live_debug._upload_kernel(
+            FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar, vmlinux=vmlinux
+        )
+    )
 
     names = [tool for tool, _ in tool_calls]
     assert names == [
         "artifacts.create_run_upload",
         "runs.complete_build",
     ]
-    decl = tool_calls[0][1]["artifacts"][0]
-    assert decl["name"] == "kernel"
-    assert decl["size_bytes"] == len(b"kernel-bytes")
-    assert decl["sha256"] == live_debug._sha256_b64(kernel_tar)
-    assert tool_calls[1][1] == {"run_id": "r1"}
-    assert len(put_calls) == 1
-    assert put_calls[0][0]["refs"]["upload_url"] == "http://s3/kernel"
-    assert put_calls[0][1] == kernel_tar
+    decls = {d["name"]: d for d in tool_calls[0][1]["artifacts"]}
+    assert set(decls) == {"kernel", "vmlinux"}
+    assert decls["kernel"]["size_bytes"] == len(b"kernel-bytes")
+    assert decls["kernel"]["sha256"] == live_debug._sha256_b64(kernel_tar)
+    assert decls["vmlinux"]["sha256"] == live_debug._sha256_b64(vmlinux)
+    # A declared vmlinux is rejected server-side unless complete_build carries its build-id.
+    assert tool_calls[1][1] == {"run_id": "r1", "build_id": "deadbeef"}
+    assert [path for _item, path in put_calls] == [kernel_tar, vmlinux]
 
 
 def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
     live_debug = _load_live_debug()
     kernel_tar = tmp_path / "kernel.tar.gz"
     kernel_tar.write_bytes(b"k")
-    contract = {"upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["rootfs"]}}}
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"\x7fELF")
+    # Only `kernel` is accepted: a contract that drops `vmlinux` must fail loudly rather than
+    # silently upload a Run with no debuginfo, which degrades every gdb-MI op to no_debuginfo.
+    contract = {
+        "upload_contracts": {"run": {"owner_kind": "run", "accepted_names": ["rootfs", "kernel"]}}
+    }
 
     class FakeClient:
         async def read_text_resource(self, uri: str) -> str:
             assert uri == live_debug.EXTERNAL_BUILD_CONTRACT_URI
             return json.dumps(contract)
 
-    with pytest.raises(RuntimeError, match="no longer accepts a 'kernel'"):
-        asyncio.run(live_debug._upload_kernel(FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar))
+    with pytest.raises(RuntimeError, match="no longer accepts run artifact"):
+        asyncio.run(
+            live_debug._upload_kernel(
+                FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar, vmlinux=vmlinux
+            )
+        )
+
+
+def test_elf_build_id_reads_the_gnu_note(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    live_debug = _load_live_debug()
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"\x7fELF")
+    readelf_out = (
+        "Displaying notes found in: .notes\n"
+        "  Owner  Data size  Description\n"
+        "  GNU    0x00000014 NT_GNU_BUILD_ID (unique build ID bitstring)\n"
+        "    Build ID: b7813d588bd6355e318d515f9577e5208f42fc8e\n"
+    )
+
+    monkeypatch.setattr(live_debug, "_required_executable", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        live_debug.subprocess,
+        "run",
+        lambda *_a, **_k: SimpleNamespace(stdout=readelf_out),
+    )
+
+    assert live_debug._elf_build_id(vmlinux) == "b7813d588bd6355e318d515f9577e5208f42fc8e"
+
+
+def test_elf_build_id_fails_loud_without_a_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    live_debug = _load_live_debug()
+    vmlinux = tmp_path / "vmlinux"
+    vmlinux.write_bytes(b"\x7fELF")
+
+    monkeypatch.setattr(live_debug, "_required_executable", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        live_debug.subprocess, "run", lambda *_a, **_k: SimpleNamespace(stdout="no notes here\n")
+    )
+
+    # Uploading a vmlinux without a build-id would be rejected by complete_build anyway; failing
+    # here names the real cause (a tree built without CONFIG_DEBUG_INFO).
+    with pytest.raises(RuntimeError, match="no GNU build-id note"):
+        live_debug._elf_build_id(vmlinux)
 
 
 def test_transcript_renders_records(
