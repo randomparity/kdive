@@ -379,7 +379,7 @@ async def is_queue_paused(conn: AsyncConnection) -> bool:
 async def set_queue_paused(conn: AsyncConnection, paused: bool) -> None:
     """Set the worker's ``queue_paused`` flag on the single-row ``ops_control``.
 
-    ``ops.queue_pause``/``ops.queue_resume`` call this. Wraps the ``UPDATE`` in
+    ``ops.set_queue_paused`` calls this. Wraps the ``UPDATE`` in
     ``conn.transaction()`` so it self-commits on any connection.
     """
     async with conn.transaction(), conn.cursor() as cur:
