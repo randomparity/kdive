@@ -591,3 +591,37 @@ def test_projection_failure_falls_back_to_original_tool_schema(
     assert len(matches) > 1
     allocations_request = next(m for m in matches if m["name"] == "allocations.request")
     assert allocations_request["input_schema"] == original_alloc_schema
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "vmcore.list",
+        "captured vmcore for this run",
+        "which core did this run capture",
+    ],
+)
+def test_vmcore_list_vocabulary_finds_runs_get(monkeypatch: pytest.MonkeyPatch, query: str) -> None:
+    """The retired name and the run-scoped core-lookup intent rank runs.get (ADR-0466).
+
+    `vmcore.list` was the only Run-scoped vmcore listing; its replacement is `runs.get`, whose
+    `refs.vmcore` carries the redacted core's artifact id. An agent holding only a `run_id` — no
+    capture job id — must still reach the core, so the old name and the intent vocabulary both
+    have to land there rather than on the System-scoped `artifacts.list`.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "runs.get" in names, f"query {query!r} did not surface runs.get: {names}"
+    assert "vmcore.list" not in names

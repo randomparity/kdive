@@ -118,6 +118,37 @@ async def drain_job(
         await asyncio.sleep(POLL_INTERVAL_S)
 
 
+async def captured_vmcore_refs(
+    client: LiveStackClient,
+    phase_name: str,
+    drained: ToolResponse,
+    *,
+    run_id: str,
+) -> list[str]:
+    """Resolve a drained capture job's published core reference to its refs (ADR-0466).
+
+    Replaces the retired ``vmcore.list`` sweep. The terminal ``capture_vmcore`` job carries the
+    redacted core's artifact id in ``refs.result``, and ``runs.get`` carries the same id as
+    ``refs.vmcore``; both are read and required to agree, so the run-keyed lookup path an agent
+    falls back to is proven live and not just in unit tests. ``artifacts.get`` then resolves the
+    stored object key, keeping the caller's method-provenance and raw-leak assertions on real
+    evidence rather than on an opaque id.
+
+    Returns every ref value collected along the way, for the caller to assert over.
+    """
+    job_ref = drained.refs.get("result")
+    if not job_ref:
+        raise SpinePhaseError(phase_name, "capture job published no vmcore reference")
+    run_env = ok(await scalar(client, "runs.get", run_id=run_id), phase_name)
+    if run_env.refs.get("vmcore") != job_ref:
+        raise SpinePhaseError(
+            phase_name,
+            f"runs.get refs.vmcore {run_env.refs.get('vmcore')!r} != job refs.result {job_ref!r}",
+        )
+    got = ok(await scalar(client, "artifacts.get", request={"artifact_id": job_ref}), phase_name)
+    return [job_ref, *got.refs.values()]
+
+
 async def await_system_state(
     client: LiveStackClient,
     phase_name: str,

@@ -12,11 +12,7 @@ from kdive.domain.capture import CaptureMethod
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools.lifecycle.vmcore.handlers import (
-    DEFAULT_CRASH_COMMANDS,
-    VmcoreHandlers,
-    list_vmcores,
-)
+from kdive.mcp.tools.lifecycle.vmcore.handlers import DEFAULT_CRASH_COMMANDS, VmcoreHandlers
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.artifacts.crash_commands import CRASH_COMMAND_ALLOWLIST
 from kdive.security.secrets.secret_registry import SecretRegistry
@@ -63,8 +59,10 @@ def register(
         ``control.force_crash`` (or capture a spontaneous panic) first; a non-CRASHED System is
         rejected with a configuration_error naming the current state. Async: this enqueues a
         ``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait`` / ``jobs.get``.
-        On success the core lands as a redacted artifact; confirm it with ``vmcore.list``, then
-        analyze it with ``postmortem.crash``. The capture ``method``
+        On success the core lands as a redacted artifact and the completed job carries its
+        artifact id in ``refs.result``: read the bytes with ``artifacts.get`` or analyze the core
+        with ``postmortem.crash``. ``runs.get`` carries the same id as ``refs.vmcore`` if you no
+        longer hold the job id. The capture ``method``
         resolves from the System profile when omitted; a kdump/fadump core also needs the guest
         kernel's crash symbols and a capable rootfs (gated before the job is admitted).
         """
@@ -75,25 +73,6 @@ def register(
             method=method,
             idempotency_key=idempotency_key,
         )
-
-    @app.tool(
-        name="vmcore.list",
-        annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def vmcore_list(
-        run_id: Annotated[
-            str,
-            Field(description="The Run whose redacted vmcore artifacts to list."),
-        ],
-    ) -> ToolResponse:
-        """List the Run's redacted vmcore artifacts as one collection envelope.
-
-        Read this after a ``vmcore.fetch`` job completes to confirm the captured core's artifact
-        reference. Each item is a redacted artifact envelope; fetch bytes with ``artifacts.get`` or
-        analyze the core with ``postmortem.crash``. Empty until a capture succeeds.
-        """
-        return await list_vmcores(pool, current_context(), run_id=run_id)
 
     @app.tool(
         name="postmortem.crash",
@@ -120,7 +99,8 @@ def register(
 
         Omit ``commands`` for the standard first-pass batch — the fast first look at a crash —
         or pass your own allowlisted commands to go further. Prerequisite: a captured core for
-        the Run (see ``vmcore.fetch``, then ``vmcore.list`` to confirm it). Every command is
+        the Run (see ``vmcore.fetch``; its completed job's ``refs.result`` — or ``runs.get``'s
+        ``refs.vmcore`` — confirms the core landed). Every command is
         validated against the crash allowlist before the core is opened, and the transcript is
         redacted before it is returned. For programmable drgn introspection use
         ``introspect.from_vmcore``.

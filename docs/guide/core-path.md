@@ -59,8 +59,9 @@ The core path stops at first-pass triage. Two common extensions:
 - **Live debug** — instead of (or before) forcing a crash, attach a live
   session with `debug.start_session`, inspect with `introspect.run`, then
   `debug.end_session`.
-- **Inspect the captured core** — after `vmcore.fetch`, confirm the reference
-  with `vmcore.list` and inspect kernel state with `introspect.from_vmcore`.
+- **Inspect the captured core** — after `vmcore.fetch`, read the reference
+  from the completed job's `refs.result` (or `runs.get`'s `refs.vmcore`) and
+  inspect kernel state with `introspect.from_vmcore`.
 
 `control.force_crash` uses the destructive-op gate (`admin` role plus profile
 opt-in); `systems.teardown` requires the `admin` role. `control.power` and
@@ -78,7 +79,7 @@ purpose per step — and each maps to a phase above:
 |---|---|---|
 | `start_investigation` | Orient and acquire capacity | 1–4 (plus `resources.list`) |
 | `build_boot_debug` | Build, boot, and live-debug a kernel | 5–9 (plus the live-debug steps) |
-| `triage_panic` | Turn a crash into a vmcore and a postmortem | 10–12 (plus `vmcore.list` / `introspect.from_vmcore`) |
+| `triage_panic` | Turn a crash into a vmcore and a postmortem | 10–12 (plus `jobs.wait` / `introspect.from_vmcore`) |
 
 The prompts carry maturity disclosure: a step backed by a `partial` tool is
 tagged with its maturity reason rather than dropped, so a prompt never silently

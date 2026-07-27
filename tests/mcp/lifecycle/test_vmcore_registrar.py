@@ -105,13 +105,13 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
 ) -> None:
     tools, _ctx, _pool = _register_tools(monkeypatch)
 
+    # vmcore.list is retired (#1591, ADR-0466): the capture job publishes the redacted core's
+    # artifact id, so the plane registers no listing tool.
     assert set(tools) == {
         "vmcore.fetch",
-        "vmcore.list",
         "postmortem.crash",
     }
     assert _read_only_hint(tools["vmcore.fetch"]) is False
-    assert _read_only_hint(tools["vmcore.list"]) is True
     assert _read_only_hint(tools["postmortem.crash"]) is True
     assert all((tool.meta or {}) == {"maturity": "implemented"} for tool in tools.values())
 
@@ -125,9 +125,6 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
         method.value for method in CaptureMethod
     }
 
-    assert _property_descriptions(tools["vmcore.list"]) == {
-        "run_id": "The Run whose redacted vmcore artifacts to list."
-    }
     crash_descriptions = _property_descriptions(tools["postmortem.crash"])
     assert crash_descriptions["run_id"] == "The Run whose captured core to analyze."
     # The commands Field enumerates the allowlisted verbs and names the rejection-detail
@@ -143,13 +140,6 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
 def test_registered_wrappers_delegate_to_vmcore_handlers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    list_calls: list[tuple[object, object, str]] = []
-
-    async def _list_vmcores(pool: AsyncConnectionPool, ctx: object, *, run_id: str) -> ToolResponse:
-        list_calls.append((pool, ctx, run_id))
-        return ToolResponse.success("list", "ok")
-
-    monkeypatch.setattr(registrar, "list_vmcores", _list_vmcores)
     tools, ctx, pool = _register_tools(monkeypatch)
 
     async def _run() -> None:
@@ -158,7 +148,6 @@ def test_registered_wrappers_delegate_to_vmcore_handlers(
             method=CaptureMethod.KDUMP,
             idempotency_key="idem-1",
         )
-        await tools["vmcore.list"].fn("run-2")
         await tools["postmortem.crash"].fn("run-3", ["sys", "log"])
         await tools["postmortem.crash"].fn("run-4")
 
@@ -185,4 +174,3 @@ def test_registered_wrappers_delegate_to_vmcore_handlers(
         # An omitted `commands` reaches the handler as None; the handler picks the default batch.
         ("postmortem_crash", pool, ctx, {"run_id": "run-4", "commands": None}),
     ]
-    assert list_calls == [(pool, ctx, "run-2")]

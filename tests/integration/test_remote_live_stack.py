@@ -35,6 +35,7 @@ import pytest
 import kdive.config as config
 from kdive.domain.errors import CategorizedError
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer
+from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.remote_libvirt.config import (
     is_remote_libvirt_configured,
@@ -49,6 +50,7 @@ from tests.integration.live_stack.spine import (
     allocate_remote,
     assert_report,
     await_system_state,
+    captured_vmcore_refs,
     crash_to_crashed,
     db_now,
     drain_job,
@@ -360,15 +362,16 @@ def test_remote_spine_over_the_wire() -> None:
                 await await_system_state(admin, "crash", system_id, "crashed")
             async with phase("capture"):
                 # Remote is KDUMP-only (ADR-0084); pin the method (fetch defaults to host_dump).
+                # Run-addressed since ADR-0244 — a System-addressed fetch is rejected outright.
                 env = ok(
-                    await scalar(op, "vmcore.fetch", system_id=system_id, method="kdump"),
+                    await scalar(op, "vmcore.fetch", run_id=run_id, method="kdump"),
                     "capture",
                 )
-                await drain_job(op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S)
-                cores = await op.call_tool("vmcore.list", system_id=system_id)
-                assert isinstance(cores, list) and cores, "no vmcore artifact listed (#1)"
-                refs = [v for c in cores for v in c.refs.values()]
-                assert refs, "no vmcore refs (#1)"
+                drained = await drain_job(
+                    op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                )
+                refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
+                assert refs, "capture published no vmcore reference (#1)"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
                 assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
                     "raw vmcore leaked (#1)"
@@ -404,15 +407,16 @@ _FOUR_METHOD_PROJECT = "remote-capstone-proj"
 _FOUR_METHOD_SESSION = "remote-capstone-sess"
 
 
-async def _assert_vmcore_captured(client: LiveStackClient, *, system_id: str, method: str) -> None:
-    """List the System's vmcores; assert one exists, has a ref, and never leaks a raw core."""
-    # vmcore.list returns a single summary ToolResponse whose `.items` hold the per-artifact
-    # responses (it is not a FastMCP list-wrapped tool, unlike artifacts.list) (#323).
-    result = await client.call_tool("vmcore.list", system_id=system_id)
-    cores = result if isinstance(result, list) else result.items
-    assert cores, f"no vmcore artifact for {method} (#1)"
-    refs = [v for c in cores for v in c.refs.values()]
-    assert refs, f"no vmcore refs for {method} (#1)"
+async def _assert_vmcore_captured(
+    client: LiveStackClient, drained: ToolResponse, *, run_id: str, method: str
+) -> None:
+    """Assert the drained capture published a redacted core and never leaked the raw one.
+
+    Run-addressed (ADR-0244) and reference-addressed (ADR-0466): the core is reached through the
+    capture job's `refs.result` and `runs.get`'s `refs.vmcore`, not through a listing tool.
+    """
+    refs = await captured_vmcore_refs(client, method, drained, run_id=run_id)
+    assert refs, f"no vmcore reference published for {method} (#1)"
     # A raw core is `.../vmcore-{method}` (no `-redacted` suffix); it must never surface.
     assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
         f"raw vmcore leaked for {method} (#1)"
@@ -473,22 +477,49 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                     profile=_remote_provision_profile(),
                     phase_name="provision-A",
                 )
+            async with phase("open-investigation-A"):
+                env = ok(
+                    await scalar(
+                        op,
+                        "investigations.open",
+                        **{"project": _FOUR_METHOD_PROJECT, "title": "capstone-A"},
+                    ),
+                    "open-investigation-A",
+                )
+                investigation_a = env.object_id
+            async with phase("create-run-A"):
+                # Capture is Run-addressed (ADR-0244): the core is owned by the Run bound to the
+                # crashing System. System A never boots a built kernel — host_dump is host-side —
+                # so the Run is created bound and left unbuilt; that is all capture requires.
+                env = ok(
+                    await scalar(
+                        op,
+                        "runs.create",
+                        investigation_id=investigation_a,
+                        system_id=system_a,
+                        build_profile=_build_profile(),
+                    ),
+                    "create-run-A",
+                )
+                run_a = env.object_id
             async with phase("crash-A"):
                 await crash_to_crashed(admin, system_id=system_a, phase_name="crash-A")
             async with phase("host_dump"):
                 env = ok(
-                    await scalar(op, "vmcore.fetch", system_id=system_a, method="host_dump"),
+                    await scalar(op, "vmcore.fetch", run_id=run_a, method="host_dump"),
                     "host_dump",
                 )
-                await drain_job(op, "host_dump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S)
-                await _assert_vmcore_captured(op, system_id=system_a, method="host_dump")
+                drained = await drain_job(
+                    op, "host_dump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                )
+                await _assert_vmcore_captured(op, drained, run_id=run_a, method="host_dump")
             async with phase("host_dump-same-system-rejected"):
-                # ensure_method_match (#118/ADR-0050) is enforced inside the capture *job*
-                # (jobs/handlers/vmcore.py:precheck_system), not at vmcore.fetch admission — so
-                # fetch admits a kdump job (distinct dedup key) and the job *fails* with
-                # configuration_error. Assert the drained job carries that category.
+                # ensure_method_match (#118/ADR-0050, Run-scoped since ADR-0244) is enforced
+                # inside the capture *job* (jobs/handlers/artifacts/vmcore.py:precheck_run), not
+                # at vmcore.fetch admission — so fetch admits a kdump job (distinct dedup key)
+                # and the job *fails* with configuration_error. Assert that category.
                 env = ok(
-                    await scalar(op, "vmcore.fetch", system_id=system_a, method="kdump"),
+                    await scalar(op, "vmcore.fetch", run_id=run_a, method="kdump"),
                     "host_dump-same-system-rejected",
                 )
                 try:
@@ -566,11 +597,13 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                 await crash_to_crashed(admin, system_id=system_b, phase_name="crash-B")
             async with phase("kdump"):
                 env = ok(
-                    await scalar(op, "vmcore.fetch", system_id=system_b, method="kdump"),
+                    await scalar(op, "vmcore.fetch", run_id=run_b, method="kdump"),
                     "kdump",
                 )
-                await drain_job(op, "kdump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S)
-                await _assert_vmcore_captured(op, system_id=system_b, method="kdump")
+                drained = await drain_job(
+                    op, "kdump", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
+                )
+                await _assert_vmcore_captured(op, drained, run_id=run_b, method="kdump")
 
             # --- release both allocations; reconciler tears the Systems down ----------------
             for label, alloc in (("release-A", alloc_a), ("release-B", alloc_b)):

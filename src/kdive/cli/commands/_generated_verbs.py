@@ -4296,25 +4296,4 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         ),
         json_params=(),
     ),
-    GeneratedVerb(
-        group="vmcore",
-        sub="list",
-        tool="vmcore.list",
-        read_only=True,
-        destructive=False,
-        help="List the Run's redacted vmcore artifacts as one collection envelope.",
-        unwrap_request=False,
-        flags=(
-            GeneratedFlag(
-                name="--run-id",
-                dest="run_id",
-                required=True,
-                help="The Run whose redacted vmcore artifacts to list.",
-                arg_type="str",
-                action=None,
-                choices=(),
-            ),
-        ),
-        json_params=(),
-    ),
 )

@@ -17,6 +17,12 @@ _RAW_VMCORE_KEY_SQL: LiteralString = (
     "WHERE owner_kind = 'runs' AND owner_id = %s "
     "AND object_key LIKE %s AND object_key NOT LIKE %s"
 )
+_REDACTED_VMCORE_ID_SQL: LiteralString = (
+    "SELECT id FROM artifacts "
+    "WHERE owner_kind = 'runs' AND owner_id = %s "
+    "AND object_key LIKE %s AND object_key LIKE %s "
+    "ORDER BY created_at, id LIMIT 1"
+)
 _RAW_VMCORE_KEY_LIKE = "%/vmcore-%"
 _REDACTED_VMCORE_LIKE = "%-redacted"
 
@@ -97,6 +103,25 @@ async def raw_vmcore_key(conn: AsyncConnection, run_id: UUID) -> str | None:
         )
         row = await cur.fetchone()
     return None if row is None else str(row["object_key"])
+
+
+async def redacted_vmcore_artifact_id(conn: AsyncConnection, run_id: UUID) -> str | None:
+    """Return the Run's redacted vmcore artifact id, or ``None`` (ADR-0466).
+
+    The single reference the capture plane publishes: a ``capture_vmcore`` job stores it as its
+    ``result_ref`` and ``runs.get`` surfaces it as ``refs.vmcore``, so a viewer holding either the
+    job id or the Run id reaches the core with ``artifacts.get`` — no separate listing tool. The
+    redacted sibling is selected by key shape (``.../vmcore-{method}-redacted``), the same
+    convention ``raw_vmcore_key`` excludes. ``None`` when the Run has no core, or when the raw core
+    survives but its redacted sibling has been reclaimed.
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            _REDACTED_VMCORE_ID_SQL,
+            (run_id, _RAW_VMCORE_KEY_LIKE, _REDACTED_VMCORE_LIKE),
+        )
+        row = await cur.fetchone()
+    return None if row is None else str(row["id"])
 
 
 async def raw_pcap_key(conn: AsyncConnection, run_id: UUID, artifact_id: UUID | None) -> str | None:

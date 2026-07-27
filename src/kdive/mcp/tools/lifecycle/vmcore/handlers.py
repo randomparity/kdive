@@ -34,7 +34,6 @@ from kdive.mcp.tools._vmcore_targets import resolve_run_vmcore_target, vmcore_ta
 from kdive.mcp.tools.lifecycle.vmcore.view import (
     console_crash_redirect,
     postmortem_success_response,
-    vmcore_collection,
 )
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.core.resolver import ProviderResolver
@@ -44,7 +43,6 @@ from kdive.security.artifacts.crash_commands import validate_crash_commands
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role, require_role
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.listing import list_redacted_run_artifacts
 
 # The standard first-pass crash(8) batch `postmortem.crash` runs when the caller omits
 # `commands` — the panic reason and the faulting context, and nothing else.
@@ -280,14 +278,6 @@ async def _fetch_vmcore(
                 kind=_VMCORE_FETCH_KIND,
                 do_work=_enqueue,
             )
-
-
-async def list_vmcores(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
-) -> ToolResponse:
-    """Return the Run's `redacted` vmcore artifacts in one collection envelope (ADR-0244)."""
-    listed = await list_redacted_run_artifacts(pool, ctx, run_id=run_id)
-    return vmcore_collection(run_id, listed)
 
 
 async def _postmortem_crash(

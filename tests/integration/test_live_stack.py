@@ -62,6 +62,7 @@ from tests.integration.live_stack.spine import (
     assert_audit,
     assert_report,
     await_system_state,
+    captured_vmcore_refs,
     drain_job,
     mint_role_token,
     ok,
@@ -542,10 +543,9 @@ def test_spine_over_the_wire() -> None:
                 await await_system_state(admin, "crash", system_id, "crashed")
             async with phase("capture"):
                 env = ok(await scalar(op, "vmcore.fetch", run_id=run_id), "capture")
-                await drain_job(op, "capture", env.object_id)
-                listing = ok(await scalar(op, "vmcore.list", run_id=run_id), "capture")
-                refs = [v for item in listing.items for v in item.refs.values()]
-                assert refs, "no vmcore artifact listed (#1)"
+                drained = await drain_job(op, "capture", env.object_id)
+                refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
+                assert refs, "capture published no vmcore reference (#1)"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
                 assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
                     "raw vmcore leaked (#1)"
@@ -1473,17 +1473,16 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                     env = ok(
                         await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-fadump:capture"
                     )
-                    await drain_job(
+                    drained = await drain_job(
                         op,
                         "ppc64le-fadump:capture",
                         env.object_id,
                         deadline_s=_PPC64LE_BOOT_DEADLINE_S,
                     )
-                    listing = ok(
-                        await scalar(op, "vmcore.list", run_id=run_id), "ppc64le-fadump:capture"
+                    refs = await captured_vmcore_refs(
+                        op, "ppc64le-fadump:capture", drained, run_id=run_id
                     )
-                    refs = [v for item in listing.items for v in item.refs.values()]
-                    assert refs, "no vmcore artifact listed — fadump captured no core"
+                    assert refs, "no vmcore reference published — fadump captured no core"
                     # The core is keyed by the resolved method: vmcore-fadump (not vmcore-kdump).
                     assert any("vmcore-fadump" in r for r in refs), (
                         f"no vmcore-fadump artifact — got {refs!r}"
@@ -1514,7 +1513,8 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
       sentinel profile token and no per-install override — asserted in the running domain's
       ``<cmdline>``, so the default (not the profile/per-install value) provably sized it.
     - ``control.force_crash`` panics the guest; its kdump kernel kexec-boots, runs makedumpfile, and
-      writes the vmcore; ``vmcore.fetch`` harvests it and ``vmcore.list`` surfaces a redacted core.
+      writes the vmcore; ``vmcore.fetch`` harvests it and the capture job's ``refs.result``
+      publishes the redacted core.
 
     The pseries VMCOREINFO/fw_cfg verdict is recorded from this run (the domain emits no
     ``<features>`` device — kdump reads VMCOREINFO from ``/proc/vmcore``, ADR-0346 §3) in the
@@ -1647,17 +1647,16 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                     env = ok(
                         await scalar(op, "vmcore.fetch", run_id=run_id), "ppc64le-kdump:capture"
                     )
-                    await drain_job(
+                    drained = await drain_job(
                         op,
                         "ppc64le-kdump:capture",
                         env.object_id,
                         deadline_s=_PPC64LE_BOOT_DEADLINE_S,
                     )
-                    listing = ok(
-                        await scalar(op, "vmcore.list", run_id=run_id), "ppc64le-kdump:capture"
+                    refs = await captured_vmcore_refs(
+                        op, "ppc64le-kdump:capture", drained, run_id=run_id
                     )
-                    refs = [v for item in listing.items for v in item.refs.values()]
-                    assert refs, "no vmcore artifact listed — kdump captured no core"
+                    assert refs, "no vmcore reference published — kdump captured no core"
                     # Only the redacted core is exposed (raw vmcore-<method> must never surface).
                     assert all(
                         not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs

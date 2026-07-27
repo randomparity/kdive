@@ -17,6 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import StoredArtifact
 from kdive.db.repositories import IMAGE_CATALOG
+from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
@@ -28,6 +29,7 @@ from kdive.jobs.handlers.console.capture_telemetry import CaptureTelemetry
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.mcp.auth import RequestContext
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.lifecycle.vmcore import handlers as vmcore_handler_tools
 from kdive.mcp.tools.lifecycle.vmcore import view as vmcore_view
 from kdive.providers.ports.retrieve import (
@@ -810,7 +812,34 @@ async def _artifact_count(pool: AsyncConnectionPool, run_id: str) -> int:
     return 0 if row is None else int(row["n"])
 
 
-def test_capture_handler_stores_rows_and_returns_ref(migrated_url: str) -> None:
+async def _artifact_key_for(pool: AsyncConnectionPool, artifact_id: str) -> str | None:
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute("SELECT object_key FROM artifacts WHERE id = %s", (artifact_id,))
+        row = await cur.fetchone()
+    return None if row is None else str(row["object_key"])
+
+
+async def _seed_core_rows(pool: AsyncConnectionPool, run_id: str, raw_key: str) -> str:
+    """Seed a raw + redacted core pair directly and return the redacted row's id."""
+    async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'sensitive', 'vmcore')",
+            (run_id, raw_key),
+        )
+        await cur.execute(
+            "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+            "retention_class) VALUES ('runs', %s, %s, 'e', 'redacted', 'vmcore') RETURNING id",
+            (run_id, f"{raw_key}-redacted"),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row["id"])
+
+
+def test_capture_handler_stores_rows_and_returns_redacted_artifact_id(migrated_url: str) -> None:
+    # ADR-0466: the job result is the redacted artifact's *id* — the value an agent hands to
+    # artifacts.get — never the raw object key it cannot read.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
@@ -820,7 +849,10 @@ def test_capture_handler_stores_rows_and_returns_ref(migrated_url: str) -> None:
                 ref = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=retriever)
                 )
-            assert ref == f"local/runs/{run_id}/vmcore-host_dump"
+            assert ref is not None
+            assert await _artifact_key_for(pool, ref) == (
+                f"local/runs/{run_id}/vmcore-host_dump-redacted"
+            )
             assert retriever.calls == 1
             assert await _artifact_count(pool, run_id) == 2
             async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -850,7 +882,31 @@ def test_capture_handler_plumbs_method_to_retriever(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_capture_handler_idempotent_skips_recapture(migrated_url: str) -> None:
+def test_capture_handler_idempotent_replay_returns_redacted_artifact_id(
+    migrated_url: str,
+) -> None:
+    # ADR-0466 sub-problem 1: the replay short-circuit resolves the *redacted* artifact id, not
+    # the raw key raw_vmcore_key matched on. Both rows are seeded so the redacted sibling exists.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            raw = f"local/runs/{run_id}/vmcore-host_dump"
+            redacted_id = await _seed_core_rows(pool, run_id, raw)
+            job = await _enqueue_capture(pool, run_id)
+            async with pool.connection() as conn:
+                ref = await vmcore_plane.capture_handler(
+                    conn, job, resolver=provider_resolver(retriever=_NoCaptureRetriever())
+                )
+            assert ref == redacted_id
+            assert await _artifact_count(pool, run_id) == 2  # no new rows
+
+    asyncio.run(_run())
+
+
+def test_capture_handler_replay_without_redacted_row_returns_no_ref(migrated_url: str) -> None:
+    # ADR-0466: a raw core whose redacted sibling was reclaimed replays with *no* result ref.
+    # refs.result means "the redacted vmcore artifact id" for every capture_vmcore job or it
+    # means nothing — a raw object key a viewer cannot read is never published.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
@@ -865,8 +921,8 @@ def test_capture_handler_idempotent_skips_recapture(migrated_url: str) -> None:
                 ref = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_NoCaptureRetriever())
                 )
-            assert ref == f"local/runs/{run_id}/vmcore-host_dump"
-            assert await _artifact_count(pool, run_id) == 1  # no second row
+            assert ref is None
+            assert await _artifact_count(pool, run_id) == 1
 
     asyncio.run(_run())
 
@@ -934,55 +990,114 @@ def test_capture_handler_missing_run_is_infra_failure(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-# --- vmcore.list ---------------------------------------------------------------------------
+# --- the captured-core reference (ADR-0466) -------------------------------------------------
 
 
-def test_list_vmcores_redacted_only(migrated_url: str) -> None:
-    async def _run() -> None:
+def test_terminal_capture_job_carries_the_redacted_artifact_id(migrated_url: str) -> None:
+    # The whole point of retiring vmcore.list: once the capture job succeeds, every jobs.get /
+    # jobs.wait / jobs.list read of it renders refs.result as the redacted core's artifact id and
+    # steers at the two tools that consume it (ADR-0414 durability, ADR-0466 reference).
+    async def _run() -> tuple[ToolResponse, str]:
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
-                await vmcore_plane.capture_handler(
+                ref = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
-            resp = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
-        keys = {r.refs["object"] for r in resp.items}
-        assert keys == {f"local/runs/{run_id}/vmcore-host_dump-redacted"}
+            assert ref is not None
+            key = await _artifact_key_for(pool, ref)
+        assert key is not None
+        terminal = job.model_copy(update={"state": JobState.SUCCEEDED, "result_ref": ref})
+        return ToolResponse.from_job(terminal), key
 
-    asyncio.run(_run())
+    envelope, key = asyncio.run(_run())
+    assert key.endswith("-redacted"), "the published reference must be the redacted core"
+    assert UUID(envelope.refs["result"]), "refs.result is an artifact id, not an object key"
+    assert envelope.suggested_next_actions[-2:] == ["artifacts.get", "postmortem.crash"]
 
 
-def test_list_vmcores_requires_viewer_role(migrated_url: str) -> None:
-    async def _run() -> None:
+def test_viewer_reads_the_captured_core_through_the_job_reference(migrated_url: str) -> None:
+    # Authorization boundary after the change (ADR-0466): capturing stays contributor, but a
+    # VIEWER-only principal still resolves and reads the published reference — jobs.* and
+    # artifacts.get are both viewer-gated, so no lookup capability moved up a role.
+    async def _run() -> tuple[str, str]:
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
-                await vmcore_plane.capture_handler(
+                ref = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
+            from kdive.mcp.tools.catalog.artifacts.reads import (  # noqa: PLC0415
+                ArtifactsGetRequest,
+                artifacts_get,
+            )
+
+            got = await artifacts_get(
+                pool,
+                _ctx(role=Role.VIEWER),
+                request=ArtifactsGetRequest(artifact_id=str(ref)),
+            )
+        return got.status, got.refs["object"]
+
+    status, object_key = asyncio.run(_run())
+    assert status != "error", "a viewer must be able to read the published reference"
+    assert object_key.endswith("-redacted")
+
+
+def test_runs_get_surfaces_the_captured_core_for_a_viewer(migrated_url: str) -> None:
+    # The Run-keyed lookup path that replaces vmcore.list (ADR-0466 §3): an agent holding only a
+    # run_id — no capture job id — still reaches the core. runs.get is viewer-gated, so this is
+    # also the proof that removing the viewer-gated vmcore.list moved no lookup up a role.
+    async def _run() -> tuple[str | None, ToolResponse]:
+        async with _pool(migrated_url) as pool:
+            sys_id, run_id = await _crashed_run(pool)
+            job = await _enqueue_capture(pool, run_id)
+            async with pool.connection() as conn:
+                ref = await vmcore_plane.capture_handler(
+                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+                )
+            from kdive.mcp.tools.lifecycle.runs.view import get_run  # noqa: PLC0415
+
+            envelope = await get_run(
+                pool,
+                _ctx(role=Role.VIEWER),
+                run_id,
+                resolver=provider_resolver(),
+                secret_registry=SecretRegistry(),
+            )
+        return ref, envelope
+
+    ref, envelope = asyncio.run(_run())
+    assert envelope.refs["vmcore"] == ref, "runs.get must publish the same id as the job result"
+
+
+def test_runs_get_omits_the_vmcore_ref_before_a_capture(migrated_url: str) -> None:
+    async def _run() -> ToolResponse:
+        async with _pool(migrated_url) as pool:
+            _sys_id, run_id = await _crashed_run(pool)
+            from kdive.mcp.tools.lifecycle.runs.view import get_run  # noqa: PLC0415
+
+            return await get_run(
+                pool,
+                _ctx(role=Role.VIEWER),
+                run_id,
+                resolver=provider_resolver(),
+                secret_registry=SecretRegistry(),
+            )
+
+    assert "vmcore" not in asyncio.run(_run()).refs
+
+
+def test_capture_still_requires_contributor(migrated_url: str) -> None:
+    # The authorization boundary is unchanged by the removal (ADR-0466): reading the reference is
+    # viewer, producing one stays contributor.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            _sys_id, run_id = await _crashed_run(pool)
             with pytest.raises(AuthorizationError):
-                await vmcore_handler_tools.list_vmcores(pool, _ctx(role=None), run_id=run_id)
-
-    asyncio.run(_run())
-
-
-def test_list_vmcores_surfaces_run_owned_redacted_core(migrated_url: str) -> None:
-    # ADR-0244 regression guard: a Run-owned redacted core must surface through the run-addressed
-    # vmcore.list. Had vmcore.list stayed System-addressed it would have returned empty here — the
-    # silent regression this test exists to catch.
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            sys_id, run_id = await _crashed_run(pool)
-            job = await _enqueue_capture(pool, run_id)
-            async with pool.connection() as conn:
-                await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
-                )
-            resp = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
-        assert len(resp.items) == 1
-        assert resp.items[0].refs["object"] == f"local/runs/{run_id}/vmcore-host_dump-redacted"
+                await _fetch_vmcore(pool, _ctx(role=Role.VIEWER), run_id=run_id)
 
     asyncio.run(_run())
 
@@ -1220,7 +1335,7 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
-                await vmcore_plane.capture_handler(
+                core_id = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
                 )
             refs: list[str] = []
@@ -1230,9 +1345,14 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
                 artifacts_list,
             )
 
-            vmcores = await vmcore_handler_tools.list_vmcores(pool, _ctx(), run_id=run_id)
-            for r in vmcores.items:
-                refs.extend(r.refs.values())
+            # The capture plane's own published reference (ADR-0466) joins the sweep: it is where
+            # a raw key would now leak, since it replaced the retired vmcore.list envelope.
+            assert core_id is not None
+            refs.append(core_id)
+            published = await artifacts_get(
+                pool, _ctx(), request=ArtifactsGetRequest(artifact_id=core_id)
+            )
+            refs.extend(published.refs.values())
             listed = await artifacts_list(pool, _ctx(), system_id=sys_id)
             artifact_items = listed.items
             for r in artifact_items:

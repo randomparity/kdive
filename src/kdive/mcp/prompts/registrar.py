@@ -208,7 +208,11 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
                 requires=("crash",),
                 provides=("vmcore",),
             ),
-            Step("vmcore.list", "confirm the captured vmcore reference", requires=("vmcore",)),
+            Step(
+                "jobs.wait",
+                "wait for the capture job; its refs.result is the captured vmcore artifact id",
+                requires=("vmcore",),
+            ),
             Step("postmortem.crash", "run the first-pass crash triage", requires=("vmcore",)),
             Step(
                 "introspect.from_vmcore",

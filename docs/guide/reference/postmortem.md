@@ -10,7 +10,8 @@ Run crash(8) over a captured vmcore; returns a redacted report (contributor).
 
 Omit ``commands`` for the standard first-pass batch — the fast first look at a crash —
 or pass your own allowlisted commands to go further. Prerequisite: a captured core for
-the Run (see ``vmcore.fetch``, then ``vmcore.list`` to confirm it). Every command is
+the Run (see ``vmcore.fetch``; its completed job's ``refs.result`` — or ``runs.get``'s
+``refs.vmcore`` — confirms the core landed). Every command is
 validated against the crash allowlist before the core is opened, and the transcript is
 redacted before it is returned. For programmable drgn introspection use
 ``introspect.from_vmcore``.

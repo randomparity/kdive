@@ -257,7 +257,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "systems.list_snapshots": _VIEWER,
     "systems.delete_snapshot": _CONTRIBUTOR,
     # vmcore
-    "vmcore.list": _VIEWER,
     "vmcore.fetch": _CONTRIBUTOR,
 }
 

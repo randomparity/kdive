@@ -8,8 +8,9 @@ return schema, read each tool's own description.
 ## Capturing the core (`vmcore`)
 
 - `vmcore.fetch` — capture the vmcore from a crashed Run. Pick a capture method or take the
-  default; this is the durable crash artifact everything downstream reads.
-- `vmcore.list` — list the vmcores already captured for a Run.
+  default; this is the durable crash artifact everything downstream reads. The completed
+  capture job carries the redacted core's artifact id in `refs.result`; `runs.get` carries the
+  same id as `refs.vmcore` when you no longer hold the job id.
 
 ## Analyzing the core
 

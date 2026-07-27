@@ -178,7 +178,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "tools.invoke": ("tests/mcp/tools/test_gateway_invoke.py",),
     "tools.search": ("tests/mcp/tools/test_gateway_search.py",),
     "vmcore.fetch": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
-    "vmcore.list": ("tests/mcp/lifecycle/test_vmcore_tools.py",),
 }
 
 

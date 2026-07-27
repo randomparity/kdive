@@ -83,11 +83,6 @@ _LIST_REDACTED_SYSTEM_SQL = (
 )
 _LIST_REDACTED_SYSTEM_SEEK = " AND (created_at, id) < (%s, %s)"
 _LIST_REDACTED_SYSTEM_ORDER = " ORDER BY created_at DESC, id DESC LIMIT %s"
-_LIST_REDACTED_RUN_SQL = (
-    "SELECT id, object_key FROM artifacts "
-    "WHERE owner_kind = 'runs' AND owner_id = %s AND sensitivity = %s "
-    "ORDER BY created_at DESC"
-)
 # The newest console artifact correlated to a Run (ADR-0374, #1238): same ``(created_at,
 # object_key) DESC`` total order as the ADR-0279 manifest, so this is ``manifest.entries[0]``
 # without loading the manifest. The ``owner_kind='systems'`` + ``run_id`` filter matches the boot
@@ -98,7 +93,6 @@ _RUN_LATEST_CONSOLE_SQL = (
     "ORDER BY created_at DESC, object_key DESC LIMIT 1"
 )
 _SYSTEM_PROJECT_SQL = "SELECT project FROM systems WHERE id = %s"
-_RUN_PROJECT_SQL = "SELECT project FROM runs WHERE id = %s"
 
 
 class RedactedArtifact(NamedTuple):
@@ -174,27 +168,3 @@ async def latest_run_console_artifact_id(conn: AsyncConnection, run_id: UUID | s
         await cur.execute(_RUN_LATEST_CONSOLE_SQL, (run_id, Sensitivity.REDACTED.value))
         row = await cur.fetchone()
     return str(row["id"]) if row is not None else None
-
-
-async def list_redacted_run_artifacts(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, run_id: str
-) -> list[RedactedArtifact]:
-    """Return redacted artifact rows owned by an authorized Run; absent Runs return empty.
-
-    The per-Run analog of :func:`list_redacted_system_artifacts` (ADR-0244): vmcore cores are
-    Run-owned (``owner_kind='runs'``), so the redacted dmesg derivative is listed by Run id.
-    """
-    try:
-        uid = UUID(run_id)
-    except ValueError:
-        return []
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute(_RUN_PROJECT_SQL, (uid,))
-            owner = await cur.fetchone()
-            if owner is None or owner["project"] not in ctx.projects:
-                return []
-            require_role(ctx, owner["project"], Role.VIEWER)
-            await cur.execute(_LIST_REDACTED_RUN_SQL, (uid, Sensitivity.REDACTED.value))
-            rows = await cur.fetchall()
-    return [RedactedArtifact(id=str(row["id"]), object_key=str(row["object_key"])) for row in rows]
