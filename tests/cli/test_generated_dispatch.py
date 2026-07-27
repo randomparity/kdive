@@ -227,11 +227,9 @@ def test_payload_absent_json_param_omitted() -> None:
 
 
 def test_payload_unwrap_request_wraps_body() -> None:
-    verb = _verb("accounting.report_granted_set", unwrap_request=True, flags=(_scalar("group_by"),))
-    args = _ns(**{_dest("group_by"): "principal"})
-    assert dispatch._assemble_generated_payload(verb, args) == {
-        "request": {"group_by": "principal"}
-    }
+    verb = _verb("investigations.list", unwrap_request=True, flags=(_scalar("state"),))
+    args = _ns(**{_dest("state"): "open"})
+    assert dispatch._assemble_generated_payload(verb, args) == {"request": {"state": "open"}}
 
 
 def test_payload_unwrap_request_empty_body_sends_no_key() -> None:
