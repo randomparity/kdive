@@ -68,12 +68,13 @@ def build_instructions(gateway_enabled: bool) -> str:
     The instructions must match the surface the agent actually sees, which depends on
     whether the core-set tool gateway is enabled (ADR-0268, #1034):
 
-    - Gateway off (the default): the full RBAC catalog is listed directly, so the text
-      names the direct ``mcp__kdive__*`` tools as the primary surface and the gateway as
-      the fallback for any capability that is not a callable tool in the client — including
-      lazy-loading hosts that materialize only a subset of the tools.
-    - Gateway on: ``list_tools`` is clipped to the core set, so the text describes the
-      ``tools.search`` / ``tools.invoke`` discovery pattern first.
+    - Gateway on (the default, ADR-0456 / #1582): ``list_tools`` is clipped to the core
+      set, so the text describes the ``tools.search`` / ``tools.invoke`` discovery pattern
+      first.
+    - Gateway off: the full RBAC catalog is listed directly, so the text names the direct
+      ``mcp__kdive__*`` tools as the primary surface and the gateway as the fallback for any
+      capability that is not a callable tool in the client — including lazy-loading hosts
+      that materialize only a subset of the tools.
 
     Both variants end with a namespace table of contents so agents can orient themselves
     without calling ``tools.search`` for every operation.
