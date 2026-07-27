@@ -52,6 +52,9 @@ def test_narrowed_tools_membership() -> None:
     assert "systems.provision" in NARROWED_TOOLS
     assert "systems.reprovision" in NARROWED_TOOLS
     assert "allocations.request" in NARROWED_TOOLS
+    # ADR-0464: the consolidated register tool takes `kind` directly, so its advertised enum
+    # must be narrowed to the composed providers the way the other write surfaces are.
+    assert "resources.register" in NARROWED_TOOLS
     assert "resources.list" not in NARROWED_TOOLS
 
 
@@ -113,6 +116,8 @@ def test_real_published_schema_narrows_for_local_only() -> None:
     assert alloc.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
     define = project_listed_tool(_tool(app, "systems.define"), kinds)
     assert set(define.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
+    register = project_listed_tool(_tool(app, "resources.register"), kinds)
+    assert register.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
 def test_resources_list_schema_permissive_on_local_only() -> None:

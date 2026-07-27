@@ -138,9 +138,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "resources.describe": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.drain": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.list": ("tests/mcp/catalog/test_resources_tools.py",),
-    "resources.register_fault_inject": ("tests/mcp/ops/test_resources_mutation.py",),
-    "resources.register_local_libvirt": ("tests/mcp/ops/test_resources_mutation.py",),
-    "resources.register_remote_libvirt": ("tests/mcp/ops/test_resources_mutation.py",),
+    "resources.register": ("tests/mcp/ops/test_resources_mutation.py",),
     "resources.renew": ("tests/mcp/ops/test_resources_mutation.py",),
     "resources.set_scheduling": ("tests/mcp/catalog/test_resources_tools.py",),
     "resources.set_status": ("tests/mcp/catalog/test_resources_tools.py",),
@@ -604,29 +602,48 @@ def test_allocation_and_estimate_payload_schemas_are_concrete() -> None:
     }
 
 
-def test_resource_register_tools_are_variant_specific() -> None:
+def test_resource_register_is_one_kind_discriminated_tool() -> None:
+    """One `resources.register` replaced the three per-provider wrappers (ADR-0464).
+
+    Every param is a flat top-level scalar so `gen_cli_verbs` can emit a real `--flag` for each;
+    a union under `request` would give `kdivectl resources register` zero flags. The three
+    retired names must be gone from the registry entirely — no aliases.
+    """
     tools = {t.name: t for t in TOOLS}
 
-    assert "resources.register" not in tools
+    for retired in (
+        "resources.register_remote_libvirt",
+        "resources.register_local_libvirt",
+        "resources.register_fault_inject",
+    ):
+        assert retired not in tools
 
-    common = {
-        "concurrent_allocation_cap",
-        "cost_class",
+    params = tools["resources.register"].parameters
+    assert set(params["properties"]) == {
+        "kind",
         "name",
-        "owner_project",
-        "secret_refs",
+        "cost_class",
         "vcpus",
         "memory_mb",
+        "host_uri",
+        "base_image",
+        "concurrent_allocation_cap",
+        "secret_refs",
+        "owner_project",
     }
-    # ADR-0372: each register_* tool exposes its fields flat at top level (no `request` wrapper).
-    remote_params = set(tools["resources.register_remote_libvirt"].parameters["properties"])
-    assert remote_params == common | {"base_image", "host_uri"}
-
-    local_params = set(tools["resources.register_local_libvirt"].parameters["properties"])
-    assert local_params == common | {"host_uri"}
-
-    fault_params = set(tools["resources.register_fault_inject"].parameters["properties"])
-    assert fault_params == common
+    # ADR-0372: flat top-level params, never a `request` wrapper.
+    assert "request" not in params["properties"]
+    # The discriminator is a scalar enum, not an object: that is what keeps the CLI flag real.
+    kind = cast(dict[str, object], params["properties"]["kind"])
+    assert kind["type"] == "string"
+    assert set(cast(list[str], kind["enum"])) == {
+        "local-libvirt",
+        "remote-libvirt",
+        "fault-inject",
+    }
+    # Branch required-ness cannot live in JSON Schema (ADR-0464): only the common fields are
+    # required, and host_uri/base_image are validated per kind by the handler.
+    assert set(params["required"]) == {"kind", "name", "cost_class", "vcpus", "memory_mb"}
 
 
 def test_every_tool_has_a_valid_maturity() -> None:

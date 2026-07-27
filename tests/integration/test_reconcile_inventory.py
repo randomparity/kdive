@@ -3190,11 +3190,11 @@ def test_override_gc_with_empty_ledger_clears_nothing(migrated_url: str, tmp_pat
 
 # A runtime-added host (managed_by='runtime') is never pruned by the inventory reconcile, which
 # only sweeps managed_by='config' rows (ADR-0199, M2.7 B #639). This locks in the runtime-add
-# acceptance criterion: register_remote_libvirt -> schedulable without restart, survives passes.
+# acceptance criterion: a remote-libvirt register -> schedulable without restart, survives passes.
 
 
 async def _insert_runtime_remote_libvirt(conn: psycopg.AsyncConnection, *, name: str) -> UUID:
-    """Insert a leased runtime remote-libvirt row (what register_remote_libvirt creates)."""
+    """Insert a leased runtime remote-libvirt row (what resources.register creates)."""
     from datetime import UTC, datetime, timedelta
 
     rid = uuid4()

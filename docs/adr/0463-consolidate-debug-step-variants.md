@@ -40,7 +40,7 @@ indefinitely rather than to a bounded stop. Neither is one more value of "how fa
 `mode` is a closed enum — `into`, `over`, `instruction`, `out` — mapped by `_ADVANCE_CALLS` to
 `engine.step`, `engine.next`, `engine.step_instruction`, and `engine.finish` respectively. All
 four old wrappers and all four names are removed in this change; there is no alias and no
-deprecation period. The registry drops from 135 tools to 132.
+deprecation period. The registry drops from 133 tools to 130.
 
 The mode names describe the *unit of advance* rather than restating the gdb command names. `into`
 and `over` say what distinguishes them (whether calls are entered), which the old `step`/`next`
@@ -132,11 +132,11 @@ all rank `debug.advance`.
 
 ## Consequences
 
-- The `debug` namespace goes from 24 tools to 21; the live registry from 135 to 132.
+- The `debug` namespace goes from 24 tools to 21; the live registry from 133 to 130.
 - `kdivectl debug step|next|step-instruction|finish` become
   `kdivectl debug advance --session-id <id> --mode <into|over|instruction|out>`. The generated
-  verb descriptors are regenerated, not hand-edited, and `--mode` is the first generated flag in
-  the catalog to carry argparse `choices`.
+  verb descriptors are regenerated, not hand-edited; `--mode` derives argparse `choices` from the
+  inline enum, the same path the other enum-valued flags already take.
 - The `GdbMiEngine` port keeps its four separate methods. The consolidation is a tool-surface
   change; the provider contract, the gdb-MI commands, and their per-verb error handling are
   untouched, and both libvirt providers are unaffected.
@@ -145,7 +145,15 @@ all rank `debug.advance`.
   bare `KeyError` out of the engine thread.
 - `scripts/live-debug.py step` — the only real exercise of stepping, since the live gdb-MI smoke
   test deliberately skips it (the panic path parks the CPU in `hlt`, which is not steppable) — is
-  rewritten to the mode enum and re-run against a live VM as part of this change.
+  rewritten to the mode enum and was run against a live local-libvirt kernel for this change. All
+  four modes advanced `rip` from a breakpoint in `vfs_read`, `mode=out` returned with
+  `reason=function-finished` and `timed_out=false`, and the live `audit_log` held exactly one row
+  each for `advance:into`, `advance:over`, `advance:instruction`, and `advance:out`.
+- Reaching that proof required repairing three defects in the script that predate this change: two
+  stale `request` wrappers on tools that had been flattened, and — the one that mattered — an
+  upload lane that published only the combined kernel tar and never the vmlinux ELF, leaving the
+  Run's `debuginfo_ref` NULL so every gdb-MI op short-circuited with `no_debuginfo`. The stepping
+  surface ADR-0379 added had therefore never been exercised live.
 - An agent calling `debug.step` gets the unknown-tool `configuration_error`; `tools.search` is the
   recovery path.
 

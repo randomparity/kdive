@@ -245,6 +245,24 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "systems.provision_defined": frozenset({"system", "provision", "defined", "named"}),
     "systems.reprovision": frozenset({"system", "reprovision", "rebuild", "refresh"}),
     "systems.teardown": frozenset({"system", "teardown", "destroy", "delete", "remove"}),
+    # resources — `resources.register` absorbed the three per-provider register_* tools
+    # (ADR-0464), so the provider words that used to be *in the retired tool names* must rank it.
+    "resources.register": frozenset(
+        {
+            "register",
+            "add",
+            "resource",
+            "host",
+            "capacity",
+            "inventory",
+            "provider",
+            "libvirt",
+            "remote",
+            "local",
+            "fault",
+            "inject",
+        }
+    ),
     # investigations
     "investigations.open": frozenset({"investigation", "open", "create", "start"}),
     "investigations.close": frozenset({"investigation", "close", "finish", "end"}),
@@ -273,6 +291,9 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",
     "resources.cordon": "resources.set_scheduling",
+    "resources.register_fault_inject": "resources.register",
+    "resources.register_local_libvirt": "resources.register",
+    "resources.register_remote_libvirt": "resources.register",
     "resources.uncordon": "resources.set_scheduling",
 }
 

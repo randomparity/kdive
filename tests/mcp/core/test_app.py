@@ -116,9 +116,7 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
             "resources.set_status",
             "resources.set_scheduling",
             "resources.drain",
-            "resources.register_remote_libvirt",
-            "resources.register_local_libvirt",
-            "resources.register_fault_inject",
+            "resources.register",
             "resources.deregister",
             "resources.renew",
         } <= names
