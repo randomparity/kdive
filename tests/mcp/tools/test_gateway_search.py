@@ -315,6 +315,33 @@ def test_artifact_text_search_vocabulary_finds_artifacts_get(
     assert "artifacts.get" in names, f"query {query!r} did not surface artifacts.get: {names}"
 
 
+@pytest.mark.parametrize("query", ["images.build", "build"])
+def test_image_build_vocabulary_finds_images_publish(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The retired name and the bare `build` intent word rank images.publish (ADR-0461).
+
+    `images.build` was a duplicate of `images.publish`, so an agent that knows only the build
+    half of the name must still reach the one surviving tool.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "images.publish" in names
+    assert "images.build" not in names
+
+
 # ---------------------------------------------------------------------------
 # Test 4: RBAC filter hides admin-only tools from a viewer
 # ---------------------------------------------------------------------------

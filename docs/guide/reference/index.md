@@ -54,7 +54,6 @@
 | [`debug.step_instruction`](debug.md#debugstep_instruction) | `implemented` |
 | [`fixtures.list`](fixtures.md#fixtureslist) | `implemented` |
 | [`fixtures.validate`](fixtures.md#fixturesvalidate) | `implemented` |
-| [`images.build`](images.md#imagesbuild) | `implemented` |
 | [`images.delete`](images.md#imagesdelete) | `implemented` |
 | [`images.describe`](images.md#imagesdescribe) | `implemented` |
 | [`images.extend`](images.md#imagesextend) | `implemented` |

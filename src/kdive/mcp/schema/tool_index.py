@@ -252,6 +252,7 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
     "artifacts.find": "artifacts.get",
+    "images.build": "images.publish",
     "ops.queue_pause": "ops.set_queue_paused",
     "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",

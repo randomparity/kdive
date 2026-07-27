@@ -4,10 +4,13 @@ The verbs are thin MCP clients over the shared ``images.*`` server tools — the
 source of truth. ``images list`` is a read passthrough (RBAC-filtered server-side to public +
 the caller's projects' private rows). The mutating verbs run the fail-closed token-``exp``
 preflight before their one MCP call, exactly like the break-glass mutations:
-``upload``/``delete`` route the project-scoped tools, ``build``/``publish`` the
-``platform_operator`` tools, and ``prune --expired``/``extend`` the ``platform_admin``
-break-glass tools. A server-side denial returns a typed failure envelope the verb maps to a
-non-zero exit, so an unprivileged or cross-project invocation is observable as exit ``3``.
+``upload``/``delete`` route the project-scoped tools, and ``prune --expired``/``extend`` the
+``platform_admin`` break-glass tools. A server-side denial returns a typed failure envelope the
+verb maps to a non-zero exit, so an unprivileged or cross-project invocation is observable as
+exit ``3``.
+
+``images publish`` is not curated: it takes the schema-generated verb, so its flags and payload
+come from the live ``images.publish`` schema (ADR-0423, ADR-0461).
 """
 
 from __future__ import annotations
@@ -18,22 +21,6 @@ from kdive.cli.commands.mutations import run_mutating_tool
 from kdive.cli.commands.reads import collection_rows, fetch_collection_envelope
 from kdive.cli.errors import exit_code_for_envelope
 from kdive.cli.render import emit, render
-
-
-def _packages(args: argparse.Namespace) -> list[str]:
-    """Return repeatable ``--packages`` values, omitting blanks."""
-    raw = getattr(args, "packages", None)
-    if not raw:
-        return []
-    return [str(package).strip() for package in raw if str(package).strip()]
-
-
-def _image_build_request(args: argparse.Namespace) -> dict[str, object]:
-    return {
-        "provider": args.provider,
-        "name": args.name,
-        "packages": _packages(args),
-    }
 
 
 async def images_list(args: argparse.Namespace) -> int:
@@ -59,22 +46,6 @@ async def images_upload(args: argparse.Namespace) -> int:
 
 async def images_delete(args: argparse.Namespace) -> int:
     return await run_mutating_tool("images.delete", {"image_id": args.image_id}, as_json=args.json)
-
-
-async def images_build(args: argparse.Namespace) -> int:
-    return await run_mutating_tool(
-        "images.build",
-        {"request": _image_build_request(args)},
-        as_json=args.json,
-    )
-
-
-async def images_publish(args: argparse.Namespace) -> int:
-    return await run_mutating_tool(
-        "images.publish",
-        {"request": _image_build_request(args)},
-        as_json=args.json,
-    )
 
 
 async def images_prune(args: argparse.Namespace) -> int:

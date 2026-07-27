@@ -80,8 +80,7 @@ the closest base image, then extend it live.
 These change the catalog and are gated to operators/admins:
 
 - `images.upload` — register a quarantined upload as a project-private image.
-- `images.build` — enqueue a platform image build.
-- `images.publish` — publish a built image to the catalog.
+- `images.publish` — enqueue an image build job that publishes the built image to the catalog.
 - `images.delete` — delete a project-private image.
 - `images.extend` — re-arm a private image's retention `expires_at` (break-glass); this
   extends the image's *lifetime in the catalog*, not its installed packages.

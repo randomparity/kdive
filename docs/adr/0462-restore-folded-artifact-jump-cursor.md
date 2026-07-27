@@ -95,7 +95,9 @@ second tool name, because the jump matcher is no longer separately callable.
 
 ## Consequences
 
-- The live registry drops from 137 tools to 136.
+- The live registry loses one tool. It measured 137 -> 136 at the time of writing; sibling
+  consolidations in this epic land in parallel, so the absolute count on `main` moves
+  independently of this change.
 - Breaking for `artifacts.find` callers, twice over: the tool is gone and the parameter is renamed
   `query` → `find`. ADR-0283 accepted this class of break as pre-first-release, and the epic
   forbids aliases.

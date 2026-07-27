@@ -168,7 +168,7 @@ separate `qemu` user can read it under `qemu:///system`. Under SELinux the file 
 `virt_image_t` label (the standard label for libvirt-managed images); this is the host-side file
 label and is independent of the guest-internal SELinux the plane disables.
 
-The RBAC-gated, publish-backed `kdivectl images build` operator verb (M2.4/7) enqueues an
+The RBAC-gated `kdivectl images publish` operator verb (M2.4/7) enqueues an
 `IMAGE_BUILD` job that runs the same plane and publishes the result to the catalog; this inline
 `build-fs` is the local-disk fixture path for the live-stack suite.
 

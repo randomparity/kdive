@@ -51,8 +51,10 @@ Raw MCP `list_tools` over the wire, no agent in the loop:
 | operator CLI (`azp=kdivectl`) | **136** — the full RBAC-visible catalog | no |
 
 136 matches the in-process registry count (`len(CLASSIFIED_TOOLS | PUBLIC_TOOLS)`), down from 137
-on `main`. The `artifacts` namespace now holds five tools: `create_investigation_upload`,
-`create_run_upload`, `fetch_raw`, `get`, `list`.
+on `main` at the time of the run. (A sibling epic consolidation, ADR-0461, merged afterwards and
+was merged into this branch, so the branch now measures 135 — one fewer for the same reason, not
+a change to anything proved here.) The `artifacts` namespace now holds five tools:
+`create_investigation_upload`, `create_run_upload`, `fetch_raw`, `get`, `list`.
 
 Gateway search, same connection:
 

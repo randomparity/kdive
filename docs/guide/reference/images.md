@@ -2,18 +2,6 @@
 
 # `images` tools
 
-## `images.build`
-
-`implemented`
-
-Enqueue an image build job.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | yes | The catalog image name. |
-| `packages` | array<string> | no | Optional package override; omitted uses the provider catalog default. |
-| `provider` | string | yes | The provider whose plane builds or built the image. |
-
 ## `images.delete`
 
 `implemented` · `destructive`
@@ -137,13 +125,17 @@ undo. ``reason`` is audited. Use ``images.extend`` to save an entry before it ex
 
 `implemented`
 
-Publish a built image into the catalog.
+Enqueue an image build job that publishes the built image to the catalog.
+
+One job covers build, validation, and catalog publication, so this is also the entry
+point for promoting an already-realized ``defined`` baseline. Re-issuing it for the same
+``provider``/``name`` returns the existing job rather than enqueuing a second one.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | yes | The catalog image name. |
+| `name` | string | yes | The catalog image name to build and publish. |
 | `packages` | array<string> | no | Optional package override; omitted uses the provider catalog default. |
-| `provider` | string | yes | The provider whose plane builds or built the image. |
+| `provider` | string | yes | The provider whose plane builds the image. |
 
 ## `images.upload`
 

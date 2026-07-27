@@ -170,22 +170,6 @@ REGISTRY: tuple[Verb, ...] = (
     ),
     Verb(
         "images",
-        "build",
-        images.images_build,
-        "images.build",
-        options=("provider", "name", "packages"),
-        read_only=False,
-    ),
-    Verb(
-        "images",
-        "publish",
-        images.images_publish,
-        "images.publish",
-        options=("provider", "name", "packages"),
-        read_only=False,
-    ),
-    Verb(
-        "images",
         "prune-expired",
         images.images_prune,
         "images.prune_expired",
