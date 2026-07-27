@@ -1,11 +1,14 @@
-"""Accounting report tool tests — two explicit report forms + read-shape audit.
+"""``accounting.report`` tests — one tool, two discriminated scopes + read-shape audit.
 
-The handler is called directly with an injected pool + RequestContext (the repo's unit
-contract). Coverage maps to the #97 acceptance bullets:
+Every call goes through the real dispatcher (:func:`report`) with a parsed request model,
+so the tests exercise the same isinstance branch selection the MCP wrapper does — a caller
+asking for a scope it cannot have lands in that scope's own gate. The handler is called
+directly with an injected pool + RequestContext (the repo's unit contract). Coverage maps
+to the #97 acceptance bullets plus the ADR-0467 branch-authorization matrix:
 
 * all-projects: platform_auditor / platform_admin rollup ≥2 projects, always audited;
-  SoD denials (project-only token; platform_operator) — denial audited iff the caller
-  holds ≥1 platform role.
+  SoD denials (project viewer/contributor/admin token; platform_operator; platform_admin
+  passes) — denial audited iff the caller holds ≥1 platform role.
 * granted-set: default to ctx.projects (role-less membership dropped), named non-member
   rejected, zero-project empty rollup, audit-iff-shape (>1 project OR group_by=principal),
   never a per-project audit_log row.
@@ -24,7 +27,9 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg_pool import AsyncConnectionPool
+from pydantic import TypeAdapter
 
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
@@ -35,12 +40,8 @@ from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.accounting.reports import (
     AccountingAllProjectsReportRequest,
     AccountingGrantedSetReportRequest,
-)
-from kdive.mcp.tools.accounting.reports import (
-    report_all_projects as _report_all_projects,
-)
-from kdive.mcp.tools.accounting.reports import (
-    report_granted_set as _report_granted_set,
+    AccountingReportRequest,
+    report,
 )
 from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
 from tests.mcp.json_data import data_str
@@ -187,11 +188,9 @@ async def report_granted_set(
     ctx: RequestContext,
     **kwargs: object,
 ) -> ToolResponse:
-    return await _report_granted_set(
-        pool,
-        ctx,
-        request=AccountingGrantedSetReportRequest.model_validate(kwargs),
-    )
+    """Drive the merged tool at ``scope='granted-set'`` through the real dispatcher."""
+    request = AccountingGrantedSetReportRequest.model_validate({"scope": "granted-set", **kwargs})
+    return await report(pool, ctx, request=request)
 
 
 async def report_all_projects(
@@ -199,11 +198,9 @@ async def report_all_projects(
     ctx: RequestContext,
     **kwargs: object,
 ) -> ToolResponse:
-    return await _report_all_projects(
-        pool,
-        ctx,
-        request=AccountingAllProjectsReportRequest.model_validate(kwargs),
-    )
+    """Drive the merged tool at ``scope='all-projects'`` through the real dispatcher."""
+    request = AccountingAllProjectsReportRequest.model_validate({"scope": "all-projects", **kwargs})
+    return await report(pool, ctx, request=request)
 
 
 # ---- all-projects form ------------------------------------------------------------
@@ -226,9 +223,7 @@ def test_all_projects_auditor_rollup_and_audit_row(migrated_url: str) -> None:
         assert total["variance"] == "-28.0000"
         # Exactly one platform_audit_log row (role recorded), zero per-project audit_log.
         rows = await _platform_audit_rows(migrated_url)
-        assert rows == [
-            ("user-1", "platform_auditor", "accounting.report_all_projects", "all-projects")
-        ]
+        assert rows == [("user-1", "platform_auditor", "accounting.report", "all-projects")]
         assert await _count_audit_log(migrated_url) == 0
 
     asyncio.run(_run())
@@ -258,7 +253,7 @@ def test_all_projects_project_only_token_denied_unaudited(migrated_url: str) -> 
             resp = await report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["accounting.report_all_projects"]
+        assert resp.suggested_next_actions == ["accounting.report"]
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())
@@ -274,7 +269,7 @@ def test_all_projects_operator_denied_but_audited(migrated_url: str) -> None:
             resp = await report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["accounting.report_all_projects"]
+        assert resp.suggested_next_actions == ["accounting.report"]
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
         assert rows[0][1] == "platform_operator"
@@ -604,7 +599,7 @@ def test_invalid_group_by_is_config_error(migrated_url: str) -> None:
             resp = await report_granted_set(pool, _BASE_CTX, group_by="project")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        assert resp.suggested_next_actions == ["accounting.report_granted_set"]
+        assert resp.suggested_next_actions == ["accounting.report"]
 
     asyncio.run(_run())
 
@@ -615,7 +610,7 @@ def test_invalid_window_is_config_error(migrated_url: str) -> None:
             resp = await report_granted_set(pool, _BASE_CTX, window=["not-a-date", None])
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        assert resp.suggested_next_actions == ["accounting.report_granted_set"]
+        assert resp.suggested_next_actions == ["accounting.report"]
 
     asyncio.run(_run())
 
@@ -677,5 +672,173 @@ def test_all_projects_universe_includes_ledger_without_budget(migrated_url: str)
         assert resp.status == "ok"
         by_project = {r["project"]: r for r in _rows(resp)}
         assert by_project["proj-x"]["reserved"] == "42.0000"
+
+    asyncio.run(_run())
+
+
+# ---- ADR-0467 branch-authorization matrix ------------------------------------------
+#
+# One tool now serves both scopes, so the matrix has to prove that the *branch* still
+# gates: every identity is driven at every scope. `scope` picks a branch; the branch
+# performs its own check.
+
+_PROJECT_ROLE_IDENTITIES = {
+    "project_viewer": Role.VIEWER,
+    "project_contributor": Role.CONTRIBUTOR,
+    "project_admin": Role.ADMIN,
+}
+_PLATFORM_ROLE_IDENTITIES = {
+    "platform_operator": PlatformRole.PLATFORM_OPERATOR,
+    "platform_admin": PlatformRole.PLATFORM_ADMIN,
+    "platform_auditor": PlatformRole.PLATFORM_AUDITOR,
+}
+
+
+def _matrix_ctx(identity: str) -> RequestContext:
+    """The RequestContext for one identity in the matrix ('unauthorized' holds nothing)."""
+    project_role = _PROJECT_ROLE_IDENTITIES.get(identity)
+    if project_role is not None:
+        return _project_ctx(
+            roles={"proj-a": project_role, "proj-b": project_role},
+            projects=("proj-a", "proj-b"),
+        )
+    platform_role = _PLATFORM_ROLE_IDENTITIES.get(identity)
+    if platform_role is not None:
+        return _platform_ctx(platform_role)
+    return _BASE_CTX
+
+
+@pytest.mark.parametrize("identity", ["platform_auditor", "platform_admin"])
+def test_matrix_all_projects_allowed(migrated_url: str, identity: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            resp = await report_all_projects(pool, _matrix_ctx(identity))
+        assert resp.status == "ok"
+        assert {r["project"] for r in _rows(resp)} == {"proj-a", "proj-b"}
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 1, "the all-projects read is unconditionally audited"
+        assert rows[0][3] == "all-projects"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "identity", ["project_viewer", "project_contributor", "project_admin", "unauthorized"]
+)
+def test_matrix_all_projects_denied_and_not_audited(migrated_url: str, identity: str) -> None:
+    # No platform role at all → denied, and the denial is NOT recorded: auditing it would
+    # let any authenticated token amplify writes into platform_audit_log (ADR-0043 §4).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            resp = await report_all_projects(pool, _matrix_ctx(identity))
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+        assert _rows(resp) == [], "a denied all-projects read must leak no rows"
+        assert await _count_platform_audit(migrated_url) == 0
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("identity", ["platform_operator"])
+def test_matrix_all_projects_denied_but_audited(migrated_url: str, identity: str) -> None:
+    # Holds ≥1 platform role but not the auditor gate → denied, and the over-reach IS
+    # audited (the accountability target).
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            resp = await report_all_projects(pool, _matrix_ctx(identity))
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+        assert _rows(resp) == []
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 1
+        assert rows[0][1] == "platform_operator"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("identity", ["project_viewer", "project_contributor", "project_admin"])
+def test_matrix_granted_set_rolls_up_own_projects(migrated_url: str, identity: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            resp = await report_granted_set(pool, _matrix_ctx(identity))
+        assert resp.status == "ok"
+        assert {r["project"] for r in _rows(resp)} == {"proj-a", "proj-b"}
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["platform_operator", "platform_admin", "platform_auditor", "unauthorized"],
+)
+def test_matrix_granted_set_without_project_grant_is_empty(
+    migrated_url: str, identity: str
+) -> None:
+    # A platform role is not a project grant: the granted-set branch reads ctx.projects and
+    # never the SQL universe, so an auditor with no membership rolls up nothing.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            resp = await report_granted_set(pool, _matrix_ctx(identity))
+        assert resp.status == "ok"
+        assert _rows(resp) == []
+        assert _total(resp)["reserved"] == "0.0000"
+
+    asyncio.run(_run())
+
+
+def test_viewer_supplied_all_projects_scope_is_denied_at_the_branch(migrated_url: str) -> None:
+    """Agent-supplied ``scope='all-projects'`` selects the branch; the branch denies it.
+
+    Parses the raw argument dict through the discriminated union exactly as the MCP wrapper
+    does, then dispatches it. A project viewer must land in the all-projects gate — never in
+    the granted-set rollup it *is* entitled to — and get back no rows.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            ctx = _project_ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
+            request = TypeAdapter(AccountingReportRequest).validate_python(
+                {"scope": "all-projects", "group_by": "principal"}
+            )
+            assert isinstance(request, AccountingAllProjectsReportRequest)
+            resp = await report(pool, ctx, request=request)
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+        assert _rows(resp) == []
+        assert await _count_platform_audit(migrated_url) == 0
+
+    asyncio.run(_run())
+
+
+def test_granted_set_and_all_projects_audit_rows_stay_distinguishable(migrated_url: str) -> None:
+    """Both scopes audit under one ``tool`` name; ``scope`` + ``platform_role`` separate them.
+
+    The consolidation drops the per-scope tool name, so attribution has to survive in the
+    remaining columns (ADR-0467): the granted-set read records the named target set and a
+    null platform_role, the all-projects read records ``all-projects`` and the held roles.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_two_projects(pool)
+            granted_ctx = _project_ctx(
+                roles={"proj-a": Role.VIEWER, "proj-b": Role.VIEWER},
+                projects=("proj-a", "proj-b"),
+            )
+            assert (await report_granted_set(pool, granted_ctx)).status == "ok"
+            auditor = _platform_ctx(PlatformRole.PLATFORM_AUDITOR)
+            assert (await report_all_projects(pool, auditor)).status == "ok"
+        rows = sorted(await _platform_audit_rows(migrated_url), key=lambda r: str(r[3]))
+        assert [r[2] for r in rows] == ["accounting.report", "accounting.report"]
+        assert rows[0][3] == "all-projects"
+        assert rows[0][1] == "platform_auditor"
+        assert rows[1][3] == "granted-set:proj-a,proj-b"
+        assert rows[1][1] is None
 
     asyncio.run(_run())

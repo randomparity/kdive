@@ -431,7 +431,7 @@ async def assert_report(
     project: str,
     artifact_name: str,
 ) -> None:
-    """Drive accounting.report_all_projects under platform_auditor; assert windowed spend.
+    """Drive accounting.report at all-projects scope under platform_auditor; assert spend.
 
     Asserts the ``project`` rollup row reflects this run's real spend (windowed wire rollup ==
     windowed DB ledger sums), then emits + re-asserts the JSON report artifact (ADR-0046 §2/§3).
@@ -441,8 +441,11 @@ async def assert_report(
         env = ok(
             await scalar(
                 auditor,
-                "accounting.report_all_projects",
-                window=[window_start.isoformat(), None],
+                "accounting.report",
+                request={
+                    "scope": "all-projects",
+                    "window": [window_start.isoformat(), None],
+                },
             ),
             "report",
         )

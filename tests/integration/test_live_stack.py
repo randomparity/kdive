@@ -14,7 +14,7 @@ Acceptance asserted over the wire / against the stack's Postgres + MinIO: protoc
 envelopes, JWKS-validated tokens), #1 (redacted vmcore in MinIO), #2 (audit per transition +
 force_crash, split by attributing principal — driver vs ``system:reconciler``), #3 (redaction does
 not leak through the wire), #5 (``torn_down`` + ``Discovery.list_owned()`` empty), the report phase
-(``accounting.report_all_projects`` under a ``platform_auditor`` token, windowed to this run —
+(``accounting.report`` at ``all-projects`` scope under a ``platform_auditor`` token, windowed —
 ADR-0046), and the RBAC negatives (viewer raised-path; operator force_crash ``authorization_denied``
 envelope; project-only token denied the all-projects report).
 
@@ -425,7 +425,7 @@ def test_viewer_denied_operator_op_over_the_wire() -> None:
 
 @pytest.mark.live_stack
 def test_report_all_projects_denied_to_project_token() -> None:
-    """A project-only token is denied accounting.report_all_projects over the wire.
+    """A project-only token asking for scope='all-projects' is denied over the wire.
 
     Verified against the tool: the all-projects form catches the raised AuthorizationError and
     *returns* ToolResponse.failure(..., AUTHORIZATION_DENIED) — a well-formed error envelope, not a
@@ -437,7 +437,9 @@ def test_report_all_projects_denied_to_project_token() -> None:
     async def _run() -> None:
         project_only = LiveStackClient.over_http(base_url, _token(issuer, role="viewer"))
         async with project_only:
-            denied = await scalar(project_only, "accounting.report_all_projects")
+            denied = await scalar(
+                project_only, "accounting.report", request={"scope": "all-projects"}
+            )
         assert denied.status == "error", "project-only token was not denied (#101)"
         assert denied.error_category == "authorization_denied", "wrong denial category (#101)"
 

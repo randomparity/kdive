@@ -1,11 +1,15 @@
-"""The reports.generate_* MCP tools (ADR-0212).
+"""The ``reports.generate`` MCP tool (ADR-0212, ADR-0467).
 
-Two tools mirror the accounting reporting split: ``generate_granted_set`` (the caller's
-granted projects, ``viewer`` floor) and ``generate_all_projects`` (``platform_auditor``).
-Each captures one ``as_of`` snapshot, gathers the section registry, redacts free text,
-returns the report inline within a per-section + byte budget, and writes the CSV/XLSX
-spreadsheets to the object store (presigned URLs in ``refs``). A store outage degrades to
-inline-only rather than failing the read.
+One tool serves two explicit scopes, selected by a discriminated ``request`` model and
+mirroring the ``accounting.report`` split: **granted-set** (the caller's granted
+projects, ``viewer`` floor, resolved from the request context) and **all-projects**
+(``platform_auditor``, universe read from SQL). The platform-role gate is the first
+statement of the all-projects branch, so ``scope`` selects a branch and never grants it.
+
+Either branch captures one ``as_of`` snapshot, gathers the section registry, redacts free
+text, returns the report inline within a per-section + byte budget, and writes the
+CSV/XLSX spreadsheets to the object store (presigned URLs in ``refs``). A store outage
+degrades to inline-only rather than failing the read.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastmcp import FastMCP
@@ -54,42 +58,36 @@ from kdive.services.reports.sections import registry
 from kdive.store.objectstore import object_store_from_env
 
 _REPORT_OBJECT_ID = "report"
-_GRANTED_TOOL = "reports.generate_granted_set"
-_ALL_PROJECTS_TOOL = "reports.generate_all_projects"
+_TOOL = "reports.generate"
 _GRANTED_SCOPE = "granted-set"
 _VALID_FORMATS = ("csv", "xlsx")
+_WINDOW_DESCRIPTION = "[start, end] ISO-8601 timestamptz pair; omit for all time."
+_FORMATS_DESCRIPTION = "Spreadsheet formats: subset of ['csv','xlsx']; omit for both."
 
 StoreFactory = Callable[[], ReportArtifactStore]
 
 
-class _GrantedReportPayload(ToolPayload):
-    """Public payload for ``reports.generate_granted_set`` filters."""
+class GrantedSetGenerateRequest(ToolPayload):
+    """Granted-set report request: the caller's own projects, ``viewer`` floor."""
 
+    scope: Literal["granted-set"]
     projects: list[str] | None = Field(
         default=None,
         description="Named project subset; omit for all member projects with a role.",
     )
-    window: list[str | None] | None = Field(
-        default=None,
-        description="[start, end] ISO-8601 timestamptz pair; omit for all time.",
-    )
-    formats: list[str] | None = Field(
-        default=None,
-        description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both.",
-    )
+    window: list[str | None] | None = Field(default=None, description=_WINDOW_DESCRIPTION)
+    formats: list[str] | None = Field(default=None, description=_FORMATS_DESCRIPTION)
 
 
-class _AllProjectsReportPayload(ToolPayload):
-    """Public payload for ``reports.generate_all_projects`` filters."""
+class AllProjectsGenerateRequest(ToolPayload):
+    """Cross-project report request: every project, ``platform_auditor`` only."""
 
-    window: list[str | None] | None = Field(
-        default=None,
-        description="[start, end] ISO-8601 timestamptz pair; omit for all time.",
-    )
-    formats: list[str] | None = Field(
-        default=None,
-        description="Spreadsheet formats: subset of ['csv','xlsx']; omit for both.",
-    )
+    scope: Literal["all-projects"]
+    window: list[str | None] | None = Field(default=None, description=_WINDOW_DESCRIPTION)
+    formats: list[str] | None = Field(default=None, description=_FORMATS_DESCRIPTION)
+
+
+type GenerateReportRequest = GrantedSetGenerateRequest | AllProjectsGenerateRequest
 
 
 def _parse_window(window: object) -> tuple[datetime | None, datetime | None] | None:
@@ -238,7 +236,6 @@ async def _build_report(
     secret_registry: SecretRegistry,
     store_factory: StoreFactory,
     scope_label: str,
-    next_tool: str,
 ) -> ToolResponse:
     as_of = await _now(conn)
     report = _normalized_report(
@@ -261,7 +258,7 @@ async def _build_report(
         _REPORT_OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=[next_tool],
+        suggested_next_actions=[_TOOL],
         refs=refs,
         data=data,
     )
@@ -271,6 +268,35 @@ def _report_args(
     scope: str, window: tuple[datetime | None, datetime | None] | None, formats: tuple[str, ...]
 ) -> dict[str, object]:
     return {"scope": scope, "window": _window_data(window), "formats": list(formats)}
+
+
+async def generate(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    secret_registry: SecretRegistry,
+    request: GenerateReportRequest,
+    store_factory: StoreFactory = object_store_from_env,
+) -> ToolResponse:
+    """Dispatch the typed ``reports.generate`` request model to its explicit handler."""
+    if isinstance(request, AllProjectsGenerateRequest):
+        return await generate_all_projects(
+            pool,
+            ctx,
+            secret_registry=secret_registry,
+            window=request.window,
+            formats=request.formats,
+            store_factory=store_factory,
+        )
+    return await generate_granted_set(
+        pool,
+        ctx,
+        secret_registry=secret_registry,
+        projects=request.projects,
+        window=request.window,
+        formats=request.formats,
+        store_factory=store_factory,
+    )
 
 
 async def generate_granted_set(
@@ -291,13 +317,13 @@ async def generate_granted_set(
             targets = _resolve_granted_targets(ctx, projects)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(
-                _REPORT_OBJECT_ID, exc, suggested_next_actions=[_GRANTED_TOOL]
+                _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
             )
         except AuthorizationError:
             return ToolResponse.failure(
                 _REPORT_OBJECT_ID,
                 ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_GRANTED_TOOL],
+                suggested_next_actions=[_TOOL],
             )
         scope = ReportScope(projects=tuple(targets), all_projects=False)
         async with pool.connection() as conn:
@@ -310,11 +336,10 @@ async def generate_granted_set(
                     secret_registry=secret_registry,
                     store_factory=store_factory,
                     scope_label=_GRANTED_SCOPE,
-                    next_tool=_GRANTED_TOOL,
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(
-                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_GRANTED_TOOL]
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
                 )
             if len(targets) > 1:
                 await _audit_granted(conn, ctx, targets, parsed_window, parsed_formats)
@@ -337,7 +362,7 @@ async def generate_all_projects(
             parsed_formats = _parse_formats(formats)
         except CategorizedError as exc:
             return ToolResponse.failure_from_error(
-                _REPORT_OBJECT_ID, exc, suggested_next_actions=[_ALL_PROJECTS_TOOL]
+                _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
             )
         try:
             require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
@@ -345,14 +370,14 @@ async def generate_all_projects(
             await audit_platform_denial(
                 pool,
                 ctx,
-                tool=_ALL_PROJECTS_TOOL,
+                tool=_TOOL,
                 scope=ALL_PROJECTS_SCOPE,
                 args=_report_args(ALL_PROJECTS_SCOPE, parsed_window, parsed_formats),
             )
             return ToolResponse.failure(
                 _REPORT_OBJECT_ID,
                 ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_ALL_PROJECTS_TOOL],
+                suggested_next_actions=[_TOOL],
             )
         async with pool.connection() as conn:
             scope = ReportScope(
@@ -367,11 +392,10 @@ async def generate_all_projects(
                     secret_registry=secret_registry,
                     store_factory=store_factory,
                     scope_label=ALL_PROJECTS_SCOPE,
-                    next_tool=_ALL_PROJECTS_TOOL,
                 )
             except CategorizedError as exc:
                 return ToolResponse.failure_from_error(
-                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_ALL_PROJECTS_TOOL]
+                    _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
                 )
             await _audit_all_projects(conn, ctx, parsed_window, parsed_formats)
         return response
@@ -391,7 +415,7 @@ async def _audit_granted(
             principal=ctx.principal,
             agent_session=ctx.agent_session,
             event=audit.PlatformAuditEvent(
-                tool=_GRANTED_TOOL,
+                tool=_TOOL,
                 scope=scope_value,
                 args=_report_args(_GRANTED_SCOPE, window, formats),
                 platform_role=None,
@@ -412,7 +436,7 @@ async def _audit_all_projects(
             principal=ctx.principal,
             agent_session=ctx.agent_session,
             event=audit.PlatformAuditEvent(
-                tool=_ALL_PROJECTS_TOOL,
+                tool=_TOOL,
                 scope=ALL_PROJECTS_SCOPE,
                 args=_report_args(ALL_PROJECTS_SCOPE, window, formats),
                 platform_role=held_platform_roles(ctx),
@@ -422,59 +446,43 @@ async def _audit_all_projects(
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, secret_registry: SecretRegistry) -> None:
-    """Register the report-generation tools on ``app``, bound to ``pool``."""
+    """Register the ``reports.generate`` tool on ``app``, bound to ``pool``."""
 
     @app.tool(
-        name=_GRANTED_TOOL,
+        name=_TOOL,
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def reports_generate_granted_set(
+    async def reports_generate(
         request: Annotated[
-            _GrantedReportPayload | None,
-            Field(description="Granted-project report filters request; omit for defaults."),
-        ] = None,
+            GenerateReportRequest,
+            Field(
+                discriminator="scope",
+                description=(
+                    "Which projects the report covers: {'scope':'granted-set'} for your "
+                    "own projects (optionally narrowed by 'projects'), or "
+                    "{'scope':'all-projects'} for every project on the platform."
+                ),
+            ),
+        ],
     ) -> ToolResponse:
-        """Generate a downloadable multi-section report over the caller's granted projects.
+        """Generate a downloadable multi-section report over projects you can see.
 
-        Captures one ``as_of`` snapshot and returns the sections inline (within a byte
-        budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
-        download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
-        inline KCU spend rollup with no spreadsheets, use ``accounting.report_granted_set``.
+        ``scope='granted-set'`` covers the projects you hold a role on — omit ``projects``
+        for all of them, or name a subset (each is checked for ``viewer``).
+        ``scope='all-projects'`` covers every project on the platform and requires
+        ``platform_auditor``; without it the call is denied, so ``scope`` selects the
+        report, it never grants access to one.
+
+        Either way the tool captures one ``as_of`` snapshot, returns the sections inline
+        (within a byte budget) and writes CSV/XLSX spreadsheets to the object store; the
+        presigned download URLs land in ``refs``. A store outage degrades to inline-only.
+        For a quick inline KCU spend rollup with no spreadsheets, use
+        ``accounting.report``.
         """
-        payload = request or _GrantedReportPayload()
-        return await generate_granted_set(
+        return await generate(
             pool,
             current_context(),
             secret_registry=secret_registry,
-            projects=payload.projects,
-            window=payload.window,
-            formats=payload.formats,
-        )
-
-    @app.tool(
-        name=_ALL_PROJECTS_TOOL,
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def reports_generate_all_projects(
-        request: Annotated[
-            _AllProjectsReportPayload | None,
-            Field(description="All-project report filters request; omit for defaults."),
-        ] = None,
-    ) -> ToolResponse:
-        """Generate a downloadable platform-wide multi-section report over every project.
-
-        Captures one ``as_of`` snapshot and returns the sections inline (within a byte
-        budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
-        download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
-        inline KCU spend rollup with no spreadsheets, use ``accounting.report_all_projects``.
-        """
-        payload = request or _AllProjectsReportPayload()
-        return await generate_all_projects(
-            pool,
-            current_context(),
-            secret_registry=secret_registry,
-            window=payload.window,
-            formats=payload.formats,
+            request=request,
         )

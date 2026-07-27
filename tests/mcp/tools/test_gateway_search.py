@@ -664,3 +664,49 @@ def test_vmcore_list_vocabulary_finds_runs_get(monkeypatch: pytest.MonkeyPatch, 
     names = _match_names(content)
     assert "runs.get" in names, f"query {query!r} did not surface runs.get: {names}"
     assert "vmcore.list" not in names
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("accounting.usage_project", "accounting.usage"),
+        ("accounting.usage_investigation", "accounting.usage"),
+        ("usage for my projects", "accounting.usage"),
+        ("how much has this investigation spent", "accounting.usage"),
+        ("accounting.report_granted_set", "accounting.report"),
+        ("accounting.report_all_projects", "accounting.report"),
+        ("cost report across all projects", "accounting.report"),
+        ("spend rollup for my granted projects", "accounting.report"),
+        ("reports.generate_granted_set", "reports.generate"),
+        ("reports.generate_all_projects", "reports.generate"),
+        ("generate a billing report", "reports.generate"),
+        ("download a csv spend export", "reports.generate"),
+    ],
+)
+def test_accounting_scope_vocabulary_finds_the_merged_tool(
+    monkeypatch: pytest.MonkeyPatch, query: str, expected: str
+) -> None:
+    """The six retired scope names and their intent phrases rank the merged tool (ADR-0467).
+
+    The target kind (`project` / `investigation`) and the reporting scope (`granted-set` /
+    `all-projects`) used to *be* the tool names. After the consolidation they survive only as
+    discriminator enum values and retired-name vocabulary, so an agent that knows only an old
+    name — or that describes the money intent in words no surviving tool name spells — must
+    still land on the one tool.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert expected in names, f"query {query!r} did not surface {expected!r}: {names}"
+    assert not any(name.endswith(("_granted_set", "_all_projects")) for name in names)

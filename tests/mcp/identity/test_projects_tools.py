@@ -51,7 +51,7 @@ def test_role_bearing_grant_names_project_role_and_platform_roles() -> None:
     assert resp.suggested_next_actions == [
         "systems.list",
         "runs.list",
-        "accounting.report_granted_set",
+        "accounting.report",
     ]
 
 

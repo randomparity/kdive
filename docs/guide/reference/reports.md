@@ -2,43 +2,36 @@
 
 # `reports` tools
 
-## `reports.generate_all_projects`
+## `reports.generate`
 
 `implemented` · `read-only`
 
-Generate a downloadable platform-wide multi-section report over every project.
+Generate a downloadable multi-section report over projects you can see.
 
-Captures one ``as_of`` snapshot and returns the sections inline (within a byte
-budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
-download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
-inline KCU spend rollup with no spreadsheets, use ``accounting.report_all_projects``.
+``scope='granted-set'`` covers the projects you hold a role on — omit ``projects``
+for all of them, or name a subset (each is checked for ``viewer``).
+``scope='all-projects'`` covers every project on the platform and requires
+``platform_auditor``; without it the call is denied, so ``scope`` selects the
+report, it never grants access to one.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `request` | object (nullable) | no | All-project report filters request; omit for defaults. |
-
-`request` fields:
-
-- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
-- `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.
-
-## `reports.generate_granted_set`
-
-`implemented` · `read-only`
-
-Generate a downloadable multi-section report over the caller's granted projects.
-
-Captures one ``as_of`` snapshot and returns the sections inline (within a byte
-budget) while writing CSV/XLSX spreadsheets to the object store; the presigned
-download URLs land in ``refs``. A store outage degrades to inline-only. For a quick
-inline KCU spend rollup with no spreadsheets, use ``accounting.report_granted_set``.
+Either way the tool captures one ``as_of`` snapshot, returns the sections inline
+(within a byte budget) and writes CSV/XLSX spreadsheets to the object store; the
+presigned download URLs land in ``refs``. A store outage degrades to inline-only.
+For a quick inline KCU spend rollup with no spreadsheets, use
+``accounting.report``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object (nullable) | no | Granted-project report filters request; omit for defaults. |
+| `request` | object(scope=granted-set) \| object(scope=all-projects) | yes | Which projects the report covers: {'scope':'granted-set'} for your own projects (optionally narrowed by 'projects'), or {'scope':'all-projects'} for every project on the platform. |
 
 `request` fields:
 
-- `projects` (`array<string> (nullable)`, optional) — Named project subset; omit for all member projects with a role.
-- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
-- `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.
+- _variant object(scope=granted-set):_
+  - `scope` (``=granted-set``, required)
+  - `projects` (`array<string> (nullable)`, optional) — Named project subset; omit for all member projects with a role.
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.
+- _variant object(scope=all-projects):_
+  - `scope` (``=all-projects``, required)
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+  - `formats` (`array<string> (nullable)`, optional) — Spreadsheet formats: subset of ['csv','xlsx']; omit for both.

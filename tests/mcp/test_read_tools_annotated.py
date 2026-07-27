@@ -31,7 +31,7 @@ READ_TOOLS = [
     "runs.get",
     "jobs.list",
     "jobs.get",
-    "accounting.usage_project",
+    "accounting.usage",
     "inventory.list",
     "secrets.list",
     "images.list",

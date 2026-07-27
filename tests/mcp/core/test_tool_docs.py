@@ -41,12 +41,10 @@ _REPO_ROOT = next(parent for parent in _HERE.parents if (parent / "pyproject.tom
 _NON_LIVE_MARKERS = ("pytest.mark.live_vm", "pytest.mark.live_stack")
 _BEHAVIOR_TESTS_BY_TOOL = {
     "accounting.estimate": ("tests/mcp/accounting/test_accounting_tools.py",),
-    "accounting.report_all_projects": ("tests/mcp/accounting/test_accounting_report.py",),
-    "accounting.report_granted_set": ("tests/mcp/accounting/test_accounting_report.py",),
+    "accounting.report": ("tests/mcp/accounting/test_accounting_report.py",),
     "accounting.set_budget": ("tests/mcp/accounting/test_accounting_admin_tools.py",),
     "accounting.set_quota": ("tests/mcp/accounting/test_accounting_admin_tools.py",),
-    "accounting.usage_investigation": ("tests/mcp/accounting/test_accounting_usage.py",),
-    "accounting.usage_project": ("tests/mcp/accounting/test_accounting_usage.py",),
+    "accounting.usage": ("tests/mcp/accounting/test_accounting_usage.py",),
     "allocations.get": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "allocations.list": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "allocations.release": ("tests/mcp/lifecycle/test_allocations_reconcile.py",),
@@ -130,8 +128,7 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "ops.set_host_capacity": ("tests/mcp/ops/test_ops_tuning.py",),
     "ops.set_queue_paused": ("tests/mcp/ops/test_queue_tools.py",),
     "ops.tool_trail": ("tests/mcp/ops/test_tool_trail.py",),
-    "reports.generate_all_projects": ("tests/mcp/tools/reports/test_generate.py",),
-    "reports.generate_granted_set": ("tests/mcp/tools/reports/test_generate.py",),
+    "reports.generate": ("tests/mcp/tools/reports/test_generate.py",),
     "resources.availability": ("tests/mcp/catalog/test_availability_tools.py",),
     "resources.deregister": ("tests/mcp/ops/test_resources_mutation.py",),
     "resources.describe": ("tests/mcp/catalog/test_resources_tools.py",),
@@ -322,8 +319,6 @@ def _request_properties(params: dict[str, object]) -> dict[str, object]:
 def test_filtered_list_tools_use_request_payloads() -> None:
     tools = {t.name: t for t in TOOLS}
     expected_fields = {
-        "accounting.report_all_projects": {"group_by", "window"},
-        "accounting.report_granted_set": {"projects", "group_by", "window"},
         "artifacts.get": {"artifact_id", "find", "byte_offset", "max_bytes", "direction"},
         "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit", "cursor"},
         "investigations.list": {"project", "state", "limit", "cursor"},

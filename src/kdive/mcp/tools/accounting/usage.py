@@ -1,8 +1,20 @@
-"""Accounting usage MCP tools (ADR-0007 §6)."""
+"""The ``accounting.usage`` MCP tool (ADR-0007 §6, ADR-0467).
+
+One tool reads a spend rollup in two explicit target kinds, selected by a discriminated
+``target`` model:
+
+* **project** — ``require_project`` + ``require_role(viewer)`` on the named project.
+* **investigation** — resolve the investigation's owning project first, then run the
+  *identical* viewer check on that project, so an investigation id is never a
+  cross-project read bypass.
+
+Each branch keeps its own resolution and authorization; the discriminator only selects
+which branch runs.
+"""
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastmcp import FastMCP
@@ -14,12 +26,53 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
+from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
 from kdive.security.authz.context import RequestContext, require_project
 from kdive.security.authz.rbac import Role, require_role
 from kdive.services.accounting import ledger as accounting_domain
 
 _USAGE_OBJECT_ID = "usage"
+_TOOL = "accounting.usage"
+
+
+class ProjectUsageTarget(ToolPayload):
+    """Roll spend up for one named project."""
+
+    kind: Literal["project"]
+    project: Annotated[
+        str, Field(description="Project name to report spend for; you need viewer on it.")
+    ]
+
+
+class InvestigationUsageTarget(ToolPayload):
+    """Roll spend up for one investigation, plus its owning project's totals."""
+
+    kind: Literal["investigation"]
+    investigation_id: Annotated[
+        str,
+        Field(
+            description=(
+                "Investigation UUID to report spend for; you need viewer on the project "
+                "that owns it."
+            )
+        ),
+    ]
+
+
+type UsageTarget = ProjectUsageTarget | InvestigationUsageTarget
+
+
+async def usage(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    target: UsageTarget,
+) -> ToolResponse:
+    """Dispatch the typed ``accounting.usage`` target to its explicit handler."""
+    if isinstance(target, ProjectUsageTarget):
+        return await usage_project(pool, ctx, project=target.project)
+    return await usage_investigation(pool, ctx, investigation_id=target.investigation_id)
 
 
 async def usage_project(
@@ -40,7 +93,7 @@ async def usage_project(
             return ToolResponse.failure_from_error(
                 _USAGE_OBJECT_ID,
                 exc,
-                suggested_next_actions=["accounting.usage_project"],
+                suggested_next_actions=[_TOOL],
             )
 
 
@@ -77,7 +130,7 @@ async def usage_investigation(
             return ToolResponse.failure_from_error(
                 _USAGE_OBJECT_ID,
                 exc,
-                suggested_next_actions=["accounting.usage_investigation"],
+                suggested_next_actions=[_TOOL],
             )
     response = _usage_response(owning_project, rollup)
     response.data["investigation_id"] = investigation_id
@@ -114,25 +167,29 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
     """Register usage accounting tools on ``app``, bound to ``pool``."""
 
     @app.tool(
-        name="accounting.usage_project",
+        name=_TOOL,
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def accounting_usage_project(
-        project: Annotated[str, Field(description="Project to report spend for.")],
-    ) -> ToolResponse:
-        """Return usage totals for one project."""
-        return await usage_project(pool, current_context(), project=project)
-
-    @app.tool(
-        name="accounting.usage_investigation",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def accounting_usage_investigation(
-        investigation_id: Annotated[
-            str, Field(description="Investigation UUID to report spend for.")
+    async def accounting_usage(
+        target: Annotated[
+            UsageTarget,
+            Field(
+                discriminator="kind",
+                description=(
+                    "What to report spend for: {'kind':'project','project':'<name>'} or "
+                    "{'kind':'investigation','investigation_id':'<uuid>'}."
+                ),
+            ),
         ],
     ) -> ToolResponse:
-        """Return usage totals for one investigation."""
-        return await usage_investigation(pool, current_context(), investigation_id=investigation_id)
+        """Return KCU spend totals for one project, or for one investigation.
+
+        Both target kinds need ``viewer`` on the project — for an investigation target that
+        is the project owning the investigation, resolved server-side, so an investigation
+        id cannot read a project you have no role on. ``data`` carries ``spent_kcu``,
+        ``budget_remaining``, ``shared_kcu``, and a ``by_cost_class`` breakdown; an
+        investigation target adds ``investigation_kcu`` for that investigation's own share.
+        For a multi-project rollup use ``accounting.report``.
+        """
+        return await usage(pool, current_context(), target=target)

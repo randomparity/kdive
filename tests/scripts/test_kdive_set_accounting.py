@@ -40,7 +40,7 @@ def test_build_calls_uses_flat_quota_params_and_defaults() -> None:
     ns = acct.parse(["--base", "http://h/mcp"])
     calls = acct.build_calls(ns)
     names = [n for n, _ in calls]
-    assert names == ["accounting.set_quota", "accounting.set_budget", "accounting.usage_project"]
+    assert names == ["accounting.set_quota", "accounting.set_budget", "accounting.usage"]
     quota = dict(calls)["accounting.set_quota"]
     assert quota == {
         "project": "demo",
@@ -77,7 +77,7 @@ def test_parse_accepts_full_long_form_argv_from_setup_scripts() -> None:
     assert [n for n, _ in acct.build_calls(ns)] == [
         "accounting.set_quota",
         "accounting.set_budget",
-        "accounting.usage_project",
+        "accounting.usage",
     ]
 
 
@@ -90,7 +90,7 @@ def test_run_invokes_three_tools_with_bearer(monkeypatch) -> None:
     assert [n for n, _ in _FakeClient.calls] == [
         "accounting.set_quota",
         "accounting.set_budget",
-        "accounting.usage_project",
+        "accounting.usage",
     ]
 
 
@@ -101,7 +101,7 @@ def test_run_stops_and_returns_1_on_first_tool_error(monkeypatch) -> None:
     ns = acct.parse(["--base", "http://h/mcp", "--token", "T", "--project", "acme"])
     rc = asyncio.run(acct.run(ns))
     assert rc == 1
-    # The loop stops at the first failure; set_budget / usage_project are never attempted.
+    # The loop stops at the first failure; set_budget / usage are never attempted.
     assert [n for n, _ in _FakeClient.calls] == ["accounting.set_quota"]
 
 

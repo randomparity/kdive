@@ -1,4 +1,9 @@
-"""reports.generate_* handler tests — scope, RBAC, output shape, store degrade (ADR-0208)."""
+"""``reports.generate`` handler tests — scope, RBAC, output shape, store degrade (ADR-0208).
+
+Every call goes through the real dispatcher (:func:`generate`) with a request model parsed
+from raw arguments, so the discriminated branch selection the MCP wrapper performs is what
+the tests exercise (ADR-0467).
+"""
 
 from __future__ import annotations
 
@@ -10,16 +15,25 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import uuid4
 
+import psycopg
+import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
+from pydantic import TypeAdapter
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.db.repositories import ALLOCATIONS, RESOURCES, SYSTEMS
 from kdive.domain.capacity.state import AllocationState, ResourceStatus, SystemState
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.reports import generate as generate_module
-from kdive.mcp.tools.reports.generate import generate_all_projects, generate_granted_set
+from kdive.mcp.tools.reports.generate import (
+    AllProjectsGenerateRequest,
+    GenerateReportRequest,
+    StoreFactory,
+    generate,
+)
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.security.secrets.redaction import REDACTION
@@ -86,6 +100,35 @@ def _secret_registry() -> SecretRegistry:
     return SecretRegistry()
 
 
+async def _generate(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    scope: str = "granted-set",
+    projects: list[str] | None = None,
+    window: list[str | None] | None = None,
+    formats: list[str] | None = None,
+    store_factory: StoreFactory = _store_factory,
+) -> ToolResponse:
+    """Drive ``reports.generate`` through the real dispatcher with a parsed request model.
+
+    Parsing the raw argument dict through the discriminated union is what the MCP wrapper
+    does, so the tests exercise the same isinstance branch selection (ADR-0467) rather than
+    calling a branch handler the caller could never have reached.
+    """
+    payload: dict[str, object] = {"scope": scope, "window": window, "formats": formats}
+    if scope == "granted-set":
+        payload["projects"] = projects
+    request = TypeAdapter(GenerateReportRequest).validate_python(payload)
+    return await generate(
+        pool,
+        ctx,
+        secret_registry=_secret_registry(),
+        request=request,
+        store_factory=store_factory,
+    )
+
+
 @asynccontextmanager
 async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
     pool = AsyncConnectionPool(url, min_size=1, max_size=3, open=False)
@@ -149,15 +192,7 @@ def test_granted_set_viewer_returns_all_sections_and_refs(migrated_url: str) -> 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await generate_granted_set(
-                pool,
-                _ctx(),
-                secret_registry=_secret_registry(),
-                projects=None,
-                window=None,
-                formats=["csv", "xlsx"],
-                store_factory=_store_factory,
-            )
+            resp = await _generate(pool, _ctx(), formats=["csv", "xlsx"])
         assert resp.status == "ok"
         assert {item.data["section"] for item in resp.items} == _SECTIONS
         assert "xlsx" in resp.refs
@@ -170,15 +205,7 @@ def test_granted_set_viewer_returns_all_sections_and_refs(migrated_url: str) -> 
 def test_granted_set_role_less_named_project_denied(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await generate_granted_set(
-                pool,
-                _ctx(role=None),
-                secret_registry=_secret_registry(),
-                projects=["proj"],
-                window=None,
-                formats=["csv"],
-                store_factory=_store_factory,
-            )
+            resp = await _generate(pool, _ctx(role=None), projects=["proj"], formats=["csv"])
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
 
@@ -188,21 +215,12 @@ def test_granted_set_role_less_named_project_denied(migrated_url: str) -> None:
 def test_all_projects_requires_platform_auditor(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            denied = await generate_all_projects(
-                pool,
-                _ctx(),
-                secret_registry=_secret_registry(),
-                window=None,
-                formats=["csv"],
-                store_factory=_store_factory,
-            )
-            ok = await generate_all_projects(
+            denied = await _generate(pool, _ctx(), scope="all-projects", formats=["csv"])
+            ok = await _generate(
                 pool,
                 _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR})),
-                secret_registry=_secret_registry(),
-                window=None,
+                scope="all-projects",
                 formats=["csv"],
-                store_factory=_store_factory,
             )
         assert denied.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert ok.status == "ok"
@@ -214,15 +232,7 @@ def test_all_projects_requires_platform_auditor(migrated_url: str) -> None:
 def test_empty_formats_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await generate_granted_set(
-                pool,
-                _ctx(),
-                secret_registry=_secret_registry(),
-                projects=None,
-                window=None,
-                formats=[],
-                store_factory=_store_factory,
-            )
+            resp = await _generate(pool, _ctx(), formats=[], store_factory=_store_factory)
         assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
 
     asyncio.run(_run())
@@ -232,14 +242,8 @@ def test_store_outage_degrades_to_inline(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await generate_granted_set(
-                pool,
-                _ctx(),
-                secret_registry=_secret_registry(),
-                projects=None,
-                window=None,
-                formats=["csv", "xlsx"],
-                store_factory=_failing_factory,
+            resp = await _generate(
+                pool, _ctx(), formats=["csv", "xlsx"], store_factory=_failing_factory
             )
         assert resp.status == "ok"
         assert resp.refs == {}
@@ -264,15 +268,7 @@ def test_missing_xlsx_dependency_is_not_reported_as_store_error(
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_system(pool)
-            resp = await generate_granted_set(
-                pool,
-                _ctx(),
-                secret_registry=_secret_registry(),
-                projects=None,
-                window=None,
-                formats=["xlsx"],
-                store_factory=_store_factory,
-            )
+            resp = await _generate(pool, _ctx(), formats=["xlsx"], store_factory=_store_factory)
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.MISSING_DEPENDENCY.value
         assert resp.data["dependency"] == "openpyxl"
@@ -319,12 +315,201 @@ def test_build_report_redacts_with_app_owned_registry(monkeypatch) -> None:  # n
             secret_registry=registry,
             store_factory=_failing_factory,
             scope_label="granted-set",
-            next_tool="reports.generate_granted_set",
         )
 
         rows = response.items[0].data["rows_json"]
         assert isinstance(rows, str)
         assert _SECRET not in rows
         assert REDACTION in rows
+
+    asyncio.run(_run())
+
+
+# ---- ADR-0467 branch-authorization matrix ------------------------------------------
+
+_PROJECT_ROLES = {
+    "project_viewer": Role.VIEWER,
+    "project_contributor": Role.CONTRIBUTOR,
+    "project_admin": Role.ADMIN,
+}
+_PLATFORM_ROLES = {
+    "platform_operator": PlatformRole.PLATFORM_OPERATOR,
+    "platform_admin": PlatformRole.PLATFORM_ADMIN,
+    "platform_auditor": PlatformRole.PLATFORM_AUDITOR,
+}
+
+
+def _matrix_ctx(identity: str) -> RequestContext:
+    """The RequestContext for one identity in the matrix ('unauthorized' holds nothing)."""
+    project_role = _PROJECT_ROLES.get(identity)
+    if project_role is not None:
+        return _ctx(role=project_role)
+    platform_role = _PLATFORM_ROLES.get(identity)
+    if platform_role is not None:
+        return _ctx(projects=(), role=None, platform=frozenset({platform_role}))
+    return _ctx(projects=(), role=None)
+
+
+@pytest.mark.parametrize("identity", ["platform_auditor", "platform_admin"])
+def test_matrix_all_projects_allowed(migrated_url: str, identity: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            resp = await _generate(
+                pool, _matrix_ctx(identity), scope="all-projects", formats=["csv"]
+            )
+        assert resp.status == "ok"
+        assert resp.data["scope"] == "all-projects"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        "project_viewer",
+        "project_contributor",
+        "project_admin",
+        "platform_operator",
+        "unauthorized",
+    ],
+)
+def test_matrix_all_projects_denied(migrated_url: str, identity: str) -> None:
+    # The gate is the first statement of the all-projects branch, so sending
+    # scope='all-projects' selects that branch and is refused there — no sections, no refs.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            resp = await _generate(
+                pool, _matrix_ctx(identity), scope="all-projects", formats=["csv"]
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert resp.items == []
+        assert resp.refs == {}
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("identity", ["project_viewer", "project_contributor", "project_admin"])
+def test_matrix_granted_set_allowed(migrated_url: str, identity: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            resp = await _generate(pool, _matrix_ctx(identity), formats=["csv"])
+        assert resp.status == "ok"
+        assert resp.data["scope"] == "granted-set"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["platform_operator", "platform_admin", "platform_auditor", "unauthorized"],
+)
+def test_matrix_granted_set_without_project_grant_names_no_project(
+    migrated_url: str, identity: str
+) -> None:
+    # A platform role is not a project grant: the granted-set branch resolves from
+    # ctx.projects and never the SQL universe, so the report spans no project.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            resp = await _generate(pool, _matrix_ctx(identity), formats=["csv"])
+        assert resp.status == "ok"
+        assert resp.data["scope"] == "granted-set"
+        assert all(item.data["count"] == 0 for item in resp.items)
+
+    asyncio.run(_run())
+
+
+def test_viewer_supplied_all_projects_scope_is_denied_at_the_branch(migrated_url: str) -> None:
+    """Agent-supplied ``scope='all-projects'`` selects the branch; the branch denies it."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            request = TypeAdapter(GenerateReportRequest).validate_python(
+                {"scope": "all-projects", "formats": ["csv"]}
+            )
+            assert isinstance(request, AllProjectsGenerateRequest)
+            resp = await generate(
+                pool,
+                _ctx(),
+                secret_registry=_secret_registry(),
+                request=request,
+                store_factory=_store_factory,
+            )
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert resp.items == []
+
+    asyncio.run(_run())
+
+
+# ---- audit attribution under one tool name (ADR-0467) ------------------------------
+
+
+async def _platform_audit_rows(url: str) -> list[tuple[object, ...]]:
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=True)
+    async with conn, conn.cursor() as cur:
+        await cur.execute("SELECT principal, platform_role, tool, scope FROM platform_audit_log")
+        return list(await cur.fetchall())
+
+
+def test_audit_rows_stay_distinguishable_under_one_tool_name(migrated_url: str) -> None:
+    """Both scopes audit as ``reports.generate``; ``scope`` + ``platform_role`` separate them."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            multi = _ctx(projects=("proj", "proj-b"))
+            assert (await _generate(pool, multi, formats=["csv"])).status == "ok"
+            auditor = _ctx(platform=frozenset({PlatformRole.PLATFORM_AUDITOR}))
+            assert (
+                await _generate(pool, auditor, scope="all-projects", formats=["csv"])
+            ).status == "ok"
+        rows = sorted(await _platform_audit_rows(migrated_url), key=lambda r: str(r[3]))
+        assert [r[2] for r in rows] == ["reports.generate", "reports.generate"]
+        assert rows[0][3] == "all-projects"
+        assert rows[0][1] == "platform_auditor"
+        assert rows[1][3] == "granted-set:proj,proj-b"
+        assert rows[1][1] is None
+
+    asyncio.run(_run())
+
+
+def test_single_project_granted_set_is_not_audited(migrated_url: str) -> None:
+    # The granted-set audit stays conditional (>1 target); a caller reading only its own
+    # single project writes no platform_audit_log row.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            assert (await _generate(pool, _ctx(), formats=["csv"])).status == "ok"
+        assert await _platform_audit_rows(migrated_url) == []
+
+    asyncio.run(_run())
+
+
+def test_all_projects_denial_audited_only_with_a_platform_role(migrated_url: str) -> None:
+    # ADR-0043 §4: a project-only token's denial is the routine non-grant case and is not
+    # recorded; a platform_operator's over-reach is.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_system(pool)
+            denied = await _generate(pool, _ctx(), scope="all-projects", formats=["csv"])
+            assert denied.status == "error"
+            assert await _platform_audit_rows(migrated_url) == []
+            operator = _ctx(
+                projects=(), role=None, platform=frozenset({PlatformRole.PLATFORM_OPERATOR})
+            )
+            assert (
+                await _generate(pool, operator, scope="all-projects", formats=["csv"])
+            ).status == "error"
+        rows = await _platform_audit_rows(migrated_url)
+        assert len(rows) == 1
+        assert rows[0][1] == "platform_operator"
+        assert rows[0][2] == "reports.generate"
+        assert rows[0][3] == "all-projects"
 
     asyncio.run(_run())

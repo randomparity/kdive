@@ -14,7 +14,7 @@ each handler's ``ToolResponse`` and are **not** exposed on the ``Tool`` schema t
 ``list_tools()`` returns (its ``suggested_next_actions`` output-schema field is the generic
 ``array-of-string`` shape). A blanket "no tool self-loops" rule is likewise out of scope and
 would be wrong — the clean registry has intentional retry/re-poll self-loops
-(``accounting.estimate``, ``accounting.usage_project``, ``artifacts.fetch_raw``,
+(``accounting.estimate``, ``accounting.usage``, ``artifacts.fetch_raw``,
 ``fixtures.validate``, ``jobs.wait``). The true, guardable invariant is that no *golden-path
 stage* is self-referential, which is what this module asserts.
 """

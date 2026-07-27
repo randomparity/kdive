@@ -116,16 +116,16 @@ _PLAT_AUDITOR = frozenset({ExposureScope.PLATFORM_AUDITOR})
 # live registry.
 _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # accounting
-    "accounting.usage_project": _VIEWER,
-    "accounting.usage_investigation": _VIEWER,
+    "accounting.usage": _VIEWER,
     "accounting.estimate": _VIEWER,
-    "accounting.report_granted_set": _VIEWER,
-    "accounting.report_all_projects": _PLAT_AUDITOR,
+    # accounting.report / reports.generate are dual: the granted-set scope needs only a
+    # project viewer role, the all-projects scope needs platform_auditor. The gate is per
+    # branch inside the handler; this any-of set is listing metadata (ADR-0467).
+    "accounting.report": frozenset({ExposureScope.PROJECT_VIEWER, ExposureScope.PLATFORM_AUDITOR}),
     "accounting.set_budget": _ADMIN,
     "accounting.set_quota": _ADMIN,
     # reports
-    "reports.generate_granted_set": _VIEWER,
-    "reports.generate_all_projects": _PLAT_AUDITOR,
+    "reports.generate": frozenset({ExposureScope.PROJECT_VIEWER, ExposureScope.PLATFORM_AUDITOR}),
     # allocations
     "allocations.get": _VIEWER,
     "allocations.list": _VIEWER,
