@@ -12,9 +12,9 @@ boot image correctly the first time.
   upload flow) read the build lane:
   resource://kdive/docs/operating/external-build-upload.md — this page complements it, it does
   not repeat it.
-- For the machine-readable byte contract (magic offsets per arch), call
-  `artifacts.expected_uploads` and read
-  `contracts.kernel.layout[boot/vmlinuz].formats_by_arch`.
+- For the machine-readable byte contract (magic offsets per arch), read
+  `resource://kdive/contracts/external-build` and inspect
+  `upload_contracts.run.contracts.kernel.layout[boot/vmlinuz].formats_by_arch`.
 
 ## Determine your architecture first
 

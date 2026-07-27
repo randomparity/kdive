@@ -205,6 +205,16 @@ class LiveStackClient:
         tools = await self._client.list_tools()
         return [tool.name for tool in tools]
 
+    async def read_text_resource(self, uri: str) -> str:
+        """Read a text MCP resource by URI."""
+        contents = await self._client.read_resource(uri)
+        if not contents:
+            raise RuntimeError(f"resource {uri!r} returned no content")
+        text = getattr(contents[0], "text", None)
+        if not isinstance(text, str):
+            raise RuntimeError(f"resource {uri!r} did not return text content")
+        return text
+
     async def call_tool(self, name: str, **args: object) -> ToolResponse | list[ToolResponse]:
         """Call ``name`` and parse the structured output into ``ToolResponse``.
 

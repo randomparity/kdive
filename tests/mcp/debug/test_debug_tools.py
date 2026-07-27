@@ -1035,8 +1035,8 @@ def test_start_session_drgn_live_warns_when_config_lacks_debuginfo(migrated_url:
         warning = cast(dict[str, Any], resp.data["missing_debuginfo"])
         assert warning["reason"] == "missing_debuginfo"
         assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
+        assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
         assert resp.suggested_next_actions == [
-            "artifacts.feature_config_requirements",
             "introspect.run",
             "introspect.script",
             "debug.end_session",
@@ -1190,8 +1190,8 @@ def test_start_session_drgn_live_blind_guest_warns_debuginfo_unloadable(migrated
     assert warning["reason"] == "debuginfo_unloadable"
     assert "DEBUG_INFO_BTF" in cast(list[str], warning["missing"])
     assert port.probe_calls == 1
+    assert resp.refs["external_build_contract"] == "resource://kdive/contracts/external-build"
     assert resp.suggested_next_actions == [
-        "artifacts.feature_config_requirements",
         "introspect.run",
         "introspect.script",
         "debug.end_session",

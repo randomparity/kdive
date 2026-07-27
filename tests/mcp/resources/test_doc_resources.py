@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.resources import registrar
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.resources.registrar import DOC_RESOURCES, audience_by_uri, register
 from kdive.providers.core.resolver import ProviderResolver
 
@@ -54,14 +55,16 @@ def test_audience_by_uri_covers_every_entry() -> None:
 
     mapping = audience_by_uri()
     # Keys are AnyUrl-normalized so the middleware's str(uri) lookup matches them exactly.
-    assert set(mapping) == {str(AnyUrl(entry.uri)) for entry in DOC_RESOURCES}
+    expected = {str(AnyUrl(entry.uri)) for entry in DOC_RESOURCES}
+    expected.add(str(AnyUrl(EXTERNAL_BUILD_CONTRACT_URI)))
+    assert set(mapping) == expected
     assert all(v in {"all", "operator"} for v in mapping.values())
 
 
 def test_register_returns_count_and_lists_every_uri_verbatim() -> None:
     app = FastMCP("probe")
     count = register(app, resolver=_ALL_KINDS)
-    assert count == len(DOC_RESOURCES)
+    assert count == len(DOC_RESOURCES) + 1
 
     async def _uris() -> set[str]:
         return {str(r.uri) for r in await app.list_resources()}
@@ -70,6 +73,7 @@ def test_register_returns_count_and_lists_every_uri_verbatim() -> None:
     # URIs must round-trip verbatim — a FastMCP scheme/host normalization would silently
     # change the advertised public contract.
     assert {e.uri for e in DOC_RESOURCES} <= listed
+    assert EXTERNAL_BUILD_CONTRACT_URI in listed
 
 
 def test_each_resource_reads_back_canonical_doc_text() -> None:
@@ -119,14 +123,14 @@ def test_register_skips_doc_whose_required_kind_is_absent(monkeypatch: pytest.Mo
     monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, _gated_remote_doc()))
     app = FastMCP("probe")
     count = register(app, resolver=_resolver({ResourceKind.LOCAL_LIBVIRT}))
-    assert count == len(DOC_RESOURCES)  # the gated entry is skipped
+    assert count == len(DOC_RESOURCES) + 1  # the gated entry is skipped
 
 
 def test_register_includes_doc_when_required_kind_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(registrar, "DOC_RESOURCES", (*DOC_RESOURCES, _gated_remote_doc()))
     app = FastMCP("probe")
     count = register(app, resolver=_resolver({ResourceKind.REMOTE_LIBVIRT}))
-    assert count == len(DOC_RESOURCES) + 1
+    assert count == len(DOC_RESOURCES) + 2
 
 
 _RESOURCE_URI = re.compile(r"resource://kdive/docs/[^\s)\"'>]+")

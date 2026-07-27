@@ -60,8 +60,8 @@ Finalize an externally built Run: validate the uploaded artifacts, mark it succe
 
 The `kernel` tar's boot/vmlinuz member is validated against the Run's build-profile arch
 (declared at runs.create): a bzImage for x86_64, an ELF vmlinux for ppc64le. A payload that
-does not match the declared arch is rejected. See artifacts.expected_uploads for the
-per-arch byte contract.
+does not match the declared arch is rejected. See
+resource://kdive/contracts/external-build for the per-arch byte contract.
 
 Finalize before the `manifest_deadline` that `artifacts.create_run_upload` returned —
 chunked and single-PUT alike. A later call is rejected with
@@ -91,13 +91,13 @@ for the finalize to answer, then act on what it says.
 
 Create a run, bound to a system or unbound against a target_kind.
 
-After runs.create, call artifacts.expected_uploads and artifacts.create_run_upload, then
-runs.complete_build. Extra kernel cmdline args are passed later as the `cmdline` field on
-runs.complete_build.
+After runs.create, read resource://kdive/contracts/external-build, call
+artifacts.create_run_upload, then runs.complete_build. Extra kernel cmdline args are
+passed later as the `cmdline` field on runs.complete_build.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `build_profile` | object(schema_version=1) | yes | Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, call artifacts.expected_uploads to learn the exact bytes to produce and artifacts.feature_config_requirements to learn which CONFIG_* each debug feature needs, artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload. |
+| `build_profile` | object(schema_version=1) | yes | Build profile for the Run's kernel: a thin document, e.g. {'schema_version': 1} or {'schema_version': 1, 'arch': 'ppc64le'}. 'arch' (default x86_64) is the target CPU architecture and selects the boot/vmlinuz upload payload format (bzImage for x86_64, ELF vmlinux for ppc64le). The kernel is built locally and uploaded, so no source tree or config is named here. After runs.create, read resource://kdive/contracts/external-build to learn the exact bytes to produce and which CONFIG_* each debug feature needs, call artifacts.create_run_upload to upload, then runs.complete_build (where you may also record the optional source_label/source_ref provenance of the tree you built from - an unverified client claim, surfaced in runs.get data.build_provenance). Extra kernel cmdline args (e.g. 'dhash_entries=1') are not set here: pass the cmdline field to runs.complete_build. See resource://kdive/docs/operating/external-build-upload.md for shaping an upload. |
 | `expected_boot_failure` | object(free-form) (nullable) | no | Optional declared boot crash. Use a named preset for a maintained, version- and arch-robust signature: {'kind':'panic'}, {'kind':'oops'}, {'kind':'hung_task'}, or {'kind':'ubsan'} - a preset takes no 'pattern' and expands to a canonical kernel console signature. For a custom signature use {'kind':'console_crash','pattern':'Unable to handle kernel'}; a preset and a custom 'pattern' are mutually exclusive. The pattern is matched as a case-sensitive literal substring (not a regex), tested line-by-line against the redacted console log; a single line containing the substring is a match. Use '\|' to OR alternatives (e.g. 'Oops\|Unable to handle kernel') - up to 16 terms, 256 characters total, each term non-empty. A match makes the expected crash the Run's success outcome. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
 | `investigation_id` | string | yes | Investigation to attach the Run to. |

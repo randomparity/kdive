@@ -119,7 +119,6 @@ def test_build_boot_debug_leads_with_external_upload_loop() -> None:
     tools = [step.tool for step in spec.steps]
     upload_loop = [
         "runs.create",
-        "artifacts.expected_uploads",
         "artifacts.create_run_upload",
         "runs.complete_build",
     ]
@@ -127,6 +126,7 @@ def test_build_boot_debug_leads_with_external_upload_loop() -> None:
     # runs.build (the warm-tree enqueue verb) is no longer a step in the journey.
     assert "runs.build" not in tools
     assert "runs.complete_build" in spec.summary
+    assert "resource://kdive/contracts/external-build" in spec.summary
     assert "upload" in spec.summary.lower()
 
 

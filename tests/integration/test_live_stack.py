@@ -47,6 +47,7 @@ from kdive.mcp.dev_harness import (
     LiveStackToolError,
     OidcIssuer,
 )
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import (
@@ -295,25 +296,25 @@ def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
     return tar_path
 
 
-def _accepted_run_upload_names(contract: ToolResponse) -> set[str]:
-    """The ``run`` owner-kind's accepted names from an ``artifacts.expected_uploads`` contract."""
-    for item in contract.items:
-        data = item.data or {}
-        if data.get("owner_kind") == "run":
-            names = data.get("accepted_names", [])
-            return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+def _accepted_run_upload_names(contract: dict[str, object]) -> set[str]:
+    """The ``run`` owner-kind's accepted names from the external-build contract resource."""
+    upload_contracts = contract.get("upload_contracts", {})
+    run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
+    if isinstance(run_contract, dict):
+        names = run_contract.get("accepted_names", [])
+        return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
     return set()
 
 
 async def _build_and_upload_kernel(op: LiveStackClient, *, run_id: str) -> None:
     """Build the x86_64 kernel tar from ``KDIVE_KERNEL_SRC`` and drive the external-upload lane.
 
-    Replaces the removed server-build lane (``runs.build``): discover the contract
-    (``artifacts.expected_uploads``), cut the combined ``kernel`` tar, declare + PUT it via
+    Replaces the removed server-build lane (``runs.build``): read the contract resource, cut the
+    combined ``kernel`` tar, declare + PUT it via
     ``artifacts.create_run_upload``, then ``runs.complete_build``. The Run goes CREATED → SUCCEEDED
     with ``steps.build == succeeded`` (set by construction in steps.py), ready for ``runs.install``.
     """
-    contract = ok(await scalar(op, "artifacts.expected_uploads"), "upload-build")
+    contract = json.loads(await op.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = _accepted_run_upload_names(contract)
     if "kernel" not in accepted:
         raise SpinePhaseError(

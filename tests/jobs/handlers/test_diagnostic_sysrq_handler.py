@@ -354,7 +354,7 @@ def test_no_console_output_fails_configuration_error(
     # requirement is surfaced in the runtime no-output remediation instead.
     assert excinfo.value.details["remediation"] == (
         "build the guest kernel with CONFIG_MAGIC_SYSRQ=y (see "
-        "artifacts.feature_config_requirements) and a PS/2 keyboard driver "
+        "resource://kdive/contracts/external-build) and a PS/2 keyboard driver "
         "(i8042/atkbd), and enable kernel.sysrq in the guest for this command"
     )
 

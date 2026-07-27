@@ -60,7 +60,7 @@ kernel with neither BTF nor an uploaded `vmlinux` returns a non-fatal `missing_d
 worker decompresses and repacks the whole module tree. Enable it only for live drgn/gdb symbol
 resolution or offline vmcore analysis. For a boot-time crash reproducer or any investigation whose
 evidence is the serial-console log (an oops/panic before userspace), omit it. The
-`artifacts.feature_config_requirements` `debuginfo` entry states the same when/cost tradeoff.
+`resource://kdive/contracts/external-build` `debuginfo` entry states the same when/cost tradeoff.
 When you do build a DWARF-heavy kernel, an operator can point `KDIVE_INSTALL_SCRATCH` at a tmpfs
 mount to keep the large, short-lived install intermediates off the staging disk (mind the RAM
 tradeoff — see the config reference).
@@ -71,7 +71,7 @@ introspection also depends on the guest image's drgn build being able to load th
 BTF but the in-guest drgn cannot actually resolve symbols, `introspect.run` / `introspect.script`
 return a non-fatal `debuginfo_unloadable` warning naming the likely cause; remediate by booting a
 BTF-capable guest image with a newer drgn, or by uploading a matching `vmlinux`.
-See `artifacts.feature_config_requirements` for the per-feature `CONFIG_*` manifest.
+See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest.
 
 ## The `kernel` artifact: one combined gzip tar
 
@@ -95,7 +95,8 @@ The tar must also contain:
 
 The declared `arch` and the payload must agree: an x86 bzImage under `arch: ppc64le`, or an ELF
 (or non-ppc64 ELF) under `arch: x86_64`, is rejected. Learn the exact per-arch magic bytes from
-`artifacts.expected_uploads` (`contracts.kernel.layout[boot/vmlinuz].formats_by_arch`).
+`resource://kdive/contracts/external-build`
+(`upload_contracts.run.contracts.kernel.layout[boot/vmlinuz].formats_by_arch`).
 
 Two further rules come from how the artifact is validated and consumed:
 
@@ -210,7 +211,8 @@ tar -tzf kernel.tar.gz | head    # boot/vmlinuz must be first; lib/modules/<rele
 
 ## The upload flow
 
-1. `artifacts.expected_uploads` — confirm the accepted names for the `run` owner-kind.
+1. Read `resource://kdive/contracts/external-build` — confirm the accepted names for the `run`
+   owner-kind and the per-feature `CONFIG_*` manifest.
 2. Build `kernel.tar.gz` with the recipe above (plus any optional artifacts).
 3. `artifacts.create_run_upload` — declare each artifact `{name, sha256 (base64), size_bytes}`
    and receive one upload item per artifact. Each item contains `refs.upload_url` and
@@ -251,6 +253,6 @@ stored SHA-256 checksum …`) — upload through the signed URL so the checksum 
 ## Related
 
 - [`artifacts` tool reference](../guide/reference/artifacts.md) — `create_run_upload`,
-  `expected_uploads`, and chunked-upload parameters.
+  upload declarations, and chunked-upload parameters.
 - [`runs` tool reference](../guide/reference/runs.md) — `runs.create` build profiles and
   `runs.complete_build`.
