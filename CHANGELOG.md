@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Publish agent-safe build contracts
 - Resolve agent and operator tool-exposure profiles
 - Default the agent profile to the tool gateway
+- Index retired tool names for tools.search
+- Express required boolean params as --flag/--no-flag
 
 ### Changed
 
@@ -63,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename _required_staging_bytes to _staging_budget
 - Reuse the manifest helpers and fold the test stores
 - Name the renamed reuse gate in two stale comments
+- Fold postmortem.triage into postmortem.crash
+- Replace queue pause/resume with one state setter
 
 ### Documentation
 
@@ -134,8 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconcile the 1539 spec with ADR-0451's residues
 - Record the server-side sweep in the spec too
 - Give ADR-0455's deferrals their tracking issues
+- Describe the gateway as the default surface
 - Decide to retire the staged System definition lane
 - Tighten ADR-0457 migration and consumer wording
+- Record the single queue state setter
 
 ### Fixed
 

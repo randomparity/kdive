@@ -249,8 +249,10 @@ def _verb_parser(
 def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) -> None:
     """Declare one schema-derived ``--flag`` on ``parser`` per its :class:`GeneratedFlag`.
 
-    Honors ``action`` (``store_true`` / ``append``), ``arg_type`` (``str`` / ``int`` /
-    ``float``), and ``choices`` (enum). The ``--<param>-json`` escape for non-scalar params is
+    Honors ``action`` (``store_true`` / ``bool_optional`` / ``append``), ``arg_type``
+    (``str`` / ``int`` / ``float``), and ``choices`` (enum). ``bool_optional`` declares the
+    ``--flag`` / ``--no-flag`` pair a required boolean needs to express false.
+    The ``--<param>-json`` escape for non-scalar params is
     a sibling (:func:`_add_generated_json_flag`); the flag-value-to-payload assembly (#1450) is
     downstream. This only shapes the parser so every generated verb is reachable at its path.
     """
@@ -259,6 +261,14 @@ def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) ->
     choices = flag.choices or None
     if flag.action == "store_true":
         parser.add_argument(flag.name, dest=dest, action="store_true", help=help_)
+    elif flag.action == "bool_optional":
+        parser.add_argument(
+            flag.name,
+            dest=dest,
+            action=argparse.BooleanOptionalAction,
+            required=flag.required,
+            help=help_,
+        )
     elif flag.action == "append":
         parser.add_argument(
             flag.name,

@@ -239,8 +239,10 @@ def _assemble_generated_payload(verb: GeneratedVerb, args: argparse.Namespace) -
     the ``registry.GENERATED_ARG_PREFIX`` dest; this strips the prefix to rebuild the tool payload.
     A ``store_true`` flag contributes only when set (an unset boolean is omitted, letting the
     server default hold — argparse cannot distinguish "unset" from an explicit ``False``); every
-    other absent flag (``None``) is likewise omitted. A ``--<param>-json`` value was validated to a
-    JSON container at parse time (:func:`registry._json_container_arg`), so it re-parses cleanly.
+    other absent flag (``None``) is likewise omitted. A ``bool_optional`` flag falls in that
+    second group, so an explicit ``--no-<flag>`` sends ``False`` rather than dropping the key.
+    A ``--<param>-json`` value was validated to a JSON container at parse time
+    (:func:`registry._json_container_arg`), so it re-parses cleanly.
     For an ``unwrap_request`` verb the whole body is re-wrapped under a single ``request`` key (and
     no key at all when nothing was given), exactly as the curated read verbs do by hand.
     """

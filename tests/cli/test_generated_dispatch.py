@@ -166,6 +166,21 @@ def test_payload_store_true_included_only_when_set() -> None:
     assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("wait"): False})) == {}
 
 
+def test_payload_bool_optional_sends_both_states() -> None:
+    # A required boolean uses --flag/--no-flag, so unlike store_true an explicit false is a
+    # value to send, not an omission: ops.set_queue_paused could otherwise never resume.
+    paused = GeneratedFlag(
+        name="--paused", dest="paused", required=True, help="", action="bool_optional"
+    )
+    verb = _verb("ops.set_queue_paused", flags=(paused,))
+    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("paused"): True})) == {
+        "paused": True
+    }
+    assert dispatch._assemble_generated_payload(verb, _ns(**{_dest("paused"): False})) == {
+        "paused": False
+    }
+
+
 def test_payload_append_flag_included_when_present() -> None:
     pkgs = GeneratedFlag(name="--pkg", dest="pkg", required=False, help="", action="append")
     verb = _verb("images.build", flags=(pkgs,))

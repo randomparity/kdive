@@ -211,11 +211,10 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "ops.export_cost_classes": _PLAT_OP,
     "ops.export_systems_toml": _PLAT_OP,
     "ops.jobs_list": _PLAT_OP,
-    "ops.queue_pause": _PLAT_OP,
-    "ops.queue_resume": _PLAT_OP,
     "ops.reconcile_now": _PLAT_OP,
     "ops.set_cost_class_coeff": _PLAT_OP,
     "ops.set_host_capacity": _PLAT_OP,
+    "ops.set_queue_paused": _PLAT_OP,
     "ops.tool_trail": _PLAT_AUDITOR,  # cross-tenant per-call trail read (ADR-0304)
     "ops.force_release": _PLAT_ADMIN,
     "ops.force_teardown": _PLAT_ADMIN,
