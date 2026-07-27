@@ -251,15 +251,15 @@ def test_read_only_verb_dispatches_with_no_flag(monkeypatch: pytest.MonkeyPatch)
 
 def test_mutating_verb_dispatches_without_any_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     # Naming the verb is the acknowledgement; no --allow-mutating exists on a generated verb.
-    client = _install(monkeypatch, _mutating_tool("resources.cordon"))
-    assert _run(_verb("resources.cordon", read_only=False), _ns()) == 0
-    assert client.calls == [("resources.cordon", {})]
+    client = _install(monkeypatch, _mutating_tool("resources.set_status"))
+    assert _run(_verb("resources.set_status", read_only=False), _ns()) == 0
+    assert client.calls == [("resources.set_status", {})]
 
 
 def test_mutating_verb_preflight_refuses_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch, _mutating_tool("resources.cordon"))
+    client = _install(monkeypatch, _mutating_tool("resources.set_status"))
     monkeypatch.setattr(dispatch, "ensure_token_valid", _raise_expiring)
-    assert _run(_verb("resources.cordon", read_only=False), _ns()) == 3
+    assert _run(_verb("resources.set_status", read_only=False), _ns()) == 3
     assert client.calls == []
 
 
@@ -309,10 +309,10 @@ def test_denied_envelope_maps_to_exit_3(monkeypatch: pytest.MonkeyPatch) -> None
         "error_category": "authorization_denied",
         "data": {},
     }
-    client = _install(monkeypatch, _mutating_tool("resources.cordon"), envelope=denied)
-    assert _run(_verb("resources.cordon", read_only=False), _ns()) == 3
+    client = _install(monkeypatch, _mutating_tool("resources.set_status"), envelope=denied)
+    assert _run(_verb("resources.set_status", read_only=False), _ns()) == 3
     # The call WAS dispatched; the denial is a returned envelope, not a client-side refusal.
-    assert client.calls == [("resources.cordon", {})]
+    assert client.calls == [("resources.set_status", {})]
 
 
 # --- live annotation governs the tier, not the committed artifact ----------------------------

@@ -44,9 +44,12 @@ from kdive.services.allocation.release import (
 )
 
 _SET_STATUS_TOOL = "resources.set_status"
-_CORDON_TOOL = "resources.cordon"
-_UNCORDON_TOOL = "resources.uncordon"
+_SET_SCHEDULING_TOOL = "resources.set_scheduling"
 _DRAIN_TOOL = "resources.drain"
+
+# The schedulability axis, as the two agent-facing state names and the `cordoned` boolean each
+# one writes. Separate from the `status` health triad by ADR-0062 §3 / ADR-0460.
+_SCHEDULING_STATES: dict[str, bool] = {"cordoned": True, "schedulable": False}
 
 # Allocations that hold a slot on the host. `requested` allocations are waiting for
 # placement, not holding the host, and are not releasable (ADR-0062).
@@ -140,19 +143,27 @@ async def _apply_cordon(conn: AsyncConnection, uid: UUID, *, cordoned: bool) -> 
     return Resource.model_validate(row) if row is not None else None
 
 
-async def _set_cordoned(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, resource_id: str, cordoned: bool, tool: str
+async def set_resource_scheduling(
+    pool: AsyncConnectionPool, ctx: RequestContext, *, resource_id: str, state: str
 ) -> ToolResponse:
-    """Toggle a host's ``cordoned`` flag; operator-only and audited."""
+    """Set a host's schedulability and leave its health ``status`` unchanged.
+
+    ``state`` is validated before the role gate, matching :func:`drain_resource`: the state
+    vocabulary is public schema, so rejecting an unknown one first leaks nothing and keeps an
+    unrecognised argument from being recorded as a denial.
+    """
+    if state not in _SCHEDULING_STATES:
+        return resource_config_error(state)
+    cordoned = _SCHEDULING_STATES[state]
     try:
         require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
     except AuthorizationError:
         await audit_platform_denial(
             pool,
             ctx,
-            tool=tool,
+            tool=_SET_SCHEDULING_TOOL,
             scope=f"resource:{resource_id}",
-            args={"resource_id": resource_id, "cordoned": cordoned},
+            args={"resource_id": resource_id, "state": state},
         )
         return _denied(resource_id)
     uid = _as_uuid(resource_id)
@@ -164,25 +175,9 @@ async def _set_cordoned(
             if resource is None:
                 return resource_config_error(resource_id)
             await _audit_host_action(
-                conn, ctx, tool=tool, resource_id=uid, detail=f"cordoned={cordoned}"
+                conn, ctx, tool=_SET_SCHEDULING_TOOL, resource_id=uid, detail=f"state={state}"
             )
         return resource_envelope(resource, next_actions=["resources.describe"])
-
-
-async def cordon_resource(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, resource_id: str
-) -> ToolResponse:
-    """Mark a host unschedulable; placement then skips or rejects it."""
-    return await _set_cordoned(pool, ctx, resource_id=resource_id, cordoned=True, tool=_CORDON_TOOL)
-
-
-async def uncordon_resource(
-    pool: AsyncConnectionPool, ctx: RequestContext, *, resource_id: str
-) -> ToolResponse:
-    """Restore a host to schedulable; leaves ``status`` unchanged."""
-    return await _set_cordoned(
-        pool, ctx, resource_id=resource_id, cordoned=False, tool=_UNCORDON_TOOL
-    )
 
 
 def _drain_role(mode: str) -> PlatformRole:
@@ -312,26 +307,31 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         )
 
     @app.tool(
-        name="resources.cordon",
+        name="resources.set_scheduling",
         annotations=_docmeta.mutating(),
         meta={"maturity": "implemented"},
     )
-    async def resources_cordon(
-        resource_id: Annotated[str, Field(description="The host Resource UUID to cordon.")],
+    async def resources_set_scheduling(
+        resource_id: Annotated[str, Field(description="The host Resource UUID.")],
+        state: Annotated[
+            str,
+            Field(description="Schedulability: 'cordoned' (no new placement) or 'schedulable'."),
+        ],
     ) -> ToolResponse:
-        """Mark a host unschedulable; placement skips/rejects it. Requires platform operator."""
-        return await cordon_resource(pool, current_context(), resource_id=resource_id)
+        """Set a host's schedulability; leaves health status unchanged. Requires platform
+        operator.
 
-    @app.tool(
-        name="resources.uncordon",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def resources_uncordon(
-        resource_id: Annotated[str, Field(description="The host Resource UUID to uncordon.")],
-    ) -> ToolResponse:
-        """Restore a host to schedulable; leaves status unchanged. Requires platform operator."""
-        return await uncordon_resource(pool, current_context(), resource_id=resource_id)
+        'cordoned' stops new placement on the host — the pick-by-kind query skips it and an
+        explicit `resource_id` naming it is rejected — while allocations already running there
+        are left untouched; use `resources.drain` to also release them. 'schedulable' restores
+        placement. Schedulability and health are orthogonal axes: this tool never changes
+        `status` and `resources.set_status` never changes schedulability, so a degraded host
+        stays degraded across a cordon and an `offline` status never clears one. Setting the
+        state a host already holds is a no-op success.
+        """
+        return await set_resource_scheduling(
+            pool, current_context(), resource_id=resource_id, state=state
+        )
 
     @app.tool(
         name="resources.drain",

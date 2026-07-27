@@ -733,7 +733,9 @@ def test_set_status_does_not_clear_cordoned(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            await resources_tools.cordon_resource(pool, _OPERATOR, resource_id=res_id)
+            await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=res_id, state="cordoned"
+            )
             await resources_tools.set_resource_status(
                 pool, _OPERATOR, resource_id=res_id, status="offline"
             )
@@ -744,44 +746,82 @@ def test_set_status_does_not_clear_cordoned(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_cordon_then_uncordon_toggles_only_cordoned(migrated_url: str) -> None:
+def test_set_scheduling_round_trip_toggles_only_cordoned(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            # Make the host degraded first; cordon/uncordon must not touch status.
+            # Make the host degraded first; neither scheduling state may touch status.
             await resources_tools.set_resource_status(
                 pool, _OPERATOR, resource_id=res_id, status="degraded"
             )
-            cordoned = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id=res_id)
+            cordoned = await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=res_id, state="cordoned"
+            )
             after_cordon = await _row(pool, res_id)
-            await resources_tools.uncordon_resource(pool, _OPERATOR, resource_id=res_id)
-            after_uncordon = await _row(pool, res_id)
-            cordon_audited = await _platform_audit_count(pool, "resources.cordon")
-            uncordon_audited = await _platform_audit_count(pool, "resources.uncordon")
+            await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=res_id, state="schedulable"
+            )
+            after_schedulable = await _row(pool, res_id)
+            audited = await _platform_audit_count(pool, "resources.set_scheduling")
         assert cordoned.status == "degraded"
         assert after_cordon == {"status": "degraded", "cordoned": True}
-        # uncordon does not change status: still degraded.
-        assert after_uncordon == {"status": "degraded", "cordoned": False}
-        assert cordon_audited == 1
-        assert uncordon_audited == 1
+        # 'schedulable' does not change status: still degraded.
+        assert after_schedulable == {"status": "degraded", "cordoned": False}
+        assert audited == 2
 
     asyncio.run(_run())
 
 
-def test_cordon_unknown_host_is_error(migrated_url: str) -> None:
+def test_set_scheduling_repeated_same_state_is_noop_success(migrated_url: str) -> None:
+    """Re-cordoning an already-cordoned host succeeds and leaves the row as it was."""
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id=str(uuid4()))
+            res_id = await _register(pool)
+            for _ in range(2):
+                resp = await resources_tools.set_resource_scheduling(
+                    pool, _OPERATOR, resource_id=res_id, state="cordoned"
+                )
+            row = await _row(pool, res_id)
+        assert resp.status == "available"
+        assert row == {"status": "available", "cordoned": True}
+
+    asyncio.run(_run())
+
+
+def test_set_scheduling_unknown_state_is_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            resp = await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=res_id, state="uncordon"
+            )
+            row = await _row(pool, res_id)
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert row["cordoned"] is False  # rejected before any write
+
+    asyncio.run(_run())
+
+
+def test_set_scheduling_unknown_host_is_error(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=str(uuid4()), state="cordoned"
+            )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
 
     asyncio.run(_run())
 
 
-def test_cordon_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
+def test_set_scheduling_malformed_resource_id_is_invalid_uuid(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await resources_tools.cordon_resource(pool, _OPERATOR, resource_id="not-a-uuid")
+            resp = await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id="not-a-uuid", state="cordoned"
+            )
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         assert resp.data["reason"] == "invalid_uuid"
@@ -824,15 +864,41 @@ def test_set_status_denied_for_auditor_is_audited(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-def test_cordon_denied_for_non_operator(migrated_url: str) -> None:
+@pytest.mark.parametrize("state", ["cordoned", "schedulable"])
+def test_set_scheduling_denied_for_non_operator(migrated_url: str, state: str) -> None:
+    """Neither branch of the setter is reachable without the platform_operator role.
+
+    Authorization is uniform across `state` (ADR-0460): one `require_platform_role` covers both,
+    so both branches are pinned here rather than only the cordon direction.
+    """
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool)
-            resp = await resources_tools.cordon_resource(pool, _NON_OPERATOR, resource_id=res_id)
+            resp = await resources_tools.set_resource_scheduling(
+                pool, _NON_OPERATOR, resource_id=res_id, state=state
+            )
             row = await _row(pool, res_id)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
         assert row["cordoned"] is False
+
+    asyncio.run(_run())
+
+
+def test_set_scheduling_denied_for_auditor_is_audited(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            resp = await resources_tools.set_resource_scheduling(
+                pool, _AUDITOR, resource_id=res_id, state="cordoned"
+            )
+            audited = await _platform_audit_rows(pool)
+        assert resp.status == "error"
+        assert resp.error_category == "authorization_denied"
+        assert audited == [
+            ("auditor-1", "platform_auditor", "resources.set_scheduling", f"resource:{res_id}")
+        ]
 
     asyncio.run(_run())
 
@@ -1026,6 +1092,31 @@ def test_drain_passive_cordons_and_reports_live_allocations(migrated_url: str) -
         assert breakglass_rows == 0
         assert active_state == "active"
         assert granted_state == "granted"
+
+    asyncio.run(_run())
+
+
+def test_drain_and_set_scheduling_write_the_same_cordoned_flag(migrated_url: str) -> None:
+    """`resources.drain` keeps cordoning through `_apply_cordon`, and the setter undoes it.
+
+    `drain` stays a separate destructive tool with its own branch-dependent authorization
+    (ADR-0460), so this pins that it still cordons the one boolean `resources.set_scheduling`
+    owns — a drained host reads back `cordoned` and `state='schedulable'` clears it.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool)
+            await resources_tools.drain_resource(
+                pool, _OPERATOR, resource_id=res_id, mode="passive"
+            )
+            after_drain = await _row(pool, res_id)
+            await resources_tools.set_resource_scheduling(
+                pool, _OPERATOR, resource_id=res_id, state="schedulable"
+            )
+            after_restore = await _row(pool, res_id)
+        assert after_drain["cordoned"] is True
+        assert after_restore["cordoned"] is False
 
     asyncio.run(_run())
 

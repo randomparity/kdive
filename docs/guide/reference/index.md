@@ -98,7 +98,6 @@
 | [`reports.generate_all_projects`](reports.md#reportsgenerate_all_projects) | `implemented` |
 | [`reports.generate_granted_set`](reports.md#reportsgenerate_granted_set) | `implemented` |
 | [`resources.availability`](resources.md#resourcesavailability) | `implemented` |
-| [`resources.cordon`](resources.md#resourcescordon) | `implemented` |
 | [`resources.deregister`](resources.md#resourcesderegister) | `implemented` |
 | [`resources.describe`](resources.md#resourcesdescribe) | `implemented` |
 | [`resources.drain`](resources.md#resourcesdrain) | `implemented` |
@@ -107,8 +106,8 @@
 | [`resources.register_local_libvirt`](resources.md#resourcesregister_local_libvirt) | `implemented` |
 | [`resources.register_remote_libvirt`](resources.md#resourcesregister_remote_libvirt) | `implemented` |
 | [`resources.renew`](resources.md#resourcesrenew) | `implemented` |
+| [`resources.set_scheduling`](resources.md#resourcesset_scheduling) | `implemented` |
 | [`resources.set_status`](resources.md#resourcesset_status) | `implemented` |
-| [`resources.uncordon`](resources.md#resourcesuncordon) | `implemented` |
 | [`runs.bind`](runs.md#runsbind) | `implemented` |
 | [`runs.boot`](runs.md#runsboot) | `implemented` |
 | [`runs.cancel`](runs.md#runscancel) | `implemented` |

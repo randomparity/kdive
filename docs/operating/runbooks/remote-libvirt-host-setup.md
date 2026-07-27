@@ -421,7 +421,7 @@ kdivectl doctor [--provider remote-libvirt]
 kdivectl images list
 kdivectl tool call <read-only-tool> --json '{}'        # fail-closed: non-read-only exits 3
 # break-glass (role-gated, audited as operator-cli):
-kdivectl resources cordon <id>                         # platform_operator
+kdivectl resources set-scheduling <id> cordoned        # platform_operator
 kdivectl ops force-teardown <id> --reason R --force    # platform_admin
 ```
 

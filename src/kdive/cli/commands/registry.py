@@ -127,11 +127,12 @@ REGISTRY: tuple[Verb, ...] = (
     ),
     Verb(
         "resources",
-        "cordon",
-        mutations.resources_cordon,
-        "resources.cordon",
-        ("resource_id",),
+        "set-scheduling",
+        mutations.resources_set_scheduling,
+        "resources.set_scheduling",
+        ("resource_id", "state"),
         read_only=False,
+        help="set a host 'cordoned' or 'schedulable' (requires a platform_operator token)",
     ),
     Verb(
         "resources",

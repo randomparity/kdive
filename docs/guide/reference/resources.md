@@ -20,16 +20,6 @@ A point-in-time hint, not a reservation; the admission path stays the authority.
 - `shape` (`string (nullable)`, optional) — Optional shape name; restricts the fitting computation to it.
 - `include_devices` (`boolean`, optional) — Include the full free PCIe device list per host. Off by default: hosts report only the free device count ('free_pcie'). Set true to also return 'free_devices' (bdf/vendor/device/class) when a specific device must be picked.
 
-## `resources.cordon`
-
-`implemented`
-
-Mark a host unschedulable; placement skips/rejects it. Requires platform operator.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `resource_id` | string | yes | The host Resource UUID to cordon. |
-
 ## `resources.deregister`
 
 `implemented` · `destructive`
@@ -181,6 +171,26 @@ Renew a runtime resource lease (platform_admin).
 |---|---|---|---|
 | `resource_id` | string | yes | The runtime Resource UUID whose lease to renew. |
 
+## `resources.set_scheduling`
+
+`implemented`
+
+Set a host's schedulability; leaves health status unchanged. Requires platform
+operator.
+
+'cordoned' stops new placement on the host — the pick-by-kind query skips it and an
+explicit `resource_id` naming it is rejected — while allocations already running there
+are left untouched; use `resources.drain` to also release them. 'schedulable' restores
+placement. Schedulability and health are orthogonal axes: this tool never changes
+`status` and `resources.set_status` never changes schedulability, so a degraded host
+stays degraded across a cordon and an `offline` status never clears one. Setting the
+state a host already holds is a no-op success.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `resource_id` | string | yes | The host Resource UUID. |
+| `state` | string | yes | Schedulability: 'cordoned' (no new placement) or 'schedulable'. |
+
 ## `resources.set_status`
 
 `implemented`
@@ -191,13 +201,3 @@ Set a host's health status; leaves cordoned unchanged. Requires platform operato
 |---|---|---|---|
 | `resource_id` | string | yes | The host Resource UUID. |
 | `status` | string | yes | Health: 'available', 'degraded', or 'offline'. |
-
-## `resources.uncordon`
-
-`implemented`
-
-Restore a host to schedulable; leaves status unchanged. Requires platform operator.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `resource_id` | string | yes | The host Resource UUID to uncordon. |

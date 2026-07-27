@@ -410,13 +410,11 @@ def test_host_ops_registrar_exposes_annotations_and_invokes_wrappers(
 
         assert set(tools) == {
             "resources.set_status",
-            "resources.cordon",
-            "resources.uncordon",
+            "resources.set_scheduling",
             "resources.drain",
         }
         assert _destructive_hint(tools["resources.set_status"]) is False
-        assert _destructive_hint(tools["resources.cordon"]) is False
-        assert _destructive_hint(tools["resources.uncordon"]) is False
+        assert _destructive_hint(tools["resources.set_scheduling"]) is False
         assert _destructive_hint(tools["resources.drain"]) is True
 
         resp = await _call_registered_tool(tools["resources.set_status"], "resource-1", "degraded")

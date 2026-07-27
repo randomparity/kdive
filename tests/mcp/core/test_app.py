@@ -115,8 +115,7 @@ def test_resource_host_and_mutation_tools_are_registered() -> None:
         names = {tool.name for tool in await app.list_tools()}
         assert {
             "resources.set_status",
-            "resources.cordon",
-            "resources.uncordon",
+            "resources.set_scheduling",
             "resources.drain",
             "resources.register_remote_libvirt",
             "resources.register_local_libvirt",

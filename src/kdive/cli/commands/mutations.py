@@ -2,8 +2,9 @@
 
 Each destructive verb is single-call and re-runnable: the server-side break-glass tools
 (``ops.force_teardown``/``ops.force_release``/``resources.drain``) return success
-idempotently against already-torn-down/already-released state, and ``resources.cordon``
-re-cordons a cordoned host as a no-op. Before its one MCP call each verb runs a fail-closed
+idempotently against already-torn-down/already-released state, and
+``resources.set_scheduling`` re-applies the state a host already holds as a no-op. Before its
+one MCP call each verb runs a fail-closed
 token-``exp`` preflight (:func:`ensure_token_valid`) so a near-expired token is refused up
 front rather than risking a mid-operation 401; a refused token costs nothing to re-acquire
 and re-run (ADR-0089).
@@ -130,8 +131,10 @@ async def allocations_force_release(args: argparse.Namespace) -> int:
     return await _run("ops.force_release", arguments, as_json=args.json)
 
 
-async def resources_cordon(args: argparse.Namespace) -> int:
-    return await _run("resources.cordon", {"resource_id": args.resource_id}, as_json=args.json)
+async def resources_set_scheduling(args: argparse.Namespace) -> int:
+    """Cordon a host or restore it to schedulable; the server validates ``state``."""
+    arguments = {"resource_id": args.resource_id, "state": args.state}
+    return await _run("resources.set_scheduling", arguments, as_json=args.json)
 
 
 async def resources_drain(args: argparse.Namespace) -> int:

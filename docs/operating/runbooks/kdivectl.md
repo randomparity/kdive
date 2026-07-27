@@ -374,7 +374,7 @@ verbs](#the-generated-verb-surface) or through the `tool call`
 ```bash
 kdivectl ops force-teardown <system_id> --reason <R> --force   # ops.force_teardown (needs --force)
 kdivectl ops force-release <allocation_id> --reason <R>  # ops.force_release
-kdivectl resources cordon <resource_id>                     # resources.cordon
+kdivectl resources set-scheduling <resource_id> cordoned|schedulable  # resources.set_scheduling
 kdivectl resources drain <resource_id> [--mode passive|force_release] [--reason <R>]  # resources.drain
 ```
 
@@ -383,7 +383,7 @@ kdivectl resources drain <resource_id> [--mode passive|force_release] [--reason 
 | verb | gated on |
 |------|----------|
 | `ops force-teardown`, `ops force-release` | `platform_admin` |
-| `resources cordon` | `platform_operator` |
+| `resources set-scheduling` | `platform_operator` |
 | `resources drain --mode passive` (default) | `platform_operator` |
 | `resources drain --mode force_release` | `platform_admin` (it empties tenant allocations) |
 

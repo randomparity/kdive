@@ -38,7 +38,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "postmortem": "Crash analysis and triage from vmcore or console evidence",
     "projects": "Project listing",
     "reports": "Generated usage and accounting report retrieval",
-    "resources": "Physical resource registration, availability, and cordon/drain",
+    "resources": "Physical resource registration, availability, scheduling, and drain",
     "runs": "Kernel test run lifecycle (build, install, boot, cancel, bind)",
     "secrets": "Secret listing",  # pragma: allowlist secret
     "session": "Session identity (whoami)",
@@ -237,6 +237,8 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "ops.queue_pause": "ops.set_queue_paused",
     "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",
+    "resources.cordon": "resources.set_scheduling",
+    "resources.uncordon": "resources.set_scheduling",
 }
 
 
