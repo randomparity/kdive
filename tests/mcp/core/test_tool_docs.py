@@ -96,7 +96,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "debug.start_session": ("tests/mcp/debug/test_debug_tools.py",),
     "fixtures.list": ("tests/mcp/catalog/test_fixtures_list.py",),
     "fixtures.validate": ("tests/mcp/catalog/test_fixtures_validate.py",),
-    "images.build": ("tests/mcp/ops/test_images_tools.py",),
     "images.delete": ("tests/mcp/ops/test_images_tools.py",),
     "images.describe": ("tests/mcp/catalog/test_images_describe.py",),
     "images.extend": ("tests/mcp/ops/test_images_tools.py",),
@@ -878,7 +877,7 @@ def test_destructive_consequence_guard_bites() -> None:
 # polling — the out-of-band async contract (#941/jobs.wait): the description must name
 # `jobs.wait` as the poll tool, not merely "poll" or `jobs.get`. This is a reviewed set (like
 # DESTRUCTIVE_TOOLS): lifecycle tools that enqueue a job to advance a durable entity
-# (images.build, systems.provision/teardown, runs.boot) are tracked via that entity's read
+# (images.publish, systems.provision/teardown, runs.boot) are tracked via that entity's read
 # tool, not jobs.wait, and are deliberately excluded.
 _JOB_HANDLE_TOOLS = frozenset(
     {

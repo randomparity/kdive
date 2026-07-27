@@ -173,20 +173,16 @@ The same plane runs inside the `IMAGE_BUILD` job behind the operator verb; publi
 built image to a public, row-first catalog entry that the async resolver hands to provisioning:
 
 ```bash
-kdivectl images build   --provider local-libvirt --name fedora-kdive-ready-44 \
-                        --arch x86_64 --releasever 44 \
-                        --source-image-digest sha256:<base> \
-                        --capabilities agent,kdump,drgn,helpers
 kdivectl images publish --provider local-libvirt --name fedora-kdive-ready-44 \
-                        --arch x86_64 --releasever 44 \
-                        --source-image-digest sha256:<base> \
-                        --capabilities agent,kdump,drgn,helpers
+                        --packages crash --packages drgn
 kdivectl images list
 ```
 
-`build`/`publish` authorize as `platform_operator`. The build worker runs the same plane this
-runbook drove inline, validates the guest contract (libguestfs inspection — a build missing
-agent/kdump/drgn/helpers is rejected, never published), and publishes row-first.
+`publish` authorizes as `platform_operator` and covers the whole build/validate/publish path —
+there is no separate build verb (ADR-0461). Re-issuing it for the same `provider`/`name` returns
+the job already in flight. The build worker runs the same plane this runbook drove inline,
+validates the guest contract (libguestfs inspection — a build missing agent/kdump/drgn/helpers is
+rejected, never published), and publishes row-first.
 
 ## Local rootfs catalog entries and kdump capability (ADR-0251)
 
@@ -230,7 +226,7 @@ in-guest `kdump` filtered-core path is affected for a v7.0-class kernel.
 | `images list` | member / operator | RBAC-filtered | public rows + the caller's project's private rows |
 | `images upload --project P --name N --arch A --quarantine-key K [--lifetime-seconds S]` | project member | per-project | register a quarantined upload as a project-private image |
 | `images delete <image_id>` | member / operator | project-scoped; operator cross-project via break-glass | delete an unreferenced private image |
-| `images build` / `images publish` | operator | `platform_operator` | enqueue `IMAGE_BUILD` / promote to a public catalog row |
+| `images publish --provider P --name N [--packages PKG]...` | operator | `platform_operator` | enqueue `IMAGE_BUILD`, which builds, validates, and promotes to a public catalog row |
 | `images prune --expired [--reason R]` | operator | `platform_admin` break-glass | force the expired-private sweep now |
 | `images extend <image_id> --seconds S [--reason R]` | operator | `platform_admin` break-glass | re-arm a private image's lifetime |
 

@@ -1,6 +1,6 @@
 """Worker handler for the ``IMAGE_BUILD`` job: build -> validate -> publish (ADR-0092, #285).
 
-An operator ``images build``/``publish`` enqueues an ``IMAGE_BUILD`` job; the worker runs this
+An operator ``images.publish`` enqueues an ``IMAGE_BUILD`` job; the worker runs this
 handler. It drives the provider's :class:`RootfsBuildPlane` (the blocking, minutes-long
 libguestfs build is offloaded via ``asyncio.to_thread`` so it never stalls the worker event
 loop), validates the built image against the guest contract, then publishes it through the
