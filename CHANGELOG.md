@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retire cordon/uncordon into search vocabulary
 - Express required boolean params as --flag/--no-flag
 - Fold artifact text search back into artifacts.get
+- Publish the redacted core id from capture jobs
+- Backfill capture_vmcore result refs to redacted ids
 
 ### Changed
 
@@ -71,9 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replace cordon/uncordon with a scheduling setter
 - Replace queue pause/resume with one state setter
 - Remove the duplicate images.build tool
-- Replace debug step variants with debug.advance
 - Fold register_* wrappers into resources.register
 - Fold fixtures.list into images.list
+- Replace debug step variants with debug.advance
 
 ### Documentation
 
@@ -153,10 +155,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0462 restoring the folded jump cursor
 - Record the cold-start proof for the artifacts.get find fold
 - State the post-0461 registry delta in ADR-0462
-- Record ADR-0463 debug.advance consolidation
 - Record ADR-0464 consolidating resource registration
 - Name the surviving queue state setter in set_queue_paused
 - Record ADR-0465 folding fixtures.list into images.list
+- Record ADR-0466 vmcore artifact reference
+- Record ADR-0463 debug.advance consolidation
 
 ### Fixed
 
