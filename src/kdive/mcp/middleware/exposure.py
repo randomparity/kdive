@@ -11,7 +11,13 @@ from fastmcp.tools import Tool
 from opentelemetry import metrics
 
 from kdive.domain.catalog.resources import ResourceKind
-from kdive.mcp.exposure import CORE_TOOLS, gateway_enabled, visible_tool_names
+from kdive.mcp.exposure import (
+    CORE_TOOLS,
+    ToolExposureProfile,
+    gateway_enabled,
+    resolve_exposure_profile,
+    visible_tool_names,
+)
 from kdive.mcp.middleware.shared import request_context
 from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.providers.core.resolver import ProviderResolver
@@ -27,6 +33,31 @@ _EXPOSURE_FAILOPEN = metrics.get_meter("kdive.mcp").create_counter(
     "kdive_mcp_tool_exposure_fail_open",
     description="tool-exposure filter fell open to the full catalog (ADR-0269)",
 )
+_PROFILE_SELECTIONS = metrics.get_meter("kdive.mcp").create_counter(
+    "kdive_mcp_tool_exposure_profile_selections",
+    description="tool-exposure profile selections by resolved profile and source (ADR-0456)",
+)
+
+
+def _record_profile(profile: ToolExposureProfile, source: str) -> None:
+    _PROFILE_SELECTIONS.add(1, {"profile": profile.value, "source": source})
+
+
+def _resolve_profile_or_agent(ctx: Any) -> ToolExposureProfile:
+    """Resolve the exposure profile, falling back to agent on resolver defects."""
+    try:
+        profile = resolve_exposure_profile(ctx)
+    except Exception:
+        profile = ToolExposureProfile.AGENT_GATEWAY
+        _record_profile(profile, "fallback")
+        _log.warning(
+            "tool-exposure profile resolution failed; using agent profile",
+            exc_info=True,
+        )
+        return profile
+    source = "oidc_client_id" if profile is ToolExposureProfile.OPERATOR_DIRECT else "default"
+    _record_profile(profile, source)
+    return profile
 
 
 def _narrow_or_passthrough(tool: Tool, kinds: frozenset[ResourceKind] | None) -> Tool:
@@ -79,7 +110,8 @@ class ToolExposureMiddleware(Middleware):
         try:
             ctx = request_context()
             visible = visible_tool_names(ctx, (tool.name for tool in tools))
-            if gateway_enabled():
+            profile = _resolve_profile_or_agent(ctx)
+            if gateway_enabled() and profile is ToolExposureProfile.AGENT_GATEWAY:
                 visible &= CORE_TOOLS
         except AuthError:
             _log.debug("no verified token in on_list_tools; advertising the full catalog")

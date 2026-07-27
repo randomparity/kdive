@@ -17,6 +17,8 @@ from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
 from kdive.mcp.schema.tool_projection import NARROWED_TOOLS, project_listed_tool
 from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.providers.assembly.composition import ProviderComposition
+from kdive.security.authz.context import RequestContext
+from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
@@ -28,6 +30,16 @@ class _FakeTool:
 
     def model_copy(self, *, update: dict) -> _FakeTool:
         return _FakeTool(self.name, update["parameters"])
+
+
+def _ctx(*, client_id: str | None = None) -> RequestContext:
+    return RequestContext(
+        principal="p",
+        agent_session=None if client_id else "agent-1",
+        projects=("a",),
+        roles={"a": Role.CONTRIBUTOR},
+        client_id=client_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +149,7 @@ def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ign
     resolver = composition.build_provider_resolver()
 
     # Monkeypatch so the RBAC filter passes everything through
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx())
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
     mw = ToolExposureMiddleware(resolver)
@@ -151,6 +163,34 @@ def test_on_list_tools_projects_visible_tools(monkeypatch) -> None:  # type: ign
     kinds = resolver.registered_kinds()
     expected = [k.value for k in ResourceKind if k in kinds]
     assert projected.parameters["$defs"]["ResourceKind"]["enum"] == expected
+
+
+def test_projection_runs_after_profile_filter(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Set the env before anything reads config: kdive.config snapshots the environment on
+    # first read and holds it until reset, so a setenv after build_app() (which calls
+    # gateway_enabled()) would be silently ignored and the test would assert the default.
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
+    app = _build_app()
+    tools = [_tool(app, "systems.define"), _tool(app, "systems.provision")]
+    composition = ProviderComposition(secret_registry=SecretRegistry())
+    resolver = composition.build_provider_resolver()
+
+    async def call_next(_ctx: object) -> list:
+        return tools
+
+    mw = ToolExposureMiddleware(resolver)
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx())
+    agent_result = asyncio.run(mw.on_list_tools(object(), call_next))
+    assert {t.name for t in agent_result} == {"systems.provision"}
+    provision = next(t for t in agent_result if t.name == "systems.provision")
+    assert set(provision.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
+
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx(client_id="kdivectl"))
+    cli_result = asyncio.run(mw.on_list_tools(object(), call_next))
+    assert {t.name for t in cli_result} == {"systems.define", "systems.provision"}
+    for tool in cli_result:
+        assert set(tool.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
 
 
 def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -168,7 +208,8 @@ def test_resolver_failure_fails_open_and_counts(monkeypatch, caplog) -> None:  #
         def registered_kinds(self) -> frozenset:
             raise RuntimeError("injected resolver failure")
 
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx())
     # admin.secret is not visible to this connection — RBAC must hold even on resolver failure.
     monkeypatch.setattr(
         exposure_mod,
@@ -228,7 +269,8 @@ def test_exposure_failopen_increments_exposure_counter(monkeypatch, caplog) -> N
     def _raise_visible(_ctx: object, _names: object) -> set:
         raise RuntimeError("injected RBAC failure")
 
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx())
     monkeypatch.setattr(exposure_mod, "visible_tool_names", _raise_visible)
 
     exposure_counter_calls: list[int] = []
@@ -270,11 +312,12 @@ def test_projection_failure_fails_open_and_counts(monkeypatch, caplog) -> None: 
     other_tool = _FakeTool("resources.list", {"type": "object"})
     tools = [alloc_tool, other_tool]
 
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
     composition = ProviderComposition(secret_registry=SecretRegistry())
     resolver = composition.build_provider_resolver()
 
     # RBAC: pass everything through.
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx())
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
     # Inject a projection failure only for the narrowed tool.

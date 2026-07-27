@@ -11,8 +11,10 @@ import pytest
 
 from kdive.mcp.exposure import (
     ExposureScope,
+    ToolExposureProfile,
     project_tool_visible,
     required_scopes,
+    resolve_exposure_profile,
     scope_satisfied,
     tool_visible,
     visible_next_actions,
@@ -24,6 +26,8 @@ from kdive.security.authz.rbac import PlatformRole, Role
 
 def _ctx(
     *,
+    agent_session: str | None = None,
+    client_id: str | None = None,
     roles: dict[str, Role] | None = None,
     projects: tuple[str, ...] | None = None,
     platform: frozenset[PlatformRole] = frozenset(),
@@ -31,11 +35,37 @@ def _ctx(
     roles = roles or {}
     return RequestContext(
         principal="p",
-        agent_session=None,
+        agent_session=agent_session,
         projects=tuple(roles) if projects is None else projects,
         roles=roles,
         platform_roles=platform,
+        client_id=client_id,
     )
+
+
+def test_exposure_profile_trusts_only_configured_cli_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
+    cli = _ctx(client_id="kdivectl")
+    agent = _ctx(agent_session="agent-1", client_id="agent-client")
+    unknown = _ctx(client_id="mystery")
+    no_client = _ctx()
+
+    assert resolve_exposure_profile(cli) is ToolExposureProfile.OPERATOR_DIRECT
+    assert resolve_exposure_profile(agent) is ToolExposureProfile.AGENT_GATEWAY
+    assert resolve_exposure_profile(unknown) is ToolExposureProfile.AGENT_GATEWAY
+    assert resolve_exposure_profile(no_client) is ToolExposureProfile.AGENT_GATEWAY
+
+
+def test_operator_profile_does_not_grant_platform_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
+    cli_without_platform = _ctx(client_id="kdivectl")
+
+    assert resolve_exposure_profile(cli_without_platform) is ToolExposureProfile.OPERATOR_DIRECT
+    assert not tool_visible("ops.diagnostics", cli_without_platform)
 
 
 def test_project_role_union_rank() -> None:

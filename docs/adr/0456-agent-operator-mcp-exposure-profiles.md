@@ -92,6 +92,13 @@ default-flip change:
 Until that evidence exists, the service may keep the current full-catalog default for normal agent
 clients even after profile-selection code exists.
 
+**Gate satisfied (2026-07-27, #1582).** Both proofs were run against a live stack with a real
+Claude Code client and recorded in
+[`2026-07-27-mcp-exposure-profiles-proof-record-1582.md`](../design/2026-07-27-mcp-exposure-profiles-proof-record-1582.md):
+a cold-start agent discovered and invoked non-listed tools through the gateway and polled a
+provision job to `succeeded`, and `kdivectl` classified read-only, mutating, and destructive direct
+tools from live annotations under the operator profile. `KDIVE_MCP_TOOL_GATEWAY` now defaults on.
+
 ## Consequences
 
 - Agent and operator clients can use different discovery profiles over one MCP transport and one
