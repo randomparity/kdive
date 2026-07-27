@@ -230,14 +230,21 @@ until wired, unchanged from today.
 
 ### 10. `systems.define` materializes `defined`; `systems.provision` admits it (amended, #111)
 
-The rootfs-upload lane (ADR-0048 §5) needs a System in `defined` as its pre-provision
+*Superseded by [ADR-0457](0457-retire-staged-system-definition-lane.md) — the staged lane
+(`systems.define` + `systems.provision_defined`) and `SystemState.DEFINED` are retired. The
+justification struck through below was already void: [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md)
+§3 removed the System-scoped upload window this decision existed to hold open. ADR-0457 records the
+decision; the removal ships under its own issue, so the lane is still live in the tree until then.
+Decisions 1–9 above are unaffected.*
+
+~~The rootfs-upload lane (ADR-0048 §5) needs a System in `defined` as its pre-provision
 upload window: create the System, upload a rootfs qcow2 to its object key, then provision —
-at which point the plane commits the uploaded rootfs. #16 left `defined` unmaterialized
+at which point the plane commits the uploaded rootfs.~~ #16 left `defined` unmaterialized
 (decision 1) because M0 had no such window; #111 adds the producer.
 
 - **`systems.define(allocation_id, profile)`** (operator), in one transaction under
-  `PROJECT → ALLOCATION` locks: validate the profile (`upload` rootfs is admitted here —
-  this is the one tool that opens an upload window), find-or-return the allocation's System
+  `PROJECT → ALLOCATION` locks: validate the profile ~~(`upload` rootfs is admitted here —
+  this is the one tool that opens an upload window)~~, find-or-return the allocation's System
   (an existing `defined` System is returned idempotently; any other state is a
   `configuration_error` — one System per Allocation), enforce `max_concurrent_systems`
   (a `defined` System occupies a slot), insert the System at `defined` storing the profile,
@@ -262,11 +269,16 @@ at which point the plane commits the uploaded rootfs. #16 left `defined` unmater
   — it requires `provisioning` on entry, now reachable from either `defined` or a fresh
   insert.
 
-The `upload`-rootfs boundary fence (#110, `validate_rootfs_reference` rejecting `kind:upload`
+~~The `upload`-rootfs boundary fence (#110, `validate_rootfs_reference` rejecting `kind:upload`
 "until #111") is split: static well-formedness (url/catalog checks) stays in
 `validate_rootfs_reference` so the worker's `render_domain_xml` renders an `upload` rootfs;
 a separate **lane** guard rejects `upload` only where there is no upload window — the
-`systems.provision` *create* branch and `systems.reprovision`. `define` admits it.
+`systems.provision` *create* branch and `systems.reprovision`. `define` admits it.~~
+
+*Superseded by [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) §3/§4 — the lane guard
+(`rootfs_upload_window_allowed`, `_system_accepts_upload`) is gone from the tree; an `upload` rootfs
+is finalized against the Investigation before any System exists and `systems.provision` resolves it
+by checksum, so there is no lane left to fence.*
 
 Because `define` makes `defined` a **durable, abandonable** state (an operator may sit in it,
 its Allocation may be released, its lease may expire), a `DEFINED` System must be
@@ -277,10 +289,15 @@ unearned failure signal). Without it, `teardown_handler`'s `update_state(... tor
 raises `IllegalTransition` for a `DEFINED` System, the teardown job dead-letters, and the
 abandoned System leaks its `max_concurrent_systems` slot indefinitely. A `DEFINED` System
 has no domain, so the handler's best-effort `teardown(domain_name)` is a safe no-op
-(`VIR_ERR_NO_DOMAIN` swallowed). Correspondingly, `artifacts.create_upload` admits a System
+(`VIR_ERR_NO_DOMAIN` swallowed). ~~Correspondingly, `artifacts.create_upload` admits a System
 upload only when the System is `DEFINED` **and** its stored profile is `upload`-kind, so an
 upload is never minted against a System that would never commit it (which would orphan the
-object past the upload reaper's `state = 'defined'` predicate once the System advanced).
+object past the upload reaper's `state = 'defined'` predicate once the System advanced).~~
+
+*Superseded by [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) §3 —
+`artifacts.create_system_upload` and the `systems` upload-owner kind were removed;
+`UploadOwnerKind` is `runs`/`investigations` only, so no upload is minted against a System in any
+state.*
 
 ## Consequences
 
@@ -298,9 +315,12 @@ object past the upload reaper's `state = 'defined'` predicate once the System ad
   (discovery); a change to it is a single-constant change with both sides' tests guarding it.
 - The reconciler's *leaked-domain* repair remains dormant in production until a later issue
   injects a real reaper (decision 8); this is stated, not silently assumed.
-- `defined` becomes a materialized state via `systems.define` (decision 10, #111); the
+- `defined` becomes a materialized state via `systems.define` (decision 10, #111); ~~the
   rootfs-upload lane (ADR-0048 §5) is live end-to-end, and the `upload`-rootfs consumers
-  shipped on #110 gain their producer.
+  shipped on #110 gain their producer.~~
+  *Superseded by [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) §3 (the System-scoped
+  upload lane is removed) and [ADR-0457](0457-retire-staged-system-definition-lane.md) (`defined`
+  itself is retired).*
 
 ## Alternatives considered
 
