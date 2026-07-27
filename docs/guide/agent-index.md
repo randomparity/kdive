@@ -56,7 +56,7 @@ the first tool to call.
    `debug.start_session(transport="drgn-live")` followed by `introspect.run`/`introspect.script`
    for non-halting drgn introspection against that session. See the debug and introspect guides.
 9. **Triage a crash** — induce one deliberately with `control.force_crash` if needed, then
-   `vmcore.fetch` and `postmortem.triage`. See the control and postmortem guides.
+   `vmcore.fetch` and `postmortem.crash`. See the control and postmortem guides.
 10. **Wind down** — release everything you acquired, in order: `systems.teardown` to
     destroy the provisioned guest (a completed teardown does not itself release the
     allocation), then `allocations.release` to return the leased capacity, then

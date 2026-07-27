@@ -209,6 +209,27 @@ def test_retired_tool_name_query_finds_its_replacement(
     assert retired not in names, f"{retired!r} is retired but still registered"
 
 
+@pytest.mark.parametrize("query", ["postmortem.triage", "triage", "postmortem"])
+def test_postmortem_triage_vocabulary_finds_postmortem_crash(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The retired name and its intent words all rank postmortem.crash into the results."""
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "postmortem.crash" in _match_names(content)
+
+
 # ---------------------------------------------------------------------------
 # Test 4: RBAC filter hides admin-only tools from a viewer
 # ---------------------------------------------------------------------------

@@ -2884,7 +2884,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="postmortem.crash",
         read_only=True,
         destructive=False,
-        help="Run allowlisted crash(8) commands over a captured vmcore; returns a redacted report.",
+        help="Run crash(8) over a captured vmcore; returns a redacted report (contributor).",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -2899,31 +2899,10 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
             GeneratedFlag(
                 name="--commands",
                 dest="commands",
-                required=True,
-                help="crash(8) commands to run over the captured core. Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command.",
+                required=False,
+                help="crash(8) commands to run over the captured core. Omit to run the standard first-pass batch (log, bt) — the fast first look at a crash. Each command's first token must be one of the read-only allowlisted verbs: bt, dev, dis, files, foreach, help, irq, kmem, list, log, mach, mod, mount, net, p, ps, rd, runq, search, struct, swap, sym, sys, task, timer, tree, union, vm, vtop. Shell metacharacters (| > < ` $( ; &), a leading '!' shell escape, and control characters are rejected; a rejected command returns a configuration_error whose detail names the offending command.",
                 arg_type="str",
                 action="append",
-                choices=(),
-            ),
-        ),
-        json_params=(),
-    ),
-    GeneratedVerb(
-        group="postmortem",
-        sub="triage",
-        tool="postmortem.triage",
-        read_only=True,
-        destructive=False,
-        help="Run the default first-pass crash(8) triage over a Run's captured vmcore (contributor).",
-        unwrap_request=False,
-        flags=(
-            GeneratedFlag(
-                name="--run-id",
-                dest="run_id",
-                required=True,
-                help="The Run whose captured core to triage.",
-                arg_type="str",
-                action=None,
                 choices=(),
             ),
         ),

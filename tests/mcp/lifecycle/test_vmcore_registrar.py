@@ -54,7 +54,7 @@ class _FakeVmcoreHandlers:
         ctx: object,
         *,
         run_id: str,
-        commands: list[str],
+        commands: list[str] | None = None,
     ) -> ToolResponse:
         self.calls.append(
             (
@@ -65,16 +65,6 @@ class _FakeVmcoreHandlers:
             )
         )
         return ToolResponse.success("crash", "ok")
-
-    async def postmortem_triage(
-        self,
-        pool: AsyncConnectionPool,
-        ctx: object,
-        *,
-        run_id: str,
-    ) -> ToolResponse:
-        self.calls.append(("postmortem_triage", pool, ctx, {"run_id": run_id}))
-        return ToolResponse.success("triage", "ok")
 
 
 def _register_tools(
@@ -119,12 +109,10 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
         "vmcore.fetch",
         "vmcore.list",
         "postmortem.crash",
-        "postmortem.triage",
     }
     assert _read_only_hint(tools["vmcore.fetch"]) is False
     assert _read_only_hint(tools["vmcore.list"]) is True
     assert _read_only_hint(tools["postmortem.crash"]) is True
-    assert _read_only_hint(tools["postmortem.triage"]) is True
     assert all((tool.meta or {}) == {"maturity": "implemented"} for tool in tools.values())
 
     fetch_descriptions = _property_descriptions(tools["vmcore.fetch"])
@@ -147,9 +135,9 @@ def test_register_publishes_vmcore_and_postmortem_contracts(
     commands_desc = crash_descriptions["commands"]
     assert "bt" in commands_desc and "log" in commands_desc and "struct" in commands_desc
     assert "detail names the offending command" in commands_desc
-    assert _property_descriptions(tools["postmortem.triage"]) == {
-        "run_id": "The Run whose captured core to triage."
-    }
+    # Omitting `commands` runs the standard first-pass batch, so the Field must name it (#1585).
+    assert "Omit to run the standard first-pass batch (log, bt)" in commands_desc
+    assert "commands" not in tools["postmortem.crash"].parameters.get("required", [])
 
 
 def test_registered_wrappers_delegate_to_vmcore_handlers(
@@ -172,7 +160,7 @@ def test_registered_wrappers_delegate_to_vmcore_handlers(
         )
         await tools["vmcore.list"].fn("run-2")
         await tools["postmortem.crash"].fn("run-3", ["sys", "log"])
-        await tools["postmortem.triage"].fn("run-4")
+        await tools["postmortem.crash"].fn("run-4")
 
     asyncio.run(_run())
 
@@ -194,6 +182,7 @@ def test_registered_wrappers_delegate_to_vmcore_handlers(
             ctx,
             {"run_id": "run-3", "commands": ["sys", "log"]},
         ),
-        ("postmortem_triage", pool, ctx, {"run_id": "run-4"}),
+        # An omitted `commands` reaches the handler as None; the handler picks the default batch.
+        ("postmortem_crash", pool, ctx, {"run_id": "run-4", "commands": None}),
     ]
     assert list_calls == [(pool, ctx, "run-2")]

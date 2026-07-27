@@ -178,7 +178,6 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "vmcore.list": frozenset({"vmcore", "list", "dumps", "crash"}),
     # postmortem
     "postmortem.crash": frozenset({"postmortem", "crash", "analysis", "vmcore", "triage"}),
-    "postmortem.triage": frozenset({"triage", "postmortem", "crash", "analysis"}),
     # allocations
     "allocations.request": frozenset({"allocate", "request", "capacity", "reserve", "system"}),
     "allocations.release": frozenset({"release", "free", "deallocate", "allocation"}),
@@ -234,7 +233,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # Because search matches substrings, a dotted name here also matches its bare parts. The guard in
 # ``tests/mcp/test_tool_index.py`` asserts each key is absent from the live registry and each
 # value is present, so a typo or a name that was never actually removed trips CI.
-RETIRED_TOOL_NAMES: dict[str, str] = {}
+RETIRED_TOOL_NAMES: dict[str, str] = {
+    "postmortem.triage": "postmortem.crash",
+}
 
 
 def _invert_retired_names(mapping: dict[str, str]) -> dict[str, frozenset[str]]:

@@ -73,7 +73,6 @@ def test_build_app_registers_jobs_tools() -> None:
             "artifacts.get",
             "artifacts.find",
             "postmortem.crash",
-            "postmortem.triage",
         } <= names
         assert {"debug.start_session", "debug.end_session"} <= names
         assert {
@@ -397,7 +396,7 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "control.force_crash": "implemented",
     "vmcore.fetch": "implemented",
     "vmcore.list": "implemented",
-    "postmortem.triage": "implemented",
+    "postmortem.crash": "implemented",
     "introspect.from_vmcore": "implemented",
 }
 
@@ -436,13 +435,13 @@ def test_build_app_registers_lifecycle_prompts() -> None:
 
 
 def test_lifecycle_prompts_disclose_no_partial_steps_when_all_implemented() -> None:
-    # #816: with postmortem.crash/triage promoted, every tool the triage_panic journey
-    # references is `implemented`, so the rendered body tags no step `[partial`. The
-    # disclosure *rendering* (a partial step gets a `[partial: reason]` tag) is unit-tested
-    # against a fabricated maturity map in tests/mcp/prompts/test_lifecycle_prompts.py; this
+    # #816: with postmortem.crash promoted, every tool the triage_panic journey references
+    # is `implemented`, so the rendered body tags no step `[partial`. The disclosure
+    # *rendering* (a partial step gets a `[partial: reason]` tag) is unit-tested against a
+    # fabricated maturity map in tests/mcp/prompts/test_lifecycle_prompts.py; this
     # integration check pins the live registry's current all-implemented state.
     body = _rendered_prompt_body(_built_app(), "triage_panic")
-    triage_line = next(line for line in body.splitlines() if "postmortem.triage " in line)
+    triage_line = next(line for line in body.splitlines() if "postmortem.crash " in line)
     assert "[partial" not in triage_line
     # No numbered step line carries a [partial tag (the _NOTES footer mentions it literally).
     step_lines = [ln for ln in body.splitlines() if " — " in ln]

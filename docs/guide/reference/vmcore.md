@@ -13,7 +13,7 @@ Prerequisite: the Run's bound System must be in CRASHED state — induce a crash
 rejected with a configuration_error naming the current state. Async: this enqueues a
 ``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait`` / ``jobs.get``.
 On success the core lands as a redacted artifact; confirm it with ``vmcore.list``, then
-analyze it with ``postmortem.triage`` or ``postmortem.crash``. The capture ``method``
+analyze it with ``postmortem.crash``. The capture ``method``
 resolves from the System profile when omitted; a kdump/fadump core also needs the guest
 kernel's crash symbols and a capable rootfs (gated before the job is admitted).
 
@@ -31,8 +31,7 @@ List the Run's redacted vmcore artifacts as one collection envelope.
 
 Read this after a ``vmcore.fetch`` job completes to confirm the captured core's artifact
 reference. Each item is a redacted artifact envelope; fetch bytes with ``artifacts.get`` or
-analyze the core with ``postmortem.triage`` / ``postmortem.crash``. Empty until a capture
-succeeds.
+analyze the core with ``postmortem.crash``. Empty until a capture succeeds.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

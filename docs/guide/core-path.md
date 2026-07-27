@@ -43,7 +43,7 @@ kernel source. See [Build lane](../operating/external-build-upload.md) for the a
 |---|---|---|
 | 10 | `control.force_crash` | Induce a crash (or react to an observed panic). |
 | 11 | `vmcore.fetch` | Capture the vmcore from the crashed system. |
-| 12 | `postmortem.triage` | Run the first-pass crash triage. |
+| 12 | `postmortem.crash` | Run the first-pass crash triage (omit `commands`). |
 
 `runs.install`, `runs.boot`, `control.force_crash`, and
 `vmcore.fetch` are long-running: each returns a job handle and you poll

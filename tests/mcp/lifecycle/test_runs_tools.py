@@ -1384,7 +1384,7 @@ def test_get_booted_run_recommends_debug_start_session(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
-def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
+def test_get_expected_crash_boot_recommends_postmortem(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             run_id = await _seed_run(pool, state=RunState.SUCCEEDED)
@@ -1393,7 +1393,7 @@ def test_get_expected_crash_boot_recommends_triage(migrated_url: str) -> None:
                 pool, run_id, "boot", "succeeded", {"boot_outcome": "expected_crash_observed"}
             )
             resp = await get_run(pool, _ctx(), run_id)
-        assert resp.suggested_next_actions == ["runs.get", "postmortem.triage", "vmcore.fetch"]
+        assert resp.suggested_next_actions == ["runs.get", "postmortem.crash", "vmcore.fetch"]
 
     asyncio.run(_run())
 

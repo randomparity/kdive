@@ -147,7 +147,7 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
 
     Keys the booted-run branch on the observed `boot_outcome` (from the boot step result),
     not the Run's create-time `expected_boot_failure`: a Run that expected a crash but booted
-    normally is live-debuggable. The `postmortem.triage` / `vmcore.fetch` pair matches the
+    normally is live-debuggable. The `postmortem.crash` / `vmcore.fetch` pair matches the
     failure `sessions_lifecycle.py` returns for a live attach on an `expected_crash_observed`
     boot.
     """
@@ -158,7 +158,7 @@ def _succeeded_next_step(run: Run, progress: StepProgress | None) -> list[str]:
     if progress.boot != RUN_STEP_SUCCEEDED:
         return ["runs.boot"]
     if progress.boot_outcome == BOOT_OUTCOME_EXPECTED_CRASH_OBSERVED:
-        return ["postmortem.triage", "vmcore.fetch"]
+        return ["postmortem.crash", "vmcore.fetch"]
     return ["debug.start_session"]
 
 

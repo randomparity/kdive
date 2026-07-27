@@ -698,7 +698,7 @@ def test_start_session_rejects_expected_crash_run(migrated_url: str) -> None:
         assert resp.data["reason"] == "expected_crash_not_live_debuggable"
         # The envelope names no dead-end tool: after an expected console_crash the System stays
         # READY, so vmcore.fetch always rejects (#759). It points straight at the console artifact
-        # and reuses postmortem.triage's shared guidance so the two surfaces cannot drift.
+        # and reuses postmortem.crash's shared guidance so the two surfaces cannot drift.
         assert resp.detail == CONSOLE_CRASH_GUIDANCE
         assert "vmcore.fetch" not in resp.suggested_next_actions
         assert resp.suggested_next_actions == ["runs.get", "artifacts.list"]
