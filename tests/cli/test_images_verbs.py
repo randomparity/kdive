@@ -1,9 +1,12 @@
 """``kdivectl images`` verbs call the right server tool with the expected payload.
 
 The verbs are driven through fakes for the MCP client so the tests are hermetic. ``list``
-is a read passthrough; ``upload``/``delete``/``build``/``publish``/``prune``/``extend`` are
-mutating verbs that run the fail-closed token preflight first, then call their server tool
-(ADR-0089). A denial envelope from the server maps to exit ``3``.
+is a read passthrough; ``upload``/``delete``/``prune``/``extend`` are curated mutating verbs
+that run the fail-closed token preflight first, then call their server tool (ADR-0089). A
+denial envelope from the server maps to exit ``3``.
+
+``publish`` has no curated verb: it takes the schema-generated shape, so it is exercised over
+the real argv-to-dispatch route rather than by calling a handler directly (ADR-0461).
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ import pytest
 import kdive.cli.commands.images as images
 import kdive.cli.commands.mutations as mutations
 import kdive.cli.commands.reads as reads
+from kdive.cli import dispatch
+from kdive.cli.__main__ import build_parser
 from kdive.cli.commands.registry import REGISTRY
 
 
@@ -182,68 +187,6 @@ def test_delete_calls_images_delete(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _install(monkeypatch)
     asyncio.run(images.images_delete(_args(image_id="img-1")))
     assert client.calls == [("images.delete", {"image_id": "img-1"})]
-
-
-def test_build_calls_images_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch)
-    asyncio.run(
-        images.images_build(
-            _args(
-                provider="local-libvirt",
-                name="fedora-40",
-                packages=["crash", "drgn"],
-            )
-        )
-    )
-    assert client.calls == [
-        (
-            "images.build",
-            {
-                "request": {
-                    "provider": "local-libvirt",
-                    "name": "fedora-40",
-                    "packages": ["crash", "drgn"],
-                },
-            },
-        )
-    ]
-
-
-def test_build_trims_blank_package_entries(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch)
-    asyncio.run(
-        images.images_build(
-            _args(
-                provider="local-libvirt",
-                name="fedora-40",
-                packages=[" crash ", " ", "drgn"],
-            )
-        )
-    )
-    assert client.calls[0] == (
-        "images.build",
-        {
-            "request": {
-                "provider": "local-libvirt",
-                "name": "fedora-40",
-                "packages": ["crash", "drgn"],
-            },
-        },
-    )
-
-
-def test_publish_calls_images_publish(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch)
-    asyncio.run(
-        images.images_publish(
-            _args(
-                provider="local-libvirt",
-                name="fedora-40",
-                packages=["crash"],
-            )
-        )
-    )
-    assert client.calls[0][0] == "images.publish"
 
 
 def test_prune_expired_calls_break_glass_tool(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -420,57 +363,6 @@ def test_delete_json_flag_threads_through_to_render(
     assert payload["object_id"] == "img-1" and payload["status"] == "deleted"
 
 
-def test_build_json_flag_threads_through_to_render(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    _install(monkeypatch, {"object_id": "b1", "status": "queued", "data": {}})
-    asyncio.run(
-        images.images_build(
-            _json_args(
-                provider="local-libvirt",
-                name="fedora-40",
-                packages=["crash"],
-            )
-        )
-    )
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["object_id"] == "b1"
-
-
-def test_build_tolerates_missing_packages_attr(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _install(monkeypatch)
-    bare = argparse.Namespace(
-        json=False,
-        provider="local-libvirt",
-        name="fedora-40",
-    )
-    asyncio.run(images.images_build(bare))
-    assert client.calls[0][1]["request"]["packages"] == []
-
-
-def test_publish_sends_request_envelope_and_threads_json(
-    monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    client = _install(monkeypatch, {"object_id": "p1", "status": "queued", "data": {}})
-    asyncio.run(
-        images.images_publish(
-            _json_args(
-                provider="local-libvirt",
-                name="fedora-40",
-                packages=["crash"],
-            )
-        )
-    )
-    name, arguments = client.calls[0]
-    assert name == "images.publish"
-    assert list(arguments.keys()) == ["request"]
-    assert arguments["request"] == {
-        "provider": "local-libvirt",
-        "name": "fedora-40",
-        "packages": ["crash"],
-    }
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["object_id"] == "p1"
-
-
 def test_prune_exit_message_names_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch)
     with pytest.raises(SystemExit) as excinfo:
@@ -508,9 +400,117 @@ def test_image_verbs_registered_with_expected_read_only_flags() -> None:
     for mutating in (
         "images.upload",
         "images.delete",
-        "images.build",
-        "images.publish",
         "images.prune_expired",
         "images.extend",
     ):
         assert by_tool[mutating].read_only is False
+
+
+def test_publish_is_not_curated_so_the_generated_verb_wins() -> None:
+    # A curated verb overrides the generated shape at its path, so leaving one here would
+    # re-impose a hand-written payload on a schema-derived tool (ADR-0461).
+    assert not [verb for verb in REGISTRY if verb.group == "images" and verb.sub == "publish"]
+
+
+# --- `kdivectl images publish` over the real dispatch path -----------------------------------
+#
+# Curated verbs bypass the generated-dispatch seam entirely, so asserting against a hand-called
+# handler cannot tell whether the shipped command line still works. These drive the real route:
+# argv -> build_parser() -> dispatch.run() -> registry.run_verb() -> invoke_generated_verb(),
+# with only the transport (`_session_factory`) faked.
+
+
+class _MutatingTool:
+    """The live annotation shape ``classify_tool`` reads: mutating, not destructive."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.annotations = argparse.Namespace(readOnlyHint=False, destructiveHint=False)
+
+
+class _GeneratedResult:
+    def __init__(self, envelope: dict) -> None:
+        self.structured_content = envelope
+        self.data = envelope
+
+
+class _GeneratedClient:
+    """A client whose result carries ``structured_content``, as generated dispatch reads."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.calls: list[tuple[str, dict]] = []
+
+    async def __aenter__(self) -> _GeneratedClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    async def list_tools(self) -> list[object]:
+        return [_MutatingTool("images.publish")]
+
+    async def call_tool(self, name: str, arguments: dict) -> _GeneratedResult:
+        self.calls.append((name, arguments))
+        return _GeneratedResult(self._payload)
+
+
+class _GeneratedSession:
+    def __init__(self, client: _GeneratedClient, token: str = "x.y.z") -> None:
+        self._client = client
+        self.token = token
+
+    def client(self) -> _GeneratedClient:
+        return self._client
+
+
+def _run_argv(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> tuple[_GeneratedClient, int]:
+    client = _GeneratedClient({"object_id": "job-1", "status": "queued", "data": {}})
+    monkeypatch.setattr(dispatch, "_session_factory", lambda: _GeneratedSession(client))
+    monkeypatch.setattr(dispatch, "ensure_token_valid", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch.sys.stdin, "isatty", lambda: False)
+    return client, asyncio.run(dispatch.run(build_parser().parse_args(argv)))
+
+
+def test_publish_command_line_sends_flat_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, code = _run_argv(
+        monkeypatch,
+        ["images", "publish", "--provider", "local-libvirt", "--name", "fedora-40"],
+    )
+    assert code == 0
+    assert client.calls == [("images.publish", {"provider": "local-libvirt", "name": "fedora-40"})]
+
+
+def test_publish_command_line_repeats_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, code = _run_argv(
+        monkeypatch,
+        [
+            "images",
+            "publish",
+            "--provider",
+            "local-libvirt",
+            "--name",
+            "fedora-40",
+            "--packages",
+            "crash",
+            "--packages",
+            "drgn",
+        ],
+    )
+    assert code == 0
+    assert client.calls[0][1]["packages"] == ["crash", "drgn"]
+
+
+def test_publish_command_line_omits_unset_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An omitted optional flag sends no key at all, so the server-side default holds.
+    client, _ = _run_argv(
+        monkeypatch,
+        ["images", "publish", "--provider", "local-libvirt", "--name", "fedora-40"],
+    )
+    assert "packages" not in client.calls[0][1]
+
+
+def test_publish_command_line_requires_provider_and_name() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["images", "publish"])
+    assert excinfo.value.code == 2
