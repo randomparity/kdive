@@ -2,6 +2,26 @@
 
 # `debug` tools
 
+## `debug.advance`
+
+`implemented`
+
+Advance a stopped live DebugSession by one step and wait for the stop. Requires
+contributor. The target must already be stopped (halt it with debug.interrupt or hit a
+breakpoint) to advance from. mode='into' steps one source line into called functions,
+'over' steps one source line over them, 'instruction' steps one machine instruction, and
+'out' resumes until the current frame returns. In a region with no debug symbols 'into'
+and 'over' return timed_out=True or a debug_attach_failure ("Cannot find bounds of
+current function"); use 'instruction' there. 'out' needs a frame that can return — in the
+outermost frame it fails with debug_attach_failure — and a frame that does not return
+within the wait interrupts back with timed_out=True.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `mode` | `into`, `over`, `instruction`, `out` | yes | How far to advance: 'into' runs one source line and enters called functions; 'over' runs one source line and steps past called functions; 'instruction' runs one machine instruction and is the fallback where the code has no debug symbols; 'out' resumes until the current (innermost) frame returns, so it needs a frame that can return. |
+| `session_id` | string | yes | The live DebugSession to advance execution on. |
+| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
+
 ## `debug.backtrace`
 
 `implemented` · `read-only`
@@ -74,20 +94,6 @@ Drive a live DebugSession to detached; close its transport. Requires contributor
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | string | yes | The DebugSession to detach and close. |
-
-## `debug.finish`
-
-`implemented`
-
-Resume a live DebugSession until the current (innermost) frame returns, and wait for
-the stop. The target must already be stopped (halt it with debug.interrupt or hit a
-breakpoint) to resume from. A frame that does not return within the wait interrupts back
-with timed_out=True. Requires contributor.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to resume until the current frame returns on. |
-| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.get_session`
 
@@ -173,20 +179,6 @@ Requires contributor.
 | `expected_base` | integer (nullable) | no | The base address seen in debug.list_modules; if it no longer matches the live module, the load is refused as stale rather than loading wrong symbols. |
 | `module` | string | yes | Loaded module name to load symbols for (from debug.list_modules). |
 | `session_id` | string | yes | The live DebugSession to load module symbols on. |
-
-## `debug.next`
-
-`implemented`
-
-Step one source line, over called functions, on a live DebugSession, and wait for the
-stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
-to step from. Same symbol-poor behavior as debug.step (use debug.step_instruction where the
-current code has no debug symbols). Requires contributor.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step over calls on. |
-| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
 
 ## `debug.read_frame`
 
@@ -285,32 +277,3 @@ it (or a multiarch gdb build) — the `multiarch_gdb` doctor check reports this 
 |---|---|---|---|
 | `run_id` | string | yes | The booted Run to attach a debug session to. |
 | `transport` | string | no | Transport kind: `gdbstub` (default) or `drgn-live`. |
-
-## `debug.step`
-
-`implemented`
-
-Step one source line, into called functions, on a live DebugSession, and wait for the
-stop. The target must already be stopped (halt it with debug.interrupt or hit a breakpoint)
-to step from. In a region with no debug symbols this returns timed_out=True or a
-debug_attach_failure ("Cannot find bounds of current function"); use
-debug.step_instruction there. Requires contributor.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step into calls on. |
-| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |
-
-## `debug.step_instruction`
-
-`implemented`
-
-Step one machine instruction on a live DebugSession, and wait for the stop. The target
-must already be stopped (halt it with debug.interrupt or hit a breakpoint) to step from.
-Works without debug symbols, so it is the fallback for stepping in symbol-poor regions.
-Requires contributor.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `session_id` | string | yes | The live DebugSession to step one instruction on. |
-| `timeout_sec` | number | no | Seconds to wait for a stop event; 0.0 uses the provider interactive wait cap. |

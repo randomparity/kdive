@@ -342,6 +342,45 @@ def test_image_build_vocabulary_finds_images_publish(
     assert "images.build" not in names
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "debug.step",
+        "debug.next",
+        "debug.step_instruction",
+        "debug.finish",
+        "step over",
+        "step into",
+        "finish frame",
+        "stepi",
+    ],
+)
+def test_stepping_vocabulary_finds_debug_advance(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """All four retired stepping names and their intent words rank debug.advance (ADR-0463).
+
+    The surviving name spells neither "step" nor "finish", so those words reach the tool only
+    through the retired-name vocabulary and the curated keyword set — the mode enum supplies
+    `into`/`over`/`instruction`/`out` but not the verbs an agent is most likely to type.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "debug.advance" in names, f"query {query!r} did not surface debug.advance: {names}"
+
+
 # ---------------------------------------------------------------------------
 # Test 4: RBAC filter hides admin-only tools from a viewer
 # ---------------------------------------------------------------------------
