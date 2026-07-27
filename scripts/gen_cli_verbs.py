@@ -107,7 +107,13 @@ def _flag_for(dest: str, spec: dict[str, Any], required: bool) -> GeneratedFlag 
             return GeneratedFlag(flag, dest, required, help_, arg_type="str", action="append")
         return None
     if type_ == "boolean":
-        return GeneratedFlag(flag, dest, required, help_, action="store_true")
+        # A required boolean must be able to express *false*, which ``store_true`` cannot:
+        # its only two states are "flag given" (true) and "flag absent", and absent is not
+        # a legal payload when the parameter is required. Such a flag pairs with a
+        # ``--no-<flag>`` instead. An optional boolean keeps ``store_true`` so "unset"
+        # stays distinguishable from an explicit false and the server default holds.
+        action = "bool_optional" if required else "store_true"
+        return GeneratedFlag(flag, dest, required, help_, action=action)
     argtype = _SCALAR_ARGTYPE.get(type_) if isinstance(type_, str) else None
     if argtype is None:
         return None
