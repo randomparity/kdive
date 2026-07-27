@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve agent and operator tool-exposure profiles
 - Default the agent profile to the tool gateway
 - Index retired tool names for tools.search
+- Retire cordon/uncordon into search vocabulary
 - Express required boolean params as --flag/--no-flag
 
 ### Changed
@@ -66,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse the manifest helpers and fold the test stores
 - Name the renamed reuse gate in two stale comments
 - Fold postmortem.triage into postmortem.crash
+- Replace cordon/uncordon with a scheduling setter
 - Replace queue pause/resume with one state setter
 
 ### Documentation
@@ -141,6 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Describe the gateway as the default surface
 - Decide to retire the staged System definition lane
 - Tighten ADR-0457 migration and consumer wording
+- Record ADR-0460 resource scheduling setter
 - Record the single queue state setter
 
 ### Fixed
