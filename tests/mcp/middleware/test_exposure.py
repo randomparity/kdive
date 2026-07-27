@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -12,11 +13,31 @@ from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.middleware import exposure as exposure_mod
 from kdive.mcp.middleware.exposure import ToolExposureMiddleware
 from kdive.providers.core.resolver import ProviderResolver
+from kdive.security.authz.context import RequestContext
 from kdive.security.authz.errors import AuthError
+from kdive.security.authz.rbac import PlatformRole, Role
 
 
 def _tools(*names: str) -> list[Any]:
     return [SimpleNamespace(name=name) for name in names]
+
+
+def _ctx(
+    *,
+    agent_session: str | None = "agent-1",
+    client_id: str | None = None,
+    roles: dict[str, Role] | None = None,
+    platform: frozenset[PlatformRole] = frozenset(),
+) -> RequestContext:
+    roles = roles or {}
+    return RequestContext(
+        principal="p",
+        agent_session=agent_session,
+        projects=tuple(roles),
+        roles=roles,
+        platform_roles=platform,
+        client_id=client_id,
+    )
 
 
 def _run(mw: ToolExposureMiddleware, tools: list[Any]) -> tuple[list[Any], Any, list[Any]]:
@@ -34,8 +55,9 @@ def _run(mw: ToolExposureMiddleware, tools: list[Any]) -> tuple[list[Any], Any, 
 
 def test_filters_to_visible_tool_names_threading_both_contexts(monkeypatch) -> None:
     tools = _tools("runs.create", "runs.get", "admin.teardown")
-    authz_ctx = object()
+    authz_ctx = _ctx()
     visible_ctxs: list[Any] = []
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
     monkeypatch.setattr(exposure_mod, "request_context", lambda: authz_ctx)
 
     def _visible(ctx: Any, names: Any) -> set[str]:
@@ -93,11 +115,11 @@ def test_unexpected_error_advertises_full_catalog_and_warns(monkeypatch) -> None
 
 
 def test_gateway_off_returns_full_rbac_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When the gateway flag is absent the full RBAC-scoped catalog is returned unchanged."""
-    # 25 synthetic tools — deliberately more than the 10-member CORE_TOOLS set
+    """When the gateway flag is off the full RBAC-scoped catalog is returned unchanged."""
+    # 25 synthetic tools — deliberately more than the 9-member CORE_TOOLS set
     many_tools = _tools(*(f"tool_{i}" for i in range(25)))
-    monkeypatch.delenv("KDIVE_MCP_TOOL_GATEWAY", raising=False)
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
+    monkeypatch.setattr(exposure_mod, "request_context", _ctx)
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
     result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), many_tools)
@@ -111,7 +133,7 @@ def test_gateway_on_returns_core_intersect_rbac(monkeypatch: pytest.MonkeyPatch)
     core_plus_extras = list(CORE_TOOLS) + ["admin.delete", "inventory.list", "ops.diagnostics"]
     tools = _tools(*core_plus_extras)
     monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
-    monkeypatch.setattr(exposure_mod, "request_context", lambda: object())
+    monkeypatch.setattr(exposure_mod, "request_context", _ctx)
     monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
 
     result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
@@ -135,3 +157,84 @@ def test_gateway_on_fails_open_on_error(monkeypatch: pytest.MonkeyPatch) -> None
     result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), all_tools)
 
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
+
+
+def test_operator_cli_gets_direct_rbac_catalog_when_gateway_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools("tools.search", "ops.diagnostics", "jobs.get")
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
+    monkeypatch.setattr(
+        exposure_mod,
+        "request_context",
+        lambda: _ctx(
+            agent_session=None,
+            client_id="kdivectl",
+            platform=frozenset({PlatformRole.PLATFORM_OPERATOR}),
+        ),
+    )
+
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
+    names = {t.name for t in result}
+
+    assert names == {"tools.search", "ops.diagnostics"}
+    assert "ops.diagnostics" not in CORE_TOOLS
+
+
+def test_unknown_client_with_platform_role_stays_on_gateway_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _tools("tools.search", "ops.diagnostics")
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
+    monkeypatch.setattr(
+        exposure_mod,
+        "request_context",
+        lambda: _ctx(
+            agent_session=None,
+            client_id="mystery",
+            platform=frozenset({PlatformRole.PLATFORM_OPERATOR}),
+        ),
+    )
+
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
+
+    assert {t.name for t in result} == {"tools.search"}
+
+
+def test_profile_resolution_failure_falls_back_to_agent_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tools = _tools("tools.search", "ops.diagnostics")
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
+    monkeypatch.setattr(
+        exposure_mod,
+        "request_context",
+        lambda: _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR})),
+    )
+    monkeypatch.setattr(exposure_mod, "visible_tool_names", lambda _ctx, names: set(names))
+
+    def _raise_profile(_ctx: RequestContext) -> object:
+        raise RuntimeError("profile resolver exploded")
+
+    monkeypatch.setattr(exposure_mod, "resolve_exposure_profile", _raise_profile)
+    profile_counter_calls: list[tuple[int, dict[str, str]]] = []
+    monkeypatch.setattr(
+        exposure_mod._PROFILE_SELECTIONS,
+        "add",
+        lambda amount, attrs: profile_counter_calls.append((amount, attrs)),
+    )
+    exposure_counter_calls: list[int] = []
+    monkeypatch.setattr(
+        exposure_mod._EXPOSURE_FAILOPEN, "add", lambda amount: exposure_counter_calls.append(amount)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="kdive.mcp.middleware.exposure"):
+        result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
+
+    assert {t.name for t in result} == {"tools.search"}
+    assert profile_counter_calls == [(1, {"profile": "agent_gateway", "source": "fallback"})]
+    assert exposure_counter_calls == []
+    assert "profile resolution failed" in caplog.text

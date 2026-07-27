@@ -24,7 +24,9 @@ from collections.abc import Iterable
 from enum import StrEnum
 
 import kdive.config as config
+from kdive.config.cli_settings import CLI_CLIENT_ID
 from kdive.config.core_settings import MCP_TOOL_GATEWAY
+from kdive.security.authz.actor import OPERATOR_CLI, resolve_actor
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import (
     PlatformRole,
@@ -38,10 +40,37 @@ def gateway_enabled() -> bool:
     """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default off, ADR-0268).
 
     Single source of truth for the gateway toggle: the exposure middleware reads it to
-    decide whether to clip ``list_tools`` to ``CORE_TOOLS``, and ``build_instructions``
-    reads it so the advertised instructions match the surface the agent actually sees.
+    decide whether gateway-profile callers are clipped to ``CORE_TOOLS``, and
+    ``build_instructions`` reads it so advertised instructions match the agent surface.
     """
     return (config.get(MCP_TOOL_GATEWAY) or "").strip().lower() in {"on", "1", "true"}
+
+
+class ToolExposureProfile(StrEnum):
+    """The list-time catalog profile resolved from verified token identity."""
+
+    AGENT_GATEWAY = "agent_gateway"
+    OPERATOR_DIRECT = "operator_direct"
+
+
+def resolve_exposure_profile(ctx: RequestContext) -> ToolExposureProfile:
+    """Resolve the advisory ``list_tools`` profile for an authenticated caller.
+
+    The operator CLI is trusted only through the verified OIDC client id configured for
+    ``kdivectl``, reusing the closed actor map that already attributes audit rows (ADR-0089
+    decision 5) so exposure and the audit trail cannot disagree about who the caller is.
+    Every other authenticated caller — unknown clients, and agents holding platform roles —
+    receives the gateway profile. Execution-time RBAC is unchanged, so the profile cannot
+    grant authorization a token does not already hold.
+    """
+    actor = resolve_actor(
+        ctx.client_id,
+        agent_session=ctx.agent_session,
+        cli_client_id=config.require(CLI_CLIENT_ID),
+    )
+    if actor == OPERATOR_CLI:
+        return ToolExposureProfile.OPERATOR_DIRECT
+    return ToolExposureProfile.AGENT_GATEWAY
 
 
 class ExposureScope(StrEnum):
