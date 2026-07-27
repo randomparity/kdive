@@ -1,9 +1,9 @@
-"""Byte-space literal jump matcher for ``artifacts.find`` (#939).
+"""Byte-space literal jump matcher for ``artifacts.get(find=...)`` (#939, ADR-0283).
 
 Locates a literal ``|``-OR term over the whole fetched artifact body and returns one
 direction-anchored window plus a strictly-advancing continuation cursor. Matching is on raw
 bytes (UTF-8-encoded terms) with line boundaries on ``\\n`` only, so the byte-offset cursor
-shared with ``artifacts.get`` stays exact and Unicode line separators do not over-split.
+shared with the plain windowed read stays exact and Unicode line separators do not over-split.
 """
 
 from __future__ import annotations

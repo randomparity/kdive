@@ -71,7 +71,6 @@ def test_build_app_registers_jobs_tools() -> None:
             "vmcore.list",
             "artifacts.list",
             "artifacts.get",
-            "artifacts.find",
             "postmortem.crash",
         } <= names
         assert {"debug.start_session", "debug.end_session"} <= names

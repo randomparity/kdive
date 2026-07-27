@@ -45,7 +45,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
     """Register the `artifacts.*` tools on ``app``, bound to ``pool``."""
     _register_artifacts_list(app, pool)
     _register_artifacts_get(app, pool)
-    _register_artifacts_find(app, pool)
     _register_artifacts_fetch_raw(app, pool)
     _register_artifacts_create_run_upload(app, pool, resolver)
     _register_artifacts_create_investigation_upload(app, pool, resolver)
@@ -106,49 +105,31 @@ def _register_artifacts_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def artifacts_get(
         request: Annotated[
             artifact_reads.ArtifactsGetRequest,
-            Field(description="Artifact id plus byte-window paging options."),
+            Field(description="Artifact id plus literal search and byte-window paging options."),
         ],
     ) -> ToolResponse:
-        """Fetch a byte window of one redacted artifact.
+        """Fetch a byte window of one redacted artifact, or jump to a literal match in it.
 
         Returns the object ref plus a byte window of the redacted bytes inline in
         `data.content` (`[byte_offset, byte_offset + max_bytes)`, capped at a hard token-safe
         ceiling and KDIVE_ARTIFACT_INLINE_MAX_BYTES); `data.content_truncated` and
         `data.next_offset` page the rest, in `direction` (forward from the start, or backward
-        from the tail). An artifact above the fetch ceiling sets `content_omitted` and is
-        retrieved via presigned `refs.download_uri` when the store is reachable and redaction
-        checks pass. When the response sets `data.content_unavailable`, callers must handle the
-        degraded result without a `download_uri`. Use `artifacts.find` for literal search.
-        Requires viewer; sensitive ids are not-found.
+        from the tail).
+
+        Pass `find` to jump to the nearest literal match instead of reading a fixed window: the
+        response then carries `data.match_found` plus, on a hit, `data.match_offset`/
+        `data.match_line`, the surrounding `data.content`, and `data.next_offset` to continue in
+        `direction`. Use it to locate a crash signature in a large console log without paging the
+        whole file.
+
+        An artifact above the fetch ceiling sets `content_omitted` and is retrieved via presigned
+        `refs.download_uri` when the store is reachable and redaction checks pass; a `find` over
+        one cannot be searched at all and returns configuration_error with
+        `data.reason=artifact_too_large`, not an empty match. When the response sets
+        `data.content_unavailable`, callers must handle the degraded result without a
+        `download_uri`. Requires viewer; sensitive ids are not-found.
         """
         return await artifact_reads.artifacts_get(
-            pool,
-            current_context(),
-            request=request,
-        )
-
-
-def _register_artifacts_find(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    @app.tool(
-        name="artifacts.find",
-        annotations=_docmeta.read_only(),
-        meta=_docmeta.maturity_meta("implemented"),
-    )
-    async def artifacts_find(
-        request: Annotated[
-            artifact_reads.ArtifactsFindRequest,
-            Field(description="Artifact id plus literal search and result-window options."),
-        ],
-    ) -> ToolResponse:
-        """Jump to the nearest literal match in one redacted artifact.
-
-        Returns `data.match_found` plus, on a hit, `data.match_offset`/`data.match_line`, the
-        surrounding `data.content`, and `data.next_offset` to continue in `direction`. An
-        artifact above the fetch ceiling cannot be searched and returns configuration_error
-        with `data.reason=artifact_too_large`, not an empty match. Requires viewer; sensitive
-        ids are not-found.
-        """
-        return await artifact_reads.artifacts_find(
             pool,
             current_context(),
             request=request,

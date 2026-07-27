@@ -184,8 +184,25 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "allocations.renew": frozenset({"renew", "extend", "lease", "allocation"}),
     "allocations.wait": frozenset({"wait", "poll", "allocation", "ready"}),
     # artifacts
-    "artifacts.get": frozenset({"artifact", "get", "fetch", "download", "file", "console", "log"}),
-    "artifacts.find": frozenset({"artifact", "search", "find", "text", "console", "log"}),
+    # `artifacts.get` carries the retired `artifacts.find` vocabulary too (ADR-0462): the jump
+    # matcher is a `find` parameter on this tool, so search/find/text/grep/string must rank it.
+    "artifacts.get": frozenset(
+        {
+            "artifact",
+            "get",
+            "fetch",
+            "download",
+            "file",
+            "console",
+            "log",
+            "search",
+            "find",
+            "text",
+            "grep",
+            "string",
+            "match",
+        }
+    ),
     "artifacts.list": frozenset({"artifacts", "list", "files", "uploads"}),
     "artifacts.fetch_raw": frozenset({"raw", "fetch", "vmcore", "vmlinux", "download"}),
     "artifacts.create_run_upload": frozenset(
@@ -234,6 +251,7 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # ``tests/mcp/test_tool_index.py`` asserts each key is absent from the live registry and each
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
+    "artifacts.find": "artifacts.get",
     "ops.queue_pause": "ops.set_queue_paused",
     "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",

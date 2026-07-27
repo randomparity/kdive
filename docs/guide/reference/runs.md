@@ -149,7 +149,8 @@ reproduced (look for an unrelated failure, not your declared signature).
 
 Console evidence: `refs.console` is the boot-window console snapshot and
 `data.console_access` names how to read it (`artifacts.get` windowed/paged, or
-`artifacts.find` for literal search). Both are present on a booted Run — including a
+`artifacts.get` with `find` for literal search). Both are present on a booted Run —
+including a
 readiness-failed boot: the console the boot captured stays reachable at `refs.console`
 (backed by the same surviving artifact as `refs.latest_console`), so one field works whether
 the boot succeeded or failed.

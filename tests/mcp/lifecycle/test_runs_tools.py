@@ -730,7 +730,7 @@ def test_envelope_for_run_omits_installed_crashkernel_without_progress() -> None
 
 _CONSOLE_ACCESS_EXPECTED = {
     "ref": "console",
-    "search": "artifacts.find",
+    "search": "artifacts.get(find=...)",
     "full_text": "artifacts.get",
 }
 
