@@ -85,15 +85,10 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {"introspect.from_vmcore", "introspect.run"} <= names
         assert {
             "accounting.estimate",
-            "accounting.usage_project",
-            "accounting.usage_investigation",
-            "accounting.report_granted_set",
-            "accounting.report_all_projects",
+            "accounting.usage",
+            "accounting.report",
         } <= names
-        assert {
-            "reports.generate_granted_set",
-            "reports.generate_all_projects",
-        } <= names
+        assert {"reports.generate"} <= names
         assert {
             "allocations.request",
             "allocations.get",

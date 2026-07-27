@@ -1,4 +1,14 @@
-"""Accounting report MCP tools (ADR-0043)."""
+"""The ``accounting.report`` MCP tool (ADR-0043, ADR-0467).
+
+One tool serves two explicit reporting scopes, selected by a discriminated ``request``
+model, each with its own project resolver and its own authorization:
+
+* **granted-set** — resolves the caller's member projects (or authorizes each named one
+  with ``require_role(viewer)``) and never reads outside them.
+* **all-projects** — gated on ``platform_auditor`` *first*, then reads the project
+  universe straight from SQL. The gate is the first statement of the branch, so a
+  ``scope`` argument only picks the branch; it never grants it.
+"""
 
 from __future__ import annotations
 
@@ -35,50 +45,58 @@ from kdive.security.authz.rbac import (
 from kdive.services.accounting import ledger as accounting_domain
 
 _REPORT_OBJECT_ID = "report"
-_REPORT_GRANTED_SET_TOOL = "accounting.report_granted_set"
-_REPORT_ALL_PROJECTS_TOOL = "accounting.report_all_projects"
+_TOOL = "accounting.report"
 _SCOPE_GRANTED_SET = "granted-set"
 _GROUP_BY_PRINCIPAL = "principal"
 
+_GROUP_BY_DESCRIPTION = "Group rows by 'principal', or omit for per-project grouping."
+_WINDOW_DESCRIPTION = "[start, end] ISO-8601 timestamptz pair; omit for all time."
+
 
 class AccountingGrantedSetReportRequest(ToolPayload):
-    """Request payload for ``accounting.report_granted_set``."""
+    """Granted-set rollup request: the caller's own projects, ``viewer`` floor."""
 
+    scope: Literal["granted-set"]
     projects: Annotated[
         list[str] | None,
         Field(description="Named project subset for granted-set scope; omit for all members."),
     ] = None
-    group_by: Annotated[
-        str | None,
-        Field(description="Group rows by 'principal', or omit for per-project grouping."),
-    ] = None
-    window: Annotated[
-        list[str | None] | None,
-        Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
-    ] = None
+    group_by: Annotated[str | None, Field(description=_GROUP_BY_DESCRIPTION)] = None
+    window: Annotated[list[str | None] | None, Field(description=_WINDOW_DESCRIPTION)] = None
 
 
 class AccountingAllProjectsReportRequest(ToolPayload):
-    """Request payload for ``accounting.report_all_projects``."""
+    """Cross-project rollup request: every project, ``platform_auditor`` only."""
 
-    group_by: Annotated[
-        str | None,
-        Field(description="Group rows by 'principal', or omit for per-project grouping."),
-    ] = None
-    window: Annotated[
-        list[str | None] | None,
-        Field(description="[start, end] ISO-8601 timestamptz pair; omit for all time."),
-    ] = None
+    scope: Literal["all-projects"]
+    group_by: Annotated[str | None, Field(description=_GROUP_BY_DESCRIPTION)] = None
+    window: Annotated[list[str | None] | None, Field(description=_WINDOW_DESCRIPTION)] = None
+
+
+type AccountingReportRequest = (
+    AccountingGrantedSetReportRequest | AccountingAllProjectsReportRequest
+)
+
+
+async def report(
+    pool: AsyncConnectionPool,
+    ctx: RequestContext,
+    *,
+    request: AccountingReportRequest,
+) -> ToolResponse:
+    """Dispatch the typed ``accounting.report`` request model to its explicit handler."""
+    if isinstance(request, AccountingAllProjectsReportRequest):
+        return await report_all_projects(pool, ctx, request=request)
+    return await report_granted_set(pool, ctx, request=request)
 
 
 async def report_granted_set(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    request: AccountingGrantedSetReportRequest | None = None,
+    request: AccountingGrantedSetReportRequest,
 ) -> ToolResponse:
     """Roll up caller-authorized member projects (ADR-0043 §3)."""
-    request = request or AccountingGrantedSetReportRequest()
     with bind_context(principal=ctx.principal):
         try:
             parsed_group_by = _parse_group_by(request.group_by)
@@ -87,7 +105,7 @@ async def report_granted_set(
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID,
                 exc,
-                suggested_next_actions=[_REPORT_GRANTED_SET_TOOL],
+                suggested_next_actions=[_TOOL],
             )
         return await _report_granted_set(
             pool, ctx, request.projects, parsed_group_by, parsed_window
@@ -98,10 +116,9 @@ async def report_all_projects(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
     *,
-    request: AccountingAllProjectsReportRequest | None = None,
+    request: AccountingAllProjectsReportRequest,
 ) -> ToolResponse:
     """Roll up all projects under the platform-auditor role (ADR-0043 §3)."""
-    request = request or AccountingAllProjectsReportRequest()
     with bind_context(principal=ctx.principal):
         try:
             parsed_group_by = _parse_group_by(request.group_by)
@@ -110,7 +127,7 @@ async def report_all_projects(
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID,
                 exc,
-                suggested_next_actions=[_REPORT_ALL_PROJECTS_TOOL],
+                suggested_next_actions=[_TOOL],
             )
         return await _report_all_projects(pool, ctx, parsed_group_by, parsed_window)
 
@@ -137,7 +154,7 @@ async def _report_granted_set(
                     principal=ctx.principal,
                     agent_session=ctx.agent_session,
                     event=audit.PlatformAuditEvent(
-                        tool=_REPORT_GRANTED_SET_TOOL,
+                        tool=_TOOL,
                         scope=scope_value,
                         args=_report_args(_SCOPE_GRANTED_SET, named, group_by, window),
                         platform_role=None,
@@ -165,8 +182,8 @@ def _resolve_granted_set(ctx: RequestContext, named: list[str] | None) -> list[s
 def _name_targets(rollup: accounting_domain.Report, targets: list[str]) -> accounting_domain.Report:
     """Name every authorized granted-set project, zero-filling those with no rows (#426).
 
-    ``report()`` emits a row only for a project with ledger rows in the window, so a granted
-    project with no spend would be unnamed (the observed bug: empty ``items``, only
+    The domain rollup emits a row only for a project with ledger rows in the window, so a
+    granted project with no spend would be unnamed (the observed bug: empty ``items``, only
     ``total_project="*"``). This adds a quantized zero row (:func:`accounting_domain.empty_row`)
     for each target absent from ``rollup.rows``, then returns the full set ordered by
     ``(project, principal)`` so the granted-set response is deterministic — the domain rollup
@@ -174,7 +191,7 @@ def _name_targets(rollup: accounting_domain.Report, targets: list[str]) -> accou
     spent+unspent set stable. ``targets`` may contain duplicates (``ctx.projects`` is not
     deduplicated upstream), so the missing set is deduplicated to avoid duplicate zero rows.
     The ``total`` row is unchanged (the zero rows add nothing to it). Granted-set only;
-    ``accounting.report_all_projects`` does not call this and keeps its existing order.
+    The all-projects branch does not call this and keeps its existing order.
     """
     present = {row.project for row in rollup.rows}
     missing = {p for p in targets if p not in present}
@@ -201,7 +218,7 @@ async def _report_all_projects(
         return ToolResponse.failure(
             _REPORT_OBJECT_ID,
             ErrorCategory.AUTHORIZATION_DENIED,
-            suggested_next_actions=[_REPORT_ALL_PROJECTS_TOOL],
+            suggested_next_actions=[_TOOL],
         )
     async with pool.connection() as conn:
         targets = await _all_projects(conn)
@@ -214,7 +231,7 @@ async def _report_all_projects(
                 principal=ctx.principal,
                 agent_session=ctx.agent_session,
                 event=audit.PlatformAuditEvent(
-                    tool=_REPORT_ALL_PROJECTS_TOOL,
+                    tool=_TOOL,
                     scope=ALL_PROJECTS_SCOPE,
                     args=_report_args(ALL_PROJECTS_SCOPE, None, group_by, window),
                     platform_role=held_platform_roles(ctx),
@@ -240,7 +257,7 @@ async def _audit_all_projects_denial(
     await audit_platform_denial(
         pool,
         ctx,
-        tool=_REPORT_ALL_PROJECTS_TOOL,
+        tool=_TOOL,
         scope=ALL_PROJECTS_SCOPE,
         args=_report_args(ALL_PROJECTS_SCOPE, None, group_by, window),
     )
@@ -323,7 +340,7 @@ def _report_response(
         _REPORT_OBJECT_ID,
         "ok",
         items,
-        suggested_next_actions=["accounting.usage_project"],
+        suggested_next_actions=["accounting.usage"],
         data={
             "scope": scope,
             "group_by": group_by or "",
@@ -344,50 +361,37 @@ def _rollup_object_id(row: accounting_domain.RollupRow) -> str:
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register report accounting tools on ``app``, bound to ``pool``."""
+    """Register the ``accounting.report`` tool on ``app``, bound to ``pool``."""
 
     @app.tool(
-        name="accounting.report_granted_set",
+        name=_TOOL,
         annotations=_docmeta.read_only(),
         meta={"maturity": "implemented"},
     )
-    async def accounting_report_granted_set(
+    async def accounting_report(
         request: Annotated[
-            AccountingGrantedSetReportRequest | None,
-            Field(description="Report filters: projects, group_by, and optional time window."),
-        ] = None,
+            AccountingReportRequest,
+            Field(
+                discriminator="scope",
+                description=(
+                    "Which projects to roll up: {'scope':'granted-set'} for your own "
+                    "projects (optionally narrowed by 'projects'), or "
+                    "{'scope':'all-projects'} for every project on the platform."
+                ),
+            ),
+        ],
     ) -> ToolResponse:
-        """Return an inline spend rollup over the caller's granted projects.
+        """Return an inline KCU spend rollup: your granted projects, or all projects.
 
-        The rollup is returned inline in ``data`` (one row per ``group_by`` bucket, KCU
-        totals); nothing is written to the object store. For a downloadable multi-section
-        CSV/XLSX export behind presigned URLs, use ``reports.generate_granted_set`` instead.
-        """
-        return await report_granted_set(
-            pool,
-            current_context(),
-            request=request or AccountingGrantedSetReportRequest(),
-        )
+        ``scope='granted-set'`` rolls up the projects you hold a role on — omit
+        ``projects`` for all of them, or name a subset (each is checked for ``viewer``).
+        ``scope='all-projects'`` rolls up every project on the platform and requires
+        ``platform_auditor``; without it the call is denied, so ``scope`` selects the
+        report, it never grants access to one.
 
-    @app.tool(
-        name="accounting.report_all_projects",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def accounting_report_all_projects(
-        request: Annotated[
-            AccountingAllProjectsReportRequest | None,
-            Field(description="Report filters: group_by and optional time window."),
-        ] = None,
-    ) -> ToolResponse:
-        """Return an inline platform-wide spend rollup over all projects.
-
-        The rollup is returned inline in ``data`` (KCU totals per ``group_by`` bucket);
+        The rollup comes back inline in ``data`` (one item per ``group_by`` bucket, with
+        ``reserved`` / ``reconciled`` / ``variance`` KCU and matching ``total_*`` fields);
         nothing is written to the object store. For a downloadable multi-section CSV/XLSX
-        export behind presigned URLs, use ``reports.generate_all_projects`` instead.
+        export behind presigned URLs, use ``reports.generate`` instead.
         """
-        return await report_all_projects(
-            pool,
-            current_context(),
-            request=request or AccountingAllProjectsReportRequest(),
-        )
+        return await report(pool, current_context(), request=request)

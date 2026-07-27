@@ -28,44 +28,38 @@ The response returns `estimate_kcu`, the `rate_kcu_per_hr`, and the vcpu/memory 
 - `cost_class` (`string`, optional) — Hypothetical cost class to price against (default 'local'); selects the per-class pricing coefficient. This is a what-if input, not the class you are billed under: actual usage is billed under the persisted cost_class of the resource the allocation books. To get an estimate that matches the bill, pass the cost_class of the resource you intend to allocate on (read it from `resources.describe`). An unknown class is a configuration_error.
 - `accel` (`string (nullable)`, optional) — Optional accelerator to price the estimate at: 'kvm' (native) or 'tcg' (foreign-arch emulation). Omit for the native baseline. A TCG guest is priced above a same-size KVM guest — price both to compare architectures before you allocate. This is a what-if input; the host resolves the real accelerator for your arch at provision. An unknown value is a configuration_error.
 
-## `accounting.report_all_projects`
+## `accounting.report`
 
 `implemented` · `read-only`
 
-Return an inline platform-wide spend rollup over all projects.
+Return an inline KCU spend rollup: your granted projects, or all projects.
 
-The rollup is returned inline in ``data`` (KCU totals per ``group_by`` bucket);
+``scope='granted-set'`` rolls up the projects you hold a role on — omit
+``projects`` for all of them, or name a subset (each is checked for ``viewer``).
+``scope='all-projects'`` rolls up every project on the platform and requires
+``platform_auditor``; without it the call is denied, so ``scope`` selects the
+report, it never grants access to one.
+
+The rollup comes back inline in ``data`` (one item per ``group_by`` bucket, with
+``reserved`` / ``reconciled`` / ``variance`` KCU and matching ``total_*`` fields);
 nothing is written to the object store. For a downloadable multi-section CSV/XLSX
-export behind presigned URLs, use ``reports.generate_all_projects`` instead.
+export behind presigned URLs, use ``reports.generate`` instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `request` | object (nullable) | no | Report filters: group_by and optional time window. |
+| `request` | object(scope=granted-set) \| object(scope=all-projects) | yes | Which projects to roll up: {'scope':'granted-set'} for your own projects (optionally narrowed by 'projects'), or {'scope':'all-projects'} for every project on the platform. |
 
 `request` fields:
 
-- `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
-- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
-
-## `accounting.report_granted_set`
-
-`implemented` · `read-only`
-
-Return an inline spend rollup over the caller's granted projects.
-
-The rollup is returned inline in ``data`` (one row per ``group_by`` bucket, KCU
-totals); nothing is written to the object store. For a downloadable multi-section
-CSV/XLSX export behind presigned URLs, use ``reports.generate_granted_set`` instead.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `request` | object (nullable) | no | Report filters: projects, group_by, and optional time window. |
-
-`request` fields:
-
-- `projects` (`array<string> (nullable)`, optional) — Named project subset for granted-set scope; omit for all members.
-- `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
-- `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+- _variant object(scope=granted-set):_
+  - `scope` (``=granted-set``, required)
+  - `projects` (`array<string> (nullable)`, optional) — Named project subset for granted-set scope; omit for all members.
+  - `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
+- _variant object(scope=all-projects):_
+  - `scope` (``=all-projects``, required)
+  - `group_by` (`string (nullable)`, optional) — Group rows by 'principal', or omit for per-project grouping.
+  - `window` (`array<string (nullable)> (nullable)`, optional) — [start, end] ISO-8601 timestamptz pair; omit for all time.
 
 ## `accounting.set_budget`
 
@@ -91,22 +85,28 @@ Set a project's concurrency caps and pending-queue cap. Requires admin.
 | `max_pending_allocations` | integer | no | Maximum queued (requested) allocations (>= 0); 0 = no queue. |
 | `project` | string | yes | Project to set concurrency caps for. |
 
-## `accounting.usage_investigation`
+## `accounting.usage`
 
 `implemented` · `read-only`
 
-Return usage totals for one investigation.
+Return KCU spend totals for one project, or for one investigation.
+
+Both target kinds need ``viewer`` on the project — for an investigation target that
+is the project owning the investigation, resolved server-side, so an investigation
+id cannot read a project you have no role on. ``data`` carries ``spent_kcu``,
+``budget_remaining``, ``shared_kcu``, and a ``by_cost_class`` breakdown; an
+investigation target adds ``investigation_kcu`` for that investigation's own share.
+For a multi-project rollup use ``accounting.report``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `investigation_id` | string | yes | Investigation UUID to report spend for. |
+| `target` | object(kind=project) \| object(kind=investigation) | yes | What to report spend for: {'kind':'project','project':'<name>'} or {'kind':'investigation','investigation_id':'<uuid>'}. |
 
-## `accounting.usage_project`
+`target` fields:
 
-`implemented` · `read-only`
-
-Return usage totals for one project.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `project` | string | yes | Project to report spend for. |
+- _variant object(kind=project):_
+  - `kind` (``=project``, required)
+  - `project` (`string`, required) — Project name to report spend for; you need viewer on it.
+- _variant object(kind=investigation):_
+  - `kind` (``=investigation``, required)
+  - `investigation_id` (`string`, required) — Investigation UUID to report spend for; you need viewer on the project that owns it.

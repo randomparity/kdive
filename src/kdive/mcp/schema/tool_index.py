@@ -37,7 +37,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "ops": "Platform operator tools (reconciliation, diagnostics, cost classes)",
     "postmortem": "Crash analysis and triage from vmcore or console evidence",
     "projects": "Project listing",
-    "reports": "Generated usage and accounting report retrieval",
+    "reports": "Downloadable multi-section usage and accounting report generation",
     "resources": "Physical resource registration, availability, scheduling, and drain",
     "runs": "Kernel test run lifecycle (build, install, boot, cancel, bind)",
     "secrets": "Secret listing",  # pragma: allowlist secret
@@ -289,6 +289,16 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     ),
     "investigations.get": frozenset({"investigation", "get", "status", "fetch"}),
     "investigations.list": frozenset({"investigations", "list", "filter"}),
+    # accounting / reports — the money vocabulary an agent reaches for (ADR-0467)
+    "accounting.usage": frozenset(
+        {"usage", "spend", "spent", "cost", "consumed", "kcu", "budget", "remaining"}
+    ),
+    "accounting.report": frozenset(
+        {"report", "rollup", "cost", "spend", "billing", "chargeback", "totals", "variance"}
+    ),
+    "reports.generate": frozenset(
+        {"generate", "report", "billing", "download", "export", "spreadsheet", "csv", "xlsx"}
+    ),
 }
 
 
@@ -299,6 +309,10 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # ``tests/mcp/test_tool_index.py`` asserts each key is absent from the live registry and each
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
+    "accounting.report_all_projects": "accounting.report",
+    "accounting.report_granted_set": "accounting.report",
+    "accounting.usage_investigation": "accounting.usage",
+    "accounting.usage_project": "accounting.usage",
     "artifacts.find": "artifacts.get",
     "debug.finish": "debug.advance",
     "debug.next": "debug.advance",
@@ -313,6 +327,8 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "resources.register_fault_inject": "resources.register",
     "resources.register_local_libvirt": "resources.register",
     "resources.register_remote_libvirt": "resources.register",
+    "reports.generate_all_projects": "reports.generate",
+    "reports.generate_granted_set": "reports.generate",
     "resources.uncordon": "resources.set_scheduling",
     "vmcore.list": "runs.get",
 }

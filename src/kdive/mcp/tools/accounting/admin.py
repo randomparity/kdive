@@ -71,7 +71,7 @@ async def set_budget(
             return ToolResponse.success(
                 _BUDGET_OBJECT_ID,
                 "ok",
-                suggested_next_actions=["accounting.usage_project", "allocations.request"],
+                suggested_next_actions=["accounting.usage", "allocations.request"],
                 data={"project": project, "limit_kcu": str(limit)},
             )
 
@@ -122,7 +122,7 @@ async def set_quota(
             return ToolResponse.success(
                 _QUOTA_OBJECT_ID,
                 "ok",
-                suggested_next_actions=["accounting.usage_project", "allocations.request"],
+                suggested_next_actions=["accounting.usage", "allocations.request"],
                 data={"project": request.project, **values},
             )
 

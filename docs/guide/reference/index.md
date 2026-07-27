@@ -5,12 +5,10 @@
 | Tool | Maturity |
 |---|---|
 | [`accounting.estimate`](accounting.md#accountingestimate) | `implemented` |
-| [`accounting.report_all_projects`](accounting.md#accountingreport_all_projects) | `implemented` |
-| [`accounting.report_granted_set`](accounting.md#accountingreport_granted_set) | `implemented` |
+| [`accounting.report`](accounting.md#accountingreport) | `implemented` |
 | [`accounting.set_budget`](accounting.md#accountingset_budget) | `implemented` |
 | [`accounting.set_quota`](accounting.md#accountingset_quota) | `implemented` |
-| [`accounting.usage_investigation`](accounting.md#accountingusage_investigation) | `implemented` |
-| [`accounting.usage_project`](accounting.md#accountingusage_project) | `implemented` |
+| [`accounting.usage`](accounting.md#accountingusage) | `implemented` |
 | [`allocations.get`](allocations.md#allocationsget) | `implemented` |
 | [`allocations.list`](allocations.md#allocationslist) | `implemented` |
 | [`allocations.release`](allocations.md#allocationsrelease) | `implemented` |
@@ -89,8 +87,7 @@
 | [`ops.tool_trail`](ops.md#opstool_trail) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `implemented` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |
-| [`reports.generate_all_projects`](reports.md#reportsgenerate_all_projects) | `implemented` |
-| [`reports.generate_granted_set`](reports.md#reportsgenerate_granted_set) | `implemented` |
+| [`reports.generate`](reports.md#reportsgenerate) | `implemented` |
 | [`resources.availability`](resources.md#resourcesavailability) | `implemented` |
 | [`resources.deregister`](resources.md#resourcesderegister) | `implemented` |
 | [`resources.describe`](resources.md#resourcesdescribe) | `implemented` |

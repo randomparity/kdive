@@ -50,7 +50,7 @@ async def _pool(url: str) -> AsyncIterator[AsyncConnectionPool]:
 
 
 def _patch_in_memory(monkeypatch, app, role: Role | None) -> None:
-    # set_quota/set_budget bind current_context in `admin`; usage_project binds it in `usage`.
+    # set_quota/set_budget bind current_context in `admin`; accounting.usage binds it in `usage`.
     monkeypatch.setattr(accounting_admin, "current_context", lambda: _ctx(role))
     monkeypatch.setattr(accounting_usage, "current_context", lambda: _ctx(role))
     # The helper builds a StreamableHttpTransport then Client(transport); redirect to the

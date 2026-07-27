@@ -44,7 +44,7 @@ def test_set_budget_creates_row(migrated_url: str) -> None:
             resp = await set_budget(pool, _ctx(), project="proj", limit_kcu="250")
             assert resp.status == "ok"
             assert resp.suggested_next_actions == [
-                "accounting.usage_project",
+                "accounting.usage",
                 "allocations.request",
             ]
             assert resp.data["project"] == "proj"
@@ -130,7 +130,7 @@ def test_set_quota_creates_row(migrated_url: str) -> None:
             )
             assert resp.status == "ok"
             assert resp.suggested_next_actions == [
-                "accounting.usage_project",
+                "accounting.usage",
                 "allocations.request",
             ]
             assert resp.data["max_concurrent_allocations"] == 3

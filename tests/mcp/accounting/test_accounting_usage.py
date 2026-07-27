@@ -1,9 +1,11 @@
-"""accounting.usage_project handler tests — viewer-scoped spend rollup (ADR-0007 §6).
+"""``accounting.usage`` handler tests — viewer-scoped spend rollup (ADR-0007 §6).
 
-usage has two call forms: by project (require_project + require_role(viewer)) and by
-investigation_id (resolve the owning project, then the identical check on it — no
-cross-project read bypass). It reports the O(1) spent/remaining totals plus the ledger
-by_cost_class and shared_kcu breakdown. Handlers are called directly with an injected pool.
+One tool with two discriminated targets: ``kind='project'`` (require_project +
+require_role(viewer)) and ``kind='investigation'`` (resolve the owning project, then the
+identical check on it — no cross-project read bypass). It reports the O(1) spent/remaining
+totals plus the ledger by_cost_class and shared_kcu breakdown. Handlers are called
+directly with an injected pool; the dispatch tests drive :func:`usage` so the isinstance
+branch selection the MCP wrapper performs is exercised too (ADR-0467).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from psycopg_pool import AsyncConnectionPool
+from pydantic import TypeAdapter
 
 from kdive.db.repositories import (
     ALLOCATIONS,
@@ -36,7 +39,14 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import AuthError, ProjectMembershipDenied, RequestContext
-from kdive.mcp.tools.accounting.usage import usage_investigation, usage_project
+from kdive.mcp.tools.accounting.usage import (
+    InvestigationUsageTarget,
+    ProjectUsageTarget,
+    UsageTarget,
+    usage,
+    usage_investigation,
+    usage_project,
+)
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.services.accounting import ledger as accounting
 from tests.mcp.roles import PROJECT_A, PROJECT_B, make_role_fixture
@@ -243,7 +253,7 @@ def test_usage_by_investigation_unknown_id_is_config_error(migrated_url: str) ->
             resp = await usage_investigation(pool, _ctx(), investigation_id=str(uuid4()))
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        assert resp.suggested_next_actions == ["accounting.usage_investigation"]
+        assert resp.suggested_next_actions == ["accounting.usage"]
 
     asyncio.run(_run())
 
@@ -254,7 +264,7 @@ def test_usage_by_investigation_malformed_id_is_config_error(migrated_url: str) 
             resp = await usage_investigation(pool, _ctx(), investigation_id="not-a-uuid")
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        assert resp.suggested_next_actions == ["accounting.usage_investigation"]
+        assert resp.suggested_next_actions == ["accounting.usage"]
 
     asyncio.run(_run())
 
@@ -295,6 +305,59 @@ def test_separated_fixture_viewer_reads_own_but_not_foreign(migrated_url: str) -
                 await usage_investigation(pool, viewer_a, investigation_id=str(inv_b))
                 raise AssertionError("expected AuthError for a foreign investigation_id")
             except AuthError:
+                pass
+
+    asyncio.run(_run())
+
+
+# ---- discriminated dispatch (ADR-0467) --------------------------------------------
+
+
+def test_dispatch_project_target_reports_project_totals(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            await _seed_spend(pool)
+            target = TypeAdapter(UsageTarget).validate_python(
+                {"kind": "project", "project": "proj"}
+            )
+            assert isinstance(target, ProjectUsageTarget)
+            resp = await usage(pool, _ctx(), target=target)
+        assert resp.status == "ok"
+        assert resp.data["project"] == "proj"
+        assert "investigation_kcu" not in resp.data
+
+    asyncio.run(_run())
+
+
+def test_dispatch_investigation_target_adds_investigation_share(migrated_url: str) -> None:
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_id = await _seed_investigation(pool, "proj")
+            target = TypeAdapter(UsageTarget).validate_python(
+                {"kind": "investigation", "investigation_id": str(inv_id)}
+            )
+            assert isinstance(target, InvestigationUsageTarget)
+            resp = await usage(pool, _ctx(), target=target)
+        assert resp.status == "ok"
+        assert resp.data["project"] == "proj"
+        assert resp.data["investigation_id"] == str(inv_id)
+        assert "investigation_kcu" in resp.data
+
+    asyncio.run(_run())
+
+
+def test_dispatch_investigation_target_cannot_read_a_foreign_project(migrated_url: str) -> None:
+    # The discriminator picks the branch; the branch still resolves the owning project and
+    # runs the same viewer check, so an investigation id is never a cross-project bypass.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            inv_b = await _seed_investigation(pool, PROJECT_B)
+            viewer_a = _ctx(projects=(PROJECT_A,))
+            target = InvestigationUsageTarget(kind="investigation", investigation_id=str(inv_b))
+            try:
+                await usage(pool, viewer_a, target=target)
+                raise AssertionError("expected a denial reading a foreign project's investigation")
+            except AuthorizationError, ProjectMembershipDenied, AuthError:
                 pass
 
     asyncio.run(_run())

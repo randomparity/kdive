@@ -19,8 +19,8 @@ server acceptance (exit 0), and rendered response (the default table render carr
 ``--json`` render is a parseable envelope).
 
 It closes with a generated-verb authorization boundary that reaches the same exit ``3`` as the
-curated boundary test, by the seam's own fail-closed gate: ``reports generate-all-projects`` (the
-``reports.generate_all_projects`` tool, non-curated) is ``platform_auditor``-scoped, so the server
+curated boundary test, by the seam's own fail-closed gate: ``ops tool-trail`` (the
+``ops.tool_trail`` tool, non-curated) is ``platform_auditor``-scoped, so the server
 does not expose it to a project-only token. The generic seam classifies the absent tool ``UNKNOWN``
 and refuses it — exit ``3`` (:mod:`kdive.cli.errors`) with a plain "unreachable" message — rather
 than blindly dispatching a tool the caller cannot see (the ``UNKNOWN`` branch of
@@ -54,7 +54,7 @@ def _cli_token(issuer: OidcIssuer, *, project: str) -> str:
     """Mint an operator token scoped to exactly ``project`` (no platform role).
 
     Operator (rank 2) satisfies the ``contributor`` floor ``investigations.open`` requires, and
-    the missing platform role is what the ``reports.generate_all_projects`` boundary check denies.
+    the missing platform role is what the ``ops.tool_trail`` boundary check denies.
     ``client_id='kdivectl'`` marks the token as the operator CLI's, mirroring the boundary test.
     """
     return mint_token(
@@ -168,14 +168,12 @@ async def _drive_generated_lifecycle(issuer: OidcIssuer, server_url: str) -> Non
     listed_ids = {item.get("object_id") for item in items if isinstance(item, dict)}
     assert investigation_id in listed_ids, f"opened investigation not listed: {listed_ids!r}"
 
-    # 5. authorization boundary (fail-closed on an unexposed tool): reports.generate_all_projects
-    #    is platform_auditor-scoped, so the server does not expose it to this project-only token.
+    # 5. authorization boundary (fail-closed on an unexposed tool): ops.tool_trail is
+    #    platform_auditor-scoped, so the server does not expose it to this project-only token.
     #    The generated-verb seam classifies the absent tool UNKNOWN and refuses it with exit 3 and a
     #    plain "unreachable" message — the generated analogue of the boundary test's exit-3 denial,
     #    proving RBAC surfaces as a distinct nonzero exit rather than a blind dispatch.
-    code, out = await _run_kdivectl(
-        ["reports", "generate-all-projects"], token=token, server_url=server_url
-    )
+    code, out = await _run_kdivectl(["ops", "tool-trail"], token=token, server_url=server_url)
     assert code == _AUTHORIZATION_DENIED_EXIT, (
         "an unexposed platform-scoped generated verb should be refused with exit 3"
     )

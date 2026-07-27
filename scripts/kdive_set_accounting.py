@@ -1,7 +1,7 @@
 """Onboard a project through the audited accounting admin tools over MCP.
 
 Calls ``accounting.set_quota`` then ``accounting.set_budget`` (and reads back
-``accounting.usage_project``) against a running KDIVE server's MCP endpoint, using a
+``accounting.usage``) against a running KDIVE server's MCP endpoint, using a
 bearer token that carries the project ``admin`` role. This is the production-style,
 audited alternative to ``seed-project``'s raw INSERTs (see
 ``docs/operating/project-onboarding.md``).
@@ -49,7 +49,7 @@ def build_calls(ns: argparse.Namespace) -> list[tuple[str, dict[str, object]]]:
             },
         ),
         ("accounting.set_budget", {"project": ns.project, "limit_kcu": ns.limit_kcu}),
-        ("accounting.usage_project", {"project": ns.project}),
+        ("accounting.usage", {"target": {"kind": "project", "project": ns.project}}),
     ]
 
 
