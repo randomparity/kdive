@@ -139,10 +139,34 @@ def test_record_verb_json_mode_emits_whole_envelope(
 def test_ledger_get_is_a_single_record(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     record = {"object_id": "p", "status": "ok", "data": {"kcu": "12", "window": "30d"}, "items": []}
     client = _install_session(monkeypatch, record)
-    asyncio.run(reads.ledger_get(_args(project="proj-a")))
-    assert client.calls == [("accounting.usage_project", {"project": "proj-a"})]
+    asyncio.run(reads.ledger_get(_args(project="proj-a", investigation_id=None)))
+    assert client.calls == [
+        ("accounting.usage", {"target": {"kind": "project", "project": "proj-a"}})
+    ]
     out = capsys.readouterr().out
     assert "kcu" in out and "12" in out
+
+
+def test_ledger_get_sends_the_investigation_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = {"object_id": "p", "status": "ok", "data": {"kcu": "12"}, "items": []}
+    client = _install_session(monkeypatch, record)
+    asyncio.run(reads.ledger_get(_args(project=None, investigation_id="inv-1")))
+    assert client.calls == [
+        ("accounting.usage", {"target": {"kind": "investigation", "investigation_id": "inv-1"}})
+    ]
+
+
+@pytest.mark.parametrize(("project", "investigation_id"), [(None, None), ("proj-a", "inv-1")])
+def test_ledger_get_requires_exactly_one_target(
+    monkeypatch: pytest.MonkeyPatch, capsys, project: str | None, investigation_id: str | None
+) -> None:
+    # The merged tool discriminates on target.kind, so neither/both is a usage error the CLI
+    # catches before any tool call rather than an opaque server-side discriminator failure.
+    client = _install_session(monkeypatch, {"object_id": "p", "status": "ok", "items": []})
+    code = asyncio.run(reads.ledger_get(_args(project=project, investigation_id=investigation_id)))
+    assert code == 2
+    assert client.calls == []
+    assert "--project" in capsys.readouterr().err
 
 
 def test_inventory_show_lists_rows(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -198,18 +222,30 @@ def test_every_registry_verb_has_a_handler() -> None:
         assert callable(verb.handler)
 
 
-def test_report_verbs_are_registered_and_read_only() -> None:
+def test_report_verb_is_registered_read_only_and_scope_required() -> None:
+    # One curated verb now covers both scopes: --scope is required so the CLI never picks a
+    # scope for the caller, and it sits at the merged tool's generated path so it overrides
+    # the schema-derived shape instead of adding a second path.
     by_path = {(v.group, v.sub): v for v in REGISTRY}
-    all_v = by_path[("accounting", "report-all-projects")]
-    granted = by_path[("accounting", "report-granted-set")]
-    assert all_v.tool == "accounting.report_all_projects" and all_v.read_only
-    assert granted.tool == "accounting.report_granted_set" and granted.read_only
-    assert all_v.options == ("group_by", "since", "until")
-    assert granted.options == ("projects", "group_by", "since", "until")
-    assert "platform_auditor" in all_v.help  # help notes the required role
+    report = by_path[("accounting", "report")]
+    assert report.tool == "accounting.report" and report.read_only
+    assert report.required_options == ("scope",)
+    assert report.options == ("projects", "group_by", "since", "until")
+    assert "platform_auditor" in report.help  # help notes the role the wide scope needs
+    usage = by_path[("accounting", "usage")]
+    assert usage.tool == "accounting.usage" and usage.read_only
+    assert usage.options == ("project", "investigation_id")
 
 
 _READ_VERBS = [v for v in REGISTRY if v.read_only]
+
+#: Values a verb needs beyond the generic ``"<name>-val"`` placeholder: an enum-valued
+#: option needs a real member, and a verb whose options are mutually exclusive needs the
+#: ones it must *not* receive dropped.
+_VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
+    ("accounting", "report"): {"scope": "granted-set"},
+    ("accounting", "usage"): {"investigation_id": None},
+}
 
 
 @pytest.mark.parametrize("verb", _READ_VERBS, ids=lambda v: f"{v.group}.{v.sub}")
@@ -221,6 +257,8 @@ def test_handler_calls_the_tool_the_registry_declares(verb, monkeypatch, capsys)
     args = argparse.Namespace(json=False)
     for name in (*verb.positionals, *verb.options, *verb.required_options):
         setattr(args, name, f"{name}-val")
+    for name, value in _VERB_ARG_OVERRIDES.get((verb.group, verb.sub), {}).items():
+        setattr(args, name, value)
     asyncio.run(verb.handler(args))
     assert client.calls and client.calls[0][0] == verb.tool
 
@@ -343,68 +381,98 @@ def _report_collection(items: list[dict], totals: dict) -> dict:
     return {"object_id": "report", "status": "ok", "data": totals, "items": items}
 
 
-def test_report_all_calls_tool_with_no_optional_args(
+def _report_args(**kwargs: object) -> argparse.Namespace:
+    defaults: dict[str, object] = {"group_by": None, "since": None, "until": None, "projects": None}
+    return _args(**{**defaults, **kwargs})
+
+
+def test_report_all_projects_sends_only_the_scope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {"scope": "all-projects"}))
+    code = asyncio.run(reads.ledger_report(_report_args(scope="all-projects")))
+    assert code == 0
+    assert client.calls == [("accounting.report", {"request": {"scope": "all-projects"}})]
+
+
+def test_report_all_projects_assembles_window_and_group_by(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    client = _install_session(monkeypatch, _report_collection([], {"scope": "all-projects"}))
-    code = asyncio.run(reads.ledger_report_all(_args(group_by=None, since=None, until=None)))
-    assert code == 0
-    assert client.calls == [("accounting.report_all_projects", {})]
-
-
-def test_report_all_assembles_window_and_group_by(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     client = _install_session(monkeypatch, _report_collection([], {}))
     asyncio.run(
-        reads.ledger_report_all(
-            _args(group_by="principal", since="2026-01-01T00:00:00+00:00", until=None)
+        reads.ledger_report(
+            _report_args(
+                scope="all-projects", group_by="principal", since="2026-01-01T00:00:00+00:00"
+            )
         )
     )
     assert client.calls == [
         (
-            "accounting.report_all_projects",
-            {"group_by": "principal", "window": ["2026-01-01T00:00:00+00:00", None]},
+            "accounting.report",
+            {
+                "request": {
+                    "scope": "all-projects",
+                    "group_by": "principal",
+                    "window": ["2026-01-01T00:00:00+00:00", None],
+                }
+            },
         )
     ]
 
 
-def test_report_all_window_until_only_is_half_open(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_report_window_until_only_is_half_open(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     # The symmetric half-open direction: only --until sets the second bound, first is null.
     client = _install_session(monkeypatch, _report_collection([], {}))
     asyncio.run(
-        reads.ledger_report_all(_args(group_by=None, since=None, until="2026-12-31T00:00:00+00:00"))
+        reads.ledger_report(_report_args(scope="all-projects", until="2026-12-31T00:00:00+00:00"))
     )
     assert client.calls == [
-        ("accounting.report_all_projects", {"window": [None, "2026-12-31T00:00:00+00:00"]})
+        (
+            "accounting.report",
+            {"request": {"scope": "all-projects", "window": [None, "2026-12-31T00:00:00+00:00"]}},
+        )
     ]
 
 
-def test_report_granted_splits_projects(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_report_granted_set_splits_projects(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     client = _install_session(monkeypatch, _report_collection([], {}))
-    asyncio.run(
-        reads.ledger_report_granted(
-            _args(group_by=None, since=None, until=None, projects="a, b ,c")
-        )
-    )
-    assert client.calls == [("accounting.report_granted_set", {"projects": ["a", "b", "c"]})]
+    asyncio.run(reads.ledger_report(_report_args(scope="granted-set", projects="a, b ,c")))
+    assert client.calls == [
+        ("accounting.report", {"request": {"scope": "granted-set", "projects": ["a", "b", "c"]}})
+    ]
 
 
-def test_report_granted_omits_projects_when_absent(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    client = _install_session(monkeypatch, _report_collection([], {}))
-    asyncio.run(
-        reads.ledger_report_granted(_args(group_by=None, since=None, until=None, projects=None))
-    )
-    assert client.calls == [("accounting.report_granted_set", {})]
-
-
-def test_report_granted_all_empty_projects_is_usage_error(
+def test_report_granted_set_omits_projects_when_absent(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     client = _install_session(monkeypatch, _report_collection([], {}))
-    code = asyncio.run(
-        reads.ledger_report_granted(_args(group_by=None, since=None, until=None, projects=" , "))
-    )
+    asyncio.run(reads.ledger_report(_report_args(scope="granted-set")))
+    assert client.calls == [("accounting.report", {"request": {"scope": "granted-set"}})]
+
+
+def test_report_all_empty_projects_is_usage_error(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    code = asyncio.run(reads.ledger_report(_report_args(scope="granted-set", projects=" , ")))
     assert code == 2
     assert client.calls == []  # rejected before any tool call
+    assert "--projects" in capsys.readouterr().err
+
+
+def test_report_rejects_an_unknown_scope(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    code = asyncio.run(reads.ledger_report(_report_args(scope="everything")))
+    assert code == 2
+    assert client.calls == []
+    assert "--scope" in capsys.readouterr().err
+
+
+def test_report_rejects_projects_outside_the_granted_set_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # `projects` exists only on the granted-set branch; sending it with all-projects would be
+    # an extra="forbid" server error, so the CLI refuses it up front.
+    client = _install_session(monkeypatch, _report_collection([], {}))
+    code = asyncio.run(reads.ledger_report(_report_args(scope="all-projects", projects="a")))
+    assert code == 2
+    assert client.calls == []
     assert "--projects" in capsys.readouterr().err
 
 
@@ -437,8 +505,15 @@ def test_report_json_emits_whole_envelope(monkeypatch: pytest.MonkeyPatch, capsy
     envelope = _report_collection(items, totals)
     _install_session(monkeypatch, envelope)
     asyncio.run(
-        reads.ledger_report_all(
-            argparse.Namespace(json=True, group_by=None, since=None, until=None)
+        reads.ledger_report(
+            argparse.Namespace(
+                json=True,
+                scope="all-projects",
+                group_by=None,
+                since=None,
+                until=None,
+                projects=None,
+            )
         )
     )
     parsed = json.loads(capsys.readouterr().out)
@@ -451,5 +526,5 @@ def test_report_all_denial_exits_authorization_denied(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     _install_session(monkeypatch, _denied("report"))
-    code = asyncio.run(reads.ledger_report_all(_args(group_by=None, since=None, until=None)))
+    code = asyncio.run(reads.ledger_report(_report_args(scope="all-projects")))
     assert code == 3

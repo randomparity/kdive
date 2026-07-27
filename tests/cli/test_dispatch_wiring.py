@@ -60,23 +60,25 @@ def test_every_registry_verb_parses_through_the_built_parser() -> None:
         assert args.command == verb.group and args.subcommand == verb.sub
 
 
-@pytest.mark.parametrize(
-    ("group", "sub"), [("allocations", "list"), ("accounting", "usage-project")]
-)
-def test_project_required_verb_rejects_a_missing_project(group: str, sub: str) -> None:
+def test_project_required_verb_rejects_a_missing_project() -> None:
     # The underlying tool's ``project`` is a required argument, so the CLI enforces it up
     # front (clean argparse usage error / exit 2) instead of a server-side missing-arg error.
     with pytest.raises(SystemExit) as excinfo:
-        build_parser().parse_args([group, sub])
+        build_parser().parse_args(["allocations", "list"])
     assert excinfo.value.code == 2
 
 
-@pytest.mark.parametrize(
-    ("group", "sub"), [("allocations", "list"), ("accounting", "usage-project")]
-)
+@pytest.mark.parametrize(("group", "sub"), [("allocations", "list"), ("accounting", "usage")])
 def test_project_required_verb_accepts_an_explicit_project(group: str, sub: str) -> None:
     args = build_parser().parse_args([group, sub, "--project", "proj-a"])
     assert args.project == "proj-a"
+
+
+def test_usage_verb_offers_both_targets() -> None:
+    # accounting.usage discriminates on target.kind, so the curated verb must keep both
+    # doors open — dropping --investigation-id would delete the investigation read path.
+    args = build_parser().parse_args(["accounting", "usage", "--investigation-id", "inv-1"])
+    assert args.investigation_id == "inv-1" and args.project is None
 
 
 def test_inventory_project_filter_stays_optional() -> None:
@@ -179,31 +181,37 @@ def test_dispatch_routes_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called == {"doctor": True}
 
 
-def test_report_all_parses_window_and_group_by() -> None:
+def test_report_parses_scope_window_and_group_by() -> None:
     args = build_parser().parse_args(
         [
             "accounting",
-            "report-all-projects",
+            "report",
+            "--scope",
+            "all-projects",
             "--group-by",
             "principal",
             "--since",
             "2026-01-01T00:00:00+00:00",
         ]
     )
-    assert args.command == "accounting" and args.subcommand == "report-all-projects"
+    assert args.command == "accounting" and args.subcommand == "report"
+    assert args.scope == "all-projects"
     assert args.group_by == "principal"
     assert args.since == "2026-01-01T00:00:00+00:00" and args.until is None
 
 
-def test_report_granted_parses_projects_flag() -> None:
-    args = build_parser().parse_args(["accounting", "report-granted-set", "--projects", "a,b"])
-    assert args.subcommand == "report-granted-set" and args.projects == "a,b"
+def test_report_parses_projects_flag() -> None:
+    args = build_parser().parse_args(
+        ["accounting", "report", "--scope", "granted-set", "--projects", "a,b"]
+    )
+    assert args.subcommand == "report" and args.projects == "a,b"
 
 
-def test_report_all_rejects_projects_flag() -> None:
-    # report-all-projects has no --projects (only report-granted-set scopes a subset).
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["accounting", "report-all-projects", "--projects", "a,b"])
+def test_report_requires_an_explicit_scope() -> None:
+    # --scope is required: the CLI never picks a reporting scope on the caller's behalf.
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["accounting", "report"])
+    assert excinfo.value.code == 2
 
 
 def test_run_verb_routes_generated_only_verb_to_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
