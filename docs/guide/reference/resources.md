@@ -26,8 +26,8 @@ A point-in-time hint, not a reservation; the admission path stays the authority.
 
 Deregister a runtime or config-owned resource (platform_admin). Irreversible.
 
-Permanently removes the resource from the inventory; there is no undo (re-add it with
-the matching ``resources.register_*`` tool). Deregistering a resource with live
+Permanently removes the resource from the inventory; there is no undo (re-add it via
+``resources.register`` with the same kind and name). Deregistering a resource with live
 allocations requires ``force=True`` (destructive-tier).
 
 | Parameter | Type | Required | Description |
@@ -110,51 +110,24 @@ the image can run on it.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
 - `cursor` (`string (nullable)`, optional) — Opaque continuation cursor from a prior page's next_cursor.
 
-## `resources.register_fault_inject`
+## `resources.register`
 
 `implemented`
 
-Register a fault-inject runtime resource (platform_admin).
+Register a runtime resource of any provider kind (platform_admin).
+
+``kind`` selects the branch: 'remote-libvirt' needs ``host_uri`` + ``base_image``,
+'local-libvirt' needs ``host_uri``, 'fault-inject' needs neither. A field that does not
+apply to the chosen kind, or a required one left blank, returns ``configuration_error``,
+as does a kind this deployment has not composed.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `base_image` | string (nullable) | no | Registered base image name. Required for 'remote-libvirt' and must already be a registered image for that provider; rejected for the other kinds. |
 | `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
 | `cost_class` | string | yes | The cost class for pricing. |
-| `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
-| `name` | string | yes | The (kind, name) identity for the new resource. |
-| `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
-| `secret_refs` | array<string> | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged. |
-| `vcpus` | integer | yes | The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable. |
-
-## `resources.register_local_libvirt`
-
-`implemented`
-
-Register a local-libvirt runtime resource (platform_admin).
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
-| `cost_class` | string | yes | The cost class for pricing. |
-| `host_uri` | string | yes | Local-libvirt provider host URI. |
-| `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
-| `name` | string | yes | The (kind, name) identity for the new resource. |
-| `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |
-| `secret_refs` | array<string> | no | Credential reference strings to preflight-resolve, e.g. cert/key/CA refs. Only the references are stored; secret bytes are never fetched or logged. |
-| `vcpus` | integer | yes | The host's vCPU size ceiling. Admission rejects a selector larger than this, so a host registered without it is un-grantable. |
-
-## `resources.register_remote_libvirt`
-
-`implemented`
-
-Register a remote-libvirt runtime resource (platform_admin).
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `base_image` | string | yes | Registered remote-libvirt base image name. |
-| `concurrent_allocation_cap` | integer | no | Per-host concurrent-allocation cap (> 0). |
-| `cost_class` | string | yes | The cost class for pricing. |
-| `host_uri` | string | yes | Remote-libvirt provider host URI. |
+| `host_uri` | string (nullable) | no | Provider host URI. Required for 'remote-libvirt' and 'local-libvirt' (both TCP-probe it for reachability before the row is written); rejected for 'fault-inject', which is synthetic and has no endpoint. |
+| `kind` | `local-libvirt`, `fault-inject`, `remote-libvirt` | yes | Provider kind to register. 'remote-libvirt' requires host_uri + base_image; 'local-libvirt' requires host_uri; 'fault-inject' takes neither (supplying one is a configuration_error). |
 | `memory_mb` | integer | yes | The host's memory size ceiling in MiB (admission ≤-resource-caps check). |
 | `name` | string | yes | The (kind, name) identity for the new resource. |
 | `owner_project` | string (nullable) | no | Owning project; defaults to the single registering project. Pass '*' for a global (any-project) resource. |

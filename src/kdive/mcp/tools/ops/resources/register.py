@@ -1,12 +1,18 @@
-"""``resources.register_*`` — register runtime provider resources (M2.6 #396, ADR-0112).
+"""``resources.register`` — register a runtime provider resource (M2.6 #396, ADR-0112).
 
 Imperative agent-native capacity registration. Writes a ``managed_by='runtime'`` row keyed by
 ``(kind, name)`` so it never collides with a declarative ``config`` row (those are removed by
 editing ``systems.toml``, not by this tool). A ``name`` already owned by a ``config`` row is
 rejected — the file owns that identity.
 
-Authorization: ``platform_admin`` only. Audit: one ``platform_audit_log`` row (never carrying
-secret bytes — only the secret *reference* strings are recorded).
+One tool covers every provider kind: ``kind`` is a scalar discriminator and the provider-specific
+fields (``host_uri``, ``base_image``) are flat optional params whose per-kind required-ness lives
+in :data:`_BRANCHES` and is enforced by :func:`_validate_branch_fields` (ADR-0464). JSON Schema
+cannot express that dependency without a ``request`` union, which ADR-0372 forbids on a mutation
+tool, so the branch contract is a ``configuration_error`` from the handler instead.
+
+Authorization: ``platform_admin`` only, for every kind. Audit: one ``platform_audit_log`` row
+(never carrying secret bytes — only the secret *reference* strings are recorded).
 """
 
 from __future__ import annotations
@@ -40,9 +46,7 @@ from kdive.inventory.reconcile.locks import resource_identity_lock
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools.ops.resources._common import (
-    REGISTER_FAULT_INJECT_TOOL,
-    REGISTER_LOCAL_LIBVIRT_TOOL,
-    REGISTER_REMOTE_LIBVIRT_TOOL,
+    REGISTER_TOOL,
     ResourceProbe,
     TcpResourceProbe,
     config_error,
@@ -59,11 +63,12 @@ _log = logging.getLogger(__name__)
 _FAULT_INJECT_HOST_URI = "fault-inject://local"
 
 
-class RuntimeResourceRegistration(BaseModel):
-    """Shared MCP request fields for runtime resource registration."""
+class ResourceRegistration(BaseModel):
+    """The handler DTO for ``resources.register``, one shape for every provider kind."""
 
     model_config = ConfigDict(extra="forbid")
 
+    kind: ResourceKind = Field(description="The provider kind of the resource being registered.")
     name: str = Field(description="The (kind, name) identity for the new resource.")
     cost_class: str = Field(description="The cost class for pricing.")
     concurrent_allocation_cap: int = Field(
@@ -94,23 +99,40 @@ class RuntimeResourceRegistration(BaseModel):
             "global (any-project) resource."
         ),
     )
+    host_uri: str | None = Field(
+        default=None, description="Provider host URI; required for the libvirt kinds."
+    )
+    base_image: str | None = Field(
+        default=None, description="Registered base image name; required for remote-libvirt."
+    )
 
 
-class RemoteLibvirtResourceRegistration(RuntimeResourceRegistration):
-    """Remote-libvirt runtime resource registration request."""
+@dataclass(frozen=True, slots=True)
+class _KindBranch:
+    """Which flat register fields a :class:`ResourceKind` takes, and its fixed host URI if any.
 
-    host_uri: str = Field(description="Remote-libvirt provider host URI.")
-    base_image: str = Field(description="Registered remote-libvirt base image name.")
+    ``fields`` is the exact set of provider-specific params the kind accepts: a member that is
+    blank/absent is a missing-required error and a non-member that is supplied is a
+    does-not-apply error, so the branch contract is symmetric and nothing is silently ignored.
+    ``probes`` marks the kinds whose ``host_uri`` is TCP-reachability-checked before the insert.
+    """
+
+    fields: frozenset[str]
+    probes: bool
+    fixed_host_uri: str | None = None
 
 
-class LocalLibvirtResourceRegistration(RuntimeResourceRegistration):
-    """Local-libvirt runtime resource registration request."""
+_BRANCHES: dict[ResourceKind, _KindBranch] = {
+    ResourceKind.REMOTE_LIBVIRT: _KindBranch(
+        fields=frozenset({"host_uri", "base_image"}), probes=True
+    ),
+    ResourceKind.LOCAL_LIBVIRT: _KindBranch(fields=frozenset({"host_uri"}), probes=True),
+    ResourceKind.FAULT_INJECT: _KindBranch(
+        fields=frozenset(), probes=False, fixed_host_uri=_FAULT_INJECT_HOST_URI
+    ),
+}
 
-    host_uri: str = Field(description="Local-libvirt provider host URI.")
-
-
-class FaultInjectResourceRegistration(RuntimeResourceRegistration):
-    """Fault-inject runtime resource registration request."""
+_BRANCH_FIELDS = ("host_uri", "base_image")
 
 
 def _lease_deadline() -> datetime:
@@ -172,8 +194,6 @@ async def _validate_runtime_name_available(
 async def _validate_remote_base_image(
     conn: AsyncConnection, *, name: str, base_image: str
 ) -> ToolResponse | None:
-    if not base_image:
-        return config_error(name, "remote-libvirt requires a base_image")
     if not await _base_image_registered(conn, ResourceKind.REMOTE_LIBVIRT, base_image):
         return config_error(
             name,
@@ -222,9 +242,35 @@ async def _authorize_registration(
     return None
 
 
+def _validate_branch_fields(request: ResourceRegistration) -> ToolResponse | None:
+    """Enforce the per-kind contract that JSON Schema cannot express (ADR-0464).
+
+    Runs after the authorization gate so a denial always wins over a malformed branch.
+
+    Args:
+        request: The flat registration request, already parsed by Pydantic.
+
+    Returns:
+        A ``configuration_error`` :class:`ToolResponse` naming the first offending field, or
+        ``None`` when every provider-specific field applicable to ``request.kind`` is supplied
+        and no inapplicable one is.
+    """
+    branch = _BRANCHES[request.kind]
+    supplied = {field for field in _BRANCH_FIELDS if (getattr(request, field) or "").strip()}
+    missing = sorted(branch.fields - supplied)
+    if missing:
+        return config_error(request.name, f"{request.kind.value} requires {missing[0]}")
+    inapplicable = sorted(supplied - branch.fields)
+    if inapplicable:
+        return config_error(
+            request.name, f"{inapplicable[0]} does not apply to kind {request.kind.value!r}"
+        )
+    return None
+
+
 def _validate_registration_and_resolve_owner(
     ctx: RequestContext,
-    request: RuntimeResourceRegistration,
+    request: ResourceRegistration,
 ) -> tuple[ToolResponse | None, str | None]:
     if request.concurrent_allocation_cap <= 0:
         return (
@@ -244,57 +290,84 @@ def _default_registration_seams(
 
 
 type ResourceDbPreflight = Callable[[AsyncConnection], Awaitable[ToolResponse | None]]
-type RegistrationPlanFactory = Callable[[str | None], "_RegistrationPlan"]
 
 
 @dataclass(frozen=True, slots=True)
 class _RegistrationPlan:
-    kind: ResourceKind
-    request: RuntimeResourceRegistration
+    request: ResourceRegistration
     host_uri: str
-    base_image: str | None
     owner_project: str | None
-    tool: str
     db_preflight: ResourceDbPreflight
 
 
-async def _register_with_plan(
+def _db_preflight_for(request: ResourceRegistration) -> ResourceDbPreflight:
+    """Build the in-transaction preflight for ``request.kind`` (name availability, base image)."""
+
+    async def preflight(conn: AsyncConnection) -> ToolResponse | None:
+        failure = await _validate_runtime_name_available(conn, kind=request.kind, name=request.name)
+        if failure is not None or request.kind is not ResourceKind.REMOTE_LIBVIRT:
+            return failure
+        return await _validate_remote_base_image(
+            conn, name=request.name, base_image=request.base_image or ""
+        )
+
+    return preflight
+
+
+def _plan_for(request: ResourceRegistration, owner_project: str | None) -> _RegistrationPlan:
+    """Resolve the kind's effective host URI and DB preflight into an insertable plan."""
+    branch = _BRANCHES[request.kind]
+    return _RegistrationPlan(
+        request=request,
+        host_uri=branch.fixed_host_uri or (request.host_uri or ""),
+        owner_project=owner_project,
+        db_preflight=_db_preflight_for(request),
+    )
+
+
+async def register_resource(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
+    request: ResourceRegistration,
     *,
-    request: RuntimeResourceRegistration,
-    tool: str,
-    plan_factory: RegistrationPlanFactory,
-    probe: ResourceProbe | None,
-    secrets_root: Path | None,
-    reachability_host_uri: str | None = None,
+    probe: ResourceProbe | None = None,
+    secrets_root: Path | None = None,
 ) -> ToolResponse:
-    failure = await _authorize_registration(pool, ctx, tool=tool, name=request.name)
+    """Register a runtime provider resource of ``request.kind``. Requires ``platform_admin``.
+
+    Args:
+        pool: The connection pool the audit + insert transaction runs on.
+        ctx: The calling request context (authorization, owner-project defaulting, audit).
+        request: The flat registration request; its ``kind`` selects the branch.
+        probe: Reachability probe seam; defaults to :class:`TcpResourceProbe`. Only the
+            libvirt kinds probe — fault-inject has no remote endpoint.
+        secrets_root: Secret-reference resolution root; defaults to the environment's.
+
+    Returns:
+        The ``registered`` envelope carrying ``{id, name, kind}``, or a failure envelope.
+    """
+    failure = await _authorize_registration(pool, ctx, tool=REGISTER_TOOL, name=request.name)
+    if failure is not None:
+        return failure
+    failure = _validate_branch_fields(request)
     if failure is not None:
         return failure
     failure, owner_project = _validate_registration_and_resolve_owner(ctx, request)
     if failure is not None:
         return failure
-    if reachability_host_uri is None:
-        _, secrets_root = _default_registration_seams(None, secrets_root)
-    else:
-        resolved_probe, secrets_root = _default_registration_seams(probe, secrets_root)
+    resolved_probe, resolved_root = _default_registration_seams(probe, secrets_root)
     failure = _validate_secret_refs(
-        name=request.name, secret_refs=request.secret_refs, secrets_root=secrets_root
+        name=request.name, secret_refs=request.secret_refs, secrets_root=resolved_root
     )
     if failure is not None:
         return failure
-    if reachability_host_uri is not None:
+    if _BRANCHES[request.kind].probes:
         failure = await _validate_reachability(
-            name=request.name, host_uri=reachability_host_uri, probe=resolved_probe
+            name=request.name, host_uri=request.host_uri or "", probe=resolved_probe
         )
         if failure is not None:
             return failure
-    return await _insert_registered_resource(
-        pool,
-        ctx,
-        plan=plan_factory(owner_project),
-    )
+    return await _insert_registered_resource(pool, ctx, plan=_plan_for(request, owner_project))
 
 
 async def _insert_registered_resource(
@@ -317,14 +390,14 @@ async def _insert_registered_resource(
         async with (
             pool.connection() as conn,
             conn.transaction(),
-            resource_identity_lock(conn, plan.kind, request.name),
+            resource_identity_lock(conn, request.kind, request.name),
         ):
             failure = await plan.db_preflight(conn)
             if failure is not None:
                 return failure
             resource_id = await _insert_runtime_resource(
                 conn,
-                kind=plan.kind,
+                kind=request.kind,
                 name=request.name,
                 caps=caps,
                 cost_class=request.cost_class,
@@ -342,7 +415,9 @@ async def _insert_registered_resource(
         return ToolResponse.failure(
             request.name,
             ErrorCategory.CONFLICT,
-            data={"reason": f"a {plan.kind.value} resource named {request.name!r} already exists"},
+            data={
+                "reason": (f"a {request.kind.value} resource named {request.name!r} already exists")
+            },
         )
     except CategorizedError as exc:
         return ToolResponse.failure_from_error(request.name, exc)
@@ -350,7 +425,7 @@ async def _insert_registered_resource(
     _log.info(
         "runtime resource %r (%s/%s) registered by %s",
         request.name,
-        plan.kind.value,
+        request.kind.value,
         resource_id,
         ctx.principal,
     )
@@ -358,7 +433,7 @@ async def _insert_registered_resource(
         str(resource_id),
         "registered",
         suggested_next_actions=["resources.list", "resources.renew"],
-        data={"id": str(resource_id), "name": request.name, "kind": plan.kind.value},
+        data={"id": str(resource_id), "name": request.name, "kind": request.kind.value},
     )
 
 
@@ -431,13 +506,13 @@ async def _audit_register(
         principal=ctx.principal,
         agent_session=ctx.agent_session,
         event=audit.PlatformAuditEvent(
-            tool=plan.tool,
+            tool=REGISTER_TOOL,
             scope=f"resource:{resource_id}",
             args={
                 "name": request.name,
-                "kind": plan.kind.value,
+                "kind": request.kind.value,
                 "host_uri": plan.host_uri,
-                "base_image": plan.base_image,
+                "base_image": request.base_image,
                 "cost_class": request.cost_class,
                 "concurrent_allocation_cap": request.concurrent_allocation_cap,
                 "secret_refs": list(request.secret_refs),
@@ -449,133 +524,4 @@ async def _audit_register(
     )
 
 
-async def register_remote_libvirt_resource(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    request: RemoteLibvirtResourceRegistration,
-    *,
-    probe: ResourceProbe | None = None,
-    secrets_root: Path | None = None,
-) -> ToolResponse:
-    """Register a runtime remote-libvirt resource. Requires ``platform_admin``."""
-    if not request.host_uri.strip():
-        return config_error(request.name, "remote_libvirt requires a host URI")
-
-    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        failure = await _validate_runtime_name_available(
-            conn, kind=ResourceKind.REMOTE_LIBVIRT, name=request.name
-        )
-        if failure is not None:
-            return failure
-        return await _validate_remote_base_image(
-            conn, name=request.name, base_image=request.base_image
-        )
-
-    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
-        return _RegistrationPlan(
-            kind=ResourceKind.REMOTE_LIBVIRT,
-            request=request,
-            host_uri=request.host_uri,
-            base_image=request.base_image,
-            owner_project=owner_project,
-            tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-            db_preflight=db_preflight,
-        )
-
-    return await _register_with_plan(
-        pool,
-        ctx,
-        request=request,
-        tool=REGISTER_REMOTE_LIBVIRT_TOOL,
-        plan_factory=plan_factory,
-        probe=probe,
-        secrets_root=secrets_root,
-        reachability_host_uri=request.host_uri,
-    )
-
-
-async def register_local_libvirt_resource(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    request: LocalLibvirtResourceRegistration,
-    *,
-    probe: ResourceProbe | None = None,
-    secrets_root: Path | None = None,
-) -> ToolResponse:
-    """Register a runtime local-libvirt resource. Requires ``platform_admin``."""
-    if not request.host_uri.strip():
-        return config_error(request.name, "local_libvirt requires a host URI")
-
-    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        return await _validate_runtime_name_available(
-            conn, kind=ResourceKind.LOCAL_LIBVIRT, name=request.name
-        )
-
-    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
-        return _RegistrationPlan(
-            kind=ResourceKind.LOCAL_LIBVIRT,
-            request=request,
-            host_uri=request.host_uri,
-            base_image=None,
-            owner_project=owner_project,
-            tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-            db_preflight=db_preflight,
-        )
-
-    return await _register_with_plan(
-        pool,
-        ctx,
-        request=request,
-        tool=REGISTER_LOCAL_LIBVIRT_TOOL,
-        plan_factory=plan_factory,
-        probe=probe,
-        secrets_root=secrets_root,
-        reachability_host_uri=request.host_uri,
-    )
-
-
-async def register_fault_inject_resource(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    request: FaultInjectResourceRegistration,
-    *,
-    probe: ResourceProbe | None = None,
-    secrets_root: Path | None = None,
-) -> ToolResponse:
-    """Register a runtime fault-inject resource. Requires ``platform_admin``."""
-
-    async def db_preflight(conn: AsyncConnection) -> ToolResponse | None:
-        return await _validate_runtime_name_available(
-            conn, kind=ResourceKind.FAULT_INJECT, name=request.name
-        )
-
-    def plan_factory(owner_project: str | None) -> _RegistrationPlan:
-        return _RegistrationPlan(
-            kind=ResourceKind.FAULT_INJECT,
-            request=request,
-            host_uri=_FAULT_INJECT_HOST_URI,
-            base_image=None,
-            owner_project=owner_project,
-            tool=REGISTER_FAULT_INJECT_TOOL,
-            db_preflight=db_preflight,
-        )
-
-    return await _register_with_plan(
-        pool,
-        ctx,
-        request=request,
-        tool=REGISTER_FAULT_INJECT_TOOL,
-        plan_factory=plan_factory,
-        probe=probe,
-        secrets_root=secrets_root,
-    )
-
-
-__all__ = [
-    "FaultInjectResourceRegistration",
-    "LocalLibvirtResourceRegistration",
-    "RemoteLibvirtResourceRegistration",
-    "register_fault_inject_resource",
-    "register_local_libvirt_resource",
-    "register_remote_libvirt_resource",
-]
+__all__ = ["ResourceRegistration", "register_resource"]

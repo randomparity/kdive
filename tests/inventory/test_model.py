@@ -120,7 +120,7 @@ def test_remote_libvirt_requires_size_ceiling() -> None:
 
 
 def test_remote_libvirt_size_ceiling_must_be_positive() -> None:
-    # gt=0 matches the resources.register_* schema: a non-positive ceiling (e.g. a `vcpus = 0`
+    # gt=0 matches the resources.register schema: a non-positive ceiling (e.g. a `vcpus = 0`
     # typo) is rejected at config load, not silently admitted into a host that then rejects every
     # allocation with a misleading "exceeds ceiling 0".
     for bad_field in ("vcpus", "memory_mb"):

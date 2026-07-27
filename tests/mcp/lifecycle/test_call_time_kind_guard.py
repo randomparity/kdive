@@ -24,6 +24,7 @@ from kdive.mcp.tools import gateway
 from kdive.mcp.tools.lifecycle.allocations import registrar as allocations_registrar
 from kdive.mcp.tools.lifecycle.allocations.request import _guard_resource_kind
 from kdive.mcp.tools.lifecycle.systems import registrar as systems_registrar
+from kdive.mcp.tools.ops.resources import registrar as resources_registrar
 from kdive.providers.core.resolver import ProviderResolver
 from kdive.security.authz.rbac import Role
 
@@ -188,6 +189,14 @@ _NON_COMPOSED_ARGS_BY_TOOL: dict[str, dict] = {
         "system_id": "00000000-0000-0000-0000-000000000001",
         "profile": _FAULT_INJECT_PROFILE,
     },
+    # ADR-0464: `kind` is a flat scalar param here, not a nested provider section.
+    "resources.register": {
+        "kind": "fault-inject",
+        "name": "fi-noncomposed",
+        "cost_class": "standard",
+        "vcpus": 8,
+        "memory_mb": 16384,
+    },
 }
 
 
@@ -197,19 +206,28 @@ def _build_full_test_app(resolver: ProviderResolver) -> FastMCP:
     app = FastMCP(name="test-narrowed-guard")
     allocations_registrar.register(app, pool, resolver=resolver)
     systems_registrar.register(app, pool, resolver=resolver)
+    resources_registrar.register(app, pool, resolver=resolver)
     gateway.register(app, resolver=resolver)
     return app
 
 
 def test_narrowed_tools_exact_membership() -> None:
-    """NARROWED_TOOLS must be exactly the four provisioning-choice surfaces (ADR-0269 §4).
+    """NARROWED_TOOLS must be exactly the provider-choice write surfaces (ADR-0269 §4).
 
     Any addition to NARROWED_TOOLS is a deliberate, reviewed schema-narrowing decision;
     pinning the exact set here makes that intent visible via a test failure.
+    `resources.register` joined when it absorbed the three per-provider register wrappers
+    (ADR-0464) and took `kind` as a directly chosen parameter.
     """
     assert (
         frozenset(
-            {"allocations.request", "systems.define", "systems.provision", "systems.reprovision"}
+            {
+                "allocations.request",
+                "resources.register",
+                "systems.define",
+                "systems.provision",
+                "systems.reprovision",
+            }
         )
         == NARROWED_TOOLS
     )
@@ -225,14 +243,15 @@ def test_narrowed_tools_sync_with_call_time_guards(
     KeyError (missing entry in the args map) or via the tool not returning
     ``configuration_error`` when driven with a non-composed provider kind.
 
-    The systems tools call ``current_context()`` before the guard; patching it in both
-    registrar modules is safe because the guard fires before any DB work and the
+    The systems tools call ``current_context()`` before the guard; patching it in every
+    registrar module is safe because the guard fires before any DB work and the
     patched context is never exercised by a successful guard rejection.
     """
     resolver = _local_libvirt_only_resolver()
     app = _build_full_test_app(resolver)
     monkeypatch.setattr(allocations_registrar, "current_context", _ctx)
     monkeypatch.setattr(systems_registrar, "current_context", _ctx)
+    monkeypatch.setattr(resources_registrar, "current_context", _ctx)
 
     for tool_name in sorted(NARROWED_TOOLS):
         args = _NON_COMPOSED_ARGS_BY_TOOL[tool_name]  # KeyError → add missing entry

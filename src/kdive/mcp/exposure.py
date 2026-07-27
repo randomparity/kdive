@@ -224,9 +224,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "resources.set_status": _PLAT_OP,
     "resources.deregister": _PLAT_ADMIN,
     "resources.renew": _PLAT_ADMIN,
-    "resources.register_local_libvirt": _PLAT_ADMIN,
-    "resources.register_remote_libvirt": _PLAT_ADMIN,
-    "resources.register_fault_inject": _PLAT_ADMIN,
+    "resources.register": _PLAT_ADMIN,  # every provider kind — no branch-dependent authz
     "resources.drain": frozenset({ExposureScope.PLATFORM_OPERATOR, ExposureScope.PLATFORM_ADMIN}),
     # runs
     "runs.get": _VIEWER,

@@ -342,6 +342,45 @@ def test_image_build_vocabulary_finds_images_publish(
     assert "images.build" not in names
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "resources.register_remote_libvirt",
+        "resources.register_local_libvirt",
+        "resources.register_fault_inject",
+        "register a remote libvirt host",
+        "add a fault injection resource",
+        "register a local libvirt host as capacity",
+    ],
+)
+def test_resource_registration_vocabulary_finds_resources_register(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The three retired names and their intent phrases all rank `resources.register` (ADR-0464).
+
+    The provider words ("remote libvirt", "fault injection") used to *be* the tool names. After
+    the consolidation they survive only as `kind` enum values and retired-name vocabulary, so an
+    agent that describes the provider rather than the verb must still land on the one tool.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "resources.register" in names, (
+        f"query {query!r} did not surface resources.register: {names}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 4: RBAC filter hides admin-only tools from a viewer
 # ---------------------------------------------------------------------------
