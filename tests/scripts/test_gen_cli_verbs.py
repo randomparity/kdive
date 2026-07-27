@@ -121,8 +121,30 @@ def test_request_wrapper_unwraps_to_flat_scalar_flags() -> None:
 
 
 def test_op_underscores_become_a_dashed_subcommand() -> None:
-    verb = gen._verb_for(_tool("accounting.report_all_projects", {"properties": {}}))
-    assert (verb.group, verb.sub) == ("accounting", "report-all-projects")
+    verb = gen._verb_for(_tool("resources.set_scheduling", {"properties": {}}))
+    assert (verb.group, verb.sub) == ("resources", "set-scheduling")
+
+
+def test_discriminated_request_falls_back_to_the_whole_param_json_escape() -> None:
+    # A `request` that is a discriminated union (accounting.report, reports.generate,
+    # audit.query) has no object body to flatten. Flattening to zero flags would leave the
+    # verb with no way to pass its required argument, so it keeps the --request-json escape.
+    tool = _tool(
+        "accounting.report",
+        {
+            "properties": {
+                "request": {
+                    "oneOf": [{"$ref": "#/$defs/Granted"}, {"$ref": "#/$defs/AllProjects"}],
+                    "discriminator": {"propertyName": "scope"},
+                }
+            },
+            "required": ["request"],
+        },
+    )
+    verb = gen._verb_for(tool)
+    assert verb.unwrap_request is False
+    assert verb.flags == ()
+    assert verb.json_params == ("request",)
 
 
 def test_required_scalar_marks_required_flag() -> None:

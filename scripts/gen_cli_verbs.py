@@ -132,7 +132,11 @@ def _verb_for(tool: Any) -> GeneratedVerb:
     if unwrap:
         body = _object_body(props["request"])
         if body is None:
-            props, required = {}, set()
+            # A ``request`` that is not a single object (a discriminated union such as
+            # ``accounting.report``) has no body to flatten. Keep it as a whole-parameter
+            # ``--request-json`` escape rather than emitting a verb with no way to pass the
+            # required argument at all.
+            unwrap = False
         else:
             props = body.get("properties", {})
             required = set(body.get("required", []))
