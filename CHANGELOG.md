@@ -134,6 +134,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconcile the 1539 spec with ADR-0451's residues
 - Record the server-side sweep in the spec too
 - Give ADR-0455's deferrals their tracking issues
+- Decide to retire the staged System definition lane
+- Tighten ADR-0457 migration and consumer wording
 
 ### Fixed
 
