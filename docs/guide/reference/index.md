@@ -132,4 +132,3 @@
 | [`tools.invoke`](tools.md#toolsinvoke) | `implemented` |
 | [`tools.search`](tools.md#toolssearch) | `implemented` |
 | [`vmcore.fetch`](vmcore.md#vmcorefetch) | `implemented` |
-| [`vmcore.list`](vmcore.md#vmcorelist) | `implemented` |

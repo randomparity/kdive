@@ -235,14 +235,18 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
             sys_id, run_id = await seed_crashed_system_with_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
-                await vmcore_plane.capture_handler(
+                core_id = await vmcore_plane.capture_handler(
                     conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(run_id))
                 )
             ctx = request_context()
             refs: list[str] = []
-            vmcores = await vmcore_tools.list_vmcores(pool, ctx, run_id=run_id)
-            for r in vmcores.items:
-                refs.extend(r.refs.values())
+            # The capture job's published reference (ADR-0466) replaces the retired vmcore.list
+            # envelope in this sweep: it is the plane's own read surface now.
+            assert core_id is not None
+            published = await artifacts_get(
+                pool, ctx, request=ArtifactsGetRequest(artifact_id=core_id)
+            )
+            refs.extend(published.refs.values())
             listed = await artifacts_list(pool, ctx, system_id=sys_id)
             for r in listed.items:
                 refs.extend(r.refs.values())

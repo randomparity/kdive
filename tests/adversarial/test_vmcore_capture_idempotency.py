@@ -120,7 +120,10 @@ def test_concurrent_same_run_capture_writes_one_core(migrated_url: str) -> None:
 
         assert retriever.calls == 2, "both handlers must pass precheck and capture (the race)"
         assert count == 1, "the per-Run lock + finalize re-check must keep it to one core"
-        assert results[0] == results[1], "both return the same Run-owned core key"
+        assert results[0] == results[1], (
+            "both return the same redacted artifact id — the loser of the finalize re-check "
+            "resolves the winner's published reference, not its own raw key (ADR-0466)"
+        )
 
     asyncio.run(_run())
 
@@ -224,6 +227,18 @@ async def _artifact_owner_kinds(pool: AsyncConnectionPool, run_id: str) -> list[
         return sorted(row[0] for row in await cur.fetchall())
 
 
+async def _redacted_core_id(pool: AsyncConnectionPool, run_id: str) -> str:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM artifacts WHERE owner_id = %s "
+            "AND object_key LIKE '%%/vmcore-%%' AND object_key LIKE '%%-redacted'",
+            (run_id,),
+        )
+        rows = await cur.fetchall()
+    assert len(rows) == 1
+    return str(rows[0][0])
+
+
 def _duration_points(reader: InMemoryMetricReader, name: str) -> list[Any]:
     data = reader.get_metrics_data()
     assert data is not None
@@ -265,6 +280,7 @@ def test_capture_handler_threads_args_records_audit_and_telemetry(migrated_url: 
                 "calls": retriever.calls,
                 "audit": await _audit_rows(pool, run_id),
                 "owners": await _artifact_owner_kinds(pool, run_id),
+                "redacted_id": await _redacted_core_id(pool, run_id),
                 "reader": reader,
                 "provider_kind": provider_kind,
                 "sys_id": sys_id,
@@ -276,7 +292,8 @@ def test_capture_handler_threads_args_records_audit_and_telemetry(migrated_url: 
 
     # The retriever is driven with the resolved (system.id, run.id, method) — none swapped to None.
     assert out["calls"] == [(UUID(out["sys_id"]), UUID(run_id), CaptureMethod.HOST_DUMP)]
-    assert out["result"] == f"local/runs/{run_id}/vmcore-host_dump"
+    # ADR-0466: the handler's return — the job's result_ref — is the redacted artifact's id.
+    assert out["result"] == out["redacted_id"]
     # Both the raw and the redacted rows are Run-owned.
     assert out["owners"] == ["runs", "runs"]
     # Exactly one audit row with the exact tool/object/transition/args.
@@ -355,7 +372,10 @@ def test_capture_handler_idempotent_recapture_returns_existing_core(migrated_url
             return first, second, first_calls, second_calls, count
 
     first, second, first_calls, second_calls, count = asyncio.run(_run())
-    assert first == second, "the re-capture returns the same existing Run-owned core key"
+    assert first == second, (
+        "the re-capture replays the same redacted artifact id (ADR-0466), not the raw key the "
+        "dedup guard matched on"
+    )
     assert first_calls == 1, "the first capture drives the retriever"
     assert second_calls == 0, "the idempotent re-capture short-circuits before the retriever"
     assert count == 1, "no duplicate core row"

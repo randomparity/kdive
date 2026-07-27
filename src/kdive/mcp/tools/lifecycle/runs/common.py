@@ -115,6 +115,7 @@ def _run_artifact_refs(
     console_ref: str | None = None,
     latest_console_ref: str | None = None,
     build_log_ref: str | None = None,
+    vmcore_ref: str | None = None,
 ) -> dict[str, str]:
     """The Run's object-store artifact keys, for the envelope ``refs`` slot.
 
@@ -128,7 +129,10 @@ def _run_artifact_refs(
     — surfaced as ``latest_console`` so an agent jumps to the newest console evidence without the
     opt-in manifest; read the same way as ``console`` and equal to it when only the boot snapshot
     exists. ``build_log_ref`` is the failed build's build-log artifact id (ADR-0238), surfaced as
-    ``build-log`` on the failed-Run path; omitted when the build captured no log.
+    ``build-log`` on the failed-Run path; omitted when the build captured no log. ``vmcore_ref`` is
+    the Run's redacted vmcore artifact id (ADR-0466), surfaced as ``vmcore`` so an agent holding
+    only a ``run_id`` — no capture job id — still reaches the core with ``artifacts.get``; omitted
+    until a capture succeeds.
     """
     refs: dict[str, str] = {}
     if run.kernel_ref:
@@ -141,6 +145,8 @@ def _run_artifact_refs(
         refs["latest_console"] = latest_console_ref
     if build_log_ref is not None:
         refs["build-log"] = build_log_ref
+    if vmcore_ref is not None:
+        refs["vmcore"] = vmcore_ref
     return refs
 
 
@@ -326,6 +332,7 @@ def envelope_for_run(
     console_manifest: ConsoleManifest | None = None,
     latest_console_ref: str | None = None,
     liveness: Liveness | None = None,
+    vmcore_ref: str | None = None,
 ) -> ToolResponse:
     """Render a Run; `failed` becomes a failure envelope carrying its `failure_category`.
 
@@ -359,6 +366,12 @@ def envelope_for_run(
     `latest_console_ref` (#1238, ADR-0374) is the newest console artifact id correlated to the Run,
     surfaced as `refs.latest_console` so an agent jumps straight to the newest console evidence
     without the opt-in manifest. The read path passes it for any non-failed Run that has one.
+
+    `vmcore_ref` (#1591, ADR-0466) is the Run's redacted vmcore artifact id, surfaced as
+    `refs.vmcore`. A capture job publishes the same id as its `refs.result`; this is the Run-keyed
+    way back to it, so an agent that only holds a `run_id` — a resumed session, a handoff — is not
+    stranded now that `vmcore.list` is gone. The read path passes it for any non-failed Run whose
+    capture landed a redacted core.
     """
     if run.state is RunState.FAILED:
         category = run.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE
@@ -403,7 +416,10 @@ def envelope_for_run(
         run.state.value,
         suggested_next_actions=actions,
         refs=_run_artifact_refs(
-            run, console_ref=console_ref, latest_console_ref=latest_console_ref
+            run,
+            console_ref=console_ref,
+            latest_console_ref=latest_console_ref,
+            vmcore_ref=vmcore_ref,
         ),
         data=data,
     )

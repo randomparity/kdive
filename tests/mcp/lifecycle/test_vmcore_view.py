@@ -15,35 +15,9 @@ from kdive.mcp.tools.lifecycle.vmcore.view import (
     CONSOLE_CRASH_GUIDANCE,
     console_crash_redirect,
     postmortem_success_response,
-    vmcore_collection,
 )
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.listing import RedactedArtifact
-
-
-def test_vmcore_collection_includes_only_redacted_vmcore_artifacts() -> None:
-    artifact = RedactedArtifact("vmcore-id", "runs/r/vmcore-deadbeef-redacted")
-    resp = vmcore_collection(
-        "run-id",
-        [
-            artifact,
-            RedactedArtifact("raw-id", "runs/r/vmcore-deadbeef"),
-            RedactedArtifact("dmesg-id", "runs/r/dmesg-redacted"),
-            RedactedArtifact("prefix-id", "runs/r/not-vmcore-redacted"),
-        ],
-    )
-
-    assert resp.object_id == "run-id"
-    assert resp.status == "ok"
-    assert resp.data["count"] == 1
-    assert resp.suggested_next_actions == ["artifacts.get", "postmortem.crash"]
-    assert len(resp.items) == 1
-    item = resp.items[0]
-    assert item.object_id == artifact.id
-    assert item.status == "available"
-    assert item.refs == {"object": artifact.object_key}
-    assert item.suggested_next_actions == ["artifacts.get"]
 
 
 def test_console_crash_redirect_maps_expected_no_vmcore_to_console_guidance() -> None:

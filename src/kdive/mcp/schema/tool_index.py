@@ -45,7 +45,7 @@ NAMESPACE_TOC: dict[str, str] = {
     "shapes": "System shape and cost-class configuration",
     "systems": "Target system provisioning, reprovision, teardown, and profiling",
     "tools": "Tool discovery gateway — search capabilities and invoke any registered tool",
-    "vmcore": "Crash dump listing and download",
+    "vmcore": "Crash dump capture from a crashed system",
 }
 
 
@@ -105,7 +105,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "runs.boot": frozenset({"boot", "kernel", "start", "launch", "built", "load", "power"}),
     "runs.install": frozenset({"install", "modules", "kernel", "load"}),
     "runs.create": frozenset({"create", "run", "investigation", "profile"}),
-    "runs.get": frozenset({"get", "run", "status", "fetch", "lookup"}),
+    # `vmcore`/`core` are the retired `vmcore.list` intent (ADR-0466): `runs.get` is the
+    # Run-keyed way back to the captured core, carrying its artifact id as `refs.vmcore`.
+    "runs.get": frozenset({"get", "run", "status", "fetch", "lookup", "vmcore", "core"}),
     "runs.list": frozenset({"list", "runs", "filter", "paginate"}),
     "runs.cancel": frozenset({"cancel", "stop", "abort", "run"}),
     "runs.bind": frozenset({"bind", "attach", "system", "run"}),
@@ -187,7 +189,6 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "introspect.script": frozenset({"drgn", "script", "live", "introspect", "kernel", "run"}),
     # vmcore plane
     "vmcore.fetch": frozenset({"vmcore", "crash", "dump", "fetch", "download", "retrieve"}),
-    "vmcore.list": frozenset({"vmcore", "list", "dumps", "crash"}),
     # postmortem
     "postmortem.crash": frozenset({"postmortem", "crash", "analysis", "vmcore", "triage"}),
     # allocations
@@ -313,6 +314,7 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "resources.register_local_libvirt": "resources.register",
     "resources.register_remote_libvirt": "resources.register",
     "resources.uncordon": "resources.set_scheduling",
+    "vmcore.list": "runs.get",
 }
 
 

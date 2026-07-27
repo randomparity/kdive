@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
-from kdive.artifacts.read_model import raw_vmcore_key
+from kdive.artifacts.read_model import raw_vmcore_key, redacted_vmcore_artifact_id
 from kdive.artifacts.registration import register_artifact_row
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
@@ -55,14 +56,29 @@ def ensure_method_match(existing_key: str, method: CaptureMethod, run_id: UUID) 
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ExistingCapture:
+    """A prior same-method core for this Run, and the artifact reference that replays it.
+
+    ``redacted_artifact_id`` is ``None`` when the raw core survives but its redacted sibling does
+    not — a reclaimed or expired artifact row. The replay then publishes no result reference rather
+    than a raw object key the caller cannot read: ``refs.result`` means "the redacted vmcore
+    artifact id" for every ``capture_vmcore`` job or it means nothing (ADR-0466).
+    """
+
+    redacted_artifact_id: str | None
+
+
 async def precheck_run(
     conn: AsyncConnection, run_id: UUID, method: CaptureMethod
-) -> tuple[Run, System] | str:
-    """Under the per-Run lock, return an existing same-method key, or the Run + bound System.
+) -> tuple[Run, System] | ExistingCapture:
+    """Under the per-Run lock, return an existing same-method capture, or the Run + bound System.
 
     Run-addressed (ADR-0244): the core is owned by the crashing Run, so the dedup guard and the
     advisory lock are scoped to ``run_id``. ``system`` is resolved from the Run's binding so the
-    provider can locate the live domain/overlay/volume.
+    provider can locate the live domain/overlay/volume. The dedup guard reads the *raw* key (only
+    it carries the capture method for :func:`ensure_method_match`), but the replay hands back the
+    *redacted* artifact id — the reference the job result carries (ADR-0466).
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
         run = await RUNS.get(conn, run_id)
@@ -82,23 +98,28 @@ async def precheck_run(
         existing = await raw_vmcore_key(conn, run_id)
         if existing is not None:
             ensure_method_match(existing, method, run_id)
-            return existing
+            return ExistingCapture(await redacted_vmcore_artifact_id(conn, run_id))
         return run, system
 
 
 async def finalize_capture(
     conn: AsyncConnection, job: Job, run: Run, method: CaptureMethod, output: Any
-) -> str:
-    """Insert both Run-owned artifact rows + audit under the per-Run lock (ADR-0244)."""
+) -> str | None:
+    """Insert both Run-owned artifact rows + audit under the per-Run lock (ADR-0244).
+
+    Returns the redacted artifact's id — the job's result reference (ADR-0466). A concurrent
+    handler that already landed the core wins the re-check and its redacted id is returned
+    instead; ``None`` only when that raced core has no surviving redacted row.
+    """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         existing = await raw_vmcore_key(conn, run.id)
         if existing is not None:
             ensure_method_match(existing, method, run.id)
-            return existing
+            return await redacted_vmcore_artifact_id(conn, run.id)
         await ARTIFACTS.insert(
             conn, register_artifact_row(output.raw, owner_kind="runs", owner_id=run.id)
         )
-        await ARTIFACTS.insert(
+        redacted = await ARTIFACTS.insert(
             conn, register_artifact_row(output.redacted, owner_kind="runs", owner_id=run.id)
         )
         await audit.record(
@@ -113,7 +134,7 @@ async def finalize_capture(
                 project=run.project,
             ),
         )
-    return str(output.raw.key)
+    return str(redacted.id)
 
 
 async def capture_handler(
@@ -123,13 +144,18 @@ async def capture_handler(
     resolver: ProviderResolver,
     telemetry: CaptureTelemetry = _DISABLED_TELEMETRY,
 ) -> str | None:
-    """Capture the System's vmcore and store the raw + redacted rows."""
+    """Capture the System's vmcore, store the raw + redacted rows, return the redacted id.
+
+    The returned value becomes the job's ``result_ref`` and reaches the agent as ``refs.result``
+    on every ``jobs.get`` / ``jobs.wait`` / ``jobs.list`` read — the redacted artifact id it hands
+    straight to ``artifacts.get`` (ADR-0466). ``None`` when no redacted row survives.
+    """
     payload = load_payload(job, CaptureVmcorePayload)
     run_id = UUID(payload.run_id)
     method = payload.method
     precheck = await precheck_run(conn, run_id, method)
-    if isinstance(precheck, str):
-        return precheck
+    if isinstance(precheck, ExistingCapture):
+        return precheck.redacted_artifact_id
     run, system = precheck
     binding = await resolver.binding_for_system(conn, system.id)
     set_provider_kind(binding.kind.value)

@@ -33,9 +33,13 @@ _NEXT_ACTIONS: dict[JobState, list[str]] = {
 # jobs.wait / jobs.list read of the terminal job carries it, not just the enqueuing tool's
 # synchronous envelope (ADR-0414). A completed TEARDOWN drives the System to torn_down but
 # leaves its Allocation `active` until allocations.release; point the agent at that second
-# step so the two-step wind-down is not forgotten (#1385). Keyed on SUCCEEDED only: a failed
-# or canceled teardown did not free anything to release.
+# step so the two-step wind-down is not forgotten (#1385). A completed CAPTURE_VMCORE carries the
+# redacted core's artifact id in `refs.result` (ADR-0466), so it points at the two tools that
+# consume that reference — read the bytes with artifacts.get, or triage the core with
+# postmortem.crash. Keyed on SUCCEEDED only: a failed or canceled teardown did not free anything
+# to release, and a failed capture produced no core.
 _TERMINAL_KIND_ACTIONS: dict[JobKind, list[str]] = {
+    JobKind.CAPTURE_VMCORE: ["artifacts.get", "postmortem.crash"],
     JobKind.TEARDOWN: ["allocations.release"],
 }
 

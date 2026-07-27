@@ -11,7 +11,6 @@ from kdive.mcp.tools._vmcore_targets import (
 )
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
-from kdive.services.artifacts.listing import RedactedArtifact
 
 # Author-controlled narrative for the early-boot console-crash redirect (#734, ADR-0227). For a
 # Run that declared expected_boot_failure=console_crash, the kernel panics before kdump's capture
@@ -23,30 +22,6 @@ CONSOLE_CRASH_GUIDANCE = (
     "capture kernel was loaded via kexec, so no vmcore is produced and none is expected. "
     "Read the console artifact instead — fetch its reference with runs.get."
 )
-
-
-def vmcore_collection(run_id: str, artifacts: list[RedactedArtifact]) -> ToolResponse:
-    """Render one Run's redacted vmcore artifacts into a collection envelope."""
-    items = [_vmcore_item(row) for row in artifacts if _is_redacted_vmcore(row.object_key)]
-    return ToolResponse.collection(
-        run_id,
-        "ok",
-        items,
-        suggested_next_actions=["artifacts.get", "postmortem.crash"],
-    )
-
-
-def _is_redacted_vmcore(object_key: str) -> bool:
-    return "/vmcore-" in object_key and object_key.endswith("-redacted")
-
-
-def _vmcore_item(artifact: RedactedArtifact) -> ToolResponse:
-    return ToolResponse.success(
-        artifact.id,
-        "available",
-        suggested_next_actions=["artifacts.get"],
-        refs={"object": artifact.object_key},
-    )
 
 
 def console_crash_redirect(run_id: str, exc: CategorizedError) -> ToolResponse | None:

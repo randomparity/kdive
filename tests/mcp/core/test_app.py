@@ -68,7 +68,6 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {"control.power", "control.force_crash"} <= names
         assert {
             "vmcore.fetch",
-            "vmcore.list",
             "artifacts.list",
             "artifacts.get",
             "postmortem.crash",
@@ -391,7 +390,6 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "debug.end_session": "implemented",
     "control.force_crash": "implemented",
     "vmcore.fetch": "implemented",
-    "vmcore.list": "implemented",
     "postmortem.crash": "implemented",
     "introspect.from_vmcore": "implemented",
 }

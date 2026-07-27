@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.read_model import redacted_vmcore_artifact_id
 from kdive.db.repositories import JOBS, RUNS, SYSTEMS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.resources import ResourceKind
@@ -58,6 +59,7 @@ class RunReadDetails:
     console_manifest: ConsoleManifest | None
     latest_console_id: str | None
     liveness: Liveness | None
+    vmcore_artifact_id: str | None
 
 
 async def get_run(
@@ -104,6 +106,7 @@ async def get_run(
             console_manifest=details.console_manifest,
             latest_console_ref=details.latest_console_id,
             liveness=details.liveness,
+            vmcore_ref=details.vmcore_artifact_id,
         )
 
 
@@ -128,6 +131,7 @@ async def _load_run_read_details(
         console_manifest=await _console_manifest(conn, run, include_console_artifacts),
         latest_console_id=await _latest_console_id(conn, run),
         liveness=await _liveness(conn, run, progress, secret_registry),
+        vmcore_artifact_id=await redacted_vmcore_artifact_id(conn, run.id),
     )
 
 
