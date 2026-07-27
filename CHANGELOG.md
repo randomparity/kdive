@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replace cordon/uncordon with a scheduling setter
 - Replace queue pause/resume with one state setter
 - Remove the duplicate images.build tool
+- Replace debug step variants with debug.advance
 - Fold register_* wrappers into resources.register
 - Fold fixtures.list into images.list
 
@@ -152,6 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0462 restoring the folded jump cursor
 - Record the cold-start proof for the artifacts.get find fold
 - State the post-0461 registry delta in ADR-0462
+- Record ADR-0463 debug.advance consolidation
 - Record ADR-0464 consolidating resource registration
 - Name the surviving queue state setter in set_queue_paused
 - Record ADR-0465 folding fixtures.list into images.list
@@ -261,6 +263,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound the orphan grace and correct the brake's claim
 - Bound both terms of the orphan-sweep threshold
 - Drop curated image build/publish verbs
+- Repair live-debug so the stepping proof can run
 
 ### Build
 
