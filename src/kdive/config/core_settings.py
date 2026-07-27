@@ -696,13 +696,14 @@ HEALTH_BIND_ADDR = Setting(
 MCP_TOOL_GATEWAY = Setting(
     name="KDIVE_MCP_TOOL_GATEWAY",
     parse=_str,
-    default="off",
+    default="on",
     group="mcp",
     processes=_SERVER,
     help=(
         "Enable the core-set tool gateway (ADR-0268): when set to on/1/true, list_tools "
-        "returns only the CORE_TOOLS set (intersected with RBAC), so agents discover "
-        "tools.search and tools.invoke first. Default off — full ADR-0148 RBAC catalog."
+        "returns only the CORE_TOOLS set for agent-profile callers (intersected with RBAC), "
+        "so agents discover tools.search and tools.invoke first. Operator-CLI callers keep "
+        "the direct RBAC catalog. Set off to restore the full ADR-0148 RBAC catalog."
     ),
 )
 

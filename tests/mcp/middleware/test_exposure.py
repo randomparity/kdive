@@ -159,6 +159,21 @@ def test_gateway_on_fails_open_on_error(monkeypatch: pytest.MonkeyPatch) -> None
     assert [t.name for t in result] == ["runs.create", "admin.teardown"]
 
 
+def test_gateway_defaults_on_for_agent_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = _tools("tools.search", "tools.invoke", "runs.create", "jobs.get", "ops.diagnostics")
+    monkeypatch.delenv("KDIVE_MCP_TOOL_GATEWAY", raising=False)
+    monkeypatch.setattr(
+        exposure_mod,
+        "request_context",
+        lambda: _ctx(roles={"a": Role.CONTRIBUTOR}),
+    )
+
+    result, _, _ = _run(ToolExposureMiddleware(ProviderResolver({})), tools)
+    names = {t.name for t in result}
+
+    assert names == {"tools.search", "tools.invoke", "runs.create"}
+
+
 def test_operator_cli_gets_direct_rbac_catalog_when_gateway_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
@@ -95,10 +96,11 @@ def test_instructions_both_modes_cover_namespaces_and_gateway_tools() -> None:
 
 
 def test_instructions_gateway_off_do_not_claim_gateway_primary() -> None:
-    """With the gateway off (default), instructions must not claim the gateway is primary.
+    """With the gateway off, instructions must not claim the gateway is primary.
 
-    Regression for #1034: the gateway is off by default, so every tool is listed
-    directly; the old text falsely asserted the opposite.
+    Regression for #1034: the instructions must describe the surface the caller actually
+    receives. With the gateway explicitly off every tool is listed directly, so the
+    gateway-primary text would be a lie.
     """
     from kdive.mcp.schema.tool_index import build_instructions
 
@@ -116,10 +118,18 @@ def test_instructions_gateway_on_describe_gateway_first() -> None:
     assert _GATEWAY_PRIMARY_CLAIM in build_instructions(gateway_enabled=True)
 
 
-def test_default_app_instructions_do_not_claim_gateway_primary() -> None:
-    """The assembled app defaults to gateway-off instructions (proves the wiring, #1034)."""
+def test_default_app_instructions_describe_the_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The assembled app defaults to gateway-on instructions (proves the wiring, #1582).
+
+    The default agent profile is clipped to ``CORE_TOOLS`` (ADR-0456 §6), so the
+    always-delivered instructions must describe gateway-first discovery — the #1034
+    invariant is that instructions match the surface, not that the gateway is off.
+    """
+    monkeypatch.delenv("KDIVE_MCP_TOOL_GATEWAY", raising=False)
     app = _built_app()
-    assert _GATEWAY_PRIMARY_CLAIM not in (app.instructions or "")
+    assert _GATEWAY_PRIMARY_CLAIM in (app.instructions or "")
 
 
 # The mis-scoped clause from #1248: framing the gateway as "for hosts without lazy tool

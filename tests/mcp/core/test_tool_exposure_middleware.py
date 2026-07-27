@@ -61,6 +61,7 @@ def _ctx(
 
 
 def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
     monkeypatch.setattr(
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.VIEWER})
     )
@@ -70,6 +71,7 @@ def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
     monkeypatch.setattr(
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.OPERATOR})
     )
@@ -80,6 +82,7 @@ def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_platform_operator_sees_platform_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "off")
     monkeypatch.setattr(
         "kdive.mcp.middleware.shared.current_context",
         lambda: _ctx(platform=frozenset({PlatformRole.PLATFORM_OPERATOR})),

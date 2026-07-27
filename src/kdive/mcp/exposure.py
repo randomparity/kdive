@@ -37,7 +37,7 @@ from kdive.security.authz.rbac import (
 
 
 def gateway_enabled() -> bool:
-    """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default off, ADR-0268).
+    """Return True when KDIVE_MCP_TOOL_GATEWAY is set to on/1/true (default on, ADR-0268).
 
     Single source of truth for the gateway toggle: the exposure middleware reads it to
     decide whether gateway-profile callers are clipped to ``CORE_TOOLS``, and
