@@ -280,10 +280,7 @@ def _op_for(op: str, runtime: DebugEngineRuntime, session_id: str, **kwargs: Any
         "resolve_symbol": ops_memory._resolve_symbol_op,
         "continue": ops_execution._continue_op,
         "interrupt": ops_execution._interrupt_op,
-        "step": ops_execution._step_op,
-        "next": ops_execution._next_op,
-        "step_instruction": ops_execution._step_instruction_op,
-        "finish": ops_execution._finish_op,
+        "advance": ops_execution._advance_op,
         "backtrace": ops_stack._backtrace_op,
         "read_frame": ops_stack._read_frame_op,
         "disassemble": ops_stack._disassemble_op,
@@ -347,10 +344,7 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
         "debug.clear_watchpoint",
         "debug.continue",
         "debug.interrupt",
-        "debug.step",
-        "debug.next",
-        "debug.step_instruction",
-        "debug.finish",
+        "debug.advance",
         "debug.load_module_symbols",
     } == debug_runtime._AUDITED_OPS
     assert debug_runtime._op_audit("debug.read_memory", address="0x1", byte_count=4) == (
@@ -362,6 +356,29 @@ def test_op_audit_descriptor_covers_only_mutating_and_sensitive_ops() -> None:
     )
     for bounded in ("debug.backtrace", "debug.read_registers", "debug.resolve_symbol"):
         assert debug_runtime._op_audit(bounded) is None
+
+
+def test_op_audit_transition_override_keeps_one_transition_per_operation() -> None:
+    # `debug.advance` folds four operations behind one tool name. Without the override the
+    # derived transition would be a flat `advance` for all four, so the audit trail would no
+    # longer say which one ran.
+    transitions = {
+        mode: debug_runtime._op_audit(
+            "debug.advance", f"advance:{mode}", mode=mode, timeout_sec=1.0
+        )
+        for mode in ("into", "over", "instruction", "out")
+    }
+    assert {t.transition for t in transitions.values() if t is not None} == {
+        "advance:into",
+        "advance:over",
+        "advance:instruction",
+        "advance:out",
+    }
+    assert transitions["out"] == debug_runtime._OpAudit(
+        tool="debug.advance",
+        transition="advance:out",
+        args={"mode": "out", "timeout_sec": 1.0},
+    )
 
 
 async def _call_registered_debug_tool(
@@ -627,15 +644,19 @@ def test_continue_returns_stopped(migrated_url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("op", "verb", "reason"),
+    ("mode", "verb", "reason"),
     [
-        ("step", "-exec-step", "end-stepping-range"),
-        ("next", "-exec-next", "end-stepping-range"),
-        ("step_instruction", "-exec-step-instruction", "end-stepping-range"),
-        ("finish", "-exec-finish", "function-finished"),
+        ("into", "-exec-step", "end-stepping-range"),
+        ("over", "-exec-next", "end-stepping-range"),
+        ("instruction", "-exec-step-instruction", "end-stepping-range"),
+        ("out", "-exec-finish", "function-finished"),
     ],
 )
-def test_stepping_op_returns_stopped(op: str, verb: str, reason: str, migrated_url: str) -> None:
+def test_advance_mode_dispatches_its_gdb_verb(
+    mode: str, verb: str, reason: str, migrated_url: str
+) -> None:
+    # Each mode must reach its own gdb-MI verb: the consolidation is only safe if the four
+    # dispatches survive it, so pin mode -> written command, not just "something stopped".
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
@@ -654,18 +675,44 @@ def test_stepping_op_returns_stopped(op: str, verb: str, reason: str, migrated_u
                 _ctx(),
                 session_id,
                 runtime,
-                _op_for(op, runtime, session_id, timeout_sec=1),
+                _op_for("advance", runtime, session_id, mode=mode, timeout_sec=1),
             )
         assert resp.status == "stopped"
         assert resp.data["reason"] == reason
         assert resp.data["timed_out"] is False
-        assert resp.suggested_next_actions
+        # One converged breadcrumb list for every mode, and it must name the surviving tool.
+        assert resp.suggested_next_actions == [
+            "debug.read_registers",
+            "debug.backtrace",
+            "debug.advance",
+            "debug.continue",
+        ]
         assert controller.written == [verb]
 
     asyncio.run(_run())
 
 
-def test_finish_op_surfaces_outermost_frame_error(migrated_url: str) -> None:
+def test_advance_rejects_an_unknown_mode(migrated_url: str) -> None:
+    # The schema enum blocks this over MCP; an in-process caller must still get a failure
+    # envelope rather than a bare KeyError out of the engine thread.
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
+            runtime = _runtime(_CountingAttach(_FakeMiController({})))
+            resp = await run_engine_op_with_runtime(
+                pool,
+                _ctx(),
+                session_id,
+                runtime,
+                _op_for("advance", runtime, session_id, mode="sideways", timeout_sec=1),
+            )
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+
+    asyncio.run(_run())
+
+
+def test_advance_out_surfaces_outermost_frame_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             session_id = await _seed_live_session(pool, state=DebugSessionState.LIVE)
@@ -686,7 +733,7 @@ def test_finish_op_surfaces_outermost_frame_error(migrated_url: str) -> None:
                 _ctx(),
                 session_id,
                 runtime,
-                _op_for("finish", runtime, session_id, timeout_sec=1),
+                _op_for("advance", runtime, session_id, mode="out", timeout_sec=1),
             )
         assert resp.status == "error"
         assert resp.error_category == "debug_attach_failure"
@@ -694,13 +741,22 @@ def test_finish_op_surfaces_outermost_frame_error(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("op", ["step", "next", "step_instruction", "finish"])
-def test_stepping_op_writes_audit_row(
-    op: str, migrated_url: str, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("mode", "verb"),
+    [
+        ("into", "-exec-step"),
+        ("over", "-exec-next"),
+        ("instruction", "-exec-step-instruction"),
+        ("out", "-exec-finish"),
+    ],
+)
+def test_advance_writes_one_audit_row_per_mode(
+    mode: str, verb: str, migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Drive each resume op through the REGISTERED wrapper so its `audit=_op_audit("debug.<op>")`
-    # wiring is exercised end-to-end; a name missing from _AUDITED_OPS fails here (no row written).
-    verb = f"-exec-{op.replace('_', '-')}"
+    # Drive each mode through the REGISTERED wrapper so its `audit=_op_audit(...)` wiring is
+    # exercised end-to-end; a name missing from _AUDITED_OPS fails here (no row written).
+    # The transition carries the mode (`advance:into`, ...) so folding four tools into one does
+    # not collapse four distinct operations into a single audit transition.
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
@@ -721,16 +777,16 @@ def test_stepping_op_writes_audit_row(
             resp = await _call_registered_debug_tool(
                 pool,
                 runtime,
-                tool=f"debug.{op}",
-                arguments={"session_id": session_id, "timeout_sec": 1},
+                tool="debug.advance",
+                arguments={"session_id": session_id, "mode": mode, "timeout_sec": 1},
                 ctx=_ctx(),
                 monkeypatch=monkeypatch,
             )
             rows = await _audit_rows(pool, session_id)
         assert resp.status == "stopped"
         assert len(rows) == 1
-        assert rows[0][1] == f"debug.{op}"
-        assert rows[0][5] == op
+        assert rows[0][1] == "debug.advance"
+        assert rows[0][5] == f"advance:{mode}"
 
     asyncio.run(_run())
 

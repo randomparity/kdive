@@ -159,12 +159,24 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "debug.end_session": frozenset({"session", "end", "stop", "gdb", "debug"}),
     "debug.continue": frozenset({"continue", "resume", "run", "debug"}),
     "debug.interrupt": frozenset({"interrupt", "pause", "break", "debug"}),
-    "debug.step": frozenset({"step", "into", "line", "stepi", "debug"}),
-    "debug.next": frozenset({"next", "step", "over", "line", "debug"}),
-    "debug.step_instruction": frozenset(
-        {"step", "instruction", "stepi", "asm", "single-step", "debug"}
+    "debug.advance": frozenset(
+        {
+            "advance",
+            "step",
+            "next",
+            "finish",
+            "into",
+            "over",
+            "out",
+            "return",
+            "line",
+            "instruction",
+            "stepi",
+            "asm",
+            "single-step",
+            "debug",
+        }
     ),
-    "debug.finish": frozenset({"finish", "return", "step", "out", "debug"}),
     "debug.get_session": frozenset({"session", "get", "status", "debug"}),
     "debug.list_sessions": frozenset({"sessions", "list", "debug"}),
     # introspect plane
@@ -287,6 +299,10 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
 # value is present, so a typo or a name that was never actually removed trips CI.
 RETIRED_TOOL_NAMES: dict[str, str] = {
     "artifacts.find": "artifacts.get",
+    "debug.finish": "debug.advance",
+    "debug.next": "debug.advance",
+    "debug.step": "debug.advance",
+    "debug.step_instruction": "debug.advance",
     "fixtures.list": "images.list",
     "images.build": "images.publish",
     "ops.queue_pause": "ops.set_queue_paused",
