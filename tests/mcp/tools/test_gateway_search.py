@@ -280,6 +280,41 @@ def test_cordon_vocabulary_finds_resources_set_scheduling(
     assert "resources.set_scheduling" in _match_names(content)
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "artifacts.find",
+        "search text in a log",
+        "find string in console output",
+        "grep a crash signature in a console log",
+    ],
+)
+def test_artifact_text_search_vocabulary_finds_artifacts_get(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The retired name and text-search intent phrases all rank artifacts.get (ADR-0462).
+
+    The jump matcher is a `find` parameter on `artifacts.get`, not a tool, so an agent that
+    describes the intent ("search text in a log") has no tool name to go on. Search is the only
+    path from that intent to the capability.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _viewer_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "artifacts.get" in names, f"query {query!r} did not surface artifacts.get: {names}"
+
+
 @pytest.mark.parametrize("query", ["images.build", "build"])
 def test_image_build_vocabulary_finds_images_publish(
     monkeypatch: pytest.MonkeyPatch, query: str

@@ -58,7 +58,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
         "tests/mcp/lifecycle/test_investigation_upload_tool.py",
     ),
     "artifacts.fetch_raw": ("tests/mcp/catalog/test_raw_fetch_tool.py",),
-    "artifacts.find": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.get": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "artifacts.list": ("tests/mcp/catalog/test_artifacts_tools.py",),
     "audit.query": ("tests/mcp/ops/test_audit_query.py",),
@@ -332,8 +331,7 @@ def test_filtered_list_tools_use_request_payloads() -> None:
     expected_fields = {
         "accounting.report_all_projects": {"group_by", "window"},
         "accounting.report_granted_set": {"projects", "group_by", "window"},
-        "artifacts.find": {"artifact_id", "query", "byte_offset", "max_bytes", "direction"},
-        "artifacts.get": {"artifact_id", "byte_offset", "max_bytes", "direction"},
+        "artifacts.get": {"artifact_id", "find", "byte_offset", "max_bytes", "direction"},
         "debug.list_sessions": {"run_id", "system_id", "project", "state", "limit", "cursor"},
         "investigations.list": {"project", "state", "limit", "cursor"},
         "resources.list": {"kind", "limit", "cursor"},

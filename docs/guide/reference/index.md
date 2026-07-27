@@ -20,7 +20,6 @@
 | [`artifacts.create_investigation_upload`](artifacts.md#artifactscreate_investigation_upload) | `implemented` |
 | [`artifacts.create_run_upload`](artifacts.md#artifactscreate_run_upload) | `implemented` |
 | [`artifacts.fetch_raw`](artifacts.md#artifactsfetch_raw) | `implemented` |
-| [`artifacts.find`](artifacts.md#artifactsfind) | `implemented` |
 | [`artifacts.get`](artifacts.md#artifactsget) | `implemented` |
 | [`artifacts.list`](artifacts.md#artifactslist) | `implemented` |
 | [`audit.query`](audit.md#auditquery) | `implemented` |
