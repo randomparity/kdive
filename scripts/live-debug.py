@@ -484,7 +484,7 @@ async def _rip(client: LiveStackClient, schemas: dict, session_id: str) -> str |
 
 
 async def _step(args: argparse.Namespace) -> int:
-    """Prove step/next/step_instruction/finish (#1255) at a returnable frame on a booted kernel."""
+    """Prove every debug.advance mode (#1584) at a returnable frame on a booted kernel."""
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
         schemas = await _input_schemas(client)
         run_id = (await _find_booted_run(client, schemas)) if args.reuse else None
@@ -512,26 +512,32 @@ async def _step(args: argparse.Namespace) -> int:
             {"session_id": session_id, "number": (bp.get("data") or {})["number"]},
             schemas,
         )
-        # step/next/step_instruction must each advance rip (deterministic on a returnable frame).
-        for verb in ("step_instruction", "next", "step"):
+        # instruction/over/into must each advance rip (deterministic on a returnable frame).
+        for mode in ("instruction", "over", "into"):
             before = await _rip(client, schemas, session_id)
             resp = await _call(
-                client, f"debug.{verb}", {"session_id": session_id, "timeout_sec": 15}, schemas
+                client,
+                "debug.advance",
+                {"session_id": session_id, "mode": mode, "timeout_sec": 15},
+                schemas,
             )
             after = await _rip(client, schemas, session_id)
             if (resp.get("data") or {}).get("timed_out") or before == after:
-                print(f"  FAIL {verb}: rip {before} -> {after} data={resp.get('data')}")
+                print(f"  FAIL mode={mode}: rip {before} -> {after} data={resp.get('data')}")
                 return 1
-            print(f"  {verb}: rip {before} -> {after}")
-        # finish must return to the caller within the wait cap (timed_out=False).
-        fin = await _call(
-            client, "debug.finish", {"session_id": session_id, "timeout_sec": 30}, schemas
+            print(f"  mode={mode}: rip {before} -> {after}")
+        # mode=out must return to the caller within the wait cap (timed_out=False).
+        out = await _call(
+            client,
+            "debug.advance",
+            {"session_id": session_id, "mode": "out", "timeout_sec": 30},
+            schemas,
         )
-        if (fin.get("data") or {}).get("timed_out") is not False:
-            print(f"  FAIL finish timed out: {fin.get('data')}")
+        if (out.get("data") or {}).get("timed_out") is not False:
+            print(f"  FAIL mode=out timed out: {out.get('data')}")
             return 1
-        fin_reason = (fin.get("data") or {}).get("reason")
-        print(f"  finish: returned to caller (timed_out=False), reason={fin_reason}")
+        out_reason = (out.get("data") or {}).get("reason")
+        print(f"  mode=out: returned to caller (timed_out=False), reason={out_reason}")
         print("STEP_PROOF=ok")
         return 0
 
@@ -659,7 +665,7 @@ def _parser() -> argparse.ArgumentParser:
         "--symbol", default=DEFAULT_BREAK_SYMBOL, help="breakpoint symbol to stop at"
     )
 
-    step = sub.add_parser("step", help="prove step/next/step_instruction/finish (#1255)")
+    step = sub.add_parser("step", help="prove every debug.advance mode (#1584)")
     step.add_argument("--reuse", action="store_true", help="reuse an already-booted Run if present")
     step.add_argument(
         "--symbol",
