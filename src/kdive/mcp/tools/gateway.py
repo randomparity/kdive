@@ -21,7 +21,7 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.exposure import tool_visible
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.schema_advertising import registered_tools
-from kdive.mcp.schema.tool_index import TOOL_KEYWORDS
+from kdive.mcp.schema.tool_index import TOOL_KEYWORDS, retired_names_for
 from kdive.mcp.schema.tool_projection import project_listed_tool
 from kdive.mcp.tools import _docmeta
 from kdive.providers.core.resolver import ProviderResolver
@@ -89,7 +89,12 @@ def _schema_terms(tool: Tool) -> list[str]:
 
 def _score(tool: Tool, tokens: list[str]) -> int:
     extras = TOOL_KEYWORDS.get(tool.name, frozenset())
-    haystack = " ".join([tool.name, tool.description or "", *extras, *_schema_terms(tool)]).lower()
+    # Retired names this tool replaced join the haystack so a query for the old name — or any
+    # substring of it — ranks the replacement (ADR-0456 §3).
+    retired = retired_names_for(tool.name)
+    haystack = " ".join(
+        [tool.name, tool.description or "", *extras, *retired, *_schema_terms(tool)]
+    ).lower()
     return sum(1 for tok in tokens if tok in haystack)
 
 

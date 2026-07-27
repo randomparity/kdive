@@ -20,8 +20,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.schema.schema_advertising import registered_tools
+from kdive.mcp.schema.tool_index import RETIRED_TOOL_NAMES
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import Role
+from kdive.security.authz.rbac import PlatformRole, Role
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
 
@@ -163,6 +164,49 @@ def test_payload_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert content["status"] == "ok", f"expected ok, got {content}"
     assert len(content["data"]["matches"]) == 3
     assert content["data"]["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Retired tool names stay searchable vocabulary for their replacement (ADR-0456 §3)
+# ---------------------------------------------------------------------------
+
+
+def _every_scope_ctx() -> RequestContext:
+    """A caller holding every project and platform role, so RBAC filters nothing out."""
+    return RequestContext(
+        principal="all-scopes-user",
+        agent_session="sess-all",
+        projects=("proj-a",),
+        roles={"proj-a": Role.ADMIN},
+        platform_roles=frozenset(PlatformRole),
+    )
+
+
+@pytest.mark.parametrize(("retired", "replacement"), sorted(RETIRED_TOOL_NAMES.items()))
+def test_retired_tool_name_query_finds_its_replacement(
+    monkeypatch: pytest.MonkeyPatch, retired: str, replacement: str
+) -> None:
+    """Searching a retired tool name returns the tool that replaced it.
+
+    Retired names are curated search vocabulary, not compatibility aliases: the old name is
+    gone from the registry, so discovery is the only path back to the new entry point.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": retired, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert replacement in names, f"query {retired!r} did not surface {replacement!r}: {names}"
+    assert retired not in names, f"{retired!r} is retired but still registered"
 
 
 # ---------------------------------------------------------------------------
