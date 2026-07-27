@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replace cordon/uncordon with a scheduling setter
 - Replace queue pause/resume with one state setter
 - Remove the duplicate images.build tool
+- Fold register_* wrappers into resources.register
 
 ### Documentation
 
@@ -150,6 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0462 restoring the folded jump cursor
 - Record the cold-start proof for the artifacts.get find fold
 - State the post-0461 registry delta in ADR-0462
+- Record ADR-0464 consolidating resource registration
 
 ### Fixed
 
