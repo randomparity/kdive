@@ -87,12 +87,11 @@
 | [`ops.force_release`](ops.md#opsforce_release) | `implemented` |
 | [`ops.force_teardown`](ops.md#opsforce_teardown) | `implemented` |
 | [`ops.jobs_list`](ops.md#opsjobs_list) | `implemented` |
-| [`ops.queue_pause`](ops.md#opsqueue_pause) | `implemented` |
-| [`ops.queue_resume`](ops.md#opsqueue_resume) | `implemented` |
 | [`ops.reconcile_now`](ops.md#opsreconcile_now) | `implemented` |
 | [`ops.reconcile_systems`](ops.md#opsreconcile_systems) | `implemented` |
 | [`ops.set_cost_class_coeff`](ops.md#opsset_cost_class_coeff) | `implemented` |
 | [`ops.set_host_capacity`](ops.md#opsset_host_capacity) | `implemented` |
+| [`ops.set_queue_paused`](ops.md#opsset_queue_paused) | `implemented` |
 | [`ops.tool_trail`](ops.md#opstool_trail) | `implemented` |
 | [`postmortem.crash`](postmortem.md#postmortemcrash) | `implemented` |
 | [`projects.list`](projects.md#projectslist) | `implemented` |

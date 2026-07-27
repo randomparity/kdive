@@ -209,6 +209,31 @@ def test_retired_tool_name_query_finds_its_replacement(
     assert retired not in names, f"{retired!r} is retired but still registered"
 
 
+@pytest.mark.parametrize("query", ["ops.queue_pause", "ops.queue_resume", "resume"])
+def test_queue_pause_resume_vocabulary_finds_the_state_setter(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """Both retired queue names, and the resume intent word, rank ops.set_queue_paused.
+
+    "resume" is the one direction the replacement's own name does not spell, so it can only
+    reach the tool through the retired-name vocabulary (ADR-0459).
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    assert "ops.set_queue_paused" in _match_names(content)
+
+
 @pytest.mark.parametrize("query", ["postmortem.triage", "triage", "postmortem"])
 def test_postmortem_triage_vocabulary_finds_postmortem_crash(
     monkeypatch: pytest.MonkeyPatch, query: str

@@ -72,18 +72,6 @@ Cross-project queue depth and per-job state. Requires platform operator.
 - `states` (`array<string> (nullable)`, optional) — Filter per-job rows to these job states; omit for all.
 - `limit` (`integer`, optional) — Maximum per-job rows returned (capped at 200).
 
-## `ops.queue_pause`
-
-`implemented`
-
-Pause the worker's claim loop (jobs in flight finish). Requires platform operator.
-
-## `ops.queue_resume`
-
-`implemented`
-
-Resume the worker's claim loop. Requires platform operator.
-
 ## `ops.reconcile_now`
 
 `implemented`
@@ -133,6 +121,19 @@ Set a host's concurrent allocation cap. Blocks new placement; no eviction. Opera
 |---|---|---|---|
 | `concurrent_allocation_cap` | integer | yes | Maximum concurrent allocations on the host (>= 0). |
 | `resource_id` | string | yes | Host (resource) id to set the cap for. |
+
+## `ops.set_queue_paused`
+
+`implemented`
+
+Pause or resume the worker's claim loop. Requires platform operator.
+
+Sets the queue to the requested state rather than toggling it, so it is safe to
+re-assert. Use `ops.jobs_list` to read queue depth and per-job state.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `paused` | boolean | yes | Target state of the worker's claim loop: true pauses it (jobs already in flight finish, and the reconciler keeps enqueuing work that waits), false resumes claiming. Writes the target state, so repeating a call leaves the queue in the same state. |
 
 ## `ops.tool_trail`
 
