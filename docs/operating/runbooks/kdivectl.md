@@ -157,9 +157,9 @@ kdivectl systems get <system_id>
 kdivectl runs get <run_id>
 kdivectl jobs list
 kdivectl jobs get <job_id>
-kdivectl accounting usage-project --project <project>
-kdivectl accounting report-all-projects [--group-by principal] [--since <ts>] [--until <ts>]
-kdivectl accounting report-granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl accounting usage (--project <project> | --investigation-id <uuid>)
+kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl inventory list [--project <project>]
 ```
 
@@ -173,10 +173,11 @@ projected. **Breaking change (pre-1.0):** `--json` previously emitted only the v
 columns; scripts that read those column keys must now read them from the envelope's `data`
 (and each row from `items[*].data`).
 
-`--project` is **required** for `allocations list` and `accounting usage-project` (no square
-brackets): each underlying tool (`allocations.list`, `accounting.usage_project`) reads exactly
-one project, so the CLI enforces the flag up front — omitting it is a usage error (exit `2`),
-not a cross-project listing. `inventory list` is the exception: its `--project` is an
+`--project` is **required** for `allocations list` (no square brackets): `allocations.list`
+reads exactly one project, so the CLI enforces the flag up front — omitting it is a usage
+error (exit `2`), not a cross-project listing. `accounting usage` reads one project *or* one
+investigation (`accounting.usage` discriminates on `target.kind`), so it needs exactly one of
+`--project` / `--investigation-id`; neither or both is a usage error (exit `2`). `inventory list` is the exception: its `--project` is an
 **optional** narrowing filter on a cross-project auditor read (`inventory.list`, see
 [the matrix below](#read-authorization-platform-axis-vs-project-axis)), omitted for the
 all-projects view. There is no "list across all my projects" verb today; query each project
@@ -184,24 +185,24 @@ in turn.
 
 ### Cross-project accounting reports
 
-Two verbs render the multi-project accounting rollups (`reserved` / `reconciled` / `variance`
-per project, plus a totals footer). They map to the report tools and split across the same
-two authorization axes as the rest of the read surface:
+One verb renders the multi-project accounting rollups (`reserved` / `reconciled` / `variance`
+per project, plus a totals footer). `--scope` picks which of the two authorization axes the
+read runs on, and is **required** — the CLI never picks a scope for you:
 
 ```bash
-kdivectl accounting report-all-projects [--group-by principal] [--since <ts>] [--until <ts>]
-kdivectl accounting report-granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
+kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 ```
 
-- `accounting report-all-projects` (`accounting.report_all_projects`) is the **platform-axis**
-  read: it needs a `platform_auditor` token (satisfied by `platform_admin`) and rolls up every
-  project. A token without that role gets `authorization_denied` (exit `3`) — it is in the
-  platform-axis row of [the matrix below](#read-authorization-platform-axis-vs-project-axis).
-- `accounting report-granted-set` (`accounting.report_granted_set`) is the **project-axis** read: it
-  rolls up the projects you hold a role on. `--projects a,b` narrows to a named subset (each
-  is `viewer`-checked; a project you are not a member of is denied). Omit `--projects` for all
-  your granted projects; a given-but-empty value (e.g. a stray comma) is a usage error
-  (exit `2`).
+- `--scope all-projects` is the **platform-axis** read: it needs a `platform_auditor` token
+  (satisfied by `platform_admin`) and rolls up every project. A token without that role gets
+  `authorization_denied` (exit `3`) — it is in the platform-axis row of
+  [the matrix below](#read-authorization-platform-axis-vs-project-axis). Passing the wider
+  scope never grants it; the server checks the role inside that branch.
+- `--scope granted-set` is the **project-axis** read: it rolls up the projects you hold a role
+  on. `--projects a,b` narrows to a named subset (each is `viewer`-checked; a project you are
+  not a member of is denied) and is valid only with this scope. Omit `--projects` for all your
+  granted projects; a given-but-empty value (e.g. a stray comma) is a usage error (exit `2`).
 - `--group-by principal` groups rows by principal instead of per-project. `--since` and
   `--until` are timezone-aware ISO-8601 bounds forming a half-open window; omit both for all
   time. The bounds are validated server-side — a non-ISO-8601, timezone-naive, or inverted
@@ -222,7 +223,7 @@ cross-project oversight view, use a `platform_auditor` token.
 
 | read | authorized by | denied to |
 |------|---------------|-----------|
-| `allocations list/get`, `systems list/get`, `runs get`, `jobs list/get`, `accounting usage-project` (`accounting.usage_project`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage-project` / `accounting.usage_project`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
+| `allocations list/get`, `systems list/get`, `runs get`, `jobs list/get`, `accounting usage` (`accounting.usage`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage --project …` / `accounting.usage`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
 | cross-project `inventory list` (`inventory.list`), `accounting.report` (all-projects), `audit.query` (cross-project) | `platform_auditor` (satisfied by `platform_admin`) | a project-member token holding no platform role |
 | `secrets list`, `doctor` | `platform_operator` | any token lacking `platform_operator` |
 | `resources list/get`, `images list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
@@ -250,7 +251,7 @@ surfaces a distinct authorization-denied code (and is **not** audited; only plat
 [Reading the audit trail](#reading-the-audit-trail-by-actor)). The distinction is deliberate: a
 by-id lookup must not become a cross-tenant existence oracle, so "ungranted, exists" is
 indistinguishable from "absent". (2) A **non-member naming a project** in a named-scope read/op
-(`allocations list --project`, `accounting.usage_project`, `accounting.estimate`) is denied
+(`allocations list --project`, `accounting.usage`, `accounting.estimate`) is denied
 `authorization_denied` (**exit `3`**, ADR-0098) — the caller already supplied the project name, so
 there is no existence to hide, and the denial surfaces distinctly rather than collapsing to a
 generic error; like the by-id non-grant it is **not** audited (the non-member case is
@@ -349,7 +350,7 @@ server's tools, classifies the target from its live annotations, and admits only
 have explicitly opted into (ADR-0107).
 
 ```bash
-kdivectl tool call accounting.usage_project --json '{"project": "my-proj"}'  # read-only default
+kdivectl tool call accounting.usage --json '{"target": {"kind": "project", "project": "my-proj"}}'  # read-only default
 kdivectl tool call resources.set_status --allow-mutating --json '{...}'       # opt in to mutating
 kdivectl tool call systems.teardown --allow-destructive --yes --json '{...}'  # opt in to destructive
 ```

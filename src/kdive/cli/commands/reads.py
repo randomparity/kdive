@@ -156,13 +156,31 @@ async def secrets_list(args: argparse.Namespace) -> int:
 
 
 async def ledger_get(args: argparse.Namespace) -> int:
-    return await _record("accounting.usage_project", args, {"project": args.project})
+    """Spend rollup for one project or one investigation (``accounting.usage``).
+
+    The merged tool discriminates on ``target.kind``, so exactly one of ``--project`` /
+    ``--investigation-id`` must be given; neither or both is a usage error (exit 2) rather
+    than an opaque server-side discriminator failure.
+    """
+    project = getattr(args, "project", None)
+    investigation_id = getattr(args, "investigation_id", None)
+    if (project is None) == (investigation_id is None):
+        print("error: give exactly one of --project or --investigation-id", file=sys.stderr)
+        return 2
+    target: dict[str, object] = (
+        {"kind": "project", "project": project}
+        if project is not None
+        else {"kind": "investigation", "investigation_id": investigation_id}
+    )
+    return await _record("accounting.usage", args, {"target": target})
 
 
 async def inventory_show(args: argparse.Namespace) -> int:
     return await _list("inventory.list", args, ["key", "backend", "status"], "project")
 
 
+_GRANTED_SET_SCOPE = "granted-set"
+_REPORT_SCOPES = (_GRANTED_SET_SCOPE, "all-projects")
 _REPORT_COLUMNS = ["project", "principal", "reserved", "reconciled", "variance"]
 _REPORT_TOTAL_COLUMNS = [
     "scope",
@@ -222,21 +240,27 @@ async def _report(name: str, args: argparse.Namespace, payload: Mapping[str, obj
     return exit_code_for_envelope(envelope)
 
 
-async def ledger_report_all(args: argparse.Namespace) -> int:
-    """Platform-wide accounting rollup (``accounting.report_all_projects``; auditor-gated)."""
-    payload = _payload(args, "group_by")
-    payload.update(_window_payload(args))
-    return await _report("accounting.report_all_projects", args, payload)
+async def ledger_report(args: argparse.Namespace) -> int:
+    """Accounting rollup over your granted projects or every project (``accounting.report``).
 
-
-async def ledger_report_granted(args: argparse.Namespace) -> int:
-    """Granted-project accounting rollup (``accounting.report_granted_set``)."""
+    ``--scope granted-set`` rolls up the caller's own projects and accepts ``--projects``;
+    ``--scope all-projects`` rolls up the whole platform and is denied server-side without
+    a ``platform_auditor`` token. Both send the scope in the discriminated ``request``, so
+    the CLI never picks a scope on the caller's behalf.
+    """
+    scope = args.scope
+    if scope not in _REPORT_SCOPES:
+        print(f"error: --scope must be one of {', '.join(_REPORT_SCOPES)}", file=sys.stderr)
+        return 2
     names = _projects_arg(args)
     if names == []:
         print("error: --projects was given but listed no project names", file=sys.stderr)
         return 2
-    payload = _payload(args, "group_by")
+    if names is not None and scope != _GRANTED_SET_SCOPE:
+        print(f"error: --projects is only valid with --scope {_GRANTED_SET_SCOPE}", file=sys.stderr)
+        return 2
+    request: dict[str, object] = {"scope": scope, **_payload(args, "group_by")}
     if names is not None:
-        payload["projects"] = names
-    payload.update(_window_payload(args))
-    return await _report("accounting.report_granted_set", args, payload)
+        request["projects"] = names
+    request.update(_window_payload(args))
+    return await _report("accounting.report", args, {"request": request})

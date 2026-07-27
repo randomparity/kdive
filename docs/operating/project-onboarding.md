@@ -44,8 +44,8 @@ recorded `spent_kcu`.
   "max_concurrent_systems": 4, "max_pending_allocations": 0}`
 
 See the [accounting tool reference](../guide/reference/accounting.md) for the full
-parameter list. Confirm the result with the read-only `accounting.usage_project`
-(`kdivectl accounting usage-project --project acme`).
+parameter list. Confirm the result with the read-only `accounting.usage`
+(`kdivectl accounting usage --project acme`).
 
 > **`kdivectl` cannot set budget or quota today.** The operator CLI's `tool call`
 > passthrough is fail-closed read-only, and `set_budget` / `set_quota` are mutating
