@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give the point read back its positional id
 - Resolve stranded defined Systems in migration 0080
 - Retire the staged System definition lane
+- Add test-live-stack-remote
 
 ### Changed
 
@@ -293,6 +294,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name an unresolvable schema and guard the namespace map
 - Refuse a non-finite --timeout-s before it reaches the wire
 - Refuse a negative --timeout-s instead of letting it clamp
+- Make guest base-image staging work at all
+- Let guest-agent helpers run in cloud-image guests
+- Stop sandboxing the inventory path for live tiers
+- Migrate the remote spine to the external-build upload lane
+- Make the gdbstub port read real, not a stub
+- Panic the guest base image on an injected NMI
+- Detach the gdb session before crashing the remote spine
+- Gate boot on the capture kernel actually being armed
+- Check the vmcore egress property on the object path, not the ref string
+- Assert the ASSEMBLED console artifact, and unwrap artifacts.list
+- Let the arming timeout name what it observed
+- Match guest-exec as a whole element, not a substring
 
 ### Build
 
