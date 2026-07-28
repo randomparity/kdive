@@ -13,8 +13,8 @@ Every read/cancel is **project-scoped**: a job is visible only to a caller with
 (teardown/force_crash), keyed off the job's kind, not its enqueuing principal. A by-id read or
 cancel of a job in an ungranted
 project returns the same
-not-found-shaped error as a missing job, so existence is not leaked (matching
-``systems``/``runs``/``allocations`` getters); ``list`` returns only readable jobs.
+not-found-shaped error as a missing job, so existence is not leaked (matching the
+``systems``/``runs`` getters and ``allocations.wait``); ``list`` returns only readable jobs.
 """
 
 from __future__ import annotations
@@ -382,7 +382,10 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
         meta={"maturity": "implemented"},
     )
     async def jobs_wait(
-        job_id: Annotated[str, Field(description="The Job to poll until terminal.")],
+        job_id: Annotated[
+            str,
+            Field(description="The Job to read, or to poll until it is terminal."),
+        ],
         timeout_s: Annotated[
             float,
             Field(

@@ -66,5 +66,5 @@ envelope). That drop is transient: retry the call. ``jobs.wait`` and the other
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `job_id` | string | yes | The Job to poll until terminal. |
+| `job_id` | string | yes | The Job to read, or to poll until it is terminal. |
 | `timeout_s` | number | no | Seconds to wait before returning a non-terminal 'still running' result; defaults to 30 and is capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the job's current status immediately, never block. Otherwise prefer the short default and repeated calls over a large value: a long wait holds one request open long enough that an intermediary proxy may sever the stream. Re-issue short waits rather than one long hold. |

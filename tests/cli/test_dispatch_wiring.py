@@ -237,3 +237,39 @@ def test_run_verb_unknown_generated_path_exits() -> None:
     args = argparse.Namespace(command="accounting", subcommand="does-not-exist")
     with pytest.raises(SystemExit):
         asyncio.run(registry.run_verb(args))
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (
+            ["jobs", "wait", "--job-id", "j-1", "--timeout-s", "0"],
+            {"genarg_job_id": "j-1", "genarg_timeout_s": 0.0},
+        ),
+        (
+            ["allocations", "wait", "--allocation-id", "a-1", "--timeout-s", "0"],
+            {"genarg_allocation_id": "a-1", "genarg_timeout_s": 0.0},
+        ),
+    ],
+)
+def test_documented_point_read_invocation_parses(
+    argv: list[str], expected: dict[str, object]
+) -> None:
+    """The point-read invocation shape `docs/operating/runbooks/kdivectl.md` documents parses.
+
+    `jobs.get` / `allocations.get` were removed (ADR-0468) and their curated verbs with them, so
+    the runbook sends operators to the generated wait verb with a zero timeout. A generated verb
+    takes its tool parameters as *required flags*, not positionals — exactly the detail a
+    hand-written runbook line gets wrong. This pins the flag names and the float coercion of
+    `--timeout-s 0`; keeping the runbook's wording in step with it is a review obligation, since
+    this test asserts against the parser, not against the markdown.
+    """
+    args = build_parser().parse_args(argv)
+    assert {k: v for k, v in vars(args).items() if k.startswith("genarg")} == expected
+
+
+@pytest.mark.parametrize("argv", [["jobs", "get", "j-1"], ["allocations", "get", "a-1"]])
+def test_removed_getter_verbs_are_gone(argv: list[str]) -> None:
+    """`kdivectl jobs get` / `allocations get` no longer exist (ADR-0468, breaking change)."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)

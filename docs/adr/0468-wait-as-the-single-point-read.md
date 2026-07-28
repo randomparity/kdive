@@ -105,9 +105,12 @@ With the two tools gone, no generated verb sits at `jobs get` or `allocations ge
 curated verbs — and their `reads.py` handlers — became unreachable code and are removed rather
 than repointed. This follows the pattern ADR-0461 §"curated verbs" and ADR-0467 set.
 
-The CLI point read is the generated `kdivectl jobs wait <id> --timeout-s 0` and
-`kdivectl allocations wait <id> --timeout-s 0`. This is a breaking CLI change, stated plainly
-rather than shimmed.
+The CLI point read is the generated `kdivectl jobs wait --job-id <id> --timeout-s 0` and
+`kdivectl allocations wait --allocation-id <id> --timeout-s 0` — a generated verb takes its
+tool parameters as required flags, not positionals, so the id moves from a bare argument to
+a named one. This is a breaking CLI change, stated plainly rather than shimmed, and
+`tests/cli/test_dispatch_wiring.py` pins the exact documented invocation so the runbook
+cannot drift back to a command that does not parse.
 
 ## Consequences
 
