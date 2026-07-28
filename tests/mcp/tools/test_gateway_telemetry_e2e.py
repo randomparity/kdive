@@ -24,8 +24,11 @@ Scope — narrower than #1625's full acceptance, in two ways worth stating plain
   ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
   class are deferred to #1635, which carries the fix and the assertions it unblocks.
 
-``tools.search`` and the telemetry recorder — the other two ``META_TOOLS`` consumers #1625
-names — remain covered only by the direct-call tests in ``test_gateway_skip.py``.
+#1625 names three consumers of ``META_TOOLS``. This module pins only ``usage.py``'s.
+``telemetry.py``'s skip is unpinned end-to-end — deleting it leaves both tests below green,
+because it double-counts in metrics and spans, not in a table (#1640) — and
+``denial_audit.py``'s is unpinned for the separate reason above (#1635). ``tools.search``,
+the other ``META_TOOLS`` *member*, is not driven through the real gateway here either.
 
 Authentication binds the SDK's ``auth_context_var`` rather than patching ``current_context``.
 That is not quite the production write: ``fastmcp.server.dependencies.get_access_token``
@@ -158,9 +161,11 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
 
     envelope, usage_rows = asyncio.run(_run())
 
-    # The call was denied on its grants, not rejected by argument binding before the gate
-    # was ever reached — an unreached gate would record outcome "error", not "denied".
-    assert envelope["error_category"] == "authorization_denied"
+    # The client-visible envelope is keyed to the inner tool, not to the gateway wrapper.
+    # Independent of the row below: object_id is chosen by the handler, where the row's
+    # tool column comes from the MCP call name. Not asserting error_category here — the
+    # middleware derives the row's "denied" outcome from it, so the row already pins it.
+    assert envelope["object_id"] == "audit.query"
 
     # One row, keyed to the inner tool. Without the META_TOOLS skip the outer chain also
     # records ("tools.invoke", "denied") and this is two rows.
