@@ -14,16 +14,27 @@ These two tests join the halves: a real ``build_app`` over a real pool, driven t
 Removing ``"tools.invoke"`` from ``META_TOOLS`` reddens both (the outer chain then records
 the gateway wrapper alongside the inner tool).
 
-Scope: this covers ``tool_invocation``, on both the success and the denial outcome. The
-matching ``audit_log`` proof is not here, because ``DenialAuditMiddleware`` does not see a
-member's ``RoleDenied`` on the real dispatch path at all (#1635) — see the denial test.
+Scope — narrower than #1625's full acceptance, in two ways worth stating plainly:
 
-Authentication goes through the SDK's own ``auth_context_var`` rather than a patched
-``current_context``. That is the single seam the real HTTP path writes, so every reader
-downstream — the inner tool, ``middleware.shared.request_context``, the denial audit —
-resolves through the unpatched production accessor. Patching ``current_context`` instead
-would need one patch per importing module, and each patch is a place the real lookup is no
-longer under test.
+* Only ``tool_invocation``. No ``audit_log`` assertion appears here at all.
+* On the denial outcome, only the denial class a tool handler envelopes itself. The class
+  #1625 named — a member's ``RoleDenied`` over-reach — never reaches the middleware chain
+  as an exception on the real dispatch path: FastMCP wraps it in ``ToolError`` first, inside
+  the branch the chain wraps. So it writes no ``audit_log`` row *and* records
+  ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
+  class are deferred to #1635, which carries the fix and the assertions it unblocks.
+
+``tools.search`` and the telemetry recorder — the other two ``META_TOOLS`` consumers #1625
+names — remain covered only by the direct-call tests in ``test_gateway_skip.py``.
+
+Authentication binds the SDK's ``auth_context_var`` rather than patching ``current_context``.
+That is not quite the production write: ``fastmcp.server.dependencies.get_access_token``
+reads the HTTP request scope first and falls back to that context var, so an in-process call
+with no HTTP request exercises the fallback. It is still the closest reachable seam — every
+reader downstream (the inner tool, ``middleware.shared.request_context``, the denial audit)
+resolves through the unpatched production accessor and the real ``context_from_claims``.
+Patching ``current_context`` instead needs one patch per importing module, and each patch is
+a place the real lookup stops being under test.
 """
 
 from __future__ import annotations
@@ -33,20 +44,16 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any, LiteralString
 
+from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
-from mcp.server.auth.provider import AccessToken
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
-from tests.mcp.usage_support import (
-    denial_audit_must_not_fail,
-    recording_must_not_fail,
-    warm_pool,
-)
+from tests.mcp.usage_support import recording_must_not_fail, warm_pool
 
 # A viewer on exactly one project: enough for session.whoami, and denied on any other
 # project — the two outcomes these tests need from one token.
@@ -60,7 +67,13 @@ _VIEWER_CLAIMS: dict[str, Any] = {
 
 @contextlib.contextmanager
 def _authenticated(claims: dict[str, Any]) -> Iterator[None]:
-    """Bind ``claims`` to the verified-token context var the real auth middleware sets."""
+    """Bind ``claims`` to the verified-token context var the auth middleware sets.
+
+    FastMCP's own ``AccessToken``, not the SDK base class: it is what ``JWTVerifier``
+    produces in production, and ``get_access_token`` returns it from an ``isinstance``
+    fast path rather than rebuilding it through the ``model_dump`` conversion shim it
+    keeps for foreign token types.
+    """
     token = AccessToken(token="test-token", client_id="test-client", scopes=[], claims=claims)
     reset = auth_context_var.set(AuthenticatedUser(token))
     try:
@@ -88,7 +101,6 @@ async def _fetch(pool: AsyncConnectionPool, query: LiteralString) -> list[tuple[
 
 
 _USAGE_ROWS = "SELECT tool, outcome FROM tool_invocation ORDER BY ts"
-_DENIAL_ROWS = "SELECT tool FROM audit_log ORDER BY ts"
 
 
 def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: str) -> None:
@@ -115,49 +127,41 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     assert rows == [("session.whoami", "ok")]
 
 
-def test_real_gateway_denial_records_one_usage_row_keyed_to_inner(migrated_url: str) -> None:
+def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
+    migrated_url: str,
+) -> None:
     """A denied tools.invoke dispatch writes exactly one denied usage row: the inner tool.
 
-    ``audit.query``'s project form gates on the caller's grants before it touches the pool,
-    so naming a project the token does not carry denies at the authorization boundary — the
-    same ``authorization_denied`` envelope a direct call produces, keyed to the inner tool.
+    Drives the denial class that reaches the middleware as a *result* rather than an
+    exception. ``audit.query``'s project form gates on the caller's grants before it touches
+    the pool, and its handler catches the non-member ``AuthorizationError`` and returns the
+    ``authorization_denied`` envelope itself, so the chain sees an enveloped denial and
+    ``UsageTrackingMiddleware`` classifies it from that envelope. That is the path
+    ``META_TOOLS`` has to de-duplicate on a denial outcome: without the skip the outer chain
+    adds its own ``("tools.invoke", "denied")`` row.
 
-    ``audit_log`` is asserted empty, not asserted to hold a row: a **non-member** denial is
-    deliberately never audited (ADR-0043 §4 — openly-callable reads must not let an ordinary
-    token amplify writes), and the audited class, a member's ``RoleDenied`` over-reach, does
-    not reach ``DenialAuditMiddleware`` at all on the real dispatch path today (#1635).
-    Asserting a denial row here would therefore be asserting a defect. The gateway half of
-    that criterion lands with #1635's fix.
+    The exception-carried class — a member's ``RoleDenied`` over-reach, the one #1625 asked
+    to mirror — is deferred to #1635 in both halves; see the module docstring. Nothing here
+    asserts on ``audit_log``: no audit write is attempted on this path, so an assertion that
+    none landed could not fail.
     """
     request = {"scope": "project", "project": "proj-not-granted"}
 
-    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]]]:
         async with warm_pool(migrated_url) as pool:
             app = _build_app(pool)
-            with (
-                _authenticated(_VIEWER_CLAIMS),
-                recording_must_not_fail(),
-                denial_audit_must_not_fail(),
-            ):
+            with _authenticated(_VIEWER_CLAIMS), recording_must_not_fail():
                 result = await app.call_tool(
                     "tools.invoke", {"name": "audit.query", "arguments": {"request": request}}
                 )
-            return (
-                _structured(result),
-                await _fetch(pool, _USAGE_ROWS),
-                await _fetch(pool, _DENIAL_ROWS),
-            )
+            return _structured(result), await _fetch(pool, _USAGE_ROWS)
 
-    envelope, usage_rows, denial_rows = asyncio.run(_run())
+    envelope, usage_rows = asyncio.run(_run())
 
-    # The call was denied at the authorization boundary, not rejected by argument binding
-    # before it ever got there — an unreached gate would record outcome "error", not "denied".
+    # The call was denied on its grants, not rejected by argument binding before the gate
+    # was ever reached — an unreached gate would record outcome "error", not "denied".
     assert envelope["error_category"] == "authorization_denied"
 
     # One row, keyed to the inner tool. Without the META_TOOLS skip the outer chain also
     # records ("tools.invoke", "denied") and this is two rows.
     assert usage_rows == [("audit.query", "denied")]
-
-    # Meaningful only because denial_audit_must_not_fail() is armed above: without it an
-    # empty audit_log could equally mean the write was attempted and swallowed.
-    assert denial_rows == []
