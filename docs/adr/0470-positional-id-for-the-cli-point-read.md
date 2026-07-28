@@ -78,7 +78,7 @@ kdivectl jobs wait <job_id> --timeout-s 0
 kdivectl allocations wait <allocation_id> --timeout-s 0
 ```
 
-### 3. `--timeout-s` is coerced to `float` in the handler
+### 3. `--timeout-s` is coerced to a *finite* `float` in the handler
 
 `_verb_parser` declares curated options with `default=None` and no `type=`, so every curated
 option value arrives on the namespace as a string. Both tools declare `timeout_s` as a JSON
@@ -87,6 +87,17 @@ option value arrives on the namespace as a string. Both tools declare `timeout_s
 fails CI rather than reaching a server. The handler coerces with `float()`, matching the
 existing hand-coercion in `images.py` (`int(args.seconds)`, `int(lifetime)`), and a
 non-numeric value is a usage error (exit `2`) instead of an uncaught `ValueError`.
+
+The handler also rejects a **non-finite** value, which is not redundant with the tools' own
+`math.isfinite` guard. `float()` accepts `inf`, `-inf` and `nan`; JSON can encode none of them,
+so pydantic serializes all three to `null` on the way out. The tool would be handed `null` for
+a property it declares as a `number`, and the transport raises before the handler's
+`configuration_error` can be returned — the CLI's own `main()` has no exception handling, so
+the operator would get a traceback and exit `1` rather than the exit `2` every other malformed
+`--timeout-s` produces. This is also the one payload defect ADR-0469's guard cannot see, since
+it validates the Python payload before serialization and `inf` passes `"type": "number"`. The
+CLI therefore refuses it up front rather than relying on a server-side check that this path
+can never reach.
 
 Teaching the `Verb` dataclass a per-option `type=` was rejected as premature: two options
 across the whole registry need coercion today, and a general mechanism would have to answer
@@ -114,10 +125,17 @@ still does not exist.
 - **The verbs are covered by the schema guard the day they land.** ADR-0469's matrix is
   parametrized over `REGISTRY` and derives its argv rows from each verb's own descriptor, so
   there was nothing to register and no exclusion to add.
-- **`--timeout-s` gains an argparse-level surface the generated verb had for free.** The
-  generated shape carried `type=float` from `GeneratedFlag.arg_type`, so a bad value failed at
-  parse time; the curated shape fails in the handler instead, one layer later, with an
-  explicit message rather than argparse's.
+- **Two things the generated shape carried for free move or disappear.** `type=float` came
+  from `GeneratedFlag.arg_type`, so a bad value failed at parse time; the curated shape fails
+  in the handler instead, one layer later, with an explicit message rather than argparse's.
+  Per-flag `--help` text is simply lost: `_verb_parser` declares curated positionals and
+  options with no `help=`, so `kdivectl jobs wait --help` prints a bare `--timeout-s
+  TIMEOUT_S` where the generated verb rendered the schema's own description. This is not new
+  with these verbs — every curated verb has always dropped it — but it costs more here,
+  because the timeout is the verb's whole semantic surface. The 30-second default and the
+  300-second clamp are stated in the runbook instead; teaching `_curated_choices` to pass
+  `GeneratedFlag.help` through as well would fix it for all 23 curated verbs at once; that is
+  tracked as #1618 rather than folded in here.
 - **The dated design record for #1592 is not rewritten.**
   `docs/specs/2026-07-27-wait-as-single-point-read-1592-design.md` still names the flag form.
   It is a record of what was designed then, and this ADR is the record of what changed.
