@@ -178,10 +178,36 @@ kdivectl allocations wait <allocation_id> --timeout-s 0
 A non-terminal return is normal, not an error: it carries the current state and means "still
 running, call again". Re-issue short waits rather than one long hold.
 
-**Breaking change (pre-1.0):** these two verbs took their id as `--job-id` /
-`--allocation-id` in the release that removed the getters. They now take it positionally, like
-every other single-record read ([ADR-0470](../../adr/0470-positional-id-for-the-cli-point-read.md));
-the flag form no longer parses.
+**Exit `0` does not mean the job finished.** The exit code is derived from the envelope's
+`error_category` alone, and a wait that times out on a still-queued or still-running job
+carries none — so it exits `0`, exactly as a wait on a *succeeded* job does.
+`kdivectl jobs wait <id> --timeout-s 30 && next-step` will therefore run `next-step` against a
+job that never completed. Read `status` from the `--json` envelope to tell the two apart:
+terminal for a job is `succeeded` / `failed` / `canceled`, and for an allocation it is any
+state other than `requested`.
+
+Exit `0` is not the whole story either, so a poll loop needs both signals:
+
+- **Nonzero exit — stop, do not re-issue.** A job that finished *failed* carries its own
+  `error_category`, so it exits nonzero (see the [exit-code table](#exit-codes)) with
+  `status: failed`. So do the calls that never waited at all: an unknown or malformed id, or a
+  read your token is not granted for, returns `status: "error"` immediately. Re-issuing any of
+  these is a hot spin against the server, not a poll.
+- **Exit `0` plus a non-terminal `status` — re-issue.** This is the only case that means "call
+  again", and it is the only one where the call actually consumed `--timeout-s` seconds.
+  Bound the loop with your own overall deadline; nothing caps how many times you re-issue.
+
+Scripts under `set -e` / `pipefail` must tolerate the nonzero exit on a failed-job read rather
+than treating it as a call failure — including the point read, where
+`kdivectl jobs wait <id> --timeout-s 0` exits nonzero on exactly the failed job you are
+investigating.
+
+**Breaking change since v0.4.0 (pre-1.0):** `kdivectl jobs get <id>` and
+`kdivectl allocations get <id>` no longer exist
+([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). Replace them with
+`kdivectl jobs wait <id> --timeout-s 0` and `kdivectl allocations wait <id> --timeout-s 0`
+([ADR-0470](../../adr/0470-positional-id-for-the-cli-point-read.md)) — the id stays positional,
+as it is on every other single-record read.
 
 `--json` may be given before or after the verb (`kdivectl --json resources list` or
 `kdivectl resources list --json`). It emits the server response envelope **verbatim** — the

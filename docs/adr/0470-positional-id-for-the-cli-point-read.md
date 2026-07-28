@@ -56,8 +56,13 @@ for both tools stay in the committed artifact — they are simply shadowed at pa
 The direct consequence, and the reason this ADR exists rather than being a one-line diff: a
 curated `Verb` **replaces** the generated parser at its path. `--job-id` and `--allocation-id`
 therefore cease to exist the moment these verbs land. This is a second breaking change to the
-same two command lines inside one release, and it is the correction of the first rather than a
-new direction.
+same two command lines inside one *unreleased range*, and it is the correction of the first
+rather than a new direction. The distinction matters for what operators are told: ADR-0468
+landed after `v0.4.0`, so the flag form has only ever existed on unreleased `main`. Relative to
+the last release there is exactly one change — `jobs get <id>` became
+`jobs wait <id> --timeout-s 0` — which is what the runbook's migration note states. The
+intermediate flag form is recorded here, and only here, so the operator contract does not
+enshrine a spelling no released artifact ever taught.
 
 ### 2. `--timeout-s` mirrors the tool default; the point read stays an explicit `--timeout-s 0`
 
@@ -111,6 +116,14 @@ deadline, and sees only a loop that appears to be working. Refusing it follows t
 already in this module, where a given-but-empty `--projects` is exit `2` rather than a value
 whose effect differs from what was asked.
 
+*Above `MAX_WAIT_S`.* Deliberately **not** refused, even though the same silent clamp applies
+at the upper bound and the schema carries no `maximum` either. The asymmetry is in the
+consequence, not the mechanism: over-clamping shortens a bounded wait, which a correct poll
+loop simply re-issues, whereas under-clamping to zero converts a wait into an unthrottled
+spin. Refusing it would also mean restating `MAX_WAIT_S` in the CLI — a second copy of a server
+constant that goes stale the moment the server raises the cap, which is exactly what
+`_curated_choices` exists to avoid for enums. The cap is stated in the runbook instead.
+
 Placing this at the handler rather than at the parser seam is a deliberate but narrow choice,
 and the reason is not that no seam exists. `_curated_choices` (ADR-0469) established exactly
 the mechanism — per-parameter argparse metadata read off the *generated* verb at the same path
@@ -137,8 +150,10 @@ still does not exist.
 ## Consequences
 
 - **`kdivectl jobs wait --job-id <id>` and `kdivectl allocations wait --allocation-id <id>`
-  stop parsing**, with no deprecation period, one release after they became the documented
-  form. Scripts written against ADR-0468's runbook line must drop the flag name.
+  stop parsing**, with no deprecation period. Nobody upgrading from a release is affected —
+  the flag form never shipped — but anyone tracking `main` since ADR-0468 must drop the flag
+  name. The break an operator on `v0.4.0` actually sees is the `get` removal, which is what the
+  runbook's migration note and this branch's `BREAKING CHANGE:` footer are anchored to.
 - **No tool change and no migration.** The registry stays at 123, both tools keep their
   schemas and their `read_only()` annotations, and nothing is persisted.
 - **The verbs are covered by the schema guard the day they land.** ADR-0469's matrix is
