@@ -45,75 +45,6 @@ SSH attempt is denied with ``Permission denied (publickey)``.
 |---|---|---|---|
 | `system_id` | string | yes | The ready System whose guest sshd reachability to probe. |
 
-## `systems.define`
-
-`implemented`
-
-Create a System in 'defined' for a granted Allocation, opening a pre-provision
-rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
-Use `systems.provision` instead when the profile needs no upload window. Requires
-contributor on the Allocation's project.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `allocation_id` | string | yes | Granted Allocation to create a DEFINED System for. |
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
-| `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
-| `profile` | object(schema_version=1) | yes | Provisioning profile for the System; an 'upload' rootfs opens a pre-provision rootfs-upload window. |
-
-`profile` fields:
-
-- `schema_version` (``=1``, required)
-- `arch` (`string`, required)
-- `vcpu` (`integer (nullable)`, optional)
-- `memory_mb` (`integer (nullable)`, optional)
-- `disk_gb` (`integer (nullable)`, optional)
-- `boot_method` (``direct-kernel`, `disk-image``, required) — The provider-agnostic boot methods.  ``disk-image`` boots an operator-staged base-OS image and iterates kernels by in-guest install + reboot (the remote-libvirt model); ``direct-kernel`` stays the local-libvirt/fault-inject method.
-- `kernel_source_ref` (`string (nullable)`, optional) — An arbitrary provenance label the operator/agent chooses for the baseline kernel this System is provisioned against (e.g. 'linux-6.9'), for A/B legibility across Systems — it is not matched against any warm-tree or inventory list, has no valid-value set to discover, and is never read by provisioning or job code: any non-empty string is accepted. Required for boot_method 'direct-kernel' (the System must reach 'ready' on a baseline kernel before its Runs iterate kernels, so the lane needs one named here); it is an opaque label only, not a URL or fetchable reference. Omit it for boot_method 'disk-image': that lane boots the operator-staged base image's own kernel and never reads this field.
-- `provider` (`object`, required) — The provider-specific section, keyed by provider name.  Exactly one concrete provider section is required. The public properties return the concrete section for callers that have already selected a provider-specific path.
-  - `local-libvirt` (`object (nullable)`, optional)
-    - `domain_xml_params` (`map<string, string>`, optional)
-    - `rootfs` (`object(kind=local) \| object(kind=artifact) \| object(kind=catalog) \| object(kind=upload)`, required)
-      - _variant object(kind=local):_
-        - `kind` (``=local``, required)
-        - `path` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=artifact):_
-        - `kind` (``=artifact``, required)
-        - `artifact_id` (`string`, required)
-        - `sha256` (`string (nullable)`, optional)
-      - _variant object(kind=catalog):_
-        - `kind` (``=catalog``, required)
-        - `provider` (`string`, required)
-        - `name` (`string`, required)
-      - _variant object(kind=upload):_
-        - `kind` (``=upload``, required)
-        - `checksum_sha256` (`string`, required) — Content checksum handle of an investigation-scoped uploaded rootfs, as returned by investigations.complete_rootfs_upload (the base64 SHA-256 of the qcow2). The System must be bound to the investigation that owns this upload; provisioning resolves the base by this checksum within that investigation.
-    - `crashkernel` (`string (nullable)`, optional)
-    - `baseline_kernel` (`string (nullable)`, optional) — Optional hint naming the baseline kernel to boot when the rootfs /boot holds more than one kernel. A direct-kernel provision extracts the rootfs's own kernel and fails closed on an ambiguous multi-kernel /boot rather than guessing a version order; this hint is the explicit escape hatch. Give either the full 'vmlinuz-<ver>' filename or the bare '<ver>' (copy a value from the 'candidates' list in the ambiguous-selection error). A hint naming no present kernel is rejected. Omit it for a single-kernel image (the common case) — selection is then unambiguous.
-    - `destructive_ops` (`array<string>`, optional)
-    - `debug` (`object`, optional) — Per-System debug provisioning flags.  Bound at provision/boot; declare which capture methods the System is provisioned for. ``preserve_on_crash`` adds a pvpanic device + ``<on_crash>preserve</on_crash>``; ``gdbstub`` adds the QEMU ``-gdb`` argument; ``fadump`` opts a ppc64le System into firmware-assisted dump (adds ``fadump=on`` to the boot cmdline, requires a ``crashkernel`` reservation, and a host QEMU that supports it).
-      - `preserve_on_crash` (`boolean`, optional)
-      - `gdbstub` (`boolean`, optional)
-      - `fadump` (`boolean`, optional)
-    - `cpu` (`object (nullable)`, optional)
-      - `model` (`string`, required) — Guest CPU model to pin, from this host's resources.describe `selectable_cpus[arch]`. Pin a portable `x86-64-vN` rung for a deterministic reproducer. A model below the rootfs image's ISA floor (x86-64-v2 for EL9/RHEL-family) produces a NON-BOOTING System — admission checks only that the host can deliver the model, not that the image can run on it. Omit to get the operator default (host CPU).
-  - `fault-inject` (`object (nullable)`, optional)
-    - `destructive_ops` (`array<string>`, optional)
-    - `capture_method` (``console`, `host_dump`, `gdbstub`, `kdump`, `fadump``, optional)
-  - `remote-libvirt` (`object (nullable)`, optional)
-    - `base_image_volume` (`string (nullable)`, optional)
-    - `base_image_source` (`object(kind=local) (nullable)`, optional)
-      - `kind` (``=local``, required)
-      - `path` (`string`, required)
-      - `sha256` (`string (nullable)`, optional)
-    - `crashkernel` (`string (nullable)`, optional)
-    - `destructive_ops` (`array<string>`, optional)
-    - `host_dump` (`boolean`, optional)
-
-See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
-
 ## `systems.delete_snapshot`
 
 `implemented`
@@ -171,7 +102,7 @@ Keyset-paginated: when ``data.truncated`` is true, pass ``data.next_cursor`` bac
 `request` fields:
 
 - `allocation_id` (`string (nullable)`, optional) — Only Systems under this Allocation id.
-- `state` (``defined`, `provisioning`, `ready`, `reprovisioning`, `restoring`, `paused`, `crashing`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
+- `state` (``provisioning`, `ready`, `reprovisioning`, `restoring`, `paused`, `crashing`, `crashed`, `torn_down`, `failed` (nullable)`, optional) — Only Systems in this lifecycle state.
 - `shape` (`string (nullable)`, optional) — Only Systems with this named shape, or '__custom__' for full-custom.
 - `pcie` (`string (nullable)`, optional) — Only Systems whose Allocation claims a matching '<vendor>:<device>' spec.
 - `limit` (`integer`, optional) — Maximum rows returned (capped at 200).
@@ -200,9 +131,11 @@ Return a ready-to-edit example profile per configured provider. Requires a token
 
 `implemented`
 
-Mint a System for a granted Allocation and enqueue provision directly (no upload
-window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
-must be uploaded before provisioning. One System per Allocation: if this Allocation's
+Mint a System for a granted Allocation and enqueue its provision job — the one lane
+for creating a System. To boot an agent-uploaded rootfs, upload it against your open
+Investigation first (`artifacts.create_investigation_upload` then
+`investigations.complete_rootfs_upload`), then reference it here by `checksum_sha256`
+with `investigation_id` set. One System per Allocation: if this Allocation's
 System already failed, retrying does not mint a new one — release this Allocation and
 request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
 System. Requires contributor on the Allocation's project.
@@ -215,7 +148,7 @@ pick one of those or an allocation on a host that offers the arch you need.
 |---|---|---|---|
 | `allocation_id` | string | yes | Granted Allocation to provision a System for. |
 | `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set (here or at systems.define) it cannot be changed; a later provision must repeat the same id or omit it. Omit for a System not tied to an investigation. |
+| `investigation_id` | string (nullable) | no | Optional Investigation id to bind this System to. The investigation must be open or active and in this System's own project. Binding scopes an uploaded rootfs the profile may reference to that investigation and couples the System to its close. Write-once: once set it cannot be changed; a later provision on the same Allocation must repeat the same id or omit it. Omit for a System not tied to an investigation. |
 | `label` | string (nullable) | no | Optional human handle for this System, echoed back as data.label in systems.get / systems.list so you thread fewer bare UUIDs. Freeform and non-unique: 1..200 printable characters (surrounding whitespace trimmed); not a lookup key. Omit for no handle. |
 | `profile` | object(schema_version=1) | yes | Provisioning profile for the System create lane. |
 
@@ -270,19 +203,6 @@ pick one of those or an allocation on a host that offers the arch you need.
     - `host_dump` (`boolean`, optional)
 
 See [`systems.profile_examples`](systems.md#systemsprofile_examples) for a ready-to-edit `profile` example per configured provider.
-
-## `systems.provision_defined`
-
-`implemented`
-
-Admit a DEFINED System after its upload window is complete; not for a fresh System —
-create it with `systems.define` first (this is the second step of that lane).
-Requires contributor on the System's project.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `idempotency_key` | string (nullable) | no | Replay-safe key; a repeated key returns the prior envelope. |
-| `system_id` | string | yes | Defined System whose stored profile should be provisioned. |
 
 ## `systems.reprovision`
 

@@ -27,9 +27,9 @@ the first tool to call.
    for the named VM shapes, and `accounting.estimate` to price a shape × lease-window in KCU
    before you spend. Then `investigations.open` to group the runs of one investigation.
 2. **Acquire capacity** — `allocations.request`, then `allocations.wait` until granted.
-3. **Define and provision a system** — `images.describe` to pick a base image and check its
-   capabilities first. Then take one of two lanes: `systems.provision` directly (profile
-   inline), or `systems.define` followed by `systems.provision_defined`. To boot an
+3. **Provision a system** — `images.describe` to pick a base image and check its
+   capabilities first. Then `systems.provision` with the profile inline — the one create
+   lane — and `jobs.wait` on the job it returns until the system is READY. To boot an
    agent-uploaded rootfs instead of a catalog image, `artifacts.create_investigation_upload`
    then `investigations.complete_rootfs_upload` into your open investigation, and reference it
    by `checksum_sha256` in the profile with the system bound to that investigation — one upload

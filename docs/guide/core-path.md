@@ -22,7 +22,7 @@ crash it and verify the result.
 | 1 | `investigations.open` | Open an investigation to group related runs. |
 | 2 | `allocations.request` | Request capacity on a resource. |
 | 3 | `allocations.wait` | Wait until the allocation is granted. |
-| 4 | `systems.define` | Define the target system to build and boot on. |
+| 4 | `systems.provision` | Provision the target system to build and boot on, then `jobs.wait` until it is READY. |
 
 ### Upload and boot
 
