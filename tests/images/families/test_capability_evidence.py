@@ -81,7 +81,9 @@ def _baked_paths(argv: list[str]) -> set[str]:
     return created
 
 
-def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) -> None:
+def test_guest_contract_markers_are_baked_by_declaring_families(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # The tests above prove a declared tag maps to an installed *package*. This proves the second
     # vocabulary — the guest-contract *file probe* (validation.GUEST_CONTRACT_PATHS) — is created
     # by customize_steps for every family that declares the tag, and NOT created when the tag is
@@ -101,7 +103,9 @@ def test_guest_contract_markers_are_baked_by_declaring_families(tmp_path: Path) 
                     distro=name,
                     version=version,
                 )
-                created = _baked_paths(render_argv(family.customize_steps(ctx), cleanup=[]))
+                created = _baked_paths(
+                    render_argv(family.customize_steps(ctx), cleanup=staged_cleanup)
+                )
                 declared = family.capabilities(kind, name, version)
                 for element, path in GUEST_CONTRACT_PATHS.items():
                     baked = path in created

@@ -39,9 +39,9 @@ def _ctx(
     )
 
 
-def _argv(ctx: CustomizeContext) -> list[str]:
+def _argv(ctx: CustomizeContext, cleanup: list[Path]) -> list[str]:
     """Render the rhel family's steps to the virt-customize argv the tests pin (ADR-0345)."""
-    return render_argv(RhelFamily().customize_steps(ctx), cleanup=[])
+    return render_argv(RhelFamily().customize_steps(ctx), cleanup=cleanup)
 
 
 def test_fedora_and_el10_debug_packages_have_separate_makedumpfile() -> None:
@@ -71,8 +71,10 @@ def test_build_packages_are_the_toolchain_set_on_every_release() -> None:
         assert "kdump-utils" not in pkgs and "kexec-tools" not in pkgs
 
 
-def test_fedora_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+def test_fedora_debug_argv_enables_kdump_and_sshd(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     j = " ".join(argv)
     assert "kdump-utils" in j and "makedumpfile" in j
     assert "systemctl enable kdump.service" in argv
@@ -81,43 +83,51 @@ def test_fedora_debug_argv_enables_kdump_and_sshd(tmp_path: Path) -> None:
     assert "final_action poweroff" in j
 
 
-def test_debug_argv_writes_makedumpfile_version_marker(tmp_path: Path) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+def test_debug_argv_writes_makedumpfile_version_marker(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in " ".join(argv)
 
 
-def test_build_argv_omits_makedumpfile_version_marker(tmp_path: Path) -> None:
+def test_build_argv_omits_makedumpfile_version_marker(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     ctx = _ctx(tmp_path, is_cloud_image=True)
     build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
-    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(_argv(build_ctx))
+    assert MAKEDUMPFILE_MARKER_GUEST_PATH not in " ".join(_argv(build_ctx, staged_cleanup))
 
 
-def test_debug_argv_writes_drgn_version_marker(tmp_path: Path) -> None:
+def test_debug_argv_writes_drgn_version_marker(tmp_path: Path, staged_cleanup: list[Path]) -> None:
     # drgn is in every rhel/fedora debug set, so the drgn-version marker is written (ADR-0334).
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     joined = " ".join(argv)
     assert DRGN_MARKER_GUEST_PATH in joined
     assert "drgn --version" in joined
 
 
-def test_build_argv_omits_drgn_version_marker(tmp_path: Path) -> None:
+def test_build_argv_omits_drgn_version_marker(tmp_path: Path, staged_cleanup: list[Path]) -> None:
     ctx = _ctx(tmp_path, is_cloud_image=True)
     build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
-    assert DRGN_MARKER_GUEST_PATH not in " ".join(_argv(build_ctx))
+    assert DRGN_MARKER_GUEST_PATH not in " ".join(_argv(build_ctx, staged_cleanup))
 
 
-def test_sshd_enable_is_coupled_to_the_debug_kind(tmp_path: Path) -> None:
+def test_sshd_enable_is_coupled_to_the_debug_kind(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # sshd enablement mirrors the SSH capability, which capabilities() ties to kind: a debug image
     # enables sshd.service, a build-host image (which declares no SSH) never does.
     ctx = _ctx(tmp_path, is_cloud_image=True)
     build_ctx = replace(ctx, kind="build", packages=RhelFamily().packages("build", "fedora", "44"))
-    assert "systemctl enable sshd.service" in _argv(ctx)
-    assert "systemctl enable sshd.service" not in _argv(build_ctx)
+    assert "systemctl enable sshd.service" in _argv(ctx, staged_cleanup)
+    assert "systemctl enable sshd.service" not in _argv(build_ctx, staged_cleanup)
 
 
-def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> None:
+def test_el9_debug_argv_enables_kdump_without_kdump_utils(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     """EL9 has no kdump-utils pkg; kdump-enable must gate on kexec-tools, not kdump-utils."""
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="rocky", version="9"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="rocky", version="9"), staged_cleanup)
     j = " ".join(argv)
     installed = argv[argv.index("--install") + 1]
     assert "kdump-utils" not in installed and "makedumpfile" not in installed
@@ -125,7 +135,9 @@ def test_el9_debug_argv_enables_kdump_without_kdump_utils(tmp_path: Path) -> Non
     assert "final_action poweroff" in j
 
 
-def test_el_clones_enable_epel_before_installing_drgn(tmp_path: Path) -> None:
+def test_el_clones_enable_epel_before_installing_drgn(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     """Every EL clone (8/9/10) sources ``drgn`` from EPEL, so EPEL is enabled before the drgn
     install transaction. EL9/EL10 were previously left out — the customize boot never ran a real EL9
     image until the #1152 CentOS Stream 9 ppc64le proof, and EL10 takes drgn from EPEL 10 too
@@ -138,7 +150,9 @@ def test_el_clones_enable_epel_before_installing_drgn(tmp_path: Path) -> None:
         ("rocky", "10"),
         ("centos-stream", "10"),
     ):
-        argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro=distro, version=version))
+        argv = _argv(
+            _ctx(tmp_path, is_cloud_image=True, distro=distro, version=version), staged_cleanup
+        )
         assert "dnf -y install epel-release" in argv, (distro, version)
         epel_idx = argv.index("dnf -y install epel-release")
         install_idx = next(i for i, a in enumerate(argv) if a.startswith("drgn,") or ",drgn" in a)
@@ -146,14 +160,16 @@ def test_el_clones_enable_epel_before_installing_drgn(tmp_path: Path) -> None:
         assert "systemctl enable kdump.service" in argv, (distro, version)
 
 
-def test_fedora_does_not_enable_epel(tmp_path: Path) -> None:
+def test_fedora_does_not_enable_epel(tmp_path: Path, staged_cleanup: list[Path]) -> None:
     """Fedora ships ``drgn`` in its base repo (no EPEL), so the customizer must not enable EPEL."""
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="fedora", version="44"))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True, distro="fedora", version="44"), staged_cleanup)
     assert "dnf -y install epel-release" not in argv
 
 
-def test_rhel_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Path) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+def test_rhel_debug_argv_omits_ssh_inject_and_stages_readiness_unit(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     j = " ".join(argv)
     assert "--ssh-inject" not in argv
     assert "root:file:" not in j
@@ -161,33 +177,39 @@ def test_rhel_debug_argv_omits_ssh_inject_and_stages_readiness_unit(tmp_path: Pa
     assert any("SELINUX" in a and "permissive" in a for a in argv)
 
 
-def test_rhel_argv_stages_no_nm_ssh_nic_keyfile(tmp_path: Path) -> None:
+def test_rhel_argv_stages_no_nm_ssh_nic_keyfile(tmp_path: Path, staged_cleanup: list[Path]) -> None:
     # ADR-0288: cloud-init DHCPs the NIC now; the NetworkManager SSH-NIC keyfile is gone.
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     j = " ".join(argv)
     assert "kdive-ssh-nic" not in j
     assert "NetworkManager/system-connections" not in j
 
 
-def test_rhel_argv_bakes_cloud_init_and_stops_masking(tmp_path: Path) -> None:
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+def test_rhel_argv_bakes_cloud_init_and_stops_masking(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     j = " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in j  # authoritative drop-in
     assert "rm -f /etc/cloud/cloud-init.disabled" in j  # undoes any cloud-init disable
     assert "systemctl mask cloud-init" not in j  # no longer masked
 
 
-def test_rhel_argv_still_omits_key_inject_and_keeps_selinux(tmp_path: Path) -> None:
+def test_rhel_argv_still_omits_key_inject_and_keeps_selinux(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # Anti-regression: no baked key (ADR-0289, #963); the SELinux permissive edit stays.
-    argv = _argv(_ctx(tmp_path, is_cloud_image=True))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=True), staged_cleanup)
     j = " ".join(argv)
     assert "--ssh-inject" not in argv
     assert "SELINUX=permissive" in j
 
 
-def test_rhel_virt_builder_base_installs_cloud_init(tmp_path: Path) -> None:
+def test_rhel_virt_builder_base_installs_cloud_init(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # A non-cloud (virt-builder) base ships no cloud-init; the family must install it so the
     # baked NoCloud seed applies uniformly (ADR-0288).
-    argv = _argv(_ctx(tmp_path, is_cloud_image=False))
+    argv = _argv(_ctx(tmp_path, is_cloud_image=False), staged_cleanup)
     assert "--install cloud-init" in " ".join(argv)
     assert "/etc/cloud/cloud.cfg.d/99-kdive.cfg" in " ".join(argv)

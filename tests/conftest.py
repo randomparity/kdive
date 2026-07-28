@@ -20,12 +20,19 @@ a dummy one (constructing the boto3 client is offline and never connects). It re
 *resolved* configuration, so a real ``KDIVE_S3_*`` in the environment — as the live_vm CI jobs
 export for the running stack — wins over the dummy. A test that exercises S3-absence builds its
 own ``Registry`` or ``delenv``s the vars explicitly.
+
+The session-scoped autouse ``session_owned_tempdir`` fixture repoints the default temp root at
+pytest's base temp directory, so an unnamed ``tempfile`` destination is bounded by pytest's
+rotation instead of accumulating in ``/tmp`` until the filesystem runs out of inodes (#1613).
+The ``staged_cleanup`` fixture is the matching explicit owner for ``render_argv``'s staged
+host tempfiles.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -61,6 +68,52 @@ def sandbox_systems_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 def s3_backend_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", _S3_ENDPOINT_URL)
     monkeypatch.setenv("KDIVE_S3_BUCKET", _S3_BUCKET)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def session_owned_tempdir(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Point the session's default temp root at a directory pytest owns and rotates (#1613).
+
+    Anything the suite creates without naming a directory — ``tempfile.mkdtemp()``,
+    ``NamedTemporaryFile``, a subprocess honoring ``TMPDIR`` — lands in the system ``/tmp`` and
+    survives the process unless some caller unlinks it. A caller that forgets leaks one entry per
+    call forever. That exhausts *inodes* rather than disk, so it is invisible to ``df -h`` and
+    surfaces as thousands of unrelated collection errors once the filesystem can no longer create
+    tmpdirs.
+
+    Rebinding the default root to pytest's base temp directory makes the leak bounded instead of
+    unbounded: pytest already garbage-collects all but the three most recent base temp roots, so a
+    forgotten unlink costs a directory for a few runs rather than forever. This is a backstop, not
+    a licence — a helper that creates temp state should still own its lifecycle (see
+    ``staged_cleanup``), and ``tests/guards/test_temp_file_hygiene.py`` pins the backstop itself.
+    """
+    previous_tempdir = tempfile.tempdir
+    previous_env = os.environ.get("TMPDIR")
+    root = tmp_path_factory.mktemp("systemp")
+    tempfile.tempdir = str(root)
+    os.environ["TMPDIR"] = str(root)
+    yield
+    tempfile.tempdir = previous_tempdir
+    if previous_env is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = previous_env
+
+
+@pytest.fixture
+def staged_cleanup() -> Iterator[list[Path]]:
+    """The ``cleanup`` list :func:`kdive.images.families.renderers.render_argv` stages files into.
+
+    ``render_argv`` writes each ``StageFile`` step's content to a host tempfile and appends the
+    path to this list, leaving the *caller* to unlink them once ``virt-customize`` has consumed
+    them. Production passes a list it drains; a test that passes a throwaway ``[]`` discards the
+    only handle to the staged files and leaks them. This fixture is the test-side owner: the test
+    body can still read what was staged, and teardown unlinks it.
+    """
+    staged: list[Path] = []
+    yield staged
+    for path in staged:
+        path.unlink(missing_ok=True)
 
 
 @pytest.fixture(autouse=True)

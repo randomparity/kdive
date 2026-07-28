@@ -14,7 +14,6 @@ import asyncio
 import hashlib
 import shutil
 import struct
-import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -61,14 +60,18 @@ class _FakeStore:
 class _FakeCapturer:
     """Full TrafficCapturer lifecycle over a worker temp dir; records every argument.
 
-    ``prepare`` returns a per-job path under its own temp dir, ``attach`` writes ``pcap`` there, and
+    ``prepare`` returns a per-job path under ``tmp_path``, ``attach`` writes ``pcap`` there, and
     ``fetch``/``captured_size``/``reclaim`` operate on that path — so the handler drives the same
     provider-dispatched file side both providers use, with no monkeypatching of module helpers.
+
+    The base directory is the caller's ``tmp_path`` rather than a self-minted ``mkdtemp``: this is
+    a plain helper class, not a fixture, so nothing would ever tear a self-minted directory down
+    and every instantiation would leak one ``/tmp`` entry permanently (#1613).
     """
 
-    def __init__(self, pcap: bytes | None = _PCAP_ONE) -> None:
+    def __init__(self, tmp_path: Path, pcap: bytes | None = _PCAP_ONE) -> None:
         self._pcap = pcap
-        self._dir = Path(tempfile.mkdtemp(prefix="kdive-pcap-test-"))
+        self._dir = tmp_path
         self.prepared: list[tuple[UUID, UUID]] = []
         self.attached: list[dict[str, Any]] = []
         self.detached: list[dict[str, Any]] = []
@@ -214,11 +217,13 @@ async def _audit_rows(pool, run_id: str):
         return await cur.fetchall()
 
 
-def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch) -> None:
+def test_happy_path_pins_wiring_audit_and_return(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     """A ready capture stores the pcap and pins every collaborator argument it passes through."""
     clear_provider_kind()
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -300,10 +305,12 @@ def test_happy_path_pins_wiring_audit_and_return(migrated_url: str, monkeypatch)
     assert out["canceled_probe"] is False  # the callback reads the real RUNNING job row
 
 
-def test_stored_domain_falls_back_to_derived_name(migrated_url: str, monkeypatch) -> None:
+def test_stored_domain_falls_back_to_derived_name(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     """A System without a stored domain name captures under the id-derived domain name."""
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -326,7 +333,9 @@ def test_stored_domain_falls_back_to_derived_name(migrated_url: str, monkeypatch
     assert attach["domain"] == domain_name_for(UUID(sys_id))
 
 
-def test_nonexistent_run_is_configuration_error(migrated_url: str, monkeypatch) -> None:
+def test_nonexistent_run_is_configuration_error(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     """A run_id with no Run row is a changed-state configuration error (not an AttributeError)."""
     store = _FakeStore()
 
@@ -340,7 +349,7 @@ def test_nonexistent_run_is_configuration_error(migrated_url: str, monkeypatch) 
                 await _run(
                     pool,
                     store,
-                    _FakeCapturer(),
+                    _FakeCapturer(tmp_path),
                     job,
                     loop_result=capture_traffic.LoopResult(False, False),
                     monkeypatch=monkeypatch,
@@ -352,7 +361,9 @@ def test_nonexistent_run_is_configuration_error(migrated_url: str, monkeypatch) 
     assert err.details == {"reason": "system_changed_state", "run_id": missing_run}
 
 
-def test_non_ready_system_pins_changed_state_error(migrated_url: str, monkeypatch) -> None:
+def test_non_ready_system_pins_changed_state_error(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     """A System that left READY yields the changed-state error with its full message + details."""
 
     async def _go():
@@ -363,7 +374,7 @@ def test_non_ready_system_pins_changed_state_error(migrated_url: str, monkeypatc
                 await _run(
                     pool,
                     _FakeStore(),
-                    _FakeCapturer(),
+                    _FakeCapturer(tmp_path),
                     _job(run_id),
                     loop_result=capture_traffic.LoopResult(False, False),
                     monkeypatch=monkeypatch,
@@ -403,9 +414,9 @@ def test_unsupported_provider_pins_message(migrated_url: str, monkeypatch) -> No
     assert str(err) == "provider does not support traffic capture"
 
 
-def test_retry_is_idempotent(migrated_url: str, monkeypatch) -> None:
+def test_retry_is_idempotent(migrated_url: str, monkeypatch, tmp_path: Path) -> None:
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -437,10 +448,10 @@ def test_retry_is_idempotent(migrated_url: str, monkeypatch) -> None:
     assert len(rows) == 1
 
 
-def test_loopresult_cancel_stores_nothing(migrated_url: str, monkeypatch) -> None:
+def test_loopresult_cancel_stores_nothing(migrated_url: str, monkeypatch, tmp_path: Path) -> None:
     """A loop that reports canceled writes nothing and still detaches the filter."""
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -464,14 +475,16 @@ def test_loopresult_cancel_stores_nothing(migrated_url: str, monkeypatch) -> Non
     assert capturer.detached  # detach still ran
 
 
-def test_canceled_job_before_store_writes_nothing(migrated_url: str, monkeypatch) -> None:
+def test_canceled_job_before_store_writes_nothing(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     """A job canceled in the DB is re-checked under the store lock: nothing is written.
 
     The loop is stubbed to report *not* canceled so the handler reaches ``_store_capture``,
     whose own cancel re-check (reading the real CANCELED job row) must still abort the write.
     """
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -491,13 +504,15 @@ def test_canceled_job_before_store_writes_nothing(migrated_url: str, monkeypatch
     assert canceled is True  # the loop's canceled callback reads the real CANCELED row
 
 
-def test_invalid_filter_fails_before_capture(migrated_url: str, monkeypatch) -> None:
+def test_invalid_filter_fails_before_capture(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     # An invalid BPF filter is validated before attach: no capture runs, nothing is stored, and the
     # error is terminal (dead-letter, not retry). Requires tcpdump for the real validate_bpf.
     if shutil.which("tcpdump") is None:
         pytest.skip("tcpdump not installed")
     store = _FakeStore()
-    capturer = _FakeCapturer()
+    capturer = _FakeCapturer(tmp_path)
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -521,9 +536,9 @@ def test_invalid_filter_fails_before_capture(migrated_url: str, monkeypatch) -> 
     assert capturer.attached == []  # validation failed before any filter-dump was attached
 
 
-def test_zero_packet_capture_is_success(migrated_url: str, monkeypatch) -> None:
+def test_zero_packet_capture_is_success(migrated_url: str, monkeypatch, tmp_path: Path) -> None:
     store = _FakeStore()
-    capturer = _FakeCapturer(pcap=_PCAP_HEADER)  # header-only = zero packets
+    capturer = _FakeCapturer(tmp_path, pcap=_PCAP_HEADER)  # header-only = zero packets
 
     async def _go():
         async with _pool(migrated_url) as pool:
@@ -544,11 +559,13 @@ def test_zero_packet_capture_is_success(migrated_url: str, monkeypatch) -> None:
     assert len(rows) == 1
 
 
-def test_unwritten_pcap_pins_configuration_error(migrated_url: str, monkeypatch) -> None:
+def test_unwritten_pcap_pins_configuration_error(
+    migrated_url: str, monkeypatch, tmp_path: Path
+) -> None:
     # The hypervisor could not write the pcap (dir not QEMU-writable/labeled): the raw file is
     # absent, so read yields < 24 bytes. This is a loud config failure, not a silent 0-byte success.
     store = _FakeStore()
-    capturer = _FakeCapturer(pcap=None)  # attach writes nothing → dest never created
+    capturer = _FakeCapturer(tmp_path, pcap=None)  # attach writes nothing → dest never created
 
     async def _go():
         async with _pool(migrated_url) as pool:
