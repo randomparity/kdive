@@ -240,32 +240,59 @@ def test_run_verb_unknown_generated_path_exits() -> None:
 
 
 @pytest.mark.parametrize(
-    ("argv", "expected"),
+    ("argv", "dest", "expected_id"),
     [
-        (
-            ["jobs", "wait", "--job-id", "j-1", "--timeout-s", "0"],
-            {"genarg_job_id": "j-1", "genarg_timeout_s": 0.0},
-        ),
-        (
-            ["allocations", "wait", "--allocation-id", "a-1", "--timeout-s", "0"],
-            {"genarg_allocation_id": "a-1", "genarg_timeout_s": 0.0},
-        ),
+        (["jobs", "wait", "j-1", "--timeout-s", "0"], "job_id", "j-1"),
+        (["allocations", "wait", "a-1", "--timeout-s", "0"], "allocation_id", "a-1"),
     ],
 )
 def test_documented_point_read_invocation_parses(
-    argv: list[str], expected: dict[str, object]
+    argv: list[str], dest: str, expected_id: str
 ) -> None:
     """The point-read invocation shape `docs/operating/runbooks/kdivectl.md` documents parses.
 
-    `jobs.get` / `allocations.get` were removed (ADR-0468) and their curated verbs with them, so
-    the runbook sends operators to the generated wait verb with a zero timeout. A generated verb
-    takes its tool parameters as *required flags*, not positionals — exactly the detail a
-    hand-written runbook line gets wrong. This pins the flag names and the float coercion of
-    `--timeout-s 0`; keeping the runbook's wording in step with it is a review obligation, since
-    this test asserts against the parser, not against the markdown.
+    `jobs.get` / `allocations.get` were removed (ADR-0468) and the point read became
+    `wait` with a zero timeout; ADR-0470 then gave it back its positional id with a curated
+    verb. The runbook line is hand-written markdown no generator checks, so this pins the exact
+    documented invocation — the bare id, and `--timeout-s 0` still spelled out rather than
+    defaulted — and keeping the runbook's wording in step with it is a review obligation.
     """
     args = build_parser().parse_args(argv)
-    assert {k: v for k, v in vars(args).items() if k.startswith("genarg")} == expected
+    assert getattr(args, dest) == expected_id
+    assert args.timeout_s == "0"
+    assert not [k for k in vars(args) if k.startswith("genarg")]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["jobs", "wait", "--job-id", "j-1", "--timeout-s", "0"],
+        ["allocations", "wait", "--allocation-id", "a-1", "--timeout-s", "0"],
+    ],
+)
+def test_generated_wait_flag_form_is_gone(argv: list[str]) -> None:
+    """`--job-id` / `--allocation-id` no longer parse (ADR-0470, breaking change).
+
+    A curated `Verb` *replaces* the generated parser at its path rather than adding to it, so
+    the flag form ADR-0468 §5 documented ceased to exist when the positional form landed.
+    """
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
+
+
+@pytest.mark.parametrize(
+    ("argv", "dest"),
+    [(["jobs", "wait", "j-1"], "job_id"), (["allocations", "wait", "a-1"], "allocation_id")],
+)
+def test_wait_verb_omitted_timeout_stays_none(argv: list[str], dest: str) -> None:
+    """An omitted `--timeout-s` parses to `None` so the handler can send no key at all.
+
+    ADR-0470 decision 2: the CLI mirrors the tools' 30-second default by staying silent rather
+    than restating it, so the namespace must not carry a CLI-chosen value here.
+    """
+    args = build_parser().parse_args(argv)
+    assert getattr(args, dest) == argv[-1]
+    assert args.timeout_s is None
 
 
 @pytest.mark.parametrize("argv", [["jobs", "get", "j-1"], ["allocations", "get", "a-1"]])

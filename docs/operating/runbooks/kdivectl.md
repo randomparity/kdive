@@ -155,21 +155,32 @@ kdivectl systems list [--state <state>]
 kdivectl systems get <system_id>
 kdivectl runs get <run_id>
 kdivectl jobs list
+kdivectl jobs wait <job_id> [--timeout-s <seconds>]
+kdivectl allocations wait <allocation_id> [--timeout-s <seconds>]
 kdivectl accounting usage (--project <project> | --investigation-id <uuid>)
 kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl inventory list [--project <project>]
 ```
 
-There is no curated `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get`
-were removed ([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). The point read is
-the generated wait verb with a zero timeout, which does one lookup and returns without
-blocking:
+There is no `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get` were removed
+([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). `wait` is both the poll and the
+point read. Omitting `--timeout-s` waits for the tool's default 30 seconds — the CLI never
+picks the timeout for you — so the point read is the zero timeout spelled out, which does one
+lookup and returns without blocking:
 
 ```bash
-kdivectl jobs wait --job-id <job_id> --timeout-s 0
-kdivectl allocations wait --allocation-id <allocation_id> --timeout-s 0
+kdivectl jobs wait <job_id> --timeout-s 0
+kdivectl allocations wait <allocation_id> --timeout-s 0
 ```
+
+A non-terminal return is normal, not an error: it carries the current state and means "still
+running, call again". Re-issue short waits rather than one long hold.
+
+**Breaking change (pre-1.0):** these two verbs took their id as `--job-id` /
+`--allocation-id` in the release that removed the getters. They now take it positionally, like
+every other single-record read ([ADR-0470](../../adr/0470-positional-id-for-the-cli-point-read.md));
+the flag form no longer parses.
 
 `--json` may be given before or after the verb (`kdivectl --json resources list` or
 `kdivectl resources list --json`). It emits the server response envelope **verbatim** — the
