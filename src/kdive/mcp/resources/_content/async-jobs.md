@@ -15,17 +15,18 @@ point contains `["jobs.wait", "jobs.cancel"]`.
 
 The agent then polls:
 
-- **`jobs.wait(job_id, timeout_s)`** — blocks up to `timeout_s` seconds (capped at
-  300), then returns the current job envelope. Use this in preference to a manual
-  poll loop.
-- **`jobs.get(job_id)`** — returns the current state immediately. Use when the agent
-  has other work to interleave.
+- **`jobs.wait(job_id, timeout_s)`** — the single read/poll contract for a job.
+  With a positive `timeout_s` it blocks up to that many seconds (capped at 300),
+  then returns the current job envelope; use it in preference to a manual poll loop.
+  With **`timeout_s=0`** it does one lookup and returns the current state
+  immediately, never blocking — that is the plain point read, for when the agent has
+  other work to interleave.
 - **`jobs.cancel(job_id)`** — requests cancellation. The job's declared cleanup
   contract runs; the outcome is `canceled` or `failed` depending on how far the op
   progressed.
 - **`jobs.list`** — lists jobs visible to the caller, useful for triage.
 
-When `jobs.wait` or `jobs.get` returns `status: succeeded`, the `refs` field
+When `jobs.wait` returns `status: succeeded`, the `refs` field
 contains an object-store reference (e.g. `{"result": "<key>"}`) for any produced
 artifact. When it returns `status: failed`, the `error_category` field names the
 failure. See the errors guide (resource://kdive/docs/guide/errors.md).
@@ -83,7 +84,7 @@ its own idle/read timeout and sever that held stream. When it does, the client s
 envelope: the connection that would carry the envelope is already gone, so the server cannot
 wrap that specific drop ([ADR-0138](../adr/0138-transport-reset-retry-contract.md)).
 
-**The contract:** a transport reset on `jobs.wait` (or any idempotent read such as `jobs.get`,
+**The contract:** a transport reset on `jobs.wait` (or any idempotent read such as
 `jobs.list`, `systems.get`, `runs.get`) is **transient and safe to retry unchanged**. Retry the
 same call.
 
@@ -97,7 +98,7 @@ short waits avoid it.
 
 ## Retrying the initial enqueue (idempotency)
 
-The read-retry contract above covers `jobs.wait`/`jobs.get`. But a transport reset can also
+The read-retry contract above covers `jobs.wait` at any `timeout_s`. But a transport reset can also
 drop the **response to the enqueuing call itself** — `runs.install`, `vmcore.fetch`,
 `control.power`, `systems.provision`, and the rest of the create/enqueue surface. A blind
 retry of that call could enqueue a second job. To retry it safely, pass an `idempotency_key`

@@ -349,7 +349,9 @@ def test_lifecycle_allocation_wrappers_roundtrip_through_fastmcp(
                     },
                 )
                 fetched = await _call_tool(
-                    client, "allocations.get", {"allocation_id": granted.object_id}
+                    client,
+                    "allocations.wait",
+                    {"allocation_id": granted.object_id, "timeout_s": 0},
                 )
         return granted, fetched
 

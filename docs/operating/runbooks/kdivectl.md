@@ -151,16 +151,24 @@ the read-only [`tool call` passthrough](#tiered-passthrough-tool-call):
 kdivectl resources list [--kind <kind>]
 kdivectl resources describe <resource_id>
 kdivectl allocations list --project <project>
-kdivectl allocations get <allocation_id>
 kdivectl systems list [--state <state>]
 kdivectl systems get <system_id>
 kdivectl runs get <run_id>
 kdivectl jobs list
-kdivectl jobs get <job_id>
 kdivectl accounting usage (--project <project> | --investigation-id <uuid>)
 kdivectl accounting report --scope all-projects [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl accounting report --scope granted-set [--projects a,b] [--group-by principal] [--since <ts>] [--until <ts>]
 kdivectl inventory list [--project <project>]
+```
+
+There is no curated `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get`
+were removed ([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). The point read is
+the generated wait verb with a zero timeout, which does one lookup and returns without
+blocking:
+
+```bash
+kdivectl jobs wait <job_id> --timeout-s 0
+kdivectl allocations wait <allocation_id> --timeout-s 0
 ```
 
 `--json` may be given before or after the verb (`kdivectl --json resources list` or

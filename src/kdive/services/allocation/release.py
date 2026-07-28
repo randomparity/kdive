@@ -248,7 +248,7 @@ async def _release_locked(
         if current.state in (AllocationState.EXPIRED, AllocationState.FAILED):
             # ADR-0293: `expired` (lease lapsed) / `failed` (provision failed) are terminal
             # outcomes the caller did NOT request. Keep `stale_handle` so the agent learns the
-            # real state via `allocations.get` rather than believing a clean release happened.
+            # real state via `allocations.wait` rather than believing a clean release happened.
             return ReleaseOutcome(
                 released=False,
                 category=ErrorCategory.STALE_HANDLE,

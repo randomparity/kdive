@@ -14,7 +14,7 @@ carrying an `object_id`, a `status`, and a `suggested_next_actions` list of lite
 next tool names. That list tells the agent what to call next without inferring it.
 When a tool starts a long-running operation — provisioning, building, installing, or
 capturing a vmcore — it returns immediately with a job handle (`status: running`) and
-the agent polls `jobs.get` or `jobs.wait` until the job reaches a terminal state.
+the agent polls `jobs.wait` until the job reaches a terminal state.
 See [async jobs](async-jobs.md) for the full pattern.
 
 The six domain objects (Resource, Allocation, System, Investigation, Run,

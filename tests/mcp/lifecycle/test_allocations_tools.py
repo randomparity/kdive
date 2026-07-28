@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -37,7 +38,6 @@ from kdive.mcp.tools.lifecycle.allocations.request import (
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
     AllocationsListRequest,
-    get_allocation,
     list_allocations,
     wait_allocation,
 )
@@ -286,7 +286,7 @@ def test_request_grant_points_contributor_at_systems_provision(migrated_url: str
             resp = await _request(pool, _ctx(role=Role.CONTRIBUTOR))
         assert resp.status == "granted"
         assert resp.suggested_next_actions == [
-            "allocations.get",
+            "allocations.wait",
             "systems.provision",
             "allocations.release",
         ]
@@ -301,12 +301,14 @@ def test_get_granted_filters_next_actions_by_role(migrated_url: str) -> None:
             await _register(pool, cap=2)
             granted = await _request(pool, _ctx(role=Role.OPERATOR))
             alloc_id = granted.object_id
-            viewer = await get_allocation(pool, _ctx(role=Role.VIEWER), alloc_id)
-            contributor = await get_allocation(pool, _ctx(role=Role.CONTRIBUTOR), alloc_id)
-            operator = await get_allocation(pool, _ctx(role=Role.OPERATOR), alloc_id)
-        assert viewer.suggested_next_actions == ["allocations.get"]
+            viewer = await wait_allocation(pool, _ctx(role=Role.VIEWER), alloc_id, timeout_s=0)
+            contributor = await wait_allocation(
+                pool, _ctx(role=Role.CONTRIBUTOR), alloc_id, timeout_s=0
+            )
+            operator = await wait_allocation(pool, _ctx(role=Role.OPERATOR), alloc_id, timeout_s=0)
+        assert viewer.suggested_next_actions == ["allocations.wait"]
         assert contributor.suggested_next_actions == [
-            "allocations.get",
+            "allocations.wait",
             "systems.provision",
             "allocations.release",
         ]
@@ -683,20 +685,20 @@ def test_get_own_allocation_returns_state(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2)
             req = await _request(pool, _ctx())
-            resp = await get_allocation(pool, _ctx(), req.object_id)
+            resp = await wait_allocation(pool, _ctx(), req.object_id, timeout_s=0)
         assert resp.object_id == req.object_id
         assert resp.status == "granted"
 
     asyncio.run(_run())
 
 
-def test_get_allocation_requires_viewer_role(migrated_url: str) -> None:
+def test_point_read_allocation_requires_viewer_role(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _register(pool, cap=2)
             req = await _request(pool, _ctx())
             with pytest.raises(AuthorizationError):
-                await get_allocation(pool, _ctx(role=None), req.object_id)
+                await wait_allocation(pool, _ctx(role=None), req.object_id, timeout_s=0)
 
     asyncio.run(_run())
 
@@ -710,7 +712,7 @@ def test_get_other_project_allocation_is_not_found(migrated_url: str) -> None:
             await _register(pool, cap=2)
             req = await _request(pool, _ctx())
             other = _ctx(projects=("elsewhere",), role=Role.OPERATOR)
-            resp = await get_allocation(pool, other, req.object_id)
+            resp = await wait_allocation(pool, other, req.object_id, timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "not_found"
         assert resp.error_category != "authorization_denied"
@@ -721,7 +723,7 @@ def test_get_other_project_allocation_is_not_found(migrated_url: str) -> None:
 def test_get_absent_allocation_is_not_found(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await get_allocation(pool, _ctx(), str(uuid4()))
+            resp = await wait_allocation(pool, _ctx(), str(uuid4()), timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "not_found"
 
@@ -731,7 +733,7 @@ def test_get_absent_allocation_is_not_found(migrated_url: str) -> None:
 def test_get_malformed_allocation_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await get_allocation(pool, _ctx(), "nope")
+            resp = await wait_allocation(pool, _ctx(), "nope", timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
         # ADR-0174: actionable reason + non-null detail for the malformed-id parse failure.
@@ -750,8 +752,8 @@ def test_get_ungranted_envelope_matches_absent(migrated_url: str) -> None:
             await _register(pool, cap=2)
             req = await _request(pool, _ctx())
             other = _ctx(projects=("elsewhere",), role=Role.OPERATOR)
-            ungranted = await get_allocation(pool, other, req.object_id)
-            absent = await get_allocation(pool, other, str(uuid4()))
+            ungranted = await wait_allocation(pool, other, req.object_id, timeout_s=0)
+            absent = await wait_allocation(pool, other, str(uuid4()), timeout_s=0)
         assert ungranted.status == absent.status == "error"
         assert ungranted.error_category == absent.error_category == "not_found"
         assert ungranted.data == absent.data
@@ -765,7 +767,7 @@ def test_get_failed_allocation_renders_failure(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool, cap=2)
             alloc_id = await _seed_alloc(pool, res_id, AllocationState.FAILED)
-            resp = await get_allocation(pool, _ctx(), alloc_id)
+            resp = await wait_allocation(pool, _ctx(), alloc_id, timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
         assert resp.data["current_status"] == "failed"
@@ -867,7 +869,7 @@ def test_release_released_allocation_is_idempotent_ok(migrated_url: str) -> None
 
 def test_release_expired_allocation_is_stale_handle(migrated_url: str) -> None:
     # ADR-0293: `expired` is a terminal outcome the caller did NOT ask for (the lease lapsed),
-    # so it keeps `stale_handle` — the agent must learn the real state via `allocations.get`.
+    # so it keeps `stale_handle` — the agent must learn the real state via `allocations.wait`.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             res_id = await _register(pool, cap=2)
@@ -998,10 +1000,10 @@ def test_envelope_role_filters_success_next_actions() -> None:
     viewer = envelope_for_allocation(alloc, _ctx(role=Role.VIEWER))
     role_less = envelope_for_allocation(alloc, _ctx(role=None))
 
-    expected = ["allocations.get", "systems.provision", "allocations.release"]
+    expected = ["allocations.wait", "systems.provision", "allocations.release"]
     assert operator.suggested_next_actions == expected
     assert contributor.suggested_next_actions == expected
-    assert viewer.suggested_next_actions == ["allocations.get"]
+    assert viewer.suggested_next_actions == ["allocations.wait"]
     assert role_less.suggested_next_actions == []
 
 
@@ -1018,7 +1020,7 @@ def test_envelope_filter_is_per_project_not_connection_union() -> None:
     )
     resp = envelope_for_allocation(alloc, ctx)
     assert "systems.provision" not in resp.suggested_next_actions
-    assert resp.suggested_next_actions == ["allocations.get"]
+    assert resp.suggested_next_actions == ["allocations.wait"]
 
 
 def test_renew_response_role_filters_success_next_actions() -> None:
@@ -1070,7 +1072,7 @@ def test_list_allocations_without_project_returns_all_readable_projects(migrated
 
         assert {item.object_id for item in responses.items} == {proj_id, other_id}
         assert "project" not in responses.data
-        assert responses.suggested_next_actions == ["allocations.get", "allocations.release"]
+        assert responses.suggested_next_actions == ["allocations.wait", "allocations.release"]
 
     asyncio.run(_run())
 
@@ -1301,7 +1303,7 @@ def test_existing_allocations_untouched_when_host_cordoned(migrated_url: str) ->
             await _set_resource_flags(pool, res_id, cordoned=True)
             # The existing allocation is still readable and unchanged; cordon only gates
             # new placement, never live allocations.
-            existing = await get_allocation(pool, _ctx(), granted.object_id)
+            existing = await wait_allocation(pool, _ctx(), granted.object_id, timeout_s=0)
         assert existing.object_id == granted.object_id
         assert existing.status == "granted"
 
@@ -1450,9 +1452,9 @@ def test_queue_position_counts_same_kind_fifo(migrated_url: str) -> None:
             a = await _seed_requested(pool, created_at=datetime(2026, 1, 1, tzinfo=UTC))
             b = await _seed_requested(pool, created_at=datetime(2026, 1, 2, tzinfo=UTC))
             c = await _seed_requested(pool, created_at=datetime(2026, 1, 3, tzinfo=UTC))
-            ra = await get_allocation(pool, _ctx(), a)
-            rb = await get_allocation(pool, _ctx(), b)
-            rc = await get_allocation(pool, _ctx(), c)
+            ra = await wait_allocation(pool, _ctx(), a, timeout_s=0)
+            rb = await wait_allocation(pool, _ctx(), b, timeout_s=0)
+            rc = await wait_allocation(pool, _ctx(), c, timeout_s=0)
         assert (ra.data["queue_position"], ra.data["queue_ahead"]) == (1, 0)
         assert (rb.data["queue_position"], rb.data["queue_ahead"]) == (2, 1)
         assert (rc.data["queue_position"], rc.data["queue_ahead"]) == (3, 2)
@@ -1475,7 +1477,7 @@ def test_queue_position_scoped_to_same_target(migrated_url: str) -> None:
             by_id = await _seed_requested(
                 pool, created_at=datetime(2026, 1, 3, tzinfo=UTC), resource_id=res
             )
-            r = await get_allocation(pool, _ctx(), by_id)
+            r = await wait_allocation(pool, _ctx(), by_id, timeout_s=0)
         assert r.data["queue_position"] == 1
 
     asyncio.run(_run())
@@ -1486,13 +1488,13 @@ def test_queue_position_absent_on_granted_and_in_list(migrated_url: str) -> None
         async with _pool(migrated_url) as pool:
             res = await _register(pool)
             granted = await _seed_alloc(pool, res, AllocationState.GRANTED)
-            rg = await get_allocation(pool, _ctx(), granted)
+            rg = await wait_allocation(pool, _ctx(), granted, timeout_s=0)
             rl = await list_allocations(
                 pool, _ctx(), AllocationsListRequest(project="proj", limit=50)
             )
         assert "queue_position" not in rg.data
         assert all("queue_position" not in item.data for item in rl.items)
-        # #462: reaching a granted allocation via allocations.get also advertises systems.provision.
+        # #462: reaching a granted allocation via the point read also advertises systems.provision.
         assert "systems.provision" in rg.suggested_next_actions
 
     asyncio.run(_run())
@@ -1659,5 +1661,99 @@ def test_shapes_set_after_stamping_does_not_resize_allocation(migrated_url: str)
         assert alloc.requested_memory_gb == 4
         assert alloc.requested_disk_gb == 20
         assert alloc.shape == "medium"
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# allocations.wait(timeout_s=0) is the point read that replaced allocations.get (ADR-0468)
+# ---------------------------------------------------------------------------
+
+
+class _CountingPool:
+    """Counts connection checkouts; stands in for the real pool at the handler seam."""
+
+    def __init__(self, inner: AsyncConnectionPool) -> None:
+        self._inner = inner
+        self.connections = 0
+
+    def connection(self) -> Any:
+        self.connections += 1
+        return self._inner.connection()
+
+    def as_pool(self) -> AsyncConnectionPool:
+        """This double typed as the pool the handler declares — it only calls connection()."""
+        return cast(AsyncConnectionPool, self)
+
+
+def test_zero_timeout_wait_is_a_single_read_on_a_settled_allocation(migrated_url: str) -> None:
+    """`allocations.wait(timeout_s=0)` issues exactly one read and never sleeps.
+
+    This is the property the removal of `allocations.get` rests on: a zero timeout that fell
+    through to a second poll would turn the point read into a blocking call.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(pool, res_id, AllocationState.GRANTED)
+            counting = _CountingPool(pool)
+            slept: list[float] = []
+
+            async def _record_sleep(delay: float) -> None:
+                slept.append(delay)
+
+            resp = await wait_allocation(
+                counting.as_pool(), _ctx(), alloc_id, timeout_s=0, sleep=_record_sleep
+            )
+        assert counting.connections == 1
+        assert slept == []
+        assert resp.status == "granted"
+        assert resp.object_id == alloc_id
+
+    asyncio.run(_run())
+
+
+def test_zero_timeout_wait_returns_a_queued_allocation_without_blocking(
+    migrated_url: str,
+) -> None:
+    """A still-`requested` allocation point-reads to its queue position instead of waiting.
+
+    `requested` is the one state `allocations.wait` would otherwise poll through, so it is the
+    state where a zero timeout has to be proven non-blocking.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(pool, res_id, AllocationState.REQUESTED)
+            counting = _CountingPool(pool)
+            slept: list[float] = []
+
+            async def _record_sleep(delay: float) -> None:
+                slept.append(delay)
+
+            resp = await wait_allocation(
+                counting.as_pool(), _ctx(), alloc_id, timeout_s=0, sleep=_record_sleep
+            )
+        assert counting.connections == 1
+        assert slept == []
+        assert resp.status == "requested"
+        assert resp.data["queue_position"] == 1
+
+    asyncio.run(_run())
+
+
+def test_negative_timeout_wait_allocation_is_also_a_single_read(migrated_url: str) -> None:
+    """A negative timeout clamps to zero rather than raising or waiting forever."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            res_id = await _register(pool, cap=2)
+            alloc_id = await _seed_alloc(pool, res_id, AllocationState.REQUESTED)
+            counting = _CountingPool(pool)
+            resp = await wait_allocation(counting.as_pool(), _ctx(), alloc_id, timeout_s=-5)
+        assert counting.connections == 1
+        assert resp.status == "requested"
 
     asyncio.run(_run())

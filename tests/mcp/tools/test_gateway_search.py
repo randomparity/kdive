@@ -710,3 +710,45 @@ def test_accounting_scope_vocabulary_finds_the_merged_tool(
     names = _match_names(content)
     assert expected in names, f"query {query!r} did not surface {expected!r}: {names}"
     assert not any(name.endswith(("_granted_set", "_all_projects")) for name in names)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("jobs.get", "jobs.wait"),
+        ("get job status", "jobs.wait"),
+        ("check if my job finished", "jobs.wait"),
+        ("look up a job by id", "jobs.wait"),
+        ("fetch the job result", "jobs.wait"),
+        ("allocations.get", "allocations.wait"),
+        ("look up an allocation by id", "allocations.wait"),
+        ("get allocation status", "allocations.wait"),
+    ],
+)
+def test_point_read_vocabulary_finds_the_wait_tool(
+    monkeypatch: pytest.MonkeyPatch, query: str, expected: str
+) -> None:
+    """The retired getter names and their intent phrases rank the wait tool (ADR-0468).
+
+    `jobs.wait` / `allocations.wait` spell neither `get` nor `status`, so an agent phrasing
+    the point read the way the removed tools were named reaches the survivor only through the
+    keyword vocabulary those tools left behind. With the gateway on by default (ADR-0456) that
+    is the difference between a reachable and an unreachable capability.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert expected in names, f"query {query!r} did not surface {expected!r}: {names}"
+    assert "jobs.get" not in names
+    assert "allocations.get" not in names

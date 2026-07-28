@@ -92,7 +92,7 @@ class PromptSpec:
 
 _NOTES = (
     "Notes:\n"
-    "- Poll long-running steps with jobs.wait / jobs.get.\n"
+    "- Poll long-running steps with jobs.wait; pass timeout_s=0 for a plain status read.\n"
     "- Read any tool's full contract before calling it; see "
     "resource://kdive/docs/guide/response-envelope.md for how to read results.\n"
     "- [partial] steps are not yet proven end-to-end; check the tool's maturity_detail."

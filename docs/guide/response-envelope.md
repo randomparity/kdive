@@ -34,7 +34,7 @@ Two distinct statuses count as a failure, and they originate differently:
   rejection (bad input, authorization denied, sequencing error) is always `error`,
   never `failed`.
 - **`failed`** is a *job terminal state*. It appears only on job-handle envelopes
-  built from a `Job` row (via `from_job`), surfaced through `jobs.get` / `jobs.wait`
+  built from a `Job` row (via `from_job`), surfaced through `jobs.wait`
   when a long-running operation fails. A direct tool call never returns `failed`.
 
 See the errors guide (resource://kdive/docs/guide/errors.md) for the taxonomy and recovery

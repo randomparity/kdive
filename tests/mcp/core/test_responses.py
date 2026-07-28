@@ -55,7 +55,7 @@ def test_from_job_succeeded_exposes_result_ref() -> None:
     resp = ToolResponse.from_job(job)
     assert resp.status == "succeeded"
     assert resp.refs == {"result": "tenant/run/abc/kernel"}
-    assert resp.suggested_next_actions == ["jobs.get"]
+    assert resp.suggested_next_actions == []
 
 
 def test_from_job_failed_carries_category() -> None:
@@ -65,7 +65,7 @@ def test_from_job_failed_carries_category() -> None:
     resp = ToolResponse.from_job(job)
     assert resp.status == "failed"
     assert resp.error_category == "build_failure"
-    assert resp.suggested_next_actions == ["jobs.get"]
+    assert resp.suggested_next_actions == []
 
 
 def test_from_job_failed_exposes_failure_context() -> None:
@@ -104,10 +104,11 @@ def test_from_job_extra_next_actions_defaults_to_lifecycle_only() -> None:
 
 def test_from_job_succeeded_teardown_steers_to_allocation_release() -> None:
     # A completed teardown leaves the Allocation active; the terminal envelope points the agent
-    # at allocations.release after the generic lifecycle set, wherever the job is rendered (#1385).
+    # at allocations.release, wherever the job is rendered (#1385). The generic terminal set is
+    # empty (ADR-0468), so the kind steer is the whole list.
     job = _BUILD_JOB.model_copy(update={"kind": JobKind.TEARDOWN, "state": JobState.SUCCEEDED})
     resp = ToolResponse.from_job(job)
-    assert resp.suggested_next_actions == ["jobs.get", "allocations.release"]
+    assert resp.suggested_next_actions == ["allocations.release"]
 
 
 def test_from_job_non_succeeded_teardown_omits_allocation_release() -> None:
@@ -122,20 +123,17 @@ def test_from_job_non_succeeded_teardown_omits_allocation_release() -> None:
 
 
 def test_from_job_succeeded_non_teardown_kind_is_unaffected() -> None:
-    # Only teardown carries the release steer; a succeeded build keeps the generic set.
+    # Only teardown carries the release steer; a succeeded build has no terminal breadcrumb at
+    # all, since re-reading the envelope it was just handed is not a next action (ADR-0468).
     resp = ToolResponse.from_job(_BUILD_JOB.model_copy(update={"state": JobState.SUCCEEDED}))
-    assert resp.suggested_next_actions == ["jobs.get"]
+    assert resp.suggested_next_actions == []
 
 
 def test_from_job_succeeded_teardown_precedes_extra_next_actions() -> None:
-    # The kind steer lands after the lifecycle set and before any caller-supplied extras.
+    # The kind steer lands after the (now empty) lifecycle set and before caller-supplied extras.
     job = _BUILD_JOB.model_copy(update={"kind": JobKind.TEARDOWN, "state": JobState.SUCCEEDED})
     resp = ToolResponse.from_job(job, extra_next_actions=["investigations.close"])
-    assert resp.suggested_next_actions == [
-        "jobs.get",
-        "allocations.release",
-        "investigations.close",
-    ]
+    assert resp.suggested_next_actions == ["allocations.release", "investigations.close"]
 
 
 def test_from_job_canceled_has_no_actions() -> None:
@@ -501,7 +499,7 @@ def test_common_job_envelope_preserves_job_fields_and_adds_object_key() -> None:
     assert resp.object_id == str(job.id)
     assert resp.status == "succeeded"
     assert resp.refs == {"result": "tenant/run/abc/kernel"}
-    assert resp.suggested_next_actions == ["jobs.get"]
+    assert resp.suggested_next_actions == []
     assert resp.data == {"kind": "build", "run_id": str(object_id)}
 
 

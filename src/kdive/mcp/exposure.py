@@ -127,7 +127,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # reports
     "reports.generate": frozenset({ExposureScope.PROJECT_VIEWER, ExposureScope.PLATFORM_AUDITOR}),
     # allocations
-    "allocations.get": _VIEWER,
     "allocations.list": _VIEWER,
     "allocations.wait": _VIEWER,
     "allocations.request": _CONTRIBUTOR,
@@ -196,7 +195,6 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     "investigations.unlink": _CONTRIBUTOR,
     "investigations.set": _CONTRIBUTOR,
     # jobs
-    "jobs.get": _VIEWER,
     "jobs.list": _VIEWER,
     "jobs.wait": _VIEWER,
     "jobs.cancel": _CONTRIBUTOR,  # lowest bar: contributor cancels leaseholder-kind jobs

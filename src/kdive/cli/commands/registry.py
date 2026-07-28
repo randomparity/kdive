@@ -74,12 +74,10 @@ REGISTRY: tuple[Verb, ...] = (
         "allocations.list",
         required_options=("project",),
     ),
-    Verb("allocations", "get", reads.allocations_get, "allocations.get", ("allocation_id",)),
     Verb("systems", "list", reads.systems_list, "systems.list", options=("state",)),
     Verb("systems", "get", reads.systems_get, "systems.get", ("system_id",)),
     Verb("runs", "get", reads.runs_get, "runs.get", ("run_id",)),
     Verb("jobs", "list", reads.jobs_list, "jobs.list"),
-    Verb("jobs", "get", reads.jobs_get, "jobs.get", ("job_id",)),
     Verb(
         "accounting",
         "usage",

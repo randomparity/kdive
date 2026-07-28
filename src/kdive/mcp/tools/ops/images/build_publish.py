@@ -68,7 +68,7 @@ async def _enqueue_image_build(
     return ToolResponse.success(
         str(job.id),
         job.state.value,
-        suggested_next_actions=["jobs.get", "jobs.wait"],
+        suggested_next_actions=["jobs.wait"],
         refs={"job": str(job.id)},
         data={"kind": job.kind.value, "name": payload.name},
     )

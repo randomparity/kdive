@@ -94,7 +94,7 @@ System-scoped tool to retry with, whatever ``retryable`` says. The way forward i
 one. Static and unfiltered, like the success path's list in the same function.
 """
 
-FAILED_SYSTEM_NEXT_ACTIONS = ["jobs.get", *FAILED_SYSTEM_RECOVERY_ACTIONS]
+FAILED_SYSTEM_NEXT_ACTIONS = ["jobs.wait", *FAILED_SYSTEM_RECOVERY_ACTIONS]
 """Next actions when the envelope cites a ``failing_job_id`` (ADR-0454 §5).
 
 The diagnostic read leads: this envelope deliberately withholds the structured
@@ -231,7 +231,7 @@ def _failed_system_envelope(
     ``suppressed_detail(category, None) is not None`` is true exactly for a suppressed category
     (it returns the fixed constant even when ``raw`` is ``None``).
 
-    The structured ``failure_detail_*`` keys are deliberately left on ``jobs.get`` rather than
+    The structured ``failure_detail_*`` keys are deliberately left on ``jobs.wait`` rather than
     duplicated here; ``failing_job_id`` is the pointer to them, and the next actions name it.
     """
     category, failing_job, fallback = _resolve_failure_verdict(system, failing_job)

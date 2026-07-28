@@ -101,7 +101,7 @@ def _raise_on_authorize_failure(proc: subprocess.CompletedProcess[str]) -> None:
     """Raise a diagnosable ``TRANSPORT_FAILURE`` when the authorize ssh exited non-zero (#1008).
 
     Classifies ssh's stderr into a closed reason vocabulary and attaches a length-capped,
-    downstream-redacted stderr tail so ``jobs.get``/``jobs.wait`` report *why* it failed, not just
+    downstream-redacted stderr tail so ``jobs.wait`` reports *why* it failed, not just
     exit ``255``. Split out from :func:`_real_ssh_exec` (whose ssh subprocess is ``live_vm``-only)
     so the classify-and-raise path is unit-tested.
     """
@@ -177,7 +177,7 @@ async def _attach_console_tail(
     not a "what was the guest doing" question. Best-effort — :func:`redacted_console_tail` never
     raises, so a missing or unreadable console cannot mask the transport failure. The tail rides
     ``CategorizedError.details`` as ``console_tail``, which the worker's ``_failure_context``
-    projects into ``failure_detail_console_tail`` on ``jobs.get``/``jobs.wait`` (beside #1008's
+    projects into ``failure_detail_console_tail`` on ``jobs.wait`` (beside #1008's
     ``reason``/``stderr_tail``).
     """
     if exc.category is not ErrorCategory.TRANSPORT_FAILURE:

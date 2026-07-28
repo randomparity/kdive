@@ -174,7 +174,7 @@ def test_failed_system_offers_the_recovery_actions_not_a_dead_end() -> None:
     )
 
     assert resp.suggested_next_actions == [
-        "jobs.get",
+        "jobs.wait",
         "allocations.release",
         "allocations.request",
     ]

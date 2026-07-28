@@ -178,27 +178,6 @@ def _require_job_role(
     return None
 
 
-async def get_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str) -> ToolResponse:
-    """Return the job's handle envelope, or an error envelope if absent/malformed.
-
-    Binds the request's ``principal`` + ``job_id`` into the structured-log context
-    (ADR-0014) so every record emitted while serving this read is attributed, whether
-    the handler is reached through the MCP tool or called directly.
-    """
-    uid = _as_uuid(job_id)
-    if uid is None:
-        return _invalid_uuid_error("job_id", job_id)
-    with bind_context(principal=ctx.principal, job_id=job_id):
-        async with pool.connection() as conn:
-            job = await JOBS.get(conn, uid)
-        if job is None or not _in_scope(job, ctx):
-            return _not_found(job_id)
-        denied = _require_job_role(job, ctx, Role.VIEWER, job_id)
-        if denied is not None:
-            return denied
-        return _job_response(job)
-
-
 async def wait_job(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -210,9 +189,12 @@ async def wait_job(
     """Poll until the job is terminal or ``timeout_s`` (clamped to ``MAX_WAIT_S``) elapses.
 
     Each poll acquires and releases a pool connection (holds none while sleeping). A
-    non-positive timeout means a single read. On a non-terminal timeout this returns the
-    job's current (``queued``/``running``) envelope with ``jobs.wait`` in
-    ``suggested_next_actions`` — the bounded "still running, call again" signal.
+    non-positive timeout is a **single read**: the deadline is fixed before the loop and
+    tested after the first query, so ``timeout_s=0`` issues exactly one ``JOBS.get`` and
+    returns — this is the point read that replaced ``jobs.get`` (ADR-0468). On a non-terminal
+    timeout this returns the job's current (``queued``/``running``) envelope with
+    ``jobs.wait`` in ``suggested_next_actions`` — the bounded "still running, call again"
+    signal.
 
     The agent-facing retry contract (short waits over one long hold; a transport drop on a
     long wait is transient and retryable) lives on the ``jobs_wait`` wrapper docstring, which
@@ -261,7 +243,7 @@ async def cancel_job(pool: AsyncConnectionPool, ctx: RequestContext, job_id: str
     Cancelling a job that has already reached a terminal state is a no-op the agent
     must be able to act on, so the error envelope carries the job's actual current
     status in ``data["current_status"]`` (the agent learns *why* without a second
-    ``jobs.get``). ``error_category`` stays paired with ``status="error"``, honoring
+    ``jobs.wait``). ``error_category`` stays paired with ``status="error"``, honoring
     the envelope's "category iff failure-status" invariant — the terminal lifecycle
     state goes in ``data``, not in ``status``.
     """
@@ -382,28 +364,17 @@ async def list_jobs(
             "jobs",
             "ok",
             responses,
-            suggested_next_actions=["jobs.get", "jobs.wait", "jobs.cancel"],
+            suggested_next_actions=["jobs.wait", "jobs.cancel"],
             data={"truncated": truncated, "next_cursor": next_cursor},
         )
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    """Register the four `jobs.*` tools on ``app``, bound to ``pool``.
+    """Register the `jobs.*` tools on ``app``, bound to ``pool``.
 
     Each wrapper resolves the request context (raising before the handler runs if no
     verified token reached the tool) and delegates; the handler owns its log context.
     """
-
-    @app.tool(
-        name="jobs.get",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def jobs_get(
-        job_id: Annotated[str, Field(description="The Job to render.")],
-    ) -> ToolResponse:
-        """Return one durable job visible to the caller."""
-        return await get_job(pool, current_context(), job_id)
 
     @app.tool(
         name="jobs.wait",
@@ -418,20 +389,27 @@ def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
                 description=(
                     "Seconds to wait before returning a non-terminal 'still running' result; "
                     f"defaults to {int(DEFAULT_WAIT_S)} and is capped at {int(MAX_WAIT_S)}. "
-                    "Prefer the short default and repeated calls over a large value: a long "
-                    "wait holds one request open long enough that an intermediary proxy may "
-                    "sever the stream. Re-issue short waits rather than one long hold."
+                    "Pass timeout_s=0 for a plain point read: one lookup, return the job's "
+                    "current status immediately, never block. Otherwise prefer the short "
+                    "default and repeated calls over a large value: a long wait holds one "
+                    "request open long enough that an intermediary proxy may sever the "
+                    "stream. Re-issue short waits rather than one long hold."
                 )
             ),
         ] = DEFAULT_WAIT_S,
     ) -> ToolResponse:
-        """Poll one durable job until it is terminal or the short timeout elapses.
+        """Read or poll one durable job — the single way to learn a job's status.
 
-        Returns as soon as the job reaches a terminal state (succeeded/failed/canceled)
-        or ``timeout_s`` elapses, whichever comes first. A non-terminal return is normal,
-        not an error: it carries the job's current (queued/running) status and lists
-        ``jobs.wait`` in ``suggested_next_actions``, meaning "still running, call
-        ``jobs.wait`` again". Re-issue short waits to poll a job to completion.
+        Pass ``timeout_s=0`` to read the job's current status once and return immediately,
+        without waiting. That is the plain point read: use it to look up, fetch, or check a
+        job by id when you do not want to block.
+
+        With a positive ``timeout_s`` (the default) this returns as soon as the job reaches
+        a terminal state (succeeded/failed/canceled) or the timeout elapses, whichever comes
+        first. A non-terminal return is normal, not an error: it carries the job's current
+        (queued/running) status and lists ``jobs.wait`` in ``suggested_next_actions``,
+        meaning "still running, call ``jobs.wait`` again". Re-issue short waits to poll a
+        job to completion.
 
         Prefer many short waits over one long hold. An intermediary proxy can sever a
         long-held request as a raw transport drop (a socket close, not an error

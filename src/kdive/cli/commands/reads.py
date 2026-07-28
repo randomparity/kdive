@@ -97,10 +97,6 @@ async def allocations_list(args: argparse.Namespace) -> int:
     return exit_code_for_envelope(envelope)
 
 
-async def allocations_get(args: argparse.Namespace) -> int:
-    return await _record("allocations.get", args, {"allocation_id": args.allocation_id})
-
-
 async def systems_list(args: argparse.Namespace) -> int:
     envelope = await _fetch("systems.list", {"request": _payload(args, "state")})
     emit(
@@ -127,10 +123,6 @@ async def jobs_list(args: argparse.Namespace) -> int:
         as_json=args.json,
     )
     return exit_code_for_envelope(envelope)
-
-
-async def jobs_get(args: argparse.Namespace) -> int:
-    return await _record("jobs.get", args, {"job_id": args.job_id})
 
 
 def _data_list(envelope: Mapping[str, object], key: str) -> list[object]:

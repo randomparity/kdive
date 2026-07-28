@@ -168,7 +168,8 @@ flow. Tool names below are the namespaced identifiers from the
    selector). This returns a job; allocation is asynchronous.
 3. `jobs.wait` — wait on the job id from the previous step until it reaches a
    terminal state.
-4. `allocations.get` — read back the granted allocation once the job succeeds.
+4. `allocations.wait(timeout_s=0)` — read back the granted allocation once the job
+   succeeds.
 
 From there, drive a run with the `runs.*` tools and read results with the
 `vmcore.*` and `debug.*` tools. The full surface is listed in the

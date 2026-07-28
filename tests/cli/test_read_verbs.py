@@ -359,10 +359,8 @@ def test_record_verbs_send_the_declared_id_payload_key(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     cases = [
-        (reads.allocations_get, "allocation_id", "allocations.get"),
         (reads.systems_get, "system_id", "systems.get"),
         (reads.runs_get, "run_id", "runs.get"),
-        (reads.jobs_get, "job_id", "jobs.get"),
     ]
     for handler, key, tool in cases:
         client = _install_session(monkeypatch, _data_envelope({}))

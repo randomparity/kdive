@@ -147,7 +147,7 @@ def test_live_stack_tier_list_tools_is_rbac_scoped() -> None:
         )
 
         # Public + viewer-gated reads are advertised to the viewer.
-        assert {"projects.list", "jobs.get", "systems.list"} <= viewer
+        assert {"projects.list", "jobs.wait", "systems.list"} <= viewer
         # Operator/admin/platform-gated tools are hidden from the viewer.
         for hidden in ("allocations.request", "control.force_crash", "ops.reconcile_now"):
             assert hidden not in viewer, f"{hidden} leaked into the viewer catalog"
