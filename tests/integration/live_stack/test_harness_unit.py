@@ -9,6 +9,7 @@ from kdive.mcp.dev_harness import (
     _build_claims,
     oidc_issuer_from_env,
 )
+from tests.integration.live_stack.spine import raw_vmcore_refs
 
 
 def test_build_claims_nested_roles_object() -> None:
@@ -78,3 +79,42 @@ def test_oidc_issuer_from_env_missing_base_url_raises(monkeypatch: pytest.Monkey
     monkeypatch.delenv("KDIVE_OIDC_ISSUER", raising=False)
     with pytest.raises(RuntimeError, match="KDIVE_OIDC_ISSUER"):
         oidc_issuer_from_env()
+
+
+# --- the raw-vmcore egress check (#1610) ----------------------------------------------------
+#
+# The first live run of the #1609 assertions reported "raw vmcore leaked" on a correctly
+# REDACTED core: the check tested the whole ref string, and a presigned URL ends with its
+# signing query, not with `-redacted`. These pin both directions so the fix cannot regress into
+# either a false positive or a check that no longer catches a real leak.
+
+_RED_KEY = "remote-libvirt/runs/r1/vmcore-kdump-redacted"
+_RED_URL = f"http://s3.example:30900/kdive-artifacts/{_RED_KEY}?AWSAccessKeyId=k&Signature=s"
+_RAW_KEY = "remote-libvirt/runs/r1/vmcore-kdump"
+_RAW_URL = f"http://s3.example:30900/kdive-artifacts/{_RAW_KEY}?AWSAccessKeyId=k&Signature=s"
+
+
+def test_redacted_presigned_url_is_not_a_leak() -> None:
+    # The exact shape artifacts.get returns, and the exact false positive seen live.
+    assert raw_vmcore_refs([_RED_URL]) == []
+
+
+def test_redacted_object_key_is_not_a_leak() -> None:
+    assert raw_vmcore_refs([_RED_KEY]) == []
+
+
+def test_an_opaque_artifact_id_is_not_a_leak() -> None:
+    assert raw_vmcore_refs(["a5a050ce-b055-42c6-b6cf-4a823623042b"]) == []
+
+
+def test_a_raw_object_key_is_still_caught() -> None:
+    assert raw_vmcore_refs([_RAW_KEY]) == [_RAW_KEY]
+
+
+def test_a_raw_presigned_url_is_still_caught() -> None:
+    # The check must survive the query string in BOTH directions, not just the passing one.
+    assert raw_vmcore_refs([_RAW_URL]) == [_RAW_URL]
+
+
+def test_a_raw_ref_among_redacted_ones_is_caught() -> None:
+    assert raw_vmcore_refs([_RED_KEY, _RAW_KEY, _RED_URL]) == [_RAW_KEY]

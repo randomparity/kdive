@@ -22,11 +22,12 @@ import os
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 import psycopg
@@ -159,6 +160,25 @@ async def captured_vmcore_refs(
         )
     got = ok(await scalar(client, "artifacts.get", request={"artifact_id": job_ref}), phase_name)
     return [job_ref, *got.refs.values()]
+
+
+def raw_vmcore_refs(refs: Iterable[str]) -> list[str]:
+    """The refs exposing an UNREDACTED core object; empty when the egress property holds.
+
+    A raw core is stored at ``.../vmcore-{method}`` and the redacted one at
+    ``.../vmcore-{method}-redacted``, so the check is on the object PATH. A ref may be a bare
+    object key or a presigned URL, and a presigned URL's query string is signing material, not
+    part of the path — testing the whole string reports every correctly-redacted core as a leak,
+    because ``…/vmcore-kdump-redacted?AWSAccessKeyId=…&Signature=…`` does not end with
+    ``-redacted``. That false positive is what the first live run of these assertions hit
+    (#1610): the redaction held, the check did not.
+    """
+    leaked: list[str] = []
+    for ref in refs:
+        path = urlsplit(ref).path or ref
+        if "/vmcore-" in path and not path.endswith("-redacted"):
+            leaked.append(ref)
+    return leaked
 
 
 async def await_system_state(

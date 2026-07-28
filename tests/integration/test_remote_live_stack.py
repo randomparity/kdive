@@ -59,6 +59,7 @@ from tests.integration.live_stack.spine import (
     ok,
     phase,
     provision_to_ready,
+    raw_vmcore_refs,
     scalar,
     seed_metering,
 )
@@ -392,9 +393,7 @@ def test_remote_spine_over_the_wire() -> None:
                 refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
                 assert refs, "capture published no vmcore reference (#1)"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
-                assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
-                    "raw vmcore leaked (#1)"
-                )
+                assert not raw_vmcore_refs(refs), f"raw vmcore leaked (#1): {raw_vmcore_refs(refs)}"
             async with phase("introspect"):
                 env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
                 report = json.dumps(data_mapping(env, "report"), sort_keys=True)
@@ -437,8 +436,8 @@ async def _assert_vmcore_captured(
     refs = await captured_vmcore_refs(client, method, drained, run_id=run_id)
     assert refs, f"no vmcore reference published for {method} (#1)"
     # A raw core is `.../vmcore-{method}` (no `-redacted` suffix); it must never surface.
-    assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
-        f"raw vmcore leaked for {method} (#1)"
+    assert not raw_vmcore_refs(refs), (
+        f"raw vmcore leaked for {method} (#1): {raw_vmcore_refs(refs)}"
     )
 
 
