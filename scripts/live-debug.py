@@ -52,6 +52,7 @@ from kdive.mcp.dev_harness import (
 )
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
+from kdive.mcp.schema.tool_index import NAMESPACE_TOC
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")
@@ -66,6 +67,9 @@ DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue sto
 # returns to its caller on the same stack.
 STEP_DEFAULT_SYMBOL = "vfs_read"
 _POLL_INTERVAL_SEC = 5.0
+# tools.search caps `limit` at 50 (`_SEARCH_LIMIT_MAX`); ask for the cap so a namespace listing
+# is not silently clipped to the default 10.
+_SEARCH_LIMIT = 50
 # Generous cap for the slow build/compress steps (make modules_install, tar+gzip). A stalled step
 # fails loudly here rather than hanging forever or being killed mid-write by an outer timeout.
 _ARCHIVE_STEP_TIMEOUT_S = 900
@@ -142,10 +146,50 @@ def _wrap_request(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any
     return args
 
 
+async def _search_schema(client: LiveStackClient, tool: str) -> dict[str, Any]:
+    """``tool``'s input schema from ``tools.search``, or ``{}`` when no match carries that name."""
+    envelope = _as_dict(await client.call_tool("tools.search", query=tool, limit=_SEARCH_LIMIT))
+    matches = (envelope.get("data") or {}).get("matches") or []
+    for match in matches:
+        # Ranking is lexical over name, description, keywords and schema text, so a sibling tool
+        # can outrank the exact name; only an exact name match is this tool's own schema.
+        if isinstance(match, dict) and match.get("name") == tool:
+            return dict(match.get("input_schema") or {})
+    return {}
+
+
+class _SchemaResolver:
+    """Resolve each tool's JSON input schema, whatever the connection's exposure profile lists.
+
+    ``list_tools`` is clipped to the nine core tools for the agent profile this script's own
+    token lands on (the gateway is on by default), so most names are simply absent from it even
+    though they stay callable directly — exposure is advisory, not a security control. Treating
+    an absent name as "no schema" makes every single-``request`` tool get called with flat kwargs,
+    which the server rejects, so a miss falls back to ``tools.search``: it is RBAC-filtered rather
+    than profile-clipped and each match carries the same full ``input_schema``.
+
+    Every answer is cached, including a miss. The pollers re-enter :func:`_call` for the same tool
+    every few seconds, so an uncached miss would issue one ``tools.search`` per poll tick.
+    """
+
+    def __init__(self) -> None:
+        self._schemas: dict[str, dict[str, Any]] = {}
+        self._listed = False
+
+    async def schema(self, client: LiveStackClient, tool: str) -> dict[str, Any]:
+        """The input schema for ``tool``, or ``{}`` if neither surface advertises one."""
+        if not self._listed:
+            self._schemas.update(await _input_schemas(client))
+            self._listed = True
+        if tool not in self._schemas:
+            self._schemas[tool] = await _search_schema(client, tool)
+        return self._schemas[tool]
+
+
 async def _call(
-    client: LiveStackClient, tool: str, args: dict[str, Any], schemas: dict[str, dict[str, Any]]
+    client: LiveStackClient, tool: str, args: dict[str, Any], schemas: _SchemaResolver
 ) -> dict[str, Any]:
-    resolved = _wrap_request(schemas.get(tool, {}), args)
+    resolved = _wrap_request(await schemas.schema(client, tool), args)
     return _as_dict(await client.call_tool(tool, **resolved))
 
 
@@ -156,7 +200,7 @@ async def _poll(
     client: LiveStackClient,
     tool: str,
     args: dict[str, Any],
-    schemas: dict[str, dict[str, Any]],
+    schemas: _SchemaResolver,
     *,
     done: set[str],
     timeout_sec: float,
@@ -184,7 +228,7 @@ _JOB_DONE = {"succeeded", "completed", "failed", "error", "cancelled"}
 
 async def _wait_job(
     client: LiveStackClient,
-    schemas: dict[str, dict[str, Any]],
+    schemas: _SchemaResolver,
     *,
     kind: str,
     timeout_sec: float,
@@ -329,7 +373,7 @@ def _elf_build_id(vmlinux: Path) -> str:
 
 async def _upload_kernel(
     client: LiveStackClient,
-    schemas: dict[str, dict[str, Any]],
+    schemas: _SchemaResolver,
     *,
     run_id: str,
     kernel_tar: Path,
@@ -375,9 +419,7 @@ async def _upload_kernel(
 # --- lifecycle to a stopped session --------------------------------------------------------
 
 
-async def _find_booted_run(
-    client: LiveStackClient, schemas: dict[str, dict[str, Any]]
-) -> str | None:
+async def _find_booted_run(client: LiveStackClient, schemas: _SchemaResolver) -> str | None:
     """A Run already booted on a ready System, or None.
 
     ``systems.list`` does not populate ``active_run.state``, so confirm each ready System's
@@ -395,7 +437,7 @@ async def _find_booted_run(
 
 
 async def _provision_boot_run(
-    client: LiveStackClient, schemas: dict[str, dict[str, Any]], *, project: str
+    client: LiveStackClient, schemas: _SchemaResolver, *, project: str
 ) -> str:
     """Full lifecycle: investigation -> allocation -> provision -> upload/install/boot -> run_id."""
     resources = await _call(client, "resources.list", {}, schemas)
@@ -486,7 +528,7 @@ async def _provision_boot_run(
 async def _stopped(args: argparse.Namespace) -> int:
     """Reach a stopped gdbstub session and print its id (and teardown handles)."""
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        schemas = await _input_schemas(client)
+        schemas = _SchemaResolver()
         run_id = (await _find_booted_run(client, schemas)) if args.reuse else None
         if run_id:
             print(f"  reusing booted run {run_id}", file=sys.stderr)
@@ -513,7 +555,7 @@ async def _stopped(args: argparse.Namespace) -> int:
         return 0
 
 
-async def _rip(client: LiveStackClient, schemas: dict, session_id: str) -> str | None:
+async def _rip(client: LiveStackClient, schemas: _SchemaResolver, session_id: str) -> str | None:
     resp = await _call(
         client, "debug.read_registers", {"session_id": session_id, "registers": ["rip"]}, schemas
     )
@@ -523,7 +565,7 @@ async def _rip(client: LiveStackClient, schemas: dict, session_id: str) -> str |
 async def _step(args: argparse.Namespace) -> int:
     """Prove every debug.advance mode (#1584) at a returnable frame on a booted kernel."""
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        schemas = await _input_schemas(client)
+        schemas = _SchemaResolver()
         run_id = (await _find_booted_run(client, schemas)) if args.reuse else None
         if not run_id:
             run_id = await _provision_boot_run(client, schemas, project=args.project)
@@ -591,15 +633,42 @@ async def _step(args: argparse.Namespace) -> int:
 async def _cmd_call(args: argparse.Namespace) -> int:
     payload = json.loads(args.args) if args.args else {}
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        schemas = await _input_schemas(client)
+        schemas = _SchemaResolver()
         print(json.dumps(await _call(client, args.tool, payload, schemas), indent=2, default=str))
     return 0
 
 
+async def _namespace_tools(client: LiveStackClient, namespace: str) -> list[str]:
+    """Every tool name in ``namespace``, via ``tools.search``'s namespace-browse mode."""
+    envelope = _as_dict(
+        await client.call_tool("tools.search", namespace=namespace, limit=_SEARCH_LIMIT)
+    )
+    data = envelope.get("data") or {}
+    if data.get("truncated"):
+        print(
+            f"  [warn] namespace {namespace!r} holds more than {_SEARCH_LIMIT} tools; "
+            "this listing is truncated",
+            file=sys.stderr,
+        )
+    return [
+        str(match["name"])
+        for match in data.get("matches") or []
+        if isinstance(match, dict) and match.get("name")
+    ]
+
+
 async def _cmd_tools(args: argparse.Namespace) -> int:
+    """List tool names, enumerating every live namespace through ``tools.search``.
+
+    ``list_tools`` would show only the nine core tools under the default surface, which would
+    make this discovery command hide exactly the tools it exists to find. Browsing each namespace
+    in ``NAMESPACE_TOC`` reaches the whole catalog the caller's roles allow.
+    """
+    names: set[str] = set()
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        names = sorted(await client.list_tools())
-    for name in names:
+        for namespace in sorted(NAMESPACE_TOC):
+            names.update(await _namespace_tools(client, namespace))
+    for name in sorted(names):
         if not args.substr or args.substr in name:
             print(name)
     return 0
@@ -607,16 +676,17 @@ async def _cmd_tools(args: argparse.Namespace) -> int:
 
 async def _cmd_schema(args: argparse.Namespace) -> int:
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        schemas = await _input_schemas(client)
-    for tool in args.tools:
-        print(f"### {tool}")
-        print(json.dumps(schemas.get(tool, {}).get("properties", {}), indent=1, default=str))
+        schemas = _SchemaResolver()
+        for tool in args.tools:
+            schema = await schemas.schema(client, tool)
+            print(f"### {tool}")
+            print(json.dumps(schema.get("properties", {}), indent=1, default=str))
     return 0
 
 
 async def _cmd_teardown(args: argparse.Namespace) -> int:
     async with LiveStackClient.over_http(BASE_URL, _token(args.project)) as client:
-        schemas = await _input_schemas(client)
+        schemas = _SchemaResolver()
         env = await _call(client, "systems.teardown", {"system_id": args.system_id}, schemas)
         print(json.dumps(env, indent=2, default=str))
     return 0
