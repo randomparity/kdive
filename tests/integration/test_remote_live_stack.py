@@ -1,6 +1,6 @@
 """Operator-run remote-libvirt spine e2e (#207, M2 issue 8; mirrors ADR-0042's local spine).
 
-Drives allocate(remote-libvirt) → provision(disk-image) → build → install → boot →
+Drives allocate(remote-libvirt) → provision(disk-image) → upload-build → install → boot →
 attach(gdb-MI direct TCP) → force-crash → two-phase KDUMP vmcore capture →
 introspect(from_vmcore) → release → (reconciler) teardown → accounting report, over the live MCP
 HTTP transport under per-project role tokens, against a genuinely remote ``qemu+tls://`` host the
@@ -50,6 +50,7 @@ from tests.integration.live_stack.spine import (
     allocate_remote,
     assert_report,
     await_system_state,
+    build_and_upload_kernel,
     captured_vmcore_refs,
     crash_to_crashed,
     db_now,
@@ -108,11 +109,14 @@ def _remote_provision_profile() -> dict[str, object]:
 
 
 def _build_profile() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "kernel_source_ref": os.environ.get(_KERNEL_TREE_ENV, _DEFAULT_KERNEL_REF),
-        "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
-    }
+    """The Run build profile for the remote x86_64 spine (upload-only lane, ADR-0337).
+
+    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` +
+    the target ``arch`` and forbids extras; the ``kernel_source_ref``/``config`` this used to
+    send were rejected outright as invalid tool arguments. The kernel bytes now arrive via
+    ``build_and_upload_kernel``.
+    """
+    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
@@ -337,7 +341,11 @@ def test_remote_spine_over_the_wire() -> None:
                     "create-run",
                 )
                 run_id = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build"):
+                # The server-build lane (runs.build) was removed with schema 0062; the Run
+                # reaches a built state through the external-build upload lane instead.
+                await build_and_upload_kernel(op, run_id=run_id, phase_name="upload-build")
+            for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
@@ -576,7 +584,9 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                     "create-run-B",
                 )
                 run_b = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build-B"):
+                await build_and_upload_kernel(op, run_id=run_b, phase_name="upload-build-B")
+            for step in ("install", "boot"):
                 async with phase(f"{step}-B"):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_b), f"{step}-B")
                     await drain_job(op, f"{step}-B", env.object_id)

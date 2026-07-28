@@ -26,18 +26,14 @@ The shared phase-naming contract has its own non-gated unit tests in
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import json
 import os
 import platform
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -47,8 +43,6 @@ from kdive.mcp.dev_harness import (
     LiveStackToolError,
     OidcIssuer,
 )
-from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
-from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import (
     expected_accel,
@@ -62,13 +56,16 @@ from tests.integration.live_stack.spine import (
     assert_audit,
     assert_report,
     await_system_state,
+    build_and_upload_kernel,
     captured_vmcore_refs,
     drain_job,
     mint_role_token,
     ok,
     phase,
+    put_presigned,
     scalar,
     seed_metering,
+    sha256_b64,
     system_torn_down,
 )
 from tests.mcp.json_data import data_mapping, data_str
@@ -199,7 +196,7 @@ def _build_profile() -> dict[str, object]:
 
     The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` + the
     target ``arch`` (``extra="forbid"``); the kernel bytes now arrive via the external-upload lane
-    (see ``_build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
+    (see ``build_and_upload_kernel``), not a server ``kernel_source_ref``/``config`` build.
     """
     return {"schema_version": 1, "arch": "x86_64"}
 
@@ -227,118 +224,6 @@ def _live_script_provision_profile() -> dict[str, object]:
             }
         },
     }
-
-
-# --- external-build upload lane (shared; ADR-0234/0337) -------------------------------------
-
-
-def _sha256_b64(path: Path) -> str:
-    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
-    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
-
-
-async def _put_presigned(item: ToolResponse, path: Path) -> None:
-    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
-    url = item.refs["upload_url"]
-    raw_headers = item.data.get("required_headers", {})
-    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
-    async with httpx.AsyncClient(timeout=180.0) as http:
-        resp = await http.put(url, content=path.read_bytes(), headers=headers)
-        resp.raise_for_status()
-
-
-def _combined_kernel_tar(kernel_src: Path, dest_dir: Path) -> Path:
-    """Cut the ADR-0234 combined ``kernel`` artifact from a built x86_64 kernel tree.
-
-    Reproduces the ``external-build-upload`` recipe (mirrors ``scripts/live-debug.py`` after #1219):
-    stage the module tree with ``make modules_install`` into ``dest_dir`` and tar
-    ``arch/x86/boot/bzImage`` (renamed to ``boot/vmlinuz``, listed first so ``lib/modules`` lands
-    inside the validator's decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping
-    the ``build``/``source`` back-symlinks.
-
-    Args:
-        kernel_src: A *built* x86_64 kernel tree (must contain ``arch/x86/boot/bzImage``).
-        dest_dir: A scratch directory to stage modules and write ``kernel.tar.gz`` into.
-
-    Returns:
-        The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
-
-    Raises:
-        RuntimeError: If ``kernel_src`` holds no built bzImage.
-    """
-    bzimage = kernel_src / "arch/x86/boot/bzImage"
-    if not bzimage.is_file():
-        raise RuntimeError(
-            f"no built bzImage at {bzimage}; build the kernel tree at {kernel_src} first"
-        )
-    modstage = dest_dir / "modstage"
-    subprocess.run(
-        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
-        check=True,
-    )
-    tar_path = dest_dir / "kernel.tar.gz"
-    subprocess.run(
-        [
-            "tar",
-            "-czf",
-            str(tar_path),
-            "--exclude=*/build",
-            "--exclude=*/source",
-            "--transform=s|^arch/x86/boot/bzImage$|boot/vmlinuz|",
-            "-C",
-            str(kernel_src),
-            "arch/x86/boot/bzImage",
-            "-C",
-            str(modstage),
-            "lib/modules",
-        ],
-        check=True,
-    )
-    return tar_path
-
-
-def _accepted_run_upload_names(contract: dict[str, object]) -> set[str]:
-    """The ``run`` owner-kind's accepted names from the external-build contract resource."""
-    upload_contracts = contract.get("upload_contracts", {})
-    run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
-    if isinstance(run_contract, dict):
-        names = run_contract.get("accepted_names", [])
-        return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
-    return set()
-
-
-async def _build_and_upload_kernel(op: LiveStackClient, *, run_id: str) -> None:
-    """Build the x86_64 kernel tar from ``KDIVE_KERNEL_SRC`` and drive the external-upload lane.
-
-    Replaces the removed server-build lane (``runs.build``): read the contract resource, cut the
-    combined ``kernel`` tar, declare + PUT it via
-    ``artifacts.create_run_upload``, then ``runs.complete_build``. The Run goes CREATED → SUCCEEDED
-    with ``steps.build == succeeded`` (set by construction in steps.py), ready for ``runs.install``.
-    """
-    contract = json.loads(await op.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
-    accepted = _accepted_run_upload_names(contract)
-    if "kernel" not in accepted:
-        raise SpinePhaseError(
-            "upload-build", f"upload contract no longer accepts 'kernel': {accepted}"
-        )
-    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
-        kernel_tar = _combined_kernel_tar(Path(os.environ[_KERNEL_TREE_ENV]), Path(scratch))
-        decls = [
-            {
-                "name": "kernel",
-                "sha256": _sha256_b64(kernel_tar),
-                "size_bytes": kernel_tar.stat().st_size,
-            }
-        ]
-        up = ok(
-            await scalar(op, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
-            "upload-build",
-        )
-        by_name = {item.data.get("name"): item for item in up.items}
-        if "kernel" not in by_name:
-            raise SpinePhaseError("upload-build", "create_run_upload returned no 'kernel' item")
-        await _put_presigned(by_name["kernel"], kernel_tar)
-    ok(await scalar(op, "runs.complete_build", run_id=run_id), "upload-build")
 
 
 # --- non-gated unit tests (CI-runnable; pin the equality invariant, ADR-0205) ----------------
@@ -519,7 +404,7 @@ def test_spine_over_the_wire() -> None:
                 )
                 run_id = env.object_id
             async with phase("upload-build"):
-                await _build_and_upload_kernel(op, run_id=run_id)
+                await build_and_upload_kernel(op, run_id=run_id)
             for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -647,7 +532,7 @@ def test_install_cmdline_sweep_two_boots_one_build_over_the_wire() -> None:
                 )
                 run_id = env.object_id
             async with phase("upload-build"):
-                await _build_and_upload_kernel(op, run_id=run_id)
+                await build_and_upload_kernel(op, run_id=run_id)
 
             for variant in ("dhash_entries=1", "dhash_entries=2"):
                 async with phase(f"install:{variant}"):
@@ -740,7 +625,7 @@ def test_spine_live_script_over_the_wire() -> None:
                 )
                 run_id = env.object_id
             async with phase("upload-build"):
-                await _build_and_upload_kernel(op, run_id=run_id)
+                await build_and_upload_kernel(op, run_id=run_id)
             for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -1196,12 +1081,12 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                     decls = [
                         {
                             "name": "kernel",
-                            "sha256": _sha256_b64(kernel_tar),
+                            "sha256": sha256_b64(kernel_tar),
                             "size_bytes": kernel_tar.stat().st_size,
                         },
                         {
                             "name": "initrd",
-                            "sha256": _sha256_b64(initrd),
+                            "sha256": sha256_b64(initrd),
                             "size_bytes": initrd.stat().st_size,
                         },
                     ]
@@ -1212,8 +1097,8 @@ def test_ppc64le_uploaded_kernel_bundle_boots_over_the_wire() -> None:
                         "ppc64le-bundle:upload",
                     )
                     by_name = {item.data.get("name"): item for item in up.items}
-                    await _put_presigned(by_name["kernel"], kernel_tar)
-                    await _put_presigned(by_name["initrd"], initrd)
+                    await put_presigned(by_name["kernel"], kernel_tar)
+                    await put_presigned(by_name["initrd"], initrd)
                     ok(
                         await scalar(op, "runs.complete_build", run_id=run_id),
                         "ppc64le-bundle:upload",
@@ -1414,12 +1299,12 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                     decls = [
                         {
                             "name": "kernel",
-                            "sha256": _sha256_b64(kernel_tar),
+                            "sha256": sha256_b64(kernel_tar),
                             "size_bytes": kernel_tar.stat().st_size,
                         },
                         {
                             "name": "initrd",
-                            "sha256": _sha256_b64(initrd),
+                            "sha256": sha256_b64(initrd),
                             "size_bytes": initrd.stat().st_size,
                         },
                     ]
@@ -1430,8 +1315,8 @@ def test_ppc64le_fadump_captures_a_vmcore_under_tcg() -> None:
                         "ppc64le-fadump:upload",
                     )
                     by_name = {item.data.get("name"): item for item in up.items}
-                    await _put_presigned(by_name["kernel"], kernel_tar)
-                    await _put_presigned(by_name["initrd"], initrd)
+                    await put_presigned(by_name["kernel"], kernel_tar)
+                    await put_presigned(by_name["initrd"], initrd)
                     ok(
                         await scalar(op, "runs.complete_build", run_id=run_id),
                         "ppc64le-fadump:upload",
@@ -1586,12 +1471,12 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                     decls = [
                         {
                             "name": "kernel",
-                            "sha256": _sha256_b64(kernel_tar),
+                            "sha256": sha256_b64(kernel_tar),
                             "size_bytes": kernel_tar.stat().st_size,
                         },
                         {
                             "name": "initrd",
-                            "sha256": _sha256_b64(initrd),
+                            "sha256": sha256_b64(initrd),
                             "size_bytes": initrd.stat().st_size,
                         },
                     ]
@@ -1602,8 +1487,8 @@ def test_ppc64le_kdump_captures_a_vmcore_under_tcg() -> None:
                         "ppc64le-kdump:upload",
                     )
                     by_name = {item.data.get("name"): item for item in up.items}
-                    await _put_presigned(by_name["kernel"], kernel_tar)
-                    await _put_presigned(by_name["initrd"], initrd)
+                    await put_presigned(by_name["kernel"], kernel_tar)
+                    await put_presigned(by_name["initrd"], initrd)
                     ok(
                         await scalar(op, "runs.complete_build", run_id=run_id),
                         "ppc64le-kdump:upload",

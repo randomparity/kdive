@@ -15,8 +15,11 @@ owned-infra teardown check) stay in each spine's own module.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 from collections.abc import AsyncIterator
@@ -25,10 +28,12 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
 
@@ -171,6 +176,161 @@ async def await_system_state(
         if time.monotonic() >= deadline:
             raise SpinePhaseError(phase_name, f"system did not reach {target}")
         await asyncio.sleep(POLL_INTERVAL_S)
+
+
+# --- external-build upload lane (ADR-0234; replaces the removed runs.build server lane) -----
+#
+# Both spines reach a bootable Run the same way: cut the combined ``kernel`` tar from a *built*
+# tree, declare + PUT it through ``artifacts.create_run_upload``, then ``runs.complete_build``.
+# ``runs.build`` was deleted with the server-build tables (schema 0062) — the local spine was
+# migrated then, the remote spine was not, which is why the remote arm could never reach its
+# capture assertions. Shared here so the next lane change lands in one place.
+
+KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
+
+
+def sha256_b64(path: Path) -> str:
+    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+async def put_presigned(item: ToolResponse, path: Path) -> None:
+    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
+    url = item.refs["upload_url"]
+    raw_headers = item.data.get("required_headers", {})
+    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+    async with httpx.AsyncClient(timeout=180.0) as http:
+        resp = await http.put(url, content=path.read_bytes(), headers=headers)
+        resp.raise_for_status()
+
+
+def accepted_run_upload_names(contract: dict[str, object]) -> set[str]:
+    """The ``run`` owner-kind's accepted names from the external-build contract resource."""
+    upload_contracts = contract.get("upload_contracts", {})
+    run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
+    if isinstance(run_contract, dict):
+        names = run_contract.get("accepted_names", [])
+        return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+    return set()
+
+
+def boot_member_source(kernel_src: Path, arch: str) -> Path:
+    """Resolve the tree-relative path of the file that becomes the tar's ``boot/vmlinuz``.
+
+    The ``kernel-build-per-arch`` resource is the contract this must match:
+
+    | ``arch``  | ``boot/vmlinuz`` must be                                        |
+    |-----------|-----------------------------------------------------------------|
+    | ``x86_64``| the bzImage, ``arch/x86/boot/bzImage`` (validator checks ``HdrS``|
+    |           | magic at offset ``0x202``; a raw ``vmlinux`` ELF is rejected)    |
+    | ``ppc64le``| the stripped ELF ``vmlinux`` (powerpc has no bzImage)          |
+
+    Args:
+        kernel_src: A *built* kernel tree.
+        arch: The target arch (``x86_64`` / ``ppc64le``), NOT the build host's arch.
+
+    Returns:
+        The path relative to ``kernel_src`` of the boot member to tar.
+
+    Raises:
+        RuntimeError: If ``arch`` is unsupported, or the resolved file is not present.
+    """
+    # Raise rather than defaulting to x86_64: a new arch silently tarring a bzImage path that
+    # does not exist would surface as an opaque tar failure, or worse as a validator rejection
+    # far downstream. An unknown arch is a test-setup bug, so name it here.
+    members = {"x86_64": Path("arch/x86/boot/bzImage"), "ppc64le": Path("vmlinux")}
+    member = members.get(arch)
+    if member is None:
+        raise RuntimeError(f"no boot member mapping for arch {arch!r}; known: {sorted(members)}")
+    if not (kernel_src / member).is_file():
+        raise RuntimeError(
+            f"no built {member} at {kernel_src / member}; build the kernel tree at {kernel_src} "
+            f"for {arch} first"
+        )
+    return member
+
+
+def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
+    """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
+
+    Reproduces the ``external-build-upload`` recipe: stage the module tree with
+    ``make modules_install`` into ``dest_dir``, then tar the arch's boot member (renamed to
+    ``boot/vmlinuz``, listed FIRST so ``lib/modules`` lands inside the validator's
+    decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping the
+    ``build``/``source`` back-symlinks.
+
+    The rename transform is derived from :func:`boot_member_source`, so that function stays the
+    single place the per-arch boot member is decided.
+
+    Args:
+        kernel_src: A *built* kernel tree for ``arch``.
+        dest_dir: A scratch directory to stage modules and write ``kernel.tar.gz`` into.
+        arch: The target arch, passed through to :func:`boot_member_source`.
+
+    Returns:
+        The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
+    """
+    member = boot_member_source(kernel_src, arch)
+    modstage = dest_dir / "modstage"
+    subprocess.run(
+        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        check=True,
+    )
+    tar_path = dest_dir / "kernel.tar.gz"
+    subprocess.run(
+        [
+            "tar",
+            "-czf",
+            str(tar_path),
+            "--exclude=*/build",
+            "--exclude=*/source",
+            f"--transform=s|^{member}$|boot/vmlinuz|",
+            "-C",
+            str(kernel_src),
+            str(member),
+            "-C",
+            str(modstage),
+            "lib/modules",
+        ],
+        check=True,
+    )
+    return tar_path
+
+
+async def build_and_upload_kernel(
+    client: LiveStackClient, *, run_id: str, phase_name: str = "upload-build", arch: str = "x86_64"
+) -> None:
+    """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
+
+    Reads the contract resource, cuts the combined ``kernel`` tar from ``KDIVE_KERNEL_SRC``,
+    declares + PUTs it via ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
+    The Run goes CREATED → SUCCEEDED with ``steps.build == succeeded``, ready for ``runs.install``.
+    """
+    contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
+    accepted = accepted_run_upload_names(contract)
+    if "kernel" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
+    kernel_src = os.environ.get(KERNEL_TREE_ENV)
+    if not kernel_src:
+        raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
+    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
+        kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        decls = [
+            {
+                "name": "kernel",
+                "sha256": sha256_b64(kernel_tar),
+                "size_bytes": kernel_tar.stat().st_size,
+            }
+        ]
+        up = ok(
+            await scalar(client, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
+            phase_name,
+        )
+        by_name = {item.data.get("name"): item for item in up.items}
+        if "kernel" not in by_name:
+            raise SpinePhaseError(phase_name, "create_run_upload returned no 'kernel' item")
+        await put_presigned(by_name["kernel"], kernel_tar)
+    ok(await scalar(client, "runs.complete_build", run_id=run_id), phase_name)
 
 
 # --- per-role token factory -----------------------------------------------------------------
