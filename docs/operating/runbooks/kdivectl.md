@@ -193,12 +193,15 @@ Exit `0` is not the whole story either, so a poll loop needs both signals:
   `status: failed`. So do the calls that never waited at all: an unknown or malformed id, or a
   read your token is not granted for, returns `status: "error"` immediately. Re-issuing any of
   these is a hot spin against the server, not a poll.
-- **Nonzero exit with no envelope at all — retry with backoff.** A call that fails at the
-  transport (a read timeout, a reset, an intermediary severing the held request) prints a
-  message to stderr and emits nothing on stdout, so there is no `status` to read. This is
-  transient, not an answer, and it is the concrete reason to prefer repeated short waits over
-  `--timeout-s 300`: the longer the hold, the likelier a proxy severs it. Distinguish it from
-  the case above by the absence of JSON output, not by the exit code.
+- **Nonzero exit with no envelope — check the cause before retrying.** Several failures print
+  to stderr and emit nothing on stdout, so there is no `status` to read, and they are not all
+  alike. Exit `2` is a **usage** error (a malformed `--timeout-s`, a missing argument): it is
+  permanent, and retrying it never succeeds — fix the command line. A missing or expired token
+  (`no token: run kdivectl login …`) is likewise permanent until you re-authenticate. Only a
+  no-envelope failure that is *neither* of those is the transient case: a read timeout, a
+  reset, or an intermediary severing the held request. That one is worth retrying with backoff,
+  and it is the concrete reason to prefer repeated short waits over `--timeout-s 300` — the
+  longer the hold, the likelier a proxy severs it.
 - **Exit `0` plus a non-terminal `status` — re-issue.** This is the only case that means "call
   again", and it is the only one where the call actually consumed `--timeout-s` seconds.
   Bound the loop with your own overall deadline; nothing caps how many times you re-issue.
