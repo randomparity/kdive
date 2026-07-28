@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Backfill capture_vmcore result refs to redacted ids
 - Consolidate scoped accounting and report tools
 - Collapse the curated accounting verbs onto merged tools
+- Make wait the single point-read and polling contract
 
 ### Changed
 
@@ -271,6 +272,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop curated image build/publish verbs
 - Repair live-debug so the stepping proof can run
 - Keep a union-typed request as a --request-json escape
+- Correct the point-read CLI invocation and the errors example
 
 ### Build
 
