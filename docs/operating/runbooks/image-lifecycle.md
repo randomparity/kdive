@@ -227,8 +227,8 @@ in-guest `kdump` filtered-core path is affected for a v7.0-class kernel.
 | `images upload --project P --name N --arch A --quarantine-key K [--lifetime-seconds S]` | project member | per-project | register a quarantined upload as a project-private image |
 | `images delete <image_id>` | member / operator | project-scoped; operator cross-project via break-glass | delete an unreferenced private image |
 | `images publish --provider P --name N [--packages PKG]...` | operator | `platform_operator` | enqueue `IMAGE_BUILD`, which builds, validates, and promotes to a public catalog row |
-| `images prune --expired [--reason R]` | operator | `platform_admin` break-glass | force the expired-private sweep now |
-| `images extend <image_id> --seconds S [--reason R]` | operator | `platform_admin` break-glass | re-arm a private image's lifetime |
+| `images prune-expired --expired --reason R` | operator | `platform_admin` break-glass | force the expired-private sweep now |
+| `images extend <image_id> --seconds S --reason R` | operator | `platform_admin` break-glass | re-arm a private image's lifetime |
 
 `prune` is destructive and requires the explicit `--expired` flag. An unprivileged or
 cross-project invocation is denied **and audited** (the deny path writes the audit row before
@@ -266,7 +266,9 @@ row-first (the catalog row is written before the object), so a live publish is n
   dangling sweep heals — never a rowless object.
 
 To force the expired-private sweep immediately (e.g. to reclaim quota now), an operator runs
-`kdivectl images prune-expired --expired` (`platform_admin` break-glass).
+`kdivectl images prune-expired --expired --reason "<why>"` (`platform_admin` break-glass). The
+`--reason` is the audited break-glass justification the tool requires; the CLI refuses the call
+without it rather than sending an empty one.
 
 ## Runtime tool installs on local-libvirt (operator-gated egress)
 

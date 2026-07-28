@@ -31,8 +31,8 @@ async def images_list(args: argparse.Namespace) -> int:
     """List catalog images; ``--scope public_baseline`` narrows to the baseline set (ADR-0465).
 
     An omitted ``--scope`` sends no ``request`` at all, leaving the server's ``visible`` default
-    authoritative rather than restating it here. An unrecognized value is rejected server-side
-    as a ``configuration_error``.
+    authoritative rather than restating it here. An unrecognized value is refused by argument
+    parsing: the flag's ``choices`` are the tool schema's own enum (ADR-0469).
     """
     scope = getattr(args, "scope", None)
     arguments: dict[str, object] = {} if scope is None else {"request": {"scope": scope}}

@@ -284,8 +284,9 @@ kdivectl images list --scope public_baseline         # baseline rootfs images, p
 private images owned by projects you can view, and `public_baseline` returns the public baseline
 rootfs images alone — the set `fixtures list` used to print. The response shape is the same for both
 scopes, and it is the full image row (publish state, capabilities, OS identity, default kernel), not
-the four-column fixture projection. An unrecognized scope is rejected by the server as a
-`configuration_error` (exit `2`), not by argument parsing (ADR-0465).
+the four-column fixture projection. An unrecognized scope is refused by argument parsing as a usage
+error (exit `2`) — the flag's choices are the tool schema's own enum, derived rather than restated
+(ADR-0465, ADR-0469).
 
 ## Diagnostics (`doctor`)
 
