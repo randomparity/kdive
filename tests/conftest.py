@@ -12,6 +12,12 @@ lands on an absent file (a quiet no-op) instead of reading the developer's real
 ``~/.config/kdive/systems.toml``. A test that needs a concrete file still overrides via
 ``monkeypatch.setenv`` + ``config.load()``.
 
+The one exception is a test carrying a live-tier marker (``live_stack`` / ``live_vm``). Those
+are operator-run against a real fleet that is only reachable through the inventory file, so an
+explicitly-exported ``KDIVE_SYSTEMS_TOML`` survives for them. Unsetting it unconditionally is
+what made the remote live_stack spine skip with "no [[remote_libvirt]] instance declared" on
+every host regardless of configuration — a gated tier that could never run (#1610).
+
 The autouse ``s3_backend_env`` fixture re-pins the ``KDIVE_S3_*`` configuration around every
 test, so a case that mutates it cannot leak into the next. S3 is a required backend
 (ADR-0337): ``build_object_store_assembly`` / ``build_app`` / ``build_handler_registry``
@@ -58,9 +64,32 @@ _S3_ENDPOINT_URL = os.environ["KDIVE_S3_ENDPOINT_URL"]
 _S3_BUCKET = os.environ["KDIVE_S3_BUCKET"]
 
 
+# The operator's real inventory path, captured before any fixture runs (same reasoning as
+# ``_S3_ENDPOINT_URL`` above). The gated live tiers are operator-run against a real fleet and
+# reach it through ``KDIVE_SYSTEMS_TOML``; blanket-unsetting it made the remote live_stack
+# preflight skip with "no [[remote_libvirt]] instance declared" on EVERY host, however well
+# configured, so that tier could never execute (#1610).
+_OPERATOR_SYSTEMS_TOML = os.environ.get("KDIVE_SYSTEMS_TOML")
+_LIVE_TIER_MARKERS = ("live_stack", "live_vm")
+
+
 @pytest.fixture(autouse=True)
-def sandbox_systems_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
+def sandbox_systems_toml(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sandbox the inventory path, except for an operator-run live tier.
+
+    Unit/service tests always land on an absent file, so they exercise the production XDG
+    branch without reading the developer's real ``~/.config/kdive/systems.toml``. A test
+    carrying a live-tier marker is operator-run by definition: it keeps an explicitly-exported
+    ``KDIVE_SYSTEMS_TOML``, since the fleet it drives is only reachable through that file.
+    ``XDG_CONFIG_HOME`` is sandboxed either way — the implicit default path is never honored.
+    """
+    live_tier = any(request.node.get_closest_marker(m) for m in _LIVE_TIER_MARKERS)
+    if live_tier and _OPERATOR_SYSTEMS_TOML:
+        monkeypatch.setenv("KDIVE_SYSTEMS_TOML", _OPERATOR_SYSTEMS_TOML)
+    else:
+        monkeypatch.delenv("KDIVE_SYSTEMS_TOML", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
 
 
