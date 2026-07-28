@@ -99,11 +99,22 @@ do_boot() {
   echo "kdive slot selected for next boot; reboot scheduled"
 }
 
+# Report whether this guest reserved crashkernel memory and whether the capture kernel is
+# actually loaded. The caller gates runs.boot on this: arming happens well after the guest
+# is otherwise up (the in-guest kdump service builds a dracut initramfs first), and crashing
+# an unarmed guest yields no vmcore. Read through the helper because the guest-agent exec
+# surface is allowlisted to these helpers -- a raw `cat` is refused.
+do_kdump_status() {
+  printf 'crash_size=%s\n' "$(cat /sys/kernel/kexec_crash_size 2>/dev/null || echo 0)"
+  printf 'crash_loaded=%s\n' "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)"
+}
+
 cmd="${1:-}"
 shift || true
 case "$cmd" in
 install) do_install "$@" ;;
 boot-id) cat /proc/sys/kernel/random/boot_id ;;
 boot) do_boot ;;
-*) die "unknown subcommand: ${cmd:-<none>} (expected install|boot-id|boot)" ;;
+kdump-status) do_kdump_status ;;
+*) die "unknown subcommand: ${cmd:-<none>} (expected install|boot-id|boot|kdump-status)" ;;
 esac

@@ -440,7 +440,9 @@ def test_boot_runs_baseline_reboot_and_poll_against_the_systems_domain() -> None
     assert set(seen_domains) == {expected_domain}  # every helper call hit the right domain
     assert argv_subs[0] == "boot-id"  # baseline read first
     assert "boot" in argv_subs  # reboot triggered
-    assert argv_subs[-1] == "boot-id"  # confirmed by a fresh boot-id read
+    # A fresh boot-id confirms the reboot, then the kdump arming gate has the last word (#1610).
+    assert argv_subs[-2] == "boot-id"
+    assert argv_subs[-1] == "kdump-status"
 
 
 def test_boot_times_out_when_boot_id_never_changes() -> None:
@@ -525,3 +527,60 @@ def test_boot_sleeps_the_configured_poll_interval_between_boot_id_polls() -> Non
     inst.boot(uuid4())
 
     assert 7.0 in slept
+
+
+# --- boot gates on kdump arming (#1610) -----------------------------------------------------
+#
+# runs.boot used to report ready while the guest's capture kernel was still loading, so a
+# force_crash straight after boot panicked a guest with no kdump behind it: no vmcore, and with
+# the default kernel.panic=0 the guest hung, surfacing much later as a capture readiness_failure.
+
+
+def _kdump_handler(
+    *, crash_size: int, loaded_sequence: list[int], state: dict[str, int]
+) -> _Handler:
+    """A boot handler that also answers the helper's kdump-status subcommand."""
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        sub = argv[1]
+        if sub == "kdump-status":
+            state["status_reads"] += 1
+            idx = min(state["status_reads"] - 1, len(loaded_sequence) - 1)
+            body = f"crash_size={crash_size}\ncrash_loaded={loaded_sequence[idx]}\n"
+            return AgentExecResult(0, body.encode(), b"")
+        if sub == "boot":
+            state["reboots"] += 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        return AgentExecResult(0, b"BASELINE-ID\n" if state["reboots"] == 0 else b"FRESH-ID\n", b"")
+
+    return handler
+
+
+def test_boot_waits_until_the_capture_kernel_is_armed() -> None:
+    state = {"reboots": 0, "status_reads": 0}
+    handler = _kdump_handler(crash_size=268435456, loaded_sequence=[0, 0, 1], state=state)
+
+    _boot_install(handler).boot(uuid4())
+
+    assert state["status_reads"] >= 3, "boot returned before the capture kernel was loaded"
+
+
+def test_boot_times_out_when_the_capture_kernel_never_arms() -> None:
+    state = {"reboots": 0, "status_reads": 0}
+    handler = _kdump_handler(crash_size=268435456, loaded_sequence=[0], state=state)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler, boot_timeout_s=600.0).boot(uuid4())
+
+    assert excinfo.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert "never armed" in str(excinfo.value)
+
+
+def test_boot_skips_the_kdump_gate_without_a_crashkernel_reservation() -> None:
+    # No reservation => not a kdump System; the non-kdump path must not pay the arming wait.
+    state = {"reboots": 0, "status_reads": 0}
+    handler = _kdump_handler(crash_size=0, loaded_sequence=[0], state=state)
+
+    _boot_install(handler).boot(uuid4())
+
+    assert state["status_reads"] == 1, "should decide from one status read and move on"

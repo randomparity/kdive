@@ -68,6 +68,10 @@ _DEFAULT_GET_EXPIRY_S = 3600
 _DEFAULT_INSTALL_TIMEOUT_S = 1800.0
 _DEFAULT_BOOT_TIMEOUT_S = 300.0
 _DEFAULT_BOOT_POLL_S = 2.0
+# Arming the capture kernel means dracut building a kdump initramfs in-guest, which took ~90s
+# on a Rocky 10 guest. It runs AFTER the guest is otherwise up, so the boot window alone does
+# not cover it.
+_DEFAULT_KDUMP_ARM_TIMEOUT_S = 300.0
 # Reboot tears down the guest agent, so the boot command and the post-reboot boot-id polls expect
 # the agent to be unreachable / its reply truncated; those categories are swallowed as "still
 # rebooting" rather than treated as failures (ADR-0082 §3).
@@ -124,6 +128,7 @@ class RemoteLibvirtInstall:
         install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
         boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
         boot_poll_s: float = _DEFAULT_BOOT_POLL_S,
+        kdump_arm_timeout_s: float = _DEFAULT_KDUMP_ARM_TIMEOUT_S,
         sleep: Sleep = time.sleep,
         monotonic: Monotonic = time.monotonic,
     ) -> None:
@@ -140,6 +145,7 @@ class RemoteLibvirtInstall:
         self._install_timeout_s = install_timeout_s
         self._boot_timeout_s = boot_timeout_s
         self._boot_poll_s = boot_poll_s
+        self._kdump_arm_timeout_s = kdump_arm_timeout_s
         self._sleep = sleep
         self._monotonic = monotonic
 
@@ -216,11 +222,15 @@ class RemoteLibvirtInstall:
         detached reboot, then polls boot_id until it differs from the baseline — proving a real
         boot transition (a stale agent connection cannot fake a new boot_id, ADR-0082 §3).
 
+        A guest that reserved crashkernel memory is a kdump System, so boot does not report
+        ready until its capture kernel is actually loaded (see :meth:`_await_kdump_armed`).
+
         Raises:
             CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
                 boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
                 before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
-                window (a panic/hang manifests as the agent never reconnecting).
+                window (a panic/hang manifests as the agent never reconnecting), or when a
+                crashkernel-reserving guest never arms its capture kernel.
         """
         del accel  # remote-libvirt is KVM (accel=NULL); TCG scaling is local-only (ADR-0341)
         config = self._config_factory()
@@ -230,6 +240,78 @@ class RemoteLibvirtInstall:
             baseline = self._read_boot_id(agent_exec, domain, system_id)
             self._trigger_reboot(agent_exec, domain)
             self._await_fresh_boot(agent_exec, domain, baseline, system_id)
+            self._await_kdump_armed(agent_exec, domain, system_id)
+
+    @staticmethod
+    def _parse_kdump_status(stdout: bytes) -> tuple[int, int] | None:
+        """Parse the helper's ``crash_size=``/``crash_loaded=`` reply.
+
+        ``None`` when the reply is not that shape, which the caller reads as "cannot determine".
+        """
+        fields: dict[str, int] = {}
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            try:
+                fields[key.strip()] = int(value.strip())
+            except ValueError:
+                continue
+        if "crash_size" not in fields or "crash_loaded" not in fields:
+            return None
+        return fields["crash_size"], fields["crash_loaded"]
+
+    def _await_kdump_armed(
+        self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID
+    ) -> None:
+        """Block until a crashkernel-reserving guest has loaded its capture kernel.
+
+        The guest itself says whether kdump is intended: a non-zero ``kexec_crash_size`` means
+        the ``crashkernel=`` reservation took, so this System exists to be crashed and captured.
+        Arming is what makes that possible, and it happens well after the guest is otherwise up
+        — the in-guest kdump service builds a dracut initramfs first (~90s on Rocky 10).
+
+        Without this gate ``runs.boot`` reported ready while ``kexec_crash_loaded`` was still 0,
+        so a ``control.force_crash`` immediately after boot panicked a guest with no capture
+        kernel behind it. Nothing then wrote a vmcore, and (with the default ``kernel.panic=0``)
+        the guest hung instead of rebooting, surfacing ~15 minutes later as an opaque capture
+        ``readiness_failure`` rather than at the point of the mistake (#1610).
+
+        A guest with no reservation is not a kdump System and is skipped, so nothing here slows
+        the non-kdump path. A guest whose helper cannot answer at all — an image staged before
+        the ``kdump-status`` subcommand existed — is also skipped rather than failed: a newer
+        server must not brick an older staged image, and skipping is no worse than the behaviour
+        this gate replaces.
+        """
+        deadline = self._monotonic() + self._kdump_arm_timeout_s
+        while True:
+            try:
+                result = agent_exec.run(domain, [_HELPER, "kdump-status"])
+            except CategorizedError as exc:
+                if exc.category is ErrorCategory.CONFIGURATION_ERROR:
+                    raise  # a refused program is a real fault, not the agent still rebooting
+                result = None  # agent still coming back after the reboot; retry
+            if result is not None:
+                if result.exit_status != 0:
+                    _log.debug("guest helper has no kdump-status; skipping the arming gate")
+                    return
+                status = self._parse_kdump_status(result.stdout)
+                if status is None:
+                    _log.debug("guest helper gave no kdump status; skipping the arming gate")
+                    return
+                crash_size, crash_loaded = status
+                if crash_size <= 0 or crash_loaded == 1:
+                    return  # not a kdump System, or already armed
+            if self._monotonic() >= deadline:
+                raise CategorizedError(
+                    "guest reserved crashkernel memory but never armed its capture kernel; "
+                    "a crash would produce no vmcore",
+                    category=ErrorCategory.BOOT_TIMEOUT,
+                    details={
+                        "system_id": str(system_id),
+                        "kexec_crash_loaded": 0,
+                        "hint": "check kdump.service in the guest (journalctl -u kdump.service)",
+                    },
+                )
+            self._sleep(self._boot_poll_s)
 
     def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
         result = agent_exec.run(domain, [_HELPER, "boot-id"])
