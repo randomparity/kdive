@@ -175,7 +175,7 @@ def test_inventory_show_lists_rows(monkeypatch: pytest.MonkeyPatch, capsys) -> N
         _collection([_item("k1", "ok", {"key": "k1", "backend": "minio", "status": "ready"})]),
     )
     asyncio.run(reads.inventory_show(_args(project=None)))
-    assert client.calls == [("inventory.list", {})]
+    assert client.calls == [("inventory.list", {"request": {}})]
     out = capsys.readouterr().out
     assert "minio" in out and "ready" in out
 
@@ -351,7 +351,9 @@ def test_inventory_show_json_emits_whole_envelope_and_passes_project_filter(
     )
     client = _install_session(monkeypatch, envelope)
     asyncio.run(reads.inventory_show(argparse.Namespace(json=True, project="proj-a")))
-    assert client.calls == [("inventory.list", {"project": "proj-a"})]
+    # ``inventory.list`` takes its filters inside the ``request`` wrapper; this pinned the flat
+    # payload the tool rejects until the schema guard caught it (#1611).
+    assert client.calls == [("inventory.list", {"request": {"project": "proj-a"}})]
     assert json.loads(capsys.readouterr().out) == envelope
 
 

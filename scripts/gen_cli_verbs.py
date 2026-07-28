@@ -7,7 +7,8 @@ read ``list_tools()``, and run a pure transform over the schemas — here into a
 (#1450), and ``--param-json`` escape (#1449) are separate downstream entries; this
 generator only emits the descriptor data.
 
-Per parameter (after unwrapping the Pydantic ``[T, null]`` optional wrapper): JSON-Schema
+Per parameter (after resolving any ``#/$defs`` reference and unwrapping the Pydantic
+``[T, null]`` optional wrapper): JSON-Schema
 ``type`` -> argparse type (``string``/``integer``/``number`` -> ``str``/``int``/``float``,
 ``boolean`` -> ``store_true``); ``enum`` -> ``choices``; array-of-string -> ``append``;
 ``required`` -> ``required=True``; ``description`` -> flag help. Flag names come from
@@ -20,6 +21,10 @@ scalar body fields as flat flags (``unwrap_request=True``); a re-wrap under a si
 object arrays, tuple/typeless arrays, scalar unions) get no flag and are recorded in
 ``json_params`` for the #1449 escape.
 
+A tool that declares required parameters but derives neither a flag nor a JSON escape is a
+generation error, not a silently argument-less verb: the drift check cannot catch that case
+because it compares an empty generation against an equally empty commit (ADR-0469).
+
 Run via ``just cli-verbs`` (write) / ``just cli-verbs-check`` (verify; joins ``just ci``).
 """
 
@@ -30,7 +35,9 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
@@ -60,36 +67,70 @@ from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 _SCALAR_ARGTYPE = {"string": "str", "integer": "int", "number": "float"}
 
+#: The empty ``$defs`` table, for schemas that define no reusable subschemas.
+_NO_DEFS: Mapping[str, Any] = MappingProxyType({})
 
-def _unwrap_optional(spec: dict[str, Any]) -> dict[str, Any] | None:
+_REF_PREFIX = "#/$defs/"
+
+
+def _resolve_ref(spec: dict[str, Any], defs: Mapping[str, Any]) -> dict[str, Any]:
+    """Follow a local ``#/$defs/<name>`` reference to the subschema it names.
+
+    fastmcp inlines most models, but a reused one — a ``StrEnum`` in particular — renders as a
+    bare ``$ref``. Left unresolved that parameter looks typeless, so it loses its ``enum`` ->
+    ``choices`` and falls through to the ``--<param>-json`` escape, which then rejects the bare
+    string the enum actually wants (#1584, ADR-0469). Keywords spelled alongside the ``$ref``
+    (a per-field ``description``) stay authoritative over the target's. A dangling or cyclic
+    reference is returned unresolved rather than raising, so an unexpected schema shape
+    degrades to the JSON escape instead of breaking generation.
+    """
+    seen: set[str] = set()
+    while isinstance(ref := spec.get("$ref"), str) and ref.startswith(_REF_PREFIX):
+        name = ref.removeprefix(_REF_PREFIX)
+        target = defs.get(name)
+        if name in seen or not isinstance(target, dict):
+            return spec
+        seen.add(name)
+        spec = {**target, **{k: v for k, v in spec.items() if k != "$ref"}}
+    return spec
+
+
+def _unwrap_optional(
+    spec: dict[str, Any], defs: Mapping[str, Any] = _NO_DEFS
+) -> dict[str, Any] | None:
     """Collapse a Pydantic ``anyOf: [T, null]`` optional to ``T``; else return ``spec``.
 
     Returns ``None`` for a genuine multi-member union (e.g. ``number | string``), which has
     no single argparse type and is deferred to the ``--param-json`` escape (#1449).
+    Both the wrapper and the surviving member are ``$ref``-resolved (:func:`_resolve_ref`).
     """
+    spec = _resolve_ref(spec, defs)
     variants = spec.get("anyOf")
     if not isinstance(variants, list):
         return spec
-    non_null = [v for v in variants if isinstance(v, dict) and v.get("type") != "null"]
+    members = [_resolve_ref(v, defs) for v in variants if isinstance(v, dict)]
+    non_null = [v for v in members if v.get("type") != "null"]
     return non_null[0] if len(non_null) == 1 else None
 
 
-def _object_body(spec: dict[str, Any]) -> dict[str, Any] | None:
+def _object_body(spec: dict[str, Any], defs: Mapping[str, Any] = _NO_DEFS) -> dict[str, Any] | None:
     """Return the object subschema of a ``request`` wrapper (``{object}`` or ``[object, null]``)."""
-    body = _unwrap_optional(spec)
+    body = _unwrap_optional(spec, defs)
     if body is not None and "properties" in body:
         return body
     return None
 
 
-def _flag_for(dest: str, spec: dict[str, Any], required: bool) -> GeneratedFlag | None:
+def _flag_for(
+    dest: str, spec: dict[str, Any], required: bool, defs: Mapping[str, Any] = _NO_DEFS
+) -> GeneratedFlag | None:
     """Derive the ``--flag`` for a parameter, or ``None`` when it is not scalar-derivable.
 
     Raises:
         ValueError: The parameter derives to a reserved flag (should be impossible; the
             collision guard already asserts it, so this is a fail-loud backstop).
     """
-    effective = _unwrap_optional(spec)
+    effective = _unwrap_optional(spec, defs)
     if effective is None:
         return None
     flag = derive_cli_flag(dest)
@@ -121,16 +162,23 @@ def _flag_for(dest: str, spec: dict[str, Any], required: bool) -> GeneratedFlag 
 
 
 def _verb_for(tool: Any) -> GeneratedVerb:
-    """Transform one registered tool into its :class:`GeneratedVerb` descriptor."""
+    """Transform one registered tool into its :class:`GeneratedVerb` descriptor.
+
+    Raises:
+        ValueError: The tool declares required parameters but derives neither a flag nor a
+            ``--<param>-json`` escape, which would emit an uninvokable verb (ADR-0469).
+    """
     group, op = tool.name.split(".", 1)
     ann = tool.annotations
     help_ = " ".join((tool.description or "").strip().split("\n")[0].split())
     schema = tool.parameters or {}
+    defs = schema.get("$defs") or _NO_DEFS
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
+    top_required = set(required)
     unwrap = set(props) == {"request"}
     if unwrap:
-        body = _object_body(props["request"])
+        body = _object_body(props["request"], defs)
         if body is None:
             # A ``request`` that is not a single object (a discriminated union such as
             # ``accounting.report``) has no body to flatten. Keep it as a whole-parameter
@@ -143,11 +191,19 @@ def _verb_for(tool: Any) -> GeneratedVerb:
     flags: list[GeneratedFlag] = []
     json_params: list[str] = []
     for name, spec in props.items():
-        flag = _flag_for(name, spec, name in required)
+        flag = _flag_for(name, spec, name in required, defs)
         if flag is None:
             json_params.append(name)
         else:
             flags.append(flag)
+    if not flags and not json_params and (required or top_required):
+        # An argument-less verb for a tool that demands arguments is uninvokable, and the
+        # artifact drift check cannot see it: it compares an empty generation against an
+        # equally empty commit and passes (#1588, ADR-0469).
+        raise ValueError(
+            f"{tool.name!r} requires {sorted(required or top_required)} but derives no flags "
+            "and no --<param>-json escape; the verb would be uninvokable"
+        )
     return GeneratedVerb(
         group=group,
         sub=op.replace("_", "-"),

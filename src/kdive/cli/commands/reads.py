@@ -55,8 +55,10 @@ def _payload(args: argparse.Namespace, *names: str) -> dict[str, object]:
     return payload
 
 
-async def _list(name: str, args: argparse.Namespace, columns: list[str], *params: str) -> int:
-    envelope = await _fetch(name, _payload(args, *params))
+async def _list(
+    name: str, args: argparse.Namespace, columns: list[str], payload: Mapping[str, object]
+) -> int:
+    envelope = await _fetch(name, payload)
     emit(envelope, lambda: render(collection_rows(envelope), columns=columns), as_json=args.json)
     return exit_code_for_envelope(envelope)
 
@@ -168,7 +170,13 @@ async def ledger_get(args: argparse.Namespace) -> int:
 
 
 async def inventory_show(args: argparse.Namespace) -> int:
-    return await _list("inventory.list", args, ["key", "backend", "status"], "project")
+    """Cross-project inventory summary, optionally narrowed by ``--project``.
+
+    ``inventory.list`` takes its filters inside a ``request`` wrapper, like the other list
+    tools, so ``--project`` goes there rather than at the top level of the payload.
+    """
+    request = {"request": _payload(args, "project")}
+    return await _list("inventory.list", args, ["key", "backend", "status"], request)
 
 
 _GRANTED_SET_SCOPE = "granted-set"

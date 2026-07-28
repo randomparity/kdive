@@ -193,6 +193,73 @@ def test_nested_object_parameter_defers_to_json_params() -> None:
     assert verb.flags == () and verb.json_params == ("profile",)
 
 
+def test_ref_into_defs_resolves_to_its_enum_choices() -> None:
+    """A ``$ref``-rendered enum keeps its ``choices`` instead of falling to the JSON escape.
+
+    fastmcp inlines most models, but a reused ``StrEnum`` renders as a bare ``$ref``. Left
+    unresolved the parameter looks typeless, so it becomes ``--mode-json`` — which then rejects
+    the bare string the enum accepts (#1584, ADR-0469).
+    """
+    tool = _tool(
+        "demo.run",
+        {
+            "$defs": {"Mode": {"enum": ["passive", "force"], "type": "string"}},
+            "properties": {
+                "mode": {
+                    "anyOf": [{"$ref": "#/$defs/Mode"}, {"type": "null"}],
+                    "description": "How to run.",
+                }
+            },
+            "required": ["mode"],
+        },
+    )
+    verb = gen._verb_for(tool)
+    assert verb.json_params == ()
+    (flag,) = verb.flags
+    assert flag.choices == ("passive", "force") and flag.arg_type == "str"
+    assert flag.help == "How to run."
+
+
+def test_ref_into_defs_resolves_a_request_wrapper_body() -> None:
+    tool = _tool(
+        "demo.list",
+        {
+            "$defs": {
+                "Req": {
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}},
+                    "required": [],
+                }
+            },
+            "properties": {"request": {"$ref": "#/$defs/Req"}},
+        },
+    )
+    verb = gen._verb_for(tool)
+    assert verb.unwrap_request is True
+    assert [f.dest for f in verb.flags] == ["limit"]
+
+
+def test_dangling_ref_degrades_to_the_json_escape() -> None:
+    """An unresolvable reference does not break generation; the param keeps its JSON escape."""
+    tool = _tool("demo.run", {"properties": {"mode": {"$ref": "#/$defs/Absent"}}})
+    assert gen._verb_for(tool).json_params == ("mode",)
+
+
+def test_required_tool_with_no_derivable_parameter_raises() -> None:
+    """A required-but-flagless verb is a generation error, not a silently uninvokable verb.
+
+    The drift check cannot catch this: it compares an empty generation against an equally empty
+    committed descriptor and passes (#1588, ADR-0469).
+    """
+    tool = _tool("demo.run", {"properties": {}, "required": ["request"]})
+    with pytest.raises(ValueError, match="uninvokable"):
+        gen._verb_for(tool)
+
+
+def test_tool_with_no_parameters_at_all_is_not_an_error() -> None:
+    assert gen._verb_for(_tool("demo.ping", {"properties": {}})).flags == ()
+
+
 def test_parameter_deriving_to_a_reserved_flag_raises() -> None:
     reserved = next(iter(RESERVED_CLI_FLAGS)).removeprefix("--").replace("-", "_")
     with pytest.raises(ValueError, match="reserved flag"):
