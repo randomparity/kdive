@@ -224,3 +224,67 @@ def test_close_transport_still_validates_schemed_gdbstub_handle():
     c.close_transport(TransportHandleData(kind="gdbstub", host="10.0.0.5", port=47002).encode())
     with pytest.raises(CategorizedError):
         c.close_transport(TransportHandle("gdbstub://"))  # schemed but malformed → rejected
+
+
+# --- the gdbstub port read: a real production read, not a stub (#1610) ----------------------
+#
+# The default resolve_port used to be a module-level stub that always raised
+# MISSING_DEPENDENCY, so a remote gdbstub attach could never succeed in production however the
+# host was configured — the live proof surfaced it as debug_attach_failure. These pin the real
+# read, mirroring the recorded_ssh_endpoint tests above.
+
+
+def _gdb_domain_xml(gdb_port: int, *, gdb_addr: str = "10.0.0.5") -> str:
+    """The `-gdb tcp:<addr>:<port>` pair provisioning records (matches a live domain's XML)."""
+    return (
+        f"<domain xmlns:qemu='{_QEMU_NS}'><qemu:commandline>"
+        "<qemu:arg value='-gdb'/>"
+        f"<qemu:arg value='tcp:{gdb_addr}:{gdb_port}'/>"
+        "</qemu:commandline></domain>"
+    )
+
+
+def _gdb_connect(xml_by_name: dict[str, str], config: RemoteLibvirtConfig) -> RemoteLibvirtConnect:
+    """A connect plane with the REAL resolve_port (no injected stub) over a canned connection."""
+    return RemoteLibvirtConnect(
+        config_factory=lambda: config,
+        probe=lambda host, port: True,
+        open_connection=lambda uri: _SshReadConn(xml_by_name),
+        secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
+    )
+
+
+def test_open_transport_reads_the_recorded_gdb_port_from_live_xml() -> None:
+    connect = _gdb_connect({_DOMAIN: _gdb_domain_xml(47001)}, _config(gdb_addr="10.0.0.5"))
+
+    handle = connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+
+    assert TransportHandleData.decode(handle).port == 47001
+
+
+def test_open_transport_gdb_port_is_a_real_read_not_missing_dependency() -> None:
+    # Regression for #1610: the default resolver must not be the MISSING_DEPENDENCY stub.
+    connect = _gdb_connect({_DOMAIN: _gdb_domain_xml(47001)}, _config(gdb_addr="10.0.0.5"))
+
+    handle = connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+
+    assert TransportHandleData.decode(handle).kind == "gdbstub"
+
+
+def test_open_transport_absent_domain_is_attach_failure() -> None:
+    connect = _gdb_connect({}, _config(gdb_addr="10.0.0.5"))
+
+    with pytest.raises(CategorizedError) as excinfo:
+        connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+
+    assert excinfo.value.category is ErrorCategory.DEBUG_ATTACH_FAILURE
+
+
+def test_open_transport_domain_without_a_gdb_port_is_configuration_error() -> None:
+    # Provisioned without a gdbstub: a config fault, distinct from a failed read.
+    connect = _gdb_connect({_DOMAIN: _domain_xml(47101)}, _config(gdb_addr="10.0.0.5"))
+
+    with pytest.raises(CategorizedError) as excinfo:
+        connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
