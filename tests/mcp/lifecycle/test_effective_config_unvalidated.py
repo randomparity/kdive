@@ -38,10 +38,11 @@ from tests.mcp.complete_build_support import pool as _pool
 from tests.mcp.complete_build_support import seed_run as _seed_run
 from tests.mcp.systems_support import provider_resolver
 
-# A real, non-degenerate config that still lacks the ext4 direct-kernel boot set: it enables an
-# unrelated symbol but neither EXT4_FS nor VIRTIO_BLK, so the advisory fires (fail-open only
-# suppresses on an absent/unreadable/degenerate config, not on this one).
-_BAD_CONFIG = b"CONFIG_XFS_FS=y\n# CONFIG_EXT4_FS is not set\n# CONFIG_VIRTIO_BLK is not set\n"
+# A real, non-degenerate config that still lacks the direct-kernel boot set: it enables an
+# unrelated symbol but no root filesystem kdive boots from and no VIRTIO_BLK, so the advisory fires
+# (fail-open only suppresses on an absent/unreadable/degenerate config, not on this one). btrfs, not
+# XFS: #1626 made XFS_FS a satisfying member of the rootfs_mount {EXT4_FS, XFS_FS} OR-group.
+_BAD_CONFIG = b"CONFIG_BTRFS_FS=y\n# CONFIG_EXT4_FS is not set\n# CONFIG_VIRTIO_BLK is not set\n"
 
 
 def _patched_load(config: KernelConfig | None) -> Any:
@@ -216,7 +217,7 @@ def test_bad_effective_config_uploads_completes_and_warns(migrated_url: str) -> 
         # ...but the success envelope now carries the non-blocking boot-config advisory.
         warning = cast("dict[str, Any]", resp.data["missing_boot_config"])
         assert warning["reason"] == MISSING_BOOT_CONFIG_REASON
-        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK"]
+        assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
         assert resp.suggested_next_actions == ["runs.get"]
         assert resp.refs["external_build_contract"] == EXTERNAL_BUILD_CONTRACT_URI
 
