@@ -12,9 +12,11 @@ the same strings are comparable with PoC failure categories where the names over
 
 A failed response has `status` equal to `failed` or `error`, and `error_category`
 set to one of the values below. The `suggested_next_actions` list in that envelope
-tells the agent what to call next (e.g. `["allocations.release"]` after a completed
-teardown). A terminal job envelope carries only kind-specific steers — re-reading the
-row it was just handed is not a next action. The
+tells the agent what to call next (e.g. `["allocations.wait"]` on the `stale_handle`
+returned by releasing a lease that already expired — read the allocation's real state).
+The list may be empty when there is nothing useful to call: a terminal job envelope
+already carries the outcome, so re-reading the row it was just handed is not a next
+action. The
 `data` field may carry structured context such as `current_status` for sequencing
 errors.
 

@@ -64,7 +64,8 @@ exact envelope.
 `add_subparsers()` only emits a curated `Verb` at a path a generated verb already occupies, so
 `Verb("jobs", "get", …)` and `Verb("allocations", "get", …)` become unreachable. Both, plus
 `reads.jobs_get` / `reads.allocations_get`, are deleted. The generated
-`kdivectl jobs wait <id> --timeout-s 0` serves the point read.
+`kdivectl jobs wait --job-id <id> --timeout-s 0` serves the point read (a generated verb takes
+its tool parameters as required flags, not positionals).
 
 ### Agent-facing prose
 

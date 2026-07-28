@@ -167,8 +167,8 @@ the generated wait verb with a zero timeout, which does one lookup and returns w
 blocking:
 
 ```bash
-kdivectl jobs wait <job_id> --timeout-s 0
-kdivectl allocations wait <allocation_id> --timeout-s 0
+kdivectl jobs wait --job-id <job_id> --timeout-s 0
+kdivectl allocations wait --allocation-id <allocation_id> --timeout-s 0
 ```
 
 `--json` may be given before or after the verb (`kdivectl --json resources list` or
