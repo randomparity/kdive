@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fold register_* wrappers into resources.register
 - Fold fixtures.list into images.list
 - Replace debug step variants with debug.advance
+- Correct _input_schemas' contract in its docstring
 
 ### Documentation
 
@@ -276,6 +277,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep a union-typed request as a --request-json escape
 - Correct the point-read CLI invocation and the errors example
 - Stop leaking /tmp entries from test helpers
+- Resolve tool schemas past the gateway surface
+- Name an unresolvable schema and guard the namespace map
 
 ### Build
 
