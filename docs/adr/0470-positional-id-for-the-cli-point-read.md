@@ -98,13 +98,13 @@ silently reinterpreted rather than rejected, which is the failure mode this deci
 zero stays legal, because it is the documented point read.
 
 *Non-finite.* `float()` accepts `inf`, `-inf` and `nan`; JSON can encode none of them, so
-pydantic serializes all three to `null` on the way out. The tool would be handed `null` for a
-property it declares as a `number`, and the transport raises before the tool's own
-`math.isfinite` check can return its `configuration_error` — and `main()` has no exception
-handling, so the operator gets a traceback and exit `1` rather than the exit `2` every other
-malformed `--timeout-s` produces. This is also the one payload defect ADR-0469's guard cannot
-see, since it validates the Python payload before serialization, where `inf` satisfies
-`"type": "number"`.
+pydantic serializes all three to `null` on the way out — silently, without raising. The tool is
+handed `null` for a property it declares as a `number`, so its own `math.isfinite` check never
+runs and the `configuration_error` it would have returned never happens. What the operator gets
+instead is the opaque failure of a rejected request at exit `1`, rather than the explicit exit
+`2` and named cause every other malformed `--timeout-s` produces. This is also the one payload
+defect ADR-0469's guard cannot see, since it validates the Python payload before serialization,
+where `inf` satisfies `"type": "number"`.
 
 *Negative.* Both handlers compute `min(max(timeout_s, 0.0), MAX_WAIT_S)`, so a negative is
 clamped to `0` — by ADR-0468's own construction, exactly one query and an immediate return.
