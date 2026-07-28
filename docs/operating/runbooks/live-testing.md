@@ -35,7 +35,9 @@ live_stack"`, so none of the tiers below run in the ordinary gate. Each tier
 The `live_vm` tier spans four families (below); `just test-live` runs all of them
 (each gated), and one — the remote-libvirt family, which drives a remote
 `qemu+tls://` host rather than local silicon — additionally has a focused
-`just test-live-remote` recipe (`-m live_vm_remote`) for driving it on its own.
+`just test-live-remote` recipe (`-m live_vm_remote`) for driving it on its own —
+which has no carriers yet and so fails by design (see the `live_vm_remote`
+section below).
 
 `live_vm_tcg` is deliberately **not** a throwaway-domain test: by ADR-0353 every
 `live_vm_tcg` proof also carries the `live_stack` marker and runs the spine over
@@ -164,8 +166,19 @@ provisioning-parity notes in [AGENTS.md](../../../AGENTS.md)).
 ### `live_vm_remote` — direct provider ops against a remote `qemu+tls://` host
 
 ```
-just test-live-remote  # -m live_vm_remote; skips cleanly with no remote env
+just test-live-remote  # -m live_vm_remote; a carrier skips cleanly with no remote env
 ```
+
+**This family has no carriers yet, so the recipe currently fails by design (#1627).**
+ADR-0425 shipped the marker, the `RemoteContract`, and `require_live_vm_remote()`
+ahead of the first remote proof. Until one is marked, `-m live_vm_remote` collects
+nothing (pytest exit 5) and the recipe reports that rather than exiting 0 — an empty
+run proves nothing, so it must not read as a pass.
+
+Call `require_live_vm_remote()` **inside** the test function, as the other families
+do. A gate at module level (`pytest.skip(..., allow_module_level=True)`) also yields
+exit 5, so an absent remote environment would fail this recipe instead of skipping
+cleanly; gated inside the test, it is a reported skip and exit 0.
 
 This drives the remote-libvirt family (a sub-selection of `live_vm`, also run by
 `just test-live`) directly against an operator-provided `qemu+tls://` host. Set
