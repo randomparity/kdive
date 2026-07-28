@@ -16,6 +16,8 @@ import pytest
 
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.schema.tool_index import NAMESPACE_TOC
+from kdive.mcp.tools.gateway import _SEARCH_LIMIT_MAX
+from scripts.gen_tool_reference import _registry_tools
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,8 +28,13 @@ _FLAT_SCHEMA: dict[str, Any] = {"properties": {"allocation_id": {"type": "string
 _SEARCHABLE: dict[str, dict[str, Any]] = {
     "allocations.list": _REQUEST_SCHEMA,
     "allocations.release": _FLAT_SCHEMA,
+    "control.capture_traffic": _FLAT_SCHEMA,
     "runs.list": _REQUEST_SCHEMA,
 }
+# Ranking really is cross-namespace: on the live registry 35 of 123 tools do not rank first for
+# their own exact name, and `jobs.wait` ranks behind `control.capture_traffic`. The fake ranks
+# this decoy first for every query so neither `matches[0]` nor a namespace-prefix filter passes.
+_TOP_RANKED_DECOY = "control.capture_traffic"
 
 
 def _load_live_debug() -> ModuleType:
@@ -96,12 +103,17 @@ class _Client:
         if namespace is not None:
             hits = sorted(n for n in self._searchable if n.startswith(f"{namespace}."))
         else:
-            # The server ranks lexically over name + description + keywords + schema text, so a
-            # sibling in the same namespace can outrank the exact name. Order the exact match
-            # LAST so a `matches[0]` shortcut picks the wrong tool's schema.
+            # The server scores lexically over name + description + keywords + schema text, which
+            # is not namespace-aware: an unrelated tool routinely outranks the exact name. Rank
+            # the decoy first and the exact match last, so neither `matches[0]` nor a
+            # same-namespace filter can pass for the right reason.
             hits = sorted(
-                (n for n in self._searchable if _same_namespace(n, str(query))),
-                key=lambda n: (n == query, n),
+                (
+                    n
+                    for n in self._searchable
+                    if n == _TOP_RANKED_DECOY or _same_namespace(n, str(query))
+                ),
+                key=lambda n: (n != _TOP_RANKED_DECOY, n == query, n),
             )
         matches = [{"name": n, "input_schema": self._searchable[n]} for n in hits]
         return {"matches": matches, "truncated": False}
@@ -165,7 +177,10 @@ def test_call_resolves_a_non_core_tool_schema_through_tools_search() -> None:
     )
 
     assert result["object_id"] == "allocations.list"
-    assert _Client.calls[0] == ("tools.search", {"query": "allocations.list", "limit": 50})
+    assert _Client.calls[0] == (
+        "tools.search",
+        {"query": "allocations.list", "limit": _SEARCH_LIMIT_MAX},
+    )
     # The searched schema is the single-`request` one, so the flat args got wrapped. Taking
     # `matches[0]` instead would have picked the higher-ranked flat sibling and left them flat.
     assert _Client.calls[1] == ("allocations.list", {"request": {"project": "demo"}})
@@ -636,6 +651,22 @@ def test_main_routes_sync_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen == ["transcript:s1", "reload"]
 
 
+def test_namespace_toc_covers_every_live_namespace() -> None:
+    """`tools` enumerates NAMESPACE_TOC, so a namespace missing from it becomes undiscoverable.
+
+    The instructions guard in tests/mcp/test_tool_index.py asserts each namespace appears in the
+    rendered instructions *text*, which a name like ``session`` or ``tools`` satisfies from the
+    surrounding prose alone. This asserts the key itself.
+    """
+    live = {tool.name.split(".", 1)[0] for tool in _registry_tools()}
+
+    assert live <= set(NAMESPACE_TOC), (
+        f"namespaces missing from NAMESPACE_TOC: {sorted(live - set(NAMESPACE_TOC))}\n"
+        "Add them in src/kdive/mcp/schema/tool_index.py; live-debug.py's `tools` command "
+        "enumerates that dict and would silently hide them."
+    )
+
+
 def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -661,7 +692,7 @@ def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(
     assert rc == 0
     searched = [args["namespace"] for tool, args in _Client.calls if tool == "tools.search"]
     assert searched == sorted(NAMESPACE_TOC)
-    assert all(args["limit"] == 50 for _tool, args in _Client.calls)
+    assert all(args["limit"] == _SEARCH_LIMIT_MAX for _tool, args in _Client.calls)
     assert client._client.list_calls == 0  # list_tools would have shown only the core nine
     # `allocations.list` is not a core tool, so only the namespace browse can surface it.
     assert capsys.readouterr().out.splitlines() == sorted(_SEARCHABLE)

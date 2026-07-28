@@ -53,6 +53,7 @@ from kdive.mcp.dev_harness import (
 from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import ToolResponse
 from kdive.mcp.schema.tool_index import NAMESPACE_TOC
+from kdive.mcp.tools.gateway import _SEARCH_LIMIT_MAX
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE_URL = os.environ.get("KDIVE_STACK_BASE_URL", "http://127.0.0.1:8000/mcp")
@@ -67,9 +68,10 @@ DEFAULT_BREAK_SYMBOL = "schedule"  # hot enough that a single -exec-continue sto
 # returns to its caller on the same stack.
 STEP_DEFAULT_SYMBOL = "vfs_read"
 _POLL_INTERVAL_SEC = 5.0
-# tools.search caps `limit` at 50 (`_SEARCH_LIMIT_MAX`); ask for the cap so a namespace listing
-# is not silently clipped to the default 10.
-_SEARCH_LIMIT = 50
+# Ask tools.search for its own cap rather than the default 10, so a namespace listing is not
+# silently clipped. Imported rather than copied: a lower server cap would fail `limit`'s pydantic
+# `le=` bound and turn every schema resolution into a tool error.
+_SEARCH_LIMIT = _SEARCH_LIMIT_MAX
 # Generous cap for the slow build/compress steps (make modules_install, tar+gzip). A stalled step
 # fails loudly here rather than hanging forever or being killed mid-write by an outer timeout.
 _ARCHIVE_STEP_TIMEOUT_S = 900
@@ -147,14 +149,25 @@ def _wrap_request(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any
 
 
 async def _search_schema(client: LiveStackClient, tool: str) -> dict[str, Any]:
-    """``tool``'s input schema from ``tools.search``, or ``{}`` when no match carries that name."""
+    """``tool``'s input schema from ``tools.search``, or ``{}`` when no match carries that name.
+
+    An empty answer is not silent: it means the tool call below will send whatever shape the
+    caller passed, so the reason (a typo, a tool the caller's roles hide, a clipped result set)
+    is worth naming here rather than leaving the user to decode a server-side validation error.
+    """
     envelope = _as_dict(await client.call_tool("tools.search", query=tool, limit=_SEARCH_LIMIT))
-    matches = (envelope.get("data") or {}).get("matches") or []
-    for match in matches:
-        # Ranking is lexical over name, description, keywords and schema text, so a sibling tool
-        # can outrank the exact name; only an exact name match is this tool's own schema.
+    data = envelope.get("data") or {}
+    for match in data.get("matches") or []:
+        # Ranking is lexical over name, description, keywords and schema text, so an unrelated
+        # tool can outrank the exact name; only an exact name match is this tool's own schema.
         if isinstance(match, dict) and match.get("name") == tool:
             return dict(match.get("input_schema") or {})
+    clipped = " (results were clipped at the search limit)" if data.get("truncated") else ""
+    print(
+        f"  [warn] no input schema for {tool!r}{clipped}: unknown tool, or one your roles hide. "
+        "Its arguments will be sent exactly as given.",
+        file=sys.stderr,
+    )
     return {}
 
 
@@ -169,7 +182,9 @@ class _SchemaResolver:
     than profile-clipped and each match carries the same full ``input_schema``.
 
     Every answer is cached, including a miss. The pollers re-enter :func:`_call` for the same tool
-    every few seconds, so an uncached miss would issue one ``tools.search`` per poll tick.
+    every few seconds, so an uncached miss would issue one ``tools.search`` per poll tick. The
+    cache is written after the await, so it dedupes only a serial caller — which is all this
+    single-threaded driver has.
     """
 
     def __init__(self) -> None:
