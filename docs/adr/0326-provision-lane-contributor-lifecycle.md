@@ -8,6 +8,14 @@
 - **Supersedes (in part):** [ADR-0234](0234-external-build-default-and-contributor-role.md) §3
   (which classified `systems.define`/`provision`/`provision_defined`/`reprovision` and
   `artifacts.create_system_upload` as "stays operator")
+- **Later superseded (in part):** [ADR-0441](0441-investigation-scoped-uploaded-rootfs.md) §3
+  removed `artifacts.create_system_upload` and the System-scoped upload window outright;
+  [ADR-0457](0457-retire-staged-system-definition-lane.md) retired `systems.define` and
+  `systems.provision_defined`. Three of the five tools this ADR reclassified no longer exist.
+  The contributor-tier decision stands for the two that do — `systems.provision` and
+  `systems.reprovision` — and for `artifacts.create_investigation_upload`, the
+  investigation-scoped successor to the removed upload tool. Names of removed tools are left
+  in place below as the historical record of what was decided.
 - **Depends on:** [ADR-0320](0320-leaseholder-power-lifecycle.md) (the leaseholder-control
   principle and the destructive-taxonomy shape it left), [ADR-0234](0234-external-build-default-and-contributor-role.md)
   (the `contributor` role), [ADR-0037](0037-rbac-hardening-role-separation.md) §1 /

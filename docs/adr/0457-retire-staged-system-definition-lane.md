@@ -1,6 +1,6 @@
 # ADR 0457 — Retire the staged System definition lane
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-27
 - **Issue:** #1580
 - **Epic:** #1576
@@ -189,7 +189,7 @@ whose scope is:
 10. Retained gateway search vocabulary so `systems.define` and `systems.provision_defined` remain
     discoverable terms resolving to `systems.provision` (ADR-0456 §3), rather than aliases.
 
-This ADR advances to Accepted when that change merges.
+This ADR advanced to Accepted when that change merged (#1600).
 
 ## Consequences
 
@@ -208,11 +208,44 @@ This ADR advances to Accepted when that change merges.
 - **Against ADR-0193.** Its Context lists `systems.define` among the UUID-minting idempotent
   creators and `systems.provision_defined` among the dedup-key enqueuers. Both entries are removed;
   the uniform contract itself is unchanged, and `systems.provision` already satisfies both roles.
+### §3's delegated mechanics, as resolved by the implementation (#1600)
+
+§3 left three choices to the implementation. Migration `0080_retire_defined_system_state.sql`
+resolves them as follows.
+
+- **Terminal state: `torn_down`.** `defined -> torn_down` was already a legal edge, described in
+  the state machine as "an abandoned create-without-provision System torn down without first
+  advancing to provisioning", and it is the honest description of what happened: no provider work
+  ever started, so there is no host domain, no overlay, and nothing to reap — only a reservation to
+  give back. `failed` was rejected because it asserts an error that never occurred and would enter
+  failure reporting. `torn_down` sits outside `_NON_TERMINAL_SYSTEM`, so it genuinely releases the
+  `max_concurrent_systems` slot rather than renaming the strand.
+- **The Allocation is left to `reap_orphaned_active_allocations`.** The row's Allocation stays
+  `active`; the migration does not touch it. That repair is precisely the "an `active` allocation
+  whose only System is terminal or absent" case (ADR-0109), it re-checks the predicate under the
+  `PROJECT -> ALLOCATION` lock, and it writes the release audit trail and ledger credit a bare SQL
+  `UPDATE` could not. Reverting the allocation in SQL would duplicate that logic outside the lock.
+  The observable cost is latency: `DEFAULT_ORPHANED_ACTIVE_GRACE` is two minutes measured from
+  `allocations.updated_at`, so the slot returns one reconciler pass later, not instantly.
+- **Audit: one `audit_log` row per resolved System.** Each row records
+  `transition = 'defined->torn_down'` under principal `system:migration` and
+  `tool = 'migration:0080_retire_defined_system_state'`, following the system-principal convention
+  `audit.record_system` uses for reconciler-initiated transitions. `args_digest` is the digest of
+  the empty argument map, since the migration took no arguments. Without these rows an object's
+  trail would show `->defined` and then nothing, with the row silently terminal across a deploy.
+  No Allocation audit row is written here — the reaper writes its own when it releases.
+
+The migration also drops `'defined'` from the `systems_state_check` CHECK constraint after
+resolving the rows, so the database rejects a value the code can no longer read. This mirrors
+migration 0044's removal of `failed` from `component_uploads_state_check`. Sequencing within the
+one migration transaction is data-resolution first, constraint tighten second; the constraint
+would otherwise fail validation against the very rows being resolved.
+
 - **Against ADR-0326.** Its contributor-tier lifecycle classified
   `systems.define`/`provision`/`provision_defined`/`reprovision` together. Two of the four
-  disappear. Its Context list also still names `artifacts.create_system_upload`, which ADR-0441 §3
-  already removed — the implementation should correct that stale reference in the same pass rather
-  than leave the ADR citing two dead tools.
+  disappear. Its Context list also still named `artifacts.create_system_upload`, which ADR-0441 §3
+  already removed; #1600 corrected that stale reference in the same pass rather than leave the ADR
+  citing two dead tools.
 - **Against ADR-0339.** This is the most affected. `_insert_defined_system` and its
   arch-validation-before-`_new_system_allowed` ordering go away, and the deliberate
   non-re-validation of arch on the `provision_defined` lane becomes moot along with the lane. Its
