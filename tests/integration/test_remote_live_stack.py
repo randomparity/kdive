@@ -48,6 +48,7 @@ from tests.integration.live_stack.spine import (
     REMOTE_ALLOCATION_DISK_GB,
     SpinePhaseError,
     allocate_remote,
+    assembled_console_refs,
     assert_report,
     await_system_state,
     build_and_upload_kernel,
@@ -441,17 +442,24 @@ async def _assert_vmcore_captured(
     )
 
 
-async def _assert_console_captured(client: LiveStackClient, *, system_id: str) -> None:
-    """Assert a redacted console artifact (boot→crash lifetime) is listed for the System."""
-    artifacts = await client.call_tool("artifacts.list", system_id=system_id)
-    assert isinstance(artifacts, list), "artifacts.list did not return a list"
-    console_refs = [
-        r
-        for a in artifacts
-        for r in a.refs.values()
-        if r.endswith("/console") or r.endswith("/console-redacted")
-    ]
-    assert console_refs, "no console artifact captured across the crash (ADR-0095)"
+async def _assert_console_captured(client: LiveStackClient, *, system_id: str, run_id: str) -> None:
+    """Assert the assembled boot→crash console artifact (ADR-0095) is listed for the System.
+
+    Two things this asserts that the naive form did not. ``artifacts.list`` answers with ONE
+    envelope carrying the artifact rows in ``items`` — never a bare list — so the listing must
+    be unwrapped before any ref is read. And teardown-finalize names the assembled artifact
+    ``console-{run_id}``: the same listing also carries the still-open ``/console`` stream and
+    its ``console-part-*`` chunks, which exist whether or not the finalize ever ran, so
+    matching those would let this phase pass without proving the crash was spanned.
+    """
+    listing = await client.call_tool("artifacts.list", system_id=system_id)
+    assert isinstance(listing, ToolResponse), (
+        f"artifacts.list answered {type(listing).__name__}, expected a single envelope"
+    )
+    refs = [ref for item in listing.items for ref in item.refs.values()]
+    assert assembled_console_refs(refs, run_id), (
+        f"no assembled boot→crash console artifact for run {run_id} (ADR-0095); saw {refs}"
+    )
 
 
 @pytest.mark.live_stack
@@ -639,13 +647,13 @@ def test_remote_four_method_capture_over_the_wire() -> None:
             # assembles the single artifact on teardown-finalize (ADR-0095). Assert it only after
             # System B is torn_down, when the finalize has persisted the artifact row.
             async with phase("console"):
-                await _await_console_artifact(op, system_id=system_b)
+                await _await_console_artifact(op, system_id=system_b, run_id=run_b)
 
     asyncio.run(_run())
 
 
 async def _await_console_artifact(
-    client: LiveStackClient, *, system_id: str, deadline_s: float = 120.0
+    client: LiveStackClient, *, system_id: str, run_id: str, deadline_s: float = 120.0
 ) -> None:
     """Poll artifacts.list until the boot→crash console artifact is persisted, or fail.
 
@@ -656,7 +664,7 @@ async def _await_console_artifact(
     deadline = time.monotonic() + deadline_s
     while True:
         try:
-            await _assert_console_captured(client, system_id=system_id)
+            await _assert_console_captured(client, system_id=system_id, run_id=run_id)
             return
         except AssertionError:
             if time.monotonic() >= deadline:

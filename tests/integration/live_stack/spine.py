@@ -181,6 +181,20 @@ def raw_vmcore_refs(refs: Iterable[str]) -> list[str]:
     return leaked
 
 
+def assembled_console_refs(refs: Iterable[str], run_id: str) -> list[str]:
+    """The refs naming the ASSEMBLED boot→crash console artifact for ``run_id``.
+
+    Teardown-finalize stores the assembled console at ``.../console-{run_id}`` (ADR-0095). The
+    same System also carries the still-open ``.../console`` stream and its
+    ``.../console-part-N-NNNNNN`` chunks, and both of those exist whether or not the finalize
+    ever ran — so a predicate that merely looks for "a console artifact" passes on a System
+    whose collector never spanned the crash, which is the one thing the phase exists to prove.
+    Matched on the object PATH, so a presigned URL's signing query cannot defeat the suffix.
+    """
+    suffix = f"/console-{run_id}"
+    return [ref for ref in refs if (urlsplit(ref).path or ref).endswith(suffix)]
+
+
 async def await_system_state(
     client: LiveStackClient,
     phase_name: str,

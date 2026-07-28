@@ -9,7 +9,7 @@ from kdive.mcp.dev_harness import (
     _build_claims,
     oidc_issuer_from_env,
 )
-from tests.integration.live_stack.spine import raw_vmcore_refs
+from tests.integration.live_stack.spine import assembled_console_refs, raw_vmcore_refs
 
 
 def test_build_claims_nested_roles_object() -> None:
@@ -118,3 +118,39 @@ def test_a_raw_presigned_url_is_still_caught() -> None:
 
 def test_a_raw_ref_among_redacted_ones_is_caught() -> None:
     assert raw_vmcore_refs([_RED_KEY, _RAW_KEY, _RED_URL]) == [_RAW_KEY]
+
+
+# --- assembled_console_refs (ADR-0095, #1610) ------------------------------------------------
+#
+# The capstone's console phase asserted `endswith("/console")` against what it assumed was a
+# list of artifacts; `artifacts.list` answers with ONE envelope carrying them in `items`, so the
+# phase failed on shape before any ref was read. These pin the predicate that replaced it: a
+# System listing carries the open stream and its part chunks alongside the assembled artifact,
+# and only the last of those proves the collector spanned the crash.
+
+_RUN = "e95bea84-9ec0-4e45-bff0-cee7c834fbec"
+_SYS_PREFIX = "remote-libvirt/systems/ee87192f-9280-4b8a-b0a3-9fdf25f1e2b8"
+_CONSOLE_STREAM = f"{_SYS_PREFIX}/console"
+_CONSOLE_PART = f"{_SYS_PREFIX}/console-part-0-000003"
+_CONSOLE_DONE = f"{_SYS_PREFIX}/console-{_RUN}"
+
+
+def test_the_assembled_console_artifact_is_found() -> None:
+    # The exact three-ref listing the first live capstone run returned.
+    refs = [_CONSOLE_STREAM, _CONSOLE_PART, _CONSOLE_DONE]
+    assert assembled_console_refs(refs, _RUN) == [_CONSOLE_DONE]
+
+
+def test_the_open_stream_alone_does_not_satisfy_the_phase() -> None:
+    # What the naive `endswith("/console")` matched — present even if finalize never ran.
+    assert assembled_console_refs([_CONSOLE_STREAM, _CONSOLE_PART], _RUN) == []
+
+
+def test_another_runs_assembled_console_does_not_satisfy_the_phase() -> None:
+    other = f"{_SYS_PREFIX}/console-11111111-2222-3333-4444-555555555555"
+    assert assembled_console_refs([_CONSOLE_STREAM, other], _RUN) == []
+
+
+def test_the_assembled_console_survives_a_presigned_query() -> None:
+    url = f"http://s3.example:30900/kdive-artifacts/{_CONSOLE_DONE}?AWSAccessKeyId=k&Signature=s"
+    assert assembled_console_refs([url], _RUN) == [url]
