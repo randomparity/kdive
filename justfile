@@ -239,6 +239,23 @@ test-live-stack:
     fi
     exit "$rc"
 
+# `test-live-stack` also collects the local spine, which needs local guest-image fixtures this
+# host may not carry; scoping to the remote module lets an operator proving the remote tier read
+# one signal. NOT the same tier as `test-live-remote`, which selects the live_vm_remote
+# (direct-provider) family by marker. See docs/operating/runbooks/remote-live-stack.md.
+# Run ONLY the remote-libvirt arm of the live_stack suite (needs a genuinely remote qemu+tls host).
+test-live-stack-remote:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    uv run python -m pytest tests/integration/test_remote_live_stack.py \
+      -m live_stack --strict-markers -q || rc=$?
+    if [[ "$rc" -eq 5 ]]; then
+      echo "no remote live_stack tests collected — skipping cleanly (remote config absent)"
+      exit 0
+    fi
+    exit "$rc"
+
 # Mutation-test ONE module against an explicit test path (see docs/development/mutation-testing.md).
 # Reports surviving mutants — code changes no test caught. mutmut runs ephemerally (not a locked dep).
 #   just mutate src/kdive/domain/errors.py tests/domain/test_errors.py

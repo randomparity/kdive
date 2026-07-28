@@ -40,6 +40,15 @@
     state: directory
     mode: "0755"
 
+# virt-customize --copy-in resolves its source on the host it runs on (the remote), so the
+# control node's helper_src must be shipped there first. The copy module is the only step
+# that crosses the control-node boundary; every later virt-customize reads the staged copy.
+- name: Stage the in-guest helpers onto the remote host
+  ansible.builtin.copy:
+    src: "{{ helper_src }}/"
+    dest: "{{ guest_base_image_helper_dir }}/"
+    mode: "0755"
+
 - name: Build and stage each selected image
   ansible.builtin.include_tasks: build_one.yml
   loop: "{{ kdive_selected_images }}"

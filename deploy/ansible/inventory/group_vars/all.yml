@@ -9,7 +9,11 @@ gdbstub_range: "47000:47099"
 gdb_addr: ""  # REQUIRED per host; provisioning fails closed without it (set in host_vars)
 
 # --- image catalog (replaces the single base_image_* globals; ADR-0188) ---
-helper_src: "{{ playbook_dir }}/../remote-libvirt-guest-helpers"
+# The in-guest helpers on the CONTROL node. playbook_dir is deploy/ansible/playbooks, and the
+# helpers live at deploy/remote-libvirt-guest-helpers, so this needs two levels up, not one.
+# guest_base_image stages this directory onto the remote host before virt-customize reads it:
+# --copy-in resolves its source on the host running virt-customize, not on the control node.
+helper_src: "{{ playbook_dir }}/../../remote-libvirt-guest-helpers"
 force_image_rebuild: false
 
 # Fields genuinely shared across catalog entries. The package set defaults to the

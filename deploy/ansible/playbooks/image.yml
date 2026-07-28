@@ -3,6 +3,15 @@
   hosts: remote_libvirt_hosts
   become: true
   gather_facts: true
+  # libguestfs defaults to the libvirt backend, which launches its appliance as the
+  # unprivileged qemu user (uid 107). The build workdir is under the become-user's HOME
+  # (/root, mode 0550), so that appliance cannot traverse to the image and every
+  # virt-builder/virt-customize task fails with "Cannot access storage file ...
+  # (as uid:107, gid:107): Permission denied". The direct backend runs the appliance in
+  # this task's own root context, which can read /root. Set at play scope so the
+  # included per-image and scratch task files inherit it too.
+  environment:
+    LIBGUESTFS_BACKEND: direct
   roles:
     - guest_image_prereqs
     - guest_base_image

@@ -15,20 +15,26 @@ owned-infra teardown check) stay in each spine's own module.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlsplit
 
+import httpx
 import psycopg
 
 from kdive.domain.accounting.cost import quantize_kcu
 from kdive.mcp.dev_harness import LiveStackClient, OidcIssuer, mint_token
+from kdive.mcp.resources.external_build_contract import EXTERNAL_BUILD_CONTRACT_URI
 from kdive.mcp.responses import JsonValue, ToolResponse
 from tests.mcp.json_data import data_str
 
@@ -49,13 +55,20 @@ _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
 
 
 class SpinePhaseError(AssertionError):
-    """A spine phase failed; carries the phase name so a failure says which step died."""
+    """A spine phase failed; carries the phase name so a failure says which step died.
+
+    The rendered message includes ``error_category`` when the envelope carried one. Without it
+    a failing phase reads only "error envelope", which names the step but not the fault — every
+    diagnosis then costs a re-run with an ad-hoc probe to recover the category the spine already
+    had in hand.
+    """
 
     def __init__(self, phase: str, reason: str, *, error_category: str | None = None) -> None:
         self.phase = phase
         self.reason = reason
         self.error_category = error_category
-        super().__init__(f"phase {phase!r} failed: {reason}")
+        detail = f"{reason} ({error_category})" if error_category else reason
+        super().__init__(f"phase {phase!r} failed: {detail}")
 
 
 @asynccontextmanager
@@ -149,6 +162,65 @@ async def captured_vmcore_refs(
     return [job_ref, *got.refs.values()]
 
 
+def raw_vmcore_refs(refs: Iterable[str]) -> list[str]:
+    """The refs exposing an UNREDACTED core object; empty when the egress property holds.
+
+    A raw core is stored at ``.../vmcore-{method}`` and the redacted one at
+    ``.../vmcore-{method}-redacted``, so the check is on the object PATH. A ref may be a bare
+    object key or a presigned URL, and a presigned URL's query string is signing material, not
+    part of the path — testing the whole string reports every correctly-redacted core as a leak,
+    because ``…/vmcore-kdump-redacted?AWSAccessKeyId=…&Signature=…`` does not end with
+    ``-redacted``. That false positive is what the first live run of these assertions hit
+    (#1610): the redaction held, the check did not.
+    """
+    leaked: list[str] = []
+    for ref in refs:
+        path = urlsplit(ref).path or ref
+        if "/vmcore-" in path and not path.endswith("-redacted"):
+            leaked.append(ref)
+    return leaked
+
+
+# The credentials this stack is actually running with. boto3 reads the AWS pair straight from
+# the environment, which is why it is not in kdive's own config catalogue.
+_LIVE_SECRET_ENV = ("AWS_SECRET_ACCESS_KEY", "KDIVE_TEST_S3_SECRET_KEY")
+
+
+def assert_no_live_secrets(text: str, what: str) -> None:
+    """Assert ``text`` carries none of the secret values this stack is actually running with.
+
+    A redaction assertion is only worth something if the secret it hunts for exists in the
+    system under test. The check this replaces searched the postmortem report for the literal
+    ``hunter2`` — a fixture value from unrelated unit tests, planted nowhere in the remote
+    spine or its guest — so it passed however badly the report leaked (#1610).
+
+    Raises when no live secret is set, rather than passing: a redaction check with nothing to
+    look for proves nothing, and failing loudly is what stops it decaying back into a no-op.
+    """
+    live = {name: os.environ[name] for name in _LIVE_SECRET_ENV if os.environ.get(name)}
+    if not live:
+        raise AssertionError(
+            f"none of {'/'.join(_LIVE_SECRET_ENV)} is set, so the redaction check on {what} "
+            "would prove nothing; export the stack's object-store secret before running"
+        )
+    leaked = sorted(name for name, value in live.items() if value in text)
+    assert not leaked, f"{what} leaked the value of {leaked}"
+
+
+def assembled_console_refs(refs: Iterable[str], run_id: str) -> list[str]:
+    """The refs naming the ASSEMBLED boot→crash console artifact for ``run_id``.
+
+    Teardown-finalize stores the assembled console at ``.../console-{run_id}`` (ADR-0095). The
+    same System also carries the still-open ``.../console`` stream and its
+    ``.../console-part-N-NNNNNN`` chunks, and both of those exist whether or not the finalize
+    ever ran — so a predicate that merely looks for "a console artifact" passes on a System
+    whose collector never spanned the crash, which is the one thing the phase exists to prove.
+    Matched on the object PATH, so a presigned URL's signing query cannot defeat the suffix.
+    """
+    suffix = f"/console-{run_id}"
+    return [ref for ref in refs if (urlsplit(ref).path or ref).endswith(suffix)]
+
+
 async def await_system_state(
     client: LiveStackClient,
     phase_name: str,
@@ -171,6 +243,217 @@ async def await_system_state(
         if time.monotonic() >= deadline:
             raise SpinePhaseError(phase_name, f"system did not reach {target}")
         await asyncio.sleep(POLL_INTERVAL_S)
+
+
+# --- external-build upload lane (ADR-0234; replaces the removed runs.build server lane) -----
+#
+# Both spines reach a bootable Run the same way: cut the combined ``kernel`` tar from a *built*
+# tree, declare + PUT it through ``artifacts.create_run_upload``, then ``runs.complete_build``.
+# ``runs.build`` was deleted with the server-build tables (schema 0062) — the local spine was
+# migrated then, the remote spine was not, which is why the remote arm could never reach its
+# capture assertions. Shared here so the next lane change lands in one place.
+
+KERNEL_TREE_ENV = "KDIVE_KERNEL_SRC"
+
+
+def sha256_b64(path: Path) -> str:
+    """The base64 SHA-256 the upload contract declares (S3 ``x-amz-checksum-sha256``)."""
+    return base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
+
+
+async def put_presigned(item: ToolResponse, path: Path) -> None:
+    """PUT ``path`` to a ``create_run_upload`` item's presigned URL + required headers."""
+    url = item.refs["upload_url"]
+    raw_headers = item.data.get("required_headers", {})
+    headers = {k: str(v) for k, v in raw_headers.items()} if isinstance(raw_headers, dict) else {}
+    async with httpx.AsyncClient(timeout=180.0) as http:
+        resp = await http.put(url, content=path.read_bytes(), headers=headers)
+        resp.raise_for_status()
+
+
+def accepted_run_upload_names(contract: dict[str, object]) -> set[str]:
+    """The ``run`` owner-kind's accepted names from the external-build contract resource."""
+    upload_contracts = contract.get("upload_contracts", {})
+    run_contract = upload_contracts.get("run", {}) if isinstance(upload_contracts, dict) else {}
+    if isinstance(run_contract, dict):
+        names = run_contract.get("accepted_names", [])
+        return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+    return set()
+
+
+def elf_build_id(elf: Path) -> str:
+    """The GNU build-id of ``elf`` as lowercase hex, via ``readelf -n``.
+
+    ``runs.complete_build`` requires this whenever a ``vmlinux`` is uploaded — it is how the
+    debug tier matches debuginfo to the running kernel, and a mismatched id is worse than none.
+
+    Uses ``readelf`` rather than scanning for the note by hand: ``vmlinux`` embeds several
+    ``GNU`` notes (the vDSO images carry their own build-ids), so a naive scan returns whichever
+    it meets first — a wrong id that still looks well-formed. The module already shells out to
+    ``make`` and ``tar``, so binutils is no new obligation for a kernel-building host.
+
+    Raises:
+        RuntimeError: If ``readelf`` reports no build-id for the file.
+    """
+    out = subprocess.run(
+        ["readelf", "-n", str(elf)], check=True, capture_output=True, text=True
+    ).stdout
+    for line in out.splitlines():
+        marker = "Build ID:"
+        if marker in line:
+            return line.split(marker, 1)[1].strip().lower()
+    raise RuntimeError(f"no GNU build-id note in {elf}")
+
+
+def boot_member_source(kernel_src: Path, arch: str) -> Path:
+    """Resolve the tree-relative path of the file that becomes the tar's ``boot/vmlinuz``.
+
+    The ``kernel-build-per-arch`` resource is the contract this must match:
+
+    | ``arch``  | ``boot/vmlinuz`` must be                                        |
+    |-----------|-----------------------------------------------------------------|
+    | ``x86_64``| the bzImage, ``arch/x86/boot/bzImage`` (validator checks ``HdrS``|
+    |           | magic at offset ``0x202``; a raw ``vmlinux`` ELF is rejected)    |
+    | ``ppc64le``| the stripped ELF ``vmlinux`` (powerpc has no bzImage)          |
+
+    Args:
+        kernel_src: A *built* kernel tree.
+        arch: The target arch (``x86_64`` / ``ppc64le``), NOT the build host's arch.
+
+    Returns:
+        The path relative to ``kernel_src`` of the boot member to tar.
+
+    Raises:
+        RuntimeError: If ``arch`` is unsupported, or the resolved file is not present.
+    """
+    # Raise rather than defaulting to x86_64: a new arch silently tarring a bzImage path that
+    # does not exist would surface as an opaque tar failure, or worse as a validator rejection
+    # far downstream. An unknown arch is a test-setup bug, so name it here.
+    members = {"x86_64": Path("arch/x86/boot/bzImage"), "ppc64le": Path("vmlinux")}
+    member = members.get(arch)
+    if member is None:
+        raise RuntimeError(f"no boot member mapping for arch {arch!r}; known: {sorted(members)}")
+    if not (kernel_src / member).is_file():
+        raise RuntimeError(
+            f"no built {member} at {kernel_src / member}; build the kernel tree at {kernel_src} "
+            f"for {arch} first"
+        )
+    return member
+
+
+def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64") -> Path:
+    """Cut the ADR-0234 combined ``kernel`` artifact from a built kernel tree.
+
+    Reproduces the ``external-build-upload`` recipe: stage the module tree with
+    ``make modules_install`` into ``dest_dir``, then tar the arch's boot member (renamed to
+    ``boot/vmlinuz``, listed FIRST so ``lib/modules`` lands inside the validator's
+    decompress-scan bound) plus ``lib/modules`` into one gzip tar, dropping the
+    ``build``/``source`` back-symlinks.
+
+    The rename transform is derived from :func:`boot_member_source`, so that function stays the
+    single place the per-arch boot member is decided.
+
+    Args:
+        kernel_src: A *built* kernel tree for ``arch``.
+        dest_dir: A scratch directory to stage modules and write ``kernel.tar.gz`` into.
+        arch: The target arch, passed through to :func:`boot_member_source`.
+
+    Returns:
+        The path to the combined ``kernel.tar.gz`` under ``dest_dir``.
+    """
+    member = boot_member_source(kernel_src, arch)
+    modstage = dest_dir / "modstage"
+    subprocess.run(
+        ["make", "-C", str(kernel_src), "modules_install", f"INSTALL_MOD_PATH={modstage}"],
+        check=True,
+    )
+    tar_path = dest_dir / "kernel.tar.gz"
+    subprocess.run(
+        [
+            "tar",
+            "-czf",
+            str(tar_path),
+            "--exclude=*/build",
+            "--exclude=*/source",
+            f"--transform=s|^{member}$|boot/vmlinuz|",
+            "-C",
+            str(kernel_src),
+            str(member),
+            "-C",
+            str(modstage),
+            "lib/modules",
+        ],
+        check=True,
+    )
+    return tar_path
+
+
+async def build_and_upload_kernel(
+    client: LiveStackClient,
+    *,
+    run_id: str,
+    phase_name: str = "upload-build",
+    arch: str = "x86_64",
+    with_vmlinux: bool = False,
+) -> None:
+    """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
+
+    Reads the contract resource, cuts the combined ``kernel`` tar from ``KDIVE_KERNEL_SRC``,
+    declares + PUTs it via ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
+    The Run goes CREATED → SUCCEEDED with ``steps.build == succeeded``, ready for ``runs.install``.
+
+    ``with_vmlinux`` additionally uploads the tree's unstripped ``vmlinux``. The gdb-MI tier
+    resolves its symbols from that artifact, so a spine that opens a debug session needs it:
+    without it ``debug.read_registers`` fails ``configuration_error`` / ``no_debuginfo``. It is
+    opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
+    upload for nothing.
+    """
+    contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
+    accepted = accepted_run_upload_names(contract)
+    if "kernel" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
+    if with_vmlinux and "vmlinux" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
+    kernel_src = os.environ.get(KERNEL_TREE_ENV)
+    if not kernel_src:
+        raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
+    with tempfile.TemporaryDirectory(prefix="kdive-spine-kernel-") as scratch:
+        kernel_tar = combined_kernel_tar(Path(kernel_src), Path(scratch), arch=arch)
+        decls = [
+            {
+                "name": "kernel",
+                "sha256": sha256_b64(kernel_tar),
+                "size_bytes": kernel_tar.stat().st_size,
+            }
+        ]
+        vmlinux = Path(kernel_src) / "vmlinux"
+        if with_vmlinux:
+            if not vmlinux.is_file():
+                raise SpinePhaseError(phase_name, f"no unstripped vmlinux at {vmlinux}")
+            decls.append(
+                {
+                    "name": "vmlinux",
+                    "sha256": sha256_b64(vmlinux),
+                    "size_bytes": vmlinux.stat().st_size,
+                }
+            )
+        up = ok(
+            await scalar(client, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
+            phase_name,
+        )
+        by_name = {item.data.get("name"): item for item in up.items}
+        if "kernel" not in by_name:
+            raise SpinePhaseError(phase_name, "create_run_upload returned no 'kernel' item")
+        await put_presigned(by_name["kernel"], kernel_tar)
+        if with_vmlinux:
+            if "vmlinux" not in by_name:
+                raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")
+            await put_presigned(by_name["vmlinux"], vmlinux)
+            build_id = elf_build_id(vmlinux)
+    # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
+    # omitting it here) is a configuration_error.
+    extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
+    ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
 
 
 # --- per-role token factory -----------------------------------------------------------------

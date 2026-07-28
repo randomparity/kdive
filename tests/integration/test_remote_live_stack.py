@@ -1,6 +1,6 @@
 """Operator-run remote-libvirt spine e2e (#207, M2 issue 8; mirrors ADR-0042's local spine).
 
-Drives allocate(remote-libvirt) → provision(disk-image) → build → install → boot →
+Drives allocate(remote-libvirt) → provision(disk-image) → upload-build → install → boot →
 attach(gdb-MI direct TCP) → force-crash → two-phase KDUMP vmcore capture →
 introspect(from_vmcore) → release → (reconciler) teardown → accounting report, over the live MCP
 HTTP transport under per-project role tokens, against a genuinely remote ``qemu+tls://`` host the
@@ -48,8 +48,11 @@ from tests.integration.live_stack.spine import (
     REMOTE_ALLOCATION_DISK_GB,
     SpinePhaseError,
     allocate_remote,
+    assembled_console_refs,
+    assert_no_live_secrets,
     assert_report,
     await_system_state,
+    build_and_upload_kernel,
     captured_vmcore_refs,
     crash_to_crashed,
     db_now,
@@ -58,6 +61,7 @@ from tests.integration.live_stack.spine import (
     ok,
     phase,
     provision_to_ready,
+    raw_vmcore_refs,
     scalar,
     seed_metering,
 )
@@ -108,11 +112,14 @@ def _remote_provision_profile() -> dict[str, object]:
 
 
 def _build_profile() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "kernel_source_ref": os.environ.get(_KERNEL_TREE_ENV, _DEFAULT_KERNEL_REF),
-        "config": {"kind": "catalog", "provider": "system", "name": "kdump"},
-    }
+    """The Run build profile for the remote x86_64 spine (upload-only lane, ADR-0337).
+
+    The server-build lane was removed, so ``BuildProfile`` accepts only ``schema_version`` +
+    the target ``arch`` and forbids extras; the ``kernel_source_ref``/``config`` this used to
+    send were rejected outright as invalid tool arguments. The kernel bytes now arrive via
+    ``build_and_upload_kernel``.
+    """
+    return {"schema_version": 1, "arch": "x86_64"}
 
 
 def _remote_spine_preflight() -> tuple[OidcIssuer, str, str]:
@@ -337,7 +344,15 @@ def test_remote_spine_over_the_wire() -> None:
                     "create-run",
                 )
                 run_id = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build"):
+                # The server-build lane (runs.build) was removed with schema 0062; the Run
+                # reaches a built state through the external-build upload lane instead.
+                # with_vmlinux: the attach phase's debug.read_registers resolves symbols from the
+                # vmlinux artifact; without it the gdb-MI tier reports no_debuginfo.
+                await build_and_upload_kernel(
+                    op, run_id=run_id, phase_name="upload-build", with_vmlinux=True
+                )
+            for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
                     await drain_job(op, step, env.object_id)
@@ -353,6 +368,13 @@ def test_remote_spine_over_the_wire() -> None:
                     ),
                     "attach",
                 )
+                # Detach before crashing. A gdb client on the QEMU gdbstub HALTS the guest — it
+                # is why read_registers can read rip at all — so a session left open means
+                # force_crash injects an NMI into a halted CPU that never executes it, the guest
+                # never panics into the kdump capture kernel, and capture times out as
+                # readiness_failure. The capstone already ends its session before crash-B; this
+                # arm did not, which only became reachable once the gdbstub attach worked.
+                ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
             async with phase("crash-rbac-negative"):
                 denied = await scalar(op, "control.force_crash", system_id=system_id)
                 if denied.status != "error" or denied.error_category != "authorization_denied":
@@ -371,16 +393,21 @@ def test_remote_spine_over_the_wire() -> None:
                     op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
                 )
                 refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
-                assert refs, "capture published no vmcore reference (#1)"
+                # `captured_vmcore_refs` raises on a missing job ref and returns
+                # `[job_ref, *artifact_refs]`, so a bare `assert refs` could never fail. What is
+                # worth asserting is that `artifacts.get` contributed refs of its own.
+                assert len(refs) > 1, f"artifacts.get published no object ref (#1): {refs}"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
-                assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
-                    "raw vmcore leaked (#1)"
-                )
+                assert not raw_vmcore_refs(refs), f"raw vmcore leaked (#1): {raw_vmcore_refs(refs)}"
             async with phase("introspect"):
                 env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
-                report = json.dumps(data_mapping(env, "report"), sort_keys=True)
-                assert report, "empty postmortem report (introspect did not route to remote run)"
-                assert "hunter2" not in report and "password=" not in report, "secret leaked (#3)"
+                report_body = data_mapping(env, "report")
+                # Assert on the mapping, NOT on its JSON text: `json.dumps({})` is `"{}"` and
+                # `json.dumps(None)` is `"null"`, both truthy, so a truthiness check on the
+                # serialized form passes on exactly the empty report it claims to catch.
+                assert report_body, "empty postmortem report (introspect did not route to remote)"
+                report = json.dumps(report_body, sort_keys=True)
+                assert_no_live_secrets(report, "postmortem report (#3)")
             async with phase("release"):
                 ok(
                     await scalar(op, "allocations.release", allocation_id=allocation_id),
@@ -416,24 +443,33 @@ async def _assert_vmcore_captured(
     capture job's `refs.result` and `runs.get`'s `refs.vmcore`, not through a listing tool.
     """
     refs = await captured_vmcore_refs(client, method, drained, run_id=run_id)
-    assert refs, f"no vmcore reference published for {method} (#1)"
+    # `captured_vmcore_refs` raises on a missing job ref and returns `[job_ref, *artifact_refs]`,
+    # so a bare `assert refs` could never fail; assert artifacts.get contributed refs of its own.
+    assert len(refs) > 1, f"artifacts.get published no object ref for {method} (#1): {refs}"
     # A raw core is `.../vmcore-{method}` (no `-redacted` suffix); it must never surface.
-    assert all(not ("/vmcore-" in r and not r.endswith("-redacted")) for r in refs), (
-        f"raw vmcore leaked for {method} (#1)"
+    assert not raw_vmcore_refs(refs), (
+        f"raw vmcore leaked for {method} (#1): {raw_vmcore_refs(refs)}"
     )
 
 
-async def _assert_console_captured(client: LiveStackClient, *, system_id: str) -> None:
-    """Assert a redacted console artifact (boot→crash lifetime) is listed for the System."""
-    artifacts = await client.call_tool("artifacts.list", system_id=system_id)
-    assert isinstance(artifacts, list), "artifacts.list did not return a list"
-    console_refs = [
-        r
-        for a in artifacts
-        for r in a.refs.values()
-        if r.endswith("/console") or r.endswith("/console-redacted")
-    ]
-    assert console_refs, "no console artifact captured across the crash (ADR-0095)"
+async def _assert_console_captured(client: LiveStackClient, *, system_id: str, run_id: str) -> None:
+    """Assert the assembled boot→crash console artifact (ADR-0095) is listed for the System.
+
+    Two things this asserts that the naive form did not. ``artifacts.list`` answers with ONE
+    envelope carrying the artifact rows in ``items`` — never a bare list — so the listing must
+    be unwrapped before any ref is read. And teardown-finalize names the assembled artifact
+    ``console-{run_id}``: the same listing also carries the still-open ``/console`` stream and
+    its ``console-part-*`` chunks, which exist whether or not the finalize ever ran, so
+    matching those would let this phase pass without proving the crash was spanned.
+    """
+    listing = await client.call_tool("artifacts.list", system_id=system_id)
+    assert isinstance(listing, ToolResponse), (
+        f"artifacts.list answered {type(listing).__name__}, expected a single envelope"
+    )
+    refs = [ref for item in listing.items for ref in item.refs.values()]
+    assert assembled_console_refs(refs, run_id), (
+        f"no assembled boot→crash console artifact for run {run_id} (ADR-0095); saw {refs}"
+    )
 
 
 @pytest.mark.live_stack
@@ -576,7 +612,11 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                     "create-run-B",
                 )
                 run_b = env.object_id
-            for step in ("build", "install", "boot"):
+            async with phase("upload-build-B"):
+                await build_and_upload_kernel(
+                    op, run_id=run_b, phase_name="upload-build-B", with_vmlinux=True
+                )
+            for step in ("install", "boot"):
                 async with phase(f"{step}-B"):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_b), f"{step}-B")
                     await drain_job(op, f"{step}-B", env.object_id)
@@ -617,13 +657,13 @@ def test_remote_four_method_capture_over_the_wire() -> None:
             # assembles the single artifact on teardown-finalize (ADR-0095). Assert it only after
             # System B is torn_down, when the finalize has persisted the artifact row.
             async with phase("console"):
-                await _await_console_artifact(op, system_id=system_b)
+                await _await_console_artifact(op, system_id=system_b, run_id=run_b)
 
     asyncio.run(_run())
 
 
 async def _await_console_artifact(
-    client: LiveStackClient, *, system_id: str, deadline_s: float = 120.0
+    client: LiveStackClient, *, system_id: str, run_id: str, deadline_s: float = 120.0
 ) -> None:
     """Poll artifacts.list until the boot→crash console artifact is persisted, or fail.
 
@@ -634,7 +674,7 @@ async def _await_console_artifact(
     deadline = time.monotonic() + deadline_s
     while True:
         try:
-            await _assert_console_captured(client, system_id=system_id)
+            await _assert_console_captured(client, system_id=system_id, run_id=run_id)
             return
         except AssertionError:
             if time.monotonic() >= deadline:
