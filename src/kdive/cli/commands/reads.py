@@ -12,6 +12,7 @@ verbs flatten the one envelope the same way and call :func:`render_record` (ADR-
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from collections.abc import Mapping
 
@@ -137,18 +138,23 @@ async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str
 
     A given value is coerced to ``float`` because curated options are declared with no
     ``type=``, so argparse hands over the raw string while both tools declare ``timeout_s`` as a
-    JSON ``number``. A non-numeric value is a usage error (exit 2) rather than an uncaught
-    ``ValueError``; the tools own the remaining validation (a non-finite timeout is a
-    server-side ``configuration_error``).
+    JSON ``number``. A value that is not a finite number is a usage error (exit 2). The
+    finiteness check is not redundant with the tools' own ``math.isfinite`` guard: ``float()``
+    accepts ``inf``/``nan``, and JSON has no encoding for either, so pydantic serializes them
+    to ``null`` on the way out — the tool would receive ``null`` for a declared ``number`` and
+    the transport would raise before its ``configuration_error`` could ever be returned.
     """
     payload: dict[str, object] = {id_key: object_id}
     raw = getattr(args, "timeout_s", None)
     if raw is not None:
         try:
-            payload["timeout_s"] = float(raw)
+            timeout = float(raw)
         except ValueError:
-            print(f"error: --timeout-s must be a number, not {raw!r}", file=sys.stderr)
+            timeout = math.nan
+        if not math.isfinite(timeout):
+            print(f"error: --timeout-s must be a finite number, not {raw!r}", file=sys.stderr)
             return 2
+        payload["timeout_s"] = timeout
     return await _record(tool, args, payload)
 
 

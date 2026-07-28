@@ -420,12 +420,19 @@ def test_wait_verb_point_read_sends_a_zero_timeout(
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
-def test_wait_verb_rejects_a_non_numeric_timeout(
-    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity"])
+def test_wait_verb_rejects_a_non_finite_timeout(
+    handler, key: str, tool: str, value: str, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """A non-numeric ``--timeout-s`` is a usage error, not an uncaught ``ValueError``."""
+    """A non-numeric or non-finite ``--timeout-s`` is a usage error, and never reaches the wire.
+
+    ``float()`` accepts ``inf``/``nan``, but JSON encodes neither: pydantic serializes both to
+    ``null``, so the tool would be handed ``null`` for a declared ``number`` and the transport
+    would raise before the tool's own ``math.isfinite`` guard could answer. The CLI must refuse
+    them itself (ADR-0470 decision 3).
+    """
     client = _install_session(monkeypatch, _data_envelope({}))
-    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "soon"})))
+    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": value})))
     assert code == 2
     assert client.calls == []
     assert "--timeout-s" in capsys.readouterr().err

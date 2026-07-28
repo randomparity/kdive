@@ -165,9 +165,10 @@ kdivectl inventory list [--project <project>]
 
 There is no `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get` were removed
 ([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). `wait` is both the poll and the
-point read. Omitting `--timeout-s` waits for the tool's default 30 seconds — the CLI never
-picks the timeout for you — so the point read is the zero timeout spelled out, which does one
-lookup and returns without blocking:
+point read. Omitting `--timeout-s` waits for the tool's default of **30 seconds** — the CLI
+never picks the timeout for you — and the server clamps any larger value to **300 seconds**.
+The point read is therefore the zero timeout spelled out, which does one lookup and returns
+without blocking:
 
 ```bash
 kdivectl jobs wait <job_id> --timeout-s 0
@@ -242,7 +243,7 @@ cross-project oversight view, use a `platform_auditor` token.
 
 | read | authorized by | denied to |
 |------|---------------|-----------|
-| `allocations list/get`, `systems list/get`, `runs get`, `jobs list/get`, `accounting usage` (`accounting.usage`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id `get` returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage --project …` / `accounting.usage`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
+| `allocations list/wait`, `systems list/get`, `runs get`, `jobs list/wait`, `accounting usage` (`accounting.usage`) | per-project `viewer` on the **target project** (`require_role`) | a platform-only token with no membership on that project sees no project tenant data. A by-id read returns a **not-found-shaped** result (exit `4`; tenant existence is not revealed, and **no** distinct authorization-denied code is emitted). A read that **names a project** the caller is not a member of (`allocations list --project …`, `accounting usage --project …` / `accounting.usage`, `accounting.estimate`) is denied `authorization_denied` (**exit `3`**, ADR-0098) — the named project carries no existence to leak, so the denial surfaces distinctly (ADR-0043 §4a) |
 | cross-project `inventory list` (`inventory.list`), `accounting.report` (all-projects), `audit.query` (cross-project) | `platform_auditor` (satisfied by `platform_admin`) | a project-member token holding no platform role |
 | `secrets list`, `doctor` | `platform_operator` | any token lacking `platform_operator` |
 | `resources list/get`, `images list` | plain authenticated read (no project scope, no role floor) | unauthenticated callers only |
@@ -257,13 +258,13 @@ verb](#the-generated-verb-surface) inherits the axis of its tool — the curated
 a subset, not the whole authorized surface. For example `audit query` (`audit.query`) is a
 platform-axis auditor read like `inventory list`; `session whoami` (`session.whoami`) and
 `projects list` (`projects.list`) are plain authenticated reads like `resources list`; and
-`runs list` / `jobs wait` are per-project `viewer` reads like `systems get`. When in doubt,
+`runs list` / `investigations list` are per-project `viewer` reads like `systems get`. When in doubt,
 `kdivectl <group> <verb>` returns the same `authorization_denied` (exit `3`) or
 not-found-shaped (exit `4`) result its tool would for an agent.
 
 Three project-axis outcomes are distinct and should not be conflated. (1) A **non-member**
-(including a platform-only token) reaching a **by-id** `get` gets the
-**not-found-shaped** result above (exit `4`) — the tool resolves the object's project, finds the
+(including a platform-only token) reaching a **by-id** read (`systems get`, `runs get`,
+`jobs wait`, `allocations wait`) gets the **not-found-shaped** result above (exit `4`) — the tool resolves the object's project, finds the
 caller is not a member, and returns not-found *before* the role check, so a non-grant never
 surfaces a distinct authorization-denied code (and is **not** audited; only platform-role
 *overreach* within the platform tier leaves a denial row — ADR-0043 §4, see
