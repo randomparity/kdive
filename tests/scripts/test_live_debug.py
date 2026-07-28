@@ -14,7 +14,20 @@ from typing import Any
 
 import pytest
 
+from kdive.mcp.exposure import CORE_TOOLS
+from kdive.mcp.schema.tool_index import NAMESPACE_TOC
+
 ROOT = Path(__file__).resolve().parents[2]
+
+_REQUEST_SCHEMA: dict[str, Any] = {"properties": {"request": {"type": "object"}}}
+_FLAT_SCHEMA: dict[str, Any] = {"properties": {"allocation_id": {"type": "string"}}}
+# The catalog tools.search can reach. `allocations.list` is deliberately NOT in CORE_TOOLS, so
+# under the default surface it is reachable only through search — the case #1608 is about.
+_SEARCHABLE: dict[str, dict[str, Any]] = {
+    "allocations.list": _REQUEST_SCHEMA,
+    "allocations.release": _FLAT_SCHEMA,
+    "runs.list": _REQUEST_SCHEMA,
+}
 
 
 def _load_live_debug() -> ModuleType:
@@ -46,16 +59,23 @@ class _SchemaTool:
 class _SchemaClient:
     def __init__(self, tools: list[_SchemaTool]) -> None:
         self._tools = tools
+        self.list_calls = 0
 
     async def list_tools(self) -> list[_SchemaTool]:
+        self.list_calls += 1
         return self._tools
 
 
 class _Client:
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    def __init__(self, tools: list[_SchemaTool] | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[_SchemaTool] | None = None,
+        searchable: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self._client = _SchemaClient(tools or [])
+        self._searchable = searchable or {}
 
     async def __aenter__(self) -> _Client:
         return self
@@ -65,7 +85,40 @@ class _Client:
 
     async def call_tool(self, tool: str, **args: Any) -> _Envelope:
         self.calls.append((tool, args))
+        if tool == "tools.search":
+            return _Envelope({"status": "ok", "data": self._search(args)})
         return _Envelope({"object_id": tool, "status": "ok", "data": {"args": args}})
+
+    def _search(self, args: dict[str, Any]) -> dict[str, Any]:
+        """The real ``tools.search`` envelope payload: ranked matches, each with its schema."""
+        namespace = args.get("namespace")
+        query = args.get("query")
+        if namespace is not None:
+            hits = sorted(n for n in self._searchable if n.startswith(f"{namespace}."))
+        else:
+            # The server ranks lexically over name + description + keywords + schema text, so a
+            # sibling in the same namespace can outrank the exact name. Order the exact match
+            # LAST so a `matches[0]` shortcut picks the wrong tool's schema.
+            hits = sorted(
+                (n for n in self._searchable if _same_namespace(n, str(query))),
+                key=lambda n: (n == query, n),
+            )
+        matches = [{"name": n, "input_schema": self._searchable[n]} for n in hits]
+        return {"matches": matches, "truncated": False}
+
+
+def _same_namespace(name: str, query: str) -> bool:
+    return name.split(".", 1)[0] == query.split(".", 1)[0]
+
+
+def _gateway_surface_client() -> _Client:
+    """A client shaped like the DEFAULT surface: ``list_tools`` advertises only ``CORE_TOOLS``.
+
+    The core set is imported from the server rather than hard-coded so this fake cannot drift
+    into advertising a catalog the script no longer sees (ADR-0456; the gateway is on by default).
+    """
+    listed = [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)]
+    return _Client(listed, dict(_SEARCHABLE))
 
 
 def test_wrap_request_only_for_single_request_schema() -> None:
@@ -82,15 +135,69 @@ def test_wrap_request_only_for_single_request_schema() -> None:
     assert live_debug._wrap_request(flat_schema, {"run_id": "r1"}) == {"run_id": "r1"}
 
 
-def test_call_uses_input_schema_to_wrap_request() -> None:
+def test_call_uses_listed_schema_without_searching_for_a_core_tool() -> None:
     live_debug = _load_live_debug()
     _Client.calls = []
-    schemas = {"runs.list": {"properties": {"request": {"type": "object"}}}}
+    client = _gateway_surface_client()
+    assert "runs.list" in CORE_TOOLS  # premise: the default surface does advertise it
 
-    result = asyncio.run(live_debug._call(_Client(), "runs.list", {"project": "demo"}, schemas))
+    result = asyncio.run(
+        live_debug._call(client, "runs.list", {"project": "demo"}, live_debug._SchemaResolver())
+    )
 
     assert result["object_id"] == "runs.list"
     assert _Client.calls == [("runs.list", {"request": {"project": "demo"}})]
+
+
+def test_call_resolves_a_non_core_tool_schema_through_tools_search() -> None:
+    """#1608: the default surface lists only CORE_TOOLS, so everything else resolves by search."""
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+    # The premise of the bug: this tool is callable but absent from the advertised catalog, so
+    # the old `list_tools`-only map had no schema for it and sent flat kwargs the server rejects.
+    assert "allocations.list" not in CORE_TOOLS
+
+    result = asyncio.run(
+        live_debug._call(
+            client, "allocations.list", {"project": "demo"}, live_debug._SchemaResolver()
+        )
+    )
+
+    assert result["object_id"] == "allocations.list"
+    assert _Client.calls[0] == ("tools.search", {"query": "allocations.list", "limit": 50})
+    # The searched schema is the single-`request` one, so the flat args got wrapped. Taking
+    # `matches[0]` instead would have picked the higher-ranked flat sibling and left them flat.
+    assert _Client.calls[1] == ("allocations.list", {"request": {"project": "demo"}})
+
+
+def test_schema_resolution_is_cached_across_calls() -> None:
+    """A poller re-enters _call every few seconds; each tool must cost at most one search."""
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+    schemas = live_debug._SchemaResolver()
+
+    for _ in range(3):
+        asyncio.run(live_debug._call(client, "allocations.list", {"project": "demo"}, schemas))
+
+    assert [tool for tool, _ in _Client.calls].count("tools.search") == 1
+    assert client._client.list_calls == 1
+
+
+def test_schema_resolution_caches_a_miss() -> None:
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+    schemas = live_debug._SchemaResolver()
+
+    # Neither surface knows this name. The call still goes out (and fails server-side with a
+    # real error), but the fruitless search must not repeat on every poll tick.
+    for _ in range(3):
+        asyncio.run(live_debug._call(client, "nowhere.missing", {"x": 1}, schemas))
+
+    assert [tool for tool, _ in _Client.calls].count("tools.search") == 1
+    assert _Client.calls[-1] == ("nowhere.missing", {"x": 1})
 
 
 def test_input_schemas_reads_harness_tool_catalog() -> None:
@@ -138,7 +245,7 @@ def test_poll_waits_until_terminal_state(
             object(),
             "jobs.wait",
             {"job_id": "j1"},
-            {},
+            live_debug._SchemaResolver(),
             done={"succeeded"},
             timeout_sec=60,
             label="boot",
@@ -192,7 +299,9 @@ def test_wait_job_selects_matching_job_and_requires_success(
     monkeypatch.setattr(live_debug, "_call", fake_call)
     monkeypatch.setattr(live_debug, "_poll", fake_poll)
 
-    asyncio.run(live_debug._wait_job(object(), {}, kind="boot", timeout_sec=30))
+    asyncio.run(
+        live_debug._wait_job(object(), live_debug._SchemaResolver(), kind="boot", timeout_sec=30)
+    )
 
     assert seen_poll_args == {
         "tool": "jobs.wait",
@@ -347,7 +456,11 @@ def test_upload_kernel_drives_declare_put_complete(
 
     asyncio.run(
         live_debug._upload_kernel(
-            FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar, vmlinux=vmlinux
+            FakeClient(),
+            live_debug._SchemaResolver(),
+            run_id="r1",
+            kernel_tar=kernel_tar,
+            vmlinux=vmlinux,
         )
     )
 
@@ -386,7 +499,11 @@ def test_upload_kernel_rejects_missing_kernel_contract(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="no longer accepts run artifact"):
         asyncio.run(
             live_debug._upload_kernel(
-                FakeClient(), {}, run_id="r1", kernel_tar=kernel_tar, vmlinux=vmlinux
+                FakeClient(),
+                live_debug._SchemaResolver(),
+                run_id="r1",
+                kernel_tar=kernel_tar,
+                vmlinux=vmlinux,
             )
         )
 
@@ -517,6 +634,89 @@ def test_main_routes_sync_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert live_debug.main(["transcript", "s1"]) == 7
     assert live_debug.main(["reload"]) == 8
     assert seen == ["transcript:s1", "reload"]
+
+
+def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The discovery command must not inherit the profile-clipped list_tools catalog."""
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+
+    class Factory:
+        @staticmethod
+        def over_http(base: str, token: str) -> _Client:
+            del base, token
+            return client
+
+    monkeypatch.setattr(live_debug, "_token", lambda project: project)
+    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+
+    rc = live_debug.asyncio.run(
+        live_debug._cmd_tools(argparse.Namespace(project="demo", substr=None))
+    )
+
+    assert rc == 0
+    searched = [args["namespace"] for tool, args in _Client.calls if tool == "tools.search"]
+    assert searched == sorted(NAMESPACE_TOC)
+    assert all(args["limit"] == 50 for _tool, args in _Client.calls)
+    assert client._client.list_calls == 0  # list_tools would have shown only the core nine
+    # `allocations.list` is not a core tool, so only the namespace browse can surface it.
+    assert capsys.readouterr().out.splitlines() == sorted(_SEARCHABLE)
+
+
+def test_cmd_tools_filters_by_substring(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+
+    class Factory:
+        @staticmethod
+        def over_http(base: str, token: str) -> _Client:
+            del base, token
+            return client
+
+    monkeypatch.setattr(live_debug, "_token", lambda project: project)
+    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+
+    rc = live_debug.asyncio.run(
+        live_debug._cmd_tools(argparse.Namespace(project="demo", substr="release"))
+    )
+
+    assert rc == 0
+    assert capsys.readouterr().out.splitlines() == ["allocations.release"]
+
+
+def test_cmd_schema_resolves_a_non_core_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _gateway_surface_client()
+
+    class Factory:
+        @staticmethod
+        def over_http(base: str, token: str) -> _Client:
+            del base, token
+            return client
+
+    monkeypatch.setattr(live_debug, "_token", lambda project: project)
+    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+
+    rc = live_debug.asyncio.run(
+        live_debug._cmd_schema(argparse.Namespace(project="demo", tools=["allocations.list"]))
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "### allocations.list" in out
+    assert json.loads(out.split("\n", 1)[1]) == _REQUEST_SCHEMA["properties"]
 
 
 def test_cmd_call_uses_live_stack_client_factory(
