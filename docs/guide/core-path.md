@@ -47,7 +47,8 @@ kernel source. See [Build lane](../operating/external-build-upload.md) for the a
 
 `runs.install`, `runs.boot`, `control.force_crash`, and
 `vmcore.fetch` are long-running: each returns a job handle and you poll
-`jobs.wait` or `jobs.get` until it reaches a terminal state. See
+`jobs.wait` until it reaches a terminal state (`jobs.wait(timeout_s=0)` for a
+non-blocking status read). See
 [async jobs](async-jobs.md). At each step, prefer the `suggested_next_actions`
 field in the [response envelope](response-envelope.md) over re-deriving the next
 call from this list.

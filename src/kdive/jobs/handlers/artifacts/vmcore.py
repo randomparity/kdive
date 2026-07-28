@@ -147,7 +147,7 @@ async def capture_handler(
     """Capture the System's vmcore, store the raw + redacted rows, return the redacted id.
 
     The returned value becomes the job's ``result_ref`` and reaches the agent as ``refs.result``
-    on every ``jobs.get`` / ``jobs.wait`` / ``jobs.list`` read — the redacted artifact id it hands
+    on every ``jobs.wait`` / ``jobs.list`` read — the redacted artifact id it hands
     straight to ``artifacts.get`` (ADR-0466). ``None`` when no redacted row survives.
     """
     payload = load_payload(job, CaptureVmcorePayload)

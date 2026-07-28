@@ -58,7 +58,7 @@ def register(
         Prerequisite: the Run's bound System must be in CRASHED state — induce a crash with
         ``control.force_crash`` (or capture a spontaneous panic) first; a non-CRASHED System is
         rejected with a configuration_error naming the current state. Async: this enqueues a
-        ``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait`` / ``jobs.get``.
+        ``capture_vmcore`` job and returns a job handle — poll it with ``jobs.wait``.
         On success the core lands as a redacted artifact and the completed job carries its
         artifact id in ``refs.result``: read the bytes with ``artifacts.get`` or analyze the core
         with ``postmortem.crash``. ``runs.get`` carries the same id as ``refs.vmcore`` if you no

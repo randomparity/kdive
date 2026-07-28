@@ -2,16 +2,6 @@
 
 # `allocations` tools
 
-## `allocations.get`
-
-`implemented` · `read-only`
-
-Return one allocation visible to the caller.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `allocation_id` | string | yes | The Allocation to render. |
-
 ## `allocations.list`
 
 `implemented` · `read-only`
@@ -43,7 +33,7 @@ is safe to call as a final cleanup step. A completed `systems.teardown` does not
 release the allocation, but the reconciler auto-releases the now-orphaned grant after a
 short grace, so a release call after teardown may find it already released and return
 `ok`. An `expired` (lease lapsed) or `failed` (provision failed) grant instead returns
-`stale_handle`; read `allocations.get` to see its real state.
+`stale_handle`; read `allocations.wait` (timeout_s=0) to see its real state.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -111,9 +101,17 @@ state before treating it as granted.
 
 `implemented` · `read-only`
 
-Poll until the allocation leaves the queued state or the deadline elapses.
+Read or poll one allocation — the single way to learn an allocation's state.
+
+Pass ``timeout_s=0`` to read the allocation's current state once and return
+immediately, without waiting. That is the plain point read: use it to look up, fetch,
+or check an allocation by id when you do not want to block.
+
+With a positive ``timeout_s`` (the default) this returns as soon as the allocation
+leaves the ``requested`` (queued) state or the timeout elapses, whichever comes
+first. A still-queued return carries the current ``queue_position``.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `allocation_id` | string | yes | The Allocation to poll until it leaves the requested (queued) state. |
-| `timeout_s` | number | no | Seconds to wait before returning; capped at 300. A non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever. |
+| `allocation_id` | string | yes | The Allocation to read, or to poll until it leaves the queue. |
+| `timeout_s` | number | no | Seconds to wait before returning; capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the allocation's current state immediately, never block. Otherwise a non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever. |

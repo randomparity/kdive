@@ -42,7 +42,7 @@ def test_build_app_registers_jobs_tools() -> None:
         # list[Tool], each with a .name (there is no get_tools()).
         tools = await app.list_tools()
         names = {t.name for t in tools}
-        assert {"jobs.get", "jobs.wait", "jobs.cancel", "jobs.list"} <= names
+        assert {"jobs.wait", "jobs.cancel", "jobs.list"} <= names
         assert {
             "systems.provision",
             "systems.provision_defined",
@@ -91,7 +91,7 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {"reports.generate"} <= names
         assert {
             "allocations.request",
-            "allocations.get",
+            "allocations.wait",
             "allocations.release",
             "allocations.renew",
             "allocations.list",

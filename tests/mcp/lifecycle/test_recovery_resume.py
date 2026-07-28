@@ -42,7 +42,7 @@ from kdive.domain.capacity.state import (
 from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
-from kdive.mcp.tools.lifecycle.allocations.view import get_allocation
+from kdive.mcp.tools.lifecycle.allocations.view import wait_allocation
 from kdive.mcp.tools.lifecycle.runs.view import get_run
 from kdive.mcp.tools.lifecycle.systems.view import get_system
 from kdive.security.authz.rbac import Role
@@ -243,7 +243,7 @@ def test_resume_from_read_tools(migrated_url: str) -> None:
             run_id = await _seed_run(pool, system_id=system_id, investigation_id=inv_id)
 
             ctx = _ctx()
-            alloc_resp = await get_allocation(pool, ctx, str(alloc_id))
+            alloc_resp = await wait_allocation(pool, ctx, str(alloc_id), timeout_s=0)
             sys_resp = await get_system(pool, ctx, str(system_id), resolver=provider_resolver())
             run_resp = await get_run(
                 pool,

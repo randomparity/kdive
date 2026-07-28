@@ -55,7 +55,7 @@ def _release_response(uid: UUID, outcome: ReleaseOutcome) -> ToolResponse:
     return ToolResponse.failure(
         str(uid),
         category,
-        suggested_next_actions=["allocations.get"]
+        suggested_next_actions=["allocations.wait"]
         if category is ErrorCategory.STALE_HANDLE
         else [],
         data=data,
@@ -105,6 +105,6 @@ def _renew_response(uid: UUID, outcome: RenewOutcome, ctx: RequestContext) -> To
     return ToolResponse.failure(
         str(uid),
         category,
-        suggested_next_actions=["allocations.get"],
+        suggested_next_actions=["allocations.wait"],
         data=data,
     )

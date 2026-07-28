@@ -37,9 +37,6 @@ from kdive.mcp.tools.lifecycle.allocations.view import (
     AllocationsListRequest,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
-    get_allocation as _get_allocation,
-)
-from kdive.mcp.tools.lifecycle.allocations.view import (
     list_allocations as _list_allocations,
 )
 from kdive.mcp.tools.lifecycle.allocations.view import (
@@ -80,7 +77,6 @@ def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResol
         resolver: Provider resolver used for call-time kind guard (ADR-0269).
     """
     _register_allocations_request(app, pool, resolver)
-    _register_allocations_get(app, pool)
     _register_allocations_release(app, pool)
     _register_allocations_renew(app, pool)
     _register_allocations_list(app, pool)
@@ -233,19 +229,6 @@ def _register_allocations_request(
         )
 
 
-def _register_allocations_get(app: FastMCP, pool: AsyncConnectionPool) -> None:
-    @app.tool(
-        name="allocations.get",
-        annotations=_docmeta.read_only(),
-        meta={"maturity": "implemented"},
-    )
-    async def allocations_get(
-        allocation_id: Annotated[str, Field(description="The Allocation to render.")],
-    ) -> ToolResponse:
-        """Return one allocation visible to the caller."""
-        return await _get_allocation(pool, current_context(), allocation_id)
-
-
 def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> None:
     @app.tool(
         name="allocations.release",
@@ -262,7 +245,7 @@ def _register_allocations_release(app: FastMCP, pool: AsyncConnectionPool) -> No
         release the allocation, but the reconciler auto-releases the now-orphaned grant after a
         short grace, so a release call after teardown may find it already released and return
         `ok`. An `expired` (lease lapsed) or `failed` (provision failed) grant instead returns
-        `stale_handle`; read `allocations.get` to see its real state.
+        `stale_handle`; read `allocations.wait` (timeout_s=0) to see its real state.
         """
         return await _release_allocation(pool, current_context(), allocation_id)
 
@@ -333,21 +316,30 @@ def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
     async def allocations_wait(
         allocation_id: Annotated[
             str,
-            Field(
-                description=("The Allocation to poll until it leaves the requested (queued) state.")
-            ),
+            Field(description="The Allocation to read, or to poll until it leaves the queue."),
         ],
         timeout_s: Annotated[
             float,
             Field(
                 description=(
-                    f"Seconds to wait before returning; capped at {int(MAX_WAIT_S)}. A "
-                    "non-terminal return is the 'still queued, call allocations.wait again' "
-                    "signal; prefer repeated short waits over one long hold that an "
-                    "intermediary proxy may sever."
+                    f"Seconds to wait before returning; capped at {int(MAX_WAIT_S)}. Pass "
+                    "timeout_s=0 for a plain point read: one lookup, return the allocation's "
+                    "current state immediately, never block. Otherwise a non-terminal return "
+                    "is the 'still queued, call allocations.wait again' signal; prefer "
+                    "repeated short waits over one long hold that an intermediary proxy may "
+                    "sever."
                 )
             ),
         ] = 30.0,
     ) -> ToolResponse:
-        """Poll until the allocation leaves the queued state or the deadline elapses."""
+        """Read or poll one allocation — the single way to learn an allocation's state.
+
+        Pass ``timeout_s=0`` to read the allocation's current state once and return
+        immediately, without waiting. That is the plain point read: use it to look up, fetch,
+        or check an allocation by id when you do not want to block.
+
+        With a positive ``timeout_s`` (the default) this returns as soon as the allocation
+        leaves the ``requested`` (queued) state or the timeout elapses, whichever comes
+        first. A still-queued return carries the current ``queue_position``.
+        """
         return await _wait_allocation(pool, current_context(), allocation_id, timeout_s)

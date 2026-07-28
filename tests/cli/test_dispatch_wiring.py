@@ -18,8 +18,8 @@ def test_curated_verb_is_a_known_subcommand() -> None:
 
 
 def test_record_verb_takes_its_positional() -> None:
-    args = build_parser().parse_args(["allocations", "get", "al-1"])
-    assert args.allocation_id == "al-1"
+    args = build_parser().parse_args(["systems", "get", "sys-1"])
+    assert args.system_id == "sys-1"
 
 
 def test_list_verb_takes_its_optional_filter() -> None:

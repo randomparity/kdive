@@ -113,8 +113,9 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "runs.bind": frozenset({"bind", "attach", "system", "run"}),
     "runs.complete_build": frozenset({"complete", "finish", "external", "build", "upload"}),
     # jobs
-    "jobs.get": frozenset({"job", "status", "get", "fetch", "lookup", "result"}),
     "jobs.list": frozenset({"jobs", "list", "filter", "background", "running"}),
+    # `get`/`status`/`fetch`/`lookup`/`result` are the retired `jobs.get` intent (ADR-0468):
+    # `jobs.wait(timeout_s=0)` is the point read, and the surviving name spells neither word.
     "jobs.wait": frozenset(
         {
             "job",
@@ -132,6 +133,11 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
             "next",
             "action",
             "actions",
+            "get",
+            "status",
+            "fetch",
+            "lookup",
+            "result",
         }
     ),
     "jobs.cancel": frozenset({"job", "cancel", "stop", "abort", "running"}),
@@ -195,7 +201,11 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     "allocations.request": frozenset({"allocate", "request", "capacity", "reserve", "system"}),
     "allocations.release": frozenset({"release", "free", "deallocate", "allocation"}),
     "allocations.renew": frozenset({"renew", "extend", "lease", "allocation"}),
-    "allocations.wait": frozenset({"wait", "poll", "allocation", "ready"}),
+    # `get`/`status`/`fetch`/`lookup`/`id` are the retired `allocations.get` intent (ADR-0468):
+    # `allocations.wait(timeout_s=0)` is the point read by allocation id.
+    "allocations.wait": frozenset(
+        {"wait", "poll", "allocation", "ready", "get", "status", "fetch", "lookup", "id"}
+    ),
     # artifacts
     # `artifacts.get` carries the retired `artifacts.find` vocabulary too (ADR-0462): the jump
     # matcher is a `find` parameter on this tool, so search/find/text/grep/string must rank it.
@@ -313,6 +323,7 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "accounting.report_granted_set": "accounting.report",
     "accounting.usage_investigation": "accounting.usage",
     "accounting.usage_project": "accounting.usage",
+    "allocations.get": "allocations.wait",
     "artifacts.find": "artifacts.get",
     "debug.finish": "debug.advance",
     "debug.next": "debug.advance",
@@ -320,6 +331,7 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "debug.step_instruction": "debug.advance",
     "fixtures.list": "images.list",
     "images.build": "images.publish",
+    "jobs.get": "jobs.wait",
     "ops.queue_pause": "ops.set_queue_paused",
     "ops.queue_resume": "ops.set_queue_paused",
     "postmortem.triage": "postmortem.crash",

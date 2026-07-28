@@ -20,16 +20,21 @@ from kdive.serialization import JsonValue, safe_error_details, validate_json_val
 
 # Literal next tool names by the job's state.
 # See the design doc's suggested_next_actions table.
+# A non-terminal job points back at `jobs.wait` because the row has not settled and calling
+# again learns something new. Every terminal state is empty (ADR-0468): the caller was just
+# handed the final envelope, so steering it at a tool that re-reads the same row is a loop.
+# What is genuinely actionable after a terminal job is kind-specific and comes from
+# _TERMINAL_KIND_ACTIONS below.
 _NEXT_ACTIONS: dict[JobState, list[str]] = {
     JobState.QUEUED: ["jobs.wait", "jobs.cancel"],
     JobState.RUNNING: ["jobs.wait", "jobs.cancel"],
-    JobState.SUCCEEDED: ["jobs.get"],
-    JobState.FAILED: ["jobs.get"],
+    JobState.SUCCEEDED: [],
+    JobState.FAILED: [],
     JobState.CANCELED: [],
 }
 
 # Tool-specific next actions appended when a job of this kind reaches SUCCEEDED, so the hint
-# is a durable property of the completed job wherever it is rendered — every jobs.get /
+# is a durable property of the completed job wherever it is rendered — every
 # jobs.wait / jobs.list read of the terminal job carries it, not just the enqueuing tool's
 # synchronous envelope (ADR-0414). A completed TEARDOWN drives the System to torn_down but
 # leaves its Allocation `active` until allocations.release; point the agent at that second
@@ -232,7 +237,7 @@ class ToolResponse(BaseModel):
         The job id is carried in the envelope's standard ``object_id`` field (``str(job.id)``),
         not a separate ``job_id`` key — the ``{job_id, status: queued}`` shorthand in the tool
         reference docs names that same value. Pass this ``object_id`` back as the ``job_id``
-        argument to ``jobs.wait`` / ``jobs.get`` / ``jobs.cancel``.
+        argument to ``jobs.wait`` / ``jobs.cancel``.
 
         ``extra_next_actions`` are tool-specific next actions appended *after* the job
         state's generic lifecycle set (order preserved, not deduplicated). The default

@@ -178,7 +178,7 @@ def test_no_grants_sees_only_public_subset() -> None:
     bare = _ctx()
     names = {
         "projects.list",  # public
-        "jobs.get",  # project viewer
+        "jobs.wait",  # project viewer
         "allocations.request",  # project contributor
         "control.force_crash",  # project admin
         "ops.reconcile_now",  # platform operator
@@ -188,8 +188,8 @@ def test_no_grants_sees_only_public_subset() -> None:
 
 def test_viewer_sees_reads_but_not_mutations() -> None:
     viewer = _ctx(roles={"a": Role.VIEWER})
-    names = {"jobs.get", "allocations.request", "control.power", "ops.reconcile_now"}
-    assert visible_tool_names(viewer, names) == {"jobs.get"}
+    names = {"jobs.wait", "allocations.request", "control.power", "ops.reconcile_now"}
+    assert visible_tool_names(viewer, names) == {"jobs.wait"}
 
 
 def test_contributor_scope_rank() -> None:
@@ -348,7 +348,7 @@ def test_project_tool_visible_is_per_project_not_connection_union() -> None:
 
 def test_project_tool_visible_member_without_role_sees_only_public() -> None:
     role_less = _ctx(projects=("a",))  # member of a, no role
-    assert not project_tool_visible("allocations.get", role_less, "a")  # viewer-gated
+    assert not project_tool_visible("allocations.wait", role_less, "a")  # viewer-gated
     assert project_tool_visible("projects.list", role_less, "a")  # public
 
 
@@ -362,14 +362,14 @@ def test_project_tool_visible_platform_scope_uses_connection_grant() -> None:
 def test_visible_next_actions_filters_preserves_order_no_dedup() -> None:
     contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
     # images.upload stays operator-only; systems.provision is now contributor (ADR-0326).
-    actions = ["allocations.get", "images.upload", "systems.provision", "allocations.release"]
+    actions = ["allocations.wait", "images.upload", "systems.provision", "allocations.release"]
     assert visible_next_actions(actions, contributor, "a") == [
-        "allocations.get",
+        "allocations.wait",
         "systems.provision",
         "allocations.release",
     ]
     viewer = _ctx(roles={"a": Role.VIEWER})
-    assert visible_next_actions(actions, viewer, "a") == ["allocations.get"]
+    assert visible_next_actions(actions, viewer, "a") == ["allocations.wait"]
     operator = _ctx(roles={"a": Role.OPERATOR})
     assert visible_next_actions(actions, operator, "a") == actions
     assert visible_next_actions([], contributor, "a") == []
@@ -381,7 +381,7 @@ def test_visible_next_actions_raises_on_unregistered_tool() -> None:
     # public and silently kept. The filter must instead surface the drift by raising (#1444).
     contributor = _ctx(roles={"a": Role.CONTRIBUTOR})
     with pytest.raises(ValueError, match="allocations.does_not_exist"):
-        visible_next_actions(["allocations.get", "allocations.does_not_exist"], contributor, "a")
+        visible_next_actions(["allocations.wait", "allocations.does_not_exist"], contributor, "a")
 
 
 def test_visible_next_actions_still_filters_registered_but_invisible() -> None:
@@ -389,6 +389,6 @@ def test_visible_next_actions_still_filters_registered_but_invisible() -> None:
     # unregistered-name guard must not turn a legitimate role-based filter into an error.
     viewer = _ctx(roles={"a": Role.VIEWER})
     # images.upload is registered (project-operator) but a viewer cannot invoke it.
-    assert visible_next_actions(["allocations.get", "images.upload"], viewer, "a") == [
-        "allocations.get"
+    assert visible_next_actions(["allocations.wait", "images.upload"], viewer, "a") == [
+        "allocations.wait"
     ]

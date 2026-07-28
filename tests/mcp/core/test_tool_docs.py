@@ -45,7 +45,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "accounting.set_budget": ("tests/mcp/accounting/test_accounting_admin_tools.py",),
     "accounting.set_quota": ("tests/mcp/accounting/test_accounting_admin_tools.py",),
     "accounting.usage": ("tests/mcp/accounting/test_accounting_usage.py",),
-    "allocations.get": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "allocations.list": ("tests/mcp/lifecycle/test_allocations_tools.py",),
     "allocations.release": ("tests/mcp/lifecycle/test_allocations_reconcile.py",),
     "allocations.renew": ("tests/mcp/lifecycle/test_allocations_renew.py",),
@@ -110,7 +109,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "investigations.set": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "investigations.unlink": ("tests/mcp/lifecycle/test_investigations_tools.py",),
     "jobs.cancel": ("tests/mcp/jobs/test_jobs_tools.py",),
-    "jobs.get": ("tests/mcp/jobs/test_jobs_tools.py",),
     "jobs.list": ("tests/mcp/jobs/test_jobs_tools.py",),
     "jobs.wait": ("tests/mcp/jobs/test_jobs_tools.py",),
     "introspect.from_vmcore": ("tests/mcp/debug/test_introspect_tools.py",),
@@ -880,7 +878,7 @@ def test_destructive_consequence_guard_bites() -> None:
 
 # Tools whose response is an opaque durable-job handle whose result the caller obtains only by
 # polling — the out-of-band async contract (#941/jobs.wait): the description must name
-# `jobs.wait` as the poll tool, not merely "poll" or `jobs.get`. This is a reviewed set (like
+# `jobs.wait` as the poll tool, not merely "poll". This is a reviewed set (like
 # DESTRUCTIVE_TOOLS): lifecycle tools that enqueue a job to advance a durable entity
 # (images.publish, systems.provision/teardown, runs.boot) are tracked via that entity's read
 # tool, not jobs.wait, and are deliberately excluded.

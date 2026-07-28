@@ -207,8 +207,8 @@ async def _wait_job(
         raise RuntimeError(f"no {kind} job found after triggering it")
     final = await _poll(
         client,
-        "jobs.get",
-        {"job_id": job_id},
+        "jobs.wait",
+        {"job_id": job_id, "timeout_s": 0},
         schemas,
         done=_JOB_DONE,
         timeout_sec=timeout_sec,

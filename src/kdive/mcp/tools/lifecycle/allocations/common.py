@@ -19,8 +19,8 @@ MAX_WAIT_S = 300.0
 def allocation_next_actions(state: AllocationState) -> list[str]:
     """Return the next tool breadcrumbs for an allocation state."""
     if state is AllocationState.GRANTED:
-        return ["allocations.get", "systems.provision", "allocations.release"]
-    return ["allocations.get", "allocations.release"]
+        return ["allocations.wait", "systems.provision", "allocations.release"]
+    return ["allocations.wait", "allocations.release"]
 
 
 async def queue_position(conn: AsyncConnection, alloc: Allocation) -> int:

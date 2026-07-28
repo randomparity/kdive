@@ -164,7 +164,7 @@ def _force_release_response(uid: UUID, outcome: ReleaseOutcome) -> ToolResponse:
     return ToolResponse.failure(
         str(uid),
         category,
-        suggested_next_actions=["allocations.get"]
+        suggested_next_actions=["allocations.wait"]
         if category is ErrorCategory.STALE_HANDLE
         else [],
         data=data,

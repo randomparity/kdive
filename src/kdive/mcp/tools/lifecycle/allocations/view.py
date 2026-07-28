@@ -42,27 +42,6 @@ from kdive.security.authz.rbac import Role, require_role
 _log = logging.getLogger(__name__)
 
 
-async def get_allocation(
-    pool: AsyncConnectionPool, ctx: RequestContext, allocation_id: str
-) -> ToolResponse:
-    """Return an allocation visible to the caller, or a no-leak not_found."""
-    uid = _as_uuid(allocation_id)
-    if uid is None:
-        return _invalid_uuid_error("allocation_id", allocation_id)
-    with bind_context(principal=ctx.principal):
-        async with pool.connection() as conn:
-            alloc = await ALLOCATIONS.get(conn, uid)
-            if alloc is None or alloc.project not in ctx.projects:
-                return _not_found(allocation_id)
-            require_role(ctx, alloc.project, Role.VIEWER)
-            position = (
-                await queue_position(conn, alloc)
-                if alloc.state is AllocationState.REQUESTED
-                else None
-            )
-        return envelope_for_allocation(alloc, ctx, queue_position=position)
-
-
 async def wait_allocation(
     pool: AsyncConnectionPool,
     ctx: RequestContext,
@@ -71,7 +50,13 @@ async def wait_allocation(
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> ToolResponse:
-    """Poll until a requested allocation settles or the clamped timeout elapses."""
+    """Poll until a requested allocation settles or the clamped timeout elapses.
+
+    A non-positive ``timeout_s`` is a **single read**: the deadline is fixed before the loop
+    and tested only after the first query, so ``timeout_s=0`` issues exactly one
+    ``ALLOCATIONS.get`` (plus the queue-position probe for a ``requested`` row) and returns
+    without sleeping. That is the point read that replaced ``allocations.get`` (ADR-0468).
+    """
     uid = _as_uuid(allocation_id)
     if uid is None:
         return _invalid_uuid_error("allocation_id", allocation_id)
@@ -102,7 +87,7 @@ async def wait_allocation(
 
 
 _ALLOCATIONS_LIST_TAG = "allocations.list"
-_ALLOCATIONS_COLLECTION_ACTIONS = ["allocations.get", "allocations.release"]
+_ALLOCATIONS_COLLECTION_ACTIONS = ["allocations.wait", "allocations.release"]
 
 
 @dataclass(frozen=True, slots=True)

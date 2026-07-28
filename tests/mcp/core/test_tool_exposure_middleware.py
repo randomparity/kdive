@@ -31,7 +31,7 @@ class _Tool:
 
 _ALL = [
     _Tool("projects.list"),  # public
-    _Tool("jobs.get"),  # project viewer
+    _Tool("jobs.wait"),  # project viewer
     _Tool("allocations.request"),  # project operator
     _Tool("control.force_crash"),  # project admin
     _Tool("ops.reconcile_now"),  # platform operator
@@ -66,7 +66,7 @@ def test_viewer_catalog_is_reduced(monkeypatch: pytest.MonkeyPatch) -> None:
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.VIEWER})
     )
     names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
-    assert names == {"projects.list", "jobs.get"}
+    assert names == {"projects.list", "jobs.wait"}
     assert names < {t.name for t in _ALL}
 
 
@@ -76,7 +76,7 @@ def test_operator_sees_operator_tools(monkeypatch: pytest.MonkeyPatch) -> None:
         "kdive.mcp.middleware.shared.current_context", lambda: _ctx(roles={"a": Role.OPERATOR})
     )
     names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
-    assert {"projects.list", "jobs.get", "allocations.request"} <= names
+    assert {"projects.list", "jobs.wait", "allocations.request"} <= names
     assert "control.force_crash" not in names  # admin-only
     assert "ops.reconcile_now" not in names  # platform
 
@@ -89,7 +89,7 @@ def test_platform_operator_sees_platform_tool(monkeypatch: pytest.MonkeyPatch) -
     )
     names = _run_filter(ToolExposureMiddleware(ProviderResolver({})))
     assert "ops.reconcile_now" in names
-    assert "jobs.get" not in names  # no project grant
+    assert "jobs.wait" not in names  # no project grant
 
 
 def test_fail_open_when_context_missing(

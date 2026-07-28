@@ -9,7 +9,6 @@
 | [`accounting.set_budget`](accounting.md#accountingset_budget) | `implemented` |
 | [`accounting.set_quota`](accounting.md#accountingset_quota) | `implemented` |
 | [`accounting.usage`](accounting.md#accountingusage) | `implemented` |
-| [`allocations.get`](allocations.md#allocationsget) | `implemented` |
 | [`allocations.list`](allocations.md#allocationslist) | `implemented` |
 | [`allocations.release`](allocations.md#allocationsrelease) | `implemented` |
 | [`allocations.renew`](allocations.md#allocationsrenew) | `implemented` |
@@ -70,7 +69,6 @@
 | [`investigations.set`](investigations.md#investigationsset) | `implemented` |
 | [`investigations.unlink`](investigations.md#investigationsunlink) | `implemented` |
 | [`jobs.cancel`](jobs.md#jobscancel) | `implemented` |
-| [`jobs.get`](jobs.md#jobsget) | `implemented` |
 | [`jobs.list`](jobs.md#jobslist) | `implemented` |
 | [`jobs.wait`](jobs.md#jobswait) | `implemented` |
 | [`ops.diagnostics`](ops.md#opsdiagnostics) | `implemented` |

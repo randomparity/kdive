@@ -6,7 +6,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -166,7 +166,7 @@ def test_get_known_job_returns_status(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
-            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert resp.object_id == job_id
         assert resp.status == "queued"
         assert resp.data == {"kind": "install"}
@@ -177,7 +177,7 @@ def test_get_known_job_returns_status(migrated_url: str) -> None:
 def test_get_unknown_job_is_error_envelope(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.get_job(pool, CTX, str(uuid4()))
+            resp = await jobs_tools.wait_job(pool, CTX, str(uuid4()), timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "not_found"
 
@@ -192,7 +192,7 @@ def test_get_job_degrades_invariant_violating_row(
             job_id = await _enqueue(pool, "bad-get")
             await _mark_failed_without_category(pool, job_id)
             caplog.set_level(logging.WARNING, logger=jobs_tools.__name__)
-            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert resp.object_id == job_id
         assert resp.status == "error"
         assert resp.error_category == "infrastructure_failure"
@@ -207,7 +207,7 @@ def test_get_job_degrades_invariant_violating_row(
 def test_get_malformed_id_is_error_envelope(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
-            resp = await jobs_tools.get_job(pool, CTX, "not-a-uuid")
+            resp = await jobs_tools.wait_job(pool, CTX, "not-a-uuid", timeout_s=0)
         assert resp.object_id == "not-a-uuid"
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
@@ -278,7 +278,7 @@ def test_cancel_operator_gated_job_denied_to_contributor(migrated_url: str, kind
             job_id = await _enqueue_system_job(pool, kind, f"opgate-{kind.value}")
             with pytest.raises(RoleDenied) as excinfo:
                 await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
-            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert excinfo.value.held is Role.CONTRIBUTOR
         assert excinfo.value.required is Role.OPERATOR
         assert owned.status == "queued"
@@ -376,7 +376,7 @@ def test_cancel_terminal_job_is_error_envelope(migrated_url: str) -> None:
             resp = await jobs_tools.cancel_job(pool, OP_CTX, job_id)  # again
         assert resp.status == "error"
         assert resp.error_category == "configuration_error"
-        # The agent learns the current state without a second jobs.get.
+        # The agent learns the current state without a second read.
         assert resp.data == {"current_status": "canceled"}
 
     asyncio.run(_run())
@@ -474,7 +474,7 @@ def test_cancel_audit_failure_rolls_back_the_mutation(
             with pytest.raises(RuntimeError, match="audit sink down"):
                 await jobs_tools.cancel_job(pool, CONTRIB_CTX, job_id)
             monkeypatch.undo()
-            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
             rows = await _audit_rows(pool, job_id)
         assert resp.status == "running"  # rolled back with the audit failure, not canceled
         assert rows == []
@@ -707,7 +707,7 @@ def test_get_job_in_unowned_project_is_indistinguishable_from_not_found(migrated
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue_in(pool, "d1", "proj")
             # _OTHER is a member of "other", not "proj": the job must look absent (no leak).
-            resp = await jobs_tools.get_job(pool, _OTHER, job_id)
+            resp = await jobs_tools.wait_job(pool, _OTHER, job_id, timeout_s=0)
         assert resp.status == "error"
         assert resp.error_category == "not_found"
         assert resp.object_id == job_id
@@ -731,7 +731,7 @@ def test_get_job_requires_viewer_role(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue(pool, "d1")
             with pytest.raises(RoleDenied) as excinfo:
-                await jobs_tools.get_job(pool, CTX, job_id)
+                await jobs_tools.wait_job(pool, CTX, job_id, timeout_s=0)
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.required is Role.VIEWER
@@ -758,7 +758,7 @@ def test_cancel_job_in_unowned_project_is_denied_and_does_not_mutate(migrated_ur
             job_id = await _enqueue_in(pool, "d1", "proj")
             denied = await jobs_tools.cancel_job(pool, _OTHER, job_id)
             # The owning project's member still sees it queued — the cancel did not land.
-            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert denied.status == "error"
         assert denied.error_category == "not_found"
         assert owned.status == "queued"
@@ -773,7 +773,7 @@ def test_cancel_job_requires_contributor_role(migrated_url: str) -> None:
             job_id = await _enqueue(pool, "d1")
             with pytest.raises(RoleDenied) as excinfo:
                 await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
-            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is Role.VIEWER
@@ -797,7 +797,7 @@ def test_cancel_job_member_overreach_is_audited_at_dispatch_boundary(
             resp = await middleware.on_call_tool(
                 _FakeContext("jobs.cancel", {"job_id": job_id}), _call_next
             )
-            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
                     "SELECT principal, agent_session, project, tool, transition "
@@ -817,7 +817,7 @@ def test_cancel_job_requires_a_project_role(migrated_url: str) -> None:
             job_id = await _enqueue(pool, "d1")
             with pytest.raises(RoleDenied) as excinfo:
                 await jobs_tools.cancel_job(pool, CTX, job_id)
-            owned = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert excinfo.value.principal == "user-1"
         assert excinfo.value.project == "proj"
         assert excinfo.value.held is None
@@ -1136,17 +1136,20 @@ async def _enqueue_teardown(pool: AsyncConnectionPool, dedup: str) -> str:
     return str(job.id)
 
 
-def test_get_succeeded_teardown_job_steers_to_allocation_release(migrated_url: str) -> None:
-    # End-to-end: an agent polling the completed teardown job through the generic jobs.get
-    # renderer is pointed at allocations.release, not just jobs.get (#1385, ADR-0414).
+def test_point_read_succeeded_teardown_job_steers_to_allocation_release(
+    migrated_url: str,
+) -> None:
+    # End-to-end: an agent point-reading the completed teardown job through the generic
+    # renderer is pointed at allocations.release (#1385, ADR-0414). The generic terminal set
+    # is empty (ADR-0468), so the kind steer is the whole list.
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue_teardown(pool, "teardown-done")
             await _set_state(pool, job_id, JobState.SUCCEEDED)
-            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert resp.status == "succeeded"
         assert resp.data == {"kind": "teardown"}
-        assert resp.suggested_next_actions == ["jobs.get", "allocations.release"]
+        assert resp.suggested_next_actions == ["allocations.release"]
 
     asyncio.run(_run())
 
@@ -1157,7 +1160,106 @@ def test_get_running_teardown_job_omits_allocation_release(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             job_id = await _enqueue_teardown(pool, "teardown-running")
             await _set_state(pool, job_id, JobState.RUNNING)
-            resp = await jobs_tools.get_job(pool, VIEWER_CTX, job_id)
+            resp = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
         assert "allocations.release" not in resp.suggested_next_actions
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# jobs.wait(timeout_s=0) is the point read that replaced jobs.get (ADR-0468)
+# ---------------------------------------------------------------------------
+
+
+class _CountingPool:
+    """Counts connection checkouts; stands in for the real pool at the handler seam."""
+
+    def __init__(self, inner: AsyncConnectionPool) -> None:
+        self._inner = inner
+        self.connections = 0
+
+    def connection(self) -> Any:
+        self.connections += 1
+        return self._inner.connection()
+
+    def as_pool(self) -> AsyncConnectionPool:
+        """This double typed as the pool the handler declares — it only calls connection()."""
+        return cast(AsyncConnectionPool, self)
+
+
+def test_zero_timeout_wait_is_a_single_read_on_a_terminal_job(migrated_url: str) -> None:
+    """`jobs.wait(timeout_s=0)` issues exactly one read and never sleeps.
+
+    This is the property the removal of `jobs.get` rests on: if the loop ever polled a second
+    time on a zero timeout, the point read would silently become a blocking call.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "zero-timeout-terminal")
+            await _set_state(pool, job_id, JobState.SUCCEEDED)
+            counting = _CountingPool(pool)
+            slept: list[float] = []
+
+            async def _record_sleep(delay: float) -> None:
+                slept.append(delay)
+
+            resp = await jobs_tools.wait_job(
+                counting.as_pool(), VIEWER_CTX, job_id, timeout_s=0, sleep=_record_sleep
+            )
+        assert counting.connections == 1
+        assert slept == []
+        assert resp.status == "succeeded"
+        assert resp.object_id == job_id
+
+    asyncio.run(_run())
+
+
+def test_zero_timeout_wait_returns_immediately_on_a_non_terminal_job(migrated_url: str) -> None:
+    """A queued job point-reads to its current state rather than blocking for the deadline."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "zero-timeout-queued")
+            counting = _CountingPool(pool)
+            slept: list[float] = []
+
+            async def _record_sleep(delay: float) -> None:
+                slept.append(delay)
+
+            resp = await jobs_tools.wait_job(
+                counting.as_pool(), VIEWER_CTX, job_id, timeout_s=0, sleep=_record_sleep
+            )
+        assert counting.connections == 1
+        assert slept == []
+        assert resp.status == "queued"
+        assert resp.suggested_next_actions == ["jobs.wait", "jobs.cancel"]
+
+    asyncio.run(_run())
+
+
+def test_negative_timeout_wait_is_also_a_single_read(migrated_url: str) -> None:
+    """A negative timeout clamps to zero rather than raising or waiting forever."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "negative-timeout")
+            counting = _CountingPool(pool)
+            resp = await jobs_tools.wait_job(counting.as_pool(), VIEWER_CTX, job_id, timeout_s=-5)
+        assert counting.connections == 1
+        assert resp.status == "queued"
+
+    asyncio.run(_run())
+
+
+def test_zero_timeout_wait_preserves_the_no_leak_not_found(migrated_url: str) -> None:
+    """The point read keeps the getter's ungranted-vs-absent indistinguishability."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            job_id = await _enqueue(pool, "zero-timeout-noleak")
+            ungranted = await jobs_tools.wait_job(pool, _OTHER, job_id, timeout_s=0)
+            absent = await jobs_tools.wait_job(pool, _OTHER, str(uuid4()), timeout_s=0)
+        assert ungranted.model_dump() == {**absent.model_dump(), "object_id": job_id}
 
     asyncio.run(_run())

@@ -418,7 +418,7 @@ allocations.request project=demo request={
   "vcpus": 2, "memory_gb": 2, "disk_gb": 10,
   "resource": {"mode": "kind", "kind": "local-libvirt"}
 }
-# → status=granted; suggested_next_actions: [allocations.get, systems.provision, allocations.release]
+# → status=granted; suggested_next_actions: [allocations.wait, systems.provision, allocations.release]
 ```
 
 **Provision a System.** Provision boots a qcow2 rootfs from disk, so it needs the **bootable image**

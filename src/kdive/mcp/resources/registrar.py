@@ -141,7 +141,7 @@ DOC_RESOURCES: tuple[DocResource, ...] = (
         name="async-jobs",
         title="Async jobs and polling",
         description=(
-            "How long-running tools return a job handle, the jobs.wait / jobs.get polling pattern, "
+            "How long-running tools return a job handle, the jobs.wait polling pattern, "
             "the transport-reset retry contract, and the idempotency-key retention window. Cited "
             "by the response-envelope guide."
         ),

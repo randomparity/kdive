@@ -123,7 +123,7 @@ def test_poll_waits_until_terminal_state(
     async def fake_call(
         _client: object, tool: str, args: dict[str, Any], _schemas: dict[str, Any]
     ) -> dict[str, Any]:
-        assert tool == "jobs.get"
+        assert tool == "jobs.wait"
         assert args == {"job_id": "j1"}
         return next(states)
 
@@ -136,7 +136,7 @@ def test_poll_waits_until_terminal_state(
     result = asyncio.run(
         live_debug._poll(
             object(),
-            "jobs.get",
+            "jobs.wait",
             {"job_id": "j1"},
             {},
             done={"succeeded"},
@@ -195,8 +195,8 @@ def test_wait_job_selects_matching_job_and_requires_success(
     asyncio.run(live_debug._wait_job(object(), {}, kind="boot", timeout_sec=30))
 
     assert seen_poll_args == {
-        "tool": "jobs.get",
-        "args": {"job_id": "boot-1"},
+        "tool": "jobs.wait",
+        "args": {"job_id": "boot-1", "timeout_s": 0},
         "done": live_debug._JOB_DONE,
         "timeout_sec": 30,
         "label": "boot",
