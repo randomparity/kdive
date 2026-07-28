@@ -131,7 +131,11 @@ def _as_dict(response: ToolResponse | list[ToolResponse]) -> dict[str, Any]:
 
 
 async def _input_schemas(client: LiveStackClient) -> dict[str, dict[str, Any]]:
-    """Map every tool name to its JSON input schema (for the request-wrap decision)."""
+    """Map every *advertised* tool name to its JSON input schema.
+
+    Only what the connection's exposure profile lists, which is why :class:`_SchemaResolver`
+    has a second source for the rest.
+    """
     tools = await client._client.list_tools()  # noqa: SLF001 - dev tool reuses the harness client
     return {tool.name: dict(tool.inputSchema) for tool in tools}
 
