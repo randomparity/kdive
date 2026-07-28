@@ -282,6 +282,7 @@ class RemoteLibvirtInstall:
         this gate replaces.
         """
         deadline = self._monotonic() + self._kdump_arm_timeout_s
+        reservation_seen = False
         while True:
             try:
                 result = agent_exec.run(domain, [_HELPER, "kdump-status"])
@@ -291,27 +292,51 @@ class RemoteLibvirtInstall:
                 result = None  # agent still coming back after the reboot; retry
             if result is not None:
                 if result.exit_status != 0:
-                    _log.debug("guest helper has no kdump-status; skipping the arming gate")
+                    # Skipping is a decision worth seeing: this is the gate declining to run.
+                    _log.info("guest helper has no kdump-status; skipping the arming gate")
                     return
                 status = self._parse_kdump_status(result.stdout)
                 if status is None:
-                    _log.debug("guest helper gave no kdump status; skipping the arming gate")
+                    _log.info("guest helper gave no kdump status; skipping the arming gate")
                     return
                 crash_size, crash_loaded = status
                 if crash_size <= 0 or crash_loaded == 1:
                     return  # not a kdump System, or already armed
+                reservation_seen = True
             if self._monotonic() >= deadline:
-                raise CategorizedError(
-                    "guest reserved crashkernel memory but never armed its capture kernel; "
-                    "a crash would produce no vmcore",
-                    category=ErrorCategory.BOOT_TIMEOUT,
-                    details={
-                        "system_id": str(system_id),
-                        "kexec_crash_loaded": 0,
-                        "hint": "check kdump.service in the guest (journalctl -u kdump.service)",
-                    },
-                )
+                raise self._kdump_arm_timeout(system_id, reservation_seen=reservation_seen)
             self._sleep(self._boot_poll_s)
+
+    @staticmethod
+    def _kdump_arm_timeout(system_id: UUID, *, reservation_seen: bool) -> CategorizedError:
+        """The timeout fault, naming what was actually observed rather than what was assumed.
+
+        Only a poll that returned a well-formed status establishes that the guest reserved
+        crashkernel memory. If the agent never answered across the whole window, nothing about
+        kdump was determined, and reporting "reserved but never armed" would send the operator
+        to ``kdump.service`` for what is really a dead guest agent.
+        """
+        if not reservation_seen:
+            return CategorizedError(
+                "guest agent never answered the kdump-status probe after the boot, so whether "
+                "the capture kernel is armed could not be determined",
+                category=ErrorCategory.BOOT_TIMEOUT,
+                details={
+                    "system_id": str(system_id),
+                    "hint": "the agent stopped answering after the reboot; check "
+                    "qemu-guest-agent in the guest",
+                },
+            )
+        return CategorizedError(
+            "guest reserved crashkernel memory but never armed its capture kernel; "
+            "a crash would produce no vmcore",
+            category=ErrorCategory.BOOT_TIMEOUT,
+            details={
+                "system_id": str(system_id),
+                "kexec_crash_loaded": 0,
+                "hint": "check kdump.service in the guest (journalctl -u kdump.service)",
+            },
+        )
 
     def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
         result = agent_exec.run(domain, [_HELPER, "boot-id"])

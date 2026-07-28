@@ -576,6 +576,34 @@ def test_boot_times_out_when_the_capture_kernel_never_arms() -> None:
     assert "never armed" in str(excinfo.value)
 
 
+def test_a_silent_agent_is_not_reported_as_an_unarmed_capture_kernel() -> None:
+    """The timeout must name what was observed, not assume the reservation it never read.
+
+    If the agent stops answering for the whole arming window, nothing about kdump was
+    determined — the guest may reserve no crashkernel at all. Reporting "reserved but never
+    armed" would point the operator at kdump.service for what is really a dead guest agent.
+    """
+    state = {"reboots": 0, "status_reads": 0}
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        sub = argv[1]
+        if sub == "kdump-status":
+            state["status_reads"] += 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        if sub == "boot":
+            state["reboots"] += 1
+            raise libvirt_error(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+        return AgentExecResult(0, b"BASELINE-ID\n" if state["reboots"] == 0 else b"FRESH-ID\n", b"")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler, boot_timeout_s=600.0).boot(uuid4())
+
+    assert excinfo.value.category is ErrorCategory.BOOT_TIMEOUT
+    assert "never armed" not in str(excinfo.value), "claimed a reservation it never observed"
+    assert "could not be determined" in str(excinfo.value)
+    assert "kexec_crash_loaded" not in excinfo.value.details
+
+
 def test_boot_skips_the_kdump_gate_without_a_crashkernel_reservation() -> None:
     # No reservation => not a kdump System; the non-kdump path must not pay the arming wait.
     state = {"reboots": 0, "status_reads": 0}
