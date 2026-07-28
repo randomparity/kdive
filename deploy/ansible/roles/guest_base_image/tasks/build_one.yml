@@ -92,6 +92,26 @@
     - image.source == 'scratch'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
 
+# --- Make an injected NMI actually panic the guest. ---
+# control.force_crash panics the guest with virDomainInjectNMI, which relies on the guest
+# panicking on an UNKNOWN NMI. Fedora/RHEL ship kernel.unknown_nmi_panic=0, so the guest
+# silently ignores the NMI: it never panics, kdump never runs, and the capture phase fails as
+# readiness_failure / "no kdump core in the guest's dump storage" while the domain sits happily
+# `running`. A crash-test base image has to opt in explicitly.
+- name: Panic on an unknown NMI for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - >-
+        printf 'kernel.unknown_nmi_panic = 1\nkernel.panic_on_unrecovered_nmi = 1\n'
+        > /etc/sysctl.d/99-kdive-nmi-panic.conf
+  when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Relax SELinux so the guest-agent-spawned helpers can work. ---
 # kdive drives the guest through guest-exec, so the helpers inherit the confined
 # ``virt_qemu_ga_t`` domain, which denies outbound connect(). kdive-install-kernel fetches the
