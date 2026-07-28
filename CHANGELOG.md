@@ -306,6 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Assert the ASSEMBLED console artifact, and unwrap artifacts.list
 - Let the arming timeout name what it observed
 - Match guest-exec as a whole element, not a substring
+- Fail test-live-remote when no test carries the marker
 
 ### Build
 
