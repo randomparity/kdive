@@ -41,7 +41,7 @@ async def _seed_run(conn: psycopg.AsyncConnection) -> UUID:
     )
     sid = await _ins(
         "INSERT INTO systems (allocation_id, state, provisioning_profile, principal, project) "
-        "VALUES (%s, 'defined', '{}'::jsonb, 'alice', 'proj') RETURNING id",
+        "VALUES (%s, 'provisioning', '{}'::jsonb, 'alice', 'proj') RETURNING id",
         (aid,),
     )
     iid = await _ins(

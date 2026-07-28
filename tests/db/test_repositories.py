@@ -88,7 +88,7 @@ def _system(allocation_id: UUID, **kw: object) -> System:
         principal="alice",
         project="proj",
         allocation_id=allocation_id,
-        state=SystemState.DEFINED,
+        state=SystemState.PROVISIONING,
         provisioning_profile={"k": "v"},
     )
     base.update(kw)
@@ -469,8 +469,7 @@ def test_set_json_column_writes_when_state_allowed(migrated_url: str) -> None:
         async with await _connect(migrated_url) as conn:
             res = await RESOURCES.insert(conn, _resource())
             alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
-            sysm = await SYSTEMS.insert(conn, _system(alloc.id))
-            await SYSTEMS.update_state(conn, sysm.id, SystemState.PROVISIONING)
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id))  # provisioning: the entry state
 
             wrote = await SYSTEMS.set_json_column(
                 conn,
@@ -493,9 +492,9 @@ def test_set_json_column_noop_when_state_not_allowed(migrated_url: str) -> None:
         async with await _connect(migrated_url) as conn:
             res = await RESOURCES.insert(conn, _resource())
             alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
-            # A freshly-inserted System is DEFINED — outside {PROVISIONING, READY} — modelling a
-            # System that crashed/was reaped before the post-provision write.
-            sysm = await SYSTEMS.insert(conn, _system(alloc.id))
+            # A `torn_down` System is outside {PROVISIONING, READY} — modelling a System that
+            # crashed/was reaped before the post-provision write.
+            sysm = await SYSTEMS.insert(conn, _system(alloc.id, state=SystemState.TORN_DOWN))
 
             wrote = await SYSTEMS.set_json_column(
                 conn,
