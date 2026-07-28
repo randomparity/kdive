@@ -88,21 +88,40 @@ fails CI rather than reaching a server. The handler coerces with `float()`, matc
 existing hand-coercion in `images.py` (`int(args.seconds)`, `int(lifetime)`), and a
 non-numeric value is a usage error (exit `2`) instead of an uncaught `ValueError`.
 
-The handler also rejects a **non-finite** value, which is not redundant with the tools' own
-`math.isfinite` guard. `float()` accepts `inf`, `-inf` and `nan`; JSON can encode none of them,
-so pydantic serializes all three to `null` on the way out. The tool would be handed `null` for
-a property it declares as a `number`, and the transport raises before the handler's
-`configuration_error` can be returned — the CLI's own `main()` has no exception handling, so
-the operator would get a traceback and exit `1` rather than the exit `2` every other malformed
-`--timeout-s` produces. This is also the one payload defect ADR-0469's guard cannot see, since
-it validates the Python payload before serialization and `inf` passes `"type": "number"`. The
-CLI therefore refuses it up front rather than relying on a server-side check that this path
-can never reach.
+The accepted range is **non-negative and finite**. Both refused classes would otherwise be
+silently reinterpreted rather than rejected, which is the failure mode this decision is about;
+zero stays legal, because it is the documented point read.
 
-Teaching the `Verb` dataclass a per-option `type=` was rejected as premature: two options
-across the whole registry need coercion today, and a general mechanism would have to answer
-where the type comes from (the schema, presumably) — which is a different change, and one the
-generated verbs already solve for themselves via `GeneratedFlag.arg_type`.
+*Non-finite.* `float()` accepts `inf`, `-inf` and `nan`; JSON can encode none of them, so
+pydantic serializes all three to `null` on the way out. The tool would be handed `null` for a
+property it declares as a `number`, and the transport raises before the tool's own
+`math.isfinite` check can return its `configuration_error` — and `main()` has no exception
+handling, so the operator gets a traceback and exit `1` rather than the exit `2` every other
+malformed `--timeout-s` produces. This is also the one payload defect ADR-0469's guard cannot
+see, since it validates the Python payload before serialization, where `inf` satisfies
+`"type": "number"`.
+
+*Negative.* Both handlers compute `min(max(timeout_s, 0.0), MAX_WAIT_S)`, so a negative is
+clamped to `0` — by ADR-0468's own construction, exactly one query and an immediate return.
+Nothing reports this: the schema carries no `minimum`, so ADR-0469's guard is silent, and no
+envelope field distinguishes a clamped negative from a requested point read. A wrapper that
+computes its wait arithmetically (`--timeout-s $(( deadline - now ))`) therefore turns a
+bounded server-side long-poll into an unthrottled client-side spin the moment it passes its
+deadline, and sees only a loop that appears to be working. Refusing it follows the convention
+already in this module, where a given-but-empty `--projects` is exit `2` rather than a value
+whose effect differs from what was asked.
+
+Placing this at the handler rather than at the parser seam is a deliberate but narrow choice,
+and the reason is not that no seam exists. `_curated_choices` (ADR-0469) established exactly
+the mechanism — per-parameter argparse metadata read off the *generated* verb at the same path
+— and `GeneratedFlag.arg_type` already carries `"float"` for both `timeout_s` flags, so the
+generalization is ten lines above `_verb_parser` rather than a different change. It is
+deferred because it is not a refactor: argparse's own `type=float` accepts `inf` and `nan`
+too, so the seam would need a shared finite-number type, and adopting it would change the
+failure mode of `images extend --seconds` and `images upload --lifetime-seconds` — two
+mutating verbs outside this issue — from an uncaught `ValueError` to an argparse usage error.
+That is a fix those verbs need (#1619), not one to smuggle in here. Until then this ADR states
+plainly that the protection is a per-verb obligation over a defect class CI cannot detect.
 
 ### 4. The invocation pin moves rather than being dropped
 
@@ -150,4 +169,9 @@ still does not exist.
   for the same reason ADR-0468 rejected it: it puts a `get` verb and a `wait` verb on one tool
   with different implied timeouts, reintroducing one layer down exactly the duplication
   ADR-0468 removed.
-- **Give `Verb` a per-option `type=`.** Rejected as premature; see decision 3.
+- **Move the coercion to a shared `type=` on the curated parser seam.** Deferred, not
+  rejected: the seam exists (`_curated_choices`) and the type is already derivable, but taking
+  it changes two mutating verbs outside this issue. See decision 3 and #1619.
+- **Let the server clamp a negative `--timeout-s`.** Rejected: the clamp is correct as a server
+  behavior and silent as a client one, and silence is what makes the poll-loop hot spin
+  invisible.
