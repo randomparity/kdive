@@ -127,6 +127,41 @@ async def jobs_list(args: argparse.Namespace) -> int:
     return exit_code_for_envelope(envelope)
 
 
+async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str) -> int:
+    """Read or poll one record through a ``wait`` tool, rendering the envelope it returns.
+
+    An omitted ``--timeout-s`` sends no ``timeout_s`` key, leaving the tool's own 30-second
+    default authoritative rather than restating it here — so a bare ``wait <id>`` waits, and the
+    point read stays the explicit ``--timeout-s 0`` (ADR-0470 decision 2, upholding ADR-0468
+    decision 2 on the CLI surface).
+
+    A given value is coerced to ``float`` because curated options are declared with no
+    ``type=``, so argparse hands over the raw string while both tools declare ``timeout_s`` as a
+    JSON ``number``. A non-numeric value is a usage error (exit 2) rather than an uncaught
+    ``ValueError``; the tools own the remaining validation (a non-finite timeout is a
+    server-side ``configuration_error``).
+    """
+    payload: dict[str, object] = {id_key: object_id}
+    raw = getattr(args, "timeout_s", None)
+    if raw is not None:
+        try:
+            payload["timeout_s"] = float(raw)
+        except ValueError:
+            print(f"error: --timeout-s must be a number, not {raw!r}", file=sys.stderr)
+            return 2
+    return await _record(tool, args, payload)
+
+
+async def jobs_wait(args: argparse.Namespace) -> int:
+    """Read or poll one job (``jobs.wait``); ``--timeout-s 0`` is the point read."""
+    return await _wait("jobs.wait", args, "job_id", args.job_id)
+
+
+async def allocations_wait(args: argparse.Namespace) -> int:
+    """Read or poll one allocation (``allocations.wait``); ``--timeout-s 0`` is the point read."""
+    return await _wait("allocations.wait", args, "allocation_id", args.allocation_id)
+
+
 def _data_list(envelope: Mapping[str, object], key: str) -> list[object]:
     """Return the list a ``data``-shaped read tool puts under ``data[key]``.
 

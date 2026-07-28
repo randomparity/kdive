@@ -240,11 +240,13 @@ def test_report_verb_is_registered_read_only_and_scope_required() -> None:
 _READ_VERBS = [v for v in REGISTRY if v.read_only]
 
 #: Values a verb needs beyond the generic ``"<name>-val"`` placeholder: an enum-valued
-#: option needs a real member, and a verb whose options are mutually exclusive needs the
-#: ones it must *not* receive dropped.
+#: option needs a real member, a numeric one needs a parseable number, and a verb whose
+#: options are mutually exclusive needs the ones it must *not* receive dropped.
 _VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
     ("accounting", "report"): {"scope": "granted-set"},
     ("accounting", "usage"): {"investigation_id": None},
+    ("jobs", "wait"): {"timeout_s": "0"},
+    ("allocations", "wait"): {"timeout_s": "0"},
 }
 
 
@@ -368,6 +370,90 @@ def test_record_verbs_send_the_declared_id_payload_key(
         client = _install_session(monkeypatch, _data_envelope({}))
         asyncio.run(handler(_args(**{key: "obj-1"})))
         assert client.calls == [(tool, {key: "obj-1"})]
+
+
+_WAIT_CASES = [
+    (reads.jobs_wait, "job_id", "jobs.wait"),
+    (reads.allocations_wait, "allocation_id", "allocations.wait"),
+]
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_omitting_timeout_sends_only_the_id(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """No ``--timeout-s`` sends no ``timeout_s``, leaving the tool's 30s default authoritative.
+
+    ADR-0470 decision 2: the CLI mirrors the tool default rather than restating it, so a bare
+    ``kdivectl jobs wait <id>`` must not become a point read behind the operator's back.
+    """
+    client = _install_session(monkeypatch, _data_envelope({"state": "running"}))
+    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": None})))
+    assert code == 0
+    assert client.calls == [(tool, {key: "obj-1"})]
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_coerces_the_timeout_to_a_number(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """``--timeout-s`` reaches the tool as a float, not the string argparse produced.
+
+    Curated options are declared with no ``type=``, so the namespace carries ``"1.5"``. Both
+    tools declare ``timeout_s`` as a JSON ``number``, so passing the string through emits a
+    payload the schema rejects (ADR-0470 decision 3).
+    """
+    client = _install_session(monkeypatch, _data_envelope({"state": "running"}))
+    asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "1.5"})))
+    assert client.calls == [(tool, {key: "obj-1", "timeout_s": 1.5})]
+    assert isinstance(client.calls[0][1]["timeout_s"], float)
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_point_read_sends_a_zero_timeout(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """The documented point read ``--timeout-s 0`` reaches the tool as ``0.0``, not dropped."""
+    client = _install_session(monkeypatch, _data_envelope({"state": "succeeded"}))
+    asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "0"})))
+    assert client.calls == [(tool, {key: "obj-1", "timeout_s": 0.0})]
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_rejects_a_non_numeric_timeout(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A non-numeric ``--timeout-s`` is a usage error, not an uncaught ``ValueError``."""
+    client = _install_session(monkeypatch, _data_envelope({}))
+    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "soon"})))
+    assert code == 2
+    assert client.calls == []
+    assert "--timeout-s" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_json_emits_whole_envelope(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    envelope = {
+        "object_id": "obj-1",
+        "status": "running",
+        "data": {"state": "running"},
+        "items": [],
+        "suggested_next_actions": [tool],
+    }
+    _install_session(monkeypatch, envelope)
+    asyncio.run(handler(argparse.Namespace(json=True, timeout_s=None, **{key: "obj-1"})))
+    assert json.loads(capsys.readouterr().out) == envelope
+
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+def test_wait_verb_denial_exits_authorization_denied(
+    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _install_session(monkeypatch, _denied("obj-1"))
+    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": None})))
+    assert code == 3
 
 
 def test_payload_omits_missing_optional_filter(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
