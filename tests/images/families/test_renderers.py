@@ -21,8 +21,7 @@ from kdive.images.families.steps import (
 )
 
 
-def test_render_argv_maps_each_step() -> None:
-    cleanup: list[Path] = []
+def test_render_argv_maps_each_step(staged_cleanup: list[Path]) -> None:
     argv = render_argv(
         [
             Mkdir("/seed"),
@@ -31,7 +30,7 @@ def test_render_argv_maps_each_step() -> None:
             WriteFile("/etc/machine-id", "0a1b"),
             UploadFile(Path("/h/u.service"), "/etc/systemd/system/kdive-ready.service"),
         ],
-        cleanup=cleanup,
+        cleanup=staged_cleanup,
     )
     assert argv == [
         "--mkdir",
@@ -47,23 +46,22 @@ def test_render_argv_maps_each_step() -> None:
     ]
 
 
-def test_stagefile_uploads_a_tempfile_with_content() -> None:
-    cleanup: list[Path] = []
+def test_stagefile_uploads_a_tempfile_with_content(staged_cleanup: list[Path]) -> None:
     argv = render_argv(
         [StageFile("/etc/cloud/x.cfg", "datasource_list: [ NoCloud ]\n")],
-        cleanup=cleanup,
+        cleanup=staged_cleanup,
     )
     assert argv[0] == "--upload"
     src, _, dest = argv[1].partition(":")
     assert dest == "/etc/cloud/x.cfg"
     assert Path(src).read_text() == "datasource_list: [ NoCloud ]\n"
-    assert cleanup == [Path(src)]
+    assert staged_cleanup == [Path(src)]
 
 
-def test_uploadfile_mode_appends_chmod() -> None:
+def test_uploadfile_mode_appends_chmod(staged_cleanup: list[Path]) -> None:
     argv = render_argv(
         [UploadFile(Path("/h/k"), "/usr/local/sbin/k", mode="0755")],
-        cleanup=[],
+        cleanup=staged_cleanup,
     )
     assert argv == [
         "--upload",

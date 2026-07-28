@@ -27,16 +27,16 @@ from kdive.images.planes._build_common import (
 )
 
 
-def test_makedumpfile_marker_args_writes_version_file() -> None:
-    argv = render_argv(makedumpfile_version_marker_steps(), cleanup=[])
+def test_makedumpfile_marker_args_writes_version_file(staged_cleanup: list[Path]) -> None:
+    argv = render_argv(makedumpfile_version_marker_steps(), cleanup=staged_cleanup)
     joined = " ".join(argv)
     assert "--run-command" in argv
     assert MAKEDUMPFILE_MARKER_GUEST_PATH in joined
     assert "makedumpfile -v" in joined
 
 
-def test_drgn_marker_args_writes_version_file() -> None:
-    argv = render_argv(drgn_version_marker_steps(), cleanup=[])
+def test_drgn_marker_args_writes_version_file(staged_cleanup: list[Path]) -> None:
+    argv = render_argv(drgn_version_marker_steps(), cleanup=staged_cleanup)
     joined = " ".join(argv)
     assert "--run-command" in argv
     assert DRGN_MARKER_GUEST_PATH in joined
@@ -110,9 +110,9 @@ def _ci_ctx(tmp_path: Path, *, is_cloud_image: bool) -> CustomizeContext:
     )
 
 
-def _ci_argv(tmp_path: Path, *, is_cloud_image: bool) -> list[str]:
+def _ci_argv(tmp_path: Path, cleanup: list[Path], *, is_cloud_image: bool) -> list[str]:
     ctx = _ci_ctx(tmp_path, is_cloud_image=is_cloud_image)
-    return render_argv(cloud_init_first_boot_steps(ctx), cleanup=[])
+    return render_argv(cloud_init_first_boot_steps(ctx), cleanup=cleanup)
 
 
 def _uploads(argv: list[str]) -> dict[str, str]:
@@ -125,8 +125,10 @@ def _uploads(argv: list[str]) -> dict[str, str]:
     return out
 
 
-def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
-    argv = _ci_argv(tmp_path, is_cloud_image=True)
+def test_cloud_init_helper_writes_authoritative_cfg(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    argv = _ci_argv(tmp_path, staged_cleanup, is_cloud_image=True)
     cfg = _uploads(argv)[KDIVE_CLOUD_CFG_PATH]
     assert "datasource_list: [ NoCloud ]" in cfg
     assert "disable_root: false" in cfg
@@ -137,15 +139,17 @@ def test_cloud_init_helper_writes_authoritative_cfg(tmp_path: Path) -> None:
     assert "resize_rootfs: true" in cfg
 
 
-def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path) -> None:
-    argv = _ci_argv(tmp_path, is_cloud_image=True)
+def test_cloud_init_helper_writes_nocloud_seed(tmp_path: Path, staged_cleanup: list[Path]) -> None:
+    argv = _ci_argv(tmp_path, staged_cleanup, is_cloud_image=True)
     uploads = _uploads(argv)
     assert uploads[f"{NOCLOUD_SEED_DIR}/meta-data"].startswith("instance-id:")
     assert uploads[f"{NOCLOUD_SEED_DIR}/user-data"].startswith("#cloud-config")
     assert "--mkdir" in argv and NOCLOUD_SEED_DIR in argv
 
 
-def test_nocloud_user_data_parses_to_a_mapping_not_none(tmp_path: Path) -> None:
+def test_nocloud_user_data_parses_to_a_mapping_not_none(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     """The baked NoCloud user-data must yaml-parse to a mapping, never None (#1152, ADR-0288).
 
     cloud-init 24.4's ``_should_wait_via_user_data`` does ``"write_files" in yaml.safe_load(ud)``
@@ -153,25 +157,31 @@ def test_nocloud_user_data_parses_to_a_mapping_not_none(tmp_path: Path) -> None:
     (``argument of type 'NoneType' is not iterable``) → no network → the customization boot's
     dnf never reaches a mirror. This reproduces that guard so a regression to an empty body fails.
     """
-    user_data = _uploads(_ci_argv(tmp_path, is_cloud_image=True))[f"{NOCLOUD_SEED_DIR}/user-data"]
+    user_data = _uploads(_ci_argv(tmp_path, staged_cleanup, is_cloud_image=True))[
+        f"{NOCLOUD_SEED_DIR}/user-data"
+    ]
     parsed = yaml.safe_load(user_data)
     assert isinstance(parsed, dict), parsed
     assert "write_files" not in parsed  # the exact check cloud-init 24.4 performs unguarded
 
 
-def test_cloud_init_helper_undisables_and_seeds_machine_id(tmp_path: Path) -> None:
+def test_cloud_init_helper_undisables_and_seeds_machine_id(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # ADR-0288: the helper undoes any cloud-init disable and seeds machine-id, but does NOT
     # `systemctl enable` named units — the vendor base ships them enabled and unit names vary
     # across cloud-init versions (24.x renamed cloud-init.service). Enumerating names is fragile.
-    j = " ".join(_ci_argv(tmp_path, is_cloud_image=True))
+    j = " ".join(_ci_argv(tmp_path, staged_cleanup, is_cloud_image=True))
     assert "rm -f /etc/cloud/cloud-init.disabled" in j  # harmless if absent (debian path)
     assert f"/etc/machine-id:{SEED_MACHINE_ID}" in j  # seeded on every image now
     assert "systemctl enable cloud-init" not in j  # no fragile unit-name enumeration
     assert "systemctl unmask cloud-init" not in j
 
 
-def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(tmp_path: Path) -> None:
-    cloud = " ".join(_ci_argv(tmp_path, is_cloud_image=True))
-    scratch = " ".join(_ci_argv(tmp_path, is_cloud_image=False))
+def test_cloud_init_helper_installs_cloud_init_only_on_non_cloud_base(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
+    cloud = " ".join(_ci_argv(tmp_path, staged_cleanup, is_cloud_image=True))
+    scratch = " ".join(_ci_argv(tmp_path, staged_cleanup, is_cloud_image=False))
     assert "--install cloud-init" not in cloud  # ships cloud-init already
     assert "--install cloud-init" in scratch  # virt-builder base needs it installed

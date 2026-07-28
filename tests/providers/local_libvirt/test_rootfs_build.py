@@ -714,6 +714,7 @@ def test_family_for_resolves_rhel_and_rejects_unknown() -> None:
 
 def _rhel_argv(
     tmp_path: Path,
+    cleanup: list[Path],
     *,
     packages: tuple[str, ...],
     is_cloud_image: bool = False,
@@ -729,7 +730,7 @@ def _rhel_argv(
         distro=distro,
         version=version,
     )
-    return render_argv(RhelFamily().customize_steps(ctx), cleanup=[])
+    return render_argv(RhelFamily().customize_steps(ctx), cleanup=cleanup)
 
 
 def _upload_target(argv: list[str], guest_path: str) -> str:
@@ -740,34 +741,40 @@ def _upload_target(argv: list[str], guest_path: str) -> str:
     raise AssertionError(f"no --upload arg targets {guest_path}: {argv}")
 
 
-def test_family_argv_omits_nmi_panic_sysctl_for_a_non_kdump_image(tmp_path: Path) -> None:
+def test_family_argv_omits_nmi_panic_sysctl_for_a_non_kdump_image(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # A non-kdump (e.g. build-host) image never runs force_crash; a stray NMI must not panic it,
     # so the sysctl is gated on the same kexec-tools condition that enables kdump.service (#823).
-    joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
+    joined = " ".join(_rhel_argv(tmp_path, staged_cleanup, packages=("gcc", "make")))
     assert "unknown_nmi_panic" not in joined
     assert "99-kdive-kdump.conf" not in joined
     assert "final_action" not in joined
 
 
-def test_family_argv_stages_kdive_drgn_helper_for_a_debug_image(tmp_path: Path) -> None:
+def test_family_argv_stages_kdive_drgn_helper_for_a_debug_image(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # The live `introspect.run` path SSH-execs `/usr/local/sbin/kdive-drgn <helper>` in the guest
     # (ADR-0219/0220, #724). The debug image (drgn in packages) stages the repo's reviewed reference
     # helper read-executable so a live attach can run it; absent → DEBUG_ATTACH_FAILURE.
-    argv = _rhel_argv(tmp_path, packages=("drgn",))
+    argv = _rhel_argv(tmp_path, staged_cleanup, packages=("drgn",))
     helper_src = _upload_target(argv, "/usr/local/sbin/kdive-drgn")
     assert helper_src.endswith("deploy/remote-libvirt-guest-helpers/kdive-drgn")
     assert "chmod 0755 /usr/local/sbin/kdive-drgn" in argv, "helper is made read-executable"
 
 
-def test_family_argv_omits_drgn_helper_for_a_non_debug_image(tmp_path: Path) -> None:
+def test_family_argv_omits_drgn_helper_for_a_non_debug_image(
+    tmp_path: Path, staged_cleanup: list[Path]
+) -> None:
     # A non-debug (e.g. build-host) image carries no drgn and no introspection contract, so it gets
     # no kdive-drgn helper — gated on `drgn in packages`.
-    joined = " ".join(_rhel_argv(tmp_path, packages=("gcc", "make")))
+    joined = " ".join(_rhel_argv(tmp_path, staged_cleanup, packages=("gcc", "make")))
     assert "kdive-drgn" not in joined
 
 
 def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_cleanup: list[Path]
 ) -> None:
     # The helper is resolved from the source tree; an absent helper file must fail loud with a
     # CONFIGURATION_ERROR rather than ship a guest that cannot introspect (ADR-0220 D2, #724).
@@ -775,7 +782,7 @@ def test_family_argv_fails_loud_when_drgn_helper_source_is_absent(
 
     monkeypatch.setattr(fedora_customize, "drgn_helper_source", lambda: tmp_path / "missing")
     with pytest.raises(CategorizedError) as exc:
-        _rhel_argv(tmp_path, packages=("drgn",))
+        _rhel_argv(tmp_path, staged_cleanup, packages=("drgn",))
     assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
 
 
