@@ -275,6 +275,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repair live-debug so the stepping proof can run
 - Keep a union-typed request as a --request-json escape
 - Correct the point-read CLI invocation and the errors example
+- Stop leaking /tmp entries from test helpers
 
 ### Build
 
