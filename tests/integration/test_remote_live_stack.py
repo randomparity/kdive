@@ -365,6 +365,13 @@ def test_remote_spine_over_the_wire() -> None:
                     ),
                     "attach",
                 )
+                # Detach before crashing. A gdb client on the QEMU gdbstub HALTS the guest — it
+                # is why read_registers can read rip at all — so a session left open means
+                # force_crash injects an NMI into a halted CPU that never executes it, the guest
+                # never panics into the kdump capture kernel, and capture times out as
+                # readiness_failure. The capstone already ends its session before crash-B; this
+                # arm did not, which only became reachable once the gdbstub attach worked.
+                ok(await scalar(op, "debug.end_session", session_id=session_id), "attach")
             async with phase("crash-rbac-negative"):
                 denied = await scalar(op, "control.force_crash", system_id=system_id)
                 if denied.status != "error" or denied.error_category != "authorization_denied":
