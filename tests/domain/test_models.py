@@ -112,10 +112,10 @@ def test_system_links_allocation_and_defaults_optional_fields() -> None:
         **_base(),
         **_attrib(),
         allocation_id=_ID2,
-        state=SystemState.DEFINED,
+        state=SystemState.PROVISIONING,
         provisioning_profile={"arch": "x86_64"},
     )
-    assert system.state is SystemState.DEFINED
+    assert system.state is SystemState.PROVISIONING
     assert system.target_fingerprint is None
     assert system.domain_name is None
 

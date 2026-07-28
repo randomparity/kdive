@@ -1,10 +1,11 @@
-"""System define/provision admission service (ADR-0025).
+"""System provision admission service (ADR-0025, ADR-0457).
 
 `systems.provision` synchronously mints a System (state ``provisioning``) for a ``granted``
 Allocation from a submitted profile, flips the Allocation ``granted -> active``, and enqueues a
-``provision`` job. `systems.provision_defined` admits a `defined` System by System id after its
-upload window is complete. Worker-owned ``provision``/``teardown``/``reprovision`` execution lives
-in ``kdive.jobs.handlers.systems``.
+``provision`` job. It is the sole create lane: ADR-0457 retired the staged
+`systems.define` / `systems.provision_defined` pair and the ``defined`` state they produced.
+Worker-owned ``provision``/``teardown``/``reprovision`` execution lives in
+``kdive.jobs.handlers.systems``.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from types import TracebackType
-from typing import Literal, Protocol, Self
+from typing import Protocol, Self
 from uuid import UUID, uuid4
 
 from psycopg import AsyncConnection
@@ -68,9 +69,9 @@ from kdive.services.systems.validation import (
 )
 
 # System states that occupy a per-project quota slot (terminal torn_down/failed do not).
+# The documented complement of the reconciler's `_LIVE_SYSTEM_STATES`; the two change together.
 _NON_TERMINAL_SYSTEM = (
-    SystemState.DEFINED,  # the create-without-provision producer (systems.define)
-    SystemState.PROVISIONING,
+    SystemState.PROVISIONING,  # the sole entry state (systems.provision; ADR-0457 §2)
     SystemState.READY,
     SystemState.REPROVISIONING,
     SystemState.RESTORING,  # mid snapshot-revert: still holds a quota slot (ADR-0378)
@@ -79,7 +80,6 @@ _NON_TERMINAL_SYSTEM = (
     SystemState.CRASHED,
 )
 type LockedAllocationSystem = tuple[AsyncConnection, Allocation, System | None]
-type CreateSystemMode = Literal["provision", "define"]
 
 
 class PreMutationTimeout(Protocol):
@@ -117,7 +117,6 @@ class MissingAllocation:
 class CreateSystemRequest:
     allocation_id: UUID
     profile: ProvisioningProfileInput
-    mode: CreateSystemMode
     # Idempotency recorder (ADR-0193): awaited with the success result inside the admission
     # transaction so the key and the System/job commit atomically. None = no idempotency.
     recorder: SystemRecorder | None = None
@@ -130,27 +129,18 @@ class CreateSystemRequest:
     investigation_id: UUID | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ProvisionDefinedRequest:
-    system_id: UUID
-    recorder: SystemRecorder | None = None
-
-
 class AdmissionFailureReason(StrEnum):
     ALLOCATION_NOT_ADMITTED = "allocation_not_admitted"
     ALLOCATION_STATE_CONFLICT = "allocation_state_conflict"
     PROVIDER_POLICY_REJECTED = "provider_policy_rejected"
     QUOTA_EXCEEDED = "quota_exceeded"
     SUBJECT_NOT_FOUND = "subject_not_found"
-    SYSTEM_ALREADY_DEFINED = "system_already_defined"
     SYSTEM_RECYCLE_REQUIRED = "system_recycle_required"
-    SYSTEM_STATE_CONFLICT = "system_state_conflict"
     TIMEOUT = "timeout"
 
 
 class AdmissionRecovery(StrEnum):
     INSPECT_SYSTEMS_AND_ALLOCATIONS = "inspect_systems_and_allocations"
-    PROVISION_DEFINED_SYSTEM = "provision_defined_system"
     RECYCLE_ALLOCATION = "recycle_allocation"
     RETRY_PROVISION = "retry_provision"
 
@@ -172,12 +162,7 @@ class ProvisionJobAdmitted:
     system_id: UUID
 
 
-@dataclass(frozen=True, slots=True)
-class DefinedSystemAdmitted:
-    system: System
-
-
-type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted | DefinedSystemAdmitted
+type AdmissionResult = AdmissionFailure | ProvisionJobAdmitted
 
 # Idempotency recorder (ADR-0193): given the open admission connection and a success result,
 # persists the service-owned AdmissionResult serialization in that transaction. The MCP adapter
@@ -195,13 +180,6 @@ def stored_admission_result(result: AdmissionResult) -> StoredResult:
                 "system_id": str(result.system_id),
             }
         )
-    if isinstance(result, DefinedSystemAdmitted):
-        return StoredResult(
-            document={
-                "type": "defined_system",
-                "system": result.system.model_dump(mode="json"),
-            }
-        )
     raise TypeError(f"cannot store admission failure: {type(result).__name__}")
 
 
@@ -214,9 +192,6 @@ def admission_result_from_stored(stored: StoredResult) -> AdmissionResult:
                 job=job,
                 system_id=UUID(str(stored.document["system_id"])),
             )
-        case "defined_system":
-            system = System.model_validate(stored.document["system"])
-            return DefinedSystemAdmitted(system)
         case _:
             raise CategorizedError(
                 "stored system admission result is invalid",
@@ -376,23 +351,6 @@ class SystemAdmission:
             return self.timeout_factory(bound)
         return asyncio.timeout(bound)
 
-    async def provision_defined(
-        self,
-        pool: AsyncConnectionPool,
-        ctx: RequestContext,
-        request: ProvisionDefinedRequest,
-    ) -> AdmissionResult:
-        """Admit a ``defined`` System after its upload window is complete."""
-        return await _provision_defined_locked(
-            pool,
-            ctx,
-            request.system_id,
-            profile_policy=self.profile_policy,
-            component_sources=self.component_sources,
-            rootfs_validator=self.rootfs_validator,
-            recorder=request.recorder,
-        )
-
     async def create_for_allocation(
         self,
         pool: AsyncConnectionPool,
@@ -462,8 +420,9 @@ class SystemAdmission:
                 await _validate_investigation_binding(
                     conn, alloc, existing, request.investigation_id
                 )
-                # The effective binding is the supplied one, else the write-once value a prior
-                # define recorded; an upload-rootfs profile requires it to resolve (ADR-0441 §2).
+                # The effective binding is the supplied one, else the write-once value the
+                # Allocation's existing System carries; an upload-rootfs profile requires it to
+                # resolve (ADR-0441 §2).
                 effective_investigation = request.investigation_id or (
                     existing.investigation_id if existing is not None else None
                 )
@@ -472,32 +431,18 @@ class SystemAdmission:
                 )
             except CategorizedError as exc:
                 return _failure_from_error(alloc.id, exc)
-            if request.mode == "provision":
-                result = await _provision_create_response(
-                    conn,
-                    ctx,
-                    alloc,
-                    existing,
-                    profile=stored,
-                    profile_policy=self.profile_policy,
-                    rootfs_validator=self.rootfs_validator,
-                    timeout=timeout,
-                    label=request.label,
-                    investigation_id=request.investigation_id,
-                )
-            else:
-                result = await _define_create_response(
-                    conn,
-                    ctx,
-                    alloc,
-                    existing,
-                    profile=stored,
-                    profile_policy=self.profile_policy,
-                    rootfs_validator=self.rootfs_validator,
-                    timeout=timeout,
-                    label=request.label,
-                    investigation_id=request.investigation_id,
-                )
+            result = await _provision_create_response(
+                conn,
+                ctx,
+                alloc,
+                existing,
+                profile=stored,
+                profile_policy=self.profile_policy,
+                rootfs_validator=self.rootfs_validator,
+                timeout=timeout,
+                label=request.label,
+                investigation_id=request.investigation_id,
+            )
             # Record the success envelope inside the admission transaction (idempotency,
             # ADR-0193) — atomic with the System insert / job enqueue. A failure is not cached.
             if request.recorder is not None and not isinstance(result, AdmissionFailure):
@@ -698,14 +643,6 @@ async def _provision_create_response(
             label,
             investigation_id=investigation_id,
         )
-    if existing.state is SystemState.DEFINED:
-        return AdmissionFailure(
-            subject_id=existing.id,
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            reason=AdmissionFailureReason.SYSTEM_ALREADY_DEFINED,
-            current_status=existing.state.value,
-            recovery=AdmissionRecovery.PROVISION_DEFINED_SYSTEM,
-        )
     if existing.state is SystemState.PROVISIONING:
         timeout.reschedule(None)  # mutation boundary: re-enqueue runs unbounded (ADR-0126)
         return await _enqueue_provision_job(
@@ -727,75 +664,6 @@ async def _provision_create_response(
     )
 
 
-async def _define_create_response(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    alloc: Allocation,
-    existing: System | None,
-    *,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    rootfs_validator: RootfsValidator,
-    timeout: PreMutationTimeout,
-    label: str | None = None,
-    investigation_id: UUID | None = None,
-) -> AdmissionResult:
-    if existing is None:
-        return await _insert_defined_system(
-            conn,
-            ctx,
-            alloc,
-            profile,
-            profile_policy,
-            rootfs_validator,
-            timeout,
-            label,
-            investigation_id=investigation_id,
-        )
-    if existing.state is SystemState.DEFINED:
-        return DefinedSystemAdmitted(existing)  # idempotent re-define
-    return AdmissionFailure(
-        subject_id=existing.id,
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
-        current_status=existing.state.value,
-    )
-
-
-async def _admit_defined(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    alloc: Allocation,
-    system: System,
-) -> AdmissionResult:
-    """Drive a ``defined`` System ``defined -> provisioning`` and enqueue its provision job.
-
-    The stored profile is provisioned (ADR-0025 decision 7); the Allocation is already
-    ``active`` (flipped at ``define``), so it is not touched. Keyed on the allocation, so
-    a retried ``systems.provision`` dedups to the same job.
-    """
-    await SYSTEMS.update_state(conn, system.id, SystemState.PROVISIONING)
-    await audit.record(
-        conn,
-        ctx,
-        audit.AuditEvent(
-            tool="systems.provision",
-            object_kind="systems",
-            object_id=system.id,
-            transition="defined->provisioning",
-            args={"allocation_id": str(alloc.id)},
-            project=alloc.project,
-        ),
-    )
-    return await _enqueue_provision_job(
-        conn,
-        ctx,
-        project=alloc.project,
-        allocation_id=alloc.id,
-        system_id=system.id,
-    )
-
-
 async def _enqueue_provision_job(
     conn: AsyncConnection,
     ctx: RequestContext,
@@ -812,102 +680,6 @@ async def _enqueue_provision_job(
         f"{allocation_id}:provision",
     )
     return ProvisionJobAdmitted(job=job, system_id=system_id)
-
-
-async def _provision_defined_locked(
-    pool: AsyncConnectionPool,
-    ctx: RequestContext,
-    system_id: UUID,
-    *,
-    profile_policy: ProfilePolicy,
-    component_sources: ComponentSourceCapabilities,
-    rootfs_validator: RootfsValidator,
-    recorder: SystemRecorder | None = None,
-) -> AdmissionResult:
-    async with pool.connection() as probe:
-        probe_system = await SYSTEMS.get(probe, system_id)
-        if probe_system is None or probe_system.project not in ctx.projects:
-            return AdmissionFailure(
-                subject_id=system_id,
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
-            )
-        project = probe_system.project
-        allocation_id = probe_system.allocation_id
-    async with (
-        pool.connection() as conn,
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.PROJECT, project),
-        advisory_xact_lock(conn, LockScope.ALLOCATION, allocation_id),
-    ):
-        system = await SYSTEMS.get(conn, system_id)
-        if system is None or system.project not in ctx.projects:
-            return AdmissionFailure(
-                subject_id=system_id,
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
-            )
-        require_role(ctx, system.project, Role.CONTRIBUTOR)
-        alloc = await ALLOCATIONS.get(conn, system.allocation_id)
-        if alloc is None or alloc.project != system.project:
-            return AdmissionFailure(
-                subject_id=system.allocation_id,
-                category=ErrorCategory.CONFIGURATION_ERROR,
-                reason=AdmissionFailureReason.SUBJECT_NOT_FOUND,
-            )
-        result = await _provision_defined_response(
-            conn,
-            ctx,
-            system,
-            alloc,
-            profile_policy=profile_policy,
-            component_sources=component_sources,
-            rootfs_validator=rootfs_validator,
-        )
-        if recorder is not None and not isinstance(result, AdmissionFailure):
-            await recorder(conn, result)
-        return result
-
-
-async def _provision_defined_response(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    system: System,
-    alloc: Allocation,
-    *,
-    profile_policy: ProfilePolicy,
-    component_sources: ComponentSourceCapabilities,
-    rootfs_validator: RootfsValidator,
-) -> AdmissionResult:
-    if system.state is SystemState.PROVISIONING:
-        return await _enqueue_provision_job(
-            conn,
-            ctx,
-            project=system.project,
-            allocation_id=system.allocation_id,
-            system_id=system.id,
-        )
-    if system.state is not SystemState.DEFINED:
-        return AdmissionFailure(
-            subject_id=system.id,
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            reason=AdmissionFailureReason.SYSTEM_STATE_CONFLICT,
-            current_status=system.state.value,
-        )
-    try:
-        parsed = ProvisioningProfile.parse(system.provisioning_profile)
-        validate_profile_for_provider(parsed, profile_policy, component_sources)
-        await validate_rootfs_for_provider(parsed, profile_policy, rootfs_validator)
-    except CategorizedError as exc:
-        return _failure_from_error(system.id, exc)
-    if alloc.state is not AllocationState.ACTIVE:
-        return AdmissionFailure(
-            subject_id=alloc.id,
-            category=ErrorCategory.CONFIGURATION_ERROR,
-            reason=AdmissionFailureReason.ALLOCATION_STATE_CONFLICT,
-            current_status=alloc.state.value,
-        )
-    return await _admit_defined(conn, ctx, alloc, system)
 
 
 async def _new_system_allowed(
@@ -1001,45 +773,6 @@ async def _insert_system_and_activate(
         ),
     )
     return system
-
-
-async def _insert_defined_system(
-    conn: AsyncConnection,
-    ctx: RequestContext,
-    alloc: Allocation,
-    profile: ProvisioningProfile,
-    profile_policy: ProfilePolicy,
-    rootfs_validator: RootfsValidator,
-    timeout: PreMutationTimeout,
-    label: str | None = None,
-    investigation_id: UUID | None = None,
-) -> AdmissionResult:
-    # Validate arch + resolve host bindings before the granted->active flip (ADR-0339/0368): a
-    # mis-arch rejection writes no System and leaves the allocation granted (all-or-nothing).
-    try:
-        accel, resolved_cpu = await _resolve_new_system_bindings(
-            conn, alloc.resource_id, profile, profile_policy
-        )
-    except CategorizedError as exc:
-        return _failure_from_error(alloc.id, exc)
-    blocked = await _new_system_allowed(conn, alloc, profile, profile_policy, rootfs_validator)
-    if blocked is not None:
-        return blocked
-    timeout.reschedule(None)  # mutation boundary: the insert+activate runs unbounded (ADR-0126)
-    system = await _insert_system_and_activate(
-        conn,
-        ctx,
-        alloc,
-        profile,
-        state=SystemState.DEFINED,
-        tool="systems.define",
-        transition="->defined",
-        accel=accel,
-        resolved_cpu=resolved_cpu,
-        label=label,
-        investigation_id=investigation_id,
-    )
-    return DefinedSystemAdmitted(system)
 
 
 async def _insert_provisioning_system(

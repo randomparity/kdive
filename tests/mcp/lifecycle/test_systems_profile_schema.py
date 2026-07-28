@@ -21,7 +21,7 @@ from kdive.profiles.provisioning import ProvisioningProfile
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 
-_TYPED_PROFILE_TOOLS = ("systems.define", "systems.provision", "systems.reprovision")
+_TYPED_PROFILE_TOOLS = ("systems.provision", "systems.reprovision")
 
 _VALID_REMOTE_PROFILE: dict[str, Any] = {
     "schema_version": 1,
@@ -87,8 +87,8 @@ def _probe_app_with_typed_profile() -> FastMCP:
     """
     app: FastMCP = FastMCP(name="probe")
 
-    @app.tool(name="systems.define")
-    async def _define(allocation_id: str, profile: ProvisioningProfile) -> dict[str, Any]:
+    @app.tool(name="systems.provision")
+    async def _provision(allocation_id: str, profile: ProvisioningProfile) -> dict[str, Any]:
         return {"arch": profile.arch}
 
     return app
@@ -102,11 +102,11 @@ def test_client_renders_input_schema_and_binds_a_valid_profile() -> None:
             # list_tools forces the client to parse the advertised input schema; a render failure
             # (the #404/ADR-0113 output-schema problem, if it recurred on input) would surface here.
             names = {t.name for t in await client.list_tools()}
-            assert "systems.define" in names
+            assert "systems.provision" in names
             # A well-formed profile binds at the boundary and reaches the body; the round-trip
             # proves the schema rendered and the value bound (no client-side schema error).
             result = await client.call_tool(
-                "systems.define",
+                "systems.provision",
                 {"allocation_id": "alloc-1", "profile": _VALID_REMOTE_PROFILE},
             )
             assert result.data == {"arch": "x86_64"}

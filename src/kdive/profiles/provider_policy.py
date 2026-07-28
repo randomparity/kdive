@@ -74,7 +74,7 @@ def require_investigation_binding_for_upload(
     if rootfs is not None and rootfs.kind == "upload" and investigation_id is None:
         raise CategorizedError(
             "upload-kind rootfs requires a bound investigation_id: pass investigation_id to "
-            "systems.define/provision so the uploaded base resolves within that investigation",
+            "systems.provision so the uploaded base resolves within that investigation",
             category=ErrorCategory.CONFIGURATION_ERROR,
         )
 

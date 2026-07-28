@@ -239,9 +239,7 @@ _TOOL_SCOPES: dict[str, frozenset[ExposureScope]] = {
     # systems
     "systems.get": _VIEWER,
     "systems.list": _VIEWER,
-    "systems.define": _CONTRIBUTOR,  # provision lane is leaseholder control (ADR-0326)
-    "systems.provision": _CONTRIBUTOR,
-    "systems.provision_defined": _CONTRIBUTOR,
+    "systems.provision": _CONTRIBUTOR,  # provision lane is leaseholder control (ADR-0326)
     "systems.reprovision": _CONTRIBUTOR,
     "systems.teardown": _ADMIN,
     "systems.ssh_info": _VIEWER,

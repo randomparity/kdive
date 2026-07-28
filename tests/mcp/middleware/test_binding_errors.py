@@ -110,7 +110,7 @@ def _ctx(name: str, arguments: Any) -> Any:
 
 
 def test_binding_object_id_reads_string_argument() -> None:
-    ctx = _ctx("systems.define", {"allocation_id": "a-1"})
+    ctx = _ctx("systems.provision", {"allocation_id": "a-1"})
     assert _binding_object_id(ctx, (("allocation_id",),)) == "a-1"
 
 
@@ -120,13 +120,14 @@ def test_binding_object_id_reads_nested_string_argument() -> None:
 
 
 def test_binding_object_id_falls_back_to_tool_name_for_non_string() -> None:
-    ctx = _ctx("systems.define", {"allocation_id": 5})
-    assert _binding_object_id(ctx, (("allocation_id",),)) == "systems.define"
+    ctx = _ctx("systems.provision", {"allocation_id": 5})
+    assert _binding_object_id(ctx, (("allocation_id",),)) == "systems.provision"
 
 
 def test_binding_object_id_falls_back_when_arguments_not_a_dict() -> None:
     assert (
-        _binding_object_id(_ctx("systems.define", None), (("allocation_id",),)) == "systems.define"
+        _binding_object_id(_ctx("systems.provision", None), (("allocation_id",),))
+        == "systems.provision"
     )
 
 
@@ -174,7 +175,7 @@ def test_on_call_tool_envelopes_matching_binding_error() -> None:
         raise _profile_range_error()
 
     result = asyncio.run(
-        mw.on_call_tool(_ctx("systems.define", {"allocation_id": "a-1"}), call_next)
+        mw.on_call_tool(_ctx("systems.provision", {"allocation_id": "a-1"}), call_next)
     )
     assert isinstance(result, ToolResult)
     assert result.structured_content["error_category"] == ErrorCategory.CONFIGURATION_ERROR.value
@@ -188,4 +189,4 @@ def test_on_call_tool_reraises_non_matching_validation_error() -> None:
         raise _non_profile_error()
 
     with pytest.raises(ValidationError):
-        asyncio.run(mw.on_call_tool(_ctx("systems.define", {"allocation_id": "a-1"}), call_next))
+        asyncio.run(mw.on_call_tool(_ctx("systems.provision", {"allocation_id": "a-1"}), call_next))

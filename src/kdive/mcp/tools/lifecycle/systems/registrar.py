@@ -81,9 +81,9 @@ _LABEL_DESCRIPTION = (
 _INVESTIGATION_ID_DESCRIPTION = (
     "Optional Investigation id to bind this System to. The investigation must be open or active "
     "and in this System's own project. Binding scopes an uploaded rootfs the profile may "
-    "reference to that investigation and couples the System to its close. Write-once: once set "
-    "(here or at systems.define) it cannot be changed; a later provision must repeat the same id "
-    "or omit it. Omit for a System not tied to an investigation."
+    "reference to that investigation and couples the System to its close. Write-once: once set it "
+    "cannot be changed; a later provision on the same Allocation must repeat the same id or omit "
+    "it. Omit for a System not tied to an investigation."
 )
 
 
@@ -126,9 +126,7 @@ class _SystemsListPayload(ToolPayload):
 
 def register(app: FastMCP, pool: AsyncConnectionPool, *, resolver: ProviderResolver) -> None:
     """Register the `systems.*` tools on ``app``, bound to ``pool``."""
-    _register_systems_define(app, pool, resolver)
     _register_systems_provision(app, pool, resolver)
-    _register_systems_provision_defined(app, pool, resolver)
     _register_systems_get(app, pool, resolver)
     _register_systems_list(app, pool)
     _register_systems_profile_examples(app, resolver)
@@ -161,66 +159,6 @@ def _admin_handlers(runtime: ProviderRuntime) -> _SystemAdminHandlers:
     )
 
 
-def _register_systems_define(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    @app.tool(
-        name="systems.define",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def systems_define(
-        allocation_id: Annotated[
-            str, Field(description="Granted Allocation to create a DEFINED System for.")
-        ],
-        profile: Annotated[
-            ProvisioningProfile,
-            Field(
-                description="Provisioning profile for the System; an 'upload' rootfs opens a "
-                "pre-provision rootfs-upload window."
-            ),
-        ],
-        idempotency_key: Annotated[
-            str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-        ] = None,
-        label: Annotated[
-            str | None,
-            Field(description=_LABEL_DESCRIPTION),
-        ] = None,
-        investigation_id: Annotated[
-            str | None,
-            Field(description=_INVESTIGATION_ID_DESCRIPTION),
-        ] = None,
-    ) -> ToolResponse:
-        """Create a System in 'defined' for a granted Allocation, opening a pre-provision
-        rootfs-upload window; follow with `systems.provision_defined` once the upload is done.
-        Use `systems.provision` instead when the profile needs no upload window. Requires
-        contributor on the Allocation's project.
-        """
-        ctx = current_context()
-        try:
-            assert_kind_composed(profile.provider.kind, resolver.registered_kinds())
-        except CategorizedError as exc:
-            return ToolResponse.failure_from_error(allocation_id, exc)
-        return await with_runtime_for_allocation(
-            pool,
-            resolver,
-            ctx,
-            allocation_id,
-            lambda runtime: _provision_handlers(runtime).define_system(
-                pool,
-                ctx,
-                allocation_id=allocation_id,
-                profile=dump_profile(profile),
-                idempotency_key=idempotency_key,
-                label=label,
-                investigation_id=investigation_id,
-            ),
-            required_role=Role.CONTRIBUTOR,
-        )
-
-
 def _register_systems_provision(
     app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
 ) -> None:
@@ -250,9 +188,11 @@ def _register_systems_provision(
             Field(description=_INVESTIGATION_ID_DESCRIPTION),
         ] = None,
     ) -> ToolResponse:
-        """Mint a System for a granted Allocation and enqueue provision directly (no upload
-        window). Use `systems.define` then `systems.provision_defined` instead when the rootfs
-        must be uploaded before provisioning. One System per Allocation: if this Allocation's
+        """Mint a System for a granted Allocation and enqueue its provision job — the one lane
+        for creating a System. To boot an agent-uploaded rootfs, upload it against your open
+        Investigation first (`artifacts.create_investigation_upload` then
+        `investigations.complete_rootfs_upload`), then reference it here by `checksum_sha256`
+        with `investigation_id` set. One System per Allocation: if this Allocation's
         System already failed, retrying does not mint a new one — release this Allocation and
         request a fresh one (`allocations.release`, then `allocations.request`) for a fresh
         System. Requires contributor on the Allocation's project.
@@ -279,44 +219,6 @@ def _register_systems_provision(
                 idempotency_key=idempotency_key,
                 label=label,
                 investigation_id=investigation_id,
-            ),
-            required_role=Role.CONTRIBUTOR,
-        )
-
-
-def _register_systems_provision_defined(
-    app: FastMCP, pool: AsyncConnectionPool, resolver: ProviderResolver
-) -> None:
-    @app.tool(
-        name="systems.provision_defined",
-        annotations=_docmeta.mutating(),
-        meta={"maturity": "implemented"},
-    )
-    async def systems_provision_defined(
-        system_id: Annotated[
-            str,
-            Field(description="Defined System whose stored profile should be provisioned."),
-        ],
-        idempotency_key: Annotated[
-            str | None,
-            Field(description="Replay-safe key; a repeated key returns the prior envelope."),
-        ] = None,
-    ) -> ToolResponse:
-        """Admit a DEFINED System after its upload window is complete; not for a fresh System —
-        create it with `systems.define` first (this is the second step of that lane).
-        Requires contributor on the System's project.
-        """
-        ctx = current_context()
-        return await with_runtime_for_system(
-            pool,
-            resolver,
-            ctx,
-            system_id,
-            lambda runtime: _provision_handlers(runtime).provision_defined_system(
-                pool,
-                ctx,
-                system_id=system_id,
-                idempotency_key=idempotency_key,
             ),
             required_role=Role.CONTRIBUTOR,
         )

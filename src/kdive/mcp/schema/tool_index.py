@@ -268,9 +268,12 @@ TOOL_KEYWORDS: dict[str, frozenset[str]] = {
     # systems
     "systems.get": frozenset({"system", "get", "status", "fetch"}),
     "systems.list": frozenset({"systems", "list", "filter"}),
-    "systems.define": frozenset({"system", "define", "create", "profile"}),
-    "systems.provision": frozenset({"system", "provision", "allocate", "create"}),
-    "systems.provision_defined": frozenset({"system", "provision", "defined", "named"}),
+    # `systems.provision` absorbed the retired staged define/provision_defined lane (ADR-0457),
+    # so it carries that lane's vocabulary: an agent asking to "define a system" or "set up a
+    # target" is asking for the one create lane that exists.
+    "systems.provision": frozenset(
+        {"system", "provision", "allocate", "create", "define", "profile", "target", "setup"}
+    ),
     "systems.reprovision": frozenset({"system", "reprovision", "rebuild", "refresh"}),
     "systems.teardown": frozenset({"system", "teardown", "destroy", "delete", "remove"}),
     # resources — `resources.register` absorbed the three per-provider register_* tools
@@ -342,6 +345,8 @@ RETIRED_TOOL_NAMES: dict[str, str] = {
     "reports.generate_all_projects": "reports.generate",
     "reports.generate_granted_set": "reports.generate",
     "resources.uncordon": "resources.set_scheduling",
+    "systems.define": "systems.provision",
+    "systems.provision_defined": "systems.provision",
     "vmcore.list": "runs.get",
 }
 

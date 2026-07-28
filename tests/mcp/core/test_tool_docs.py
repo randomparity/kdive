@@ -152,7 +152,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "shapes.delete": ("tests/mcp/catalog/test_shapes_tools.py",),
     "shapes.list": ("tests/mcp/catalog/test_shapes_tools.py",),
     "shapes.set": ("tests/mcp/catalog/test_shapes_tools.py",),
-    "systems.define": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.get": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.authorize_ssh_key": ("tests/mcp/lifecycle/test_systems_ssh_access.py",),
     "systems.check_ssh_reachable": ("tests/mcp/lifecycle/test_systems_ssh_access.py",),
@@ -160,7 +159,6 @@ _BEHAVIOR_TESTS_BY_TOOL = {
     "systems.list": ("tests/mcp/lifecycle/test_systems_list.py",),
     "systems.profile_examples": ("tests/mcp/lifecycle/test_systems_profile_examples.py",),
     "systems.provision": ("tests/mcp/lifecycle/test_systems_tools.py",),
-    "systems.provision_defined": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.reprovision": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.teardown": ("tests/mcp/lifecycle/test_systems_tools.py",),
     "systems.snapshot": ("tests/mcp/lifecycle/test_systems_snapshot.py",),
@@ -1006,9 +1004,6 @@ def test_systems_list_state_filter_is_enum_constrained() -> None:
 
 
 _CONFUSABLE_SYSTEMS_ALTERNATIVES = {
-    "systems.define": (r"\bsystems\.provision\b(?!_)",),
-    "systems.provision": (r"\bsystems\.define\b", r"\bsystems\.provision_defined\b"),
-    "systems.provision_defined": (r"\bsystems\.define\b",),
     "systems.reprovision": (r"\bsystems\.provision\b(?!_)",),
 }
 _NEGATIVE_GUIDANCE = re.compile(r"\b(instead|rather|not)\b", re.IGNORECASE)

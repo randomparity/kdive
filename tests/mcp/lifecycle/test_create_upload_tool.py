@@ -36,8 +36,7 @@ from kdive.mcp.tools.catalog.artifacts.uploads import (
 )
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import AuthorizationError, Role
-from tests.mcp.systems_support import SYSTEM_PROVISION_HANDLERS, provider_resolver
-from tests.mcp.systems_support import granted_allocation as _granted_allocation
+from tests.mcp.systems_support import provider_resolver
 
 
 async def _audit_rows(pool: AsyncConnectionPool, object_id: str) -> list[tuple[Any, ...]]:
@@ -197,20 +196,6 @@ async def _seed_system(
             ),
         )
     return str(system.id)
-
-
-async def _defined_system_via_tool(
-    pool: AsyncConnectionPool, *, rootfs_kind: str = "upload"
-) -> str:
-    """Produce a DEFINED System through systems.define (the real producer, #111)."""
-    alloc_id = await _granted_allocation(pool)
-    resp = await SYSTEM_PROVISION_HANDLERS.define_system(
-        pool,
-        _ctx(),
-        allocation_id=alloc_id,
-        profile=_provisioning_profile(rootfs_kind),
-    )
-    return resp.object_id
 
 
 async def _seed_created_run(

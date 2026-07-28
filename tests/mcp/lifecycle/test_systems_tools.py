@@ -67,9 +67,6 @@ from tests.mcp.systems_support import (
     ctx as _ctx,
 )
 from tests.mcp.systems_support import (
-    define_system as _define,
-)
-from tests.mcp.systems_support import (
     enqueue_provision as _enqueue_provision,
 )
 from tests.mcp.systems_support import (
@@ -291,14 +288,6 @@ def _admin_handlers(
     return SystemAdminHandlers(_TEST_PROFILE_POLICY, _TEST_COMPONENT_SOURCES, rootfs_validator)
 
 
-async def _provision_defined(pool: AsyncConnectionPool, ctx: RequestContext, system_id: str):
-    return await _SYSTEM_PROVISION_HANDLERS.provision_defined_system(
-        pool,
-        ctx,
-        system_id=system_id,
-    )
-
-
 def _artifact_rootfs_profile() -> dict[str, Any]:
     profile = _profile()
     profile["provider"]["local-libvirt"]["rootfs"] = {
@@ -379,18 +368,6 @@ def test_provision_with_label_persists_and_systems_get_echoes(migrated_url: str)
             system_id = str(resp.data["system_id"])
             get_resp = await get_system(pool, _ctx(), system_id, resolver=_provider_resolver())
         assert get_resp.data["label"] == "edge-case A"  # stored stripped, echoed verbatim
-
-    asyncio.run(_run())
-
-
-def test_define_with_label_echoes_on_systems_get(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(), alloc_id, _profile(), label="defined-A")
-            assert resp.status == "defined"
-            get_resp = await get_system(pool, _ctx(), resp.object_id, resolver=_provider_resolver())
-        assert get_resp.data["label"] == "defined-A"
 
     asyncio.run(_run())
 
@@ -836,6 +813,23 @@ def test_provision_viewer_denied_before_provider_rootfs_validation(
 
     asyncio.run(_run())
     assert calls == []
+
+
+def test_provision_foreign_allocation_is_not_found(migrated_url: str) -> None:
+    """An Allocation outside the caller's projects is not found, never a cross-project mint."""
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            alloc_id = await _granted_allocation(pool)
+            resp = await _provision(pool, _ctx(projects=("other",)), alloc_id, _profile())
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute("SELECT count(*) AS n FROM systems")
+                sys_n = await cur.fetchone()
+        assert resp.status == "error"
+        assert resp.error_category == "configuration_error"
+        assert sys_n is not None and sys_n["n"] == 0
+
+    asyncio.run(_run())
 
 
 def test_provision_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
@@ -2073,388 +2067,6 @@ def test_reprovision_rejects_unbound_upload_rootfs(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-# --- systems.define ------------------------------------------------------------------------
-
-
-def test_define_inserts_defined_system_and_activates_allocation(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(), alloc_id, _profile())
-            assert resp.status == "defined"
-            assert resp.suggested_next_actions == ["systems.provision_defined"]
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state, allocation_id FROM systems")
-                sys_row = await cur.fetchone()
-                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
-                alloc_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition IN "
-                    "('->defined', 'granted->active')"
-                )
-                audit_row = await cur.fetchone()
-        assert sys_row is not None and sys_row["state"] == "defined"
-        assert str(sys_row["allocation_id"]) == alloc_id
-        assert alloc_row is not None and alloc_row["state"] == "active"
-        assert audit_row is not None and audit_row["n"] == 2
-
-    asyncio.run(_run())
-
-
-def test_define_is_idempotent(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            first = await _define(pool, _ctx(), alloc_id, _profile())
-            second = await _define(pool, _ctx(), alloc_id, _profile())
-            assert first.object_id == second.object_id
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM systems")
-                sys_n = await cur.fetchone()
-                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
-                alloc_row = await cur.fetchone()
-        assert sys_n is not None and sys_n["n"] == 1  # one System
-        assert alloc_row is not None and alloc_row["state"] == "active"  # not re-flipped
-
-    asyncio.run(_run())
-
-
-def test_define_non_granted_allocation_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            async with pool.connection() as conn:
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
-            resp = await _define(pool, _ctx(), alloc_id, _profile())
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "releasing"
-
-    asyncio.run(_run())
-
-
-def test_define_existing_non_defined_system_is_config_error(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            await _seed_system(pool, alloc_id, SystemState.READY)
-            resp = await _define(pool, _ctx(), alloc_id, _profile())
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM systems")
-                sys_n = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "ready"
-        assert sys_n is not None and sys_n["n"] == 1  # no second System minted
-
-    asyncio.run(_run())
-
-
-def test_define_over_quota_is_quota_exceeded(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool, systems_quota=0)
-            resp = await _define(pool, _ctx(), alloc_id, _profile())
-        assert resp.status == "error"
-        assert resp.error_category == "quota_exceeded"
-
-    asyncio.run(_run())
-
-
-def test_define_requires_operator(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            with pytest.raises(AuthorizationError):
-                await _define(pool, _ctx(role=None), alloc_id, _profile())
-
-    asyncio.run(_run())
-
-
-def test_define_viewer_denied_before_provider_rootfs_validation(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    calls: list[ComponentRef] = []
-    outside = tmp_path / "outside.qcow2"
-    outside.write_bytes(b"rootfs")
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            with pytest.raises(AuthorizationError):
-                await _provision_handlers(_failing_rootfs_validator(calls)).define_system(
-                    pool,
-                    _ctx(Role.VIEWER),
-                    allocation_id=alloc_id,
-                    profile=_local_rootfs_profile(outside),
-                )
-
-    asyncio.run(_run())
-    assert calls == []
-
-
-def test_define_foreign_allocation_is_not_found(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(projects=("other",)), alloc_id, _profile())
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-
-    asyncio.run(_run())
-
-
-def test_define_rejects_unsupported_artifact_rootfs_without_opening_upload_window(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _define(pool, _ctx(), alloc_id, _artifact_rootfs_profile())
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM systems")
-                sys_n = await cur.fetchone()
-                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
-                alloc_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert sys_n is not None and sys_n["n"] == 0
-        assert alloc_row is not None and alloc_row["state"] == "granted"
-
-    asyncio.run(_run())
-
-
-def test_define_rejects_local_rootfs_outside_allowed_root_without_opening_upload_window(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    outside = tmp_path / "outside.qcow2"
-    outside.write_bytes(b"rootfs")
-    allowed_root = tmp_path / "allowed"
-    allowed_root.mkdir()
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            resp = await _provision_handlers(_rootfs_validator(allowed_root)).define_system(
-                pool,
-                _ctx(),
-                allocation_id=alloc_id,
-                profile=_local_rootfs_profile(outside),
-            )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT count(*) AS n FROM systems")
-                sys_n = await cur.fetchone()
-                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
-                alloc_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert sys_n is not None and sys_n["n"] == 0
-        assert alloc_row is not None and alloc_row["state"] == "granted"
-
-    asyncio.run(_run())
-
-
-# --- systems.provision_defined admits a DEFINED System -------------------------------------
-
-
-def test_provision_defined_admits_defined_system(migrated_url: str) -> None:
-    # systems.provision_defined(system_id) drives an existing DEFINED System
-    # defined -> provisioning and enqueues its provision job (#111).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
-            resp = await _provision_defined(pool, _ctx(), sys_id)
-            assert resp.status == "queued"
-            assert resp.data["system_id"] == sys_id
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute("SELECT state FROM allocations WHERE id = %s", (alloc_id,))
-                alloc_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM audit_log WHERE transition = 'defined->provisioning'"
-                )
-                audit_row = await cur.fetchone()
-        assert sys_row is not None and sys_row["state"] == "provisioning"
-        assert alloc_row is not None and alloc_row["state"] == "active"  # untouched (set at define)
-        assert audit_row is not None and audit_row["n"] == 1
-
-    asyncio.run(_run())
-
-
-def test_provision_defined_malformed_uuid_is_invalid_uuid(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _provision_defined(pool, _ctx(), "not-a-uuid")
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["reason"] == "invalid_uuid"
-        assert resp.detail is not None
-        assert "system_id" in resp.detail and "not-a-uuid" in resp.detail
-
-    asyncio.run(_run())
-
-
-def test_provision_defined_refuses_released_allocation(migrated_url: str) -> None:
-    # A DEFINED System whose lease was released (but not yet reaped) must not be admitted to
-    # provisioning — symmetric with the create lane's granted check (#111 review).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
-            async with pool.connection() as conn:
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
-            resp = await _provision_defined(pool, _ctx(), sys_id)
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
-                    (f"{alloc_id}:provision",),
-                )
-                job_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "released"
-        assert sys_row is not None and sys_row["state"] == "defined"  # not advanced
-        assert job_row is not None and job_row["n"] == 0  # no provision job enqueued
-
-    asyncio.run(_run())
-
-
-@pytest.mark.parametrize(
-    "state",
-    [SystemState.READY, SystemState.REPROVISIONING, SystemState.CRASHED],
-)
-def test_provision_defined_reports_existing_system_state(
-    migrated_url: str, state: SystemState
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, state)
-            resp = await _provision_defined(pool, _ctx(), sys_id)
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
-                    (f"{alloc_id}:provision",),
-                )
-                job_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.object_id == sys_id
-        assert resp.data["current_status"] == state.value
-        assert job_row is not None and job_row["n"] == 0
-
-    asyncio.run(_run())
-
-
-def test_provision_defined_revalidates_stored_profile_against_provider(
-    migrated_url: str,
-) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            async with pool.connection() as conn:
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
-            sys_id = await _seed_system_with_profile(
-                pool,
-                alloc_id,
-                SystemState.DEFINED,
-                _artifact_rootfs_profile(),
-            )
-            resp = await _provision_defined(pool, _ctx(), sys_id)
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
-                    (f"{alloc_id}:provision",),
-                )
-                job_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert sys_row is not None and sys_row["state"] == "defined"
-        assert job_row is not None and job_row["n"] == 0
-
-    asyncio.run(_run())
-
-
-def test_provision_defined_revalidates_stored_local_rootfs_against_provider_roots(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    outside = tmp_path / "outside.qcow2"
-    outside.write_bytes(b"rootfs")
-    allowed_root = tmp_path / "allowed"
-    allowed_root.mkdir()
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            async with pool.connection() as conn:
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
-            sys_id = await _seed_system_with_profile(
-                pool,
-                alloc_id,
-                SystemState.DEFINED,
-                _local_rootfs_profile(outside),
-            )
-            resp = await _provision_handlers(
-                _rootfs_validator(allowed_root)
-            ).provision_defined_system(
-                pool,
-                _ctx(),
-                system_id=sys_id,
-            )
-            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute("SELECT state FROM systems WHERE id = %s", (sys_id,))
-                sys_row = await cur.fetchone()
-                await cur.execute(
-                    "SELECT count(*) AS n FROM jobs WHERE dedup_key = %s",
-                    (f"{alloc_id}:provision",),
-                )
-                job_row = await cur.fetchone()
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert sys_row is not None and sys_row["state"] == "defined"
-        assert job_row is not None and job_row["n"] == 0
-
-    asyncio.run(_run())
-
-
-def test_provision_defined_viewer_denied_before_provider_rootfs_validation(
-    migrated_url: str, tmp_path: Path
-) -> None:
-    calls: list[ComponentRef] = []
-    outside = tmp_path / "outside.qcow2"
-    outside.write_bytes(b"rootfs")
-
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            async with pool.connection() as conn:
-                await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.ACTIVE)
-            sys_id = await _seed_system_with_profile(
-                pool,
-                alloc_id,
-                SystemState.DEFINED,
-                _local_rootfs_profile(outside),
-            )
-            with pytest.raises(AuthorizationError):
-                await _provision_handlers(
-                    _failing_rootfs_validator(calls)
-                ).provision_defined_system(
-                    pool,
-                    _ctx(Role.VIEWER),
-                    system_id=sys_id,
-                )
-
-    asyncio.run(_run())
-    assert calls == []
-
-
 def test_provision_create_lane_rejects_unbound_upload(migrated_url: str) -> None:
     # An upload-rootfs provision with no investigation binding fails fast at admission (ADR-0441
     # §2): the base resolves by content checksum within an investigation, so a missing binding is
@@ -2472,20 +2084,6 @@ def test_provision_create_lane_rejects_unbound_upload(migrated_url: str) -> None
         assert resp.error_category == "configuration_error"
         assert "investigation_id" in (resp.detail or "")
         assert sys_n is not None and sys_n["n"] == 0  # fail fast, no System inserted
-
-    asyncio.run(_run())
-
-
-def test_provision_create_lane_refuses_defined_system(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
-            resp = await _provision(pool, _ctx(), alloc_id, _profile())
-        assert resp.status == "error"
-        assert resp.error_category == "configuration_error"
-        assert resp.object_id == sys_id
-        assert resp.data["reason"] == "use_systems.provision_defined"
 
     asyncio.run(_run())
 
@@ -2517,15 +2115,16 @@ def test_provision_create_lane_reports_existing_system_state(
     asyncio.run(_run())
 
 
-# --- teardown of a DEFINED System (defined -> torn_down, #111) ------------------------------
+# --- teardown of a pre-ready System (provisioning -> torn_down) -----------------------------
 
 
-def test_teardown_handler_drives_defined_system_to_torn_down(migrated_url: str) -> None:
-    # An abandoned DEFINED System (no domain) is terminable via defined -> torn_down (#111).
+def test_teardown_handler_drives_pre_ready_system_to_torn_down(migrated_url: str) -> None:
+    # A System abandoned before its provision job ran (no domain) is terminable via
+    # provisioning -> torn_down (#111).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
             job = await _enqueue_teardown(pool, sys_id)
             prov = _FakeProvisioning()
             async with pool.connection() as conn:
@@ -2541,15 +2140,15 @@ def test_teardown_handler_drives_defined_system_to_torn_down(migrated_url: str) 
     asyncio.run(_run())
 
 
-def test_reconciler_gc_tears_down_defined_orphan(migrated_url: str) -> None:
-    # Releasing the allocation orphans its DEFINED System; the reconciler enqueues a teardown
-    # the handler can now complete (defined -> torn_down), freeing the quota slot (#111).
+def test_reconciler_gc_tears_down_pre_ready_orphan(migrated_url: str) -> None:
+    # Releasing the allocation orphans its still-provisioning System; the reconciler enqueues a
+    # teardown the handler can complete (provisioning -> torn_down), freeing the quota slot (#111).
     from kdive.reconciler.loop import _repair_orphaned_systems
 
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = (await _define(pool, _ctx(), alloc_id, _profile())).object_id
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
             async with pool.connection() as conn:
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASING)
                 await ALLOCATIONS.update_state(conn, UUID(alloc_id), AllocationState.RELEASED)
@@ -2700,32 +2299,6 @@ def test_catalog_change_after_provision_does_not_resize_system(migrated_url: str
                 )
             stored = await _stored_profile(pool, sys_id)
         # The System's stored sizing is unchanged — the catalog edit is not retroactive.
-        assert stored["vcpu"] == 2
-        assert stored["memory_mb"] == 4096
-        assert stored["disk_gb"] == 20
-
-    asyncio.run(_run())
-
-
-def test_define_then_catalog_change_then_provision_defined_keeps_size(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(
-                pool, requested_vcpus=2, requested_memory_gb=4, requested_disk_gb=20, shape="medium"
-            )
-            # define freezes the reconciled size into the stored profile.
-            defined = await _define(pool, _ctx(), alloc_id, _sized_profile())
-            sys_id = defined.object_id
-            async with pool.connection() as conn:
-                await conn.execute(
-                    "UPDATE system_shapes SET vcpus = 8, memory_mb = 16384, disk_gb = 80 "
-                    "WHERE name = 'medium'"
-                )
-            resp = await _provision_defined(pool, _ctx(), sys_id)
-            assert resp.status == "queued"
-            stored = await _stored_profile(pool, sys_id)
-        # provision_defined re-validates the stored profile; the intervening catalog change
-        # has no effect (sizing is read from the stored profile, never re-resolved).
         assert stored["vcpu"] == 2
         assert stored["memory_mb"] == 4096
         assert stored["disk_gb"] == 20

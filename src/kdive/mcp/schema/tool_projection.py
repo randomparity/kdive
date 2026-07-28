@@ -12,7 +12,6 @@ NARROWED_TOOLS: frozenset[str] = frozenset(
     {
         "allocations.request",
         "resources.register",
-        "systems.define",
         "systems.provision",
         "systems.reprovision",
     }

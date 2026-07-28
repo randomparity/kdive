@@ -112,9 +112,6 @@ class _BindingConversion:
 
 
 _BINDING_CONVERSIONS: dict[str, _BindingConversion] = {
-    "systems.define": _BindingConversion(
-        (("allocation_id",),), _loc_under("profile"), _profile_envelope
-    ),
     "systems.provision": _BindingConversion(
         (("allocation_id",),), _loc_under("profile"), _profile_envelope
     ),

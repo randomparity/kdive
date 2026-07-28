@@ -9,7 +9,7 @@ configured provider (ADR-0124). The tests assert three contracts:
 2. **No-leak** — no example contains a ``[[remote_libvirt]]`` ``uri``/``gdb_addr``/``gdbstub_range``
    or a ``*_cert_ref`` secret-ref name, and no ``private``-visibility inventory image name appears.
 3. **Shape** — one item per configured provider; placeholders carry a ``note``; the collection
-   chains into ``systems.define``/``allocations.request``.
+   chains into ``systems.provision``/``allocations.request``.
 
 The validity test must reckon with a file-vs-doc coupling: ``validate_rootfs_reference`` re-loads
 the inventory from ``KDIVE_SYSTEMS_TOML`` (not the in-memory doc), so the test points that env at

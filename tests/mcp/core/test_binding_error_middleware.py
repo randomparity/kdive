@@ -123,7 +123,7 @@ def _drive(tool: str, arguments: dict[str, object] | None, exc: BaseException) -
 def test_binding_error_on_typed_profile_tool_becomes_configuration_error() -> None:
     envelope = _envelope(
         _drive(
-            "systems.define",
+            "systems.provision",
             {"allocation_id": "alloc-1", "profile": {"bogus": 1}},
             _profile_validation_error(),
         )
@@ -189,14 +189,14 @@ def test_validation_error_on_other_tool_is_reraised() -> None:
 def test_non_validation_error_is_reraised() -> None:
     boom = RuntimeError("boom")
     with pytest.raises(RuntimeError):
-        _drive("systems.define", {"allocation_id": "a1"}, boom)
+        _drive("systems.provision", {"allocation_id": "a1"}, boom)
 
 
 def test_non_profile_validation_error_on_typed_tool_is_reraised() -> None:
     # A ValidationError whose locations are not under `profile` is not a binding failure (the tool
     # bodies never let a raw ValidationError escape) — it must propagate, not be mislabeled.
     with pytest.raises(ValidationError):
-        _drive("systems.define", {"allocation_id": "a1"}, _non_profile_validation_error())
+        _drive("systems.provision", {"allocation_id": "a1"}, _non_profile_validation_error())
 
 
 def test_valid_call_passes_through_unchanged() -> None:
@@ -207,7 +207,7 @@ def test_valid_call_passes_through_unchanged() -> None:
         return sentinel
 
     async def _run() -> Any:
-        return await mw.on_call_tool(_FakeContext("systems.define", {}), _call_next)
+        return await mw.on_call_tool(_FakeContext("systems.provision", {}), _call_next)
 
     assert asyncio.run(_run()) is sentinel
 
@@ -268,8 +268,8 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     app: FastMCP = FastMCP(name="probe")
     app.add_middleware(BindingErrorMiddleware())
 
-    @app.tool(name="systems.define")
-    async def _define(allocation_id: str, profile: ProvisioningProfile) -> ToolResponse:
+    @app.tool(name="systems.provision")
+    async def _provision(allocation_id: str, profile: ProvisioningProfile) -> ToolResponse:
         return ToolResponse.success(allocation_id, "ok")
 
     # The real build_app sweeps every tool to the fielded envelope output schema (ADR-0170); apply
@@ -281,7 +281,7 @@ def test_end_to_end_malformed_profile_returns_envelope_not_toolerror() -> None:
     async def _run() -> dict[str, Any] | None:
         async with Client(app) as client:
             result = await client.call_tool(
-                "systems.define",
+                "systems.provision",
                 {"allocation_id": "alloc-1", "profile": {"schema_version": 1}},
             )
             return result.structured_content

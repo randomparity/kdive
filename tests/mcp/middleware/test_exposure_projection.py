@@ -48,7 +48,6 @@ def _ctx(*, client_id: str | None = None) -> RequestContext:
 
 
 def test_narrowed_tools_membership() -> None:
-    assert "systems.define" in NARROWED_TOOLS
     assert "systems.provision" in NARROWED_TOOLS
     assert "systems.reprovision" in NARROWED_TOOLS
     assert "allocations.request" in NARROWED_TOOLS
@@ -71,8 +70,8 @@ def test_allocation_tool_kind_enum_is_projected() -> None:
 
 
 def test_systems_tool_section_props_are_projected() -> None:
-    # systems.define narrows via $defs.ProviderSection.properties (no ResourceKind enum here).
-    tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+    # systems.provision narrows via $defs.ProviderSection.properties (no ResourceKind enum).
+    tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
     out = project_listed_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     kept = set(out.parameters["$defs"]["ProviderSection"]["properties"])
     assert kept == {"local-libvirt"}
@@ -114,8 +113,8 @@ def test_real_published_schema_narrows_for_local_only() -> None:
     kinds = frozenset({ResourceKind.LOCAL_LIBVIRT})
     alloc = project_listed_tool(_tool(app, "allocations.request"), kinds)
     assert alloc.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
-    define = project_listed_tool(_tool(app, "systems.define"), kinds)
-    assert set(define.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
+    provision = project_listed_tool(_tool(app, "systems.provision"), kinds)
+    assert set(provision.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
     register = project_listed_tool(_tool(app, "resources.register"), kinds)
     assert register.parameters["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
@@ -177,7 +176,7 @@ def test_projection_runs_after_profile_filter(monkeypatch) -> None:  # type: ign
     monkeypatch.setenv("KDIVE_MCP_TOOL_GATEWAY", "on")
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "kdivectl")
     app = _build_app()
-    tools = [_tool(app, "systems.define"), _tool(app, "systems.provision")]
+    tools = [_tool(app, "systems.reprovision"), _tool(app, "systems.provision")]
     composition = ProviderComposition(secret_registry=SecretRegistry())
     resolver = composition.build_provider_resolver()
 
@@ -193,7 +192,7 @@ def test_projection_runs_after_profile_filter(monkeypatch) -> None:  # type: ign
 
     monkeypatch.setattr(exposure_mod, "request_context", lambda: _ctx(client_id="kdivectl"))
     cli_result = asyncio.run(mw.on_list_tools(object(), call_next))
-    assert {t.name for t in cli_result} == {"systems.define", "systems.provision"}
+    assert {t.name for t in cli_result} == {"systems.reprovision", "systems.provision"}
     for tool in cli_result:
         assert set(tool.parameters["$defs"]["ProviderSection"]["properties"]) == {"local-libvirt"}
 

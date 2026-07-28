@@ -61,9 +61,7 @@ _GOLDEN_PATH: tuple[tuple[int, str, frozenset[str]], ...] = (
     (
         3,
         "images.describe",
-        frozenset(
-            {"images.describe", "systems.provision", "systems.define", "systems.provision_defined"}
-        ),
+        frozenset({"images.describe", "systems.provision"}),
     ),
     (
         4,

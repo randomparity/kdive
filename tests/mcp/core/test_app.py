@@ -45,7 +45,6 @@ def test_build_app_registers_jobs_tools() -> None:
         assert {"jobs.wait", "jobs.cancel", "jobs.list"} <= names
         assert {
             "systems.provision",
-            "systems.provision_defined",
             "systems.get",
             "systems.teardown",
             "systems.reprovision",
@@ -360,7 +359,7 @@ def test_exposure_map_covers_every_registered_tool() -> None:
     # allocations.request (ADR-0234) and the provision lane (ADR-0326) are contributor;
     # images.upload stays operator (shared cross-tenant catalog).
     assert required_scopes("allocations.request") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
-    assert required_scopes("systems.define") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
+    assert required_scopes("systems.provision") == frozenset({ExposureScope.PROJECT_CONTRIBUTOR})
     assert required_scopes("images.upload") == frozenset({ExposureScope.PROJECT_OPERATOR})
 
 
@@ -375,7 +374,7 @@ _EXPECTED_STEP_MATURITY: dict[str, str] = {
     "resources.list": "implemented",
     "allocations.request": "implemented",
     "allocations.wait": "implemented",
-    "systems.define": "implemented",
+    "systems.provision": "implemented",
     "runs.create": "implemented",
     "runs.complete_build": "implemented",
     "runs.install": "implemented",

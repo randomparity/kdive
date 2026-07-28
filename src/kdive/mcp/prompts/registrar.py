@@ -125,8 +125,8 @@ CANONICAL_PROMPTS: tuple[PromptSpec, ...] = (
                 provides=("granted-allocation",),
             ),
             Step(
-                "systems.define",
-                "define the target system to build/boot on",
+                "systems.provision",
+                "provision the target system to build/boot on, then jobs.wait for it",
                 requires=("granted-allocation",),
                 provides=("system",),
             ),
