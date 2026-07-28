@@ -50,6 +50,12 @@ class Verb:
     arguments (no server-side default); the CLI marks them ``required=True`` so an omission
     fails up front with a clean usage error (exit 2) rather than an opaque server-side
     missing-argument error. ``options`` stay optional (default ``None``).
+
+    Which bucket a parameter belongs in is not a matter of taste: the schema guard
+    (``tests/cli/test_verb_schema_guard.py``) drives every argv this shape accepts and
+    validates the resulting payload against the tool's live JSON schema, so a
+    schema-required property parked in ``options`` fails — an omitted optional sends
+    ``null`` where the tool declares a value (ADR-0469).
     """
 
     group: str
@@ -103,7 +109,7 @@ REGISTRY: tuple[Verb, ...] = (
         mutations.teardown,
         "ops.force_teardown",
         ("system_id",),
-        options=("reason",),
+        required_options=("reason",),
         flags=("force",),
         read_only=False,
     ),
@@ -113,7 +119,7 @@ REGISTRY: tuple[Verb, ...] = (
         mutations.allocations_force_release,
         "ops.force_release",
         ("allocation_id",),
-        options=("reason",),
+        required_options=("reason",),
         read_only=False,
     ),
     Verb(
@@ -148,7 +154,8 @@ REGISTRY: tuple[Verb, ...] = (
         "upload",
         images.images_upload,
         "images.upload",
-        options=("project", "name", "arch", "quarantine_key", "lifetime_seconds"),
+        required_options=("project", "name", "arch", "quarantine_key"),
+        options=("lifetime_seconds",),
         read_only=False,
     ),
     Verb(
@@ -164,7 +171,7 @@ REGISTRY: tuple[Verb, ...] = (
         "prune-expired",
         images.images_prune,
         "images.prune_expired",
-        options=("reason",),
+        required_options=("reason",),
         flags=("expired",),
         read_only=False,
     ),
@@ -174,7 +181,7 @@ REGISTRY: tuple[Verb, ...] = (
         images.images_extend,
         "images.extend",
         ("image_id",),
-        options=("seconds", "reason"),
+        required_options=("seconds", "reason"),
         read_only=False,
     ),
 )
@@ -203,20 +210,45 @@ def _json_parent() -> argparse.ArgumentParser:
     return parent
 
 
+def _curated_choices(verb: Verb) -> dict[str, tuple[str, ...]]:
+    """Schema-derived enum ``choices`` for ``verb``'s parameters, keyed by parameter name.
+
+    A curated :class:`Verb` overrides the generated shape at its path, and the hand-written
+    shape has no place to spell an enum. Rather than restate the allowed values by hand — a
+    second copy that goes stale the moment the enum grows a member — the choices are read off
+    the *generated* verb at the same path, whose flags the generator derives from the live tool
+    schema and ``cli-verbs-check`` keeps in sync. A curated parameter with no generated
+    counterpart, or one whose schema property carries no ``enum``, contributes nothing
+    (ADR-0469).
+    """
+    generated = _GENERATED_BY_PATH.get((verb.group, verb.sub))
+    if generated is None:
+        return {}
+    return {flag.dest: flag.choices for flag in generated.flags if flag.choices}
+
+
 def _verb_parser(
     group_parser: argparse._SubParsersAction, verb: Verb, parent: argparse.ArgumentParser
 ) -> None:
     """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options."""
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
+    choices = _curated_choices(verb)
     for positional in verb.positionals:
-        parser.add_argument(positional)
+        parser.add_argument(positional, choices=choices.get(positional))
     for option in verb.options:
-        if option == "packages":
-            parser.add_argument(f"--{option.replace('_', '-')}", dest=option, action="append")
-            continue
-        parser.add_argument(f"--{option.replace('_', '-')}", dest=option, default=None)
+        parser.add_argument(
+            f"--{option.replace('_', '-')}",
+            dest=option,
+            default=None,
+            choices=choices.get(option),
+        )
     for option in verb.required_options:
-        parser.add_argument(f"--{option.replace('_', '-')}", dest=option, required=True)
+        parser.add_argument(
+            f"--{option.replace('_', '-')}",
+            dest=option,
+            required=True,
+            choices=choices.get(option),
+        )
     for flag in verb.flags:
         parser.add_argument(f"--{flag.replace('_', '-')}", dest=flag, action="store_true")
 
