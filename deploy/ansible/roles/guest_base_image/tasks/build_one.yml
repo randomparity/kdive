@@ -141,6 +141,15 @@
 # install fails as `transport_failure`: "Command guest-exec has been disabled". Only the
 # two RPCs kdive actually calls are added (guest-ping is already allowed) — the filter
 # stays on. Debian-family images ship no such file, so the guard makes this a no-op there.
+#
+# The guard matches guest-exec as a whole comma-delimited element, NOT as a substring: a
+# plain `grep 'allow-rpcs=.*guest-exec'` is satisfied by guest-exec-STATUS, so an allowlist
+# carrying only guest-exec-status was skipped and left guest-exec blocked — the same opaque
+# "Command guest-exec has been disabled" this task exists to prevent. Delimiters make it
+# exact, and re-running is a no-op once both RPCs are present.
+#
+# Known gap: an image using a `--block-rpcs=` DENYLIST instead is left alone, so guest-exec
+# stays blocked there. No RHEL-family image ships that shape; it fails closed, not open.
 - name: Allow the guest-exec RPCs kdive requires for {{ image.name }}
   ansible.builtin.command: # noqa: command-instead-of-module
     # No Ansible module wraps virt-customize; the command module is the only option.
@@ -150,8 +159,8 @@
       - "{{ guest_base_image_qcow2 }}"
       - --run-command
       - >-
-        if [ -f /etc/sysconfig/qemu-ga ] && ! grep -q 'allow-rpcs=.*guest-exec'
-        /etc/sysconfig/qemu-ga; then sed -i
+        if [ -f /etc/sysconfig/qemu-ga ] && ! grep -qE
+        'allow-rpcs=([^"]*,)?guest-exec([,"]|$)' /etc/sysconfig/qemu-ga; then sed -i
         's/--allow-rpcs=/--allow-rpcs=guest-exec,guest-exec-status,/'
         /etc/sysconfig/qemu-ga; fi
   when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
