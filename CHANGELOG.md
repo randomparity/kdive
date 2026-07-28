@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ⚠ Breaking Changes
+
+- Document the wait polling contract and the get removal
+
 ### Added
 
 - Add column-agnostic render_envelope for generated verbs
@@ -54,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Collapse the curated accounting verbs onto merged tools
 - Make wait the single point-read and polling contract
 - Guard every verb's argparse shape against its tool schema
+- Give the point read back its positional id
 
 ### Changed
 
@@ -167,6 +172,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0463 debug.advance consolidation
 - Record ADR-0467 for the accounting tool merge
 - Record ADR-0469 and correct the stale CLI verb usages
+- Document the wait polling contract and the get removal
+- Name the transport outcome in the wait poll rule
+- Correct the no-envelope retry rule and the inf/nan mechanism
 
 ### Fixed
 
@@ -279,6 +287,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop leaking /tmp entries from test helpers
 - Resolve tool schemas past the gateway surface
 - Name an unresolvable schema and guard the namespace map
+- Refuse a non-finite --timeout-s before it reaches the wire
+- Refuse a negative --timeout-s instead of letting it clamp
 
 ### Build
 
