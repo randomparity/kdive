@@ -179,6 +179,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0077",
         "0078",
         "0079",
+        "0080",
     ]
     assert second == []
 
@@ -642,6 +643,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0077",
         "0078",
         "0079",
+        "0080",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -999,6 +1001,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0077",
         "0078",
         "0079",
+        "0080",
     ]
 
 
@@ -1482,7 +1485,8 @@ def _seed_system(conn: psycopg.Connection, *, investigation_id: str | None = Non
     assert alloc is not None
     row = conn.execute(
         "INSERT INTO systems (allocation_id, state, provisioning_profile, principal, project, "
-        "investigation_id) VALUES (%s, 'defined', '{}'::jsonb, 'alice', 'proj', %s) RETURNING id",
+        "investigation_id) VALUES (%s, 'provisioning', '{}'::jsonb, 'alice', 'proj', %s) "
+        "RETURNING id",
         (alloc[0], investigation_id),
     ).fetchone()
     assert row is not None
