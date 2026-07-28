@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ⚠ Breaking Changes
 
 - Document the wait polling contract and the get removal
+- Retire the staged System definition lane
 
 ### Added
 
@@ -59,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make wait the single point-read and polling contract
 - Guard every verb's argparse shape against its tool schema
 - Give the point read back its positional id
+- Resolve stranded defined Systems in migration 0080
+- Retire the staged System definition lane
 
 ### Changed
 
@@ -175,6 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Document the wait polling contract and the get removal
 - Name the transport outcome in the wait poll rule
 - Correct the no-envelope retry rule and the inf/nan mechanism
+- Ratify ADR-0457 and correct ADR-0326's dead tool cites
 
 ### Fixed
 
