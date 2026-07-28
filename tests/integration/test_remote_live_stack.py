@@ -49,6 +49,7 @@ from tests.integration.live_stack.spine import (
     SpinePhaseError,
     allocate_remote,
     assembled_console_refs,
+    assert_no_live_secrets,
     assert_report,
     await_system_state,
     build_and_upload_kernel,
@@ -392,14 +393,21 @@ def test_remote_spine_over_the_wire() -> None:
                     op, "capture", env.object_id, deadline_s=_CAPTURE_DEADLINE_S
                 )
                 refs = await captured_vmcore_refs(op, "capture", drained, run_id=run_id)
-                assert refs, "capture published no vmcore reference (#1)"
+                # `captured_vmcore_refs` raises on a missing job ref and returns
+                # `[job_ref, *artifact_refs]`, so a bare `assert refs` could never fail. What is
+                # worth asserting is that `artifacts.get` contributed refs of its own.
+                assert len(refs) > 1, f"artifacts.get published no object ref (#1): {refs}"
                 # A raw core is `.../vmcore-{method}` (no `-redacted`); it must never surface.
                 assert not raw_vmcore_refs(refs), f"raw vmcore leaked (#1): {raw_vmcore_refs(refs)}"
             async with phase("introspect"):
                 env = ok(await scalar(op, "introspect.from_vmcore", run_id=run_id), "introspect")
-                report = json.dumps(data_mapping(env, "report"), sort_keys=True)
-                assert report, "empty postmortem report (introspect did not route to remote run)"
-                assert "hunter2" not in report and "password=" not in report, "secret leaked (#3)"
+                report_body = data_mapping(env, "report")
+                # Assert on the mapping, NOT on its JSON text: `json.dumps({})` is `"{}"` and
+                # `json.dumps(None)` is `"null"`, both truthy, so a truthiness check on the
+                # serialized form passes on exactly the empty report it claims to catch.
+                assert report_body, "empty postmortem report (introspect did not route to remote)"
+                report = json.dumps(report_body, sort_keys=True)
+                assert_no_live_secrets(report, "postmortem report (#3)")
             async with phase("release"):
                 ok(
                     await scalar(op, "allocations.release", allocation_id=allocation_id),
@@ -435,7 +443,9 @@ async def _assert_vmcore_captured(
     capture job's `refs.result` and `runs.get`'s `refs.vmcore`, not through a listing tool.
     """
     refs = await captured_vmcore_refs(client, method, drained, run_id=run_id)
-    assert refs, f"no vmcore reference published for {method} (#1)"
+    # `captured_vmcore_refs` raises on a missing job ref and returns `[job_ref, *artifact_refs]`,
+    # so a bare `assert refs` could never fail; assert artifacts.get contributed refs of its own.
+    assert len(refs) > 1, f"artifacts.get published no object ref for {method} (#1): {refs}"
     # A raw core is `.../vmcore-{method}` (no `-redacted` suffix); it must never surface.
     assert not raw_vmcore_refs(refs), (
         f"raw vmcore leaked for {method} (#1): {raw_vmcore_refs(refs)}"

@@ -181,6 +181,32 @@ def raw_vmcore_refs(refs: Iterable[str]) -> list[str]:
     return leaked
 
 
+# The credentials this stack is actually running with. boto3 reads the AWS pair straight from
+# the environment, which is why it is not in kdive's own config catalogue.
+_LIVE_SECRET_ENV = ("AWS_SECRET_ACCESS_KEY", "KDIVE_TEST_S3_SECRET_KEY")
+
+
+def assert_no_live_secrets(text: str, what: str) -> None:
+    """Assert ``text`` carries none of the secret values this stack is actually running with.
+
+    A redaction assertion is only worth something if the secret it hunts for exists in the
+    system under test. The check this replaces searched the postmortem report for the literal
+    ``hunter2`` — a fixture value from unrelated unit tests, planted nowhere in the remote
+    spine or its guest — so it passed however badly the report leaked (#1610).
+
+    Raises when no live secret is set, rather than passing: a redaction check with nothing to
+    look for proves nothing, and failing loudly is what stops it decaying back into a no-op.
+    """
+    live = {name: os.environ[name] for name in _LIVE_SECRET_ENV if os.environ.get(name)}
+    if not live:
+        raise AssertionError(
+            f"none of {'/'.join(_LIVE_SECRET_ENV)} is set, so the redaction check on {what} "
+            "would prove nothing; export the stack's object-store secret before running"
+        )
+    leaked = sorted(name for name, value in live.items() if value in text)
+    assert not leaked, f"{what} leaked the value of {leaked}"
+
+
 def assembled_console_refs(refs: Iterable[str], run_id: str) -> list[str]:
     """The refs naming the ASSEMBLED boot→crash console artifact for ``run_id``.
 

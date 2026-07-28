@@ -9,7 +9,11 @@ from kdive.mcp.dev_harness import (
     _build_claims,
     oidc_issuer_from_env,
 )
-from tests.integration.live_stack.spine import assembled_console_refs, raw_vmcore_refs
+from tests.integration.live_stack.spine import (
+    assembled_console_refs,
+    assert_no_live_secrets,
+    raw_vmcore_refs,
+)
 
 
 def test_build_claims_nested_roles_object() -> None:
@@ -154,3 +158,37 @@ def test_another_runs_assembled_console_does_not_satisfy_the_phase() -> None:
 def test_the_assembled_console_survives_a_presigned_query() -> None:
     url = f"http://s3.example:30900/kdive-artifacts/{_CONSOLE_DONE}?AWSAccessKeyId=k&Signature=s"
     assert assembled_console_refs([url], _RUN) == [url]
+
+
+# --- assert_no_live_secrets (#1610) ----------------------------------------------------------
+#
+# The check this replaced searched the postmortem report for the literal "hunter2" — a fixture
+# value from unrelated unit tests, planted nowhere in the remote spine — so it passed however
+# badly the report leaked. The replacement hunts the values the stack is actually running with,
+# and refuses to run at all when there are none, so it cannot decay back into a no-op.
+
+
+def test_a_leaked_live_secret_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "kdive-demo-secret")
+    with pytest.raises(AssertionError, match="AWS_SECRET_ACCESS_KEY"):
+        assert_no_live_secrets('{"cmdline": "s3-key=kdive-demo-secret"}', "report")
+
+
+def test_a_clean_report_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "kdive-demo-secret")
+    assert_no_live_secrets('{"panic": "Oops: 0000 [#1] SMP"}', "report")
+
+
+def test_the_check_refuses_to_run_with_no_live_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole point: with nothing to look for, passing would be a lie. It must fail loudly.
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("KDIVE_TEST_S3_SECRET_KEY", raising=False)
+    with pytest.raises(AssertionError, match="would prove nothing"):
+        assert_no_live_secrets("anything at all", "report")
+
+
+def test_the_secondary_secret_env_is_also_hunted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setenv("KDIVE_TEST_S3_SECRET_KEY", "minio-secret-value")
+    with pytest.raises(AssertionError, match="KDIVE_TEST_S3_SECRET_KEY"):
+        assert_no_live_secrets("leaked minio-secret-value here", "report")

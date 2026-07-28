@@ -288,3 +288,36 @@ def test_open_transport_domain_without_a_gdb_port_is_configuration_error() -> No
         connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
 
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+
+
+class _FailingLookupConn:
+    """A connection whose lookup fails with a libvirt error other than NO_DOMAIN."""
+
+    def __init__(self, code: int) -> None:
+        self._code = code
+
+    def lookupByName(self, name: str) -> object:  # noqa: N802 - libvirt API name
+        raise libvirt_error(self._code)
+
+    def close(self) -> None:
+        pass
+
+
+def test_open_transport_libvirt_fault_reading_the_port_is_infrastructure_failure() -> None:
+    """A broken connection is not a missing domain, and must not be reported as one.
+
+    ``_read_gdb_port`` special-cases NO_DOMAIN into DEBUG_ATTACH_FAILURE ("nothing to attach
+    to"); every other libvirt fault is the read itself failing. Collapsing the two would send
+    an operator hunting a System that exists.
+    """
+    connect = RemoteLibvirtConnect(
+        config_factory=lambda: _config(gdb_addr="10.0.0.5"),
+        probe=lambda host, port: True,
+        open_connection=lambda uri: _FailingLookupConn(libvirt.VIR_ERR_INTERNAL_ERROR),
+        secret_backend_factory=lambda: cast(SecretBackend, RecordingBackend()),
+    )
+
+    with pytest.raises(CategorizedError) as excinfo:
+        connect.open_transport(SystemHandle(_DOMAIN), "gdbstub")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
