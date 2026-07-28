@@ -344,7 +344,11 @@ def test_remote_spine_over_the_wire() -> None:
             async with phase("upload-build"):
                 # The server-build lane (runs.build) was removed with schema 0062; the Run
                 # reaches a built state through the external-build upload lane instead.
-                await build_and_upload_kernel(op, run_id=run_id, phase_name="upload-build")
+                # with_vmlinux: the attach phase's debug.read_registers resolves symbols from the
+                # vmlinux artifact; without it the gdb-MI tier reports no_debuginfo.
+                await build_and_upload_kernel(
+                    op, run_id=run_id, phase_name="upload-build", with_vmlinux=True
+                )
             for step in ("install", "boot"):
                 async with phase(step):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_id), step)
@@ -585,7 +589,9 @@ def test_remote_four_method_capture_over_the_wire() -> None:
                 )
                 run_b = env.object_id
             async with phase("upload-build-B"):
-                await build_and_upload_kernel(op, run_id=run_b, phase_name="upload-build-B")
+                await build_and_upload_kernel(
+                    op, run_id=run_b, phase_name="upload-build-B", with_vmlinux=True
+                )
             for step in ("install", "boot"):
                 async with phase(f"{step}-B"):
                     env = ok(await scalar(op, f"runs.{step}", run_id=run_b), f"{step}-B")

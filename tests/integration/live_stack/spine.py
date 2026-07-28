@@ -54,13 +54,20 @@ _ARTIFACT_DIR_ENV = "KDIVE_ARTIFACT_DIR"
 
 
 class SpinePhaseError(AssertionError):
-    """A spine phase failed; carries the phase name so a failure says which step died."""
+    """A spine phase failed; carries the phase name so a failure says which step died.
+
+    The rendered message includes ``error_category`` when the envelope carried one. Without it
+    a failing phase reads only "error envelope", which names the step but not the fault — every
+    diagnosis then costs a re-run with an ad-hoc probe to recover the category the spine already
+    had in hand.
+    """
 
     def __init__(self, phase: str, reason: str, *, error_category: str | None = None) -> None:
         self.phase = phase
         self.reason = reason
         self.error_category = error_category
-        super().__init__(f"phase {phase!r} failed: {reason}")
+        detail = f"{reason} ({error_category})" if error_category else reason
+        super().__init__(f"phase {phase!r} failed: {detail}")
 
 
 @asynccontextmanager
@@ -214,6 +221,30 @@ def accepted_run_upload_names(contract: dict[str, object]) -> set[str]:
     return set()
 
 
+def elf_build_id(elf: Path) -> str:
+    """The GNU build-id of ``elf`` as lowercase hex, via ``readelf -n``.
+
+    ``runs.complete_build`` requires this whenever a ``vmlinux`` is uploaded — it is how the
+    debug tier matches debuginfo to the running kernel, and a mismatched id is worse than none.
+
+    Uses ``readelf`` rather than scanning for the note by hand: ``vmlinux`` embeds several
+    ``GNU`` notes (the vDSO images carry their own build-ids), so a naive scan returns whichever
+    it meets first — a wrong id that still looks well-formed. The module already shells out to
+    ``make`` and ``tar``, so binutils is no new obligation for a kernel-building host.
+
+    Raises:
+        RuntimeError: If ``readelf`` reports no build-id for the file.
+    """
+    out = subprocess.run(
+        ["readelf", "-n", str(elf)], check=True, capture_output=True, text=True
+    ).stdout
+    for line in out.splitlines():
+        marker = "Build ID:"
+        if marker in line:
+            return line.split(marker, 1)[1].strip().lower()
+    raise RuntimeError(f"no GNU build-id note in {elf}")
+
+
 def boot_member_source(kernel_src: Path, arch: str) -> Path:
     """Resolve the tree-relative path of the file that becomes the tar's ``boot/vmlinuz``.
 
@@ -298,18 +329,31 @@ def combined_kernel_tar(kernel_src: Path, dest_dir: Path, *, arch: str = "x86_64
 
 
 async def build_and_upload_kernel(
-    client: LiveStackClient, *, run_id: str, phase_name: str = "upload-build", arch: str = "x86_64"
+    client: LiveStackClient,
+    *,
+    run_id: str,
+    phase_name: str = "upload-build",
+    arch: str = "x86_64",
+    with_vmlinux: bool = False,
 ) -> None:
     """Drive the external-build upload lane for ``run_id`` and complete the Run's build step.
 
     Reads the contract resource, cuts the combined ``kernel`` tar from ``KDIVE_KERNEL_SRC``,
     declares + PUTs it via ``artifacts.create_run_upload``, then calls ``runs.complete_build``.
     The Run goes CREATED → SUCCEEDED with ``steps.build == succeeded``, ready for ``runs.install``.
+
+    ``with_vmlinux`` additionally uploads the tree's unstripped ``vmlinux``. The gdb-MI tier
+    resolves its symbols from that artifact, so a spine that opens a debug session needs it:
+    without it ``debug.read_registers`` fails ``configuration_error`` / ``no_debuginfo``. It is
+    opt-in because the ELF is large (hundreds of MB) and a spine that never attaches pays the
+    upload for nothing.
     """
     contract = json.loads(await client.read_text_resource(EXTERNAL_BUILD_CONTRACT_URI))
     accepted = accepted_run_upload_names(contract)
     if "kernel" not in accepted:
         raise SpinePhaseError(phase_name, f"upload contract no longer accepts 'kernel': {accepted}")
+    if with_vmlinux and "vmlinux" not in accepted:
+        raise SpinePhaseError(phase_name, f"upload contract accepts no 'vmlinux': {accepted}")
     kernel_src = os.environ.get(KERNEL_TREE_ENV)
     if not kernel_src:
         raise SpinePhaseError(phase_name, f"{KERNEL_TREE_ENV} unset; point it at a built tree")
@@ -322,6 +366,17 @@ async def build_and_upload_kernel(
                 "size_bytes": kernel_tar.stat().st_size,
             }
         ]
+        vmlinux = Path(kernel_src) / "vmlinux"
+        if with_vmlinux:
+            if not vmlinux.is_file():
+                raise SpinePhaseError(phase_name, f"no unstripped vmlinux at {vmlinux}")
+            decls.append(
+                {
+                    "name": "vmlinux",
+                    "sha256": sha256_b64(vmlinux),
+                    "size_bytes": vmlinux.stat().st_size,
+                }
+            )
         up = ok(
             await scalar(client, "artifacts.create_run_upload", run_id=run_id, artifacts=decls),
             phase_name,
@@ -330,7 +385,15 @@ async def build_and_upload_kernel(
         if "kernel" not in by_name:
             raise SpinePhaseError(phase_name, "create_run_upload returned no 'kernel' item")
         await put_presigned(by_name["kernel"], kernel_tar)
-    ok(await scalar(client, "runs.complete_build", run_id=run_id), phase_name)
+        if with_vmlinux:
+            if "vmlinux" not in by_name:
+                raise SpinePhaseError(phase_name, "create_run_upload returned no 'vmlinux' item")
+            await put_presigned(by_name["vmlinux"], vmlinux)
+            build_id = elf_build_id(vmlinux)
+    # complete_build requires build_id iff a vmlinux was uploaded; sending it otherwise (or
+    # omitting it here) is a configuration_error.
+    extra: dict[str, JsonValue] = {"build_id": build_id} if with_vmlinux else {}
+    ok(await scalar(client, "runs.complete_build", run_id=run_id, **extra), phase_name)
 
 
 # --- per-role token factory -----------------------------------------------------------------
