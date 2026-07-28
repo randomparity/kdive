@@ -42,7 +42,6 @@ def test_reclaim_sets_are_disjoint_and_non_terminal() -> None:
 
 def test_pre_overlay_set_is_the_documented_states() -> None:
     expected = {
-        SystemState.DEFINED,
         SystemState.PROVISIONING,
         SystemState.REPROVISIONING,
         SystemState.RESTORING,

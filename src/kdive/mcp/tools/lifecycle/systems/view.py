@@ -291,16 +291,6 @@ def _resolve_failure_verdict(
     return category, failing_job, _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
 
 
-def defined_system_envelope(system: System) -> ToolResponse:
-    """Render a newly defined System with its provision next action."""
-    return ToolResponse.success(
-        str(system.id),
-        SystemState.DEFINED.value,
-        suggested_next_actions=["systems.provision_defined"],
-        data={"project": system.project},
-    )
-
-
 async def _placement_for_system(
     conn: AsyncConnection, allocation_id: UUID
 ) -> tuple[str | None, str | None]:

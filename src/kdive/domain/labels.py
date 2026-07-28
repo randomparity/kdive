@@ -6,7 +6,7 @@ Run or System to cut bare-UUID threading. It is the caller's own input, echoed b
 here rather than run through the secret redactor.
 
 Validation lives in this pure helper (called from the handler/service layer) rather than
-as a pydantic ``Field`` bound: ``runs.create`` / ``systems.define`` / ``systems.provision``
+as a pydantic ``Field`` bound: ``runs.create`` / ``systems.provision``
 sit behind ``BindingErrorMiddleware`` whose conversions match only profile errors, so a
 schema bound would leak a raw ``ValidationError`` instead of the uniform envelope
 (ADR-0247 / ADR-0259).

@@ -643,14 +643,14 @@ def test_start_session_non_ready_system_is_config_error(migrated_url: str) -> No
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.DEFINED)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
             run_id = await _seed_run(pool, sys_id)
             resp = await _start_session(
                 pool, _ctx(), run_id=run_id, transport="gdbstub", connector=_FakeConnector()
             )
             count = await _session_count(pool)
         assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "defined"
+        assert resp.data["current_status"] == "provisioning"
         assert count == 0
 
     asyncio.run(_run())

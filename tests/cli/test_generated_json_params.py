@@ -28,7 +28,6 @@ _JSON_PARAM_VERBS = [
 # The specific tools the issue names as carrying nested-object / object-array params.
 _TARGET_TOOLS = {
     "systems.provision",
-    "systems.define",
     "systems.reprovision",
     "runs.create",
     "artifacts.create_run_upload",

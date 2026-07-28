@@ -62,9 +62,10 @@ class SystemState(StrEnum):
 
     Reprovision-in-place cycles a ready System through
     ``ready → reprovisioning → ready`` on the same row; an interrupted reprovision fails to
-    ``reprovisioning → failed``. ``defined → torn_down`` lets an abandoned
-    create-without-provision System be torn down without first advancing to
-    ``provisioning``. ``force_crash`` cycles a ready System ``ready → crashing → crashed``: the
+    ``reprovisioning → failed``. ``provisioning`` is the sole entry state: `systems.provision`
+    mints the row and enqueues its job in one transaction, so a System never exists before its
+    provider work is committed. ``force_crash`` cycles a ready System ``ready → crashing →
+    crashed``: the
     ``crashing`` marker is committed before the physical NMI so the power path (which refuses any
     non-``ready`` System) cannot reset the guest mid-crash.
 
@@ -77,7 +78,6 @@ class SystemState(StrEnum):
     ``ready``, so the ``ready ⇒ running`` invariant the snapshot/SSH tools rely on holds.
     """
 
-    DEFINED = "defined"
     PROVISIONING = "provisioning"
     READY = "ready"
     REPROVISIONING = "reprovisioning"
@@ -90,8 +90,8 @@ class SystemState(StrEnum):
 
 
 #: Non-terminal :class:`SystemState`\ s in which a bound System legitimately has **no** per-System
-#: overlay file yet still needs its rootfs base: the pre-overlay read window (``defined``/
-#: ``provisioning``) and the re-materialize window (``reprovisioning``/``restoring``), each of which
+#: overlay file yet still needs its rootfs base: the pre-overlay create window (``provisioning``)
+#: and the re-materialize window (``reprovisioning``/``restoring``), each of which
 #: reads or re-creates the overlay against the base with the overlay momentarily absent. The
 #: investigation-scoped rootfs reclaim sweep's condition (b) (ADR-0441 §6) must **not** unlink a
 #: base while any referencing System is in one of these states, even though no overlay file pins it.
@@ -99,7 +99,6 @@ class SystemState(StrEnum):
 #: so a new non-terminal state added without being classified here reddens CI.
 ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES: frozenset[SystemState] = frozenset(
     {
-        SystemState.DEFINED,
         SystemState.PROVISIONING,
         SystemState.REPROVISIONING,
         SystemState.RESTORING,
@@ -219,9 +218,6 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
         AllocationState.FAILED: frozenset(),
     },
     SystemState: {
-        SystemState.DEFINED: frozenset(
-            {SystemState.PROVISIONING, SystemState.TORN_DOWN, SystemState.FAILED}
-        ),
         SystemState.PROVISIONING: frozenset(
             {SystemState.READY, SystemState.FAILED, SystemState.TORN_DOWN}
         ),

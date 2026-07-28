@@ -95,7 +95,7 @@ def _system(allocation_id: UUID) -> System:
         principal="alice",
         project="proj",
         allocation_id=allocation_id,
-        state=SystemState.DEFINED,
+        state=SystemState.PROVISIONING,
         provisioning_profile={"k": "v"},
     )
 
@@ -103,8 +103,7 @@ def _system(allocation_id: UUID) -> System:
 async def _seed_ready_system(conn: psycopg.AsyncConnection) -> System:
     res = await RESOURCES.insert(conn, _resource())
     alloc = await ALLOCATIONS.insert(conn, _allocation(res.id))
-    sysm = await SYSTEMS.insert(conn, _system(alloc.id))
-    await SYSTEMS.update_state(conn, sysm.id, SystemState.PROVISIONING)
+    sysm = await SYSTEMS.insert(conn, _system(alloc.id))  # provisioning: the entry state
     return await SYSTEMS.update_state(conn, sysm.id, SystemState.READY)
 
 

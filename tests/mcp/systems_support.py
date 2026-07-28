@@ -370,20 +370,3 @@ async def enqueue_provision(conn_pool: AsyncConnectionPool, system_id: str, allo
             {"principal": "user-1", "agent_session": "s", "project": "proj"},
             f"{alloc_id}:provision",
         )
-
-
-async def define_system(
-    conn_pool: AsyncConnectionPool,
-    request_ctx: RequestContext,
-    alloc_id: str,
-    profile: dict[str, Any],
-    *,
-    label: str | None = None,
-):
-    return await SYSTEM_PROVISION_HANDLERS.define_system(
-        conn_pool,
-        request_ctx,
-        allocation_id=alloc_id,
-        profile=profile,
-        label=label,
-    )

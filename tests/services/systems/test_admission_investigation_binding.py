@@ -1,9 +1,9 @@
 """System->Investigation binding admission assertions (ADR-0441 §2, #1502).
 
-`systems.define`/`systems.provision` accept an optional `investigation_id`. A supplied binding is
-validated at admission: it must name a non-terminal investigation in the System's own project, and
-it is write-once (a later provision must match or omit it, never change it). Omitting it leaves the
-classic allocation-only path unchanged.
+`systems.provision` accepts an optional `investigation_id`. A supplied binding is validated at
+admission: it must name a non-terminal investigation in the System's own project, and it is
+write-once (a re-provision on the same Allocation must match or omit it, never change it).
+Omitting it leaves the classic allocation-only path unchanged.
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ from kdive.domain.lifecycle.records import Investigation
 from kdive.services.systems.admission import (
     AdmissionFailure,
     AdmissionResult,
-    CreateSystemMode,
     CreateSystemRequest,
-    DefinedSystemAdmitted,
     ProvisionJobAdmitted,
     SystemAdmission,
 )
@@ -87,7 +85,6 @@ async def _create(
     pool: AsyncConnectionPool,
     alloc_id: str,
     *,
-    mode: CreateSystemMode = "provision",
     investigation_id: UUID | None = None,
 ) -> AdmissionResult:
     return await admission.create_for_allocation(
@@ -96,7 +93,6 @@ async def _create(
         CreateSystemRequest(
             allocation_id=UUID(alloc_id),
             profile=_profile(),
-            mode=mode,
             investigation_id=investigation_id,
         ),
     )
@@ -175,46 +171,45 @@ def test_provision_rejects_cross_project_investigation(migrated_url: str) -> Non
     assert result.category is ErrorCategory.CONFIGURATION_ERROR
 
 
-def test_define_then_provision_cannot_change_binding(migrated_url: str) -> None:
+def test_reprovision_cannot_change_binding(migrated_url: str) -> None:
+    """The binding the first provision recorded is write-once: a second one may not move it.
+
+    A retried `systems.provision` on the same Allocation re-enters admission with the existing
+    `provisioning` System in scope, which is where the write-once rule is enforced.
+    """
+
     async def _run() -> tuple[AdmissionResult, UUID | None, UUID]:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             async with pool.connection() as conn:
                 bound = await _seed_investigation(conn)
                 other = await _seed_investigation(conn)
-            defined = await _create(
-                _admission(), pool, alloc_id, mode="define", investigation_id=bound
-            )
-            assert isinstance(defined, DefinedSystemAdmitted)
-            changed = await _create(
-                _admission(), pool, alloc_id, mode="provision", investigation_id=other
-            )
+            first = await _create(_admission(), pool, alloc_id, investigation_id=bound)
+            assert isinstance(first, ProvisionJobAdmitted)
+            changed = await _create(_admission(), pool, alloc_id, investigation_id=other)
             return changed, await _row_investigation_id(pool, alloc_id), bound
 
     result, stored, bound = asyncio.run(_run())
     assert isinstance(result, AdmissionFailure)
     assert result.category is ErrorCategory.CONFIGURATION_ERROR
-    # The write-once binding recorded at define is untouched by the rejected provision.
+    # The write-once binding recorded at the first provision survives the rejected retry.
     assert stored == bound
 
 
-def test_define_then_provision_matching_binding_is_allowed(migrated_url: str) -> None:
+def test_reprovision_with_matching_binding_is_allowed(migrated_url: str) -> None:
+    """Re-supplying the same binding is the dedup retry: it re-enqueues, it does not conflict."""
+
     async def _run() -> AdmissionResult:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
             async with pool.connection() as conn:
                 bound = await _seed_investigation(conn)
-            defined = await _create(
-                _admission(), pool, alloc_id, mode="define", investigation_id=bound
-            )
-            assert isinstance(defined, DefinedSystemAdmitted)
-            # Re-supplying the same binding on the define-lane is the idempotent re-define.
-            return await _create(
-                _admission(), pool, alloc_id, mode="define", investigation_id=bound
-            )
+            first = await _create(_admission(), pool, alloc_id, investigation_id=bound)
+            assert isinstance(first, ProvisionJobAdmitted)
+            return await _create(_admission(), pool, alloc_id, investigation_id=bound)
 
     result = asyncio.run(_run())
-    assert isinstance(result, DefinedSystemAdmitted)
+    assert isinstance(result, ProvisionJobAdmitted)
 
 
 def test_bind_serializes_with_concurrent_close(migrated_url: str) -> None:

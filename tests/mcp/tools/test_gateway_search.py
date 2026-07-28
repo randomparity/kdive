@@ -752,3 +752,45 @@ def test_point_read_vocabulary_finds_the_wait_tool(
     assert expected in names, f"query {query!r} did not surface {expected!r}: {names}"
     assert "jobs.get" not in names
     assert "allocations.get" not in names
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "systems.define",
+        "systems.provision_defined",
+        "define a system",
+        "define the target system to build on",
+        "create a system without provisioning it yet",
+        "set up a target machine",
+        "provision a system I already defined",
+    ],
+)
+def test_define_vocabulary_finds_the_one_create_lane(
+    monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """The retired define-lane names and their intent phrases rank `systems.provision` (ADR-0457).
+
+    An agent that wants a target machine says "define a system", not "systems.provision" — the
+    staged lane's own docs and the core-path guide taught that verb for months. `systems.provision`
+    spells neither `define` nor `target`, so those phrasings reach the surviving create lane only
+    through the vocabulary the retired tools left behind. With the gateway on by default
+    (ADR-0456), a miss here is an unreachable capability, not merely a worse ranking.
+    """
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", _every_scope_ctx)
+
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", {"query": query, "limit": 50})
+
+    result = asyncio.run(_run())
+    content = _call_result(result)
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    names = _match_names(content)
+    assert "systems.provision" in names, f"query {query!r} did not surface it: {names}"
+    assert "systems.define" not in names
+    assert "systems.provision_defined" not in names

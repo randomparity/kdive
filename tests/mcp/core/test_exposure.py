@@ -224,9 +224,7 @@ _CONTRIBUTOR_LOOP = frozenset(
         "investigations.open",
         "control.power",  # leaseholder power lifecycle over a READY transient VM (ADR-0320)
         # the provision lane instantiates a System on the slot the contributor holds (ADR-0326)
-        "systems.define",
         "systems.provision",
-        "systems.provision_defined",
         "systems.reprovision",
         "artifacts.create_investigation_upload",
     }

@@ -473,7 +473,7 @@ def test_runs_wrappers_roundtrip_create_and_validation_through_fastmcp(
     assert count == 1
 
 
-def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
+def test_systems_wrappers_roundtrip_provision_and_validation_through_fastmcp(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _run() -> tuple[ToolResponse, str]:
@@ -489,9 +489,9 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
             monkeypatch.setattr(systems_tools, "current_context", _ctx)
             app = build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
             async with Client(app) as client:
-                defined = await _call_tool(
+                provisioned = await _call_tool(
                     client,
-                    "systems.define",
+                    "systems.provision",
                     {
                         "allocation_id": allocation_id,
                         "profile": upload_profile(),
@@ -506,11 +506,11 @@ def test_systems_wrappers_roundtrip_define_and_validation_through_fastmcp(
                 invalid_state_error = await _call_tool_schema_rejected(
                     client, "systems.list", {"request": {"state": "bogus"}}
                 )
-        return defined, invalid_state_error
+        return provisioned, invalid_state_error
 
-    defined, invalid_state_error = asyncio.run(_run())
-    assert defined.status == "defined", defined
-    assert defined.suggested_next_actions == ["systems.provision_defined"]
+    provisioned, invalid_state_error = asyncio.run(_run())
+    assert provisioned.status == "queued", provisioned
+    assert provisioned.data["system_id"]
     assert "Input should be" in invalid_state_error
     assert "ready" in invalid_state_error
 

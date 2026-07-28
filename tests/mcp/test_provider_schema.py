@@ -17,7 +17,7 @@ FAULT = ResourceKind.FAULT_INJECT
 
 # The two surfaces narrow via DIFFERENT $defs (verified against the real schemas):
 #   - allocations.request: `$defs.ResourceKind` is a named enum (the kind selector).
-#   - systems.define/provision: `$defs.ProviderSection.properties` keyed by alias; the profile
+#   - systems.provision: `$defs.ProviderSection.properties` keyed by alias; the profile
 #     schema has NO `ResourceKind` $def. So enum tests source from the allocation payload and
 #     section tests source from the profile.
 def _allocation_schema() -> JsonSchema:

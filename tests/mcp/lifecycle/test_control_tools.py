@@ -329,10 +329,10 @@ def test_power_non_ready_system_is_config_error(migrated_url: str) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             alloc_id = await _granted_allocation(pool)
-            sys_id = await _seed_system(pool, alloc_id, SystemState.DEFINED)
+            sys_id = await _seed_system(pool, alloc_id, SystemState.PROVISIONING)
             resp = await _power(pool, _ctx(Role.CONTRIBUTOR), system_id=sys_id, action="off")
         assert resp.status == "error" and resp.error_category == "configuration_error"
-        assert resp.data["current_status"] == "defined"
+        assert resp.data["current_status"] == "provisioning"
 
     asyncio.run(_run())
 

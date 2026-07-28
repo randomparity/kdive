@@ -145,13 +145,13 @@ def _run(verb: GeneratedVerb, args: argparse.Namespace) -> int:
 
 
 def test_payload_strips_the_genarg_prefix() -> None:
-    verb = _verb("systems.define", flags=(_scalar("name"),))
+    verb = _verb("systems.provision", flags=(_scalar("name"),))
     args = _ns(**{_dest("name"): "web-01"})
     assert dispatch._assemble_generated_payload(verb, args) == {"name": "web-01"}
 
 
 def test_payload_omits_absent_scalar_flags() -> None:
-    verb = _verb("systems.define", flags=(_scalar("name"), _scalar("arch")))
+    verb = _verb("systems.provision", flags=(_scalar("name"), _scalar("arch")))
     args = _ns(**{_dest("name"): "web-01", _dest("arch"): None})
     assert dispatch._assemble_generated_payload(verb, args) == {"name": "web-01"}
 

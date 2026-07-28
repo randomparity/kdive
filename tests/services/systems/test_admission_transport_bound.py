@@ -70,7 +70,7 @@ async def _create(
     result = await admission.create_for_allocation(
         pool,
         _ctx(),
-        CreateSystemRequest(allocation_id=UUID(alloc_id), profile=_profile(), mode="provision"),
+        CreateSystemRequest(allocation_id=UUID(alloc_id), profile=_profile()),
     )
     assert isinstance(result, AdmissionFailure | ProvisionJobAdmitted)
     return result

@@ -35,8 +35,7 @@ _OBJECT_ID = "profile-examples"
 # The discovery→provision lifecycle a cold agent should follow (#474). Each is a registered tool
 # identifier; the order walks `resources.list` (resource kind/id) → `shapes.list` (sizing) →
 # `accounting.estimate` (cost) so the `allocations.request` is built from discovered context and
-# granted on the first valid attempt, then provisions and tears down. `systems.define` (the
-# two-step define-then-provision lane) stays directly callable but is not led to from here.
+# granted on the first valid attempt, then provisions and tears down.
 _NEXT_ACTIONS = [
     "resources.list",
     "shapes.list",

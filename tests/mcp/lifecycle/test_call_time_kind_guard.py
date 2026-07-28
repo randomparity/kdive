@@ -177,10 +177,6 @@ _FAULT_INJECT_PROFILE: dict = {
 # tool was added to the set without a corresponding entry — add one.
 _NON_COMPOSED_ARGS_BY_TOOL: dict[str, dict] = {
     "allocations.request": _NON_COMPOSED_REQUEST_ARGS,
-    "systems.define": {
-        "allocation_id": "00000000-0000-0000-0000-000000000001",
-        "profile": _FAULT_INJECT_PROFILE,
-    },
     "systems.provision": {
         "allocation_id": "00000000-0000-0000-0000-000000000001",
         "profile": _FAULT_INJECT_PROFILE,
@@ -224,7 +220,6 @@ def test_narrowed_tools_exact_membership() -> None:
             {
                 "allocations.request",
                 "resources.register",
-                "systems.define",
                 "systems.provision",
                 "systems.reprovision",
             }

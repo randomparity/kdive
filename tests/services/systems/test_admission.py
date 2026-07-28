@@ -200,23 +200,6 @@ def test_admission_failure_data_omits_current_status_when_absent() -> None:
     assert "current_status" not in response.data
 
 
-def test_admission_response_flags_already_defined_recovery_hint() -> None:
-    failure = admission.AdmissionFailure(
-        subject_id=_SYSTEM_ID,
-        category=ErrorCategory.CONFIGURATION_ERROR,
-        reason=admission.AdmissionFailureReason.SYSTEM_ALREADY_DEFINED,
-        current_status="defined",
-        failure_message="system already defined",
-        recovery=admission.AdmissionRecovery.PROVISION_DEFINED_SYSTEM,
-    )
-
-    response = _admission_response(failure)
-
-    assert response.data["reason"] == "use_systems.provision_defined"
-    assert response.data["current_status"] == "defined"
-    assert response.suggested_next_actions == ["systems.provision_defined"]
-
-
 def test_admission_response_other_reason_has_no_reason_hint() -> None:
     failure = admission.AdmissionFailure(
         subject_id=_SYSTEM_ID,

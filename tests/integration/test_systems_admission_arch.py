@@ -293,53 +293,10 @@ def test_provision_rejection_names_supported_set_in_details(migrated_url: str) -
     asyncio.run(_run())
 
 
-# The define lane (systems.define -> systems.provision_defined) resolves accel + validates arch at
-# a second, independent call site (_insert_defined_system); it must reject/record the same way.
-
-
-def test_define_records_accel_when_host_advertises_arch(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)
-
-            resp = await _HANDLERS.define_system(
-                pool, _ctx(), allocation_id=alloc_id, profile=_profile()
-            )
-
-            assert resp.error_category is None, resp.data
-            row = await _system_for_allocation(pool, alloc_id)
-            assert row is not None
-            assert row["state"] == "defined"
-            assert row["accel"] == "kvm"  # recorded at define, not deferred to provision_defined
-
-    asyncio.run(_run())
-
-
-def test_define_rejects_arch_host_does_not_advertise(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            await _set_resource_guest_arches(pool, alloc_id, _PPC_ONLY_GUEST_ARCHES)
-
-            resp = await _HANDLERS.define_system(
-                pool, _ctx(), allocation_id=alloc_id, profile=_profile()
-            )
-
-            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
-            assert resp.data.get("accepted_values") == ["ppc64le"]
-            # All-or-nothing: no System minted, allocation stays granted (never flipped active).
-            assert await _system_for_allocation(pool, alloc_id) is None
-            async with pool.connection() as conn:
-                alloc = await ALLOCATIONS.get(conn, alloc_id)
-            assert alloc is not None and alloc.state is AllocationState.GRANTED
-
-    asyncio.run(_run())
-
-
-# The fadump host gate (ADR-0349) sits beside accel resolution at both mint sites: a fadump-opted
-# profile is admitted only when the bound host advertises pseries_fadump=True; otherwise it is
-# rejected before the granted->active flip (no System, capacity untouched — never a hang).
+# The fadump host gate (ADR-0349) sits beside accel resolution at the single mint site: a
+# fadump-opted profile is admitted only when the bound host advertises pseries_fadump=True;
+# otherwise it is rejected before the granted->active flip (no System, capacity untouched — never
+# a hang).
 
 
 def test_provision_admits_fadump_when_host_supports_it(migrated_url: str) -> None:
@@ -397,25 +354,5 @@ def test_provision_rejects_fadump_when_host_signal_absent(migrated_url: str) -> 
 
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
             assert await _system_for_allocation(pool, alloc_id) is None
-
-    asyncio.run(_run())
-
-
-def test_define_rejects_fadump_when_host_unsupported(migrated_url: str) -> None:
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            alloc_id = await _granted_allocation(pool)
-            await _set_resource_guest_arches(pool, alloc_id, _X86_GUEST_ARCHES)
-            await _set_resource_pseries_fadump(pool, alloc_id, supported=False)
-
-            resp = await _HANDLERS.define_system(
-                pool, _ctx(), allocation_id=alloc_id, profile=_fadump_profile()
-            )
-
-            assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR
-            assert await _system_for_allocation(pool, alloc_id) is None
-            async with pool.connection() as conn:
-                alloc = await ALLOCATIONS.get(conn, alloc_id)
-            assert alloc is not None and alloc.state is AllocationState.GRANTED
 
     asyncio.run(_run())

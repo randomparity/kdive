@@ -141,7 +141,7 @@ async def _finalize_locked(
     return ToolResponse.success(
         raw_id,
         "rootfs_upload_complete",
-        suggested_next_actions=["systems.define"],
+        suggested_next_actions=["systems.provision"],
         data={
             "checksum_sha256": entry.sha256,
             "object_key": object_key,

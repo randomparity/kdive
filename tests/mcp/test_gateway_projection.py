@@ -30,7 +30,7 @@ def test_describe_narrows_allocation_kind_enum() -> None:
 
 
 def test_describe_narrows_systems_section_props() -> None:
-    tool = _FakeTool("systems.define", ProvisioningProfile.model_json_schema())
+    tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
     described = describe_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
     schema = cast("dict[str, Any]", described["input_schema"])
     props = set(schema["$defs"]["ProviderSection"]["properties"])

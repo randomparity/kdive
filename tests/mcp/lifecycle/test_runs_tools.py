@@ -2459,7 +2459,9 @@ def test_create_on_gone_system_is_stale_handle(migrated_url: str, state: SystemS
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("state", [SystemState.DEFINED, SystemState.PROVISIONING])
+@pytest.mark.parametrize(
+    "state", [SystemState.PROVISIONING, SystemState.REPROVISIONING, SystemState.PAUSED]
+)
 def test_create_on_not_ready_system_is_config_error(migrated_url: str, state: SystemState) -> None:
     async def _run() -> None:
         async with _pool(migrated_url) as pool:

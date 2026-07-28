@@ -42,13 +42,12 @@ _ACTIVE_CAPTURE_JOB_STATE_VALUES = tuple(state.value for state in _ACTIVE_CAPTUR
 _ACTIVE_ALLOCATION_STATE_VALUE = AllocationState.ACTIVE.value
 
 # A System in one of these states is "live" — it keeps its allocation legitimately occupied.
-# This is the complement of admission's `_NON_TERMINAL_SYSTEM` (defined/provisioning/ready/
-# reprovisioning/crashing/crashed); a `crashing` (mid-force_crash) or `crashed` System whose
+# This is the complement of admission's `_NON_TERMINAL_SYSTEM` (provisioning/ready/reprovisioning/
+# restoring/paused/crashing/crashed); a `crashing` (mid-force_crash) or `crashed` System whose
 # allocation backs an in-progress crash investigation is live, NOT orphaned. Keep this in step
 # with `_NON_TERMINAL_SYSTEM` when SystemState gains a value. Mirrors the sibling
 # `reconciler.systems._ORPHANED_SYSTEM_TERMINAL_STATES`.
 _LIVE_SYSTEM_STATES = (
-    SystemState.DEFINED,
     SystemState.PROVISIONING,
     SystemState.READY,
     SystemState.REPROVISIONING,
