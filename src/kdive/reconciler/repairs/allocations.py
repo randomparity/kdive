@@ -148,8 +148,15 @@ def _live_system_exists_sql(allocation_ref: LiteralString) -> LiteralString:
     )
 
 
+# `crashed_idle` is carried purely so the reclaim can say *which* leak it just closed. The
+# crashed-idle arm is the one that can end an investigation an operator still believed in, so
+# "your guest is gone" must be greppable and must name the window that decided it.
 _ORPHANED_ACTIVE_CANDIDATES_SQL = (
-    "SELECT a.id, a.project FROM allocations a "
+    "SELECT a.id, a.project, "
+    "  EXISTS (SELECT 1 FROM systems s2 "
+    "          WHERE s2.allocation_id = a.id AND s2.state = %(crashed_system_state)s) "
+    "  AS crashed_idle "
+    "FROM allocations a "
     "WHERE a.state = %(active_allocation_state)s "
     "  AND a.updated_at < now() - %(grace)s "
     "  AND NOT " + _live_system_exists_sql("a.id")
@@ -279,7 +286,11 @@ async def reap_orphaned_active_allocations(
     for candidate in candidates:
         try:
             if await _reclaim_orphaned_active(
-                conn, candidate["id"], candidate["project"], crashed_idle_grace
+                conn,
+                candidate["id"],
+                candidate["project"],
+                crashed_idle_grace,
+                crashed_idle=candidate["crashed_idle"],
             ):
                 reclaimed += 1
         except Exception:  # noqa: BLE001 - one allocation must not starve the rest
@@ -292,7 +303,12 @@ async def reap_orphaned_active_allocations(
 
 
 async def _reclaim_orphaned_active(
-    conn: AsyncConnection, allocation_id: UUID, project: str, crashed_idle_grace: timedelta
+    conn: AsyncConnection,
+    allocation_id: UUID,
+    project: str,
+    crashed_idle_grace: timedelta,
+    *,
+    crashed_idle: bool = False,
 ) -> bool:
     """Re-check the orphaned-active predicate under the allocation lock, then release.
 
@@ -304,6 +320,9 @@ async def _reclaim_orphaned_active(
     candidate read and the lock (a capture job enqueued, a debug session attached) is preserved
     too. A concurrent release/expiry that already moved the allocation terminal yields a
     non-`released` outcome, which is skipped (idempotent re-run).
+
+    ``crashed_idle`` only selects the log line: the crashed-idle arm is the one that can end an
+    investigation an operator still believed in, so it says so and names the knob.
     """
 
     async def _still_orphaned(locked: AsyncConnection) -> bool:
@@ -318,11 +337,19 @@ async def _reclaim_orphaned_active(
     )
     if not outcome.released:
         return False
-    _log.info(
-        "reconciler: orphaned active allocation %s released "
-        "(System terminal, absent, or crashed-and-idle)",
-        allocation_id,
-    )
+    if crashed_idle:
+        _log.info(
+            "reconciler: allocation %s released — its crashed System showed no investigation "
+            "activity for %s (ADR-0480); teardown of the crashed guest follows. Raise "
+            "ReconcileConfig.crashed_idle_grace if investigations here idle longer",
+            allocation_id,
+            crashed_idle_grace,
+        )
+    else:
+        _log.info(
+            "reconciler: orphaned active allocation %s released (System terminal/absent)",
+            allocation_id,
+        )
     return True
 
 

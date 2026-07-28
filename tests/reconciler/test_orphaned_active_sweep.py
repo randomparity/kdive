@@ -18,11 +18,13 @@ it, or a non-terminal / recently-touched DebugSession on one of its Runs. Silenc
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import psycopg
+import pytest
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
@@ -350,7 +352,7 @@ def test_active_with_recently_crashed_system_preserved(migrated_url: str) -> Non
     asyncio.run(_run())
 
 
-def test_idle_crashed_system_reclaimed(migrated_url: str) -> None:
+def test_idle_crashed_system_reclaimed(migrated_url: str, caplog: pytest.LogCaptureFixture) -> None:
     # #1628: a run that aborted between crashing its System and releasing the allocation. The
     # System sits `crashed` with nothing else happening, so the slot is stranded until the 4h
     # lease. Past the idle window with no job and no session, it is reclaimed.
@@ -366,7 +368,31 @@ def test_idle_crashed_system_reclaimed(migrated_url: str) -> None:
             assert await _alloc_state(check, alloc_id) == "released"
             assert await _ledger_kinds(check, alloc_id) == ["reserved", "reconciled"]
 
-    asyncio.run(_run())
+    with caplog.at_level(logging.INFO, logger=allocation_repairs.__name__):
+        asyncio.run(_run())
+    # This arm ends a guest an operator may still believe in, so it must say so distinctly and
+    # name the knob — not share the terminal/absent line.
+    reclaim_logs = [r.getMessage() for r in caplog.records if "released" in r.getMessage()]
+    assert any("no investigation activity" in message for message in reclaim_logs), reclaim_logs
+    assert any("crashed_idle_grace" in message for message in reclaim_logs), reclaim_logs
+
+
+def test_terminal_system_reclaim_does_not_claim_crash_idleness(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The complement: a torn_down System's reclaim must not blame a crash investigation that
+    # never existed. Guards the `crashed_idle` flag against being hard-coded true.
+    async def _run() -> None:
+        async with await connect(migrated_url) as seed:
+            await _seed_active_alloc(seed, system_state=SystemState.TORN_DOWN)
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, allocation_repairs.reap_orphaned_active_allocations) == 1
+
+    with caplog.at_level(logging.INFO, logger=allocation_repairs.__name__):
+        asyncio.run(_run())
+    reclaim_logs = [r.getMessage() for r in caplog.records if "released" in r.getMessage()]
+    assert reclaim_logs
+    assert not any("no investigation activity" in message for message in reclaim_logs)
 
 
 def test_idle_crashed_system_with_queued_capture_job_preserved(migrated_url: str) -> None:
