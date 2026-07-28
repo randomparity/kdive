@@ -129,14 +129,15 @@ def _same_namespace(name: str, query: str) -> bool:
     return name.split(".", 1)[0] == query.split(".", 1)[0]
 
 
-def _gateway_surface_client() -> _Client:
+def _gateway_surface_client(*, truncated: bool = False) -> _Client:
     """A client shaped like the DEFAULT surface: ``list_tools`` advertises only ``CORE_TOOLS``.
 
     The core set is imported from the server rather than hard-coded so this fake cannot drift
     into advertising a catalog the script no longer sees (ADR-0456; the gateway is on by default).
+    ``truncated`` makes every ``tools.search`` report a clipped result set.
     """
     listed = [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)]
-    return _Client(listed, dict(_SEARCHABLE))
+    return _Client(listed, dict(_SEARCHABLE), truncated=truncated)
 
 
 def _bind_client(monkeypatch: pytest.MonkeyPatch, live_debug: Any, client: _Client) -> None:
@@ -244,11 +245,7 @@ def test_a_clipped_search_says_so_instead_of_blaming_the_name(
 ) -> None:
     live_debug = _load_live_debug()
     _Client.calls = []
-    client = _Client(
-        [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)],
-        dict(_SEARCHABLE),
-        truncated=True,
-    )
+    client = _gateway_surface_client(truncated=True)
 
     asyncio.run(
         live_debug._call(
@@ -746,11 +743,7 @@ def test_cmd_tools_warns_when_a_namespace_listing_is_clipped(
     """A namespace bigger than the search cap loses tools; say so rather than under-report."""
     live_debug = _load_live_debug()
     _Client.calls = []
-    client = _Client(
-        [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)],
-        dict(_SEARCHABLE),
-        truncated=True,
-    )
+    client = _gateway_surface_client(truncated=True)
     _bind_client(monkeypatch, live_debug, client)
 
     rc = live_debug.asyncio.run(
