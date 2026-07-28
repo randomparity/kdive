@@ -122,7 +122,7 @@ consequence, not the mechanism: over-clamping shortens a bounded wait, which a c
 loop simply re-issues, whereas under-clamping to zero converts a wait into an unthrottled
 spin. Refusing it would also mean restating `MAX_WAIT_S` in the CLI — a second copy of a server
 constant that goes stale the moment the server raises the cap, which is exactly what
-`_curated_choices` exists to avoid for enums. The cap is stated in the runbook instead.
+`_curated_choices` exists to avoid for enums. The cap is stated in the runbook instead — one hand-copied figure, which with the default makes several restatements of two literals that no guard binds; that drift surface is tracked as #1622.
 
 Placing this at the handler rather than at the parser seam is a deliberate but narrow choice,
 and the reason is not that no seam exists. `_curated_choices` (ADR-0469) established exactly
@@ -179,6 +179,16 @@ still does not exist.
 - **Leave the flag form and change nothing.** Rejected: it makes the point read the one
   single-record read in the CLI that spells its id with a flag, for no reason other than that
   the tool it now dispatches to happens to have a second parameter.
+- **Teach `gen_cli_verbs` to emit a sole required scalar id as a positional.** This is the only
+  option that reaches the goal with *no* hand-written payload — the thing the Context above
+  names as what kept drifting through epic #1576 — and it would keep both things decision 1
+  gives up (parse-time `type=float`, and the schema-derived per-flag `--help`) while fixing the
+  same flag-vs-positional inconsistency for every by-id generated verb rather than two.
+  Rejected on blast radius, not on merit: it changes the command line of every generated verb
+  with a single required id across the whole surface, which is a third breaking change to
+  unrelated commands inside one unreleased range and far outside #1616. The hand-written
+  payload it would have avoided is the risk ADR-0469's guard was built to carry, and that guard
+  is now merged — which is why the narrower option is acceptable here and was not before.
 - **Default the curated `--timeout-s` to `0`.** Rejected by the user; see decision 2.
 - **Add a curated `jobs get` verb over `jobs.wait` with a hardcoded `timeout_s=0`.** Rejected
   for the same reason ADR-0468 rejected it: it puts a `get` verb and a `wait` verb on one tool

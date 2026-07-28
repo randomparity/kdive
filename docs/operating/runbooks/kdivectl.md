@@ -193,6 +193,12 @@ Exit `0` is not the whole story either, so a poll loop needs both signals:
   `status: failed`. So do the calls that never waited at all: an unknown or malformed id, or a
   read your token is not granted for, returns `status: "error"` immediately. Re-issuing any of
   these is a hot spin against the server, not a poll.
+- **Nonzero exit with no envelope at all — retry with backoff.** A call that fails at the
+  transport (a read timeout, a reset, an intermediary severing the held request) prints a
+  message to stderr and emits nothing on stdout, so there is no `status` to read. This is
+  transient, not an answer, and it is the concrete reason to prefer repeated short waits over
+  `--timeout-s 300`: the longer the hold, the likelier a proxy severs it. Distinguish it from
+  the case above by the absence of JSON output, not by the exit code.
 - **Exit `0` plus a non-terminal `status` — re-issue.** This is the only case that means "call
   again", and it is the only one where the call actually consumed `--timeout-s` seconds.
   Bound the loop with your own overall deadline; nothing caps how many times you re-issue.
