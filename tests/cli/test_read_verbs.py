@@ -420,16 +420,18 @@ def test_wait_verb_point_read_sends_a_zero_timeout(
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
-@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity"])
-def test_wait_verb_rejects_a_non_finite_timeout(
+@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity", "-5", "-0.5"])
+def test_wait_verb_rejects_a_negative_or_non_finite_timeout(
     handler, key: str, tool: str, value: str, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """A non-numeric or non-finite ``--timeout-s`` is a usage error, and never reaches the wire.
+    """Only a non-negative finite ``--timeout-s`` reaches the wire (ADR-0470 decision 3).
 
+    Both refused classes would otherwise be silently reinterpreted rather than rejected.
     ``float()`` accepts ``inf``/``nan``, but JSON encodes neither: pydantic serializes both to
     ``null``, so the tool would be handed ``null`` for a declared ``number`` and the transport
-    would raise before the tool's own ``math.isfinite`` guard could answer. The CLI must refuse
-    them itself (ADR-0470 decision 3).
+    would raise before the tool's own ``math.isfinite`` guard could answer. A negative is
+    clamped server-side to ``0``, quietly turning a requested wait into a point read — which is
+    how a poll loop computing ``--timeout-s`` from a passed deadline becomes a hot spin.
     """
     client = _install_session(monkeypatch, _data_envelope({}))
     code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": value})))
