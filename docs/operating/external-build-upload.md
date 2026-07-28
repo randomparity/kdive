@@ -19,10 +19,14 @@ debug options turned on. The validator constrains only the artifacts' **structur
 magic, gzip layout, a `lib/modules` member); it never rejects a build over your `.config`.
 There is no allowed-config allowlist and no required-symbol gate: enable what the
 investigation needs. One non-blocking exception: if you upload an `effective_config` that
-provably lacks the symbols needed to mount the root filesystem and boot (`EXT4_FS` and
-`VIRTIO_BLK` — root is `/dev/vda` ext4 on virtio-blk), `runs.complete_build` still succeeds but
-returns a `data.missing_boot_config` advisory naming the missing symbols, so a kernel that
-cannot boot is not silently accepted.
+provably lacks the symbols needed to mount the root filesystem and boot (`VIRTIO_BLK` for the
+`/dev/vda` root device, plus `EXT4_FS` **or** `XFS_FS` for the filesystem on it),
+`runs.complete_build` still succeeds but returns a `data.missing_boot_config` advisory naming the
+missing symbols, so a kernel that cannot boot is not silently accepted. The filesystem half is an
+either/or because kdive does not know your guest's root filesystem: local-libvirt provisions a
+whole-disk ext4 qcow2, while a remote base image or an agent-uploaded rootfs is commonly XFS.
+Build in the one your rootfs actually uses — the advisory only fires when the kernel carries
+neither.
 
 **Start from the catalog image's own config, not a bare `defconfig`.** When you build against a
 catalog image, call `images.kernel_config(image_id)` (ADR-0317) and start from the `.config` it
@@ -71,6 +75,29 @@ introspection also depends on the guest image's drgn build being able to load th
 BTF but the in-guest drgn cannot actually resolve symbols, `introspect.run` / `introspect.script`
 return a non-fatal `debuginfo_unloadable` warning naming the likely cause; remediate by booting a
 BTF-capable guest image with a newer drgn, or by uploading a matching `vmlinux`.
+**kdump on a RHEL-family guest needs more than the crash-capture symbols.** `CONFIG_KEXEC`,
+`CONFIG_CRASH_DUMP`, `CONFIG_VMCORE_INFO`, `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS` and
+`CONFIG_RELOCATABLE` get the capture kernel *loaded* — `/sys/kernel/kexec_crash_size` is non-zero
+and the boot looks healthy — but they do not get a vmcore *written*. On RHEL, Rocky, AlmaLinux,
+CentOS Stream or Fedora, also build in the `crash_capture_rhel_guest` set:
+
+```
+CONFIG_XFS_FS=y          # the RHEL root filesystem the capture kernel must mount to write the core
+CONFIG_KEXEC_FILE=y      # RHEL's kdump loads via kexec_file_load, not the legacy kexec_load
+CONFIG_SQUASHFS=y        # dracut builds the kdump initramfs as a compressed squashfs or erofs
+CONFIG_SQUASHFS_ZSTD=y   # image over a loop device with an overlay; which one it picks varies
+CONFIG_EROFS_FS=y        # by release, so build all of them in
+CONFIG_OVERLAY_FS=y
+CONFIG_BLK_DEV_LOOP=y
+```
+
+All `=y`, not `=m`: a crash initramfs must not depend on the primary kernel loading modules first.
+A stock `x86_64_defconfig` supplies none of them. This set is filesystem- and initramfs-dependent,
+not universal — a guest with a different root filesystem or initramfs scheme needs a different set,
+so kdive advertises it and never refuses on it. Missing any one of these fails only at capture
+time, after the crash, when the guest and the evidence are gone; each omission masks the next, so
+build the whole set in at once.
+
 See `resource://kdive/contracts/external-build` for the per-feature `CONFIG_*` manifest.
 
 ## The `kernel` artifact: one combined gzip tar

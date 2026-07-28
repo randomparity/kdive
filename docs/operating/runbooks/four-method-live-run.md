@@ -16,7 +16,15 @@ All prerequisites from the [local live-stack runbook](live-stack.md), plus:
 
 - A locally-built kernel to upload: a combined `kernel` tar (`boot/vmlinuz` + `lib/modules/`)
   with the kdump/debug symbols armed (`CONFIG_KEXEC`, `CONFIG_CRASH_DUMP`, `CONFIG_VMCORE_INFO`,
-  `CONFIG_FW_CFG_SYSFS`, …). See the [build-lane recipe](../external-build-upload.md).
+  `CONFIG_PROC_VMCORE`, `CONFIG_FW_CFG_SYSFS`, `CONFIG_RELOCATABLE`). Those load the capture
+  kernel; they do not write a vmcore on their own. **On a RHEL-family guest** (RHEL, Rocky,
+  AlmaLinux, CentOS Stream, Fedora) also build in `CONFIG_XFS_FS` (the XFS root the capture kernel
+  must mount), `CONFIG_KEXEC_FILE` (RHEL kdump uses `kexec_file_load`, not `kexec_load`), and
+  `CONFIG_SQUASHFS` + `CONFIG_SQUASHFS_ZSTD` + `CONFIG_EROFS_FS` + `CONFIG_OVERLAY_FS` +
+  `CONFIG_BLK_DEV_LOOP` (dracut's squash/erofs kdump initramfs). This second set is
+  filesystem- and initramfs-dependent, not universal — a non-RHEL guest may need a different one.
+  See the [build-lane recipe](../external-build-upload.md) and
+  `resource://kdive/contracts/external-build` for the authoritative per-feature manifest.
 - The remote provider configured with a base-OS qcow2 and TLS, if running against a remote
   `qemu+tls://` host (see [remote-live-stack.md §1–4](remote-live-stack.md)).
 - For **local-libvirt** `kdump` capture only: the worker venv must import `guestfs` (the
@@ -42,8 +50,11 @@ Upload your locally-built artifacts, then finalize the Run:
 
 `runs.complete_build` validates the uploaded artifacts' **structure** (bzImage magic, gzip layout,
 a `lib/modules` member, manifest `sha256`/`size_bytes`, and the optional `vmlinux` build-id). It
-never inspects your `.config`: arming kdump is your responsibility at build time — a kernel missing
-`CONFIG_KEXEC`/`CONFIG_CRASH_DUMP`/`CONFIG_VMCORE_INFO` simply captures no vmcore.
+never inspects your `.config` beyond the non-blocking boot advisory: arming kdump is your
+responsibility at build time — a kernel missing `CONFIG_KEXEC`/`CONFIG_CRASH_DUMP`/
+`CONFIG_VMCORE_INFO` simply captures no vmcore, and on a RHEL-family guest so does one missing the
+XFS/dracut-initramfs/`KEXEC_FILE` set above. That failure appears only *after* the crash, so verify
+the set before you crash the guest, not after.
 
 ## 3. Install and boot the uploaded kernel
 
