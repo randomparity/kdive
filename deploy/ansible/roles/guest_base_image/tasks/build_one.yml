@@ -50,8 +50,6 @@
       - systemctl enable qemu-guest-agent.service
       - --run-command
       - systemctl enable {{ guest_base_image_kdump_service }}
-      - --run-command
-      - sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config
   when:
     - image.source == 'virt-builder'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
@@ -94,6 +92,51 @@
     - image.source == 'scratch'
     - (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
 
+# --- Relax SELinux so the guest-agent-spawned helpers can work. ---
+# kdive drives the guest through guest-exec, so the helpers inherit the confined
+# ``virt_qemu_ga_t`` domain, which denies outbound connect(). kdive-install-kernel fetches the
+# kernel from a presigned object-store URL, so under enforcing SELinux every remote install
+# fails as `install_failure` with the helper seeing EACCES on connect (the domain is confined
+# enough that even security_getenforce() is denied, so the cause is not self-evident in-guest).
+# This ran ONLY in the virt-builder branch before, so cloud-image builds (rocky, ubuntu) stayed
+# enforcing and could never complete an install. Applied to every build path, once, here.
+- name: Relax SELinux to permissive for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - >-
+        if [ -f /etc/selinux/config ]; then sed -i
+        's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config; fi
+  when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
+# --- Unblock the guest-agent RPCs the remote provider drives the guest with. ---
+# RHEL-family images ship /etc/sysconfig/qemu-ga with an ALLOWLIST (FILTER_RPC_ARGS
+# --allow-rpcs=...) that omits guest-exec. runs.install and the artifact channel spawn
+# in-guest commands over guest-exec/guest-exec-status, so without this every remote
+# install fails as `transport_failure`: "Command guest-exec has been disabled". Only the
+# two RPCs kdive actually calls are added (guest-ping is already allowed) — the filter
+# stays on. Debian-family images ship no such file, so the guard makes this a no-op there.
+- name: Allow the guest-exec RPCs kdive requires for {{ image.name }}
+  ansible.builtin.command: # noqa: command-instead-of-module
+    # No Ansible module wraps virt-customize; the command module is the only option.
+    argv:
+      - virt-customize
+      - -a
+      - "{{ guest_base_image_qcow2 }}"
+      - --run-command
+      - >-
+        if [ -f /etc/sysconfig/qemu-ga ] && ! grep -q 'allow-rpcs=.*guest-exec'
+        /etc/sysconfig/qemu-ga; then sed -i
+        's/--allow-rpcs=/--allow-rpcs=guest-exec,guest-exec-status,/'
+        /etc/sysconfig/qemu-ga; fi
+  when: (not guest_base_image_staged.stat.exists) or guest_base_image_force | bool
+  changed_when: true
+
 # --- Set the crashkernel reservation when a debuginfo/kdump image is requested. ---
 - name: Set the crashkernel reservation for {{ image.name }}
   ansible.builtin.command:  # noqa: command-instead-of-module
@@ -116,7 +159,7 @@
   ansible.builtin.set_fact:
     guest_base_image_helper_args: >-
       {{ guest_base_image_helper_args
-         + ['--copy-in', helper_src ~ '/' ~ item ~ ':/usr/local/sbin/',
+         + ['--copy-in', guest_base_image_helper_dir ~ '/' ~ item ~ ':/usr/local/sbin/',
             '--run-command', 'chown root:root /usr/local/sbin/' ~ item,
             '--run-command', 'chmod 0755 /usr/local/sbin/' ~ item,
             '--run-command', 'restorecon -v /usr/local/sbin/' ~ item] }}
