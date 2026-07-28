@@ -165,10 +165,16 @@ test-live-tcg:
     fi
     exit "$rc"
 
-# --strict-markers fails a mis-marked test; pytest exit 5 ("no tests collected") is tolerated as a
-# clean skip, other codes propagate. Needs an operator-provided qemu+tls:// host (KDIVE_LIVE_VM_REMOTE_URI
-# + base-image volume + KDIVE_S3_* + a running reconciler); the require_live_vm_remote gate skips
-# cleanly with no remote env and fails loud on a partial one (docs/operating/runbooks/remote-live-stack.md).
+# --strict-markers fails a mis-marked test. Needs an operator-provided qemu+tls:// host
+# (KDIVE_LIVE_VM_REMOTE_URI + base-image volume + KDIVE_S3_* + a running reconciler); the
+# require_live_vm_remote gate skips cleanly with no remote env and fails loud on a partial one
+# (docs/operating/runbooks/remote-live-stack.md).
+#
+# pytest exit 5 ("no tests collected") is a FAILURE here, not a clean skip: it means no
+# live_vm_remote test ran, so the run proved nothing either way. Today it means the family has zero
+# carriers (ADR-0425 shipped the marker and gate ahead of the first remote proof). It would also
+# fire if a future carrier skipped at MODULE level, which likewise yields exit 5 — hence the gate
+# belongs inside the test, where an absent remote env is a reported skip and exit 0 (#1627).
 #
 # Run the remote-libvirt live_vm family: direct provider ops against a genuinely remote qemu+tls:// host.
 test-live-remote:
@@ -177,8 +183,12 @@ test-live-remote:
     rc=0
     uv run python -m pytest -m live_vm_remote --strict-markers -q || rc=$?
     if [[ "$rc" -eq 5 ]]; then
-      echo "no live_vm_remote tests collected — skipping cleanly (remote env or marked suite absent)"
-      exit 0
+      echo "no live_vm_remote test ran — this recipe proved nothing, so it is not a pass." >&2
+      echo "pytest collected nothing. Either no test carries the marker (ADR-0425 shipped the" >&2
+      echo "gate ahead of the first remote proof), or a carrier skipped at module level." >&2
+      echo "Mark the remote-libvirt proofs and call require_live_vm_remote() INSIDE the test —" >&2
+      echo "an absent remote env is then a reported skip, not an empty run (#1627)." >&2
+      exit 1
     fi
     exit "$rc"
 
