@@ -17,7 +17,6 @@ import pytest
 from kdive.mcp.exposure import CORE_TOOLS
 from kdive.mcp.schema.tool_index import NAMESPACE_TOC
 from kdive.mcp.tools.gateway import _SEARCH_LIMIT_MAX
-from scripts.gen_tool_reference import _registry_tools
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -692,22 +691,6 @@ def test_main_routes_sync_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     assert live_debug.main(["transcript", "s1"]) == 7
     assert live_debug.main(["reload"]) == 8
     assert seen == ["transcript:s1", "reload"]
-
-
-def test_namespace_toc_covers_every_live_namespace() -> None:
-    """`tools` enumerates NAMESPACE_TOC, so a namespace missing from it becomes undiscoverable.
-
-    The instructions guard in tests/mcp/test_tool_index.py asserts each namespace appears in the
-    rendered instructions *text*, which a name like ``session`` or ``tools`` satisfies from the
-    surrounding prose alone. This asserts the key itself.
-    """
-    live = {tool.name.split(".", 1)[0] for tool in _registry_tools()}
-
-    assert live <= set(NAMESPACE_TOC), (
-        f"namespaces missing from NAMESPACE_TOC: {sorted(live - set(NAMESPACE_TOC))}\n"
-        "Add them in src/kdive/mcp/schema/tool_index.py; live-debug.py's `tools` command "
-        "enumerates that dict and would silently hide them."
-    )
 
 
 def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(

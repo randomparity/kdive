@@ -16,6 +16,7 @@ from kdive.serialization import JsonValue
 Clause = frozenset[str]
 
 CRASH_CAPTURE = "crash_capture"
+CRASH_CAPTURE_RHEL_GUEST = "crash_capture_rhel_guest"
 SYSRQ = "sysrq"
 ROOTFS_MOUNT = "rootfs_mount"
 
@@ -46,12 +47,21 @@ def _plain(*symbols: str) -> tuple[Clause, ...]:
 FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
     FeatureRequirement(
         ROOTFS_MOUNT,
-        "Mount the ext4 root filesystem direct-kernel boots from (root=/dev/vda, no initramfs).",
-        _plain("EXT4_FS", "VIRTIO_BLK"),
+        "Mount the root filesystem the guest boots from. Local-libvirt direct-kernel-boots a "
+        "whole-disk ext4 qcow2 (root=/dev/vda, no initramfs); a remote or agent-uploaded rootfs "
+        "is commonly XFS (RHEL-family base images). kdive does not know which family your guest "
+        "uses, so it asks only that the kernel can mount at least one of them plus the virtio-blk "
+        "root device - build in the one your rootfs actually uses.",
+        (
+            frozenset({"EXT4_FS", "XFS_FS"}),
+            frozenset({"VIRTIO_BLK"}),
+        ),
     ),
     FeatureRequirement(
         CRASH_CAPTURE,
-        "Reserve a crashkernel and capture a vmcore via kdump.",
+        "Reserve a crashkernel and capture a vmcore via kdump. Guest-family-independent only: "
+        "these symbols get the capture kernel loaded, not the vmcore written. A RHEL-family guest "
+        "needs the crash_capture_rhel_guest set as well.",
         _plain(
             "KEXEC",
             "KEXEC_CORE",
@@ -71,6 +81,28 @@ FEATURE_REQUIREMENTS: tuple[FeatureRequirement, ...] = (
             frozenset({"VMCORE_INFO"}),
             frozenset({"FW_CFG_SYSFS"}),
             frozenset({"RELOCATABLE"}),
+        ),
+    ),
+    FeatureRequirement(
+        CRASH_CAPTURE_RHEL_GUEST,
+        "Extra symbols a RHEL-family guest (RHEL/Rocky/AlmaLinux/CentOS Stream/Fedora) needs "
+        "before kdump can actually write a vmcore. All are filesystem- or initramfs-dependent, so "
+        "they are advisory, never gated: kdive cannot tell which OS your guest runs. XFS_FS - the "
+        "RHEL root filesystem the capture kernel must mount to write the core (a stock defconfig "
+        "builds EXT4 but not XFS). SQUASHFS/SQUASHFS_ZSTD/EROFS_FS/OVERLAY_FS/BLK_DEV_LOOP - "
+        "dracut builds the kdump initramfs as a compressed squashfs or erofs image over a loop "
+        "device with an overlay; which one varies by release, so build all of them in. "
+        "KEXEC_FILE - RHEL's kdump service loads the capture kernel with kexec_file_load, not the "
+        "legacy kexec_load, so a KEXEC-only kernel arms crashkernel= and then captures nothing. "
+        "Skip this feature entirely for a non-RHEL guest whose root and initramfs differ.",
+        _plain(
+            "XFS_FS",
+            "SQUASHFS",
+            "SQUASHFS_ZSTD",
+            "EROFS_FS",
+            "OVERLAY_FS",
+            "BLK_DEV_LOOP",
+            "KEXEC_FILE",
         ),
     ),
     FeatureRequirement(

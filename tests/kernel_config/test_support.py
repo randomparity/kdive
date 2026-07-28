@@ -48,12 +48,26 @@ _ROOTFS = feature_requirement(ROOTFS_MOUNT)
 
 def test_advertised_clauses_read_the_advertise_set_not_the_empty_gate():
     # rootfs_mount has no gate_required, so unmet_clauses is always empty; the advisory path must
-    # read the advertised set instead.
-    cfg = KernelConfig(frozenset({"XFS_FS"}))
+    # read the advertised set instead. BTRFS_FS keeps the config non-degenerate while enabling no
+    # root filesystem kdive boots (#1626 made XFS_FS one, so it no longer serves that role here).
+    cfg = KernelConfig(frozenset({"BTRFS_FS"}))
     assert unmet_clauses(cfg, _ROOTFS) == ()
-    assert missing_symbols(unmet_advertised_clauses(cfg, _ROOTFS)) == ["EXT4_FS", "VIRTIO_BLK"]
+    assert missing_symbols(unmet_advertised_clauses(cfg, _ROOTFS)) == [
+        "EXT4_FS",
+        "VIRTIO_BLK",
+        "XFS_FS",
+    ]
 
 
 def test_advertised_clauses_satisfied_by_full_boot_set():
     cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
     assert unmet_advertised_clauses(cfg, _ROOTFS) == ()
+
+
+def test_advertised_root_filesystem_or_group_accepts_either_family():
+    # #1626: {EXT4_FS, XFS_FS} is one OR-group, so an XFS-root guest's kernel is satisfied without
+    # ext4 and vice versa — the AND-of-OR semantics are what make both cases silent.
+    xfs_root = KernelConfig(frozenset({"XFS_FS", "VIRTIO_BLK"}))
+    ext4_root = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK"}))
+    assert unmet_advertised_clauses(xfs_root, _ROOTFS) == ()
+    assert unmet_advertised_clauses(ext4_root, _ROOTFS) == ()

@@ -36,19 +36,25 @@ from kdive.serialization import JsonValue
 _EXTERNAL_BUILD_CONTRACT_URI = "resource://kdive/contracts/external-build"
 
 CRASH_CONFIG_REASON = "kernel_missing_crash_config"
-_REMEDIATION = f"rebuild the kernel with the missing CONFIG_* (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+_REMEDIATION = (
+    "rebuild the kernel with the missing CONFIG_*; on a RHEL-family guest also build in the "
+    "advisory crash_capture_rhel_guest set (XFS root, dracut squash/erofs initramfs, "
+    "kexec_file_load) or the capture kernel loads and writes nothing "
+    f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
+)
 
 MISSING_BOOT_CONFIG_REASON = "kernel_missing_boot_config"
 _ROOTFS_REMEDIATION = (
-    "rebuild the kernel with the missing CONFIG_* so the guest can mount its ext4 root filesystem "
-    f"and boot (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "rebuild the kernel with the missing CONFIG_* so the guest can mount its root filesystem and "
+    "boot - EXT4_FS or XFS_FS, whichever your rootfs uses "
+    f"(see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 NO_EFFECTIVE_CONFIG_REASON = "no_effective_config_uploaded"
 _NO_EFFECTIVE_CONFIG_REMEDIATION = (
     "upload the built kernel's effective_config alongside the build (artifacts.create_run_upload) "
-    "so runs.complete_build can check the boot-critical EXT4_FS/VIRTIO_BLK symbols the guest needs "
-    f"to mount its root filesystem (see {_EXTERNAL_BUILD_CONTRACT_URI})"
+    "so runs.complete_build can check the boot-critical EXT4_FS-or-XFS_FS/VIRTIO_BLK symbols the "
+    f"guest needs to mount its root filesystem (see {_EXTERNAL_BUILD_CONTRACT_URI})"
 )
 
 MISSING_DEBUGINFO_REASON = "missing_debuginfo"
@@ -95,11 +101,17 @@ async def rootfs_mount_warning(conn: AsyncConnection, run_id: UUID) -> dict[str,
     """Non-fatal ``kernel_missing_boot_config`` warning for ``runs.complete_build``, or ``None``.
 
     Returns ``None`` (complete as today) when no ``effective_config`` was uploaded or it cannot be
-    read/trusted (:func:`load_effective_config` fails open), and when the config enables every
-    ``rootfs_mount`` boot symbol. Otherwise returns ``{reason, missing, remediation}`` — the payload
+    read/trusted (:func:`load_effective_config` fails open), and when the config satisfies every
+    ``rootfs_mount`` boot clause. Otherwise returns ``{reason, missing, remediation}`` — the payload
     the complete_build handler spreads into its success ``data`` so a kernel that cannot mount its
     root filesystem is no longer silently completed. Keys on the ``rootfs_mount`` *advertised*
     clauses (the feature is never gated); warns, never refuses — the upload always succeeds.
+
+    The root-filesystem clause is the OR-group ``{EXT4_FS, XFS_FS}``: kdive has no guest-family
+    axis, so it cannot tell whether the Run targets local-libvirt's ext4 qcow2 or a RHEL-family
+    XFS rootfs. The warning therefore means "this kernel can mount *no* root filesystem kdive
+    boots", not "this kernel does not match your guest" — a deliberately weak predicate that never
+    fires on a kernel carrying either filesystem.
     """
     config = await load_effective_config(conn, run_id)
     if config is None:
