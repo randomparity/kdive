@@ -158,4 +158,6 @@ def test_real_gateway_denial_records_one_usage_row_keyed_to_inner(migrated_url: 
     # records ("tools.invoke", "denied") and this is two rows.
     assert usage_rows == [("audit.query", "denied")]
 
+    # Meaningful only because denial_audit_must_not_fail() is armed above: without it an
+    # empty audit_log could equally mean the write was attempted and swallowed.
     assert denial_rows == []
