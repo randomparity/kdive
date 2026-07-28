@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidate scoped accounting and report tools
 - Collapse the curated accounting verbs onto merged tools
 - Make wait the single point-read and polling contract
+- Guard every verb's argparse shape against its tool schema
 
 ### Changed
 
@@ -164,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0466 vmcore artifact reference
 - Record ADR-0463 debug.advance consolidation
 - Record ADR-0467 for the accounting tool merge
+- Record ADR-0469 and correct the stale CLI verb usages
 
 ### Fixed
 
