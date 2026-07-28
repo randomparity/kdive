@@ -80,9 +80,12 @@ class _Client:
         self,
         tools: list[_SchemaTool] | None = None,
         searchable: dict[str, dict[str, Any]] | None = None,
+        *,
+        truncated: bool = False,
     ) -> None:
         self._client = _SchemaClient(tools or [])
         self._searchable = searchable or {}
+        self._truncated = truncated
 
     async def __aenter__(self) -> _Client:
         return self
@@ -115,8 +118,11 @@ class _Client:
                 ),
                 key=lambda n: (n != _TOP_RANKED_DECOY, n == query, n),
             )
+        if self._truncated:
+            # A clipped result set drops the tail, which is where the exact match was ranked.
+            hits = hits[:1]
         matches = [{"name": n, "input_schema": self._searchable[n]} for n in hits]
-        return {"matches": matches, "truncated": False}
+        return {"matches": matches, "truncated": self._truncated}
 
 
 def _same_namespace(name: str, query: str) -> bool:
@@ -131,6 +137,19 @@ def _gateway_surface_client() -> _Client:
     """
     listed = [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)]
     return _Client(listed, dict(_SEARCHABLE))
+
+
+def _bind_client(monkeypatch: pytest.MonkeyPatch, live_debug: Any, client: _Client) -> None:
+    """Point the script's client factory and token minter at ``client``."""
+
+    class Factory:
+        @staticmethod
+        def over_http(base: str, token: str) -> _Client:
+            del base, token
+            return client
+
+    monkeypatch.setattr(live_debug, "_token", lambda project: project)
+    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
 
 
 def test_wrap_request_only_for_single_request_schema() -> None:
@@ -200,7 +219,7 @@ def test_schema_resolution_is_cached_across_calls() -> None:
     assert client._client.list_calls == 1
 
 
-def test_schema_resolution_caches_a_miss() -> None:
+def test_schema_resolution_caches_and_reports_a_miss(capsys: pytest.CaptureFixture[str]) -> None:
     live_debug = _load_live_debug()
     _Client.calls = []
     client = _gateway_surface_client()
@@ -213,6 +232,33 @@ def test_schema_resolution_caches_a_miss() -> None:
 
     assert [tool for tool, _ in _Client.calls].count("tools.search") == 1
     assert _Client.calls[-1] == ("nowhere.missing", {"x": 1})
+    # The args go out unwrapped, so name the reason once rather than leaving the user to decode
+    # the server-side validation error that follows.
+    err = capsys.readouterr().err
+    assert "no input schema for 'nowhere.missing'" in err
+    assert "clipped" not in err  # this result set was complete, only the name was unknown
+
+
+def test_a_clipped_search_says_so_instead_of_blaming_the_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _Client(
+        [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)],
+        dict(_SEARCHABLE),
+        truncated=True,
+    )
+
+    asyncio.run(
+        live_debug._call(
+            client, "allocations.list", {"project": "demo"}, live_debug._SchemaResolver()
+        )
+    )
+
+    # The exact match ranks last, so clipping drops it: "unknown tool" would be the wrong story.
+    assert "no input schema for 'allocations.list' (results were clipped" in capsys.readouterr().err
+    assert _Client.calls[-1] == ("allocations.list", {"project": "demo"})
 
 
 def test_input_schemas_reads_harness_tool_catalog() -> None:
@@ -676,14 +722,7 @@ def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(
     _Client.calls = []
     client = _gateway_surface_client()
 
-    class Factory:
-        @staticmethod
-        def over_http(base: str, token: str) -> _Client:
-            del base, token
-            return client
-
-    monkeypatch.setattr(live_debug, "_token", lambda project: project)
-    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+    _bind_client(monkeypatch, live_debug, client)
 
     rc = live_debug.asyncio.run(
         live_debug._cmd_tools(argparse.Namespace(project="demo", substr=None))
@@ -692,10 +731,42 @@ def test_cmd_tools_enumerates_namespaces_instead_of_list_tools(
     assert rc == 0
     searched = [args["namespace"] for tool, args in _Client.calls if tool == "tools.search"]
     assert searched == sorted(NAMESPACE_TOC)
-    assert all(args["limit"] == _SEARCH_LIMIT_MAX for _tool, args in _Client.calls)
+    assert all(
+        args["limit"] == _SEARCH_LIMIT_MAX for tool, args in _Client.calls if tool == "tools.search"
+    )
     assert client._client.list_calls == 0  # list_tools would have shown only the core nine
     # `allocations.list` is not a core tool, so only the namespace browse can surface it.
     assert capsys.readouterr().out.splitlines() == sorted(_SEARCHABLE)
+
+
+def test_cmd_tools_warns_when_a_namespace_listing_is_clipped(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A namespace bigger than the search cap loses tools; say so rather than under-report."""
+    live_debug = _load_live_debug()
+    _Client.calls = []
+    client = _Client(
+        [_SchemaTool(name, _REQUEST_SCHEMA) for name in sorted(CORE_TOOLS)],
+        dict(_SEARCHABLE),
+        truncated=True,
+    )
+    _bind_client(monkeypatch, live_debug, client)
+
+    rc = live_debug.asyncio.run(
+        live_debug._cmd_tools(argparse.Namespace(project="demo", substr=None))
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "holds more than" in captured.err
+    assert "'allocations'" in captured.err
+    # `allocations.release` fell off the clipped page, which is exactly what the warning is for.
+    assert captured.out.splitlines() == [
+        "allocations.list",
+        "control.capture_traffic",
+        "runs.list",
+    ]
 
 
 def test_cmd_tools_filters_by_substring(
@@ -706,14 +777,7 @@ def test_cmd_tools_filters_by_substring(
     _Client.calls = []
     client = _gateway_surface_client()
 
-    class Factory:
-        @staticmethod
-        def over_http(base: str, token: str) -> _Client:
-            del base, token
-            return client
-
-    monkeypatch.setattr(live_debug, "_token", lambda project: project)
-    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+    _bind_client(monkeypatch, live_debug, client)
 
     rc = live_debug.asyncio.run(
         live_debug._cmd_tools(argparse.Namespace(project="demo", substr="release"))
@@ -731,14 +795,7 @@ def test_cmd_schema_resolves_a_non_core_tool(
     _Client.calls = []
     client = _gateway_surface_client()
 
-    class Factory:
-        @staticmethod
-        def over_http(base: str, token: str) -> _Client:
-            del base, token
-            return client
-
-    monkeypatch.setattr(live_debug, "_token", lambda project: project)
-    monkeypatch.setattr(live_debug, "LiveStackClient", Factory)
+    _bind_client(monkeypatch, live_debug, client)
 
     rc = live_debug.asyncio.run(
         live_debug._cmd_schema(argparse.Namespace(project="demo", tools=["allocations.list"]))
