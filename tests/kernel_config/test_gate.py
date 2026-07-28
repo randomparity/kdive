@@ -1,4 +1,8 @@
-"""Unit tests for `debuginfo_warning` (ADR-0322): warn, never refuse, and fail open."""
+"""Unit tests for the kernel-config gate seams (ADR-0322, ADR-0478).
+
+`debuginfo_warning` and `rootfs_mount_warning` warn, never refuse, and fail open;
+`crash_capture_refusal` is the one seam that refuses, and only on its narrow gated subset.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +14,11 @@ from uuid import uuid4
 from psycopg import AsyncConnection
 
 from kdive.kernel_config.gate import (
+    CRASH_CONFIG_REASON,
     DEBUGINFO_UNLOADABLE_REASON,
     MISSING_BOOT_CONFIG_REASON,
     MISSING_DEBUGINFO_REASON,
+    crash_capture_refusal,
     debuginfo_unloadable_warning,
     debuginfo_warning,
     rootfs_mount_warning,
@@ -108,9 +114,24 @@ def test_rootfs_full_boot_set_produces_no_warning():
     assert _rootfs_call(cfg) is None
 
 
+def test_rootfs_ext4_local_libvirt_kernel_stays_silent_after_adding_xfs():
+    # #1626 regression guard: XFS_FS joined rootfs_mount as an OR-group member, not as a second
+    # required clause. Appending it with _plain would have made every ext4-root local-libvirt
+    # kernel — the overwhelmingly common case — start emitting a spurious missing_boot_config.
+    cfg = KernelConfig(frozenset({"EXT4_FS", "VIRTIO_BLK", "KEXEC", "MAGIC_SYSRQ"}))
+    assert _rootfs_call(cfg) is None
+
+
+def test_rootfs_xfs_only_kernel_is_no_longer_told_to_add_ext4():
+    # A RHEL-family / remote base image roots on XFS (ADR-0183). Before #1626 such a kernel was
+    # told to build in EXT4_FS, which its guest never mounts.
+    cfg = KernelConfig(frozenset({"XFS_FS", "VIRTIO_BLK"}))
+    assert _rootfs_call(cfg) is None
+
+
 def test_rootfs_missing_one_symbol_warns_and_names_it():
-    # A real, non-degenerate config missing only VIRTIO_BLK still warns (each advertise clause
-    # is required; it is not an OR-group across EXT4_FS/VIRTIO_BLK).
+    # VIRTIO_BLK is its own clause (the root *device*, not the filesystem), so a config carrying a
+    # root filesystem but no virtio-blk driver still warns.
     cfg = KernelConfig(frozenset({"EXT4_FS"}))
     warning = _rootfs_call(cfg)
     assert warning is not None
@@ -118,9 +139,50 @@ def test_rootfs_missing_one_symbol_warns_and_names_it():
     assert warning["missing"] == ["VIRTIO_BLK"]
 
 
-def test_rootfs_missing_both_symbols_names_both():
-    cfg = KernelConfig(frozenset({"XFS_FS"}))  # non-degenerate, but neither boot symbol
+def test_rootfs_no_supported_filesystem_names_both_alternatives():
+    # BTRFS is a real filesystem kdive never boots from: neither OR-group member is enabled, so
+    # the advisory fires and offers both alternatives rather than only ext4.
+    cfg = KernelConfig(frozenset({"BTRFS_FS"}))
     warning = _rootfs_call(cfg)
     assert warning is not None
-    assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK"]
+    assert warning["missing"] == ["EXT4_FS", "VIRTIO_BLK", "XFS_FS"]
     assert "mount" in warning["remediation"]
+
+
+_KEXEC_LOAD_ONLY = frozenset(
+    {
+        "KEXEC",
+        "KEXEC_CORE",
+        "CRASH_DUMP",
+        "PROC_VMCORE",
+        "VMCORE_INFO",
+        "FW_CFG_SYSFS",
+        "RELOCATABLE",
+    }
+)
+
+
+def _crash_call(config: KernelConfig | None) -> dict[str, Any] | None:
+    async def _run() -> dict[str, Any] | None:
+        with _patched_load(config):
+            return await crash_capture_refusal(_CONN, _RUN_ID)
+
+    return asyncio.run(_run())
+
+
+def test_crash_capture_still_admits_a_legacy_kexec_load_only_kernel():
+    # #1626 judgment call: RHEL kdump uses kexec_file_load, so KEXEC alone cannot capture *there*.
+    # Tightening the {KEXEC, KEXEC_FILE} OR-group into a hard KEXEC_FILE requirement would refuse
+    # installs that capture fine on a non-RHEL guest, and kdive has no guest-family axis to
+    # discriminate. The gate deliberately stays an OR; the RHEL gap is advisory instead.
+    assert _crash_call(KernelConfig(_KEXEC_LOAD_ONLY)) is None
+
+
+def test_crash_capture_refusal_remediation_points_at_the_rhel_guest_feature():
+    # When the gate does refuse, the remediation must not imply the gated set is sufficient on a
+    # RHEL guest — that is exactly the trap #1626 reports.
+    refusal = _crash_call(KernelConfig(_KEXEC_LOAD_ONLY - {"FW_CFG_SYSFS"}))
+    assert refusal is not None
+    assert refusal["reason"] == CRASH_CONFIG_REASON
+    assert refusal["missing"] == ["FW_CFG_SYSFS"]
+    assert "crash_capture_rhel_guest" in cast(str, refusal["remediation"])
