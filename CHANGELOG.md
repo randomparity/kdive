@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fold artifact text search back into artifacts.get
 - Publish the redacted core id from capture jobs
 - Backfill capture_vmcore result refs to redacted ids
+- Consolidate scoped accounting and report tools
+- Collapse the curated accounting verbs onto merged tools
 
 ### Changed
 
@@ -160,6 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0465 folding fixtures.list into images.list
 - Record ADR-0466 vmcore artifact reference
 - Record ADR-0463 debug.advance consolidation
+- Record ADR-0467 for the accounting tool merge
 
 ### Fixed
 
@@ -267,6 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound both terms of the orphan-sweep threshold
 - Drop curated image build/publish verbs
 - Repair live-debug so the stepping proof can run
+- Keep a union-typed request as a --request-json escape
 
 ### Build
 
