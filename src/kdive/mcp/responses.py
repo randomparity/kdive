@@ -52,6 +52,18 @@ _TERMINAL_KIND_ACTIONS: dict[JobKind, list[str]] = {
 # tool-level `error` status; both require an error category, all others forbid one.
 _FAILURE_STATUSES = frozenset({JobState.FAILED.value, "error"})
 
+#: The only next action an ``authorization_denied`` envelope ever carries (ADR-0471).
+#:
+#: A denial used to point back at the tool that just denied the caller, steering a
+#: contract-following agent into an action it cannot complete without a grant it does not hold
+#: (#1596). The recovery for a denial is never the denied tool: it is a grant the server cannot
+#: issue. ``session.whoami`` is the one step the caller can always take — it is in
+#: ``PUBLIC_TOOLS`` (guarded in tests/mcp/core/test_responses.py), so it never denies, it names
+#: the grants the caller actually holds, and it is not the denied tool, so it cannot loop.
+#: Combined with ADR-0123's suppressed ``detail``, it is the caller's only route to a blocker it
+#: can report to its operator.
+DENIAL_NEXT_ACTIONS: tuple[str, ...] = ("session.whoami",)
+
 # Retryability is a pure function of the failure category (ADR-0118): a bare
 # re-invocation may succeed once a transient condition clears, with no caller change.
 # Exhaustive over ErrorCategory; the bias is terminal when transience is ambiguous,
@@ -208,6 +220,30 @@ class ToolResponse(BaseModel):
             suggested_next_actions=suggested_next_actions or [],
             refs=refs or {},
             data=dict(data or {}),
+        )
+
+    @classmethod
+    def denied(cls, object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
+        """Build the ``authorization_denied`` envelope (ADR-0471).
+
+        The single constructor for a denial across the whole tool surface. It takes no
+        ``suggested_next_actions``: the breadcrumb is fixed to :data:`DENIAL_NEXT_ACTIONS`, so a
+        denial naming the tool that produced it — the #1596 defect — is unrepresentable rather
+        than merely discouraged. ``tests/guards/test_denial_envelope_actions.py`` pins this as
+        the only way an ``AUTHORIZATION_DENIED`` envelope is built, so a new tool cannot
+        reintroduce a self-suggestion by hand-rolling ``ToolResponse.failure``.
+
+        Args:
+            object_id: The envelope's object id — the same id the served call would carry.
+            data: Structured fields safe to surface under the no-leak seam (ADR-0123 suppresses
+                ``detail``, not ``data``), e.g. the destructive-op gate's closed enum of failed
+                policy checks (ADR-0129).
+        """
+        return cls.failure(
+            object_id,
+            ErrorCategory.AUTHORIZATION_DENIED,
+            suggested_next_actions=list(DENIAL_NEXT_ACTIONS),
+            data=data,
         )
 
     @classmethod

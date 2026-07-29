@@ -58,7 +58,7 @@ async def export_systems_toml(
             await audit_platform_denial(
                 pool, ctx, tool=_EXPORT_SYSTEMS_TOOL, scope=_EXPORT_SYSTEMS_SCOPE
             )
-            return _denied(_EXPORT_SYSTEMS_OBJECT_ID, _EXPORT_SYSTEMS_TOOL)
+            return _denied(_EXPORT_SYSTEMS_OBJECT_ID)
         if document is not None and not persist:
             return _export_config_error(
                 "a document was supplied without persist=true; nothing would store it"
@@ -176,10 +176,8 @@ async def _audit_inventory_write(
         )
 
 
-def _denied(object_id: str, tool: str) -> ToolResponse:
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-    )
+def _denied(object_id: str) -> ToolResponse:
+    return ToolResponse.denied(object_id)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:

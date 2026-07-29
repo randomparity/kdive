@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
@@ -83,11 +82,7 @@ async def reconcile_now(
                 scope=_RECONCILE_SCOPE,
                 args={"tool": _RECONCILE_TOOL},
             )
-            return ToolResponse.failure(
-                _RECONCILE_OBJECT_ID,
-                ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_RECONCILE_TOOL],
-            )
+            return ToolResponse.denied(_RECONCILE_OBJECT_ID)
         # reconcile_once isolates every per-repair failure into report.failures and does
         # not re-raise it, so there is no CategorizedError to catch here; a rare whole-pass
         # error (e.g. pool acquisition) propagates, matching the periodic loop's contract.

@@ -297,7 +297,8 @@ def test_force_release_operator_denied(migrated_url: str) -> None:
             )
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-            assert resp.suggested_next_actions == ["ops.force_release"]
+            assert resp.suggested_next_actions == ["session.whoami"]
+            assert "ops.force_release" not in resp.suggested_next_actions  # ADR-0471, #1596
             assert await _alloc_state(migrated_url, alloc_id) == "active"
             assert await _platform_audit_rows(migrated_url) == [
                 (
@@ -431,7 +432,8 @@ def test_force_teardown_operator_denied(migrated_url: str) -> None:
             )
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-            assert resp.suggested_next_actions == ["ops.force_teardown"]
+            assert resp.suggested_next_actions == ["session.whoami"]
+            assert "ops.force_teardown" not in resp.suggested_next_actions  # ADR-0471, #1596
             assert await _job_count(migrated_url, f"{sys_id}:teardown") == 0
             assert await _platform_audit_rows(migrated_url) == [
                 (

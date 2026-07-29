@@ -280,9 +280,7 @@ def authz_denied(object_id: str, missing_checks: list[str]) -> ToolResponse:
     ``detail`` only, not ``data``.
     """
     checks: list[JsonValue] = list(missing_checks)
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, data={"missing_checks": checks}
-    )
+    return ToolResponse.denied(object_id, data={"missing_checks": checks})
 
 
 def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:

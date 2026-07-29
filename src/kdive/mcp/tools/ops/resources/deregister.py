@@ -82,7 +82,7 @@ async def deregister_resource(
             scope=f"denied:{resource_id}",
             args={"resource_id": resource_id, "force": force},
         )
-        return denied(resource_id, DEREGISTER_TOOL)
+        return denied(resource_id)
 
     uid = _as_uuid(resource_id)
     if uid is None:
