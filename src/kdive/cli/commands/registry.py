@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
@@ -209,7 +210,40 @@ _CURATED_BY_PATH: dict[tuple[str, str], Verb] = {(v.group, v.sub): v for v in RE
 _GENERATED_BY_PATH: dict[tuple[str, str], GeneratedVerb] = {
     (v.group, v.sub): v for v in GENERATED_VERBS
 }
-_ARG_TYPES: dict[str, type] = {"str": str, "int": int, "float": float}
+
+
+def _finite_float(raw: str) -> float:
+    """Parse ``raw`` as a float, refusing ``inf``/``nan`` (ADR-0474 decision 2).
+
+    ``float()`` accepts both, but JSON encodes neither: pydantic serializes them to ``null``
+    without raising, so the value does not reach the tool as a number its own validation could
+    reject — it reaches it as a missing key, and the tool quietly applies its default. Every
+    float parameter in the CLI is a timeout or a deadline in seconds, where an infinite or
+    undefined value has no meaning the wire format could carry.
+
+    Raises:
+        argparse.ArgumentTypeError: When ``raw`` is not a finite number, so argparse renders it
+            as a usage error on exit 2 rather than letting a ``ValueError`` escape.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid float value: {raw!r}") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"must be a finite number, not {raw!r}")
+    return value
+
+
+#: How argparse consumes a value for each ``GeneratedFlag.arg_type``. The single map both halves
+#: of the parser read — :func:`_add_generated_flag` for the schema-generated flags and
+#: :func:`_derived_type` for the curated ones — so the finite check lands on both at once.
+#: ``int`` stays the builtin: it already refuses ``inf``/``nan``/``1.5`` with the ``ValueError``
+#: argparse renders as a usage error, so a wrapper there would change no outcome.
+_ARG_TYPES: dict[str, Callable[[str], object]] = {
+    "str": str,
+    "int": int,
+    "float": _finite_float,
+}
 
 #: Generated-verb flag values land on the namespace under this prefix (``genarg_<param>``),
 #: so a tool parameter named ``command``/``subcommand``/``json`` can never clobber argparse's
@@ -265,15 +299,43 @@ def _derived_help(derived: Mapping[str, GeneratedFlag], name: str) -> str | None
     return (flag.help or None) if flag is not None else None
 
 
+def _derived_type(
+    derived: Mapping[str, GeneratedFlag], name: str
+) -> Callable[[str], object] | None:
+    """``name``'s schema-derived argparse ``type=``, or ``None`` to leave it a string.
+
+    Curated options were declared with no ``type=``, so a parameter the tool schema types as a
+    JSON ``number`` arrived at its handler as the raw ``str`` argparse read from ``argv`` and died
+    there in a hand-written ``int()`` — a traceback on exit 1 where every other malformed argument
+    is a usage error on exit 2 (ADR-0474 decision 1).
+
+    Absent is normalized to ``None`` because that is already argparse's own default for ``type=``
+    (its registry maps ``None`` to the identity function), so a curated parameter with no
+    generated counterpart needs no special case to stay a string.
+    """
+    flag = derived.get(name)
+    if flag is None or flag.arg_type is None:
+        return None
+    return _ARG_TYPES[flag.arg_type]
+
+
 def _verb_parser(
     group_parser: argparse._SubParsersAction, verb: Verb, parent: argparse.ArgumentParser
 ) -> None:
-    """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options."""
+    """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options.
+
+    The three value-taking buckets read ``type``/``choices``/``help`` off the generated verb at
+    the same path; the ``store_true`` bucket reads ``help`` alone, because ``_StoreTrueAction``
+    accepts neither ``type`` nor ``choices`` and passing either raises ``TypeError`` while the
+    parser is being built. That is why these four calls stay spelled out rather than sharing a
+    ``**kwargs`` helper — the buckets genuinely do not take the same keywords (ADR-0474).
+    """
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
     derived = _curated_flags(verb)
     for positional in verb.positionals:
         parser.add_argument(
             positional,
+            type=_derived_type(derived, positional),
             choices=_derived_choices(derived, positional),
             help=_derived_help(derived, positional),
         )
@@ -282,6 +344,7 @@ def _verb_parser(
             f"--{option.replace('_', '-')}",
             dest=option,
             default=None,
+            type=_derived_type(derived, option),
             choices=_derived_choices(derived, option),
             help=_derived_help(derived, option),
         )
@@ -290,6 +353,7 @@ def _verb_parser(
             f"--{option.replace('_', '-')}",
             dest=option,
             required=True,
+            type=_derived_type(derived, option),
             choices=_derived_choices(derived, option),
             help=_derived_help(derived, option),
         )

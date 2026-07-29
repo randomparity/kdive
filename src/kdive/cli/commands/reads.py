@@ -12,7 +12,6 @@ verbs flatten the one envelope the same way and call :func:`render_record` (ADR-
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from collections.abc import Mapping
 
@@ -136,26 +135,20 @@ async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str
     point read stays the explicit ``--timeout-s 0`` (ADR-0470 decision 2, upholding ADR-0468
     decision 2 on the CLI surface).
 
-    A given value is coerced to ``float`` because curated options are declared with no
-    ``type=``, so argparse hands over the raw string while both tools declare ``timeout_s`` as a
-    JSON ``number``. Anything that is not a non-negative finite number is a usage error (exit
-    2), because both remaining cases would otherwise be silently reinterpreted rather than
-    refused: ``inf``/``nan`` have no JSON encoding, so pydantic serializes them to ``null``
-    without raising and the tool's own ``math.isfinite`` check never sees a number to reject;
-    a negative value is clamped server-side to ``0``, turning a requested wait into a point read
-    with no error anywhere, which is how a deadline-arithmetic poll loop becomes a hot spin.
-    Zero stays legal — it is the documented point read (ADR-0470 decision 3).
+    A given value arrives already coerced to a finite ``float``: the parser reads the type off
+    the generated verb at this path, so a non-numeric or ``inf``/``nan`` value is refused by
+    argparse before the handler runs (ADR-0474, amending ADR-0470 decision 3). What stays here
+    is the range bound the parser cannot express, because ``GeneratedFlag`` carries no schema
+    ``minimum``: a negative value is clamped server-side to ``0``, turning a requested wait into
+    a point read with no error anywhere, which is how a deadline-arithmetic poll loop becomes a
+    hot spin. Zero stays legal — it is the documented point read (ADR-0470 decision 3).
     """
     payload: dict[str, object] = {id_key: object_id}
-    raw = getattr(args, "timeout_s", None)
-    if raw is not None:
-        try:
-            timeout = float(raw)
-        except ValueError:
-            timeout = math.nan
-        if not math.isfinite(timeout) or timeout < 0:
+    timeout = getattr(args, "timeout_s", None)
+    if timeout is not None:
+        if timeout < 0:
             print(
-                f"error: --timeout-s must be a non-negative finite number, not {raw!r}",
+                f"error: --timeout-s must be a non-negative finite number, not {timeout!r}",
                 file=sys.stderr,
             )
             return 2

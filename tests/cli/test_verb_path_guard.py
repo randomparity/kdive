@@ -13,7 +13,7 @@ import pytest
 
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import REGISTRY, Verb
+from kdive.cli.commands.registry import REGISTRY, Verb, _curated_flags
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 
@@ -45,9 +45,21 @@ def test_generated_paths_are_unique() -> None:
 
 
 def _required_argv_for_curated(verb: Verb) -> list[str]:
-    argv = [f"{name}-val" for name in verb.positionals]
+    """Placeholder argv reaching ``verb``'s required surface, typed off its generated twin.
+
+    A curated parameter's ``type``/``choices`` are read off the generated verb at the same path
+    (ADR-0469, ADR-0474), so the placeholder has to be derived from the same flag: a bare
+    ``seconds-val`` stopped parsing the moment ``images extend --seconds`` became a real ``int``.
+    """
+    derived = _curated_flags(verb)
+
+    def value(name: str) -> str:
+        flag = derived.get(name)
+        return _value_for_flag(flag) if flag is not None else f"{name}-val"
+
+    argv = [value(name) for name in verb.positionals]
     for option in verb.required_options:
-        argv += [f"--{option.replace('_', '-')}", f"{option}-val"]
+        argv += [f"--{option.replace('_', '-')}", value(option)]
     return argv
 
 
