@@ -179,8 +179,11 @@ callers.
 `scripts/kdive_set_accounting.py` was one, and its contract test caught it: a `viewer` running
 the onboarding helper used to exit 1 on the first denied call and now ran to completion and
 exited 0, having written nothing. It is fixed here to treat a returned failure envelope as a
-failure, and keeps exiting 1 rather than adopting `kdive/cli/errors.py`'s mapped 3, so its
-observable contract is byte-identical to what it was before this change.
+failure, and keeps exiting 1 rather than adopting `kdive/cli/errors.py`'s mapped 3, so **its
+exit codes are unchanged at every outcome** — 0 success, 2 no token, 1 any failure. Its *stderr*
+is not identical: a failure now also dumps the envelope, which is new diagnostic output on the
+enveloped path. The dump is suppressed when `structured_content` is `None`, so the pre-existing
+`is_error` path does not gain a bare `null` line.
 
 `LiveStackClient.call_tool` (`src/kdive/mcp/dev_harness.py`) was the other, and **no gate in
 `just ci` could have caught it**: `just test` excludes the `live_stack` marker, so the driver
