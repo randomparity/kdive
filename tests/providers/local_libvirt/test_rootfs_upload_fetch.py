@@ -229,6 +229,33 @@ def test_stage_missing_object_is_config_error(tmp_path: Path) -> None:
         _stage(store, tmp_path, encoding=None, uncompressed_size=None)
     assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
     assert "never uploaded" in str(error.value)
+    assert error.value.details.get("dest") is None
+    assert store.stream_calls == 0
+
+
+def test_stage_missing_object_with_staged_base_names_it(tmp_path: Path) -> None:
+    # #1571: ADR-0451 routes a present-but-unmarked base through this same HEAD, so "never uploaded"
+    # is no longer only reachable when nothing was ever staged. A base already sitting at `dest` (an
+    # out-of-band object delete, a lifecycle rule, a partial restore) needs a message and a `dest`
+    # detail an operator can act on, distinct from the ordinary no-base-at-all case above.
+    store = _FakeStore(None, checksum=None)
+    dest = _dest(tmp_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(_QCOW2)  # present on disk; no marker or object needed for this gate
+    with pytest.raises(CategorizedError) as error:
+        stage_uploaded_rootfs(
+            store,
+            object_key="local/investigations/inv/rootfs-token",
+            dest=dest,
+            encoding=None,
+            uncompressed_size=None,
+            system_id=uuid4(),
+        )
+    assert error.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert str(dest) in str(error.value)
+    assert error.value.details["dest"] == str(dest)
+    # Not the ordinary no-base message: the operator needs to know a base already sits at `dest`.
+    assert str(error.value) != "upload-kind rootfs was never uploaded"
     assert store.stream_calls == 0
 
 

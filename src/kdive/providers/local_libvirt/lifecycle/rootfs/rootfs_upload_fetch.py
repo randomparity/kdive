@@ -703,11 +703,12 @@ def stage_uploaded_rootfs(
 ) -> None:
     """Download + verify the object and stage it to ``dest`` via a unique per-fetcher ``.partial``.
 
-    HEAD the object (absent → ``CONFIGURATION_ERROR``; no stored checksum →
-    ``INFRASTRUCTURE_FAILURE``), then refuse the stage outright if the staging filesystem cannot
-    hold the base plus a margin (:func:`_require_staging_free_space`, #1525) — an advisory check,
-    ordered behind the HEAD because the size it budgets comes from there. When ``encoding`` is
-    ``gzip`` the object is streamed-decompressed
+    HEAD the object (absent → ``CONFIGURATION_ERROR``, naming a staged base at ``dest`` when one is
+    present — #1571; no stored checksum → ``INFRASTRUCTURE_FAILURE``), then refuse the stage
+    outright if the staging filesystem cannot hold the base plus a margin
+    (:func:`_require_staging_free_space`, #1525) — an advisory check, ordered behind the HEAD
+    because the size it budgets comes from there. When ``encoding`` is ``gzip`` the object is
+    streamed-decompressed
     (bounded by ``uncompressed_size``, gzip-bomb guarded, transport-hash verified); otherwise it is
     streamed verbatim and its SHA-256 verified. Neither path buffers the whole object. Either way
     the canonical base is qcow2-magic-validated and written atomically **and durably** (a
@@ -723,6 +724,30 @@ def stage_uploaded_rootfs(
     """
     head = store.head(object_key)
     if head is None:
+        try:
+            base_present = stat.S_ISREG(dest.stat().st_mode)
+        except OSError:
+            # Absent, an absent parent, or unreadable — every case degrades to the plain
+            # never-uploaded message below rather than risking a false "a base is present" for a
+            # path this call cannot actually confirm holds one.
+            base_present = False
+        if base_present:
+            # ADR-0451 rejects every pre-marker base once, which routes a provision with a good
+            # local base through this HEAD for the first time — before it, a present magic-passing
+            # base short-circuited the caller and this branch was unreachable with anything staged.
+            # If the object is also gone (an out-of-band delete, a lifecycle rule, a partial
+            # restore), the plain "never uploaded" text sends an operator to re-upload something
+            # that visibly already exists at `dest`. Naming that base is not a remedy in itself —
+            # ADR-0451 rejects adopting a local base with no way to verify it against the missing
+            # object, for the same reason it rejects adopting a marker-less one — so this only
+            # describes the condition and points at the object as what needs restoring.
+            raise CategorizedError(
+                f"the uploaded rootfs object is gone from the object store, but a staged base is "
+                f"already present at {str(dest)!r} with no object left to verify it against; it is "
+                "not reused unverified — restore the object or re-upload it",
+                category=ErrorCategory.CONFIGURATION_ERROR,
+                details={"system_id": str(system_id), "dest": str(dest)},
+            )
         raise CategorizedError(
             "upload-kind rootfs was never uploaded",
             category=ErrorCategory.CONFIGURATION_ERROR,
