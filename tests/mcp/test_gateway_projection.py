@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.mcp.schema.tool_payloads import AllocationRequestPayload
-from kdive.mcp.tools.gateway import describe_tool
+from kdive.mcp.tools.gateway import SearchDetail, describe_tool
 from kdive.profiles.provisioning import ProvisioningProfile
 
 
@@ -24,14 +24,22 @@ class _FakeTool:
 
 def test_describe_narrows_allocation_kind_enum() -> None:
     tool = _FakeTool("allocations.request", AllocationRequestPayload.model_json_schema())
-    described = describe_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
+    described = describe_tool(
+        tool,  # ty: ignore[invalid-argument-type]
+        frozenset({ResourceKind.LOCAL_LIBVIRT}),
+        detail=SearchDetail.FULL,
+    )
     schema = cast("dict[str, Any]", described["input_schema"])
     assert schema["$defs"]["ResourceKind"]["enum"] == ["local-libvirt"]
 
 
 def test_describe_narrows_systems_section_props() -> None:
     tool = _FakeTool("systems.provision", ProvisioningProfile.model_json_schema())
-    described = describe_tool(tool, frozenset({ResourceKind.LOCAL_LIBVIRT}))  # ty: ignore[invalid-argument-type]
+    described = describe_tool(
+        tool,  # ty: ignore[invalid-argument-type]
+        frozenset({ResourceKind.LOCAL_LIBVIRT}),
+        detail=SearchDetail.FULL,
+    )
     schema = cast("dict[str, Any]", described["input_schema"])
     props = set(schema["$defs"]["ProviderSection"]["properties"])
     assert props == {"local-libvirt"}
