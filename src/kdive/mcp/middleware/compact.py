@@ -2,10 +2,10 @@
 
 When KDIVE_COMPACT_RESPONSES is on, rebuild each tool result's envelope with the null/empty
 defaulted fields omitted (recursively within ``items``), cutting per-call tokens. Registered
-outermost in ``build_app`` so it observes the final result — a ``ToolResult`` (the normal tool
-path and ``BindingErrorMiddleware``'s synthesized failures) or a bare ``ToolResponse``
-(``DenialAuditMiddleware``'s ``authorization_denied`` short-circuit); both are compacted.
-Default off: the result passes through unchanged.
+outermost in ``build_app`` so it observes the final result, which is always a ``ToolResult`` —
+the normal tool path, ``BindingErrorMiddleware``'s synthesized failures, and (since ADR-0486)
+``DenialAuditMiddleware``'s ``authorization_denied`` short-circuit. Default off: the result
+passes through unchanged.
 """
 
 from __future__ import annotations
@@ -42,16 +42,21 @@ class CompactResponseMiddleware(Middleware):
 def _compact_result(result: Any) -> Any:
     """Return `result` with its envelope compacted, or unchanged when it is not an envelope.
 
-    Handles both shapes a middleware chain can produce: a bare ``ToolResponse`` (a short-circuit
-    such as ``DenialAuditMiddleware``) and a ``ToolResult`` carrying an envelope
+    Takes the one shape a middleware chain can produce: a ``ToolResult`` carrying an envelope
     ``structured_content``. ``exclude_defaults=True`` omits the null/empty defaulted fields
     (recursively within ``items``) while keeping every non-default failure field; ``is_error`` and
     ``meta`` are carried through. Anything that is not an envelope — a non-dict / non-envelope
     ``structured_content`` or a dict that fails ``ToolResponse`` validation — is returned
     untouched: fail safe, never corrupt a response.
+
+    A bare ``ToolResponse`` branch used to sit here for ``DenialAuditMiddleware``'s short-circuit.
+    ADR-0486 removed it along with the shape it handled, deliberately rather than leaving it
+    inert: it could only ever run with ``KDIVE_COMPACT_RESPONSES`` **on**, and with the flag off
+    — the default — a bare ``ToolResponse`` still reaches ``_call_tool_mcp``'s
+    ``to_mcp_result()`` and dies with an ``AttributeError``. So it never provided the safety its
+    presence implied, while making a wire-invalid shape look supported. Without it, a middleware
+    that returns one fails loudly on every path instead of only some.
     """
-    if isinstance(result, ToolResponse):
-        return ToolResult(structured_content=result.model_dump(mode="json", exclude_defaults=True))
     if not isinstance(result, ToolResult):
         return result
     sc = result.structured_content

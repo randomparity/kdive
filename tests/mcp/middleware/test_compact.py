@@ -135,15 +135,30 @@ def test_enabled_preserves_is_error_flag(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out.is_error is True  # not flipped to False by the rebuild
 
 
-def test_enabled_compacts_bare_toolresponse(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A middleware short-circuit (e.g. DenialAudit) returns a bare ToolResponse, not a ToolResult.
+def test_enabled_compacts_the_denial_short_circuit(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DenialAuditMiddleware's short-circuit reaches this middleware as a ToolResult since
+    # ADR-0486 — the shape the transport can serialize. It used to hand over a bare
+    # ToolResponse, which this middleware normalized only when compaction was ON.
     env = ToolResponse.failure("runs.create", ErrorCategory.AUTHORIZATION_DENIED)
-    out = _drive(env, enabled=True, monkeypatch=monkeypatch)
+    out = _drive(
+        ToolResult(structured_content=env.model_dump(mode="json")),
+        enabled=True,
+        monkeypatch=monkeypatch,
+    )
     assert isinstance(out, ToolResult)
     sc = out.structured_content
     assert sc["error_category"] == ErrorCategory.AUTHORIZATION_DENIED.value
     assert sc["detail"]  # suppressed constant kept
     assert "refs" not in sc and "items" not in sc  # empties compacted away
+
+
+def test_a_bare_toolresponse_is_passed_through_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No middleware produces this shape any more (ADR-0486 removed the branch that handled it).
+    # Pin the fail-safe: an unrecognised object is returned as-is rather than corrupted — and
+    # crucially NOT converted to a ToolResult, so a middleware that regressed to returning one
+    # fails at the transport on every path instead of only when compaction happens to be on.
+    env = ToolResponse.failure("runs.create", ErrorCategory.AUTHORIZATION_DENIED)
+    assert _drive(env, enabled=True, monkeypatch=monkeypatch) is env
 
 
 def test_enabled_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
