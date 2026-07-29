@@ -101,8 +101,9 @@ should be added then, with the ctx threading its own cost justifies.
 
 `tests/guards/test_denial_envelope_actions.py`:
 
-1. **Source.** An AST walk over `src/kdive/mcp/` fails on any call passing
-   `ErrorCategory.AUTHORIZATION_DENIED` as an argument, with `responses.py` as the single
+1. **Source.** An AST walk over `src/kdive/` — the whole package, not just `mcp/`, so a denial
+   built in a service or provider module is caught too — fails on any call passing
+   `ErrorCategory.AUTHORIZATION_DENIED` as an argument, with `mcp/responses.py` as the single
    allowlisted definition site. A new tool hand-rolling
    `ToolResponse.failure(obj, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL])`
    trips it at the moment it is written.
