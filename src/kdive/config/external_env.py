@@ -234,6 +234,14 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Base URL of a running kdive server for the live_stack HTTP tier; unset → that tier skips.",
     ),
     ExternalEnvVar(
+        "KDIVE_STACK_SKEW_POLICY",
+        "test",
+        None,
+        "How hard the live_stack version-skew preflight bites (ADR-0482): 'off' (do not probe), "
+        "'warn' (never skip), 'strict' (skip on anything but a fresh stack); unset → the default "
+        "table, where only stale_restart skips.",
+    ),
+    ExternalEnvVar(
         "KDIVE_ARTIFACT_DIR",
         "test",
         None,

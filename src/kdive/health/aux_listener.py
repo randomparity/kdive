@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+from kdive.health.deployed_version import deployed_version
 from kdive.health.heartbeat import Heartbeat
 from kdive.health.metrics_text import CONTENT_TYPE, render_prometheus
 from kdive.health.probe import HealthProbe
@@ -42,10 +43,18 @@ def build_aux_app(
         live = heartbeat.is_live()
         return PlainTextResponse("ok" if live else "stale", status_code=_code(live))
 
+    # Resolved once, when the app is built — i.e. once per process, at startup. `started_at`
+    # is therefore this process's start instant, which is what lets the live-stack preflight
+    # tell a process that predates the source on disk from one that does not (ADR-0482 §1).
+    deployed = deployed_version()
+
     async def readyz(_: Request) -> Response:
         result = await probe.check()
+        # `version` rides the body on 503 as well as 200: a stack whose backends are down is
+        # exactly when someone needs to know whether they are chasing a defect or a stale
+        # build, so readiness must not gate the build identifier (ADR-0482 §1).
         return JSONResponse(
-            {"ready": result.ready, "checks": result.checks},
+            {"ready": result.ready, "checks": result.checks, "version": deployed.payload()},
             status_code=_code(result.ready),
         )
 
