@@ -42,6 +42,13 @@ _DEFAULT_REGION = "us-east-1"
 # The image catalog's object namespace; the one prefix ``list_image_objects`` may list.
 _IMAGE_PREFIX = "images/"
 
+#: How many keys one ``list_objects_v2`` page carries. It is the S3 maximum and boto3's own
+#: default, stated here rather than inherited because it is the bound a caller streaming
+#: :meth:`ObjectStore.iter_prefix_pages_with_mtime` relies on (ADR-0498): the page is what bounds
+#: that caller's peak memory and its per-statement parameter width, so the number has to be a
+#: property of this module rather than of whatever boto3 defaults to next.
+_LIST_PAGE_SIZE = 1000
+
 # A missing object (404) and an etag mismatch (412) are the one stale_handle case.
 _STALE_STATUSES = frozenset({404, 412})
 
@@ -527,30 +534,60 @@ class ObjectStore:
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("delete_object", key, err) from err
 
+    def iter_prefix_pages_with_mtime(
+        self, prefix: str
+    ) -> Iterator[list[artifact_types.ObjectListing]]:
+        """Yield ``prefix``'s objects and their mtimes, one ``list_objects_v2`` page at a time.
+
+        The streaming primitive :meth:`list_prefix_with_mtime` flattens. It exists because a caller
+        sweeping an unbounded prefix must not hold the whole listing: `local/runs/` accumulates a
+        vmcore per crashing run, a pcap per capture, and every chunked upload's parts for the life
+        of the deployment, and the upload orphan sweep walks it every 30 seconds (ADR-0498). A page
+        bounds that caller's peak memory *and* the width of any array parameter it derives from a
+        page, which is the half a `LIMIT` could not have bounded.
+
+        Pages arrive in store order — S3 lists lexicographically by key and boto3's paginator
+        preserves that — so a caller acting page by page acts in the same order it would have acting
+        on the flattened list. Each page is one round trip, so a fault surfaces from the iterator
+        mid-listing rather than from the call: a caller that has acted on earlier pages keeps those
+        effects, which is why the sweep counts a mid-listing fault as a partial root.
+
+        An empty prefix still yields one empty page, mirroring ``list_objects_v2``'s own reply for a
+        prefix that matches nothing; a caller counting pages must not read that as no request made.
+
+        Raises:
+            CategorizedError: the listing fails, raised from the iterator at the page that failed
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(
+                Bucket=self._bucket,
+                Prefix=prefix,
+                PaginationConfig={"PageSize": _LIST_PAGE_SIZE},
+            )
+            for page in pages:
+                yield [
+                    artifact_types.ObjectListing(key=obj["Key"], last_modified=obj["LastModified"])
+                    for obj in page.get("Contents", [])
+                ]
+        except (BotoCoreError, ClientError) as err:
+            raise _infrastructure_error("list_objects_v2", prefix, err) from err
+
     def list_prefix_with_mtime(self, prefix: str) -> list[artifact_types.ObjectListing]:
         """Return every object under ``prefix`` with its store mtime (paginated), or ``[]``.
 
-        The mtime-bearing twin of :meth:`list_prefix`. It backs every orphan sweep that must
-        compare an unreferenced object's age against a grace window in Postgres ``now()`` before
-        deleting it — the leaked-image sweep (ADR-0092) and the upload-prefix sweep (ADR-0455).
+        The mtime-bearing twin of :meth:`list_prefix`, and the flattening delegate over
+        :meth:`iter_prefix_pages_with_mtime` so the pagination loop and its error mapping exist
+        once (ADR-0455 §7's rule, now applied to the paged primitive). It backs the leaked-image
+        sweep (ADR-0092), whose prefix is bounded by the image catalog and which classifies per
+        object anyway; a caller over an unbounded prefix wants the iterator instead.
 
         Raises:
             CategorizedError: the listing fails
                 (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
         """
-        listings: list[artifact_types.ObjectListing] = []
-        try:
-            paginator = self._client.get_paginator("list_objects_v2")
-            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-                for obj in page.get("Contents", []):
-                    listings.append(
-                        artifact_types.ObjectListing(
-                            key=obj["Key"], last_modified=obj["LastModified"]
-                        )
-                    )
-        except (BotoCoreError, ClientError) as err:
-            raise _infrastructure_error("list_objects_v2", prefix, err) from err
-        return listings
+        return [listing for page in self.iter_prefix_pages_with_mtime(prefix) for listing in page]
 
     def list_image_objects(self) -> list[artifact_types.ObjectListing]:
         """Return every object under the ``images/`` prefix with its store mtime.
