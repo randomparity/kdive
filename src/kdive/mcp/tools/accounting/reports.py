@@ -39,6 +39,7 @@ from kdive.security.authz.rbac import (
     AuthorizationError,
     PlatformRole,
     Role,
+    RoleDenied,
     require_platform_role,
     require_role,
 )
@@ -140,7 +141,19 @@ async def _report_granted_set(
     window: tuple[datetime | None, datetime | None] | None,
 ) -> ToolResponse:
     """Resolve + authorize the member project set, roll up, audit by read-shape."""
-    targets = _resolve_granted_set(ctx, named)
+    try:
+        targets = _resolve_granted_set(ctx, named)
+    except RoleDenied:
+        # The member over-reach. `DenialAuditMiddleware` is the one place ADR-0062 §5's
+        # `audit_log` row is written, and it only sees a denial that keeps propagating, so
+        # this arm must re-raise rather than envelope (ADR-0493).
+        raise
+    except AuthorizationError:
+        # Only the non-member arm reaches here. No boundary owns the base class, so before
+        # ADR-0493 it left this handler as a raw `ToolError` and metered as `error` (#1661).
+        # No role is named: `viewer` would confirm the project exists and is merely not
+        # granted (ADR-0123, ADR-0490).
+        return ToolResponse.denied(_REPORT_OBJECT_ID)
     async with pool.connection() as conn:
         rollup = await accounting_domain.report(
             conn, projects=targets, group_by=group_by, window=window
@@ -169,8 +182,14 @@ def _resolve_granted_set(ctx: RequestContext, named: list[str] | None) -> list[s
 
     The default set (no ``named``) is the projects in ``ctx.projects`` with a non-None role
     (``viewer`` is rank 0, so "has a role" already satisfies the floor); role-less
-    memberships are dropped. A **named** set authorizes each via ``require_role(viewer)``,
-    which raises ``AuthorizationError`` for a non-member or role-less project.
+    memberships are dropped. A **named** set authorizes each via ``require_role(viewer)``.
+
+    Raises:
+        RoleDenied: A role-less member named one of their own projects. Propagated to the
+            dispatch boundary, which audits and envelopes it (ADR-0062 §5, ADR-0486).
+        AuthorizationError: The caller named a project they are not a member of. Enveloped
+            by :func:`_report_granted_set`, because no boundary owns the base class
+            (ADR-0493).
     """
     if named is None:
         return [p for p in ctx.projects if ctx.roles.get(p) is not None]

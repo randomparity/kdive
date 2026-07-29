@@ -133,6 +133,11 @@ _ROLELESS_DENIALS: dict[str, tuple[int, str]] = {
         1,
         "authz_denied speaks ADR-0129's `missing_checks`; a role is only one of its factors",
     ),
+    "mcp/tools/accounting/reports.py": (
+        1,
+        "non-member arm only (RoleDenied is re-raised so the boundary still audits it, "
+        "ADR-0493); naming a role would confirm the caller-named project exists",
+    ),
     "mcp/tools/jobs.py": (
         1,
         "non-member arm only (RoleDenied is re-raised); naming a role would confirm the project",
