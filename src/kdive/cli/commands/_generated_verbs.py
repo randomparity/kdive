@@ -344,7 +344,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 name="--timeout-s",
                 dest="timeout_s",
                 required=False,
-                help="Seconds to wait before returning; capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the allocation's current state immediately, never block. Otherwise a non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever.",
+                help="Seconds to wait before returning; defaults to 30 and is capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the allocation's current state immediately, never block. Otherwise a non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever.",
                 arg_type="float",
                 action=None,
                 choices=(),
