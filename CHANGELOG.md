@@ -97,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replace debug step variants with debug.advance
 - Correct _input_schemas' contract in its docstring
 - Give the wait timeout default and cap one home
+- Remove compact.py's unreachable bare-ToolResponse branch
 
 ### Documentation
 
@@ -199,6 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the cost claim ADR-0485 rests on
 - Amend the design doc §6 was written from, and tighten the index row
 - The denial-plane skip is not de-duplication
+- Record the denial-boundary ToolError unwrap
+- Amend ADR-0045 §2 and ADR-0046 §3, which ADR-0486 falsifies
 
 ### Fixed
 
@@ -339,6 +342,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Let the guest helper's exit code name transience
 - Raise tempfail only when curl actually ran
 - Split META_TOOLS into purpose-keyed skip sets
+- Unwrap the ToolError wrapper at the denial boundary
+- Parse the denial envelope the harness used to raise on
+- Do not dump a bare null when a failure carries no envelope
 
 ### Build
 
