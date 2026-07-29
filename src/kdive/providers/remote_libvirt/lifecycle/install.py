@@ -226,7 +226,8 @@ class RemoteLibvirtInstall:
         ready until its capture kernel is actually loaded (see :meth:`_await_kdump_armed`).
 
         Raises:
-            CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a domain lookup fault (retryable —
+                it crosses the libvirtd socket); ``INSTALL_FAILURE`` for a non-zero
                 boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
                 before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
                 window (a panic/hang manifests as the agent never reconnecting), or when a
@@ -410,9 +411,13 @@ class RemoteLibvirtInstall:
         try:
             return conn.lookupByName(domain_name)
         except libvirt.libvirtError as exc:
+            # INFRASTRUCTURE_FAILURE, not INSTALL_FAILURE: this crosses the qemu+tls socket to a
+            # remote libvirtd, so a daemon restart or a network blip mid-install is exactly the
+            # transient the queue's retry exists for. Under ADR-0483 the category decides whether
+            # the job may retry, so calling a lookup fault an install fault would strand the Run.
             raise CategorizedError(
                 "remote domain lookup failed for install/boot",
-                category=ErrorCategory.INSTALL_FAILURE,
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"domain": domain_name},
             ) from exc
 

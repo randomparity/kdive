@@ -17,7 +17,7 @@ import pytest
 
 from kdive.artifacts.storage import ArtifactWriteRequest, StoredArtifact
 from kdive.domain.capture import CaptureMethod
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
@@ -314,6 +314,34 @@ def test_install_nonzero_helper_exit_is_install_failure() -> None:
     assert str(excinfo.value) == "in-guest kernel install exited non-zero"
     assert excinfo.value.details["system_id"] == str(request.system_id)
     assert excinfo.value.details["exit_status"] == 3
+
+
+def test_remote_domain_lookup_failure_is_retryable_infrastructure_failure() -> None:
+    # This site had NO test and was `install_failure` — non-retryable, so under ADR-0483 a
+    # libvirtd restart or network blip on the qemu+tls socket would have permanently stranded
+    # the Run instead of self-healing on attempt 2. The lookup is infrastructure, not the
+    # in-guest install (which keeps `install_failure`, above).
+    class _FailingLookupConn:
+        def lookupByName(self, name: str) -> _FakeDomain:  # noqa: N802 - libvirt binding name
+            raise libvirt_error(libvirt.VIR_ERR_INTERNAL_ERROR)
+
+        def close(self) -> None:
+            return None
+
+    inst = RemoteLibvirtInstall(
+        secret_registry=SecretRegistry(),
+        config_factory=_config,
+        open_connection=lambda _uri: _FailingLookupConn(),
+        store_factory=_FakeStore,
+        agent_command=_ScriptedAgent(lambda _argv: AgentExecResult(0, b"", b"")),
+        secret_backend_factory=_backend,
+        sleep=lambda _s: None,
+    )
+    with pytest.raises(CategorizedError) as excinfo:
+        inst.boot(uuid4())
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(excinfo.value.category) is True
+    assert str(excinfo.value) == "remote domain lookup failed for install/boot"
 
 
 def test_install_failure_surfaces_the_redacted_transcript() -> None:

@@ -9,6 +9,11 @@
 - **Amends:** [ADR-0159](0159-guest-agent-deterministic-failure-classification.md), which classified guest-agent
   failures by libvirt error code. The code set stays exactly as it was; one message-shaped
   condition is added alongside it.
+- **Supersedes in part:** [ADR-0128](0128-remote-provision-vm-creation-gaps.md) — its Context
+  claim that "the fix cannot key the worker's terminal decision on category" and the
+  correspondingly rejected alternative. Rebutted in Decision 1; the rest of ADR-0128 (the
+  discoverable base volume, and `terminal=True` on the provision-failure path) stands unchanged
+  and is in fact the escalation case this ADR preserves.
 
 ## Context
 
@@ -81,6 +86,28 @@ failure already drove the target to a terminal state (a provision failure that l
 `failed`). Every existing `terminal=True` site keeps its meaning; none is now redundant, because
 each one sits on a retryable category.
 
+**Rebutting ADR-0128.** This exact design was considered and rejected once before, in ADR-0128's
+Alternatives: *"conflates the client-retry flag with job-retry policy and would change requeue
+behavior for `BUILD_FAILURE`/`INSTALL_FAILURE` (today retried to `max_attempts`). Rejected."*
+That objection was correct on its facts and is not hand-waved here — it names precisely the
+regression this change had to handle, and it is the reason the recategorisation in Consequences
+is part of *this* PR rather than a follow-up.
+
+It is superseded on two grounds. First, its concrete harm was specific, not structural: it is
+about `INSTALL_FAILURE` covering libvirt connection/lookup faults that a retry genuinely heals.
+That is a **mislabelling**, and the honest repair is to label those sites
+`INFRASTRUCTURE_FAILURE`, not to keep the queue permanently ignorant of every category so one
+wrong label stays harmless. `BUILD_FAILURE`, the other named case, is a kernel that did not
+compile — retrying it to `max_attempts` burns tens of minutes to reach the same failure.
+
+Second, "conflates the client-retry flag with job-retry policy" presumes the two are different
+questions. They are the same question — *can running this identical request again succeed?* —
+asked by two callers. Keeping two answers did not keep them independent; it let them **disagree**,
+which is the #1631 bug exactly: the envelope said `retryable: false` while the queue retried
+three times. ADR-0128 was written when the divergence was invisible because nothing depended on
+it. `RETRYABLE_BY_CATEGORY` is now load-bearing and must be correct per category rather than
+merely advisory — which is a real added obligation, and the price of the fix.
+
 Rejected: making this seam-local — having the guest-agent classifier set `terminal=True` on the
 denial and leaving the queue as it was. It is a smaller and lower-risk change, and it fixes the
 symptom in the issue. It was rejected because it fixes exactly one raise site out of the class,
@@ -129,6 +156,12 @@ If QEMU rewords the message the classification silently reverts to the pre-#1631
 `transport_failure`, retried three times — which is slower and vaguer but never a transient fault
 wrongly declared permanent. A drifted match costs the diagnosis, not correctness.
 
+The regex is unanchored, so guest-controlled text that embeds the phrase (a command whose output
+is relayed into an error message) also matches; the reachable effect is that a compromised guest
+agent forces *its own* job to dead-letter on attempt 1 instead of 3 — self-inflicted, on a System
+the requester already controls, and not an escalation. Anchoring is not worth losing libvirt's
+own message prefixes.
+
 There is no non-fragile alternative available at this seam. libvirt does not preserve QEMU's QMP
 error class, and probing the allowlist before each call would add a round-trip to every in-guest
 command to detect a condition the guest image build already prevents.
@@ -144,12 +177,32 @@ failure in any of these categories now dead-letters on attempt 1 instead of atte
 `transport_failure`, `transport_conflict`, `debug_attach_failure`, `control_failure`,
 `capacity_exhausted`, `queue_timeout` — is untouched and still requeues.
 
-Reviewed against the actual raise sites: these are host binaries that are not installed
-(`missing_dependency`), artifact validation that rejected the payload (`build_failure`), an
-in-guest install script that failed (`install_failure`), and admission denials
-(`quota_exceeded` / `allocation_denied`). None becomes true because the same request ran again
-seconds later. The requeue path has no backoff — it clears the lease and the job is immediately
-re-claimable — so the retries it removes were never waiting for anything to change.
+Five of those categories are moot at this seam: `lease_expired` has no raise site at all
+(`reconciler/repairs/jobs.py` writes the column directly, never through `Worker._run_handler`),
+and `conflict`, `quota_exceeded`, `allocation_denied` and `authorization_denied` are reachable
+only from synchronous MCP paths, never from a job handler. Of the rest, `missing_dependency` is a
+host binary that is not installed, `build_failure` is artifact validation rejecting the payload,
+`stale_handle` and `not_found` are a vanished object — none becomes true because the same request
+ran again seconds later. The requeue path has no backoff — it clears the lease and the job is
+immediately re-claimable — so the retries it removes were never waiting for anything to change.
+
+**`install_failure` was the exception, and it forced a taxonomy correction in this change.**
+An earlier draft of this ADR cleared it as "an in-guest install script that failed". That was
+wrong. `install_failure` was *also* raised for libvirt **connection and lookup** faults —
+`local_libvirt/lifecycle/install.py` `_open` (connecting), `_lookup`, `_power_cycle`, the
+`defineXML` redefine, and `remote_libvirt/lifecycle/install.py` `_lookup` — all reachable from
+`jobs/handlers/runs/install.py`. Those cross the libvirtd socket, so a daemon restart or socket
+blip mid-install self-heals on attempt 2 today. Making the category load-bearing without touching
+them would have converted every such blip into a permanently stranded Run: strictly worse than
+the bug this ADR fixes.
+
+Those sites are therefore recategorised to `INFRASTRUCTURE_FAILURE` here, in the same change —
+not deferred, because shipping the queue change without them ships a known regression. A
+genuinely failed in-guest install (a non-zero helper exit) keeps `install_failure`, as does a
+domain XML document this seam refuses to parse; both are deterministic. The split is now explicit
+in the code: `_install_failure` versus `_libvirt_transport_failure` in the local plane. This is
+the general shape of the migration cost — the category was decorative at the queue before this
+ADR, so any site that picked a loose one now has to mean it.
 
 The cost is real and worth naming: a failure that *was* transient but got classified into a
 non-retryable category now fails on the first attempt with no second chance. Before this change

@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import libvirt
 import psycopg
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
@@ -32,12 +33,14 @@ from kdive.jobs.payloads import (
 )
 from kdive.jobs.worker import Worker, WorkerConfig
 from kdive.jobs.worker_telemetry import WorkerTelemetry
+from kdive.providers.local_libvirt.lifecycle.install import _open
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.integration._seed import (
     seed_granted_allocation,
     seed_running_run,
     seed_system,
 )
+from tests.providers.remote_libvirt.conftest import libvirt_error
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -320,6 +323,47 @@ def test_run_once_non_retryable_category_dead_letters_at_once(migrated_url: str)
             assert final.error_category is ErrorCategory.CONFIGURATION_ERROR
             assert await worker.run_once() is None  # dead-lettered: not re-dequeued
             assert calls == 1
+
+    asyncio.run(_run())
+
+
+def test_run_once_libvirt_connect_failure_during_install_still_requeues(migrated_url: str) -> None:
+    # The regression ADR-0483 had to avoid, driven through the REAL provider seam rather than a
+    # hand-picked category: a libvirtd restart mid-install must still self-heal on attempt 2.
+    # `_open` used to raise INSTALL_FAILURE, which is non-retryable — making the category
+    # load-bearing would have turned every libvirtd blip into a permanently stranded Run.
+    def connect_refused() -> object:
+        raise libvirt_error(libvirt.VIR_ERR_SYSTEM_ERROR)
+
+    async def _run() -> None:
+        async with AsyncConnectionPool(migrated_url, min_size=2, max_size=10) as pool:
+            calls = 0
+
+            async def install_via_provider(conn: psycopg.AsyncConnection, job: Job) -> str:
+                nonlocal calls
+                calls += 1
+                _open(connect_refused, "for install")  # ty: ignore[invalid-argument-type]
+                raise AssertionError("unreachable: _open must raise")
+
+            reg = HandlerRegistry()
+            reg.register(JobKind.INSTALL, install_via_provider)
+            worker = _worker(pool, reg, worker_id="w1")
+            async with pool.connection() as conn:
+                job = await queue.enqueue(
+                    conn,
+                    JobKind.INSTALL,
+                    _build_payload(),
+                    _AUTHORIZING,
+                    "dk-libvirt-blip",
+                    max_attempts=3,
+                )
+
+            await worker.run_once()
+            assert calls == 1
+            requeued = await _final_state(migrated_url, job.id)
+            assert requeued.state is JobState.QUEUED  # NOT dead-lettered on a transient
+            assert await worker.run_once() is not None
+            assert calls == 2  # re-dispatched, so a recovered libvirtd would succeed here
 
     asyncio.run(_run())
 
