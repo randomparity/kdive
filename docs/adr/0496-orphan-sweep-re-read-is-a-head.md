@@ -3,10 +3,11 @@
 - **Status:** Accepted
 - **Date:** 2026-07-29
 - **Issue:** #1575
-- **Amends:** [ADR-0455](0455-upload-prefix-orphan-sweep.md) §3, whose cost model priced the
-  per-key mtime re-read as one round trip and then disclosed, in the same paragraph, that it is
-  not one for a chunked base key. That disclosure is now discharged; ADR-0455's decisions — the
-  three fences, the bulk-classify-then-re-check ordering, the per-root budget — are unchanged.
+- **Amends:** [ADR-0455](0455-upload-prefix-orphan-sweep.md) §3, which priced the per-key mtime
+  re-read as one round trip and then disclosed, in the same paragraph, that it is not one for a
+  chunked base key; and §6, whose per-candidate cost model has the same LIST term. That
+  disclosure is now discharged; ADR-0455's decisions — the three fences, the
+  bulk-classify-then-re-check ordering, the per-root budget and its value — are unchanged.
 - **Depends on:** [ADR-0104](0104-chunked-external-upload-reassembly.md) §1 (the
   `<base>.partNNNN` key shape that makes a base key's LIST unbounded),
   [ADR-0453](0453-row-first-upload-reap.md) §1 (the row-first reap whose partial failure produces
@@ -101,11 +102,16 @@ catalog, and one of its two per-candidate terms is unchanged; re-tuning it wants
 against a real backlog, not an inference from a removed term.
 
 The S3 action changes for this call — `list_objects_v2` needs `s3:ListBucket`, `head_object`
-needs `s3:GetObject` — which would be a deployment break if the reconciler's credentials granted
-only the first. They do not need to: the dangling-image sweep in
-`reconciler/cleanup/images.py` already calls `ObjectStore.head_present`, which is
-`head_object`, on the same store object in the same process. Any policy that lets the reconciler
-run today already permits this read.
+needs `s3:GetObject` — and this is the honest version of what that costs. The reconciler already
+issues `head_object` through the *same* `ObjectStore` instance (`processes/reconciler.py` passes
+one object as both `upload_store` and `image_store`, and `reconciler/cleanup/images.py`'s
+dangling sweep calls `head_present`), so no *new* grant is introduced. But that sweep HEADs only
+when it has dangling candidates, so a credential holding `ListBucket` + `DeleteObject` and not
+`GetObject` could have been latently broken and never shown it; after this change the orphan
+sweep exercises the grant on every candidate. The failure is loud and safe — the re-read is a
+per-key failure site, so such a key is skipped, counted, and the pass raises rather than deleting
+on a re-read it could not make — and it is pinned by a test that fails `head` for one key and
+asserts the key behind it is still reclaimed.
 
 The sweep is the only consumer of the new field, so every other `HeadResult` caller now carries a
 value it ignores. That is the honest price of the required-field decision in §2 and is recorded
@@ -113,9 +119,19 @@ rather than left to be discovered.
 
 Nothing about what the sweep *deletes* changes: the fences, the threshold, the per-root budget,
 the skip-and-count fault handling, and the listing-order traversal are all untouched, and the
-existing test that pins the exactness property (an old base and a young part under one prefix)
-passes unmodified against the new mechanism. A new test asserts the *cost* directly — one `head`
-per examined candidate and no listing beyond the one per root — because a call-count assertion
-alone would also have passed for a bounded LIST.
+whole existing sweep suite passes unmodified — reverting `_reread_from_store` to the LIST-and-
+filter implementation fails exactly one test, the new cost one, and no delete-behaviour test
+changed meaning.
+
+Three tests are added or corrected rather than one. The cost test asserts one `head` per examined
+candidate **and** no listing beyond the one per root, because a call-count assertion alone would
+also have passed for a bounded LIST. A re-read-failure test covers the fourth per-key failure
+site, which §2's action change makes newly worth pinning. And the pre-existing test named for
+"the re-read takes the exact key, not a sibling it prefixes" is renamed and re-documented: it
+never pinned the re-read — deleting the re-read outright leaves it green, because the young part
+it seeds is excluded by the *bulk classify* and never reaches the re-read at all — and what it
+actually pins, that `_RECLAIMABLE_SQL` ages each candidate on its own mtime, is worth keeping
+under an honest name. The property it was named for is not re-pinned elsewhere because it is no
+longer a property that can fail: a `head` on a key resolves to that key or to nothing.
 
 No schema, no migration, no config setting, no MCP tool-surface or RBAC change.
