@@ -198,6 +198,9 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
   tail's `*.qcow2` collection is what keeps that from being a permanent leak. **#1559** keeps the
   case this does not reach: a base orphaned while *other* rootfs rows remain, where the zero-row
   precondition that licenses an ungated unlink does not hold.
+  *Amended by [ADR-0494](0494-token-keyed-staging-drain.md): the collection is keyed on each file's
+  own token rather than on the zero-row precondition, and #1559's remaining states — including a
+  never-closed investigation that no lane selects at all — are closed there.*
 - **The retained marker converges on the close-driven lane only.** A TTL job runs against an
   `open`/`active` investigation whose marker is already NULL, so the retain is a no-op there — and
   `_TTL_ROOTFS_OBJECTS_SQL` is a pure `artifacts` query over rows the job just deleted, so that lane
@@ -214,6 +217,8 @@ investigation-reclaim backstop sweep took it (#1544)" as one of its two causes.
   missing-backing-file error; if after, the inode stays charged to `df` behind QEMU's descriptor —
   the diagnosis-hostile shape ADR-0446 removes for partials. Bounded by the System already being
   terminal, and closed outright by #1558.
+  *Amended by [ADR-0494](0494-token-keyed-staging-drain.md) §3: such a base's token is now in the
+  pinned set, so the sweep leaves it and defers the drain instead of unlinking it.*
 - No schema, no migration, no config setting, no new dependency, no MCP/RBAC surface. Not an AI
   surface. `#1539` adds a sidecar completion marker to this same directory and this pass keeps the
   shape it needs: a second glob added to the same function. Note that a sidecar matching neither
