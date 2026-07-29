@@ -78,6 +78,31 @@ _DEFAULT_KDUMP_ARM_TIMEOUT_S = 300.0
 _REBOOT_EXPECTED = frozenset(
     {ErrorCategory.TRANSPORT_FAILURE, ErrorCategory.INFRASTRUCTURE_FAILURE}
 )
+# The helper's exit-code contract (ADR-0489). `EX_TEMPFAIL` (sysexits' 75) is the one condition
+# the helper can name as transient: the bundle did not arrive from the presigned URL, which a
+# retry heals by minting a fresh one. Every other code is deterministic.
+_HELPER_EX_TEMPFAIL = 75
+_CATEGORY_BY_HELPER_EXIT: dict[int, ErrorCategory] = {
+    _HELPER_EX_TEMPFAIL: ErrorCategory.INFRASTRUCTURE_FAILURE,
+}
+
+
+def _category_for_helper_exit(exit_status: int) -> ErrorCategory:
+    """Map a non-zero helper exit onto its failure category (ADR-0489).
+
+    The helper is baked into an operator-built base image, so a worker that knows this contract
+    still meets guests built before it that exit ``1`` for every failure — and a future helper may
+    add codes this worker has never heard of. An unrecognised code therefore maps to
+    ``INSTALL_FAILURE``, which is exactly the pre-#1653 behaviour: an old guest degrades to it
+    rather than being misclassified, and an unknown code is never assumed retryable.
+
+    Args:
+        exit_status: The in-guest helper's non-zero exit status.
+
+    Returns:
+        The category the failure is reported as; retryable only for a recognised transient code.
+    """
+    return _CATEGORY_BY_HELPER_EXIT.get(exit_status, ErrorCategory.INSTALL_FAILURE)
 
 
 class _StorePort(Protocol):
@@ -170,10 +195,12 @@ class RemoteLibvirtInstall:
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` is a
                 loopback/localhost address the remote guest cannot reach (preflight, ADR-0110),
-                ``INSTALL_FAILURE`` for a non-zero helper exit (incl. an in-guest curl 403/404
-                from a vanished object — the worker only mints the URL, it never fetches),
-                ``TRANSPORT_FAILURE`` for an unreachable guest agent, ``INFRASTRUCTURE_FAILURE``
-                from the object store or a malformed agent reply, ``CONFIGURATION_ERROR`` for
+                ``INSTALL_FAILURE`` for a deterministic non-zero helper exit (incl. an in-guest
+                curl 403/404 from a vanished object — the worker only mints the URL, it never
+                fetches) and for any exit code this worker does not recognise,
+                ``INFRASTRUCTURE_FAILURE`` for the helper's transient exit code (ADR-0489, the
+                bundle did not arrive), from the object store, or from a malformed agent reply,
+                ``TRANSPORT_FAILURE`` for an unreachable guest agent, ``CONFIGURATION_ERROR`` for
                 missing operator config, propagated from the seams.
         """
         config = self._config_factory()
@@ -205,16 +232,13 @@ class RemoteLibvirtInstall:
                 owner_id=str(request.system_id),
             )
         if output.result.exit_status != 0:
-            # INSTALL_FAILURE is non-retryable, so since ADR-0483 this dead-letters the Run on
-            # attempt 1. That is right for the helper's deterministic failures (dracut, grubby)
-            # and WRONG for its transient one: `kdive-install-kernel` exits 1 for everything,
-            # including a `curl` bundle download that lost the object store or hit an expired
-            # presigned URL, which attempt 2 used to heal by re-minting it. Distinguishing them
-            # needs distinct exit codes from the helper — a guest-image contract change, tracked
-            # as #1653. Until then the conflation is deliberate and disclosed, not overlooked.
+            # The category decides whether the queue may retry (ADR-0483), so it is read from the
+            # helper's exit code rather than fixed: a lost bundle download is transient and heals
+            # on attempt 2 with a fresh presigned URL, while dracut/grubby are deterministic and
+            # must dead-letter on attempt 1 (ADR-0489).
             raise CategorizedError(
                 "in-guest kernel install exited non-zero",
-                category=ErrorCategory.INSTALL_FAILURE,
+                category=_category_for_helper_exit(output.result.exit_status),
                 details={
                     "system_id": str(request.system_id),
                     "exit_status": output.result.exit_status,
@@ -234,9 +258,11 @@ class RemoteLibvirtInstall:
 
         Raises:
             CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a domain lookup fault (retryable —
-                it crosses the libvirtd socket); ``INSTALL_FAILURE`` for a non-zero
-                boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
-                before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
+                it crosses the libvirtd socket); the helper exit-code contract's category for a
+                non-zero boot-id baseline read (``INSTALL_FAILURE`` unless the helper named the
+                failure transient, ADR-0489); ``TRANSPORT_FAILURE`` when the guest agent is
+                unreachable before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears
+                within the boot
                 window (a panic/hang manifests as the agent never reconnecting), or when a
                 crashkernel-reserving guest never arms its capture kernel.
         """
@@ -349,9 +375,11 @@ class RemoteLibvirtInstall:
     def _read_boot_id(self, agent_exec: GuestAgentExec, domain: _Domain, system_id: UUID) -> str:
         result = agent_exec.run(domain, [_HELPER, "boot-id"])
         if result.exit_status != 0:
+            # Same exit-code contract as install (ADR-0489): one mapping, so the two sites that
+            # read a helper exit cannot drift into disagreeing about what a code means.
             raise CategorizedError(
                 "could not read the guest boot-id baseline",
-                category=ErrorCategory.INSTALL_FAILURE,
+                category=_category_for_helper_exit(result.exit_status),
                 details={"system_id": str(system_id), "exit_status": result.exit_status},
             )
         return result.stdout.decode("utf-8", errors="replace").strip()
