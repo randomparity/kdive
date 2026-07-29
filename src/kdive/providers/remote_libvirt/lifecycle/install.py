@@ -195,11 +195,12 @@ class RemoteLibvirtInstall:
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` when ``KDIVE_S3_ENDPOINT_URL`` is a
                 loopback/localhost address the remote guest cannot reach (preflight, ADR-0110),
-                ``INSTALL_FAILURE`` for a deterministic non-zero helper exit (incl. an in-guest
-                curl 403/404 from a vanished object — the worker only mints the URL, it never
-                fetches) and for any exit code this worker does not recognise,
-                ``INFRASTRUCTURE_FAILURE`` for the helper's transient exit code (ADR-0489, the
-                bundle did not arrive), from the object store, or from a malformed agent reply,
+                ``INSTALL_FAILURE`` for a deterministic non-zero helper exit (a bad bundle,
+                dracut, grubby, or a guest image with no curl) and for any exit code this worker
+                does not recognise, ``INFRASTRUCTURE_FAILURE`` for the helper's transient exit
+                code (ADR-0489 — curl ran and did not get the bundle, including an in-guest
+                403/404 from a vanished object, since the worker only mints the URL and never
+                fetches), from the object store, or from a malformed agent reply,
                 ``TRANSPORT_FAILURE`` for an unreachable guest agent, ``CONFIGURATION_ERROR`` for
                 missing operator config, propagated from the seams.
         """

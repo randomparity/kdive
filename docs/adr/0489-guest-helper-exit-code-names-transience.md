@@ -51,14 +51,24 @@ already-per-condition exit contracts of `kdive-capture-vmcore` and `kdive-drgn`.
 | exit | condition | worker category | retryable |
 |---|---|---|---|
 | `0` | success | — | — |
-| `75` | bundle fetch failed (`curl`) — store down, network unsettled, URL expired | `infrastructure_failure` | yes |
-| `1` | bad argv; bundle contents wrong; `tar`, `depmod`, `dracut`, `grubby`, `grub2-reboot` | `install_failure` | no |
-| other | a `set -e` propagation from an unguarded command | `install_failure` | no |
+| `75` | curl **ran** and did not get the bundle — store down, network unsettled, URL expired | `infrastructure_failure` | yes |
+| `1` | every `die` site: bad argv or subcommand, curl missing or unexecutable, `tar` extract failure, bundle contents wrong, `dracut`, `grubby`, `grub2-reboot` | `install_failure` | no |
+| other | the exit status of an unguarded command `set -e` propagated — `install`, `rm -rf`, `cp -a`, `depmod` carry no `\|\| die` | `install_failure` | no |
+
+**`75` means curl ran and failed, never "curl could not run."** A bare `curl … || die_tempfail`
+also catches the shell's `127` for a program it could not find, which would report a base image
+missing `curl` — a permanent image defect — as retryable. So a `command -v curl` preflight dies
+deterministically before the fetch, and curl's exit status is captured and checked: `126`/`127`
+are the shell's and die deterministically; everything else is the transient.
 
 **`tar` extract stays deterministic**, not tempfail. `curl -f` already fails a short transfer, so
 bytes that arrived whole and still will not extract are a bad object, and re-downloading yields
-the same bytes. This follows the taxonomy's stated bias (`errors.py`: non-retryable when
-transience is ambiguous).
+the same bytes. This argument is about the *source*; the *destination* can fail too — the extract
+writes hundreds of MB into `mktemp -d`, often a tmpfs, so ENOSPC there also exits `1` and
+dead-letters on attempt 1. That is deliberate rather than overlooked: a full guest filesystem is
+not cleared by re-running the same install, and the taxonomy's stated bias is non-retryable when
+transience is ambiguous (`errors.py`). Both readings of an extract failure land on the same
+category, so the classification does not depend on telling them apart.
 
 **2. An unrecognised code is permanent.**
 
@@ -78,6 +88,18 @@ into disagreeing about what a code means.
 - **A transient install self-heals again.** An object-store blip or an expired presigned GET is
   `infrastructure_failure`, so the queue re-dispatches, `install()` mints a fresh URL, and the Run
   completes instead of dead-lettering on attempt 1.
+- **An SELinux-enforcing base image now costs the full retry budget too, and this is the worst
+  case of the change.** Per ADR-0484 a confined `virt_qemu_ga_t` cannot `connect()`, and `curl`
+  is the first network operation the install helper performs; curl reports a denied `connect()`
+  as exit `7`, exactly as it reports a real connect blip. At the exit-code level the two are
+  indistinguishable, so an enforcing image — the most common setup mistake this repo documents —
+  is now retried three times and fails every time, where before it dead-lettered on attempt 1.
+  Accepted rather than closed: distinguishing them means scraping curl's stderr for "Permission
+  denied", and a *downgrade* to permanent on a string match is the dangerous direction (a curl
+  reword would make a genuinely transient fault permanently fatal), which is precisely why
+  ADR-0483 allows message matching only as a one-way upgrade. The operator-visible cost is
+  latency, not a wrong terminal verdict, and the transcript still names the failing step. The
+  runbook and the helpers README both state it at the point an operator meets it.
 - **A vanished `kernel_ref` now costs the full retry budget.** The worker only mints the URL and
   never fetches, so an object that is genuinely gone surfaces as the same in-guest `curl` failure
   as an expired URL (S3 answers both with a 4xx) and is retried before dead-lettering. Accepted:
