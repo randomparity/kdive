@@ -36,7 +36,8 @@ _OBJECT_ID = "secrets"
 
 
 def _denied() -> ToolResponse:
-    return ToolResponse.denied(_OBJECT_ID)
+    """The ``secrets.list`` denial envelope; the tool's one gate is ``platform_operator``."""
+    return ToolResponse.denied(_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 async def list_secrets_tool(

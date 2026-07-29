@@ -432,6 +432,8 @@ def test_delete_member_overreach_denied_and_audited(migrated_url: str) -> None:
                 pool, _member_ctx(role=Role.VIEWER), image_id=str(image_id)
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        # A member over-reaching is told the project role they need (ADR-0490).
+        assert resp.data["missing_roles"] == ["operator"]
         assert await _image_exists(migrated_url, image_id) is True
         audit = await _audit_log_rows(migrated_url)
         assert audit == [("dev-1", _TARGET_PROJECT, "images.delete", "denied")]
@@ -451,6 +453,9 @@ def test_delete_cross_project_denied_without_project_audit(migrated_url: str) ->
                 image_id=str(image_id),
             )
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        # A non-member gets no role named: doing so would confirm the owning project exists
+        # and that membership, not rank, is the blocker (ADR-0490).
+        assert "missing_roles" not in resp.data
         assert await _image_exists(migrated_url, image_id) is True
         assert await _audit_log_rows(migrated_url) == []
 

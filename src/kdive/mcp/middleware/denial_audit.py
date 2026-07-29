@@ -94,8 +94,14 @@ class DenialAuditMiddleware(Middleware):
                 await self._record(tool, denial, args=args)
             except Exception:
                 _log.warning("failed to audit RoleDenied for tool %s", tool, exc_info=True)
-            return ToolResponse.denied(tool)
+            # `RoleDenied` fires only at require_role's rank-below site, so the caller is a
+            # member and the role it needed is safe to name (ADR-0490). This is the funnel for
+            # the ~40 require_role sites that do not catch locally, so without it the majority
+            # of the surface would deny without ever saying what it required.
+            return ToolResponse.denied(tool, missing_roles=[denial.required])
         except ProjectMembershipDenied:
+            # The project is not granted at all: no role would have helped, and naming one
+            # would confirm the project exists (ADR-0490, ADR-0123).
             return ToolResponse.denied(context.message.name)
 
     async def _record(

@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from kdive.domain.catalog.resources import ResourceKind
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import ToolResponse
+from kdive.security.authz.rbac import PlatformRole
 from kdive.security.secrets.paths import PathSafetyError
 from kdive.security.secrets.secrets import read_secret_file
 
@@ -50,9 +51,13 @@ def resolve_block_kind(block: str) -> ResourceKind | None:
     return _KIND_BY_BLOCK.get(block)
 
 
-def denied(object_id: str) -> ToolResponse:
-    """The authorization-denied envelope (ADR-0471)."""
-    return ToolResponse.denied(object_id)
+def denied(object_id: str, role: PlatformRole) -> ToolResponse:
+    """The authorization-denied envelope naming the failed gate (ADR-0471, ADR-0490).
+
+    ``role`` is required rather than defaulted so a new resources tool cannot silently ship a
+    denial that leaves the caller guessing which grant it needed.
+    """
+    return ToolResponse.denied(object_id, missing_roles=[role])
 
 
 def config_error(object_id: str, reason: str) -> ToolResponse:

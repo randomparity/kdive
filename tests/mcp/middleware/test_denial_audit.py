@@ -142,6 +142,12 @@ def test_on_call_tool_audits_role_denied_and_envelopes() -> None:
     result = asyncio.run(mw.on_call_tool(_context(arguments={"force": True}), call_next))
 
     assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
+    # This middleware is the funnel for every `require_role` site that does not catch locally,
+    # so the role it names here is what most of the surface reports (ADR-0490). `RoleDenied`
+    # fires only past `require_role`'s membership check, so the caller is a member and the
+    # required role discloses nothing their own membership did not.
+    assert isinstance(result, ToolResponse)
+    assert result.data["missing_roles"] == [denial.required.value] == ["operator"]
     (tool, recorded_denial, args) = recorded[0]
     assert tool == "admin.teardown"
     assert recorded_denial is denial
@@ -180,6 +186,9 @@ def test_on_call_tool_envelopes_project_membership_denied() -> None:
 
     assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
     assert recorded == []  # membership denial is enveloped, not RoleDenied-audited
+    # The project is not granted at all: naming a role would confirm it exists (ADR-0490).
+    assert isinstance(result, ToolResponse)
+    assert "missing_roles" not in result.data
 
 
 # --- _record ----------------------------------------------------------------

@@ -101,6 +101,9 @@ def test_platform_admin_alone_denied_but_audited(migrated_url: str) -> None:
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
             assert _SECRET_VALUE not in str(resp.model_dump())
+            # ADR-0490: the denial names the role that would have worked, which is *not* the
+            # one the caller holds — platform_admin implies only platform_auditor.
+            assert resp.data["missing_roles"] == ["platform_operator"]
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
         assert rows[0][1] == "platform_admin"

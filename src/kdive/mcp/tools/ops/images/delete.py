@@ -48,13 +48,14 @@ async def delete(pool: AsyncConnectionPool, ctx: RequestContext, *, image_id: st
             return _config_error(image_id)
         try:
             require_role(ctx, entry.owner, Role.OPERATOR)
-        except RoleDenied:
+        except RoleDenied as exc:
             await audit_project_denial(
                 pool, ctx, tool=DELETE_TOOL, project=entry.owner, args={"image_id": image_id}
             )
-            return denied(image_id)
+            return denied(image_id, exc.required)
         except AuthorizationError:
-            return denied(image_id)
+            # Non-member: no role would have helped, and naming one would confirm the project.
+            return denied(image_id, None)
         return await _delete_owned(pool, ctx, uid, project=entry.owner)
 
 

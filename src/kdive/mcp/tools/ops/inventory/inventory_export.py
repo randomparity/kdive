@@ -177,7 +177,8 @@ async def _audit_inventory_write(
 
 
 def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.denied(object_id)
+    """The ``inventory.export_systems`` denial envelope; its gate is ``platform_operator``."""
+    return ToolResponse.denied(object_id, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:

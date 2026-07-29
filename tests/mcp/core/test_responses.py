@@ -16,12 +16,14 @@ from kdive.domain.errors import (
 )
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.mcp.responses import (
+    MISSING_ROLES_KEY,
     ResponseData,
     ToolResponse,
     current_status_data,
     reason_data,
 )
 from kdive.mcp.tools import _common
+from kdive.security.authz.rbac import PlatformRole, Role
 
 _NOW = dt.datetime(2026, 6, 3, 12, 0, tzinfo=dt.UTC)
 _BUILD_JOB = Job(
@@ -586,3 +588,61 @@ def test_failure_carries_optional_refs() -> None:
 def test_failure_refs_default_empty() -> None:
     resp = ToolResponse.failure("run-1", ErrorCategory.INSTALL_FAILURE)
     assert resp.refs == {}
+
+
+# ---------------------------------------------------------------------------
+# Naming the missing grant (ADR-0490)
+# ---------------------------------------------------------------------------
+
+
+def test_denied_names_the_missing_platform_role() -> None:
+    resp = ToolResponse.denied("queue", missing_roles=[PlatformRole.PLATFORM_OPERATOR])
+    assert resp.data[MISSING_ROLES_KEY] == ["platform_operator"]
+
+
+def test_denied_names_the_missing_project_role() -> None:
+    resp = ToolResponse.denied("img-1", missing_roles=[Role.OPERATOR])
+    assert resp.data[MISSING_ROLES_KEY] == ["operator"]
+
+
+def test_denied_omits_the_key_when_no_role_would_have_helped() -> None:
+    """Absent, not present-but-empty: `[]` would read as "a role, but we lost track of which"."""
+    assert ToolResponse.denied("systems-1").data == {}
+
+
+def test_denied_sorts_and_deduplicates_missing_roles() -> None:
+    """A stable wire order, so a client can compare two denials without normalizing first."""
+    resp = ToolResponse.denied(
+        "resource-1",
+        missing_roles=[
+            PlatformRole.PLATFORM_OPERATOR,
+            PlatformRole.PLATFORM_ADMIN,
+            PlatformRole.PLATFORM_OPERATOR,
+        ],
+    )
+    assert resp.data[MISSING_ROLES_KEY] == ["platform_admin", "platform_operator"]
+
+
+def test_denied_keeps_caller_data_alongside_the_missing_role() -> None:
+    """The ADR-0129 destructive-gate payload and a named role can coexist without clobbering."""
+    resp = ToolResponse.denied(
+        "systems-1", missing_roles=[Role.ADMIN], data={"missing_checks": ["admin_role"]}
+    )
+    assert resp.data == {"missing_checks": ["admin_role"], MISSING_ROLES_KEY: ["admin"]}
+
+
+def test_denied_rejects_missing_roles_smuggled_through_data() -> None:
+    """`data` is an unchecked dict, so it must not be a back door around the typed argument.
+
+    Without this the vocabulary is closed only on the `missing_roles=` path:
+    ``data={"missing_roles": ["superuser"]}`` shipped raw strings on the egress seam.
+    """
+    with pytest.raises(ValueError, match="missing_roles"):
+        ToolResponse.denied("obj", data={MISSING_ROLES_KEY: ["superuser", "root"]})
+
+
+def test_denied_rejects_the_data_back_door_even_alongside_typed_roles() -> None:
+    with pytest.raises(ValueError, match="missing_roles"):
+        ToolResponse.denied(
+            "obj", missing_roles=[Role.ADMIN], data={MISSING_ROLES_KEY: ["superuser"]}
+        )

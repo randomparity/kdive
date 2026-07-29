@@ -215,7 +215,7 @@ async def _report_all_projects(
         require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
     except AuthorizationError:
         await _audit_all_projects_denial(pool, ctx, group_by, window)
-        return ToolResponse.denied(_REPORT_OBJECT_ID)
+        return ToolResponse.denied(_REPORT_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_AUDITOR])
     async with pool.connection() as conn:
         targets = await _all_projects(conn)
         rollup = await accounting_domain.report(

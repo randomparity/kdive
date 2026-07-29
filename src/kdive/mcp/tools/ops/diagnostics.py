@@ -70,7 +70,8 @@ class ServiceFactory(Protocol):
 
 
 def _denied() -> ToolResponse:
-    return ToolResponse.denied(_OBJECT_ID)
+    """The denial envelope; this module's one gate is ``platform_operator``."""
+    return ToolResponse.denied(_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 async def run_diagnostics(

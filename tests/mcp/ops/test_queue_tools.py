@@ -171,6 +171,8 @@ def test_set_paused_denied_for_project_only_token_unaudited(migrated_url: str) -
             resp = await ops_queue.set_queue_paused(pool, _ctx(projects=("proj-a",)), paused=True)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
+        # The blocker is actionable: the envelope names the grant to go ask for (ADR-0490).
+        assert resp.data["missing_roles"] == ["platform_operator"]
         assert await _paused(migrated_url) is False  # flag untouched
         assert await _count_platform_audit(migrated_url) == 0  # no write-amplification
 

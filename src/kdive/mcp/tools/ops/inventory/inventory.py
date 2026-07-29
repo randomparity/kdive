@@ -104,7 +104,7 @@ async def list_inventory(
             require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
         except AuthorizationError:
             await _reads.audit_denial(pool, ctx, tool=_TOOL, args=args)
-            return ToolResponse.denied(_OBJECT_ID)
+            return ToolResponse.denied(_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_AUDITOR])
         capped = _clamp_list_limit(limit)
         async with pool.connection() as conn:
             allocations = await _fetch_allocations(conn, project, resource_uuid, capped + 1)
@@ -270,7 +270,9 @@ async def clear_override(
                 scope=f"denied:{resource_kind}/{name}",
                 args={"resource_kind": resource_kind, "name": name},
             )
-            return ToolResponse.denied(_CLEAR_OBJECT_ID)
+            return ToolResponse.denied(
+                _CLEAR_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_ADMIN]
+            )
         identity = _parse_override_identity(resource_kind, name)
         if isinstance(identity, ToolResponse):
             return identity

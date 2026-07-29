@@ -48,7 +48,7 @@ async def prune_expired(
             await audit_platform_denial(
                 pool, ctx, tool=PRUNE_TOOL, scope=f"denied:{PRUNE_SCOPE}", args={}
             )
-            return denied(PRUNE_OBJECT_ID)
+            return denied(PRUNE_OBJECT_ID, PlatformRole.PLATFORM_ADMIN)
         if blank(reason):
             return _config_error(PRUNE_OBJECT_ID)
         await record_admin_breakglass(
@@ -93,7 +93,7 @@ async def extend(
                 scope=f"denied:{image_id}",
                 args={"image_id": image_id},
             )
-            return denied(image_id)
+            return denied(image_id, PlatformRole.PLATFORM_ADMIN)
         if blank(reason) or seconds <= 0:
             return _config_error(image_id)
         await record_admin_breakglass(

@@ -52,7 +52,7 @@ async def query_platform_audited_page(
         require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
     except AuthorizationError:
         await _reads.audit_denial(pool, ctx, tool=tool, args=args)
-        return ToolResponse.denied(object_id)
+        return ToolResponse.denied(object_id, missing_roles=[PlatformRole.PLATFORM_AUDITOR])
 
     after: CursorAnchor | None = None
     if cursor:
