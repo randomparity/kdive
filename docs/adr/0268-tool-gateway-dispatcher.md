@@ -137,13 +137,18 @@ middleware skips when `context.message.name ∈ {tools.invoke, tools.search}` �
 sole recorder. `BindingErrorMiddleware` / `ToolExposureMiddleware` record nothing per call and need
 no skip. This *improves* the ADR-0148 usage data: it measures real work, not dispatcher noise.
 
-> **Amended by [ADR-0485](0485-purpose-keyed-middleware-skip-sets.md) (#1654):** the re-entry
-> argument above is the whole justification only for `tools.invoke`. `tools.search` does not
-> re-enter — `tools_search` reads the registry and returns, with no `app.call_tool` on the path —
-> so its skip suppressed the only record rather than de-duplicating a second one. It is retained
-> for the usage plane on the *volume* ground this paragraph's last sentence states, and dropped
-> from the telemetry and denial-audit planes. The single set becomes `REENTRANT_TOOLS`
-> (de-duplication) and `UNMETERED_TOOLS` (volume); `tools.invoke`'s membership and the single-row
+> **Amended by [ADR-0485](0485-purpose-keyed-middleware-skip-sets.md) (#1654) on two counts.**
+> *First*, the re-entry argument above is the whole justification only for `tools.invoke`.
+> `tools.search` does not re-enter — `tools_search` reads the registry and returns, with no
+> `app.call_tool` on the path — so its skip suppressed the only record rather than
+> de-duplicating a second one. It is retained for the usage plane on the *volume* ground this
+> paragraph's last sentence states, and dropped from the telemetry and denial-audit planes. The
+> single set becomes `REENTRANT_TOOLS` (de-duplication) and `UNMETERED_TOOLS` (volume).
+> *Second*, "the subtle one" above is wrong: `DenialAuditMiddleware` runs in the re-entered
+> inner chain too, and its inner instance **returns** `ToolResponse.denied(inner_tool)` rather
+> than re-raising, so no `AuthorizationError` can reach an outer instance and the second,
+> misattributed row keyed to `tools.invoke` is structurally unreachable. That skip is retained
+> as ordering-defensive, not as de-duplication. `tools.invoke`'s membership and the single-row
 > guarantee for gateway dispatch are unchanged.
 
 ### 7. Empirical verification gate (revert lesson)

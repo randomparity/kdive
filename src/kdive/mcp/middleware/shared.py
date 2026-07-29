@@ -15,9 +15,10 @@ from kdive.mcp.responses import ToolResponse
 # De-duplication: each name re-enters the middleware chain via
 # app.call_tool(run_middleware=True), so the inner chain is the authoritative record — including
 # for an unknown inner name, since FastMCP runs the chain before resolution and resolves inside
-# call_next. Without the skip the outer chain double-counts every usage/telemetry row, and on a
-# denial writes a *misattributed* audit row keyed to the dispatcher rather than the tool that
-# was denied. Every per-call recorder skips this set.
+# call_next. Without the skip the outer chain double-counts every usage/telemetry row. The
+# denial plane is the exception and skips for a different reason (see denial_audit.py): its
+# inner instance returns an enveloped denial instead of re-raising, so there is no second row
+# to remove there.
 REENTRANT_TOOLS: frozenset[str] = frozenset({"tools.invoke"})
 
 # Volume: each name does NOT re-enter and has no inner recorder, so skipping it forgoes the

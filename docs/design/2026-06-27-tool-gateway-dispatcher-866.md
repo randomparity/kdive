@@ -258,7 +258,9 @@ So every per-call recording/auditing middleware skips when
 ~~`context.message.name ∈ {tools.invoke, tools.search}` — the inner call is the sole recorder.~~
 **Amended by [ADR-0485](../adr/0485-purpose-keyed-middleware-skip-sets.md) (#1654):** that re-entry
 rationale holds for `tools.invoke` alone — `tools.search` never calls `app.call_tool`, so the set
-splits into `REENTRANT_TOOLS` (skipped by all three) and `UNMETERED_TOOLS` (skipped by usage only).
+splits into `REENTRANT_TOOLS` (skipped by all three) and `UNMETERED_TOOLS` (skipped by usage only);
+and the denial bullet above is unreachable, because the inner `DenialAuditMiddleware` returns an
+enveloped denial rather than re-raising, so nothing reaches an outer instance to double-audit.
 One
 row per real call, keyed to the inner tool with correct project/outcome (`_call_project` already
 reads `arguments["project"]`, which on the re-entered inner call is the real argument dict). A test

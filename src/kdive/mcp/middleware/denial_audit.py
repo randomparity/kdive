@@ -107,9 +107,12 @@ class DenialAuditMiddleware(Middleware):
     async def _record(
         self, tool: str, denial: RoleDenied, *, args: dict[str, object] | None = None
     ) -> None:
-        # De-duplication only (ADR-0485): the hazard this arm exists for is re-entry-specific —
-        # an inner denial propagating through the outer chain would be audited a second time,
-        # keyed to the dispatcher rather than to the tool that was actually denied.
+        # Ordering-defensive, and unreachable today (ADR-0485 §2). This middleware runs in the
+        # re-entered inner chain too, and the inner instance *returns* an enveloped denial
+        # rather than re-raising, so no RoleDenied can reach an outer instance to be audited a
+        # second time under the dispatcher's name. Kept because it costs nothing and a future
+        # reorder, or a re-raise on this path, would make that hazard real. NOT de-duplication:
+        # unlike the usage and telemetry planes, there is no second row to remove.
         if tool in REENTRANT_TOOLS:
             return
         async with self._pool.connection() as conn, conn.transaction():
