@@ -52,9 +52,9 @@ async def delete(pool: AsyncConnectionPool, ctx: RequestContext, *, image_id: st
             await audit_project_denial(
                 pool, ctx, tool=DELETE_TOOL, project=entry.owner, args={"image_id": image_id}
             )
-            return denied(image_id, DELETE_TOOL)
+            return denied(image_id)
         except AuthorizationError:
-            return denied(image_id, DELETE_TOOL)
+            return denied(image_id)
         return await _delete_owned(pool, ctx, uid, project=entry.owner)
 
 

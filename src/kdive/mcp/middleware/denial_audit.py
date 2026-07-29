@@ -10,7 +10,6 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.shared import META_TOOLS, request_context
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
@@ -95,9 +94,9 @@ class DenialAuditMiddleware(Middleware):
                 await self._record(tool, denial, args=args)
             except Exception:
                 _log.warning("failed to audit RoleDenied for tool %s", tool, exc_info=True)
-            return ToolResponse.failure(tool, ErrorCategory.AUTHORIZATION_DENIED)
+            return ToolResponse.denied(tool)
         except ProjectMembershipDenied:
-            return ToolResponse.failure(context.message.name, ErrorCategory.AUTHORIZATION_DENIED)
+            return ToolResponse.denied(context.message.name)
 
     async def _record(
         self, tool: str, denial: RoleDenied, *, args: dict[str, object] | None = None

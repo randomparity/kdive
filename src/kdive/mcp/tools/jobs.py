@@ -174,7 +174,7 @@ def _require_job_role(
     except RoleDenied:
         raise
     except AuthorizationError:
-        return _error(object_id, ErrorCategory.AUTHORIZATION_DENIED)
+        return ToolResponse.denied(object_id)
     return None
 
 

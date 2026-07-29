@@ -64,7 +64,7 @@ async def renew_resource(
             scope=f"denied:{resource_id}",
             args={"resource_id": resource_id},
         )
-        return denied(resource_id, RENEW_TOOL)
+        return denied(resource_id)
 
     uid = _as_uuid(resource_id)
     if uid is None:

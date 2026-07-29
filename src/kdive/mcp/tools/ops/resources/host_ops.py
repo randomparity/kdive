@@ -82,7 +82,7 @@ async def _audit_host_action(
 
 
 def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.failure(object_id, ErrorCategory.AUTHORIZATION_DENIED)
+    return ToolResponse.denied(object_id)
 
 
 def _classify_drain_release(alloc_id: str, outcome: ReleaseOutcome) -> ToolResponse:

@@ -50,11 +50,9 @@ def resolve_block_kind(block: str) -> ResourceKind | None:
     return _KIND_BY_BLOCK.get(block)
 
 
-def denied(object_id: str, tool: str) -> ToolResponse:
-    """The authorization-denied envelope, pointing the caller back at the tool."""
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-    )
+def denied(object_id: str) -> ToolResponse:
+    """The authorization-denied envelope (ADR-0471)."""
+    return ToolResponse.denied(object_id)
 
 
 def config_error(object_id: str, reason: str) -> ToolResponse:

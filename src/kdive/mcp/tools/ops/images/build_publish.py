@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.context import authorizing as job_authorizing
@@ -27,9 +26,7 @@ PLATFORM_PROJECT = "platform"
 
 
 def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[PUBLISH_TOOL]
-    )
+    return ToolResponse.denied(object_id)
 
 
 async def _enqueue_image_build(

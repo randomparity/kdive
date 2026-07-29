@@ -108,7 +108,7 @@ async def set_shape(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_SET_TOOL, scope=request.name)
-            return _denied(request.name, _SET_TOOL)
+            return _denied(request.name)
         try:
             shape = _build_shape(request)
         except CategorizedError as exc:
@@ -139,7 +139,7 @@ async def delete_shape(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_DELETE_TOOL, scope=name)
-            return _denied(name, _DELETE_TOOL)
+            return _denied(name)
         async with pool.connection() as conn, conn.transaction():
             removed = await SYSTEM_SHAPES.delete(conn, name)
             if not removed:
@@ -232,10 +232,8 @@ async def _audit_applied(
     )
 
 
-def _denied(name: str, tool: str) -> ToolResponse:
-    return ToolResponse.failure(
-        name, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-    )
+def _denied(name: str) -> ToolResponse:
+    return ToolResponse.denied(name)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:

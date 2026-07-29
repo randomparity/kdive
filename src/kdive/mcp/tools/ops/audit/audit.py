@@ -204,9 +204,7 @@ async def _query_project(
         # boundary-audited, so it keeps the graceful envelope below.
         raise
     except AuthorizationError:
-        return ToolResponse.failure(
-            _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
-        )
+        return ToolResponse.denied(_OBJECT_ID)
     # Decode the cursor only after authz so a bad cursor cannot change the denial path.
     after: tuple[datetime, UUID] | None = None
     if cursor:

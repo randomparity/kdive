@@ -175,7 +175,8 @@ def test_project_only_non_operator_is_denied_and_writes_no_audit_row(
             resp = await ops_reconcile.reconcile_now(pool, _ctx(), ports=_ports())
             assert resp.status == "error"
             assert resp.error_category == "authorization_denied"
-            assert resp.suggested_next_actions == ["ops.reconcile_now"]
+            assert resp.suggested_next_actions == ["session.whoami"]
+            assert "ops.reconcile_now" not in resp.suggested_next_actions  # ADR-0471, #1596
         # The denied calls performed no repair and wrote no audit row.
         assert await _teardown_job_count(migrated_url) == 0
         assert await _platform_audit_count(migrated_url) == 0

@@ -71,11 +71,7 @@ async def set_queue_paused(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_SET_PAUSED_TOOL, scope="queue")
-            return ToolResponse.failure(
-                _QUEUE_OBJECT_ID,
-                ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_SET_PAUSED_TOOL],
-            )
+            return ToolResponse.denied(_QUEUE_OBJECT_ID)
         # One transaction: the flag flip and its audit row commit together or neither
         # does, so a failed audit write can never leave a paused/resumed queue unaudited
         # (the house pattern, accounting.set_budget). `set_queue_paused`'s own
@@ -123,11 +119,7 @@ async def jobs_list(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_JOBS_LIST_TOOL, scope="queue")
-            return ToolResponse.failure(
-                _JOBS_OBJECT_ID,
-                ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_JOBS_LIST_TOOL],
-            )
+            return ToolResponse.denied(_JOBS_OBJECT_ID)
         try:
             parsed_states = _parse_states(states)
         except CategorizedError as exc:

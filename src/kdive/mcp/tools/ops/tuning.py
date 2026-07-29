@@ -74,7 +74,7 @@ async def set_cost_class_coeff(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_SET_COEFF_TOOL, scope=cost_class)
-            return _denied(_COEFF_OBJECT_ID, _SET_COEFF_TOOL)
+            return _denied(_COEFF_OBJECT_ID)
         try:
             _validate_cost_class(cost_class)
             parsed = _parse_positive_coeff(coeff)
@@ -110,7 +110,7 @@ async def export_cost_classes(pool: AsyncConnectionPool, ctx: RequestContext) ->
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_EXPORT_TOOL, scope=_EXPORT_SCOPE)
-            return _denied(_EXPORT_OBJECT_ID, _EXPORT_TOOL)
+            return _denied(_EXPORT_OBJECT_ID)
         async with pool.connection() as conn:
             rows = await _all_coefficients(conn)
             await _audit_read(conn, ctx)
@@ -144,7 +144,7 @@ async def set_host_capacity(
             require_platform_role(ctx, PlatformRole.PLATFORM_OPERATOR)
         except AuthorizationError:
             await audit_platform_denial(pool, ctx, tool=_SET_CAPACITY_TOOL, scope=resource_id)
-            return _denied(_CAPACITY_OBJECT_ID, _SET_CAPACITY_TOOL)
+            return _denied(_CAPACITY_OBJECT_ID)
         try:
             target = _parse_resource_id(resource_id)
             cap = _parse_cap(concurrent_allocation_cap)
@@ -351,10 +351,8 @@ async def _audit_read(conn: AsyncConnection, ctx: RequestContext) -> None:
         )
 
 
-def _denied(object_id: str, tool: str) -> ToolResponse:
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-    )
+def _denied(object_id: str) -> ToolResponse:
+    return ToolResponse.denied(object_id)
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:
