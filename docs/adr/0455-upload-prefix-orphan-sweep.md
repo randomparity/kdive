@@ -122,6 +122,11 @@ siblings are its `<base>.partNNNN` parts (ADR-0104 §1), and a row-first reap th
 leaves base and parts rowless together, so that re-read costs a round trip per 1000 parts rather
 than the one this section's cost model assumes. Correct, not O(1); #1575 tracks making it both.
 
+> **Amended by [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (#1575).** The re-read is a
+> single `store.head`, not a LIST and a filter, so it is one round trip for every key shape and
+> the exactness is structural rather than filtered. The `re-read → re-check → delete` ordering
+> and the residual the next paragraph states are unchanged.
+
 The residual it leaves is narrow and stated rather than implied: a PUT that lands between that
 re-read and the `delete_object` is deleted. That is a single re-read→delete gap, for a key that has
 been rowless, manifest-less, and unwritten for the whole threshold. It does **not** require a
@@ -211,6 +216,11 @@ and the alert is the one a permanent leak needs, so the count is written to the 
 immediately before the raise instead of being lost with it.
 
 ### 6. Each root examines at most `MAX_RECLAIMS_PER_ROOT` candidates
+
+> **Amended by [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (#1575) and #1570.** The
+> per-candidate cost is now a HEAD and a query, and that query is an index scan since migration
+> `0081` added the `artifacts (object_key)` btree. The budget itself is unchanged and was not
+> re-tuned.
 
 Each examined candidate costs a LIST and a query whatever its outcome, and that query is the
 unindexed `artifacts` anti-join filed as #1570 — so the cost is per key, not per pass, and the
