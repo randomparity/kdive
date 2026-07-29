@@ -129,6 +129,18 @@ bypassed the helper.
   *has*) without disclosing what the tool *requires*.
 - **New denial paths cost one line.** `ToolResponse.denied(object_id)` — and the guard makes the
   wrong version fail rather than ship.
+- **Two of the 26 sites are unreachable today, and this ADR does not claim otherwise.** #1635
+  establishes that FastMCP wraps a handler exception in `ToolError` *inside* the branch the
+  middleware chain wraps, so `DenialAuditMiddleware`'s `except RoleDenied` and its
+  `except ProjectMembershipDenied` are both dead on the real dispatch path — an envelope that is
+  never emitted cannot suggest anything, self-referential or not. Nothing decided here rests on
+  those two: the other 24 sites envelope their denial *inside the handler* and demonstrably reach
+  the client (the #1582 observation quoted in *Context* is `ops.diagnostics`'s own handler-level
+  `_denied()`, not the middleware), and decision 4's source guard is a static property of the tree
+  that holds regardless of reachability. The interaction runs the other way: when #1635 restores
+  that boundary, both paths will already emit the uniform envelope instead of needing a second
+  pass. Fixing #1635 is out of scope here, and this ADR takes no position on how that boundary
+  should unwrap.
 
 ## Deferred
 
