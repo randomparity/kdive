@@ -7,6 +7,8 @@ import logging
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from opentelemetry import metrics, trace
+from opentelemetry.metrics import Meter
+from opentelemetry.trace import Tracer
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.tool_registration import AppAssembly, build_plane_registrars
@@ -35,8 +37,24 @@ def build_app(
     verifier: JWTVerifier | None = None,
     provider_composition: ProviderComposition | None = None,
     secret_registry: SecretRegistry,
+    tracer: Tracer | None = None,
+    meter: Meter | None = None,
 ) -> FastMCP:
-    """Construct the FastMCP app and register every plane's tools."""
+    """Construct the FastMCP app and register every plane's tools.
+
+    Args:
+        pool: The Postgres pool the recording middlewares and tool handlers write through.
+        verifier: Token verifier; defaults to the configured one.
+        provider_composition: Provider wiring; defaults to one built over ``secret_registry``.
+        secret_registry: The app-owned registry redaction and providers read through.
+        tracer: Span emitter for ``TelemetryMiddleware``; defaults to the process-global
+            tracer. Injectable per ADR-0487 so telemetry can be observed for one app.
+        meter: RED-metric emitter for ``TelemetryMiddleware``; defaults to the
+            process-global meter, on the same terms as ``tracer``.
+
+    Returns:
+        The assembled FastMCP app.
+    """
     app: FastMCP = FastMCP(
         name="kdive",
         auth=verifier or build_verifier(),
@@ -45,9 +63,14 @@ def build_app(
     app.add_middleware(CompactResponseMiddleware())  # first == outermost (ADR-0314)
     if compact_responses_enabled():
         _log.info("compact_responses enabled")
+    # Both handles default to the process globals the observability facade installs, and
+    # are overridable per app (ADR-0487): the OTel globals are set-once per process, so an
+    # app's telemetry is otherwise only observable by mutating state every other app in the
+    # process shares.
     app.add_middleware(
         TelemetryMiddleware(
-            tracer=trace.get_tracer("kdive.mcp"), meter=metrics.get_meter("kdive.mcp")
+            tracer=tracer or trace.get_tracer("kdive.mcp"),
+            meter=meter or metrics.get_meter("kdive.mcp"),
         )
     )
     composition = provider_composition or ProviderComposition(secret_registry=secret_registry)

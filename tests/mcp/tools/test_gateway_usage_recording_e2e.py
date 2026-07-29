@@ -1,13 +1,23 @@
-"""End-to-end proof that a real gateway call writes one ``tool_invocation`` row (#1625).
+"""End-to-end proof that a real gateway call is recorded exactly once (#1625, #1640).
 
-Pins ``usage.py``'s ``REENTRANT_TOOLS`` skip and, since #1635, the denial boundary itself.
-``telemetry.py``'s skip stays unpinned end to end: it double-counts in metrics and spans
-rather than in a table, so deleting it leaves every test below green (#1640).
-``tools.search`` is not driven through the real gateway here either — since #1654 it is no
-longer skipped on the same grounds as ``tools.invoke`` (ADR-0485 splits the one set into
-``REENTRANT_TOOLS`` for de-duplication and ``UNMETERED_TOOLS`` for volume; ``tools.search``
-is in the latter, so it stays out of ``tool_invocation`` while gaining a span and RED
-metrics). A green run of this module is not an all-clear for either skip set as a whole.
+Pins ``usage.py``'s ``REENTRANT_TOOLS`` skip, since #1635 the denial boundary itself, and
+since #1640 ``telemetry.py``'s skip as well. The file name predates the telemetry half and
+is left alone because ADR-0486 cites the path; the module covers all three recording planes.
+
+The telemetry half closes what the other two structurally could not. A telemetry regression
+double-counts in spans and RED metrics rather than in a table, so before #1640 deleting
+``telemetry.py:54``'s skip left every row assertion here green — the failure mode #1625 was
+filed about, unguarded on the one plane that never touches Postgres. Reaching it needed a
+seam: ``build_app`` hard-wired both handles to OTel's process-global providers, which are
+set-once per process and shared across every test an ``-n auto --dist worksteal`` worker
+runs. ADR-0487 made them injectable, so ``_recorders`` below scopes an in-memory span
+exporter and metric reader to one app.
+
+``tools.search`` is driven only on the telemetry plane, which is where #1654 changed it:
+ADR-0485 splits the one skip set into ``REENTRANT_TOOLS`` for de-duplication and
+``UNMETERED_TOOLS`` for volume, so ``tools.search`` stays out of ``tool_invocation`` while
+gaining a span and RED metrics. Its absence from the usage rows here is a consequence of the
+queries selecting the whole table, not an assertion aimed at it.
 
 Epic #1576's criterion — *tool invocation and denial telemetry records the inner operation
 once, not the gateway wrapper plus the inner call* — was covered by two halves that never
@@ -41,11 +51,13 @@ well as through the gateway, and asserts two identical rows. Without it, "the ou
 and ``REENTRANT_TOOLS`` suppressed its row" and "the outer chain never ran" are the same
 observation — one absent row — and the redden proof above would evaporate silently if
 ``app.call_tool``'s ``run_middleware`` default ever changed. With it, a dead outer chain
-yields one row and a stripped ``REENTRANT_TOOLS`` yields three. The last two tests are the
-exception: each drives one call through a real ``Client`` to pin the transport shape of the
-denial — once as the SDK returns it, once as ``LiveStackClient`` parses it — where a second
-dispatch would add nothing. The harness one stands in for the ``live_stack`` tier, which
-``just test`` excludes entirely and which would otherwise absorb this change unobserved.
+yields one row and a stripped ``REENTRANT_TOOLS`` yields three. The telemetry tests carry the
+same control on their own plane, in spans and metric points rather than rows. The two
+transport tests are the exception: each drives one call through a real ``Client`` to pin the
+transport shape of the denial — once as the SDK returns it, once as ``LiveStackClient``
+parses it — where a second dispatch would add nothing. The harness one stands in for the
+``live_stack`` tier, which ``just test`` excludes entirely and which would otherwise absorb
+this change unobserved.
 
 The identity half is real too: the token is minted, signed, and run through the same
 ``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
@@ -61,12 +73,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, LiteralString
 
 from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from opentelemetry.metrics import Meter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import Tracer
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
@@ -89,8 +109,74 @@ _CLIENT_ID = "test-client"
 _PROJECT = "proj-a"
 
 
+@dataclass(frozen=True, slots=True)
+class _Recorders:
+    """In-memory OTel collectors and the two handles ``build_app`` wires them in through."""
+
+    span_exporter: InMemorySpanExporter
+    metric_reader: InMemoryMetricReader
+    tracer: Tracer
+    meter: Meter
+
+    def span_names(self) -> list[str]:
+        """Every finished span name, in completion order."""
+        return [span.name for span in self.span_exporter.get_finished_spans()]
+
+    def metric_points(self) -> list[tuple[str, tuple[tuple[str, Any], ...], float]]:
+        """Every recorded point as ``(metric, sorted labels, quantity)``, sorted.
+
+        A counter point contributes its value and a histogram point its observation count —
+        in both cases the quantity a double-count inflates. Sorted so the comparison is
+        against the *set* of points, not against the order the SDK happens to collect them
+        in, which is not part of any contract under test here.
+        """
+        data = self.metric_reader.get_metrics_data()
+        points: list[tuple[str, tuple[tuple[str, Any], ...], float]] = []
+        for resource_metric in data.resource_metrics if data is not None else ():
+            for scope_metric in resource_metric.scope_metrics:
+                for metric in scope_metric.metrics:
+                    for point in metric.data.data_points:
+                        quantity = (
+                            point.value if isinstance(point, NumberDataPoint) else point.count
+                        )
+                        labels = tuple(sorted((point.attributes or {}).items()))
+                        points.append((metric.name, labels, quantity))
+        return sorted(points)
+
+
+def _recorders() -> _Recorders:
+    """Span and metric collectors scoped to a single ``build_app`` call.
+
+    The providers are local objects, never installed with ``trace.set_tracer_provider`` /
+    ``metrics.set_meter_provider``. Those are set-once per process and every test an
+    ``-n auto --dist worksteal`` worker runs shares that process, so a global install would
+    both no-op after the first test to try it and pool every other test's spans into this
+    one's assertions. That set-once constraint is the whole reason ADR-0487 put the seam on
+    ``build_app`` instead.
+
+    The sampler is ``TracerProvider``'s default rather than the facade's
+    ``ParentBased(TraceIdRatioBased(0.1))``, so a missing span below is a missing span
+    rather than a sampling decision that would make these assertions flaky at 1-in-10.
+    """
+    span_exporter = InMemorySpanExporter()
+    tracer_provider = TracerProvider()
+    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    metric_reader = InMemoryMetricReader()
+    meter_provider = MeterProvider(metric_readers=[metric_reader])
+    return _Recorders(
+        span_exporter=span_exporter,
+        metric_reader=metric_reader,
+        tracer=tracer_provider.get_tracer("kdive.mcp"),
+        meter=meter_provider.get_meter("kdive.mcp"),
+    )
+
+
 @contextlib.asynccontextmanager
-async def _authenticated_app(pool: AsyncConnectionPool) -> AsyncIterator[Any]:
+async def _authenticated_app(
+    pool: AsyncConnectionPool,
+    *,
+    recorders: _Recorders | None = None,
+) -> AsyncIterator[Any]:
     """A real app, with a verified viewer token bound to the in-flight request context.
 
     The token is minted and then verified by the *same* ``JWTVerifier`` instance the app is
@@ -99,10 +185,20 @@ async def _authenticated_app(pool: AsyncConnectionPool) -> AsyncIterator[Any]:
     change to custom-claim handling — namespacing them, dropping unregistered ones,
     altering ``azp`` — a failure here rather than a silent loss of attribution in
     production.
+
+    ``recorders`` routes ``TelemetryMiddleware``'s span and metric output to in-memory
+    collectors through ADR-0487's ``build_app`` seam; left ``None``, the app reads the
+    process-global providers exactly as production does.
     """
     keypair = make_keypair()
     verifier = JWTVerifier(public_key=keypair.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    app = build_app(
+        pool,
+        verifier=verifier,
+        secret_registry=SecretRegistry(),
+        tracer=None if recorders is None else recorders.tracer,
+        meter=None if recorders is None else recorders.meter,
+    )
     token = await verifier.verify_token(
         mint(
             keypair,
@@ -358,3 +454,124 @@ def test_role_denial_reaches_the_live_stack_harness_as_an_envelope(migrated_url:
     # The named role survives the harness's parse, which is what the live-tier viewer negative
     # now asserts over real HTTP for `allocations.request`'s `contributor`.
     assert denied.data["missing_roles"] == ["admin"]
+
+
+# ============================================================
+# The telemetry plane: spans and RED metrics through the real gateway (#1640)
+# ============================================================
+
+
+def test_real_gateway_call_emits_one_span_and_one_metric_set_per_inner_dispatch(
+    migrated_url: str,
+) -> None:
+    """A real ``tools.invoke`` dispatch is traced and metered once: as the inner tool.
+
+    The success arm of ``telemetry.py``'s ``REENTRANT_TOOLS`` skip, driven through
+    ``build_app`` rather than a hand-built middleware. Deleting that skip reddens every
+    assertion below: the outer chain then closes an ``mcp.tool/tools.invoke`` span around
+    the inner one and adds its own ``requests``/``duration`` points beside it.
+
+    Two dispatches of ``session.whoami`` — one through the gateway, one direct — are the
+    positive control the sibling usage tests use for the same reason: with only the gateway
+    call, "the outer chain ran and the skip suppressed its span" and "the outer chain never
+    ran" are the same empty observation. The direct call's span and its second point on
+    every instrument are what distinguish them.
+
+    ``tools.search`` rides along because it is the *other* half of ADR-0485 §2 and §3
+    recorded it as pinned at unit level only: it is not in ``REENTRANT_TOOLS``, so a real
+    dispatch must be traced and metered like any other tool. Putting ``"tools.search"``
+    back into the telemetry skip reddens this test and nothing else end to end.
+    """
+    recorders = _recorders()
+
+    async def _run() -> dict[str, Any]:
+        async with (
+            warm_pool(migrated_url) as pool,
+            _authenticated_app(pool, recorders=recorders) as app,
+        ):
+            with recording_must_not_fail():
+                result = await app.call_tool(
+                    "tools.invoke", {"name": "session.whoami", "arguments": {}}
+                )
+                # Positive control — the same tool, called directly. See the docstring.
+                await app.call_tool("session.whoami", {})
+                await app.call_tool("tools.search", {"query": "session.whoami", "limit": 1})
+            return _structured(result)
+
+    envelope = asyncio.run(_run())
+
+    # The inner tool really ran: an inner failure would relabel every point below
+    # outcome="error", so this pins the labels asserted next to a successful dispatch.
+    assert envelope["status"] == "ok"
+
+    assert recorders.span_names() == [
+        "mcp.tool/session.whoami",  # the gateway dispatch's inner call
+        "mcp.tool/session.whoami",  # the direct positive control
+        "mcp.tool/tools.search",
+    ]
+
+    whoami = (("outcome", "ok"), ("tool", "session.whoami"))
+    search = (("outcome", "ok"), ("tool", "tools.search"))
+    # Compared as a whole list, so the absence of `kdive.mcp.request.errors` is asserted
+    # too: an instrument with no measurement collects no data point, and a spurious error
+    # add on this arm would appear here as a fourth entry.
+    assert recorders.metric_points() == [
+        ("kdive.mcp.request.duration", whoami, 2),
+        ("kdive.mcp.request.duration", search, 1),
+        ("kdive.mcp.requests", whoami, 2),
+        ("kdive.mcp.requests", search, 1),
+    ]
+
+
+def test_real_gateway_denial_emits_one_error_span_and_metric_set_per_inner_dispatch(
+    migrated_url: str,
+) -> None:
+    """The error arm of the same skip: a denied dispatch is counted once, as the inner tool.
+
+    Telemetry classifies any enveloped ``error_category`` as ``ToolOutcome.ERROR``, so this
+    drives the two instruments the success arm above leaves empty — the errors counter and
+    the duration histogram *on the error path*. Both are asserted, because a regression that
+    dropped only the error-arm histogram would leave a counter-only assertion green.
+
+    The skip is one early return ahead of the span today, so this arm and the success arm
+    share a guard; pinning them separately is what keeps a later narrowing of that guard to
+    one exit from landing green.
+    """
+    recorders = _recorders()
+    request = {"scope": "project", "project": "proj-not-granted"}
+
+    async def _run() -> dict[str, Any]:
+        async with (
+            warm_pool(migrated_url) as pool,
+            _authenticated_app(pool, recorders=recorders) as app,
+        ):
+            with recording_must_not_fail():
+                result = await app.call_tool(
+                    "tools.invoke", {"name": "audit.query", "arguments": {"request": request}}
+                )
+                # Positive control — the same denial, called directly. See the success test.
+                await app.call_tool("audit.query", {"request": request})
+            return _structured(result)
+
+    envelope = asyncio.run(_run())
+
+    # The denial the labels below are derived from: telemetry reads `error_category` off
+    # this same envelope, so an inner call that succeeded would relabel every point.
+    assert envelope["error_category"] == "authorization_denied"
+
+    assert recorders.span_names() == ["mcp.tool/audit.query", "mcp.tool/audit.query"]
+
+    denied = (("outcome", "error"), ("tool", "audit.query"))
+    assert recorders.metric_points() == [
+        ("kdive.mcp.request.duration", denied, 2),
+        (
+            "kdive.mcp.request.errors",
+            (
+                ("error_category", "authorization_denied"),
+                ("outcome", "error"),
+                ("tool", "audit.query"),
+            ),
+            2,
+        ),
+        ("kdive.mcp.requests", denied, 2),
+    ]
