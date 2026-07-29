@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retire the staged System definition lane
 - Add test-live-stack-remote
 - Name the crashed-idle reclaim distinctly in the log
+- Summary-first tools.search and a namespace authz signal
 
 ### Changed
 
@@ -185,6 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the RHEL-family kdump CONFIG_* set
 - Record SELinux permissive as the accepted guest posture
 - ADR-0480 reclaim an abandoned crashed System's allocation
+- Mark ADR-0456 §3 amended and fix the agent-index schema claim
 
 ### Fixed
 
