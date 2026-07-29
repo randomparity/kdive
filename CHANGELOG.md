@@ -70,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bind the CLI wait default to its source constant
 - Name the missing role in an authorization_denied envelope
 - Inject build_app's tracer and meter to pin telemetry skip
+- Index jobs on the payload system_id correlation key
 
 ### Changed
 
@@ -208,6 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct the _call_project claim #1644 made incomplete
 - Scope _call_project's totality claim to delivered args
 - Record report artifact byte-reproducibility as a non-goal
+- Record the jobs payload system_id index shape
 
 ### Fixed
 
