@@ -47,7 +47,13 @@ from kdive.mcp.auth import current_context
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.schema.tool_payloads import ToolPayload
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT, InvalidCursor
+from kdive.mcp.tools._common import (
+    DEFAULT_LIST_LIMIT,
+    DEFAULT_WAIT_S,
+    MAX_LIST_LIMIT,
+    MAX_WAIT_S,
+    InvalidCursor,
+)
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import decode_ts_uuid_cursor as _decode_ts_uuid_cursor
@@ -63,8 +69,6 @@ from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied, requ
 _log = logging.getLogger(__name__)
 
 POLL_INTERVAL_S = 0.5
-DEFAULT_WAIT_S = 30.0
-MAX_WAIT_S = 300.0
 
 _TERMINAL = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELED})
 

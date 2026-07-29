@@ -20,7 +20,12 @@ from kdive.domain.lifecycle.records import Allocation
 from kdive.log import bind_context
 from kdive.mcp.exposure import tool_visible, visible_next_actions
 from kdive.mcp.responses import JsonValue, ToolResponse
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, ConfigErrorReason, InvalidCursor
+from kdive.mcp.tools._common import (
+    DEFAULT_LIST_LIMIT,
+    MAX_WAIT_S,
+    ConfigErrorReason,
+    InvalidCursor,
+)
 from kdive.mcp.tools._common import as_uuid as _as_uuid
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
 from kdive.mcp.tools._common import config_error_reason as _config_error_reason
@@ -31,7 +36,6 @@ from kdive.mcp.tools._common import invalid_uuid_error as _invalid_uuid_error
 from kdive.mcp.tools._common import not_found as _not_found
 from kdive.mcp.tools._common import paginate as _paginate
 from kdive.mcp.tools.lifecycle.allocations.common import (
-    MAX_WAIT_S,
     POLL_INTERVAL_S,
     envelope_for_allocation,
     queue_position,

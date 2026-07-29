@@ -114,4 +114,4 @@ first. A still-queued return carries the current ``queue_position``.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `allocation_id` | string | yes | The Allocation to read, or to poll until it leaves the queue. |
-| `timeout_s` | number | no | Seconds to wait before returning; capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the allocation's current state immediately, never block. Otherwise a non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever. |
+| `timeout_s` | number | no | Seconds to wait before returning; defaults to 30 and is capped at 300. Pass timeout_s=0 for a plain point read: one lookup, return the allocation's current state immediately, never block. Otherwise a non-terminal return is the 'still queued, call allocations.wait again' signal; prefer repeated short waits over one long hold that an intermediary proxy may sever. |

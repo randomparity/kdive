@@ -13,7 +13,12 @@ from kdive.mcp.tools.lifecycle._recovery import iso
 from kdive.security.authz.context import RequestContext
 
 POLL_INTERVAL_S = 0.5
-MAX_WAIT_S = 300.0
+"""Poll cadence for ``allocations.wait``.
+
+Local tuning, deliberately *not* shared with ``jobs.wait``'s identically-valued constant: the
+two loops poll different tables and are free to diverge. The wait default and cap are the
+opposite case and live in ``tools._common`` (ADR-0476).
+"""
 
 
 def allocation_next_actions(state: AllocationState) -> list[str]:

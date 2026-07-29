@@ -21,8 +21,12 @@ from kdive.mcp.schema.tool_payloads import (
     ToolPayload,
 )
 from kdive.mcp.tools import _docmeta
-from kdive.mcp.tools._common import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
-from kdive.mcp.tools.lifecycle.allocations.common import MAX_WAIT_S
+from kdive.mcp.tools._common import (
+    DEFAULT_LIST_LIMIT,
+    DEFAULT_WAIT_S,
+    MAX_LIST_LIMIT,
+    MAX_WAIT_S,
+)
 from kdive.mcp.tools.lifecycle.allocations.lifecycle import (
     release_allocation as _release_allocation,
 )
@@ -322,7 +326,8 @@ def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
             float,
             Field(
                 description=(
-                    f"Seconds to wait before returning; capped at {int(MAX_WAIT_S)}. Pass "
+                    "Seconds to wait before returning; defaults to "
+                    f"{int(DEFAULT_WAIT_S)} and is capped at {int(MAX_WAIT_S)}. Pass "
                     "timeout_s=0 for a plain point read: one lookup, return the allocation's "
                     "current state immediately, never block. Otherwise a non-terminal return "
                     "is the 'still queued, call allocations.wait again' signal; prefer "
@@ -330,7 +335,7 @@ def _register_allocations_wait(app: FastMCP, pool: AsyncConnectionPool) -> None:
                     "sever."
                 )
             ),
-        ] = 30.0,
+        ] = DEFAULT_WAIT_S,
     ) -> ToolResponse:
         """Read or poll one allocation — the single way to learn an allocation's state.
 
