@@ -10,7 +10,7 @@ from typing import Any
 from fastmcp.server.middleware import Middleware
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.mcp.middleware.shared import META_TOOLS, request_context
+from kdive.mcp.middleware.shared import REENTRANT_TOOLS, request_context
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
 from kdive.security.authz.errors import ProjectMembershipDenied
@@ -107,7 +107,10 @@ class DenialAuditMiddleware(Middleware):
     async def _record(
         self, tool: str, denial: RoleDenied, *, args: dict[str, object] | None = None
     ) -> None:
-        if tool in META_TOOLS:
+        # De-duplication only (ADR-0485): the hazard this arm exists for is re-entry-specific —
+        # an inner denial propagating through the outer chain would be audited a second time,
+        # keyed to the dispatcher rather than to the tool that was actually denied.
+        if tool in REENTRANT_TOOLS:
             return
         async with self._pool.connection() as conn, conn.transaction():
             await audit.record_denial(

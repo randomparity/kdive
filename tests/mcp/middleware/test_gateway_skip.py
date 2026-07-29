@@ -1,14 +1,24 @@
-"""META_TOOLS skip-set: meta-tools skip per-call recording/audit (#866, Task 6).
+"""Purpose-keyed skip sets: which meta-tools skip per-call recording, and why (#866, #1654).
 
-Failing tests (before the fix) verify:
-- UsageTrackingMiddleware records NOTHING for tools.invoke / tools.search.
-- TelemetryMiddleware emits NO span or metrics for tools.invoke / tools.search.
-- DenialAuditMiddleware writes NO denial row for tools.invoke / tools.search.
+Two sets, two reasons (ADR-0485, amending ADR-0268 §6). ``REENTRANT_TOOLS`` is
+de-duplication — ``tools.invoke`` dispatches through ``app.call_tool(run_middleware=True)``,
+so the inner call is the authoritative record and the outer chain must add nothing.
+``UNMETERED_TOOLS`` is volume — ``tools.search`` does *not* re-enter, so skipping it forgoes
+the only record that would exist, taken deliberately for the usage plane alone.
+
+These tests pin each middleware against the sets whose reason applies to it:
+
+- ``UsageTrackingMiddleware`` records NOTHING for tools.invoke *or* tools.search.
+- ``TelemetryMiddleware`` emits no span/metrics for tools.invoke, and **does** emit both for
+  tools.search — the change #1654 made, and the one assertion here that would go quiet if
+  ``tools.search`` were put back in the telemetry skip.
+- ``DenialAuditMiddleware`` writes no denial row for tools.invoke, and **does** write one for
+  tools.search.
 - A gateway call writes exactly ONE usage row (keyed to inner tool, not tools.invoke).
 - A denied gateway call writes exactly ONE denial-audit row (inner tool).
 
-The denial-equivalence test verifies (before and after the fix) that the client-visible
-denial shape from a gateway call is identical to a direct inner-tool denial.
+The denial-equivalence test verifies that the client-visible denial shape from a gateway
+call is identical to a direct inner-tool denial.
 """
 
 from __future__ import annotations
@@ -25,7 +35,11 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware import denial_audit as da_mod
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
-from kdive.mcp.middleware.shared import META_TOOLS, result_error_category
+from kdive.mcp.middleware.shared import (
+    REENTRANT_TOOLS,
+    UNMETERED_TOOLS,
+    result_error_category,
+)
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
@@ -107,13 +121,18 @@ def _raising(exc: BaseException) -> Any:
 
 
 # ============================================================
-# META_TOOLS constant
+# Skip-set constants
 # ============================================================
 
 
-def test_meta_tools_contains_invoke_and_search() -> None:
-    assert "tools.invoke" in META_TOOLS
-    assert "tools.search" in META_TOOLS
+def test_skip_sets_state_disjoint_reasons() -> None:
+    """No tool carries both reasons at once — that conflation is the defect #1654 fixed.
+
+    Each set's name is its justification (ADR-0485). A name in both would mean the reason a
+    given skip site implements is once again unrecoverable from the membership, which is
+    exactly what let ADR-0268 §6's re-entry claim stand while being false of ``tools.search``.
+    """
+    assert not (REENTRANT_TOOLS & UNMETERED_TOOLS)
 
 
 # ============================================================
@@ -143,6 +162,13 @@ def test_usage_invoke_skips_recording_on_success() -> None:
 
 
 def test_usage_search_skips_recording_on_success() -> None:
+    """tools.search is skipped on the usage plane for volume, not de-duplication.
+
+    It has no inner call and therefore no other recorder: this absent row is the only row
+    that would ever exist, declined because a ``tool_invocation`` write on the highest-
+    frequency agent call is not worth its signal (ADR-0485 §2). Contrast the telemetry test
+    below, where the same tool *is* recorded.
+    """
     mw, recorded = _spy_usage()
     result = ToolResponse.success("tools.search", "ok")
 
@@ -244,15 +270,29 @@ def test_telemetry_invoke_emits_no_span_or_metric() -> None:
     assert meter.histogram_records == []
 
 
-def test_telemetry_search_emits_no_span_or_metric() -> None:
+def test_telemetry_search_emits_span_and_metrics() -> None:
+    """tools.search IS traced and metered: it never re-enters, so nothing else records it.
+
+    The telemetry plane skips ``REENTRANT_TOOLS`` only (ADR-0485 §2). Spans and metric points
+    are in-process, cheap, and sampled, and this is the plane where discovery latency and
+    error rate are answerable — unlike a ``tool_invocation`` row, which is a per-call Postgres
+    write and stays declined.
+
+    Every assertion below reddens if ``"tools.search"`` is added to the telemetry skip set:
+    the skip is an early ``return await call_next(context)`` ahead of the span, so a skipped
+    call leaves all three recorders empty.
+    """
     mw, meter, tracer = _telemetry_mw()
     result = ToolResponse.success("tools.search", "ok")
 
     asyncio.run(mw.on_call_tool(_context("tools.search"), _returning(result)))
 
-    assert tracer.span_names == []
-    assert meter.counter_adds == []
-    assert meter.histogram_records == []
+    labels = {"tool": "tools.search", "outcome": "ok"}
+    assert tracer.span_names == ["mcp.tool/tools.search"]
+    # Exactly the success counter: an error add would carry outcome="error" and mean the
+    # middleware misclassified a successful envelope.
+    assert meter.counter_adds == [(1, labels)]
+    assert [lbl for _, lbl in meter.histogram_records] == [labels]
 
 
 def test_telemetry_invoke_still_passes_through_to_call_next() -> None:
@@ -298,6 +338,32 @@ def test_denial_audit_invoke_skips_row_on_role_denied(
     assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
     # But writes no row
     assert calls == []
+
+
+def test_denial_audit_search_writes_row_on_role_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RoleDenied on tools.search IS audited: the skip is re-entry-specific (ADR-0485 §2).
+
+    The hazard the arm exists for — a second, misattributed row keyed to the dispatcher
+    instead of the denied tool — needs an inner call, and tools.search has none. This pins
+    the middleware's contract against ``REENTRANT_TOOLS``, not a production reachability
+    claim: ``tools.search`` is in ``CORE_TOOLS`` and RBAC-filters its matches internally via
+    ``tool_visible`` rather than raising, so whether a real dispatch can raise ``RoleDenied``
+    here is #1635's question, not this test's.
+    """
+    calls: list[Any] = []
+
+    async def _mock_record_denial(_conn: Any, *, event: Any) -> None:
+        calls.append(event)
+
+    monkeypatch.setattr(da_mod.audit, "record_denial", _mock_record_denial)
+    mw = DenialAuditMiddleware(pool=_pool(_FakePool()), agent_session=lambda: "sess-1")
+
+    result = asyncio.run(mw.on_call_tool(_context("tools.search"), _raising(_role_denied())))
+
+    assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
+    assert [event.tool for event in calls] == ["tools.search"]
 
 
 def test_denial_audit_non_meta_tool_still_writes_row(

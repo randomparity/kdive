@@ -10,7 +10,7 @@ from fastmcp.server.middleware import Middleware
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.mcp.middleware.shared import META_TOOLS, ToolOutcome, result_error_category
+from kdive.mcp.middleware.shared import REENTRANT_TOOLS, ToolOutcome, result_error_category
 
 _DURATION_BUCKETS = (0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0)
 
@@ -47,7 +47,10 @@ class TelemetryMiddleware(Middleware):
     ) -> Any:
         """Time and trace one tool call; record RED metrics; re-raise on failure."""
         tool = context.message.name
-        if tool in META_TOOLS:
+        # De-duplication only (ADR-0485): a re-entrant dispatcher's inner call emits the span.
+        # UNMETERED_TOOLS is deliberately not skipped here — a span and three metric points are
+        # cheap and sampled, and they are where discovery latency and error rate are diagnosed.
+        if tool in REENTRANT_TOOLS:
             return await call_next(context)
         started = time.perf_counter()
         with self._tracer.start_as_current_span(
