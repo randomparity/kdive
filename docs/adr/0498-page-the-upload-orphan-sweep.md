@@ -7,7 +7,7 @@
   whole-root listing and whole-root array parameter as an accepted, unresolved cost and named this
   issue as its tracker; §6, whose budget now bounds the listing as well as the deletes; and §7,
   whose "one prefix-parameterised listing primitive" is now the paged iterator with the flat list as
-  its delegate. ADR-0455's decisions — the three fences, the bulk-classify-then-re-check ordering,
+  its delegate. ADR-0455's decisions — the three fences, the classify-then-re-check ordering,
   the per-root budget and its value, the threshold — are unchanged.
 - **Depends on:** [ADR-0453](0453-row-first-upload-reap.md) §1 (the row-first reap whose partial
   failure produces the candidate set), [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (the
@@ -65,10 +65,11 @@ acceptance criteria of #1569 are structural rather than tuned — there is no ac
 **Order is preserved, and it is preserved the same way it was.** Pages arrive in store order (S3
 lists lexicographically; boto3's paginator does not reorder), and within a page the deletes follow
 the *page's* order filtered by the classify's approved set — not the classify's row order, because a
-planner may reorder an anti-join's output and the store may not. So the sequence of deletes is
-byte-for-byte the sequence the flattened listing produced. That matters for the reason ADR-0455 §3
-gives: a pass truncated by the budget or by a fault is only reproducible if the prefix of the
-sequence it got through is deterministic.
+planner may reorder an anti-join's output and the store may not. So the deletes come out in the order the
+flattened listing produced them. That matters for the reason ADR-0455 §3 gives: a pass truncated by
+the budget or by a fault is only reproducible if the prefix of the sequence it got through is
+deterministic. (The *membership* of that sequence can differ slightly from the unpaged sweep's,
+because each page's classify reads its own `now()`; §Consequences states the bound.)
 
 The `_warn_if_wholly_unattributable` drift check (ADR-0455 §4) accumulates its `listed`/`attributed`
 counts across the root's pages and reports once after the root, rather than per page. Its subject is
@@ -148,8 +149,27 @@ for the reason ADR-0496 §2 gives.
 
 **The acceptance criteria are structural, not tuned.** Peak memory and per-statement parameter width
 are bounded by `_LIST_PAGE_SIZE` because there is nowhere for a root's listing to accumulate — not
-because a limit is checked. The same keys are reclaimed and the same keys are protected: the fences,
-the threshold, and the re-check ordering are untouched, and the delete sequence is identical.
+because a limit is checked. The fences, the threshold, and the re-check ordering are untouched, and
+the delete **order** is unchanged: store order, taken from the page and never from the anti-join's
+rows.
+
+**The reclaimed *set* is not bit-identical to the unpaged sweep's, and the reason is `now()`.** Each
+page's classify opens its own short transaction (it always did — §Decision 2 of ADR-0455 keeps the
+snapshot off the blocking store calls), so `now()` advances between pages. The unpaged sweep aged
+every key in a root against one `now()`; the paged sweep ages page 20's keys against a `now()`
+however long the first nineteen pages took. An object sitting at `grace - 30s` when page 1 was
+classified can therefore cross the threshold by page 20 and be reclaimed in the same pass that would
+previously have spared it.
+
+This is stated rather than claimed away, and it is not a correctness problem in either direction. The
+shortening is bounded by one pass's own duration, against a threshold of `orphan_grace + upload_ttl`
+— 48h at the defaults — so the object was reclaimable within seconds of when it was reclaimed, and
+it had been rowless, manifest-less and unwritten for two days. Nothing becomes reclaimable that was
+not about to be. The opposite direction cannot happen at all: `now()` only advances, so no key is
+protected by paging that the unpaged sweep would have deleted. What would have been a real problem is
+a *shared* `now()` captured once per pass, because that would age a root's tail against a clock from
+before its own listing; per-page `now()` is the conservative choice and also the one the code already
+made.
 
 **A root is no longer atomic with respect to a listing fault.** §3 makes this explicit because it is
 the one behavioural change an operator could observe: a pass that previously logged "could not list

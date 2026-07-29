@@ -230,6 +230,20 @@ and the two deferred cost items make that more likely over time. Aborting would 
 fault persisted, which is the starvation this whole section exists to prevent, arriving by the two
 paths the budget does not cover.
 
+> **Amended by [ADR-0498](0498-page-the-upload-orphan-sweep.md) (#1569), and #1570 for the index.**
+> Three details of the two preceding paragraphs no longer hold. The listing fault is not
+> `list_prefix_with_mtime` — the sweep's port takes the paged iterator and no longer has the flat
+> method — and it is no longer *whole-root*: it can arrive mid-root, after earlier pages have deleted
+> irreversibly, so that root is abandoned from the failed page on and those deletes stand. The
+> classify's root-correlation argument is discharged rather than amended: its parameter is now a
+> listing page wide whatever the root's size, so a `statement_timeout` no longer fires preferentially
+> on `local/runs/`, and its `artifacts` anti-join does have a usable index (migration `0081`) — which
+> at a page's width Postgres actually chooses. **The decision is unchanged.** Skip-and-count is still
+> right for both, because a `statement_timeout`, a dropped connection, or a scoped `s3:ListBucket`
+> deny is not made impossible by a narrower statement, and the starvation this section prevents is
+> still what aborting would cause. What changed is only that the argument no longer needs the
+> root-correlation premise to reach that conclusion.
+
 A fault that is *not* root-scoped still ends the pass, and ends it *through the same count-logging
 path*, because by then a root may already have deleted irreversibly: that path catches every abort,
 not only a store one, so a dropped pool connection out of the classify and cancellation at shutdown
