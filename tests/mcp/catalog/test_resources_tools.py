@@ -1183,6 +1183,9 @@ def test_drain_passive_denied_for_admin_only_token(migrated_url: str) -> None:
             row = await _row(pool, res_id)
             audited = await _platform_audit_rows(pool)
         assert resp.error_category == "authorization_denied"
+        # `resources.drain` gates on a mode-dependent role, so the denial names the one this
+        # call actually needed — passive drain wants platform_operator (ADR-0490).
+        assert resp.data["missing_roles"] == ["platform_operator"]
         assert row["cordoned"] is False
         assert audited == [("admin-1", "platform_admin", "resources.drain", f"resource:{res_id}")]
 
@@ -1204,6 +1207,8 @@ def test_drain_force_release_operator_denied(migrated_url: str) -> None:
             audited = await _platform_audit_rows(pool)
             alloc_state = await _alloc_state(pool, alloc)
         assert resp.error_category == "authorization_denied"
+        # Same tool, other mode, other answer: force_release wants platform_admin (ADR-0490).
+        assert resp.data["missing_roles"] == ["platform_admin"]
         assert row["cordoned"] is False  # denied before cordon
         assert alloc_state == "active"  # untouched
         assert audited == [("op-1", "platform_operator", "resources.drain", f"resource:{res_id}")]

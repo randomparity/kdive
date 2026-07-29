@@ -9,7 +9,7 @@ rather than per-plane discipline.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,6 +21,7 @@ from kdive.domain.errors import (
     suppressed_detail,
 )
 from kdive.domain.operations.jobs import Job, JobKind
+from kdive.security.authz.rbac import PlatformRole, Role
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
 
 # Literal next tool names by the job's state.
@@ -68,6 +69,27 @@ _FAILURE_STATUSES = frozenset({JobState.FAILED.value, "error"})
 #: Combined with ADR-0123's suppressed ``detail``, it is the caller's only route to a blocker it
 #: can report to its operator.
 DENIAL_NEXT_ACTIONS: tuple[str, ...] = ("session.whoami",)
+
+type MissingRole = Role | PlatformRole
+"""The closed vocabulary a denial may name as the grant the caller lacks (ADR-0490).
+
+Both halves are the *live* enforcement enums — :class:`~kdive.security.authz.rbac.Role` is
+what :func:`~kdive.security.authz.rbac.require_role` checks and
+:class:`~kdive.security.authz.rbac.PlatformRole` is what
+:func:`~kdive.security.authz.rbac.require_platform_role` checks — so the wire vocabulary
+cannot drift from the thing actually enforced, and a typo at a call site is a type error
+rather than a shipped string. Their value sets are disjoint (guarded in
+``tests/guards/test_denial_envelope_actions.py``), so one flat ``missing_roles`` list is
+unambiguous about which tier a token belongs to.
+"""
+
+MISSING_ROLES_KEY = "missing_roles"
+"""The ``data`` key a denial names its missing grant under (ADR-0490).
+
+Absent — never present-but-empty — when the denial is not role-shaped, so an agent can tell
+"no role would have helped" (a non-member denial, or the ADR-0129 destructive gate, which
+speaks ``missing_checks`` instead) from "a role would".
+"""
 
 ResponseData = dict[str, JsonValue]
 ResponseDataInput = Mapping[str, JsonValue]
@@ -200,8 +222,14 @@ class ToolResponse(BaseModel):
         )
 
     @classmethod
-    def denied(cls, object_id: str, *, data: ResponseDataInput | None = None) -> ToolResponse:
-        """Build the ``authorization_denied`` envelope (ADR-0471).
+    def denied(
+        cls,
+        object_id: str,
+        *,
+        missing_roles: Sequence[MissingRole] = (),
+        data: ResponseDataInput | None = None,
+    ) -> ToolResponse:
+        """Build the ``authorization_denied`` envelope (ADR-0471, ADR-0490).
 
         The single constructor for a denial across the whole tool surface. It takes no
         ``suggested_next_actions``: the breadcrumb is fixed to :data:`DENIAL_NEXT_ACTIONS`, so a
@@ -210,17 +238,41 @@ class ToolResponse(BaseModel):
         the only way an ``AUTHORIZATION_DENIED`` envelope is built, so a new tool cannot
         reintroduce a self-suggestion by hand-rolling ``ToolResponse.failure``.
 
+        ``missing_roles`` names the grant the caller lacks under ``data.missing_roles``, leaving
+        ADR-0123's suppressed ``detail`` untouched (ADR-0490). It is typed :data:`MissingRole`,
+        not ``str``, so the disclosed vocabulary is closed by construction. Roles are deduplicated
+        and sorted for a stable wire order, and the key is **omitted entirely** when the sequence
+        is empty — see :data:`MISSING_ROLES_KEY` for why absence rather than ``[]``.
+
         Args:
             object_id: The envelope's object id — the same id the served call would carry.
+            missing_roles: The role(s) the gate required, any one of which would have satisfied
+                it. Empty for a denial no role would have fixed — a non-member denial (naming a
+                role there would confirm the project exists) or the ADR-0129 destructive gate,
+                which reports ``data.missing_checks`` instead.
             data: Structured fields safe to surface under the no-leak seam (ADR-0123 suppresses
                 ``detail``, not ``data``), e.g. the destructive-op gate's closed enum of failed
-                policy checks (ADR-0129).
+                policy checks (ADR-0129). It may not carry ``missing_roles`` itself.
+
+        Raises:
+            ValueError: ``data`` carries the ``missing_roles`` key. The closed vocabulary holds
+                only because every token comes from a :data:`MissingRole` member, and a raw
+                ``data`` dict is unchecked — routing the key through it would put a free-form
+                string on a client-facing egress seam. Pass ``missing_roles=`` instead.
         """
+        payload = dict(data or {})
+        if MISSING_ROLES_KEY in payload:
+            raise ValueError(
+                f"{MISSING_ROLES_KEY!r} must be passed as the typed `missing_roles` argument, "
+                "not through `data`, so the disclosed role vocabulary stays closed (ADR-0490)"
+            )
+        if missing_roles:
+            payload[MISSING_ROLES_KEY] = sorted({role.value for role in missing_roles})
         return cls.failure(
             object_id,
             ErrorCategory.AUTHORIZATION_DENIED,
             suggested_next_actions=list(DENIAL_NEXT_ACTIONS),
-            data=data,
+            data=payload,
         )
 
     @classmethod

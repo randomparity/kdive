@@ -81,8 +81,14 @@ async def _audit_host_action(
         )
 
 
-def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.denied(object_id)
+def _denied(object_id: str, role: PlatformRole) -> ToolResponse:
+    """The denial envelope naming ``role`` — the gate this call actually failed (ADR-0490).
+
+    ``role`` is a parameter rather than a module constant because ``resources.drain``
+    gates on ``_drain_role(mode)``: a ``force_release`` drain needs ``platform_admin``
+    where an ordinary drain needs ``platform_operator``.
+    """
+    return ToolResponse.denied(object_id, missing_roles=[role])
 
 
 def _classify_drain_release(alloc_id: str, outcome: ReleaseOutcome) -> ToolResponse:
@@ -111,7 +117,7 @@ async def set_resource_status(
             scope=f"resource:{resource_id}",
             args={"resource_id": resource_id, "status": status},
         )
-        return _denied(resource_id)
+        return _denied(resource_id, PlatformRole.PLATFORM_OPERATOR)
     uid = _as_uuid(resource_id)
     if uid is None:
         return _invalid_uuid_error("resource_id", resource_id)
@@ -165,7 +171,7 @@ async def set_resource_scheduling(
             scope=f"resource:{resource_id}",
             args={"resource_id": resource_id, "state": state},
         )
-        return _denied(resource_id)
+        return _denied(resource_id, PlatformRole.PLATFORM_OPERATOR)
     uid = _as_uuid(resource_id)
     if uid is None:
         return _invalid_uuid_error("resource_id", resource_id)
@@ -247,7 +253,7 @@ async def drain_resource(
             scope=f"resource:{resource_id}",
             args={"resource_id": resource_id, "mode": mode},
         )
-        return _denied(resource_id)
+        return _denied(resource_id, _drain_role(mode))
     if mode == "force_release" and not reason.strip():
         return resource_config_error(resource_id)
     uid = _as_uuid(resource_id)

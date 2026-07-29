@@ -68,13 +68,14 @@ async def upload(
     with bind_context(principal=ctx.principal):
         try:
             require_role(ctx, request.project, Role.OPERATOR)
-        except RoleDenied:
+        except RoleDenied as exc:
             await audit_project_denial(
                 pool, ctx, tool=UPLOAD_TOOL, project=request.project, args={"name": request.name}
             )
-            return denied(request.name)
+            return denied(request.name, exc.required)
         except AuthorizationError:
-            return denied(request.name)
+            # Non-member: no role would have helped, and naming one would confirm the project.
+            return denied(request.name, None)
         if request.quarantine_key.startswith(PUBLISHED_IMAGE_PREFIX):
             return _config_error(
                 request.name, data={"reason": "quarantine_key in published prefix"}

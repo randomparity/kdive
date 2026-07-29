@@ -46,6 +46,7 @@ from kdive.security.authz.rbac import (
     AuthorizationError,
     PlatformRole,
     Role,
+    RoleDenied,
     require_platform_role,
     require_role,
 )
@@ -319,7 +320,14 @@ async def generate_granted_set(
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
             )
+        except RoleDenied as exc:
+            # A member ranking below the `viewer` floor on a project they named: the role is
+            # safe to disclose because RoleDenied only fires for members, so it confirms
+            # nothing the caller's own membership did not already tell them (ADR-0490).
+            return ToolResponse.denied(_REPORT_OBJECT_ID, missing_roles=[exc.required])
         except AuthorizationError:
+            # The non-member arm. Naming `viewer` here would confirm the named project exists
+            # and is simply not granted, which ADR-0123's seam exists to prevent.
             return ToolResponse.denied(_REPORT_OBJECT_ID)
         scope = ReportScope(projects=tuple(targets), all_projects=False)
         async with pool.connection() as conn:
@@ -370,7 +378,9 @@ async def generate_all_projects(
                 scope=ALL_PROJECTS_SCOPE,
                 args=_report_args(ALL_PROJECTS_SCOPE, parsed_window, parsed_formats),
             )
-            return ToolResponse.denied(_REPORT_OBJECT_ID)
+            return ToolResponse.denied(
+                _REPORT_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_AUDITOR]
+            )
         async with pool.connection() as conn:
             scope = ReportScope(
                 projects=tuple(await _all_projects_universe(conn)), all_projects=True

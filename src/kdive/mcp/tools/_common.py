@@ -292,6 +292,11 @@ def authz_denied(object_id: str, missing_checks: list[str]) -> ToolResponse:
     (``admin_role``/``operator_role``, ``profile_opt_in``) — never a resource identifier — so
     it is safe to surface in ``data`` under the no-leak seam (ADR-0123), which suppresses
     ``detail`` only, not ``data``.
+
+    Deliberately **not** also ``missing_roles`` (ADR-0490): the gate is an any-of over factors
+    of which a role is only one — ``profile_opt_in`` is not a grant at all — so a check token
+    already answers "what am I missing" more precisely than a role would, and emitting both
+    would give one denial two vocabularies that could disagree.
     """
     checks: list[JsonValue] = list(missing_checks)
     return ToolResponse.denied(object_id, data={"missing_checks": checks})

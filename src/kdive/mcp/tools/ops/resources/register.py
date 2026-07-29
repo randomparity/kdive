@@ -238,7 +238,7 @@ async def _authorize_registration(
         await audit_platform_denial(
             pool, ctx, tool=tool, scope=f"denied:{name}", args={"name": name}
         )
-        return denied(name)
+        return denied(name, PlatformRole.PLATFORM_ADMIN)
     return None
 
 

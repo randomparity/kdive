@@ -178,6 +178,9 @@ def _require_job_role(
     except RoleDenied:
         raise
     except AuthorizationError:
+        # Only the non-member arm reaches here (RoleDenied is re-raised above), so there is no
+        # role to name: the caller is not in the job's project at all, and naming the role would
+        # confirm the project exists (ADR-0490, ADR-0123).
         return ToolResponse.denied(object_id)
     return None
 

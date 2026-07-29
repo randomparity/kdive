@@ -203,11 +203,34 @@ def test_granted_set_viewer_returns_all_sections_and_refs(migrated_url: str) -> 
 
 
 def test_granted_set_role_less_named_project_denied(migrated_url: str) -> None:
+    # A *member* of "proj" holding no role: RoleDenied, so the denial names the `viewer` floor
+    # it fell short of (ADR-0490).
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             resp = await _generate(pool, _ctx(role=None), projects=["proj"], formats=["csv"])
         assert resp.status == "error"
         assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert resp.data["missing_roles"] == ["viewer"]
+
+    asyncio.run(_run())
+
+
+def test_granted_set_non_member_named_project_names_no_role(migrated_url: str) -> None:
+    """The non-member arm discloses nothing: naming a role would confirm the project exists.
+
+    The counterpart to the test above, and the reason the two arms are separate `except`
+    clauses rather than one. `require_role` raises the base `AuthorizationError` here — never
+    `RoleDenied`, which fires only past the membership check — so `other-proj` gets a denial
+    byte-identical to one for a project that does not exist at all (ADR-0123, ADR-0490).
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            resp = await _generate(pool, _ctx(), projects=["other-proj"], formats=["csv"])
+        assert resp.status == "error"
+        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert "missing_roles" not in resp.data
+        assert "other-proj" not in resp.model_dump_json()
 
     asyncio.run(_run())
 

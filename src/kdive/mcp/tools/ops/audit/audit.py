@@ -204,6 +204,8 @@ async def _query_project(
         # boundary-audited, so it keeps the graceful envelope below.
         raise
     except AuthorizationError:
+        # Non-member only (RoleDenied is re-raised above): no role would have helped, and naming
+        # `admin` would confirm the project exists (ADR-0490, ADR-0123).
         return ToolResponse.denied(_OBJECT_ID)
     # Decode the cursor only after authz so a bad cursor cannot change the denial path.
     after: tuple[datetime, UUID] | None = None

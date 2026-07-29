@@ -26,7 +26,8 @@ PLATFORM_PROJECT = "platform"
 
 
 def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.denied(object_id)
+    """The ``images.publish`` denial envelope; its one gate is ``platform_operator``."""
+    return ToolResponse.denied(object_id, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 async def _enqueue_image_build(

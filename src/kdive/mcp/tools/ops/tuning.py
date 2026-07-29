@@ -352,7 +352,8 @@ async def _audit_read(conn: AsyncConnection, ctx: RequestContext) -> None:
 
 
 def _denied(object_id: str) -> ToolResponse:
-    return ToolResponse.denied(object_id)
+    """The denial envelope for every tool in this module — all gate ``platform_operator``."""
+    return ToolResponse.denied(object_id, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:

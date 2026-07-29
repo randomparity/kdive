@@ -233,7 +233,8 @@ async def _audit_applied(
 
 
 def _denied(name: str) -> ToolResponse:
-    return ToolResponse.denied(name)
+    """The denial envelope for both write tools here — each gates ``platform_operator``."""
+    return ToolResponse.denied(name, missing_roles=[PlatformRole.PLATFORM_OPERATOR])
 
 
 def register(app: FastMCP, pool: AsyncConnectionPool) -> None:

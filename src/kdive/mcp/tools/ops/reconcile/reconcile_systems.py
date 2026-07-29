@@ -82,7 +82,9 @@ async def reconcile_systems(
                 scope=_BASE_SCOPE,
                 args={"tool": _RECONCILE_TOOL},
             )
-            return ToolResponse.denied(_RECONCILE_OBJECT_ID)
+            return ToolResponse.denied(
+                _RECONCILE_OBJECT_ID, missing_roles=[PlatformRole.PLATFORM_ADMIN]
+            )
         try:
             diff = await _run_pass(pool, image_store)
         except InventoryError as exc:

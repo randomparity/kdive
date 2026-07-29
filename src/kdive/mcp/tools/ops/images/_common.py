@@ -8,7 +8,7 @@ from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platf
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import PlatformRole
+from kdive.security.authz.rbac import PlatformRole, Role
 
 UPLOAD_TOOL = "images.upload"
 DELETE_TOOL = "images.delete"
@@ -19,8 +19,14 @@ PRUNE_OBJECT_ID = "expired-private"
 PRUNE_SCOPE = "all-private"
 
 
-def denied(object_id: str) -> ToolResponse:
-    return ToolResponse.denied(object_id)
+def denied(object_id: str, role: Role | PlatformRole | None) -> ToolResponse:
+    """The image-plane denial envelope, naming ``role`` when one would have helped (ADR-0490).
+
+    ``role`` is required-but-nullable rather than defaulted: every call site must state an
+    answer, and ``None`` is the deliberate one for a **non-member** denial, where naming the
+    project role would confirm the project exists (ADR-0123).
+    """
+    return ToolResponse.denied(object_id, missing_roles=[role] if role is not None else [])
 
 
 def blank(reason: str) -> bool:

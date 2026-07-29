@@ -493,6 +493,8 @@ def test_non_admin_deregister_and_renew_denied(migrated_url: str) -> None:
             renew = await renew_resource(pool, _non_admin_ctx(), resource_id=str(rid))
         assert dereg.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
         assert renew.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+        assert dereg.data["missing_roles"] == ["platform_admin"]  # ADR-0490
+        assert renew.data["missing_roles"] == ["platform_admin"]
 
     asyncio.run(_run())
 
