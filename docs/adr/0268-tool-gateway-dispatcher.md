@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-06-27
 - Supersedes: ADR-0267 (reverted in full, PR #881)
+- **§6 amended by [ADR-0485](0485-purpose-keyed-middleware-skip-sets.md) (#1654):** the
+  re-entry rationale below holds for `tools.invoke` and does not hold for `tools.search`,
+  which never calls `app.call_tool`. The one skip set is split into two purpose-keyed sets.
 
 ## Context
 
@@ -133,6 +136,15 @@ denial row keyed to `tools.invoke`, corrupting the audit trail. So every per-cal
 middleware skips when `context.message.name ∈ {tools.invoke, tools.search}` — the inner call is the
 sole recorder. `BindingErrorMiddleware` / `ToolExposureMiddleware` record nothing per call and need
 no skip. This *improves* the ADR-0148 usage data: it measures real work, not dispatcher noise.
+
+> **Amended by [ADR-0485](0485-purpose-keyed-middleware-skip-sets.md) (#1654):** the re-entry
+> argument above is the whole justification only for `tools.invoke`. `tools.search` does not
+> re-enter — `tools_search` reads the registry and returns, with no `app.call_tool` on the path —
+> so its skip suppressed the only record rather than de-duplicating a second one. It is retained
+> for the usage plane on the *volume* ground this paragraph's last sentence states, and dropped
+> from the telemetry and denial-audit planes. The single set becomes `REENTRANT_TOOLS`
+> (de-duplication) and `UNMETERED_TOOLS` (volume); `tools.invoke`'s membership and the single-row
+> guarantee for gateway dispatch are unchanged.
 
 ### 7. Empirical verification gate (revert lesson)
 

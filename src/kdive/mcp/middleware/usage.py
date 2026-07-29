@@ -13,7 +13,8 @@ from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.shared import (
-    META_TOOLS,
+    REENTRANT_TOOLS,
+    UNMETERED_TOOLS,
     ToolOutcome,
     request_context,
     result_error_category,
@@ -25,6 +26,11 @@ from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.usage import UsageEvent, digest_args, record_usage
 
 _log = logging.getLogger(__name__)
+
+# The only plane that skips both sets (ADR-0485): a row is de-duplicated away for a
+# re-entrant dispatcher, and declined outright for an unmetered tool because it is a per-call
+# Postgres write on the highest-frequency agent call.
+_UNRECORDED_TOOLS: frozenset[str] = REENTRANT_TOOLS | UNMETERED_TOOLS
 
 # ADR-0148 keeps the swallow — best-effort recording must never fail a tool call — but a
 # swallowed write is a *lost row*, and a WARNING is invisible to anything scraping /metrics.
@@ -105,7 +111,7 @@ class UsageTrackingMiddleware(Middleware):
         call_next: Callable[[Any], Any],
     ) -> Any:
         """Dispatch one call, then record its outcome best-effort."""
-        if getattr(context.message, "name", "?") in META_TOOLS:
+        if getattr(context.message, "name", "?") in _UNRECORDED_TOOLS:
             return await call_next(context)
         try:
             result = await call_next(context)

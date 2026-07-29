@@ -1,24 +1,27 @@
 """End-to-end proof that a real gateway call writes one ``tool_invocation`` row (#1625).
 
-Pins ``usage.py``'s ``META_TOOLS`` skip, and only that. The other two consumers #1625 names
-stay unpinned end to end: ``telemetry.py``'s skip double-counts in metrics and spans rather
-than in a table, so deleting it leaves both tests below green (#1640), and
+Pins ``usage.py``'s ``REENTRANT_TOOLS`` skip, and only that. The other two consumers #1625
+names stay unpinned end to end: ``telemetry.py``'s skip double-counts in metrics and spans
+rather than in a table, so deleting it leaves both tests below green (#1640), and
 ``denial_audit.py``'s is unreachable for the separate reason under *Scope* (#1635).
-``tools.search``, the other ``META_TOOLS`` *member*, is not driven through the real gateway
-here either. A green run of this module is not an all-clear for the skip set as a whole.
+``tools.search`` is not driven through the real gateway here either — since #1654 it is no
+longer skipped on the same grounds as ``tools.invoke`` (ADR-0485 splits the one set into
+``REENTRANT_TOOLS`` for de-duplication and ``UNMETERED_TOOLS`` for volume; ``tools.search``
+is in the latter, so it stays out of ``tool_invocation`` while gaining a span and RED
+metrics). A green run of this module is not an all-clear for either skip set as a whole.
 
 Epic #1576's criterion — *tool invocation and denial telemetry records the inner operation
 once, not the gateway wrapper plus the inner call* — was covered by two halves that never
 met. ``tests/mcp/middleware/test_gateway_skip.py`` asserts row counts against a real
 migrated Postgres but hand-builds the middleware contexts and calls ``on_call_tool``
 directly, so it never reaches ``gateway.py``'s ``app.call_tool(..., run_middleware=True)``
-re-entry — the exact mechanism ``META_TOOLS`` exists to de-duplicate.
+re-entry — the exact mechanism ``REENTRANT_TOOLS`` exists to de-duplicate.
 ``tests/mcp/tools/test_gateway_invoke.py`` drives that re-entry for real but against a pool
 that is never opened, so it structurally cannot observe a row.
 
 These two tests join the halves: a real ``build_app`` over a real pool, driven through
 ``app.call_tool("tools.invoke", ...)``, asserting on the rows the middleware actually wrote.
-Removing ``"tools.invoke"`` from ``META_TOOLS`` reddens both (the outer chain then records
+Removing ``"tools.invoke"`` from ``REENTRANT_TOOLS`` reddens both (the outer chain then records
 the gateway wrapper alongside the inner tool).
 
 Scope — narrower than #1625's full acceptance, in two ways worth stating plainly:
@@ -31,16 +34,16 @@ Scope — narrower than #1625's full acceptance, in two ways worth stating plain
   ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
   class are deferred to #1635, which carries the fix and the assertions it unblocks.
 * ``UsageTrackingMiddleware``'s exception-carried exits are not driven here — both cases
-  below land on its returned-result branch. Its ``META_TOOLS`` check is a single early
+  below land on its returned-result branch. Its ``REENTRANT_TOOLS`` check is a single early
   return ahead of the ``try``, so all three exits share one guard, but that path stays
   unpinned end to end. Noted on #1635, whose fix is what makes its ``outcome`` assertable.
 
 Each test carries a **positive control**: it calls the same inner tool directly as well as
 through the gateway, and asserts two identical rows. Without it, "the outer chain ran and
-``META_TOOLS`` suppressed its row" and "the outer chain never ran" are the same observation —
+``REENTRANT_TOOLS`` suppressed its row" and "the outer chain never ran" are the same observation —
 one absent row — and the redden proof above would evaporate silently if
 ``app.call_tool``'s ``run_middleware`` default ever changed. With it, a dead outer chain
-yields one row and a stripped ``META_TOOLS`` yields three.
+yields one row and a stripped ``REENTRANT_TOOLS`` yields three.
 
 The identity half is real too: the token is minted, signed, and run through the same
 ``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
@@ -159,7 +162,7 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
 
     # Two rows for two dispatches of the inner tool, each attributed to the verified token
     # and neither keyed to the wrapper. One row means the outer chain never ran; three
-    # means "tools.invoke" left META_TOOLS and the wrapper recorded itself.
+    # means "tools.invoke" left REENTRANT_TOOLS and the wrapper recorded itself.
     row = ("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
     assert rows == [row, row]
 
@@ -174,7 +177,7 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     the pool, and its handler catches the non-member ``AuthorizationError`` and returns the
     ``authorization_denied`` envelope itself, so the chain sees an enveloped denial and
     ``UsageTrackingMiddleware`` classifies it from that envelope. That is the path
-    ``META_TOOLS`` has to de-duplicate on a denial outcome: without the skip the outer chain
+    ``REENTRANT_TOOLS`` has to de-duplicate on a denial outcome: without the skip the outer chain
     adds its own ``("tools.invoke", "denied")`` row.
 
     The exception-carried class — a member's ``RoleDenied`` over-reach, the one #1625 asked
@@ -203,6 +206,6 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     assert envelope["object_id"] == "audit.query"
 
     # Two rows for two dispatches of the inner tool. One means the outer chain never ran;
-    # three means "tools.invoke" left META_TOOLS and the wrapper recorded itself.
+    # three means "tools.invoke" left REENTRANT_TOOLS and the wrapper recorded itself.
     row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
     assert usage_rows == [row, row]
