@@ -23,7 +23,6 @@ from kdive.mcp.middleware import usage as usage_mod
 from kdive.mcp.middleware.shared import ToolOutcome
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware, _call_project
 from kdive.mcp.responses import ToolResponse
-from kdive.security.authz.rbac import AuthorizationError
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.usage import digest_args
@@ -148,16 +147,14 @@ def test_on_call_tool_records_classified_outcome_on_success() -> None:
     assert recorded == [(ctx, ToolOutcome.ERROR)]
 
 
-def test_on_call_tool_records_denied_and_reraises_on_authorization_error() -> None:
-    mw, recorded = _spy_middleware()
-    ctx = _context()
-
-    async def call_next(_ctx: Any) -> ToolResponse:
-        raise AuthorizationError("nope")
-
-    with pytest.raises(AuthorizationError):
-        asyncio.run(mw.on_call_tool(ctx, call_next))
-    assert recorded == [(ctx, ToolOutcome.DENIED)]
+# A `test_on_call_tool_records_denied_and_reraises_on_authorization_error` used to sit here. It
+# raised `AuthorizationError` from `call_next` and asserted `DENIED` — the direct-`on_call_tool`
+# shape ADR-0486 §4 disqualifies, pinning an arm no real dispatch could reach and that ADR-0493
+# deleted. Not replaced: the envelope-classified denial it *looked* like it covered is already
+# pinned by `test_classify_denied_for_authorization_denied` above (the classifier) and by
+# `test_on_call_tool_records_classified_outcome_on_success` (that `on_call_tool` records what the
+# classifier returns). The real-dispatch pin lives in
+# `tests/mcp/tools/test_gateway_usage_recording_e2e.py`.
 
 
 def test_on_call_tool_records_error_and_reraises_on_other_exception() -> None:

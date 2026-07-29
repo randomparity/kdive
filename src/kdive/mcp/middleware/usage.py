@@ -20,7 +20,6 @@ from kdive.mcp.middleware.shared import (
     result_error_category,
 )
 from kdive.mcp.platform_auth import actor_for
-from kdive.security.authz.rbac import AuthorizationError
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.usage import UsageEvent, digest_args, record_usage
@@ -140,14 +139,19 @@ class UsageTrackingMiddleware(Middleware):
         context: Any,
         call_next: Callable[[Any], Any],
     ) -> Any:
-        """Dispatch one call, then record its outcome best-effort."""
+        """Dispatch one call, then record its outcome best-effort.
+
+        A denial is classified from the **returned envelope**, never from an exception: FastMCP
+        builds the middleware chain outside the branch that wraps a tool exception in
+        ``ToolError``, so no ``AuthorizationError`` can arrive here unwrapped, and every denial
+        class is enveloped before it reaches this middleware — by its own handler or by
+        ``DenialAuditMiddleware`` (ADR-0486, ADR-0493). What still reaches ``except Exception``
+        is a genuine fault, which ``error`` is the right outcome for.
+        """
         if getattr(context.message, "name", "?") in _UNRECORDED_TOOLS:
             return await call_next(context)
         try:
             result = await call_next(context)
-        except AuthorizationError:
-            await self._record(context, ToolOutcome.DENIED)
-            raise
         except Exception:
             await self._record(context, ToolOutcome.ERROR)
             raise

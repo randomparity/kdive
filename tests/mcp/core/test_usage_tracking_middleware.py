@@ -1,10 +1,23 @@
 """Per-call usage recording + outcome classification (#506, ADR-0148).
 
-The middleware records one best-effort ``tool_invocation`` row per call. Outcome covers
-every denial path: the ``authorization_denied`` envelope ``DenialAuditMiddleware`` returns
-(a ``ToolResult`` on the normal path, a bare ``ToolResponse`` on its short-circuit) *and* a
-propagated ``AuthorizationError`` (``DestructiveOpDenied`` / non-member) that bubbles past
-it. A recording failure is swallowed — it never fails the call.
+The middleware records one best-effort ``tool_invocation`` row per call. Every denial reaches
+it as a **returned** ``authorization_denied`` envelope — built by the tool's own handler, or by
+``DenialAuditMiddleware`` (ADR-0486) — and is classified from that envelope. A recording
+failure is swallowed; it never fails the call.
+
+Two claims this docstring used to make are gone, and neither is coming back:
+
+* *a propagated ``AuthorizationError`` that bubbles past the boundary.* FastMCP builds the
+  middleware chain outside the branch that wraps a tool exception in ``ToolError``, so no
+  denial can arrive here unwrapped. That arm was deleted in ADR-0493, along with the direct-
+  ``on_call_tool`` test that "covered" it — the shape ADR-0486 §4 disqualifies, which stayed
+  green through the whole #1635 regression. The one class that really did escape its handler,
+  ``accounting.report``'s non-member ``AuthorizationError``, is fixed at the handler and pinned
+  by a real-dispatch test in ``tests/mcp/tools/test_gateway_usage_recording_e2e.py``.
+* *a bare ``ToolResponse`` on the boundary's short-circuit.* ADR-0486 decision 2 deleted that
+  short-circuit; the boundary returns a ``ToolResult``. ``test_denied_from_bare_toolresponse``
+  below survives it because ``result_error_category`` is a shared helper that accepts both
+  shapes, not because anything still produces the bare one.
 
 Because that swallow is the middleware's contract, every row-asserting test drives it
 over a warm pool and under a guard that names a swallowed failure — see
@@ -28,7 +41,6 @@ from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware
 from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.gate import DestructiveOpDenied
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.usage_support import recording_must_not_fail, warm_pool
@@ -120,7 +132,10 @@ def test_denied_from_envelope(migrated_url: str, monkeypatch: pytest.MonkeyPatch
 
 
 def test_denied_from_bare_toolresponse(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    # DenialAuditMiddleware short-circuits with a bare ToolResponse, not a ToolResult.
+    # `result_error_category` accepts a bare ToolResponse as well as a ToolResult, so the
+    # classifier does too. Nothing on the dispatch path produces the bare shape any more —
+    # ADR-0486 decision 2 removed the short-circuit that did — so this pins the shared helper's
+    # tolerance, not a live wire format. See the module docstring.
     async def denied(_c: Any) -> ToolResponse:
         return ToolResponse.failure("x", ErrorCategory.AUTHORIZATION_DENIED)
 
@@ -128,14 +143,12 @@ def test_denied_from_bare_toolresponse(migrated_url: str, monkeypatch: pytest.Mo
     assert rows[0][1] == "denied"
 
 
-def test_denied_from_propagated_authorization_error(
-    migrated_url: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def boom(_c: Any) -> Any:
-        raise DestructiveOpDenied(["admin_role"])
-
-    rows = _drive(migrated_url, "control.force_crash", boom, monkeypatch)
-    assert rows[0][1] == "denied"
+# `test_denied_from_propagated_authorization_error` used to sit here, raising `DestructiveOpDenied`
+# from `call_next` and asserting `denied`. ADR-0493 deleted the `except AuthorizationError` arm it
+# depended on: FastMCP never delivers an unwrapped denial to this middleware, so the test only ever
+# proved that a hand-driven `on_call_tool` behaves as written. `DestructiveOpDenied` has exactly one
+# raiser (`security/authz/gate.py`) and one catcher (`lifecycle/control/registrar.py`), which
+# envelopes it before it can reach any middleware.
 
 
 def test_error_from_failure_envelope(migrated_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
