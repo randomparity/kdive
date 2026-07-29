@@ -85,9 +85,12 @@ def _call_project(context: Any) -> str | None:
     as the call's project. The top level still wins, so a tool that names both is resolved by
     its own argument rather than by its payload's.
 
-    Total by construction — it runs inside ADR-0148's best-effort recorder, where a raise
-    costs the whole row. Anything that is not a mapping carrying a non-empty string
-    ``project`` yields ``None``.
+    Total over the argument mappings the transport delivers — plain ``dict`` objects decoded
+    from the call's JSON — for which anything that is not a mapping carrying a non-empty
+    string ``project`` yields ``None`` rather than raising. That matters because it runs
+    inside ADR-0148's best-effort recorder, where a raise costs the whole row. It is not
+    total over an arbitrary ``Mapping``: a ``get``/``values`` that raises would propagate,
+    and nothing on this path can produce one.
     """
     arguments = _call_arguments(context)
     if arguments is None:
