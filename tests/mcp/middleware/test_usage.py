@@ -76,9 +76,11 @@ def test_call_project_prefers_the_top_level_over_a_nested_one() -> None:
     assert _call_project(_context(arguments=arguments)) == "outer"
 
 
-def test_call_project_takes_the_first_payload_carrying_a_project() -> None:
-    # Argument order decides, so the result is a function of the call rather than of dict
-    # iteration luck: the earlier payload has no project, the later one does.
+def test_call_project_skips_a_payload_that_carries_no_project() -> None:
+    # A mapping-valued argument without a `project` key is stepped over, not treated as an
+    # answer: the scan continues to the next payload rather than stopping at the first
+    # mapping it sees. Which payload wins when *two* carry a project is argument order, and
+    # no wrapper has two model-typed params, so nothing here pins that.
     arguments = {"filters": {"state": "open"}, "request": {"project": "proj-z"}}
     assert _call_project(_context(arguments=arguments)) == "proj-z"
 
