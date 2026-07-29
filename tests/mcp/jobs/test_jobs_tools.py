@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from fastmcp.tools.base import ToolResult
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -33,6 +34,7 @@ from kdive.jobs.payloads import (
 )
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
+from kdive.mcp.responses import ToolResponse
 from kdive.mcp.tools import jobs as jobs_tools
 from kdive.security.audit import args_digest
 from kdive.security.authz.rbac import Role, RoleDenied
@@ -794,9 +796,14 @@ def test_cancel_job_member_overreach_is_audited_at_dispatch_boundary(
             async def _call_next(_ctx: Any) -> object:
                 return await jobs_tools.cancel_job(pool, VIEWER_CTX, job_id)
 
-            resp = await middleware.on_call_tool(
+            result = await middleware.on_call_tool(
                 _FakeContext("jobs.cancel", {"job_id": job_id}), _call_next
             )
+            # The boundary answers with a ToolResult so the envelope survives the transport
+            # (ADR-0486); read the envelope out of it rather than off the middleware's return.
+            assert isinstance(result, ToolResult)
+            assert isinstance(result.structured_content, dict)
+            resp = ToolResponse.model_validate(result.structured_content)
             owned = await jobs_tools.wait_job(pool, VIEWER_CTX, job_id, timeout_s=0)
             async with pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(

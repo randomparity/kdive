@@ -1,9 +1,8 @@
 """End-to-end proof that a real gateway call writes one ``tool_invocation`` row (#1625).
 
-Pins ``usage.py``'s ``REENTRANT_TOOLS`` skip, and only that. The other two consumers #1625
-names stay unpinned end to end: ``telemetry.py``'s skip double-counts in metrics and spans
-rather than in a table, so deleting it leaves both tests below green (#1640), and
-``denial_audit.py``'s is unreachable for the separate reason under *Scope* (#1635).
+Pins ``usage.py``'s ``REENTRANT_TOOLS`` skip and, since #1635, the denial boundary itself.
+``telemetry.py``'s skip stays unpinned end to end: it double-counts in metrics and spans
+rather than in a table, so deleting it leaves every test below green (#1640).
 ``tools.search`` is not driven through the real gateway here either — since #1654 it is no
 longer skipped on the same grounds as ``tools.invoke`` (ADR-0485 splits the one set into
 ``REENTRANT_TOOLS`` for de-duplication and ``UNMETERED_TOOLS`` for volume; ``tools.search``
@@ -19,31 +18,32 @@ re-entry — the exact mechanism ``REENTRANT_TOOLS`` exists to de-duplicate.
 ``tests/mcp/tools/test_gateway_invoke.py`` drives that re-entry for real but against a pool
 that is never opened, so it structurally cannot observe a row.
 
-These two tests join the halves: a real ``build_app`` over a real pool, driven through
+The gateway tests here join the halves: a real ``build_app`` over a real pool, driven through
 ``app.call_tool("tools.invoke", ...)``, asserting on the rows the middleware actually wrote.
-Removing ``"tools.invoke"`` from ``REENTRANT_TOOLS`` reddens both (the outer chain then records
-the gateway wrapper alongside the inner tool).
+Removing ``"tools.invoke"`` from ``REENTRANT_TOOLS`` reddens each of them (the outer chain then
+records the gateway wrapper alongside the inner tool).
 
-Scope — narrower than #1625's full acceptance, in two ways worth stating plainly:
+Both denial classes are now driven: the one a tool handler envelopes itself (non-member) and
+the one that leaves the handler as an exception (a member's ``RoleDenied`` over-reach, the
+class #1625 named and #1635 fixed). The second reaches the chain wrapped in ``ToolError``,
+which is what made it unreachable before ADR-0486; its test asserts all three planes —
+envelope, ``audit_log``, and ``tool_invocation.outcome``.
 
-* Only ``tool_invocation``. No ``audit_log`` assertion appears here at all.
-* On the denial outcome, only the denial class a tool handler envelopes itself. The class
-  #1625 named — a member's ``RoleDenied`` over-reach — never reaches the middleware chain
-  as an exception on the real dispatch path: FastMCP wraps it in ``ToolError`` first, inside
-  the branch the chain wraps. So it writes no ``audit_log`` row *and* records
-  ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
-  class are deferred to #1635, which carries the fix and the assertions it unblocks.
-* ``UsageTrackingMiddleware``'s exception-carried exits are not driven here — both cases
-  below land on its returned-result branch. Its ``REENTRANT_TOOLS`` check is a single early
-  return ahead of the ``try``, so all three exits share one guard, but that path stays
-  unpinned end to end. Noted on #1635, whose fix is what makes its ``outcome`` assertable.
+Scope — still narrower than #1625's full acceptance in one way worth stating plainly:
+``UsageTrackingMiddleware``'s exception-carried exits are not driven here. Every case below
+lands on its returned-result branch, because the denial boundary converts both denial classes
+to a result before the usage recorder sees them. Its ``REENTRANT_TOOLS`` check is a single
+early return ahead of the ``try``, so all three exits share one guard, but the raising paths
+stay unpinned end to end.
 
-Each test carries a **positive control**: it calls the same inner tool directly as well as
-through the gateway, and asserts two identical rows. Without it, "the outer chain ran and
-``REENTRANT_TOOLS`` suppressed its row" and "the outer chain never ran" are the same observation —
-one absent row — and the redden proof above would evaporate silently if
+Each gateway test carries a **positive control**: it calls the same inner tool directly as
+well as through the gateway, and asserts two identical rows. Without it, "the outer chain ran
+and ``REENTRANT_TOOLS`` suppressed its row" and "the outer chain never ran" are the same
+observation — one absent row — and the redden proof above would evaporate silently if
 ``app.call_tool``'s ``run_middleware`` default ever changed. With it, a dead outer chain
-yields one row and a stripped ``REENTRANT_TOOLS`` yields three.
+yields one row and a stripped ``REENTRANT_TOOLS`` yields three. The last test is the
+exception: it drives one call through a real ``Client`` to pin the transport shape of the
+denial, where a second dispatch would add nothing.
 
 The identity half is real too: the token is minted, signed, and run through the same
 ``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
@@ -61,6 +61,7 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Any, LiteralString
 
+from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
@@ -69,7 +70,11 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair, mint
-from tests.mcp.usage_support import recording_must_not_fail, warm_pool
+from tests.mcp.usage_support import (
+    denial_audit_must_not_fail,
+    recording_must_not_fail,
+    warm_pool,
+)
 
 # A viewer on exactly one project: enough for session.whoami, and denied on any other
 # project — the two outcomes these tests need from one token. Every claim the recorder
@@ -180,10 +185,9 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     ``REENTRANT_TOOLS`` has to de-duplicate on a denial outcome: without the skip the outer chain
     adds its own ``("tools.invoke", "denied")`` row.
 
-    The exception-carried class — a member's ``RoleDenied`` over-reach, the one #1625 asked
-    to mirror — is deferred to #1635 in both halves; see the module docstring. Nothing here
-    asserts on ``audit_log``: no audit write is attempted on this path, so an assertion that
-    none landed could not fail.
+    The exception-carried class — a member's ``RoleDenied`` over-reach — is the sibling test
+    below. Nothing here asserts on ``audit_log``: no audit write is attempted on this path, so
+    an assertion that none landed could not fail.
     """
     request = {"scope": "project", "project": "proj-not-granted"}
 
@@ -209,3 +213,98 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     # three means "tools.invoke" left REENTRANT_TOOLS and the wrapper recorded itself.
     row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
     assert usage_rows == [row, row]
+
+
+# The denial-audit row's own columns. `project` is asserted because it is the one field the
+# boundary cannot recover from call arguments — it rides on `RoleDenied` itself — and
+# `object_kind`/`object_id` because the boundary is object-agnostic by contract (ADR-0062 §5).
+_AUDIT_ROWS = (
+    "SELECT tool, principal, agent_session, project, transition, object_kind, object_id "
+    "FROM audit_log ORDER BY ts"
+)
+
+
+def test_real_dispatch_role_denial_is_audited_enveloped_and_recorded_denied(
+    migrated_url: str,
+) -> None:
+    """A member's role over-reach, driven through the real dispatch path (#1635, ADR-0486).
+
+    The class the module docstring deferred. ``audit.query``'s project form requires ``admin``
+    on the named project and re-raises ``RoleDenied`` rather than enveloping it locally, so
+    with a ``viewer`` grant on that same project the denial leaves the handler as an exception
+    and reaches the middleware chain the only way FastMCP delivers one: wrapped in
+    ``ToolError``, with the denial demoted to ``__cause__``.
+
+    Both the gateway and the direct dispatch are driven, and all three planes are asserted
+    together — that is what makes this the pin for the whole boundary rather than for the
+    envelope alone. Against pre-fix code every one of the three fails: the call raises
+    ``ToolError`` out of ``call_tool``, ``audit_log`` stays empty, and the usage row records
+    ``error``.
+    """
+    request = {"scope": "project", "project": _PROJECT}
+
+    async def _run() -> tuple[dict[str, Any], dict[str, Any], list[Any], list[Any]]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                gateway = await app.call_tool(
+                    "tools.invoke", {"name": "audit.query", "arguments": {"request": request}}
+                )
+                # Positive control — the same denial, called directly. See the success test.
+                direct = await app.call_tool("audit.query", {"request": request})
+            return (
+                _structured(gateway),
+                _structured(direct),
+                await _fetch(pool, _AUDIT_ROWS),
+                await _fetch(pool, _USAGE_ROWS),
+            )
+
+    gateway_envelope, direct_envelope, audit_rows, usage_rows = asyncio.run(_run())
+
+    for envelope in (gateway_envelope, direct_envelope):
+        # Keyed to the inner tool on both paths, never to the gateway wrapper.
+        assert envelope["object_id"] == "audit.query"
+        assert envelope["error_category"] == "authorization_denied"
+        # ADR-0490's named role, reaching a client for the first time through this boundary:
+        # `audit.query` never builds this envelope itself, so `admin` can only have come from
+        # the `RoleDenied` the middleware unwrapped. Dropping `missing_roles` at the boundary
+        # leaves the two assertions above green and only this one red.
+        assert envelope["data"]["missing_roles"] == ["admin"]
+
+    # `detail` stays ADR-0123's constant even though the role is named (ADR-0490): the grant
+    # the caller lacks is disclosed, the resource behind it is not.
+    assert gateway_envelope["detail"] == "access denied"
+
+    audit_row = ("audit.query", _PRINCIPAL, _AGENT_SESSION, _PROJECT, "denied", None, None)
+    assert audit_rows == [audit_row, audit_row]
+
+    usage_row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    assert usage_rows == [usage_row, usage_row]
+
+
+def test_role_denial_reaches_a_real_client_as_an_envelope(migrated_url: str) -> None:
+    """The denial survives the transport, not just ``call_tool`` in process (ADR-0486).
+
+    ``app.call_tool`` above returns the middleware's object as-is; the SDK ``tools/call``
+    handler does not — ``mcp_operations._call_tool_mcp`` calls ``result.to_mcp_result()`` on
+    it, a method only ``ToolResult`` has. A short-circuit returning a bare ``ToolResponse``
+    therefore satisfies every assertion above and still reaches the client as an
+    ``AttributeError`` dressed up as a ``ToolError``. That is the shape ``kdivectl`` and every
+    MCP client see, and ``is_error=False`` with a mapped ``error_category`` is what turns the
+    denial into exit 3 rather than the generic exit 1 (``kdive.cli.errors``).
+    """
+
+    async def _run() -> tuple[Any, bool]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                async with Client(app) as client:
+                    result = await client.call_tool(
+                        "audit.query", {"request": {"scope": "project", "project": _PROJECT}}
+                    )
+            return result.structured_content, result.is_error
+
+    structured, is_error = asyncio.run(_run())
+
+    assert is_error is False, "a denial is an enveloped result, not a transport error"
+    assert isinstance(structured, dict)
+    assert structured["error_category"] == "authorization_denied"
+    assert structured["data"]["missing_roles"] == ["admin"]
