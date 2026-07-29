@@ -126,12 +126,16 @@ def _raising(exc: BaseException) -> Any:
 
 
 def test_skip_sets_state_disjoint_reasons() -> None:
-    """No tool carries both reasons at once — that conflation is the defect #1654 fixed.
+    """Each tool sits in exactly the set whose reason it satisfies, and in only one.
 
-    Each set's name is its justification (ADR-0485). A name in both would mean the reason a
-    given skip site implements is once again unrecoverable from the membership, which is
-    exactly what let ADR-0268 §6's re-entry claim stand while being false of ``tools.search``.
+    Membership is pinned exactly, not by containment: the sets are small, closed, and the
+    subject of ADR-0485, so a silent addition to either is a decision that was not recorded.
+    Disjointness is asserted on top, because a name in both would mean the reason a given
+    skip site implements is once again unrecoverable from the membership — exactly what let
+    ADR-0268 §6's re-entry claim stand while being false of ``tools.search``.
     """
+    assert sorted(REENTRANT_TOOLS) == ["tools.invoke"]
+    assert sorted(UNMETERED_TOOLS) == ["tools.search"]
     assert not (REENTRANT_TOOLS & UNMETERED_TOOLS)
 
 
@@ -203,6 +207,15 @@ def test_usage_non_meta_tool_still_records() -> None:
 
 
 class _FakeMeter:
+    """Records every counter add into one list, shared by the requests and errors counters.
+
+    That sharing is load-bearing for the exact-list assertions below rather than merely
+    tolerated: an error outcome appends *two* entries with distinct labels (``_finish``'s
+    ``outcome="error"``, then ``_record_error``'s add carrying ``error_category``), so an
+    equality check against a single ``outcome="ok"`` entry cannot be satisfied by an error
+    path. A bare truthiness check on this list, by contrast, cannot tell the two apart.
+    """
+
     def __init__(self) -> None:
         self.counter_adds: list[tuple[int, dict[str, str]]] = []
         self.histogram_records: list[tuple[float, dict[str, str]]] = []
@@ -273,10 +286,10 @@ def test_telemetry_invoke_emits_no_span_or_metric() -> None:
 def test_telemetry_search_emits_span_and_metrics() -> None:
     """tools.search IS traced and metered: it never re-enters, so nothing else records it.
 
-    The telemetry plane skips ``REENTRANT_TOOLS`` only (ADR-0485 §2). Spans and metric points
-    are in-process, cheap, and sampled, and this is the plane where discovery latency and
-    error rate are answerable — unlike a ``tool_invocation`` row, which is a per-call Postgres
-    write and stays declined.
+    The telemetry plane skips ``REENTRANT_TOOLS`` only (ADR-0485 §2). The span and its metric
+    points stay in process — the span sampled besides — and this is the plane where discovery
+    latency and error rate are answerable, unlike a ``tool_invocation`` row, which is a
+    per-call Postgres write and stays declined.
 
     Every assertion below reddens if ``"tools.search"`` is added to the telemetry skip set:
     the skip is an early ``return await call_next(context)`` ahead of the span, so a skipped

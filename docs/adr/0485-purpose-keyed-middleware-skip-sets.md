@@ -53,9 +53,13 @@ flattened away:
   (ADR-0148 §3's swallow, counted since ADR-0449). Discovery is the highest-frequency call
   an agent makes; a row per search is real, unbounded, growing write load on the same pool
   that serves real work.
-- A span and three metric points are **in-process, cheap, and sampleable**, and they are
-  the plane where discovery is actually diagnosed: search latency, error rate, and
-  (via the existing `tool_search_miss` structured log alongside them) zero-result queries.
+- A span and two metric points (three on an error outcome) are **in-process** — no network
+  round-trip, no durable write, nothing taken from the connection pool that serves real
+  work — and the span is additionally **sampled**, at `OTEL_TRACES_SAMPLER_RATIO`, default
+  0.1 (`observability/facade.py`). The metric points are not sampled; they are counter and
+  histogram updates in local memory, aggregated before export. And this is the plane where
+  discovery is actually diagnosed: search latency, error rate, and — via the existing
+  `tool_search_miss` structured log alongside them — zero-result queries.
 
 ## Decision
 
@@ -73,8 +77,14 @@ that meant "both reasons at once" is the defect, so keeping it available would l
 conflation return.
 
 `REENTRANT_TOOLS` is the de-duplication set: a member dispatches through
-`app.call_tool(..., run_middleware=True)`, so the inner call is the authoritative record
-and the outer chain must record nothing. `UNMETERED_TOOLS` is the volume set: a member does
+`app.call_tool(..., run_middleware=True)`, so the inner chain is the authoritative record
+and the outer chain must record nothing. That holds even when the inner dispatch never
+reaches a tool — FastMCP builds the middleware context and runs the chain *before*
+resolution, resolving inside `call_next` (`fastmcp/server/server.py`'s `call_tool`), so an
+unknown or disabled inner name raises `NotFoundError` out of `call_next` and is recorded by
+the inner chain as an `error` outcome keyed to the name that was asked for, before
+`tools_invoke` maps it to a `configuration_error` envelope. There is no pre-dispatch
+failure the skip silences. `UNMETERED_TOOLS` is the volume set: a member does
 not re-enter and has no inner recorder, so skipping it is a deliberate choice to forgo the
 only record, taken because the per-call cost on that plane is not worth its signal.
 
@@ -83,7 +93,7 @@ only record, taken because the per-call cost on that plane is not worth its sign
 | middleware | skips | why |
 |---|---|---|
 | `UsageTrackingMiddleware` | `REENTRANT_TOOLS \| UNMETERED_TOOLS` | de-duplication *and* volume: a row is a per-call DB write |
-| `TelemetryMiddleware` | `REENTRANT_TOOLS` | de-duplication only; spans/metrics are cheap and sampled |
+| `TelemetryMiddleware` | `REENTRANT_TOOLS` | de-duplication only; spans/metrics stay in-process |
 | `DenialAuditMiddleware` | `REENTRANT_TOOLS` | de-duplication only; the misattributed-row hazard is re-entry-specific |
 
 The net behavioural change is exactly one thing: **`tools.search` is now traced and
