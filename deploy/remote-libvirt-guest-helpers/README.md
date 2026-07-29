@@ -26,10 +26,35 @@ All three pass `shellcheck` + `shfmt -i 2 -d` and are guarded in CI by `just lin
   gzip bundle (`boot/vmlinuz` + `lib/modules/<ver>`), install it, and **add-or-replace one
   deterministic grub slot** ("kdive") whose kernel cmdline is `<cmdline>` verbatim. Does NOT
   change the boot selection. `--method kdump` also enables the kdump service. Idempotent
-  (replace, not append). Exit non-zero on any failure.
+  (replace, not append). Exit non-zero on any failure, with the code naming whether the failure
+  is transient (below).
 - `boot-id` — print `/proc/sys/kernel/random/boot_id`.
 - `boot` — select the "kdive" slot for the **next boot only** (grub one-shot) and trigger a
   **detached** reboot into it, atomically.
+
+**Exit codes (ADR-0489).** The worker maps the helper's exit code onto a failure category, and
+since ADR-0483 that category decides whether the job may be retried at all — so the code is a
+contract, not a detail:
+
+| exit | condition | worker category | retryable |
+|---|---|---|---|
+| `0` | success | — | — |
+| `75` (`EX_TEMPFAIL`) | `curl` **ran** and did not get the bundle — object store down, guest network unsettled, or the presigned URL expired | `infrastructure_failure` | yes — attempt 2 mints a fresh URL |
+| `1` | every `die` site: bad argv or subcommand, **curl missing or unexecutable**, `tar` extract failure, bundle contents wrong, `dracut`, `grubby`, `grub2-reboot` | `install_failure` | no |
+| any other | the exit status of an unguarded command `set -e` propagated — `install`, `rm -rf`, `cp -a`, `depmod` carry no `\|\| die` | `install_failure` | no |
+
+A missing `curl` is checked **before** the fetch and a shell `126`/`127` is discriminated from
+curl's own statuses, so "curl could not run" can never be reported as the retryable code. One case
+does still land on `75` while being permanent: an SELinux-**enforcing** base image confines the
+agent to `virt_qemu_ga_t`, which cannot `connect()`, and curl reports that as exit `7` exactly like
+a real connect blip. Such an install is retried and still fails — build the image permissive
+(ADR-0484); the cost is disclosed in ADR-0489's Consequences.
+
+The codes are **additive**: a worker that has learned them still meets base images built before
+this contract, which exit `1` for everything. Unrecognised codes map to `install_failure`, so an
+old image degrades to the pre-ADR-0489 behaviour rather than being misclassified — and a code the
+worker has never heard of is never assumed retryable. **A guest image must be rebuilt to carry
+the new codes**; until then its installs are classified exactly as they were before.
 
 ### `kdive-capture-vmcore` (ADR-0084 §2)
 

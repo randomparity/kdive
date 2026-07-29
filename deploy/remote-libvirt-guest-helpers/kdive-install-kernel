@@ -16,13 +16,39 @@
 #   boot
 #       select the "kdive" slot for the NEXT boot only (grub one-shot) AND trigger a detached
 #       reboot into it, atomically.
+#
+# Exit-code contract (ADR-0489). The worker maps each code onto a failure category, and the
+# category decides whether the job may be retried:
+#   0   success
+#   75  EX_TEMPFAIL — curl RAN and failed to fetch the bundle. Transient: the object store
+#       blipped, the guest network was not settled, or the presigned URL had expired. A retry
+#       mints a fresh URL and can succeed, so the worker reads this as infrastructure_failure.
+#       Note a confined guest agent that cannot connect() at all (an SELinux-ENFORCING base
+#       image, ADR-0484) also lands here as curl 7, indistinguishable from a real connect
+#       blip — a permanent misconfiguration that will burn the retry budget. Disclosed in
+#       ADR-0489 Consequences; the fix is to build the image permissive.
+#   1   every `die` site: bad argv or subcommand, curl missing or unexecutable, bundle extract
+#       failure, bundle contents wrong, dracut, grubby, grub2-reboot. Deterministic.
+#   *   the exit status of an UNGUARDED command that `set -e` propagated — `install`, `rm -rf`,
+#       `cp -a`, `depmod` carry no `|| die`, so they exit with whatever the tool returned. Also
+#       deterministic; the worker maps every unrecognised code to install_failure.
+# Codes are ADDITIVE to this contract: the worker treats an unknown one as deterministic, so an
+# image built before this contract existed (exit 1 for everything) keeps its old behaviour.
 set -euo pipefail
 
 KDIVE_TITLE="kdive"
+readonly EX_DETERMINISTIC=1
+readonly EX_TEMPFAIL=75
 
 die() {
   echo "kdive-install-kernel: $*" >&2
-  exit 1
+  exit "$EX_DETERMINISTIC"
+}
+
+# A failure a bare retry can heal: the worker re-mints the presigned URL and runs install again.
+die_tempfail() {
+  echo "kdive-install-kernel: $*" >&2
+  exit "$EX_TEMPFAIL"
 }
 
 # Remove every existing grub entry titled "kdive" so install replaces a single slot.
@@ -58,11 +84,30 @@ do_install() {
   [ -n "$url" ] || die "install requires --url"
   [ -n "$cmdline" ] || die "install requires --cmdline"
 
+  # A base image with no curl is an image defect, never a transient. Check it BEFORE the fetch:
+  # `curl ... || die_tempfail` cannot tell curl's own failure from the shell's 127 for a program
+  # it could not find, and reporting a missing binary as retryable burns the whole retry budget
+  # on a fault no retry can clear.
+  command -v curl >/dev/null 2>&1 || die "curl is not installed in this guest image"
+
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
 
-  curl -fsSL --retry 3 "$url" -o "$tmp/bundle.tar.gz" || die "bundle download failed"
+  # curl's own --retry covers seconds; it does not cover an object store that is restarting or a
+  # presigned URL that has already expired. Those need the worker's retry, which mints a new URL.
+  local rc=0
+  curl -fsSL --retry 3 "$url" -o "$tmp/bundle.tar.gz" || rc=$?
+  case "$rc" in
+  0) ;;
+  # 126/127 are the shell's, not curl's: the program could not be executed, so nothing was
+  # learned about the object store and the condition is permanent (cf. the preflight above,
+  # which catches the common case with a better message).
+  126 | 127) die "curl could not be executed (exit $rc)" ;;
+  *) die_tempfail "bundle download failed (curl exit $rc)" ;;
+  esac
+  # Deterministic, not tempfail: curl already fails a short transfer, so bytes that arrived whole
+  # and still will not extract are a bad object, and re-downloading them yields the same bytes.
   tar xzf "$tmp/bundle.tar.gz" -C "$tmp" || die "bundle extract failed"
   [ -f "$tmp/boot/vmlinuz" ] || die "bundle missing boot/vmlinuz"
   [ -d "$tmp/lib/modules" ] || die "bundle missing lib/modules"

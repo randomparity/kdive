@@ -189,6 +189,15 @@
 # --- Install the in-guest helpers: chown root:root + restorecon per helper
 # --- (ENOENT-not-EACCES gotcha -- chmod alone does not fix it). Build the argv
 # --- list with a fact loop, then run virt-customize once. ---
+#
+# The helpers and the worker are SEPARATELY VERSIONED artifacts: these files are baked into the
+# image, so an image staged earlier keeps whatever helper contract it was built with. That matters
+# for kdive-install-kernel's exit codes (ADR-0489): it exits 75 (EX_TEMPFAIL) when the kernel
+# bundle could not be fetched -- which the worker reads as the retryable `infrastructure_failure`
+# -- and 1 for deterministic dracut/grubby/argv failures, which dead-letter the job on attempt 1.
+# An image built before that contract exits 1 for everything; the worker maps every unrecognised
+# code to `install_failure`, so such an image behaves exactly as it did before rather than being
+# misclassified. Rebuild the image (force_image_rebuild=true) to give its installs the retry back.
 - name: Build the virt-customize helper arguments for {{ image.name }}
   ansible.builtin.set_fact:
     guest_base_image_helper_args: >-

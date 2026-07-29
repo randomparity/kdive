@@ -198,8 +198,13 @@ needs the running kernel's DWARF to attach).
 
 **The `SELINUX=permissive` line is required, not optional.** The Install/Retrieve/drgn helpers run
 privileged system mutations via `guest-exec`, so they inherit the confined `virt_qemu_ga_t` domain
-and an enforcing base image fails `runs.install` (surfaced as a non-zero in-guest exit via the
-`install_failure` transcript, #386). This is a deliberate, accepted posture — a kdive guest runs
+and an enforcing base image fails `runs.install` (surfaced as a non-zero in-guest exit whose
+transcript names the step, #386). Since [ADR-0489](../../adr/0489-guest-helper-exit-code-names-transience.md)
+the category depends on **which** step the confinement blocks: the helper's `curl` of the kernel
+bundle cannot `connect()` and reports exit `7`, which is indistinguishable from a transient network
+fault, so it surfaces as `infrastructure_failure` and the job is **retried and still fails**; the
+later `/boot` + `/lib/modules` mutations surface as `install_failure`. Either way the transcript,
+not the category, is what names the blocked step. This is a deliberate, accepted posture — a kdive guest runs
 with SELinux not enforcing — with the full rationale, the accepted security cost, and the
 conditions for ever reversing it in
 [ADR-0484](../../adr/0484-guest-images-ship-selinux-permissive.md). Do not substitute a per-domain
