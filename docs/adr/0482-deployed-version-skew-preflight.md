@@ -29,8 +29,23 @@ meant nothing.
 
 `version_info()` already resolves the answer. Its three consumers — `kdive --version`, the
 startup log line, and `service_version` inside the `ops.diagnostics` envelope — are all
-*reporting* surfaces. None is comparative, and nothing in `src/`, `tests/`, `scripts/`, or the
-justfile compares a deployed version against anything. The fact exists; nothing consumes it.
+*reporting* surfaces; none is comparative.
+
+There is one piece of prior art, and it is the right shape: `report_build_stamps()` in
+`scripts/live-stack/lib.sh` greps each process's `starting kdive …` startup line out of
+`.live-stack-logs/` and prints it under `=== build stamps (expect g<head_sha>) ===`. It proves
+the comparison is worth making. What it cannot do is *gate* anything — it is a human-read
+console banner emitted by a bring-up script, not a fact the test suite consumes, so a stale
+stack still runs the whole live tier and reports a meaningless result.
+
+A log-scraping preflight was the obvious extension of it and was considered. It reads
+`started_at` (the log `ts`) and the commit from a line kdive already emits, needs no change to
+any network surface, and — unlike an HTTP probe — still answers for a process that has since
+died. It was rejected because it only works where the log files are: it is coupled to
+`.live-stack-logs/` paths and a `KDIVE_STACK_LOG_DIR` layout that exists solely for the
+host-process bring-up, and it answers nothing at all for a container or a pod, which is the
+deployment shape that caused #1610 in the first place. `/readyz` answers for both, over a
+surface every deployment already exposes.
 
 ## Decision
 
@@ -85,18 +100,36 @@ compare correctly:
 
 | verdict | condition | severity |
 |---|---|---|
-| `fresh` | deployed commit == `HEAD`, and no tracked file under `src/kdive` is newer than `started_at` | pass, silent |
-| `stale_restart` | deployed commit == `HEAD`, but source on disk changed after the process started | **skip** |
+| `fresh` | deployed commit == `HEAD`, and no `src/kdive` file *differing from `HEAD`* is newer than `started_at` | pass, silent |
+| `stale_restart` | deployed commit == `HEAD`, but an **uncommitted** `src/kdive` change is newer than `started_at` | **skip** |
 | `behind` | deployed commit is an ancestor of `HEAD` | warn |
 | `diverged` | deployed commit is a real commit but not an ancestor of `HEAD`, or is unknown to this repo | warn |
 | `unknown` | the process reports no commit, or no aux listener answered | warn |
 
-`stale_restart` is the only verdict that skips, and the asymmetry is deliberate. It is the
-local variant from #1610, it has effectively no false-positive rate — a source file whose mtime
-is later than the process start time is one the running process provably did not load — and its
-remedy is one command (`scripts/live-stack/up.sh`). Skipping there is *more* informative than
-letting the test proceed, because the skip reason names the fix while the eventual failure would
-not.
+`stale_restart` is the only verdict that skips, and the asymmetry is deliberate: it is the
+local variant from #1610 and its remedy is one command (`scripts/live-stack/up.sh`), so skipping
+is *more* informative than letting the test proceed — the skip reason names the fix, the eventual
+failure would not.
+
+Its precision rests on one detail that is easy to get wrong. A bare mtime walk of `src/kdive`
+is **not** a staleness signal: a `git worktree add` stamps every file `now`, and a branch
+round-trip, a stash pop, or an identical reformat rewrite mtimes while leaving content
+byte-identical to `HEAD`. Both were reproduced; either would have produced a false
+`stale_restart` — and since this is the verdict that skips, a false positive silently deletes
+the whole live tier, the exact failure this ADR refuses to accept for `behind` two paragraphs
+down. In this repo's worktree-per-agent workflow it would have fired on essentially every run.
+
+So the mtime is only consulted for files git reports as *differing from `HEAD`*
+(`git diff --name-only HEAD -- src/kdive`). The deployed commit is already known to equal
+`HEAD` at that point, so a clean tree means the process is running the code on disk whatever
+the timestamps say, and the verdict is `fresh`. Only an uncommitted edit newer than the process
+start is evidence, and there it is conclusive.
+
+Two residual gaps, stated rather than papered over. A process started against a dirty tree that
+was later `git restore`d reads `fresh` though it still holds the discarded code. And the
+comparison is against the checkout the *tests* run from, which in a worktree workflow need not
+be the checkout the stack was started from — a genuine difference then surfaces as
+`behind`/`diverged` (correct, and warn-level), but an identical-commit mismatch is invisible.
 
 `behind` and `diverged` only warn, because both can be legitimate: deliberately exercising an
 older deployment, or running from a branch the deployment does not contain. Turning either into
@@ -140,4 +173,7 @@ guards cannot drift the way the k3s deployment did.
   outside the cluster, because no `Service` fronts the aux port. Surfacing skew for a genuinely
   remote deployment needs a decision about exposing an authenticated build identifier on the
   public port, and is not made here.
-- `stale_restart` costs one `git ls-files`-scoped mtime walk of `src/kdive` per session.
+- `stale_restart` costs one `git diff --name-only HEAD -- src/kdive` plus a `stat` of each
+  changed file, once per session.
+- The probe degrades to `unknown` (warn, never skip) for any process that does not answer or
+  predates this ADR, so it never blocks an older deployment.

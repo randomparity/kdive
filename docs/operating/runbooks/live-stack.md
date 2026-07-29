@@ -257,14 +257,21 @@ confusing test failure:
 | verdict | meaning | what happens |
 |---|---|---|
 | `fresh` | the process is at `HEAD` and started after your last edit | runs, silently |
-| `stale_restart` | at `HEAD`, but source changed after it started | **skips** — run `scripts/live-stack/up.sh` |
+| `stale_restart` | at `HEAD`, but an **uncommitted** `src/kdive` change is newer than its start | **skips** — run `scripts/live-stack/up.sh` |
 | `behind` | the deployed commit is an ancestor of `HEAD` | warns, names the commit distance |
 | `diverged` | not an ancestor of `HEAD` (other branch, or `HEAD` rewritten) | warns |
 | `unknown` | the process reports no build, or is not answering | warns |
 
-Only `stale_restart` skips, because it is the one verdict that cannot be a false positive and
-its remedy is one command. `behind` and `diverged` warn, so a deliberate run against an older
-deployment is never blocked.
+Only `stale_restart` skips, because its remedy is one command. It is deliberately narrow: the
+timestamp of a file that still matches `HEAD` proves nothing (a `git worktree add`, a branch
+round-trip or a stash pop rewrites mtimes without changing content), so only an *uncommitted*
+change newer than the process start counts. `behind` and `diverged` warn, so a deliberate run
+against an older deployment is never blocked.
+
+One limit worth knowing: the comparison is against the checkout the **tests** run from. If you
+run the suite from a git worktree while the stack was started from a different checkout, a real
+commit difference shows up as `behind`/`diverged`, but two checkouts sitting on the same commit
+are indistinguishable.
 
 Override with `KDIVE_STACK_SKEW_POLICY`:
 

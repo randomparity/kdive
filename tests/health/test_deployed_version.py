@@ -8,18 +8,35 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from kdive.health.deployed_version import deployed_version
-from kdive.version import version_info
+from kdive.version import VersionInfo
 
 
-def test_mirrors_version_info_rather_than_resolving_independently() -> None:
+def test_mirrors_version_info_rather_than_resolving_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # ADR-0482 §1: the aux listener adds no fourth version-resolution path. Whatever
     # version_info() says (baked _buildinfo, else live git, else unknown) is what /readyz says.
-    info = version_info()
+    #
+    # Pinned against a sentinel rather than a second version_info() call: that function is
+    # lru_cached, so `deployed.commit == version_info().commit` compares an object with itself
+    # and would still pass if this module resolved nothing at all — on a git-less host without
+    # baked build info the whole assertion degrades to `None == None`.
+    sentinel = VersionInfo(version="9.9.9", commit="cafebabe", is_release=True)
+    monkeypatch.setattr("kdive.health.deployed_version.version_info", lambda: sentinel)
     deployed = deployed_version()
-    assert deployed.version == info.version
-    assert deployed.commit == info.commit
-    assert deployed.is_release == info.is_release
+    assert deployed.version == "9.9.9"
+    assert deployed.commit == "cafebabe"
+    assert deployed.is_release is True
+
+
+def test_reports_an_unresolvable_commit_as_none_rather_than_inventing_one() -> None:
+    unknown = VersionInfo(version="0.0.0", commit=None, is_release=False)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("kdive.health.deployed_version.version_info", lambda: unknown)
+        assert deployed_version().commit is None
 
 
 def test_started_at_is_the_injected_instant_in_iso_8601_utc() -> None:

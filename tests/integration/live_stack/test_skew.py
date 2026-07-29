@@ -8,13 +8,26 @@ these assert the tolerance rather than an equality.
 
 from __future__ import annotations
 
+import re
+import socket
+import socketserver
+import subprocess
+import threading
+import time
 import warnings
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+import uvicorn
 from _pytest.outcomes import Skipped
 
-from tests.integration.live_stack import conftest
+from kdive.health.aux_listener import build_aux_app
+from kdive.health.heartbeat import Heartbeat
+from kdive.health.probe import BackendCheck, HealthProbe
+from kdive.version import version_info
+from tests.integration.live_stack import conftest, skew
 from tests.integration.live_stack.skew import (
     POLICY_ENV,
     ProcessSkew,
@@ -23,7 +36,9 @@ from tests.integration.live_stack.skew import (
     SkewVerdict,
     classify,
     partition,
+    probe_stack_skew,
     readyz_urls,
+    repo_facts,
     skew_policy,
     skipping_verdicts,
 )
@@ -46,19 +61,34 @@ def _facts(
 ) -> RepoFacts:
     resolved = known if known is not None else {_HEAD: _HEAD, _OLDER: _OLDER, _OTHER: _OTHER}
     edges = ancestors if ancestors is not None else {(_OLDER, _HEAD)}
-    # Default: last edit one hour BEFORE startup, i.e. the process loaded the code on disk.
-    before_start = (_STARTED - timedelta(hours=1)).timestamp()
-    mtime = newest_mtime if newest_mtime is not None else before_start
+    # Default: a clean tree — no file differs from HEAD, so there is no staleness signal.
     return RepoFacts(
         head=head,
         resolve=lambda c: resolved.get(c),
         is_ancestor=lambda a, d: (a, d) in edges,
         commits_between=lambda _a, _d: count,
-        newest_source_mtime=lambda: mtime,
+        newest_modified_source_mtime=lambda: newest_mtime,
     )
 
 
-def test_head_with_older_source_is_fresh() -> None:
+def test_head_with_a_clean_tree_is_fresh() -> None:
+    result = classify("server", commit=_HEAD, started_at=_STARTED_AT, facts=_facts())
+    assert result.verdict is SkewVerdict.FRESH
+
+
+def test_head_with_an_uncommitted_edit_made_before_startup_is_fresh() -> None:
+    # The process started after the edit, so it loaded it. Dirty is not by itself stale.
+    edited = (_STARTED - timedelta(minutes=5)).timestamp()
+    result = classify(
+        "server", commit=_HEAD, started_at=_STARTED_AT, facts=_facts(newest_mtime=edited)
+    )
+    assert result.verdict is SkewVerdict.FRESH
+
+
+def test_head_with_a_clean_tree_is_fresh_however_new_the_timestamps() -> None:
+    # The false positive that would silently delete the live tier: `git worktree add`, a branch
+    # round-trip and a stash pop all stamp every file `now` while leaving content identical to
+    # HEAD. A clean tree yields no modified file, so mtimes never enter the grading at all.
     result = classify("server", commit=_HEAD, started_at=_STARTED_AT, facts=_facts())
     assert result.verdict is SkewVerdict.FRESH
 
@@ -72,6 +102,7 @@ def test_head_with_source_edited_after_startup_is_stale_restart() -> None:
     )
     assert result.verdict is SkewVerdict.STALE_RESTART
     assert "300s after this process started" in result.detail
+    assert "uncommitted source" in result.detail
     assert "scripts/live-stack/up.sh" in result.detail
 
 
@@ -133,9 +164,16 @@ def test_warn_policy_skips_nothing() -> None:
 
 
 def test_strict_policy_skips_every_non_fresh_verdict() -> None:
-    skipping = skipping_verdicts(SkewPolicy.STRICT)
-    assert SkewVerdict.FRESH not in skipping
-    assert skipping == frozenset(v for v in SkewVerdict if v is not SkewVerdict.FRESH)
+    # Enumerated, not derived from the same comprehension the implementation uses — a derived
+    # expectation auto-adapts to a new verdict and can only fail if that source line is edited.
+    assert skipping_verdicts(SkewPolicy.STRICT) == frozenset(
+        {
+            SkewVerdict.STALE_RESTART,
+            SkewVerdict.BEHIND,
+            SkewVerdict.DIVERGED,
+            SkewVerdict.UNKNOWN,
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -195,6 +233,150 @@ def test_readyz_urls_follow_a_relocated_stack_host() -> None:
     assert urls["server"] == "http://kdive.internal:9464/readyz"
 
 
+def test_readyz_urls_bracket_an_ipv6_host() -> None:
+    # urlsplit().hostname strips the brackets; re-emitting them bare yields "http://::1:9464".
+    assert readyz_urls("http://[::1]:8000/mcp")["server"] == "http://[::1]:9464/readyz"
+
+
+def test_readyz_urls_honor_an_explicit_health_bind_addr() -> None:
+    # An explicit KDIVE_HEALTH_BIND_ADDR wins for every process (ADR-0090 §5), so the
+    # per-process default map does not apply and probing it would hit the wrong port.
+    urls = readyz_urls("http://127.0.0.1:8000/mcp", {"KDIVE_HEALTH_BIND_ADDR": "0.0.0.0:7000"})
+    assert urls == {"stack": "http://127.0.0.1:7000/readyz"}
+
+
+# --- the network and git layers ---------------------------------------------------------------
+#
+# The grading above is pure. Everything that actually reaches a process or a repository is
+# exercised here against a real socket and this real checkout — otherwise the feature could be
+# wholly non-functional and still look green, since its only failure signal is a warning.
+
+
+def _serve(app: object) -> Iterator[str]:
+    """Serve ``app`` on an ephemeral loopback port; yield its base URL."""
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")  # ty: ignore
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20.0
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert server.started, "uvicorn did not start"
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=20.0)
+
+
+@pytest.fixture
+def ready_stack() -> Iterator[str]:
+    app = build_aux_app(
+        heartbeat=Heartbeat(stale_after=1e9), probe=HealthProbe(checks=[]), metric_reader=None
+    )
+    yield from _serve(app)
+
+
+@pytest.fixture
+def unready_stack() -> Iterator[str]:
+    async def down() -> None:
+        raise RuntimeError("pg down")
+
+    app = build_aux_app(
+        heartbeat=Heartbeat(stale_after=1e9),
+        probe=HealthProbe(checks=[BackendCheck(name="pg", probe=down)]),
+        metric_reader=None,
+    )
+    yield from _serve(app)
+
+
+def test_fetch_version_reads_the_real_aux_listener(ready_stack: str) -> None:
+    # Over a real socket against the real app: proves the produced body and the consumer agree.
+    version = skew._fetch_version(f"{ready_stack}/readyz")
+    assert version is not None
+    assert version["commit"] == version_info().commit
+    assert set(version) == {"version", "commit", "is_release", "started_at"}
+
+
+def test_fetch_version_reads_the_body_of_a_503(unready_stack: str) -> None:
+    # The load-bearing edge (ADR-0482 §1): urllib raises HTTPError on 503, so without the
+    # re-read path the preflight goes blind exactly when a backend is down.
+    version = skew._fetch_version(f"{unready_stack}/readyz")
+    assert version is not None
+    assert version["commit"] == version_info().commit
+
+
+def test_fetch_version_is_none_on_a_closed_port() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    assert skew._fetch_version(f"http://127.0.0.1:{closed}/readyz") is None
+
+
+def test_fetch_version_is_none_on_a_non_http_listener() -> None:
+    # A squatter on the aux port raises BadStatusLine, which is neither an OSError nor wrapped
+    # by urlopen — uncaught, it would error every live_stack test rather than degrade.
+    with socketserver.TCPServer(("127.0.0.1", 0), _GarbageHandler) as server:
+        threading.Thread(target=server.handle_request, daemon=True).start()
+        port = server.server_address[1]
+        assert skew._fetch_version(f"http://127.0.0.1:{port}/readyz") is None
+
+
+class _GarbageHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        self.request.recv(4096)
+        self.request.sendall(b"GARBAGE NOT HTTP\r\n\r\n")
+
+
+def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
+    # A stack that predates this feature, or is simply down, must warn — never skip, never
+    # raise. This is the backward-compatibility contract.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = probe.getsockname()[1]
+    results = probe_stack_skew(f"http://127.0.0.1:{closed}/mcp")
+    assert {r.verdict for r in results} == {SkewVerdict.UNKNOWN}
+    assert [r.process for r in results] == ["reconciler", "server", "worker"]
+
+
+def test_repo_facts_describe_this_actual_checkout() -> None:
+    facts = repo_facts()
+    assert facts is not None
+    assert re.fullmatch(r"[0-9a-f]{40}", facts.head)
+    # A real short SHA resolves to the same full SHA — the width-tolerance the grading needs.
+    assert facts.resolve(facts.head[:9]) == facts.head
+    assert facts.is_ancestor(facts.head, facts.head)
+    assert facts.commits_between(facts.head, facts.head) == 0
+
+
+def test_repo_facts_reject_a_ref_name_reported_as_a_commit() -> None:
+    facts = repo_facts()
+    assert facts is not None
+    # "HEAD"/"main" would otherwise resolve against *this* checkout and grade a foreign
+    # responder as clean.
+    assert facts.resolve("HEAD") is None
+    assert facts.resolve("main") is None
+    assert facts.resolve("") is None
+
+
+def test_repo_facts_report_no_modified_source_on_a_clean_tree() -> None:
+    facts = repo_facts()
+    assert facts is not None
+    dirty = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD", "--", "src/kdive"],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if dirty:
+        pytest.skip(f"src/kdive has uncommitted changes: {dirty.splitlines()}")
+    # The P1 guarantee: a clean tree yields no timestamp at all, so no mtime — however recently
+    # rewritten by a worktree add or a branch round-trip — can produce a stale_restart skip.
+    assert facts.newest_modified_source_mtime() is None
+
+
 # --- the require_stack() seam ---------------------------------------------------------------
 #
 # The grading above is worthless if the gate never runs. These drive the real preflight every
@@ -204,9 +386,13 @@ _STACK_URL = "http://127.0.0.1:8000/mcp"
 
 
 @pytest.fixture
-def stack_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def stack_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("KDIVE_STACK_BASE_URL", _STACK_URL)
     monkeypatch.delenv(POLICY_ENV, raising=False)
+    conftest._SKEW_CACHE.clear()
+    yield
+    # Clear on the way out too: these tests seed the *real* conftest cache with fabricated
+    # verdicts, which a later live_stack run in the same process would otherwise trust.
     conftest._SKEW_CACHE.clear()
 
 
