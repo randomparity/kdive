@@ -13,30 +13,47 @@ delete, so a row or a re-mint committed after the bulk classify protects its obj
 landing after that re-read has neither a row nor a fresh mtime the sweep will look at again, and
 `store.delete` then runs unconditionally.
 
-The losing interleaving is reachable in the code, not hypothetically. `local/runs/<run_id>/` holds
-the vmcore lane's two objects, and that lane mints **no** upload window at all:
+The losing interleaving is reachable in the code, not hypothetically. `UPLOAD_ORPHAN_ROOTS` is
+derived from `UPLOAD_TENANT = "local"`, so the swept roots are `local/runs/` and
+`local/investigations/` — and the **local-libvirt** provider writes its vmcore pair there
+(`providers/local_libvirt/retrieve.py` is constructed with `tenant="local"`; its raw core goes
+through `_put_stream` and its redacted sibling through `_put`). That lane mints **no** upload window
+at all, so the manifest fence never applies to it:
 
-1. A first `capture_vmcore` attempt PUTs `local/runs/<run>/vmcore-<method>` and dies before
-   `finalize_capture`. The object is now rowless and manifest-less, and stays that way.
+1. A first `capture_vmcore` attempt streams `local/runs/<run>/vmcore-<method>` into the store and
+   dies before `finalize_capture`. The object is now rowless and manifest-less, and stays that way.
 2. More than `orphan_grace + upload_ttl` later (48h at the defaults) the sweep lists the root and
    classifies the key reclaimable — no `artifacts` row, no `upload_manifests` row, mtime past the
    threshold.
 3. The re-read observes the old mtime; `reclaimable_upload_keys` re-confirms.
-4. **A retried capture's presigned PUT completes.** The key now holds fresh, wanted bytes.
+4. **A retried capture's `put_stream` completes.** The key now holds fresh, wanted bytes.
 5. `store.delete` executes. The bytes are gone.
 6. `finalize_capture` commits `artifacts` rows against an object that no longer exists — a dangling
    reference on a Run that reports success, which is the defect class
    [ADR-0453](0453-row-first-upload-reap.md) and ADR-0455 exist to keep out of the tree. Nothing
    raises.
 
-The write in step 4 holds no lock the sweep could contend on. `precheck_run`
-(`jobs/handlers/artifacts/vmcore.py`) releases the `LockScope.RUN` advisory lock before the provider
-capture, and the vmcore PUT is performed **by the guest** against a presigned URL — there is no
-server-side call to wrap in a lock at all. That is what rules out the fence that would otherwise be
-the obvious remedy, and it is why this residual is not the same shape as
-[#1557](https://github.com/randomparity/kdive/issues/1557) even though the two are siblings:
-`capture_traffic` PUTs inside `advisory_xact_lock(RUN)` and *would* be fenced by a shared lock, but
-the cheapest path into this race is precisely the one a lock cannot cover.
+The write in step 4 holds no lock the sweep could contend on, but not because there is no
+server-side call to hold one across — there is. `precheck_run`
+(`jobs/handlers/artifacts/vmcore.py`) deliberately releases the `LockScope.RUN` advisory lock
+*before* the provider capture ([ADR-0244](0244-per-run-vmcore-capture.md)) precisely so a
+multi-GiB stream is not held under it, and the sweep takes no Run lock at any point. Both halves
+would have to change for a lock to fence this, which is what §3 weighs.
+
+Two adjacent lanes are **not** the path in, and naming them keeps the scope honest:
+
+- **remote-libvirt's presigned guest PUT is out of reach of the sweep entirely.** Its keys are built
+  from `TENANT = "remote-libvirt"` (`providers/remote_libvirt/retrieve/common.py`), so
+  `remote-libvirt/runs/<run>/vmcore-kdump` sits under no swept root and cannot be classified,
+  re-read, or deleted by this repair. The verify this ADR adds still covers it, but there it guards
+  only an operator delete or a bucket lifecycle rule.
+- **`capture_traffic` writes under `local/runs/` but holds the Run lock across its PUT**
+  (`jobs/handlers/control/capture_traffic.py::_store_capture`), so it is the one writer a shared
+  fence would already reach.
+
+This is also why the residual is not quite the shape of
+[#1557](https://github.com/randomparity/kdive/issues/1557), even though the two are siblings: the
+reaper side has no re-read at all.
 
 ## Decision
 
@@ -78,22 +95,26 @@ shape (roughly twenty declarations in this tree conform to it).
 
 `finalize_capture` takes an object-store port and, inside the same transaction and `LockScope.RUN`
 advisory lock that inserts the rows, heads **both** objects the `CaptureOutput` names — the raw core
-and its redacted sibling, both of which sit under `local/runs/<run_id>/` and are both sweep
-candidates for the whole capture. A key that is absent, or present at a different etag, raises
-`INFRASTRUCTURE_FAILURE`; the transaction rolls back and **no** row is committed.
+and its redacted sibling. Under local-libvirt both sit beneath `local/runs/<run_id>/` and are
+therefore sweep candidates for the whole capture; the check is written against the `CaptureOutput`
+rather than against a key prefix so it holds for every provider without knowing which tenant it
+writes to. A key that is absent, or present at a different etag, raises `INFRASTRUCTURE_FAILURE`;
+the transaction rolls back and **no** row is committed.
 
 The comparison is on the etag, not on mere existence, and that is a deliberate strengthening: the
-etag the capture observed is already carried on `StoredArtifact` (the remote-libvirt retriever's
-`_reference` reads it from the post-upload HEAD), so comparing it also catches an object that was
-deleted *and re-PUT* between the capture and the finalize — a case a presence check cannot see and
-which would commit a row whose `etag` column is a lie.
+etag the capture observed is already carried on `StoredArtifact` by every producer — the store
+returns it from local-libvirt's `put_stream`/`put_artifact`, and remote-libvirt's `_reference` reads
+it from the post-upload HEAD — so comparing it also catches an object that was deleted *and re-PUT*
+between the capture and the finalize, a case a presence check cannot see and which would commit a row
+whose `etag` column is a lie.
 
 The verify is the **last** thing the transaction does before committing. Ordering matters only for
 the size of the residual window, not for correctness: the sweep's per-key re-check reads committed
 rows, so an uncommitted insert protects nothing, and the object is protected the instant the
 transaction commits. Putting the HEAD immediately before the commit therefore reduces the exposed
-window from the length of a multi-GiB PUT to a HEAD plus a commit round trip. The cost is one
-blocking store call under the Run lock, which is a rounding error next to the capture it follows.
+window from the length of a multi-GiB write to a HEAD plus a commit round trip. The steady-state cost
+is one blocking store call per object under the Run lock, negligible next to the capture it follows;
+the cost when that call *fails* is not negligible, and Consequences states it rather than burying it.
 
 ### 3. This mitigates the race; it does not close it
 
@@ -107,13 +128,25 @@ survives, or the delete fails loudly" does not, and cannot, for as long as the b
 the precondition.
 
 The only remedy that would actually close it is a fence the sweep and the object-before-row writers
-share. For the vmcore lane that means giving the capture a row the sweep's existing fences already
-respect — an `upload_manifests` row for the `(runs, run_id)` owner minted before the presigned URL
-is handed to the guest, which the sweep's manifest fence protects unconditionally and which needs no
-store capability at all. That is a change on the mint side of a lane that deliberately has no upload
-window today, it is the same mechanism #1557 needs, and it is left unowned by this ADR rather than
-half-built here. Re-probing MinIO on a future release for `If-Match` support is the other path back
-to §1's rejected option.
+share, and there are two candidate fences with different reach.
+
+A **shared advisory lock** would reach the local-libvirt vmcore write, since that write is
+server-side — but it requires reversing ADR-0244's deliberate release of the Run lock before the
+capture, which would hold `LockScope.RUN` for the length of a multi-GiB stream and block every other
+Run-scoped operation behind it, and it requires the sweep to take a per-candidate Run lock it takes
+none of today. It also does not generalise: `local/investigations/` is the rootfs upload lane's root
+and its objects arrive as **presigned client PUTs**, where there genuinely is no server-side call to
+hold a lock across.
+
+A **row minted before the write** does generalise, needs no store capability, and reuses fences the
+sweep already evaluates: an `upload_manifests` row for the `(runs, run_id)` owner, committed before
+the capture's `put_stream` and dropped by the finalize, is protected by the sweep's manifest fence
+unconditionally and for every writer under a swept root. That is a change on the mint side of a lane
+that deliberately has no upload window today, it is the mechanism #1557 also wants, and it is left
+unowned by this ADR rather than half-built here.
+
+Re-probing MinIO on a future release for `If-Match` support is the other path back to §1's rejected
+option.
 
 ### 4. The primitive is not reusable for #1557; the finding is
 
@@ -140,6 +173,26 @@ lifecycle rule — now fails the job where it previously succeeded with a dangli
 intended trade: the row was never usable, and `artifacts.get` on it failed later and further from
 the cause.
 
+Two further arms are reachable and are disclosed rather than smoothed over:
+
+- **A transient HEAD fault now discards a completed capture.** `ObjectStore.head` raises
+  `INFRASTRUCTURE_FAILURE` for any non-404, and the verify does not distinguish "the store answered:
+  gone" from "the store could not be asked" — it cannot, because committing on an unanswerable HEAD
+  reopens exactly the hole this closes. So a single 503 or socket timeout on either HEAD rolls back
+  the inserts for a capture whose object is intact, and the job's retry re-captures from scratch:
+  another multi-GiB stream. The verify itself is one round trip, but the *cost of its failure* is a
+  whole re-capture, which is a worse amplification than the round trip suggests. Bounding it with a
+  HEAD retry is deliberately not done here — it is a second mechanism to get right, and the arm is
+  transient and self-healing — but the disclosure is the record for whoever sees it in production.
+- **Two concurrent captures of the same Run whose bytes differ now fail one of the two dispatches.**
+  Both write the same deterministic key, so the later write wins; the handler that finalizes first
+  then heads the key, sees the other's etag, and refuses. Previously both committed, and one of the
+  two `artifacts` rows carried an `etag` that matched no bytes in the bucket — so failing is the more
+  truthful outcome, and `INFRASTRUCTURE_FAILURE` is retryable, so the retry replays into the row the
+  winner committed and nothing is lost. The cost is a spurious job failure and an error metric on a
+  race ADR-0244's dedup guard previously absorbed silently. Byte-identical cores still both succeed,
+  which is what `test_concurrent_same_run_capture_writes_one_core` pins.
+
 The sweep is untouched. ADR-0455 §3's residual paragraph is amended to record this resolution and to
 name the MinIO measurement, so the next reader does not re-derive the rejected option. A same-key
 gap test is added to the sweep's suite: the existing concurrency tests all fire their hook before a
@@ -151,15 +204,15 @@ rather than a fix.
 
 - **S3 `If-Match` on `DeleteObject`** — rejected on measurement, §1. Not a design disagreement: the
   header is ignored by both MinIO releases this repo pins.
-- **An owner-scoped advisory lock shared by the sweep and the writers** — the fence #1557 needs
-  anyway, and rejected here because it does not reach this race: the vmcore PUT is performed by the
-  guest over a presigned URL, so there is no server-side operation to hold a lock across. It would
-  fence `capture_traffic`, which already holds the Run lock across its PUT and is therefore not the
-  path in.
-- **A presigned-URL-time `upload_manifests` row for the vmcore lane** — the only option that would
-  actually close the race (§3), and deliberately not taken here. It changes the mint side of a lane
-  that has no upload window by design, it is shared with #1557, and bundling it into a mitigation
-  would leave neither properly reviewed.
+- **An owner-scoped advisory lock shared by the sweep and the writers** — rejected on cost and
+  reach, not on reachability (§3): it would fence the local-libvirt vmcore write, but only by
+  reversing ADR-0244's release of the Run lock before a multi-GiB capture, and it cannot cover
+  `local/investigations/`, whose objects arrive as presigned client PUTs with no server-side call at
+  all.
+- **An `upload_manifests` row minted before the capture's write** — the option that would actually
+  close the race (§3), and deliberately not taken here. It changes the mint side of a lane that has
+  no upload window by design, it is shared with #1557, and bundling it into a mitigation would leave
+  neither properly reviewed.
 - **A presence-only re-head at finalize** — rejected for the strictly cheaper etag comparison, §2.
   Presence alone cannot distinguish the object the capture wrote from a different object at the same
   key, and the row would then carry an `etag` that never matched the bytes.
