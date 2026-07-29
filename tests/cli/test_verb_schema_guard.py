@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 import io
 import itertools
+import re
 from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
@@ -319,6 +320,56 @@ def test_curated_enum_parameter_declares_its_choices(
             f"{verb.group} {verb.sub} {_flag(name)}: schema enum {enum} but argparse "
             f"choices {declared}"
         )
+
+
+_GENERATED_BY_PATH = {(verb.group, verb.sub): verb for verb in GENERATED_VERBS}
+
+
+@pytest.mark.parametrize("verb", REGISTRY, ids=lambda v: f"{v.group}-{v.sub}")
+def test_curated_parameter_carries_its_generated_help(
+    verb: Verb, parser: argparse.ArgumentParser
+) -> None:
+    """A curated parameter renders the generated verb's help, and never a hand-written one.
+
+    The curated shape has no place to spell a per-parameter description, so ``--help`` came out
+    bare while the derived string sat unread in the descriptor at the same path (#1618). Both
+    directions matter: a parameter whose generated counterpart describes it must render exactly
+    that string, and a parameter with no counterpart must render *nothing* — a help string
+    typed into the ``Verb`` instead would be the second source of truth ADR-0469 exists to
+    avoid, and it would drift the moment the tool's docstring is reworded.
+    """
+    generated = _GENERATED_BY_PATH.get((verb.group, verb.sub))
+    assert generated is not None, f"{verb.group} {verb.sub}: curated verb overrides no tool"
+    described = {flag.dest: flag.help for flag in generated.flags if flag.help}
+    actions = {
+        action.dest: action
+        for action in _subparser_for(parser, verb.group, verb.sub)._actions  # noqa: SLF001
+    }
+    for name in (*verb.positionals, *verb.options, *verb.required_options, *verb.flags):
+        assert actions[name].help == described.get(name), (
+            f"{verb.group} {verb.sub} {_flag(name)}: --help renders "
+            f"{actions[name].help!r}, but the generated verb at the same path derives "
+            f"{described.get(name)!r}"
+        )
+
+
+def test_wait_verb_help_states_its_timeout_default_and_cap(
+    parser: argparse.ArgumentParser,
+) -> None:
+    """``kdivectl jobs wait --help`` states the 30-second default and the 300-second cap.
+
+    The per-parameter guard above compares descriptor to argparse action; this one drives the
+    formatter, because the timeout is the wait verbs' whole semantic surface and neither figure
+    reached the user anywhere else (#1618). The sentence is read back out of the descriptor so a
+    reworded tool docstring does not redden this, but both figures are asserted directly — losing
+    either is the regression, whatever the wording. argparse re-wraps to the terminal width, so
+    the comparison is over whitespace-collapsed text.
+    """
+    flag = next(f for f in _GENERATED_BY_PATH["jobs", "wait"].flags if f.dest == "timeout_s")
+    rendered = " ".join(_subparser_for(parser, "jobs", "wait").format_help().split())
+    assert " ".join(flag.help.split()) in rendered
+    assert re.search(r"\b30\b", rendered), f"no 30-second default in: {rendered}"
+    assert re.search(r"\b300\b", rendered), f"no 300-second cap in: {rendered}"
 
 
 def _child_parser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:

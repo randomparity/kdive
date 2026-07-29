@@ -45,7 +45,7 @@ kdive_image_defaults:
     ppc64le: ppc64el
 
 # The catalog. Each entry: logical name, distro/version, source kind, optional
-# per-entry overrides (packages/helpers/arches/root_device/cloud_image_url/force).
+# per-entry overrides (packages/helpers/arches/host_distros/root_device/cloud_image_url/force).
 # The in-guest helpers are Fedora/RHEL-family (grubby/dracut): the full kdive
 # build->install->boot->debug arc ships for fedora + rocky; the ubuntu image stages,
 # boots, and connects its guest agent (provision/host_dump) but runs.install needs a
@@ -83,6 +83,12 @@ kdive_image_catalog:
     distro: bare
     version: "1"
     source: scratch  # built from the host OS family
+    # Build-host admission (ADR-0481, #1629). The scratch installroot names `busybox`
+    # (ADR-0188 §4 "bare but conformant"), which is absent from the RHEL/Rocky/Alma base
+    # repositories — `dnf --installroot ... busybox` there dies with "Unable to find a
+    # match: busybox". The constraint is per-DISTRO, not per-family: Fedora and Rocky are
+    # both ansible_os_family=RedHat, and only Fedora ships busybox in its base repos.
+    host_distros: [Fedora, Debian, Ubuntu]
 
 host_images_default: [fedora-kdive-remote-base-43]
 
@@ -91,6 +97,23 @@ kdive_requested_images: "{{ host_images | default(host_images_default) }}"
 kdive_selected_images: >-
   {{ kdive_image_catalog | selectattr('name', 'in', kdive_requested_images) | list }}
 kdive_default_image: "{{ host_default_image | default(kdive_requested_images[0]) }}"
+
+# Build-host admission split (ADR-0481). An entry with no `host_distros` is buildable
+# anywhere; one that declares it is buildable only where ansible_distribution is listed.
+# guest_base_image builds the buildable set and SKIPS the rest instead of failing the play,
+# so one undeliverable entry does not cost a host its other images. Computed over names to
+# keep catalog order (Jinja has no list comprehension).
+kdive_buildable_image_names: >-
+  {{ (kdive_selected_images | selectattr('host_distros', 'undefined')
+      | map(attribute='name') | list)
+     + (kdive_selected_images | selectattr('host_distros', 'defined')
+        | selectattr('host_distros', 'contains', ansible_distribution | default(''))
+        | map(attribute='name') | list) }}
+kdive_buildable_images: >-
+  {{ kdive_selected_images | selectattr('name', 'in', kdive_buildable_image_names) | list }}
+kdive_unbuildable_images: >-
+  {{ kdive_selected_images | rejectattr('name', 'in', kdive_buildable_image_names) | list }}
+
 image_arch_alias: >-
   {{ kdive_image_defaults.arch_alias.get(ansible_architecture | default('x86_64'),
      ansible_architecture | default('x86_64')) }}

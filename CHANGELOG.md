@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the crashed-idle reclaim distinctly in the log
 - Summary-first tools.search and a namespace authz signal
 - Report the deployed build on /readyz and preflight live-stack skew
+- Thread schema-derived help into curated verb flags
 
 ### Changed
 
@@ -189,6 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0480 reclaim an abandoned crashed System's allocation
 - Mark ADR-0456 §3 amended and fix the agent-index schema claim
 - Register KDIVE_STACK_SKEW_POLICY in the env reference
+- Note the #1635 interaction in ADR-0471
 
 ### Fixed
 
@@ -321,6 +323,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route every authorization_denied envelope through denied()
 - Reclaim an active allocation on an abandoned crashed System
 - Grade stale_restart on modified files, not bare mtimes
+- Gate the bare image on the build host's distro
 
 ### Build
 

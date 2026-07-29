@@ -1,0 +1,9 @@
+---
+- name: Exercise the remote_libvirt_facts volume confirmation + render (regression harness)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../inventory/group_vars/all.yml
+  roles:
+    - role: remote_libvirt_facts

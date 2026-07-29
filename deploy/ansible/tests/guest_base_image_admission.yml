@@ -1,0 +1,18 @@
+---
+- name: Exercise the guest_base_image admission decision in isolation (regression harness)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../inventory/group_vars/all.yml
+  roles:
+    - role: guest_base_image
+  tasks:
+    - name: Record the admission decision for the harness
+      ansible.builtin.copy:
+        content: |
+          buildable={{ kdive_buildable_images | map(attribute='name') | join(',') }}
+          skipped={{ kdive_unbuildable_images | map(attribute='name') | join(',') }}
+        dest: "{{ admission_out }}"
+        mode: "0644"
+      tags: [guest_base_image_admission]
