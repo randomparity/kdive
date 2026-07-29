@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import psycopg
 
 from kdive.db import migrate
+from kdive.reconciler.cleanup.upload_orphans import _RECLAIMABLE_SQL
 from kdive.store.objectstore import _LIST_PAGE_SIZE as _PAGE_WIDTH
 
 
@@ -84,21 +86,25 @@ def test_general_index_is_usable_without_an_owner_kind_predicate(
     assert "artifacts_object_key_idx" in plan_text
 
 
-def test_a_page_wide_unnest_anti_join_is_index_served(pg_conn: psycopg.Connection) -> None:
+def test_the_sweeps_page_wide_classify_is_index_served(pg_conn: psycopg.Connection) -> None:
     """The orphan sweep classifies a listing page at a time now (#1569, ADR-0498 §5).
 
-    Paging turns one root-wide statement into several page-wide ones, and the worry that makes that
-    worth pinning is the planner picking a *worse* strategy at the narrower width — the driving
-    side's estimate tracks the array's real length, so the width is visible to the planner and the
-    choice genuinely can differ. It differs in the safe direction: at a page's width the anti-join
-    is a nested loop over migration ``0081``'s ``object_key`` btree, so N pages cost N pages' worth
-    of index probes and not N sequential scans of ``artifacts``.
+    Paging turns one root-wide statement into several page-wide ones, and the worry that makes
+    that worth pinning is the planner picking a *worse* strategy at the narrower width: the
+    driving side's estimate tracks the array's real length, so the width is visible to the
+    planner and the choice genuinely can differ. It differs in the safe direction — at a page's
+    width the ``artifacts`` anti-join is a nested loop over migration ``0081``'s ``object_key``
+    btree, so N pages cost N pages' worth of index probes and not N sequential scans.
+
+    ``_RECLAIMABLE_SQL`` itself is what is explained, not a hand-written approximation of it. The
+    real statement has four parallel arrays, a ``last_modified`` inequality that cuts the driving
+    estimate to a third, and a second anti-join against ``upload_manifests`` — all of which move
+    the join order search and the crossover, so a reduced stand-in would pin a plan the sweep
+    never asks for.
 
     Enough rows are inserted for the index to win on cost, so no ``enable_seqscan`` override is
-    needed and the plan asserted is the one production gets. The row count is not arbitrary: the
-    crossover on this schema sits right at 80k, close enough that a byte of row width flips it, and
-    200k puts the nested loop ~2x ahead. ADR-0498 §5 records that measurement and the wall-clock
-    comparison against the root-wide statement.
+    needed and the plan asserted is the one production gets. ADR-0498 §5 records the measurement
+    across widths and the wall-clock comparison against the root-wide statement.
     """
     migrate.apply_migrations(pg_conn)
     owner = uuid4()
@@ -110,11 +116,11 @@ def test_a_page_wide_unnest_anti_join_is_index_served(pg_conn: psycopg.Connectio
     )
     pg_conn.execute("ANALYZE artifacts")
 
+    aged = datetime.now(UTC) - timedelta(days=99)
     page = [f"local/runs/{owner}/absent-{i:06d}" for i in range(_PAGE_WIDTH)]
     plan = pg_conn.execute(
-        b"EXPLAIN SELECT c.key FROM unnest(%s::text[]) AS c(key) "
-        b"WHERE NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)",
-        (page,),
+        b"EXPLAIN " + _RECLAIMABLE_SQL.encode(),
+        (page, [aged] * len(page), ["runs"] * len(page), [owner] * len(page), timedelta(hours=1)),
     ).fetchall()
     plan_text = "\n".join(row[0] for row in plan)
     assert "artifacts_object_key_idx" in plan_text, plan_text
