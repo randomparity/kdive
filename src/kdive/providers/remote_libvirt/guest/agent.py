@@ -65,15 +65,6 @@ _DETERMINISTIC_CONFIG_CODES: frozenset[int] = frozenset(
     }
 )
 
-# The build transport runs only AFTER the guest-ping readiness gate (ADR-0168) has confirmed the
-# agent answers a command, so a subsequent VIR_ERR_AGENT_UNRESPONSIVE (code 86) is no longer the
-# mid-boot transient ADR-0159 keeps retryable — it is a deterministic dead-agent condition for the
-# build path. This extended set is used ONLY by GuestExecBuildTransport; every other consumer keeps
-# the base set above, so ADR-0159's global contract is unchanged.
-BUILD_DETERMINISTIC_CONFIG_CODES: frozenset[int] = _DETERMINISTIC_CONFIG_CODES | frozenset(
-    {libvirt.VIR_ERR_AGENT_UNRESPONSIVE}
-)
-
 # An RPC the guest image excluded from qemu-guest-agent's `--allow-rpcs` allowlist is refused
 # INSIDE a healthy channel, not by dropping it: QEMU's `qmp_dispatch` answers with
 # `error_setg(..., "Command %s has been disabled%s%s")` (GenericError), and libvirt's
@@ -91,13 +82,13 @@ _RPC_DISABLED_RE = re.compile(r"[Cc]ommand\s+(?P<rpc>[A-Za-z0-9_-]+)\s+has been 
 
 
 def classify_agent_libvirt_error(
-    domain: GuestDomain, exc: libvirt.libvirtError, *, deterministic_codes: frozenset[int]
+    domain: GuestDomain, exc: libvirt.libvirtError
 ) -> CategorizedError:
-    """Map a guest-agent libvirt error onto the correct failure category (ADR-0159, ADR-0168).
+    """Map a guest-agent libvirt error onto the correct failure category (ADR-0159).
 
-    A libvirt error whose code is in ``deterministic_codes`` names a deterministic condition —
-    the agent is not configured, the command is denied, the host cannot run it, or (for the
-    post-readiness build transport) the agent has gone unresponsive — and is a permanent failure
+    A libvirt error whose code is in ``_DETERMINISTIC_CONFIG_CODES`` names a deterministic
+    condition — the agent is not configured, the command is denied, or the host cannot run it —
+    and is a permanent failure
     (``CONFIGURATION_ERROR``, not retryable). An allowlist denial is permanent too but arrives
     under libvirt's catch-all ``VIR_ERR_INTERNAL_ERROR``, so it is recognised by its message
     (``_RPC_DISABLED_RE``) and named after the RPC the guest refused. Every other libvirt error,
@@ -122,7 +113,7 @@ def classify_agent_libvirt_error(
             category=ErrorCategory.CONFIGURATION_ERROR,
             details=details,
         )
-    if code in deterministic_codes:
+    if code in _DETERMINISTIC_CONFIG_CODES:
         return CategorizedError(
             "qemu-guest-agent is not usable on this build host "
             "(not configured, unsupported, denied, or unresponsive)",
@@ -218,7 +209,6 @@ class GuestAgentExec:
         *,
         agent_command: AgentCommand,
         allowed_programs: frozenset[str],
-        deterministic_codes: frozenset[int] = _DETERMINISTIC_CONFIG_CODES,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         poll_s: float = _DEFAULT_POLL_S,
         agent_call_timeout_s: int = _DEFAULT_AGENT_CALL_TIMEOUT_S,
@@ -227,7 +217,6 @@ class GuestAgentExec:
     ) -> None:
         self._agent_command = agent_command
         self._allowed_programs = allowed_programs
-        self._deterministic_codes = deterministic_codes
         self._timeout_s = timeout_s
         self._poll_s = poll_s
         self._agent_call_timeout_s = agent_call_timeout_s
@@ -321,9 +310,7 @@ class GuestAgentExec:
         try:
             raw = self._agent_command(domain, command, self._agent_call_timeout_s, 0)
         except libvirt.libvirtError as exc:
-            raise classify_agent_libvirt_error(
-                domain, exc, deterministic_codes=self._deterministic_codes
-            ) from exc
+            raise classify_agent_libvirt_error(domain, exc) from exc
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as exc:

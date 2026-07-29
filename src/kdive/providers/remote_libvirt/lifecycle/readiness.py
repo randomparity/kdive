@@ -10,7 +10,6 @@ import libvirt
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.providers.remote_libvirt.guest.agent import (
-    _DETERMINISTIC_CONFIG_CODES,
     AgentCommand,
     classify_agent_libvirt_error,
 )
@@ -120,9 +119,7 @@ def wait_for_agent_responsive(
             agent_command(domain, _GUEST_PING_COMMAND, call_timeout_s, 0)
             return
         except libvirt.libvirtError as exc:
-            classified = classify_agent_libvirt_error(
-                domain, exc, deterministic_codes=_DETERMINISTIC_CONFIG_CODES
-            )
+            classified = classify_agent_libvirt_error(domain, exc)
             if classified.category is ErrorCategory.CONFIGURATION_ERROR:
                 raise classified from exc
             # Transient (incl. AGENT_UNRESPONSIVE / bare drop): keep polling until the deadline.

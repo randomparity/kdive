@@ -1,5 +1,13 @@
 # ADR 0168 — An active guest-ping gate makes a build-VM agent ready, and a post-readiness code 86 is deterministic
 
+> **Decision 2 no longer applies** (2026-07-28, #1657) — the `deterministic_codes` parameter and
+> `BUILD_DETERMINISTIC_CONFIG_CODES` were removed as dead code. They existed only for
+> `GuestExecBuildTransport`, which the server-build-lane removal
+> ([ADR-0316](0316-remove-server-build-lane.md)) deleted; no caller had overridden the set since.
+> `classify_agent_libvirt_error` now applies ADR-0159's base set unconditionally, so code 86 is
+> retryable `transport_failure` on every plane. Decision 1 — the `wait_for_agent_responsive`
+> guest-ping gate in `lifecycle/readiness.py` — is unchanged and still in force.
+
 - **Status:** Accepted <!-- Proposed | Accepted | Rejected | Superseded by NNNN -->
 - **Date:** 2026-06-18
 - **Deciders:** KDIVE maintainers
