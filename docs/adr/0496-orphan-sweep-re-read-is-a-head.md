@@ -100,6 +100,13 @@ bounded. The remaining per-key cost is the `artifacts` anti-join, which is an in
 catalog, and one of its two per-candidate terms is unchanged; re-tuning it wants a measurement
 against a real backlog, not an inference from a removed term.
 
+The S3 action changes for this call — `list_objects_v2` needs `s3:ListBucket`, `head_object`
+needs `s3:GetObject` — which would be a deployment break if the reconciler's credentials granted
+only the first. They do not need to: the dangling-image sweep in
+`reconciler/cleanup/images.py` already calls `ObjectStore.head_present`, which is
+`head_object`, on the same store object in the same process. Any policy that lets the reconciler
+run today already permits this read.
+
 The sweep is the only consumer of the new field, so every other `HeadResult` caller now carries a
 value it ignores. That is the honest price of the required-field decision in §2 and is recorded
 rather than left to be discovered.
