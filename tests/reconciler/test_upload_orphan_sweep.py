@@ -702,6 +702,46 @@ def test_an_object_rewritten_between_the_listing_and_the_delete_is_not_reclaimed
     asyncio.run(_run())
 
 
+def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(migrated_url: str) -> None:
+    """ADR-0455 §3's residual, for the key actually being deleted (#1574, ADR-0497).
+
+    Every other concurrency test in this module fires its hook before a **different** key's delete,
+    so what they pin is the re-check declining a *later* candidate — the gap this one is about was
+    never exercised. Here the store holds one key, so the hook lands between that key's own
+    re-check and its own ``delete_object``, and the delete is unconditional: the fresh bytes go.
+
+    This asserts the loss on purpose. ADR-0497 rejected the fix this test invites — S3 ``If-Match``
+    on ``DeleteObject``, using the etag the re-read already observed — because both MinIO releases
+    this repo pins accept the header, return success, and delete the object regardless, so a guard
+    built on it would leave this assertion true while reading as if the race were closed. The loss
+    is instead made *loud* one layer down, where ``finalize_capture`` refuses to commit a row
+    against the object this delete removed
+    (``tests/adversarial/test_vmcore_finalize_object_verify.py``). If this test ever fails because
+    the object survived, the store has gained the precondition and ADR-0497 §1 should be revisited.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        vmcore = f"{prefix}vmcore-kdump"
+        store: _FakeUploadStore
+
+        def _the_retried_capture_s_put_completes() -> None:
+            store.put(vmcore, timedelta(seconds=0))
+
+        # One key, so the hook fires in *this* key's gap rather than ahead of a sibling's.
+        store = _HookedStore(
+            {vmcore: _GRACE * 2}, before_delete=_the_retried_capture_s_put_completes
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == 1
+        assert store.deleted == [vmcore]
+        assert vmcore not in store.present
+
+    asyncio.run(_run())
+
+
 def test_an_object_deleted_by_someone_else_before_the_delete_is_skipped(
     migrated_url: str,
 ) -> None:

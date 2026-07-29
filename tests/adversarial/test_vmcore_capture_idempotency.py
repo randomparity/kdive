@@ -24,7 +24,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import StoredArtifact
+from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError
@@ -36,6 +36,7 @@ from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.jobs.provider_context import take_provider_kind
 from kdive.providers.ports.retrieve import CaptureOutput
 from kdive.security.audit import args_digest
+from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
 
@@ -67,11 +68,30 @@ def _core(run_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP) -> Captu
     return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
 
 
-class _BarrierRetriever:
+class _CaptureDouble:
+    """Base for this module's capture fakes: also the store ``finalize_capture`` verifies through.
+
+    ADR-0497 makes a retriever double incomplete on its own — the handler heads both objects the
+    ``CaptureOutput`` names before committing. Recording them here keeps the double self-consistent
+    without any test having to restate the keys and etags ``_core`` already chose.
+    """
+
+    def __init__(self, run_id: str) -> None:
+        self._run_id = run_id
+        self._objects = WrittenObjects()
+
+    def _output(self, method: CaptureMethod) -> CaptureOutput:
+        return self._objects.record(_core(self._run_id, method))
+
+    def head(self, key: str) -> HeadResult | None:
+        return self._objects.head(key)
+
+
+class _BarrierRetriever(_CaptureDouble):
     """A retriever whose capture seam rendezvouses on a barrier, forcing the precheck race."""
 
     def __init__(self, run_id: str, barrier: threading.Barrier) -> None:
-        self._run_id = run_id
+        super().__init__(run_id)
         self._barrier = barrier
         self._lock = threading.Lock()
         self.calls = 0
@@ -80,7 +100,7 @@ class _BarrierRetriever:
         with self._lock:
             self.calls += 1
         self._barrier.wait()  # both handlers reach here only after both passed precheck
-        return _core(self._run_id, method)
+        return self._output(method)
 
 
 async def _raw_core_count(pool: AsyncConnectionPool, run_id: str) -> int:
@@ -113,7 +133,9 @@ def test_concurrent_same_run_capture_writes_one_core(migrated_url: str) -> None:
 
             async def _handle() -> str | None:
                 async with pool.connection() as conn:
-                    return await vmcore_plane.capture_handler(conn, job, resolver=resolver)
+                    return await vmcore_plane.capture_handler(
+                        conn, job, resolver=resolver, artifact_store=retriever
+                    )
 
             results = await asyncio.gather(_handle(), _handle())
             count = await _raw_core_count(pool, run_id)
@@ -146,9 +168,12 @@ def test_two_runs_on_one_system_retain_distinct_cores(migrated_url: str) -> None
                         _AUTH,
                         f"{run_id}:capture_vmcore:host_dump",
                     )
-                resolver = provider_resolver(retriever=_PlainRetriever(run_id))
+                retriever = _PlainRetriever(run_id)
+                resolver = provider_resolver(retriever=retriever)
                 async with pool.connection() as conn:
-                    await vmcore_plane.capture_handler(conn, job, resolver=resolver)
+                    await vmcore_plane.capture_handler(
+                        conn, job, resolver=resolver, artifact_store=retriever
+                    )
             count_a = await _raw_core_count(pool, run_a)
             count_b = await _raw_core_count(pool, run_b)
 
@@ -158,14 +183,11 @@ def test_two_runs_on_one_system_retain_distinct_cores(migrated_url: str) -> None
     asyncio.run(_run())
 
 
-class _PlainRetriever:
+class _PlainRetriever(_CaptureDouble):
     """A retriever that returns a deterministic Run-owned core with no rendezvous."""
 
-    def __init__(self, run_id: str) -> None:
-        self._run_id = run_id
-
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
-        return _core(self._run_id, method)
+        return self._output(method)
 
 
 # --- captured_method / method-suffix parsing (pure) ------------------------------------------
@@ -195,16 +217,16 @@ def test_captured_method_rejects_missing_suffix() -> None:
 # --- handler collaborator args / audit / telemetry -------------------------------------------
 
 
-class _RecordingRetriever:
+class _RecordingRetriever(_CaptureDouble):
     """A retriever recording the (system_id, run_id, method) it was driven with."""
 
     def __init__(self, run_id: str) -> None:
-        self._run_id = run_id
+        super().__init__(run_id)
         self.calls: list[tuple[UUID, UUID, CaptureMethod]] = []
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         self.calls.append((system_id, run_id, method))
-        return _core(self._run_id, method)
+        return self._output(method)
 
 
 async def _audit_rows(pool: AsyncConnectionPool, run_id: str) -> list[dict[str, Any]]:
@@ -271,7 +293,7 @@ def test_capture_handler_threads_args_records_audit_and_telemetry(migrated_url: 
             telemetry = CaptureTelemetry(meter=meter)
             async with pool.connection() as conn:
                 result = await vmcore_plane.capture_handler(
-                    conn, job, resolver=resolver, telemetry=telemetry
+                    conn, job, resolver=resolver, artifact_store=retriever, telemetry=telemetry
                 )
                 # Same task as the handler: the provider-kind tag it set is still readable.
                 provider_kind = take_provider_kind()
@@ -334,10 +356,13 @@ def test_capture_handler_missing_run_fails_closed(migrated_url: str) -> None:
                     _AUTH,
                     f"{missing_run_id}:capture_vmcore:host_dump",
                 )
-            resolver = provider_resolver(retriever=_PlainRetriever(missing_run_id))
+            retriever = _PlainRetriever(missing_run_id)
+            resolver = provider_resolver(retriever=retriever)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as excinfo:
-                    await vmcore_plane.capture_handler(conn, job, resolver=resolver)
+                    await vmcore_plane.capture_handler(
+                        conn, job, resolver=resolver, artifact_store=retriever
+                    )
             assert excinfo.value.details["run_id"] == missing_run_id
 
     asyncio.run(_run())
@@ -363,7 +388,9 @@ def test_capture_handler_idempotent_recapture_returns_existing_core(migrated_url
                 retriever = _RecordingRetriever(run_id)
                 resolver = provider_resolver(retriever=retriever)
                 async with pool.connection() as conn:
-                    res = await vmcore_plane.capture_handler(conn, job, resolver=resolver)
+                    res = await vmcore_plane.capture_handler(
+                        conn, job, resolver=resolver, artifact_store=retriever
+                    )
                 return res, len(retriever.calls)
 
             first, first_calls = await _capture()

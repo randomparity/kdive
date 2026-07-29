@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from psycopg import AsyncConnection
 
 from kdive.artifacts.read_model import raw_vmcore_key, redacted_vmcore_artifact_id
 from kdive.artifacts.registration import register_artifact_row
+from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
@@ -27,6 +28,17 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.security import audit
 
 _DISABLED_TELEMETRY = CaptureTelemetry.disabled()
+
+
+class CaptureObjectStore(Protocol):
+    """The one store read this plane needs: stat a key it is about to reference (ADR-0497).
+
+    Narrower than :class:`~kdive.store.objectstore.ObjectStore` on purpose. The verify needs the
+    object's current identity and nothing else, and a port that cannot delete or write is a port
+    that cannot be misused into compensating for a failed verify.
+    """
+
+    def head(self, key: str) -> HeadResult | None: ...
 
 
 def captured_method(object_key: str) -> str:
@@ -102,14 +114,85 @@ async def precheck_run(
         return run, system
 
 
+async def verify_objects_still_stored(
+    store: CaptureObjectStore, run_id: UUID, *stored: StoredArtifact
+) -> None:
+    """Raise unless the store still holds each ``stored`` object at the etag the capture observed.
+
+    This is the ADR-0497 fence against a lost write. The vmcore lane's keys are deterministic per
+    ``(run, method)`` and mint **no** upload window, so between a first attempt that PUT the core
+    and died before this finalize and a retry that PUTs it again, the key is a live candidate for
+    the ADR-0455 orphan sweep: rowless, manifest-less, and past the grace. The sweep re-reads and
+    re-classifies immediately before deleting, but a PUT landing inside that last gap is deleted
+    anyway (ADR-0455 §3), and the guest's presigned PUT holds no lock any fence could contend on.
+    Without this check the retry then commits ``artifacts`` rows against bytes that no longer
+    exist — a dangling reference on a Run reporting success — and nothing raises.
+
+    The comparison is on the etag rather than on presence, which costs the same round trip and
+    catches strictly more: an object deleted *and re-PUT* between the capture and here is present
+    but is not the object the row would claim, and committing would write an ``etag`` column that
+    never matched any bytes.
+
+    This does not prevent the delete — the sweep still destroys the object, because the conditional
+    delete that would have stopped it is inert on the MinIO releases this repo pins (ADR-0497 §1).
+    It converts a silent dangling row into a failed job naming the key.
+
+    Args:
+        store: The object store to stat through.
+        run_id: The owning Run, for the error details.
+        stored: Every object whose ``artifacts`` row is about to be committed.
+
+    Raises:
+        CategorizedError: an object is absent or holds different bytes
+            (:attr:`~kdive.domain.errors.ErrorCategory.INFRASTRUCTURE_FAILURE`). Raised inside the
+            caller's transaction so no row survives.
+    """
+    for artifact in stored:
+        head = await asyncio.to_thread(store.head, artifact.key)
+        details: dict[str, object] = {
+            "run_id": str(run_id),
+            "object_key": artifact.key,
+            "captured_etag": artifact.etag,
+        }
+        if head is None:
+            raise CategorizedError(
+                "the captured object is gone from the object store; no artifact row is committed "
+                "for this capture. Re-run the capture.",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details=details,
+            )
+        if head.etag != artifact.etag:
+            raise CategorizedError(
+                "the captured object was replaced in the object store after it was captured; no "
+                "artifact row is committed for this capture. Re-run the capture.",
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+                details=details | {"stored_etag": head.etag},
+            )
+
+
 async def finalize_capture(
-    conn: AsyncConnection, job: Job, run: Run, method: CaptureMethod, output: Any
+    conn: AsyncConnection,
+    job: Job,
+    run: Run,
+    method: CaptureMethod,
+    output: Any,
+    *,
+    artifact_store: CaptureObjectStore,
 ) -> str | None:
     """Insert both Run-owned artifact rows + audit under the per-Run lock (ADR-0244).
 
     Returns the redacted artifact's id — the job's result reference (ADR-0466). A concurrent
     handler that already landed the core wins the re-check and its redacted id is returned
     instead; ``None`` only when that raced core has no surviving redacted row.
+
+    Both objects are re-stated against the store before this transaction commits
+    (:func:`verify_objects_still_stored`, ADR-0497). It is the **last** thing the transaction does,
+    and that ordering is the whole point: the orphan sweep's per-key re-check reads *committed*
+    rows, so an uncommitted insert protects nothing and the object becomes safe only at the commit.
+    Heading immediately before it therefore narrows the window in which the sweep can delete under
+    this handler from the length of a multi-GiB PUT to a HEAD plus a commit round trip. The replay
+    arm needs no verify: it commits no new row, and the object it returns an id for is already
+    row-protected.
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
         existing = await raw_vmcore_key(conn, run.id)
@@ -134,6 +217,7 @@ async def finalize_capture(
                 project=run.project,
             ),
         )
+        await verify_objects_still_stored(artifact_store, run.id, output.raw, output.redacted)
     return str(redacted.id)
 
 
@@ -142,6 +226,7 @@ async def capture_handler(
     job: Job,
     *,
     resolver: ProviderResolver,
+    artifact_store: CaptureObjectStore,
     telemetry: CaptureTelemetry = _DISABLED_TELEMETRY,
 ) -> str | None:
     """Capture the System's vmcore, store the raw + redacted rows, return the redacted id.
@@ -149,6 +234,11 @@ async def capture_handler(
     The returned value becomes the job's ``result_ref`` and reaches the agent as ``refs.result``
     on every ``jobs.wait`` / ``jobs.list`` read — the redacted artifact id it hands
     straight to ``artifacts.get`` (ADR-0466). ``None`` when no redacted row survives.
+
+    ``artifact_store`` is required rather than defaulted: it is what
+    :func:`verify_objects_still_stored` stats through, and a ``None`` default that skipped the
+    verify would be a data-loss guard that silently does nothing — the same failure mode ADR-0497
+    §1 rejects the conditional delete for.
     """
     payload = load_payload(job, CaptureVmcorePayload)
     run_id = UUID(payload.run_id)
@@ -163,7 +253,9 @@ async def capture_handler(
     started = time.perf_counter()
     try:
         output = await asyncio.to_thread(retriever.capture, system.id, run.id, method)
-        result = await finalize_capture(conn, job, run, method, output)
+        result = await finalize_capture(
+            conn, job, run, method, output, artifact_store=artifact_store
+        )
     except Exception:
         elapsed = time.perf_counter() - started
         outcome: CaptureOutcome = "error"
@@ -185,10 +277,13 @@ def register_handlers(
     registry: HandlerRegistry,
     *,
     resolver: ProviderResolver,
+    artifact_store: CaptureObjectStore,
     telemetry: CaptureTelemetry = _DISABLED_TELEMETRY,
 ) -> None:
     """Bind the `capture_vmcore` job handler."""
     registry.register(
         JobKind.CAPTURE_VMCORE,
-        lambda conn, job: capture_handler(conn, job, resolver=resolver, telemetry=telemetry),
+        lambda conn, job: capture_handler(
+            conn, job, resolver=resolver, artifact_store=artifact_store, telemetry=telemetry
+        ),
     )

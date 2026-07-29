@@ -15,7 +15,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import StoredArtifact
+from kdive.artifacts.storage import HeadResult, StoredArtifact
 from kdive.db.repositories import IMAGE_CATALOG
 from kdive.domain.capacity.state import JobState
 from kdive.domain.capture import CaptureMethod
@@ -39,6 +39,7 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.json_data import data_str
 from tests.mcp.systems_support import provider_resolver
@@ -104,27 +105,43 @@ def _capture_output(run_id: str, method: CaptureMethod = CaptureMethod.HOST_DUMP
 
 
 class _FakeRetriever:
-    """Records capture calls; returns a canned CaptureOutput or raises a planted error."""
+    """Records capture calls; returns a canned CaptureOutput or raises a planted error.
+
+    Doubles as the ``CaptureObjectStore`` ``finalize_capture`` verifies through (ADR-0497), so the
+    objects it claims to have written are the objects the handler finds — which is what a real
+    provider plus its bucket does, and keeps the keys and etags in one place.
+    """
 
     def __init__(self, run_id: str, *, raises: CategorizedError | None = None) -> None:
         self._run_id = run_id
         self._raises = raises
+        self._objects = WrittenObjects()
         self.calls = 0
         self.methods: list[CaptureMethod] = []
+
+    def head(self, key: str) -> HeadResult | None:
+        return self._objects.head(key)
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         self.calls += 1
         self.methods.append(method)
         if self._raises is not None:
             raise self._raises
-        return _capture_output(self._run_id, method)
+        return self._objects.record(_capture_output(self._run_id, method))
 
 
 class _NoCaptureRetriever:
-    """Fails the test if .capture is ever called (idempotency probe)."""
+    """Fails the test if .capture is ever called (idempotency probe).
+
+    Its ``head`` answers nothing on purpose: the replay arm commits no row and so must stat no
+    object (ADR-0497). A replay that reached the verify would fail here rather than silently pass.
+    """
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         raise AssertionError("capture must not be called when a vmcore row already exists")
+
+    def head(self, key: str) -> HeadResult | None:
+        raise AssertionError("the replay arm commits no row, so it must stat no object")
 
 
 class _FakeCrash:
@@ -847,7 +864,10 @@ def test_capture_handler_stores_rows_and_returns_redacted_artifact_id(migrated_u
             retriever = _FakeRetriever(run_id)
             async with pool.connection() as conn:
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=retriever)
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=retriever),
+                    artifact_store=retriever,
                 )
             assert ref is not None
             assert await _artifact_key_for(pool, ref) == (
@@ -875,7 +895,10 @@ def test_capture_handler_plumbs_method_to_retriever(migrated_url: str) -> None:
             retriever = _FakeRetriever(run_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=retriever)
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=retriever),
+                    artifact_store=retriever,
                 )
         assert retriever.methods == [CaptureMethod.HOST_DUMP]
 
@@ -894,8 +917,12 @@ def test_capture_handler_idempotent_replay_returns_redacted_artifact_id(
             redacted_id = await _seed_core_rows(pool, run_id, raw)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
+                replay = _NoCaptureRetriever()
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_NoCaptureRetriever())
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=replay),
+                    artifact_store=replay,
                 )
             assert ref == redacted_id
             assert await _artifact_count(pool, run_id) == 2  # no new rows
@@ -918,8 +945,12 @@ def test_capture_handler_replay_without_redacted_row_returns_no_ref(migrated_url
                 )
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
+                replay = _NoCaptureRetriever()
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_NoCaptureRetriever())
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=replay),
+                    artifact_store=replay,
                 )
             assert ref is None
             assert await _artifact_count(pool, run_id) == 1
@@ -940,8 +971,12 @@ def test_capture_handler_rejects_different_method(migrated_url: str) -> None:
             job = await _enqueue_capture(pool, run_id, method="kdump")
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
+                    replay = _NoCaptureRetriever()
                     await vmcore_plane.capture_handler(
-                        conn, job, resolver=provider_resolver(retriever=_NoCaptureRetriever())
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=replay),
+                        artifact_store=replay,
                     )
             assert exc.value.category is ErrorCategory.CONFIGURATION_ERROR
             assert exc.value.details["existing_method"] == "host_dump"
@@ -967,7 +1002,10 @@ def test_capture_handler_no_core_raises_readiness(migrated_url: str) -> None:
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
                     await vmcore_plane.capture_handler(
-                        conn, job, resolver=provider_resolver(retriever=retriever)
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=retriever),
+                        artifact_store=retriever,
                     )
             assert exc.value.category is ErrorCategory.READINESS_FAILURE
             assert await _artifact_count(pool, run_id) == 0
@@ -982,8 +1020,12 @@ def test_capture_handler_missing_run_is_infra_failure(migrated_url: str) -> None
             job = await _enqueue_capture(pool, ghost)
             async with pool.connection() as conn:
                 with pytest.raises(CategorizedError) as exc:
+                    ghost_capture = _FakeRetriever(ghost)
                     await vmcore_plane.capture_handler(
-                        conn, job, resolver=provider_resolver(retriever=_FakeRetriever(ghost))
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=ghost_capture),
+                        artifact_store=ghost_capture,
                     )
         assert exc.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
@@ -1002,8 +1044,12 @@ def test_terminal_capture_job_carries_the_redacted_artifact_id(migrated_url: str
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
+                capture_double = _FakeRetriever(run_id)
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             assert ref is not None
             key = await _artifact_key_for(pool, ref)
@@ -1026,8 +1072,12 @@ def test_viewer_reads_the_captured_core_through_the_job_reference(migrated_url: 
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
+                capture_double = _FakeRetriever(run_id)
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             from kdive.mcp.tools.catalog.artifacts.reads import (  # noqa: PLC0415
                 ArtifactsGetRequest,
@@ -1055,8 +1105,12 @@ def test_runs_get_surfaces_the_captured_core_for_a_viewer(migrated_url: str) -> 
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
             async with pool.connection() as conn:
+                capture_double = _FakeRetriever(run_id)
                 ref = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             from kdive.mcp.tools.lifecycle.runs.view import get_run  # noqa: PLC0415
 
@@ -1112,8 +1166,12 @@ async def _crashed_with_built_run(pool: AsyncConnectionPool) -> str:
     )
     job = await _enqueue_capture(pool, run_id)
     async with pool.connection() as conn:
+        capture_double = _FakeRetriever(run_id)
         await vmcore_plane.capture_handler(
-            conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+            conn,
+            job,
+            resolver=provider_resolver(retriever=capture_double),
+            artifact_store=capture_double,
         )
     return run_id
 
@@ -1334,9 +1392,13 @@ def test_no_raw_vmcore_key_in_any_read_response(migrated_url: str) -> None:
         async with _pool(migrated_url) as pool:
             sys_id, run_id = await _crashed_run(pool)
             job = await _enqueue_capture(pool, run_id)
+            capture_double = _FakeRetriever(run_id)
             async with pool.connection() as conn:
                 core_id = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_FakeRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             refs: list[str] = []
             from kdive.mcp.tools.catalog.artifacts.reads import (
@@ -1403,6 +1465,7 @@ def test_capture_handler_emits_telemetry_on_success(migrated_url: str) -> None:
                     conn,
                     job,
                     resolver=provider_resolver(retriever=retriever),
+                    artifact_store=retriever,
                     telemetry=telemetry,
                 )
         dur_pts = _metric_points(reader, "kdive.vmcore.capture.duration")
@@ -1436,6 +1499,7 @@ def test_capture_handler_emits_error_telemetry_no_bytes(migrated_url: str) -> No
                         conn,
                         job,
                         resolver=provider_resolver(retriever=retriever),
+                        artifact_store=retriever,
                         telemetry=telemetry,
                     )
         dur_pts = _metric_points(reader, "kdive.vmcore.capture.duration")
@@ -1452,7 +1516,10 @@ def test_capture_handler_emits_error_telemetry_no_bytes(migrated_url: str) -> No
 
 def test_register_handlers_binds_capture_vmcore() -> None:
     registry = HandlerRegistry()
+    capture_double = _FakeRetriever("x")
     vmcore_plane.register_handlers(
-        registry, resolver=provider_resolver(retriever=_FakeRetriever("x"))
+        registry,
+        resolver=provider_resolver(retriever=capture_double),
+        artifact_store=capture_double,
     )
     assert registry.get(JobKind.CAPTURE_VMCORE) is not None

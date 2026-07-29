@@ -151,11 +151,14 @@ def _watch_for_crash_handler_registrar(
     return _register
 
 
-def _vmcore_handlers_registrar(resolver: ProviderResolver) -> HandlerRegistrar:
+def _vmcore_handlers_registrar(
+    *, resolver: ProviderResolver, object_stores: ObjectStoreAssembly
+) -> HandlerRegistrar:
     def _register(registry: HandlerRegistry) -> None:
         vmcore.register_handlers(
             registry,
             resolver=resolver,
+            artifact_store=object_stores.store,
             telemetry=CaptureTelemetry(meter=metrics.get_meter("kdive.worker")),
         )
 
@@ -219,7 +222,9 @@ def build_handler_registrars(assembly: WorkerHandlerAssembly) -> tuple[HandlerRe
         _watch_for_crash_handler_registrar(
             resolver=assembly.resolver, secret_registry=assembly.secret_registry
         ),
-        _vmcore_handlers_registrar(assembly.resolver),
+        _vmcore_handlers_registrar(
+            resolver=assembly.resolver, object_stores=assembly.object_stores
+        ),
         _image_build_handler_registrar(
             resolver=assembly.resolver, object_stores=assembly.object_stores
         ),
