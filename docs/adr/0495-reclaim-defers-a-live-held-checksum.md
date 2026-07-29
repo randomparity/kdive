@@ -69,40 +69,44 @@ pointing an operator at the object store over a purely local reclaim race.
    filename. The glob is the same `<dest.stem>.*.partial` the fetch-side sweep uses against its own
    `dest`.
 
-4. **The gate is read-only and fail-closed, and `staging_partials` grows a second entry point
-   rather than having its collector predicate re-read.** `unlink_partial_if_unheld` is a *collector*:
-   its `bool` merges "locked it, so it is a crash orphan" with "could not be evaluated", which is
-   correct there because both call for the same inaction on the only thing it touches — the file. A
-   caller that reads that `False` as "no live writer" and then deletes a staged base, an object-store
-   object and an `artifacts` row is doing #1558's data loss with extra steps: an `EACCES` partial
-   under the uid asymmetry ADR-0442 documents in this same subsystem, or an `EMFILE` under descriptor
-   exhaustion (likeliest exactly when many stagings are in flight), is a file the reclaim **cannot
-   show is dead**.
+4. **The gate is read-only, and `staging_partials` grows a second entry point rather than having its
+   collector predicate re-read.** `unlink_partial_if_unheld` is a *collector*, and its whole
+   vocabulary is "was this file dealt with". A caller whose answer instead licenses deleting a staged
+   base, an object-store object and an `artifacts` row must not unlink at all: collecting stays the
+   two sweeps' job on every path, a gate that mutates the filesystem to reach a verdict cannot be run
+   speculatively, and on a filesystem that cannot `flock` the file it would take may be a live
+   writer's only copy. So the `flock` mechanics move into a shared `_probed` returning a five-valued
+   `_Liveness`, and the module exposes two mappings over it. Sharing the probe rather than the
+   predicate keeps the callers from drifting on what the kernel's answers *mean* while letting them
+   differ on what to *do*.
 
-   So the `flock` mechanics move into a shared `_probed` returning a five-valued `_Liveness`, and the
-   module exposes two mappings over it. `live_writer_may_hold_partial` treats `UNEVALUABLE` as
-   "may be held" — the same fail-closed rule `_overlay_pins_base` already applies to a failed `stat`
-   one gate earlier in the same function — and it never unlinks. Sharing the probe rather than the
-   predicate is what keeps the call sites from drifting on what the kernel's answers *mean* while
-   letting them differ on what to *do*, which they genuinely must.
+5. **Only a proven hold defers. Every other answer proceeds, loudly.** This is ADR-0452 §5's rule
+   re-applied one layer up, not a shortcut. A held `flock` is the one *provably transient* answer,
+   because the kernel drops it when the holding descriptor closes, including on `SIGKILL`. An
+   `EACCES` partial under the uid asymmetry ADR-0442 documents in this same subsystem, an `EMFILE`, an
+   `ENOLCK` NFS mount — each is **permanent until an operator acts**, and ADR-0452 §5 already decided
+   that such a file must not pin an investigation forever.
 
-   A crash orphan needs no collecting here: `UNHELD` does not defer, so leaving the file costs
-   nothing, and `sweep_investigation_staging_dir` remains its collector exactly as before.
+   Failing *closed* on those is recorded here because it was tried and is worse. Deferring keeps the
+   checksum's `artifacts` row, which is decision 2's retry mechanism — and that same surviving row
+   makes `_finish_drained_investigation` compute `drained=False`, which retires the drain tail's
+   partial collector. The orphan then pins the row and the row retires the orphan's only collector:
+   base, object and row leaked permanently and **silently**, since the job still succeeds and nothing
+   dead-letters, plus a never-clearing `rootfs_cleanup_pending_at` re-firing the close-driven lane
+   every backoff forever. That is precisely the loop ADR-0442 was written about, and
+   `_finish_drained_investigation`'s own docstring already forbids it for this exact errno.
 
-5. **`UNLOCKABLE` proceeds, and is the one answer the gate does not fail closed on.** On
-   `ENOLCK`/`EOPNOTSUPP` the writer's own `_flocked_partial` degraded and staged unguarded, so no
-   answer is available for any file on that filesystem, ever. Deferring there is not caution but a
-   permanent refusal to reclaim any uploaded base on that host — the never-terminating shape
-   ADR-0452 §5 rejects — so the reclaim degrades to its pre-ADR-0495 behaviour. Nor may the gate
-   *unlink* there, which is what re-reading the collector's `unlink_when_unlockable=True` would have
-   done: it would destroy the only copy of a writer that may well be live, on exactly the hosts where
-   nothing can prove otherwise. The drain tail's own policy for that case is unchanged.
+   So the gate reaches the one condition it can discharge soundly and no further. On an unevaluable
+   or unlockable candidate the reclaim behaves exactly as it does on `main` — unchanged there rather
+   than improved — and the `WARNING` is the operator's signal that a download could not be ruled out.
 
-6. **The directory walk is `os.scandir`, not `Path.glob`, and a walk fault defers too.** `Path.glob`
-   swallows the `OSError` and yields nothing, so an unreadable staging directory is indistinguishable
-   from an empty one. That is a real fail-open path rather than a theoretical one: unlinking a known
-   name needs write and execute on the directory, **not** read, so at mode `0o333` the glob would
-   report no candidates while `_unlink_staged_base` behind it succeeded. `ENOENT` on the directory
+6. **The directory walk is `os.scandir`, not `Path.glob`, and a walk fault proceeds too.** `Path.glob`
+   swallows the `OSError` and yields nothing, so an unreadable staging directory is silently
+   indistinguishable from an empty one — and that is reachable rather than theoretical, because
+   unlinking a known name needs write and execute on the directory, **not** read, so at mode `0o333`
+   `_unlink_staged_base` behind it still succeeds. What `scandir` buys is the `WARNING`, not a
+   deferral: this walk is keyed on the *directory*, so deferring on a permanently faulting one would
+   strand every checksum of that investigation at once, by decision 5's argument amplified. `ENOENT`
    stays the achieved post-state for an investigation that never staged anything.
 
 7. **`rootfs_cleanup_pending_at` is not set on an open investigation.** Rejected here for the third
@@ -142,30 +146,35 @@ pointing an operator at the object store over a purely local reclaim race.
   retained-row retry has nothing to retain. Fixing it means re-deriving that lane's age gate from
   something other than the `systems` row, which is a change to ADR-0494's decision 5 and its own
   disclosed steady-state cost. Named as follow-on work rather than folded in.
-- **A permanently unevaluable partial permanently retains its checksum's row, base and object.** The
-  cost of decision 4's fail-closed rule, and it is a real permanence: an `EACCES` partial under a uid
-  asymmetry does not heal on its own. It is deliberately not the never-clearing *marker* ADR-0452 §5
-  rejects — no durable state is pinned, the row stays inspectable, and the drain tail still clears
-  `rootfs_cleanup_pending_at` on that condition exactly as ADR-0452 decided. It also adds no new
-  permanence class: a base whose `unlink` faults permanently already retains its row forever under
-  ADR-0442 §4's fault contract, and the same `EACCES` that blocks the probe blocks that `unlink`. The
-  `WARNING` from the shared probe is the operator signal, and the alternative — deleting the last
-  copies of a SENSITIVE base this process cannot show is dead — is strictly worse.
-- **On a filesystem that cannot `flock`, the fix is a no-op and the pre-existing race is unchanged.**
-  Decision 5's cost, stated rather than derived. `ENOLCK`/`EOPNOTSUPP` (NFS with a dead lock manager,
-  some FUSE and 9p backends) leaves the reclaim exactly as it behaves on `main` today. That is the
-  floor, not a regression, and the alternatives are both worse: deferring forever leaks every base on
-  such a host, and unlinking the unguarded partial destroys a possibly-live writer's only copy.
+- **The gate's reach is narrower than "no download is in flight", and the gap is a whole class rather
+  than an instant.** Decision 5's cost, stated rather than derived. Wherever the kernel cannot answer
+  — an `EACCES`/`EMFILE`/`EIO` partial, or an `ENOLCK`/`EOPNOTSUPP` filesystem (NFS with a dead lock
+  manager, some FUSE and 9p backends) — the reclaim behaves exactly as it does on `main`, including
+  deleting a base under a download it could not rule out. That is the floor rather than a regression,
+  and both alternatives are worse: deferring forever produces decision 5's silent permanent leak, and
+  unlinking the unguarded partial destroys a possibly-live writer's only copy. Closing it needs
+  #1558's option 2. On the host-process local-libvirt deployment the reclaim runs as **root**, where
+  `CAP_DAC_OVERRIDE` makes the permission-shaped members of that class unreachable anyway.
 - **The gate never unlinks, so it adds no filesystem mutation to the `INVESTIGATION`-lock critical
   section** beyond the `scandir` below. Collecting a partial stays `sweep_investigation_staging_dir`'s
   job on every path, which is also why the drain tail's `unlink_when_unlockable=True` and its ADR-0452
-  §4 marker rule are untouched by this ADR.
+  §4 marker rule are untouched by this ADR — and why `_finish_drained_investigation`'s "defers only on
+  causes that are provably transient" docstring stays true.
+- **The probe takes `LOCK_EX`, so it is a third contender for the writer's creation window.**
+  `_flocked_partial` creates its partial and locks it in two syscalls, and a probe landing between
+  them wins; the writer then raises its `_CREATION_WINDOW` fault, whose text says a sweep "took" the
+  partial when in fact this gate's next syscall is `close`. Microsecond-wide, and pre-existing for
+  both collectors, which take `LOCK_EX` for the same reason — a shared lock would block on the
+  writer's exclusive one just the same, so there is no weaker mode that still answers the question.
+  Named rather than fixed.
 - **Cost is one `scandir` of a per-investigation directory per due checksum, on the
   `INVESTIGATION`-lock critical section** — the same section, and the same order of magnitude, as the
   three globs ADR-0494 already put in the drain tail. The probe runs only after the pin gate has
   passed, so a pinned base (the steady state for the whole grace window) does not pay for it.
 - **A deferral is logged at `WARNING` from two frames.** The shared `_probed` reports the *file*
-  observation and `_reclaim_one_checksum` reports the *decision* and what it retained. The job
+  observation and `_reclaim_one_checksum` reports the *decision* and what it retained. Both can now
+  name a live writer as fact rather than as a conditional, because decision 5 means a deferral only
+  ever follows a proven `EWOULDBLOCK`. The job
   succeeds either way, so without the second line a deferral is indistinguishable from an
   already-drained row. On the TTL lane the pair can repeat once per
   `ROOTFS_RECLAIM_RETRY_BACKOFF` (5 minutes) for the length of a download, which is bounded by the
@@ -199,12 +208,18 @@ pointing an operator at the object store over a purely local reclaim race.
   transaction-scoped. The `flock` exists precisely so liveness needs no shared lock.
 - **Probe before the pin gate.** Rejected as strictly more work for the same answer: a pinned base is
   not reclaimed, so the `scandir` would be spent on the steady state and thrown away.
-- **Reuse `unlink_partial_if_unheld` and read its `bool`.** Rejected — it was the first shape of this
-  change and it is wrong twice over, which is what decisions 4 and 5 record. Its `False` merges
-  "proven crash orphan" with "could not be evaluated", so the gate would delete three copies of a base
-  it cannot show is dead; and no value of `unlink_when_unlockable` is right for a gate, since `True`
-  destroys a possibly-live writer's unguarded partial while `False` would have to mean defer-forever.
-  Sharing the underlying probe instead keeps the anti-drift property that predicate was reached for.
+- **Reuse `unlink_partial_if_unheld` and read its `bool`.** Rejected: no value of
+  `unlink_when_unlockable` is right for a gate. `True` destroys a possibly-live writer's unguarded
+  partial on exactly the hosts where nothing can prove otherwise, and `False` leaves a SENSITIVE
+  orphan for a collector that is not running. Sharing the underlying probe keeps the anti-drift
+  property that predicate was reached for without borrowing its actions.
+- **Fail closed on every answer the kernel could not give — "if you cannot prove it is dead, keep
+  it".** Rejected, and it was this change's first shape. Decision 5 has the argument: the deferral's
+  own retained row retires the drain tail's partial collector, so the condition becomes
+  self-sustaining, and the resulting leak of base, object and row is permanent, silent, and
+  accompanied by a never-clearing `rootfs_cleanup_pending_at`. Trading a bounded exposure to a race
+  for an unbounded silent leak of the same bytes is the wrong direction, and ADR-0452 §5 had already
+  decided it.
 - **Have the gate collect the crash orphans it walks past.** Rejected as an unjustified side effect.
   The rationale for it does not hold: an `UNHELD` candidate does not defer either way, so nothing is
   gained by removing it here, and `sweep_investigation_staging_dir` already collects it in the same

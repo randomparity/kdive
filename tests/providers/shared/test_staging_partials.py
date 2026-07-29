@@ -3,14 +3,17 @@
 The primitive itself, tested apart from every caller (ADR-0446 §4, ADR-0452 §1, ADR-0495). Its
 per-outcome behaviour is what those callers' safety rests on: ADR-0452 has the reclaim handler
 retain ``rootfs_cleanup_pending_at`` on a "held", and ADR-0495 has the row-driven reclaim defer a
-whole
-checksum on it — so "held" and "could not evaluate" must not collapse into one answer.
+whole checksum on it — so "held" and "could not evaluate" must not collapse into one answer.
 
-Two functions over one probe, and the cases below are deliberately paired across them. The collector
-(:func:`unlink_partial_if_unheld`) merges "could not evaluate" into its ``False``, because for a
-collector that and "already gone" call for the same inaction. The gate
-(:func:`live_writer_may_hold_partial`) cannot: its answer licenses deleting a staged base, an
-object-store object and an ``artifacts`` row, so it fails **closed** there and never unlinks.
+Two functions over one probe, and the cases below are paired across them. They agree on the verdict
+for every answer; where they differ is the **action**. The collector unlinks; the gate
+(:func:`live_writer_holds_partial`) never does, because its answer licenses deleting a staged base,
+an object-store object and an ``artifacts`` row, and because on an unlockable filesystem the file it
+would take may be a live writer's only copy.
+
+Only a *held* ``flock`` defers a reclaim. That is ADR-0452 §5's rule, and the tests below pin it as
+such: an unopenable or unlockable candidate is permanent until an operator acts, and deferring on
+one would have the surviving ``artifacts`` row retire the very sweep that collects it.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from typing import Any
 import pytest
 
 from kdive.providers.shared.staging_partials import (
-    live_writer_may_hold_partial,
+    live_writer_holds_partial,
     unlink_partial_if_unheld,
 )
 
@@ -210,7 +213,7 @@ def test_the_read_only_probe_reports_a_held_partial_and_leaves_it(tmp_path: Path
     partial = _partial(tmp_path)
 
     with _flocked(partial):
-        assert live_writer_may_hold_partial(partial) is True
+        assert live_writer_holds_partial(partial) is True
 
     assert partial.read_bytes() == b"staged bytes"
 
@@ -223,26 +226,28 @@ def test_the_read_only_probe_reports_a_crash_orphan_unheld_and_still_leaves_it(
     # the checksum either way, and the drain tail remains its collector.
     partial = _partial(tmp_path)
 
-    assert live_writer_may_hold_partial(partial) is False
+    assert live_writer_holds_partial(partial) is False
 
     assert partial.exists(), "the read-only probe collected a file it was only asked about"
 
 
 def test_the_read_only_probe_reads_an_absent_candidate_as_no_writer(tmp_path: Path) -> None:
     # A candidate that vanished between the directory walk and the open is the achieved post-state,
-    # not a fault, so it must not defer a reclaim forever.
-    assert live_writer_may_hold_partial(tmp_path / "token.gone.partial") is False
+    # not a fault, so it must not defer a reclaim.
+    assert live_writer_holds_partial(tmp_path / "token.gone.partial") is False
 
 
-def test_the_read_only_probe_fails_closed_on_a_partial_it_cannot_open(
+def test_the_read_only_probe_does_not_defer_on_a_partial_it_cannot_open(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The finding that separates this function from the collector, and the reason it exists at all.
-    # `unlink_partial_if_unheld` reports EACCES/EMFILE/EIO as False -- correct for a collector,
-    # since "leave it alone" and "already gone" are the same inaction -- but a caller reading False
-    # as "no live writer" then deletes the staged base, the object-store object and the artifacts
-    # row of a SENSITIVE image it cannot show is dead. That is #1558's data loss. So the gate treats
-    # "cannot evaluate" as "may be held", exactly as `_overlay_pins_base` treats a failed stat.
+    # The rule that keeps the gate terminating, and it is ADR-0452 section 5 re-applied rather than
+    # a convenience. Failing CLOSED here was tried and is worse: the deferral keeps the checksum's
+    # artifacts row, that row makes _finish_drained_investigation compute drained=False, and that
+    # retires the drain tail's partial collector -- so the orphan pins the row and the row retires
+    # the orphan's only collector. Permanently, and silently, since the job still succeeds. An
+    # EACCES partial under a uid asymmetry does not heal on its own, so there is nothing to wait
+    # for.
+    # The WARNING is the whole signal; the reclaim proceeds as it did before ADR-0495.
     partial = _partial(tmp_path)
     real_open = os.open
 
@@ -253,41 +258,44 @@ def test_the_read_only_probe_fails_closed_on_a_partial_it_cannot_open(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", refusing_open)
-        assert live_writer_may_hold_partial(partial) is True
+        assert live_writer_holds_partial(partial) is False
 
-    assert partial.exists()
+    assert partial.exists(), "the read-only probe unlinked a candidate it could not even open"
     assert any("could not open the staging partial" in r.getMessage() for r in caplog.records), (
         caplog.text
     )
 
 
-def test_the_read_only_probe_fails_closed_on_a_per_candidate_lock_fault(tmp_path: Path) -> None:
-    # Same rule one step later: an EIO from the flock itself says nothing about whether a writer
-    # holds it, so it is not evidence of death either.
+def test_the_read_only_probe_does_not_defer_on_a_per_candidate_lock_fault(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Same rule one step later. An EIO from the flock itself is not evidence a writer holds it, and
+    # it is not provably transient either, so it is reported and the reclaim proceeds.
     partial = _partial(tmp_path)
 
-    with pytest.MonkeyPatch.context() as patch:
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", _unlockable_flock(errno.EIO))
-        assert live_writer_may_hold_partial(partial) is True
+        assert live_writer_holds_partial(partial) is False
 
     assert partial.exists()
+    assert any(
+        "could not test whether a live writer holds" in r.getMessage() for r in caplog.records
+    ), caplog.text
 
 
 @pytest.mark.parametrize("lock_errno", [errno.ENOLCK, errno.EOPNOTSUPP])
 def test_the_read_only_probe_proceeds_on_an_unlockable_filesystem_without_unlinking(
     tmp_path: Path, lock_errno: int
 ) -> None:
-    # The one answer the gate deliberately does NOT fail closed on, and the one place it would do
-    # real harm to unlink. There is no answer available for any file on such a filesystem -- the
-    # writer's own _flocked_partial degraded and staged unguarded -- so deferring is not caution but
-    # a permanent refusal to reclaim any uploaded base on that host, the never-terminating shape
-    # ADR-0452 section 5 rejects. Unlinking would instead destroy the only copy of a writer that may
-    # well be live, on exactly the hosts where nothing can prove otherwise. So: proceed, and leave
-    # the file to the drain tail, whose own `unlink_when_unlockable=True` policy is unchanged.
+    # Same verdict as the two above, and one extra property that is this function's own. There is no
+    # answer available for any file on such a filesystem -- the writer's own _flocked_partial
+    # degraded and staged unguarded -- so proceeding is forced. But unlinking, which the collector
+    # does here under `unlink_when_unlockable=True`, would destroy the only copy of a writer that
+    # may well be live. The gate must not, and collecting stays the drain tail's job.
     partial = _partial(tmp_path)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", _unlockable_flock(lock_errno))
-        assert live_writer_may_hold_partial(partial) is False
+        assert live_writer_holds_partial(partial) is False
 
     assert partial.read_bytes() == b"staged bytes"

@@ -935,93 +935,108 @@ def test_a_crash_orphan_partial_of_the_same_token_does_not_defer_the_reclaim(
     asyncio.run(_run())
 
 
-async def _defers_with(
-    migrated_url: str,
-    tmp_path: Path,
-    *,
-    patch: pytest.MonkeyPatch,
-    make_partial: bool = True,
-) -> tuple[bool, list[str]]:
-    """Run one reclaim of a `torn_down`-referenced checksum; report whether it retained everything.
-
-    Shared by the fail-closed cases below, which differ only in *which* fault the monkeypatch
-    injects. Returns (everything retained, keys the store was asked to delete) so each case asserts
-    the whole retention contract rather than one file.
-    """
-    seed = await connect(migrated_url)
-    try:
-        inv = await _seed_investigation(seed, state="closed", closed=True)
-        artifact_id = await _seed_rootfs_row(seed, inv)
-        await _seed_system(seed, inv, "torn_down", _upload_profile())
-    finally:
-        await seed.close()
-    rootfs_dir, uploads = _dirs(tmp_path)
-    staged = _stage(uploads, inv)
-    if make_partial:
-        (uploads / str(inv) / f"{_TOKEN}.deadbeef.partial").write_bytes(b"cannot be evaluated")
-    store = _RecordingStore()
-    result = await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
-    check = await connect(migrated_url)
-    try:
-        row_kept = await _row_exists(check, artifact_id)
-    finally:
-        await check.close()
-    del patch  # the caller owns the patch context; named so the dependency is explicit
-    retained = result == "0" and staged.exists() and not store.deleted and row_kept
-    return retained, store.deleted
-
-
-def test_a_partial_that_cannot_be_opened_defers_rather_than_reading_as_dead(
+def test_an_unopenable_partial_does_not_strand_the_checksum(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # The distinction that makes this gate different from the drain tail's collector. EACCES (the
-    # uid asymmetry ADR-0442 documents here) or EMFILE means "this file cannot be shown to be dead",
-    # not "no writer" — but `unlink_partial_if_unheld` reports both as False, because for a
-    # *collector* "leave it alone" and "already gone" are the same inaction. Reading that False as a
-    # licence to delete the base, the object and the row is #1558's data loss with extra steps, so
-    # the gate uses the fail-closed `live_writer_may_hold_partial` instead, matching
-    # `_overlay_pins_base` one gate earlier. The staging *sweep* still leaves the file
-    # (test_an_unopenable_partial_...); what is new is that the reclaim no longer marches past it.
+    # The rule that keeps ADR-0495's gate terminating, and the reason it is not "fail closed on
+    # anything you cannot evaluate". Deferring here keeps the artifacts row; that row makes
+    # _finish_drained_investigation compute drained=False; and that retires the drain tail's partial
+    # collector -- so the orphan would pin the row and the row would retire the orphan's only
+    # collector, permanently and silently, since the job still succeeds. It would also retain
+    # rootfs_cleanup_pending_at forever on a closed investigation, re-firing the close-driven lane
+    # every backoff: the never-clearing marker ADR-0442 was written about, which ADR-0452 section 5
+    # already ruled out for this exact errno. An EACCES partial is permanent until an operator acts,
+    # so the reclaim proceeds as it did before ADR-0495 and the WARNING is the signal.
+    inv = uuid4()
+
     async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        unopenable = uploads / str(inv) / f"{_TOKEN}.deadbeef.partial"
+        unopenable.write_bytes(b"present but not openable by this uid")
         real_open = os.open
 
         def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
-            if str(path).endswith(".partial"):
+            if Path(path) == unopenable:
                 raise PermissionError(errno.EACCES, "Permission denied", str(path))
             return real_open(path, flags, *args, **kwargs)
 
+        store = _RecordingStore()
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(os, "open", refusing_open)
-            retained, deleted = await _defers_with(migrated_url, tmp_path, patch=patch)
-        assert retained, "an unevaluable partial was read as 'no live writer'"
-        assert deleted == []
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+
+        assert result == "1", "an unevaluable partial stranded its checksum"
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        assert unopenable.exists()  # left for an operator, never unlinked unchecked
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            # The termination property, and the assertion whose absence let the wrong policy
+            # through: the marker must clear, or the close-driven lane re-fires here forever.
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
 
     asyncio.run(_run())
 
 
-def test_an_unreadable_staging_dir_defers_rather_than_reading_as_empty(
+def test_an_unreadable_staging_dir_does_not_strand_the_checksum(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # The directory-level half of the same rule, and the reason the walk is `os.scandir` rather than
-    # `Path.glob`. glob swallows the OSError and yields nothing, so an unreadable staging directory
-    # is indistinguishable from an empty one — while `_unlink_staged_base` behind it still SUCCEEDS,
-    # because unlinking a known name needs write+execute on the directory, not read. That is a real
-    # fail-open path (mode 0o333), not a theoretical one, so the walk fault defers.
+    # The same rule at directory scope, where it matters more: this walk is keyed on the directory,
+    # so deferring on a permanently faulting one would strand *every* checksum of the investigation.
+    # The walk is still `os.scandir` rather than `Path.glob` — glob swallows the OSError and yields
+    # nothing, so the fault would be invisible while `_unlink_staged_base` behind it still
+    # succeeded (unlinking a known name needs write+execute on the directory, not read) — but what
+    # scandir buys is the WARNING, not a deferral.
+    inv = uuid4()
+
     async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
         real_scandir = os.scandir
 
         def refusing_scandir(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
-            if "rootfs-uploads" in str(path):
+            if Path(path) == staged.parent:
                 raise PermissionError(errno.EACCES, "Permission denied", str(path))
             return real_scandir(path, *args, **kwargs)
 
+        store = _RecordingStore()
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(os, "scandir", refusing_scandir)
-            retained, deleted = await _defers_with(
-                migrated_url, tmp_path, patch=patch, make_partial=False
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
             )
-        assert retained, "an unreadable staging directory was read as holding no live writer"
-        assert deleted == []
+
+        assert result == "1", "an unreadable staging directory stranded its checksum"
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
 
     asyncio.run(_run())
 
@@ -1029,12 +1044,12 @@ def test_an_unreadable_staging_dir_defers_rather_than_reading_as_empty(
 def test_a_host_that_cannot_flock_still_reclaims_rather_than_deferring_forever(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # The one place the gate is deliberately NOT conservative. On ENOLCK/EOPNOTSUPP the writer's own
-    # `_flocked_partial` degraded and staged unguarded, so no answer exists for any file on that
-    # filesystem, ever. Deferring would refuse to reclaim any uploaded base on such a host forever —
-    # the never-terminating shape ADR-0452 §5 rejects — so the reclaim proceeds, degrading to its
-    # pre-ADR-0495 behaviour. That the gate does not *unlink* the partial on the way there is pinned
-    # directly on the primitive, in tests/providers/shared/test_staging_partials.py.
+    # Third instance of the same rule, on the errno set where a *writer* cannot lock either: the
+    # writer's own `_flocked_partial` degraded and staged unguarded, so no answer is available for
+    # any file on that filesystem, ever. Deferring would refuse to reclaim any uploaded base on such
+    # a host for as long as it stayed mounted. That the gate does not *unlink* on the way there —
+    # which would destroy a possibly-live writer's only copy — is pinned directly on the primitive,
+    # in tests/providers/shared/test_staging_partials.py.
     inv = uuid4()
 
     async def _run() -> None:
@@ -1067,6 +1082,7 @@ def test_a_host_that_cannot_flock_still_reclaims_rather_than_deferring_forever(
         check = await connect(migrated_url)
         try:
             assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
         finally:
             await check.close()
 
