@@ -23,6 +23,7 @@ import pytest
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.storage import HeadResult
 from kdive.domain.capacity.state import SystemState
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
@@ -44,6 +45,7 @@ from kdive.providers.ports.retrieve import (
 )
 from kdive.security.authz.rbac import Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.capture_store import WrittenObjects
 from tests.integration._seed import (
     seed_crashed_system_with_run,
     seed_granted_allocation,
@@ -68,7 +70,12 @@ class _SecretBearingRetriever:
 
     def __init__(self, run_id: str) -> None:
         self._run_id = run_id
+        self._objects = WrittenObjects()
         self.calls = 0
+
+    def head(self, key: str) -> HeadResult | None:
+        """The bucket side of this double: what ``finalize_capture`` verifies (ADR-0497)."""
+        return self._objects.head(key)
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         from kdive.artifacts.storage import StoredArtifact
@@ -87,7 +94,9 @@ class _SecretBearingRetriever:
             Sensitivity.REDACTED,
             "vmcore",
         )
-        return CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
+        return self._objects.record(
+            CaptureOutput(raw=raw, redacted=red, vmcore_build_id="deadbeef", raw_size_bytes=512)
+        )
 
 
 class _SecretBearingCrash:
@@ -200,9 +209,13 @@ def test_planted_secret_is_redacted(migrated_url: str) -> None:
         async with open_pool(migrated_url) as pool:
             sys_id, run_id = await seed_crashed_system_with_run(pool)
             job = await _enqueue_capture(pool, run_id)
+            capture_double = _SecretBearingRetriever(run_id)
             async with pool.connection() as conn:
                 await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             secret_registry = SecretRegistry()
             secret_registry.register(_SecretBearingCrash.PLANTED_SECRET, scope="test")
@@ -234,9 +247,13 @@ def test_raw_vmcore_is_sensitive_and_unreachable(migrated_url: str) -> None:
         async with open_pool(migrated_url) as pool:
             sys_id, run_id = await seed_crashed_system_with_run(pool)
             job = await _enqueue_capture(pool, run_id)
+            capture_double = _SecretBearingRetriever(run_id)
             async with pool.connection() as conn:
                 core_id = await vmcore_plane.capture_handler(
-                    conn, job, resolver=provider_resolver(retriever=_SecretBearingRetriever(run_id))
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=capture_double),
+                    artifact_store=capture_double,
                 )
             ctx = request_context()
             refs: list[str] = []
