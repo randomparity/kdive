@@ -98,6 +98,12 @@ class UploadOrphanStore(UploadStore, Protocol):
     this sweep a whole root's listing is a port through which the cost #1569 fixed can return
     (ADR-0498 §1). ``ObjectStore`` still offers ``list_prefix_with_mtime`` for the bounded
     ``images/`` sweep; this port does not.
+
+    An implementation must not do I/O before the returned iterator's first ``next``: the sweep calls
+    this method on the event loop and offloads only the advance (:func:`_next_page`). A generator
+    function satisfies that by construction, which is what ``ObjectStore`` is; one that eagerly
+    fetched a whole root and returned ``iter(...)`` would type-check and block the loop for exactly
+    as long as the cost this port exists to bound.
     """
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]: ...
@@ -139,7 +145,7 @@ async def repair_leaked_upload_objects(
     code cannot see — a reconciler provisioned without ``KDIVE_UPLOAD_TTL_SECONDS`` while the
     minting server raises it — which is the one way the margin can still go negative (ADR-0455 §2).
 
-    A root has four failure sites — its listing, its bulk classify, and each per-key re-read and
+    A root has four failure sites — its listing, each page's classify, and each per-key re-read and
     delete — and all four are logged, counted, and skipped, with the pass raising once at the end
     (ADR-0455 §5); each root gets its own work budget (§6). The re-read is worth naming separately
     from the delete because since #1575 it is the sweep's only ``head_object``, so it is the one
@@ -287,6 +293,10 @@ async def _sweep_root(
     gone and would otherwise re-read the whole backlog uncapped.
     """
     sweep = _RootSweep(root)
+    # Abandoned rather than closed on every early exit below. There is nothing to release — the
+    # paginator holds no handle — and ``pages.close()`` would be no safer on the one path where
+    # finalization is awkward: a ``CancelledError`` out of the ``to_thread`` leaves the generator
+    # still advancing on the worker thread, and closing a running generator raises either way.
     pages = store.iter_prefix_pages_with_mtime(root)
     while not sweep.budget_spent:
         page = await _next_page_or_fault(pages, root, tally)
