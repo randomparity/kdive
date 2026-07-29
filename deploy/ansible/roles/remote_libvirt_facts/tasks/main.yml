@@ -24,6 +24,50 @@
       [[remote_libvirt]].base_image must name a staged [[image]] or the app
       rejects systems.toml at load.
 
+# A `[[image]]` with `[image.source] kind = "staged"` is a claim that the named volume is
+# already in the host's pool. This play runs in site.yml, which does NOT build images — that
+# is the separate opt-in playbooks/image.yml — and the guest_base_image role skips entries
+# this host cannot build (ADR-0481, #1629). So the selection alone proves nothing: declaring
+# every selected entry registered catalog rows provisioning could only fail on, and a
+# never-built image looked available until a System tried to boot it.
+#
+# Confirm each volume by the same check build_one.yml uses for its own idempotence — a stat
+# of the staged path in the pool — and let the template declare only what stats back. This
+# runs unprivileged: the pool dir is mode 0711, so traversal to a known filename works
+# without listing it, and a genuinely unreadable pool makes stat fail loudly rather than
+# report a false absence.
+- name: Check which selected image volumes are actually staged on this host
+  ansible.builtin.stat:
+    path: "{{ storage_pool_target }}/{{ item.name }}.qcow2"
+  loop: "{{ kdive_selected_images }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: remote_libvirt_facts_volumes
+
+- name: Split the selection into confirmed and unconfirmed volumes
+  ansible.builtin.set_fact:
+    remote_libvirt_facts_staged: >-
+      {{ remote_libvirt_facts_volumes.results
+         | selectattr('stat.exists') | map(attribute='item') | list }}
+    remote_libvirt_facts_missing: >-
+      {{ remote_libvirt_facts_volumes.results
+         | rejectattr('stat.exists') | map(attribute='item') | list }}
+
+# An unconfirmed DEFAULT image is the one case the operator must not paste past: the emitted
+# base_image would name an image the fragment does not declare. That is rejected by
+# InventoryDoc.parse at load (model.py _check_base_image_refs) instead of surfacing as a
+# provision failure later, and the file's header comment says which playbook to run. Warn
+# rather than fail: site.yml legitimately runs before playbooks/image.yml on a fresh host
+# (deploy/ansible/README.md usage steps 2 and 3), and re-running site.yml afterwards
+# regenerates a complete fragment.
+- name: Warn when the emitted fragment is incomplete
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }}: no staged volume for
+      {{ remote_libvirt_facts_missing | map(attribute='name') | join(', ') }} — those [[image]]
+      blocks are omitted. Run playbooks/image.yml, then re-run site.yml to regenerate.
+  when: remote_libvirt_facts_missing | length > 0
+
 - name: Ensure the controller artifacts dir exists
   ansible.builtin.file:
     path: "{{ pki_artifacts_dir }}"

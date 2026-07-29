@@ -4,8 +4,25 @@
 # multi-instance remote selection lands). The [[image]] blocks below are safe to
 # include alongside it. Machine type is an env knob, not a systems.toml field:
 #   KDIVE_REMOTE_LIBVIRT_MACHINE={{ machine_type[ansible_architecture] }}
+#
+# An [[image]] block is emitted only for a volume confirmed present in this host's
+# pool ({{ storage_pool_target }}) at render time — `kind = "staged"` is a claim
+# about the host, not about the inventory (ADR-0481, #1629).
+{% if remote_libvirt_facts_missing %}
+#
+# OMITTED — selected but not staged on this host; run playbooks/image.yml, then
+# re-run site.yml to regenerate this file:
+{% for img in remote_libvirt_facts_missing %}
+#   {{ img.name }} (no {{ storage_pool_target }}/{{ img.name }}.qcow2)
+{% endfor %}
+{% if kdive_default_image not in (remote_libvirt_facts_staged | map(attribute='name') | list) %}
+# INCOMPLETE: base_image below names '{{ kdive_default_image }}', which is one of
+# the omitted images, so this fragment is NOT loadable as-is — InventoryDoc.parse
+# rejects it ("names undeclared image"). Stage that image and re-render.
+{% endif %}
+{% endif %}
 
-{% for img in kdive_selected_images %}
+{% for img in remote_libvirt_facts_staged %}
 [[image]]
 provider = "remote-libvirt"
 name = "{{ img.name }}"

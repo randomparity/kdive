@@ -2,5 +2,8 @@
 remote_host_fqdn: rock10-big.dev.pdx.drc.nz
 gdb_addr: 192.168.12.4
 # Rocky host: RHEL-family, full kdive arc (Fedora-family helpers apply).
+# bare-kdive-remote-base is declared but SKIPPED here: its scratch build needs busybox,
+# which the Rocky base repos do not carry (host_distros, ADR-0481/#1629). image.yml stages
+# the rocky image and reports the skip; no [[image]] block is emitted for the bare one.
 host_images: [rocky-10-kdive-remote-base, bare-kdive-remote-base]
 host_default_image: rocky-10-kdive-remote-base
