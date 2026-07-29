@@ -62,7 +62,11 @@ _DT = datetime(2026, 1, 1, tzinfo=UTC)
 # --- unit: the envelope ---------------------------------------------------------------
 
 
-def _system(state: SystemState = SystemState.FAILED) -> System:
+def _system(
+    state: SystemState = SystemState.FAILED,
+    *,
+    failure_category: ErrorCategory | None = None,
+) -> System:
     return System(
         id=uuid4(),
         created_at=_DT,
@@ -72,6 +76,7 @@ def _system(state: SystemState = SystemState.FAILED) -> System:
         allocation_id=uuid4(),
         state=state,
         provisioning_profile=_provisioning_profile(),
+        failure_category=failure_category,
     )
 
 
@@ -162,6 +167,86 @@ def test_failed_system_attributed_to_an_abandoned_job_says_so() -> None:
     assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
     assert resp.detail != NO_JOB_SYSTEM_FAILURE_DETAIL
     assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_recorded_category_outranks_a_lease_expired_job() -> None:
+    # ADR-0492 §3: the System's own column is written in the transaction that commits the
+    # `failed` transition, so it survives a worker that died before `queue.fail` — the exact
+    # window in which the reconciler stamps `lease_expired` over the job.
+    job = _failed_job(ErrorCategory.LEASE_EXPIRED, {})
+
+    resp = system_envelope(
+        _system(failure_category=ErrorCategory.CONFIGURATION_ERROR),
+        failing_job=job,
+        failure_attributed=True,
+    )
+
+    assert resp.error_category == "configuration_error"
+    assert resp.retryable is False
+    # The reason still describes the *job*: it explains why no message survived, which is a
+    # complementary fact rather than a contradiction of the category the System kept.
+    assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_recorded_category_answers_when_the_retry_ended_succeeded() -> None:
+    # ADR-0492 Context shape 2: with attempts remaining the reclaimed job re-enters a terminal
+    # System, early-returns, and ends `succeeded`, so `latest_failed_job_for_system` attributes
+    # nothing — `failing_job=None`. The System's own record is the only thing left.
+    resp = system_envelope(
+        _system(failure_category=ErrorCategory.CONFIGURATION_ERROR),
+        failing_job=None,
+        failure_attributed=True,
+    )
+
+    assert resp.error_category == "configuration_error"
+    assert resp.retryable is False
+    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
+    assert "failing_job_id" not in resp.data
+
+
+def test_recorded_no_leak_category_is_dropped_like_a_jobs_would_be() -> None:
+    # ADR-0492 §3: the no-leak rule is a property of the category, not of where it was written.
+    # A provider raising NOT_FOUND reaches `_record_system_failure` on the provision path.
+    resp = system_envelope(
+        _system(failure_category=ErrorCategory.NOT_FOUND),
+        failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": "m"}),
+        failure_attributed=True,
+    )
+
+    assert resp.error_category == "infrastructure_failure"
+    assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
+    assert "failing_job_id" not in resp.data
+
+
+def test_recorded_category_survives_dropping_a_no_leak_job() -> None:
+    # The converse is deliberately asymmetric: the *job* is dropped whole for its no-leak
+    # category, but the System's own recorded verdict is a different fact from a write this
+    # surface trusts, so it is still reported.
+    job = _failed_job(ErrorCategory.NOT_FOUND, {"failure_message": "secret-host-name"})
+
+    resp = system_envelope(
+        _system(failure_category=ErrorCategory.PROVISIONING_FAILURE),
+        failing_job=job,
+        failure_attributed=True,
+    )
+
+    assert resp.error_category == "provisioning_failure"
+    assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
+    assert "failing_job_id" not in resp.data
+    assert "secret-host-name" not in str(resp.model_dump())
+
+
+def test_unattributed_system_reports_its_recorded_category_but_no_reason() -> None:
+    # ADR-0492 Consequences: the column is on the row the list path already reads, so the
+    # category needs no query — but `detail` stays gated on having *run* the lookup, since
+    # every derived reason is a positive claim about a fact that was checked.
+    resp = system_envelope(_system(failure_category=ErrorCategory.CONFIGURATION_ERROR))
+
+    assert resp.error_category == "configuration_error"
+    assert resp.retryable is False
+    assert resp.detail is None
+    assert "failing_job_id" not in resp.data
 
 
 def test_failed_system_offers_the_recovery_actions_not_a_dead_end() -> None:
@@ -256,7 +341,13 @@ def test_system_failing_job_kinds_are_the_kinds_that_write_failed() -> None:
 # --- integration: the lookup and the read path ----------------------------------------
 
 
-async def _seed_system(conn_pool: AsyncConnectionPool, alloc_id: str, state: SystemState) -> UUID:
+async def _seed_system(
+    conn_pool: AsyncConnectionPool,
+    alloc_id: str,
+    state: SystemState,
+    *,
+    failure_category: ErrorCategory | None = None,
+) -> UUID:
     async with conn_pool.connection() as conn:
         system = await SYSTEMS.insert(
             conn,
@@ -269,6 +360,7 @@ async def _seed_system(conn_pool: AsyncConnectionPool, alloc_id: str, state: Sys
                 allocation_id=UUID(alloc_id),
                 state=state,
                 provisioning_profile=_provisioning_profile(),
+                failure_category=failure_category,
             ),
         )
     return system.id
@@ -590,9 +682,35 @@ def test_get_system_on_a_ready_system_makes_no_job_lookup(migrated_url: str) -> 
     asyncio.run(_run())
 
 
+def test_systems_list_reports_a_recorded_category_without_a_query(migrated_url: str) -> None:
+    # ADR-0492 Consequences: the column is on the row `systems.list` already reads, so the list
+    # path reports the truthful category with no per-row lookup — narrowing the gap ADR-0454 §4
+    # disclosed. `detail` stays silent there, because the list path still checks nothing.
+    async def _run() -> None:
+        async with _pool(migrated_url) as conn_pool:
+            alloc_id = await _granted_allocation(conn_pool)
+            system_id = await _seed_system(
+                conn_pool,
+                alloc_id,
+                SystemState.FAILED,
+                failure_category=ErrorCategory.CONFIGURATION_ERROR,
+            )
+            resp = await list_systems(
+                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED.value)
+            )
+        assert [item.object_id for item in resp.items] == [str(system_id)]
+        assert resp.items[0].error_category == "configuration_error"
+        assert resp.items[0].retryable is False
+        assert resp.items[0].detail is None
+
+    asyncio.run(_run())
+
+
 def test_systems_list_keeps_the_flattened_category(migrated_url: str) -> None:
-    # ADR-0454 §4, pinned so the disclosed gap is a fact rather than an assumption: the list
-    # path shares `system_envelope` and passes no job, so it still reports the default.
+    # ADR-0454 §4, pinned so the *remaining* gap is a fact rather than an assumption: a System
+    # that recorded no category of its own (a pre-ADR-0492 row, or one failed by the job-less
+    # reconciler repair) still needs the per-row lookup the list path does not do, so it still
+    # reports the default.
     async def _run() -> None:
         async with _pool(migrated_url) as conn_pool:
             alloc_id = await _granted_allocation(conn_pool)

@@ -91,6 +91,11 @@ class System(DomainModel, Attribution):
     #: allocation-only System. Write-once at the admission layer once set — the reclaim gate's
     #: referencer enumeration depends on this column never silently dropping a live System.
     investigation_id: UUID | None = None
+    #: Why this System is `failed`, written by the handler in the same transaction as the
+    #: `failed` transition (ADR-0492, #1562). NULL for every non-failed System, for the
+    #: reconciler's job-less repair path, and for rows that predate the column; the
+    #: `systems.get` envelope then falls back to the ADR-0454 failing-job lookup.
+    failure_category: ErrorCategory | None = None
 
 
 class Snapshot(DomainModel, Attribution):

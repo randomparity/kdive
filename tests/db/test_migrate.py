@@ -33,6 +33,7 @@ CHECK_ENUMS = [
     ("runs_failure_category_check", errors.ErrorCategory),
     ("jobs_error_category_check", errors.ErrorCategory),
     ("allocations_failure_category_check", errors.ErrorCategory),
+    ("systems_failure_category_check", errors.ErrorCategory),
     ("image_visibility_check", images.ImageVisibility),
     ("image_state_check", images.ImageState),
     ("image_catalog_managed_by_check", resources.ManagedBy),
@@ -182,6 +183,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0080",
         "0081",
         "0082",
+        "0083",
     ]
     assert second == []
 
@@ -648,6 +650,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0080",
         "0081",
         "0082",
+        "0083",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1008,6 +1011,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0080",
         "0081",
         "0082",
+        "0083",
     ]
 
 
