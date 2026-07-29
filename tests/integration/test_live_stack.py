@@ -15,8 +15,9 @@ envelopes, JWKS-validated tokens), #1 (redacted vmcore in MinIO), #2 (audit per 
 force_crash, split by attributing principal — driver vs ``system:reconciler``), #3 (redaction does
 not leak through the wire), #5 (``torn_down`` + ``Discovery.list_owned()`` empty), the report phase
 (``accounting.report`` at ``all-projects`` scope under a ``platform_auditor`` token, windowed —
-ADR-0046), and the RBAC negatives (viewer raised-path; operator force_crash ``authorization_denied``
-envelope; project-only token denied the all-projects report).
+ADR-0046), and the RBAC negatives (viewer denied an operator op at the dispatch boundary, naming
+the role it lacked; operator force_crash ``authorization_denied`` envelope; project-only token
+denied the all-projects report — all three envelopes since ADR-0486).
 
 The shared phase-naming contract has its own non-gated unit tests in
 ``tests/integration/live_stack/test_spine.py``; the spine + RBAC tests here are
@@ -40,9 +41,9 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.sizing import AllocationSizing
 from kdive.mcp.dev_harness import (
     LiveStackClient,
-    LiveStackToolError,
     OidcIssuer,
 )
+from kdive.mcp.responses import ToolResponse
 from kdive.profiles.provisioning import reconcile_profile_sizing
 from tests.integration.live_stack.conftest import (
     expected_accel,
@@ -282,30 +283,42 @@ def test_ppc64le_provision_profile_disk_gb_equals_allocation_request(
     assert reconciled["disk_gb"] == LOCAL_ALLOCATION_DISK_GB
 
 
-# --- RBAC negative: the raised path (no real system needed) ----------------------------------
+# --- RBAC negative: the dispatch-boundary path (no real system needed) -----------------------
 
 
 @pytest.mark.live_stack
 def test_viewer_denied_operator_op_over_the_wire() -> None:
-    """A viewer token is denied an operator op; require_role raises → a tool error over HTTP.
+    """A viewer token is denied an operator op; the denial arrives as an envelope over HTTP.
 
     The viewer token carries the spine project (role ``viewer``), so the denial exercises the
     ``require_role`` (role) boundary, not the ``require_project`` (membership) boundary that
-    ``allocations.request`` checks first.
+    ``allocations.request`` checks first. ``allocations.request`` does not catch ``RoleDenied``
+    locally, so this is the one wire test that reaches ``DenialAuditMiddleware`` itself.
+
+    Until ADR-0486 it asserted a raised ``LiveStackToolError``: the denial escaped as FastMCP's
+    ``ToolError`` because the middleware never saw it. Now the boundary unwraps that wrapper and
+    returns the uniform envelope, so this joins its two sibling negatives in asserting the
+    envelope — and additionally pins ADR-0490's named role, which reaches a client through this
+    boundary and nowhere else on this tool.
     """
     issuer, base_url = _wire_preflight()
 
-    async def _run() -> None:
+    async def _run() -> ToolResponse:
         viewer = LiveStackClient.over_http(base_url, _token(issuer, role="viewer"))
         async with viewer:
-            with pytest.raises(LiveStackToolError):  # require_role raises → tool error
-                await viewer.call_tool(
-                    "allocations.request",
-                    project=_PROJECT,
-                    **{"vcpus": 1, "memory_gb": 1, "resource": {"mode": "kind"}},
-                )
+            return await scalar(
+                viewer,
+                "allocations.request",
+                project=_PROJECT,
+                **{"vcpus": 1, "memory_gb": 1, "resource": {"mode": "kind"}},
+            )
 
-    asyncio.run(_run())
+    denied = asyncio.run(_run())
+    assert denied.status == "error", "viewer was not denied the operator op"
+    assert denied.error_category == "authorization_denied", "wrong denial category"
+    # `allocations.request` builds no denial envelope of its own, so `contributor` can only have
+    # come from the RoleDenied the dispatch boundary unwrapped (ADR-0486, ADR-0490).
+    assert denied.data["missing_roles"] == ["contributor"], "the boundary lost the named role"
 
 
 @pytest.mark.live_stack
