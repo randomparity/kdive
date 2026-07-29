@@ -9,7 +9,8 @@ import pytest
 
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
-from kdive.cli.commands.registry import REGISTRY, _curated_flags
+from kdive.cli.commands.registry import REGISTRY
+from tests.cli.verb_argv import required_argv_for_curated
 
 
 def test_curated_verb_is_a_known_subcommand() -> None:
@@ -53,22 +54,9 @@ def test_json_absent_after_verb_does_not_clobber_top_level() -> None:
 def test_every_registry_verb_parses_through_the_built_parser() -> None:
     parser = build_parser()
     for verb in REGISTRY:
-
-        def placeholder(name: str, verb=verb) -> str:
-            # Curated parameters take their type and enum from the generated verb at the same
-            # path (ADR-0469, ADR-0474), so a bare "<name>-val" no longer parses for a numeric
-            # or enumerated one.
-            flag = _curated_flags(verb).get(name)
-            if flag is None:
-                return f"{name}-val"
-            if flag.choices:
-                return flag.choices[0]
-            return "1" if flag.arg_type in {"int", "float"} else f"{name}-val"
-
-        argv = [verb.group, verb.sub, *(placeholder(p) for p in verb.positionals)]
-        for option in verb.required_options:
-            argv += [f"--{option.replace('_', '-')}", placeholder(option)]
-        args = parser.parse_args(argv)
+        # Curated parameters take their type and enum from the generated verb at the same path
+        # (ADR-0469, ADR-0474), so a bare "<name>-val" no longer parses for a numeric one.
+        args = parser.parse_args([verb.group, verb.sub, *required_argv_for_curated(verb)])
         assert args.command == verb.group and args.subcommand == verb.sub
 
 

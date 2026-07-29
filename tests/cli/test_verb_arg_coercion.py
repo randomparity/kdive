@@ -18,8 +18,9 @@ from _pytest.mark import ParameterSet
 
 from kdive.cli.__main__ import build_parser, main
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import _ARG_TYPES, REGISTRY, _curated_flags
+from kdive.cli.commands.registry import _ARG_TYPES, GENERATED_ARG_PREFIX, REGISTRY, _curated_flags
 from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from tests.cli.verb_argv import required_argv_for_curated, required_argv_for_generated
 
 #: Every curated parameter whose generated counterpart is a JSON ``number``, with the argv tail
 #: that reaches it and the Python type it must land on the namespace as. Derived by hand here on
@@ -63,24 +64,30 @@ _CURATED_NUMERIC = [
 
 #: Values no numeric option may accept. ``inf``/``nan`` are here because ``float()`` takes them
 #: while JSON does not: pydantic serializes both to ``null``, so the tool never sees a number to
-#: reject and silently applies its own default (ADR-0474 decision 2).
-_MALFORMED = ["abc", "", "1.2.3", "inf", "-inf", "nan", "NaN", "infinity", "1e", "0x10"]
+#: reject and silently applies its own default (ADR-0474 decision 2). ``1e400`` is the same class
+#: spelled without an obvious ``inf``: it overflows to one.
+_MALFORMED = ["abc", "", "1.2.3", "inf", "-inf", "nan", "NaN", "infinity", "1e", "0x10", "1e400"]
 
 
 @pytest.mark.parametrize(("head", "flag", "dest", "expected"), _CURATED_NUMERIC)
 @pytest.mark.parametrize("value", _MALFORMED)
 def test_curated_numeric_option_refuses_a_malformed_value(
-    head: list[str], flag: str, dest: str, expected: type, value: str
+    head: list[str], flag: str, dest: str, expected: type, value: str, capsys
 ) -> None:
     """A non-numeric value is an argparse usage error (exit 2), never a handler ``ValueError``.
 
     Before #1619 these reached the handler as ``str`` and died in a bare ``int()`` with a
     traceback on exit ``1`` — the one malformed argument on the whole CLI that did not produce
     the usage error every other one does.
+
+    The value is attached with ``=`` so every case actually reaches the type callable. Argparse's
+    negative-number heuristic matches only a leading digit or ``.``, so a bare ``--flag -inf``
+    fails earlier with "expected one argument" and would pass no matter what the callable did.
     """
     with pytest.raises(SystemExit) as excinfo:
-        build_parser().parse_args([*head, flag, value])
+        build_parser().parse_args([*head, f"{flag}={value}"])
     assert excinfo.value.code == 2
+    assert f"argument {flag}:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("head", "flag", "dest", "expected"), _CURATED_NUMERIC)
@@ -103,16 +110,21 @@ def test_curated_numeric_option_omitted_stays_none(
     30-second default authoritative (ADR-0470 decision 2). A ``type=`` that defaulted the value
     would silently turn a bare ``wait`` into something else.
     """
-    if flag in {"--seconds", "--reason"}:
+    if flag == "--seconds":
         pytest.skip(f"{flag} is a required option and cannot be omitted")
     args = build_parser().parse_args(head)
     assert getattr(args, dest) is None
 
 
-@pytest.mark.parametrize("value", ["3.5", "0"])
+@pytest.mark.parametrize("value", ["3.5", "0", "-1.5"])
 def test_curated_float_option_keeps_a_fractional_value(value: str) -> None:
-    """``--timeout-s`` is a float, not an int: a fractional timeout must survive the seam."""
-    args = build_parser().parse_args(["jobs", "wait", "job-1", "--timeout-s", value])
+    """``--timeout-s`` is a float, not an int: a fractional timeout must survive the seam.
+
+    ``-1.5`` pins the *sign* as well as the fraction — a coercion that quietly took the magnitude
+    would satisfy every refusal assertion in this module while turning a rejected negative into
+    an accepted wait.
+    """
+    args = build_parser().parse_args(["jobs", "wait", "job-1", f"--timeout-s={value}"])
     assert args.timeout_s == float(value)
     assert isinstance(args.timeout_s, float)
 
@@ -153,32 +165,8 @@ def _required_tail(verb: GeneratedVerb, skip: str) -> list[str]:
     """
     curated = {(v.group, v.sub): v for v in REGISTRY}.get((verb.group, verb.sub))
     if curated is not None:
-        derived = _curated_flags(curated)
-
-        def value(name: str) -> str:
-            flag = derived.get(name)
-            if flag is None:
-                return f"{name}-val"
-            if flag.choices:
-                return flag.choices[0]
-            return "1" if flag.arg_type in {"int", "float"} else f"{name}-val"
-
-        argv = [value(name) for name in curated.positionals]
-        for option in curated.required_options:
-            if f"--{option.replace('_', '-')}" != skip:
-                argv += [f"--{option.replace('_', '-')}", value(option)]
-        return argv
-    argv = []
-    for flag in verb.flags:
-        if not flag.required or flag.name == skip:
-            continue
-        if flag.action in {"store_true", "bool_optional"}:
-            argv.append(flag.name)
-        elif flag.choices:
-            argv += [flag.name, flag.choices[0]]
-        else:
-            argv += [flag.name, "1" if flag.arg_type in {"int", "float"} else "x"]
-    return argv
+        return required_argv_for_curated(curated, skip)
+    return required_argv_for_generated(verb, skip)
 
 
 def _generated_float_flags() -> list[ParameterSet]:
@@ -206,15 +194,17 @@ def test_generated_float_flag_refuses_a_non_finite_value(
     an argv missing a required argument exits 2 on its own, which would make this pass with the
     finite check reverted to the builtin ``float``. ``-inf`` is spelled with ``=`` because
     argparse's negative-number heuristic only recognizes a leading digit or ``.``, so a bare
-    ``--flag -inf`` is rejected as an unknown option before any type callable runs.
+    ``--flag -inf`` reads as an option and fails with "expected one argument" before any type
+    callable runs.
     """
     argv = [verb.group, verb.sub, *_required_tail(verb, flag.name), f"{flag.name}={value}"]
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args(argv)
     assert excinfo.value.code == 2
+    # Matched as one string: argparse prints a usage line naming every declared option, so a bare
+    # `flag.name in err` would be satisfied even when a *different* argument was the one to fail.
     err = capsys.readouterr().err
-    assert "must be a finite number" in err, err
-    assert flag.name in err, err
+    assert f"argument {flag.name}: must be a finite number" in err, err
 
 
 @pytest.mark.parametrize(("verb", "flag"), _generated_float_flags())
@@ -230,7 +220,7 @@ def test_generated_float_flag_accepts_a_finite_value(
     args = build_parser().parse_args(argv)
     value = getattr(args, flag.dest, None)
     if value is None:  # a curated verb overrides this path and keeps the bare dest
-        value = getattr(args, f"genarg_{flag.dest}", None)
+        value = getattr(args, f"{GENERATED_ARG_PREFIX}{flag.dest}", None)
     assert value == 1.5
     assert isinstance(value, float)
 
@@ -239,17 +229,22 @@ def test_every_generated_float_flag_is_covered() -> None:
     """The parametrization above is not vacuous: the schema really does declare float flags.
 
     A generator change that stopped emitting ``arg_type="float"`` would otherwise turn the
-    repo-wide claim into zero test cases that all pass.
+    repo-wide claim into zero test cases that all pass. Pinned to the exact count, not a floor,
+    because ADR-0474 decision 2 *enumerates* the blast radius: a seventh float flag would widen
+    what the finite check refuses for a new operator-facing argument, and that belongs in the
+    record rather than sliding under a ``>=``.
     """
-    assert len(_generated_float_flags()) >= 6
+    assert len(_generated_float_flags()) == 6, "ADR-0474 decision 2 enumerates exactly 6"
 
 
 def test_curated_parameter_without_a_generated_counterpart_stays_a_string() -> None:
     """A curated option the generated verb does not know contributes no type (ADR-0469).
 
-    ``accounting`` has no generated verb at its path, so ``_curated_flags`` returns ``{}`` and
-    every one of its options must still accept an arbitrary string rather than being coerced or
-    — the argparse trap — rejected outright.
+    Both ``accounting`` verbs *do* have a generated twin, but its whole payload is a nested
+    object carried in ``json_params``, so it declares no scalar flags at all and
+    ``_curated_flags`` returns ``{}`` from the empty comprehension. Every one of these options
+    must still accept an arbitrary string rather than being coerced or — the argparse trap —
+    rejected outright.
     """
     args = build_parser().parse_args(
         ["accounting", "report", "--scope", "anything", "--since", "2026-01-01"]

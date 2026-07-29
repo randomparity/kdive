@@ -119,10 +119,12 @@ through, having no range bound of their own to enforce.
   and after.
 - `1e400` overflows to `inf` and is reported as `must be a finite number, not '1e400'`. The value
   looks finite as written; the message names what it parsed to, which is the accurate answer.
-- A bare `--timeout-s -inf` is rejected by argparse as an *unknown option* rather than by
-  `_finite_float`, because argparse's negative-number heuristic recognizes only a leading digit
-  or `.`. The exit code is `2` either way. `--timeout-s=-inf` reaches the type callable and gets
-  the finite-number message; the tests use the `=` form for exactly this reason, since the bare
+- A bare `--timeout-s -inf` never reaches `_finite_float`. Argparse's negative-number heuristic
+  recognizes only a leading digit or `.` (`-\.?\d`), so `-inf` reads as an option rather than a
+  value and the parser fails first with `argument --timeout-s: expected one argument`. A negative
+  *number* like `-5` or `-1.5` is unaffected and parses normally. The exit code is `2` either
+  way, so this changes no outcome — but `--timeout-s=-inf` is the only spelling that exercises
+  the finite check, and the tests use the `=` form throughout for exactly that reason: the bare
   form would pass no matter what the callable did.
 - Anything scripting `--timeout-s inf` or a non-finite value on any of the six float flags now
   gets a usage error where it previously got the tool's default. This is the intended correction;

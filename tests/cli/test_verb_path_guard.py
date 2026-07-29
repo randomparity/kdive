@@ -13,8 +13,9 @@ import pytest
 
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import REGISTRY, Verb, _curated_flags
-from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
+from kdive.cli.commands.registry import REGISTRY
+from kdive.cli.commands.verb_spec import GeneratedVerb
+from tests.cli.verb_argv import required_argv_for_curated, required_argv_for_generated
 
 
 def _derive_path(tool: str) -> tuple[str, str]:
@@ -44,51 +45,16 @@ def test_generated_paths_are_unique() -> None:
     assert len(paths) == len(set(paths)), "a generated path is claimed by two tools"
 
 
-def _required_argv_for_curated(verb: Verb) -> list[str]:
-    """Placeholder argv reaching ``verb``'s required surface, typed off its generated twin.
-
-    A curated parameter's ``type``/``choices`` are read off the generated verb at the same path
-    (ADR-0469, ADR-0474), so the placeholder has to be derived from the same flag: a bare
-    ``seconds-val`` stopped parsing the moment ``images extend --seconds`` became a real ``int``.
-    """
-    derived = _curated_flags(verb)
-
-    def value(name: str) -> str:
-        flag = derived.get(name)
-        return _value_for_flag(flag) if flag is not None else f"{name}-val"
-
-    argv = [value(name) for name in verb.positionals]
-    for option in verb.required_options:
-        argv += [f"--{option.replace('_', '-')}", value(option)]
-    return argv
-
-
-def _value_for_flag(flag: GeneratedFlag) -> str:
-    if flag.choices:
-        return flag.choices[0]
-    return "1" if flag.arg_type in {"int", "float"} else "x"
-
-
-def _required_argv_for_generated(verb: GeneratedVerb) -> list[str]:
-    argv: list[str] = []
-    for flag in verb.flags:
-        if not flag.required:
-            continue
-        if flag.action in {"store_true", "bool_optional"}:
-            argv.append(flag.name)  # both are valueless; bool_optional also accepts --no-<flag>
-        else:
-            argv += [flag.name, _value_for_flag(flag)]
-    return argv
-
-
 @pytest.mark.parametrize("generated", GENERATED_VERBS, ids=lambda v: v.tool)
 def test_parser_resolves_every_verb_at_its_canonical_path(generated: GeneratedVerb) -> None:
     # Derive each path mechanically and assert the built parser resolves it — no alias table.
+    # The placeholder values are typed off the same flags the parser reads (ADR-0469, ADR-0474):
+    # a bare "seconds-val" stopped parsing once `images extend --seconds` became a real int.
     curated = {(v.group, v.sub): v for v in REGISTRY}.get((generated.group, generated.sub))
     tail = (
-        _required_argv_for_curated(curated)
+        required_argv_for_curated(curated)
         if curated is not None
-        else _required_argv_for_generated(generated)
+        else required_argv_for_generated(generated)
     )
     args = build_parser().parse_args([generated.group, generated.sub, *tail])
     assert (args.command, args.subcommand) == (generated.group, generated.sub)

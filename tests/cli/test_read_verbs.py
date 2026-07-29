@@ -431,13 +431,14 @@ def test_wait_verb_refuses_a_non_numeric_or_non_finite_timeout(
     is that argparse now says so before any tool call.
 
     The value is attached with ``=``: argparse's negative-number heuristic matches only a leading
-    digit or ``.``, so a bare ``--timeout-s -inf`` is rejected as an unknown option and would
-    never reach the type callable this test exists to exercise.
+    digit or ``.``, so a bare ``--timeout-s -inf`` fails earlier with "expected one argument" and
+    would never reach the type callable this test exists to exercise.
     """
     with pytest.raises(SystemExit) as excinfo:
         build_parser().parse_args([group, "wait", "obj-1", f"--timeout-s={value}"])
     assert excinfo.value.code == 2
-    assert "--timeout-s" in capsys.readouterr().err
+    # The usage line names every option, so the flag is matched as part of the error line itself.
+    assert "argument --timeout-s:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
