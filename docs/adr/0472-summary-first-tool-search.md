@@ -110,7 +110,9 @@ only boundary.
   6.8 KB to 3.0 KB. Discovery becomes a call an agent can issue freely, which is the behavior the
   gateway was defaulted on for.
 - Reaching an invocable schema now costs a second round trip for the chosen tool. That is the
-  intended trade: one 1–3 KB schema instead of ten.
+  intended trade: one 1–3 KB schema instead of ten. A `detail: "full"` response is ~10% larger
+  than the pre-#1597 one, because `summary` rides both modes to keep summary keys a strict
+  subset; that cost buys a client one shape to parse instead of two.
 - `detail: "full"` with `limit: 50` can still return a large payload. That is opt-in and bounded by
   the caller's own `limit`; the defect this ADR fixes was the *default*, and adding a second,
   smaller cap for full mode would silently return fewer results than the caller asked for.
