@@ -231,6 +231,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_SSH_PARITY_DOMAIN` | — | Running, agent-ready remote-libvirt domain name for the SSH-parity bootstrap-key injection live test (#966); unset → that test skips. |
 | `KDIVE_SSH_PARITY_URI` | — | libvirt qemu+tls connection URI for the SSH-parity injection live test (#966). |
 | `KDIVE_STACK_BASE_URL` | — | Base URL of a running kdive server for the live_stack HTTP tier; unset → that tier skips. |
+| `KDIVE_STACK_SKEW_POLICY` | — | How hard the live_stack version-skew preflight bites (ADR-0482): 'off' (do not probe), 'warn' (never skip), 'strict' (skip on anything but a fresh stack); unset → the default table, where only stale_restart skips. |
 | `KDIVE_TEST_BUILD_CONFIG` | — | Path or file:// URL to a kernel .config (kdump + debuginfo) for the live_vm real-make build-id test; unset → that test skips. |
 | `KDIVE_TEST_PG_URL` | — | Postgres server URL (with credentials) the db-test fixtures reuse instead of starting a per-run container (ADR-0401); unset → one shared testcontainer is started per run. Each worker creates its own kdive_test_<worker>_<token> database on it. |
 | `KDIVE_TEST_S3_ACCESS_KEY` | `minioadmin` | Access key for the KDIVE_TEST_S3_URL override MinIO/S3 (ADR-0401); defaults to the just compose-up minioadmin root. |

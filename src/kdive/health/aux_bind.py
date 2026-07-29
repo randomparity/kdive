@@ -21,8 +21,10 @@ from kdive.config.core_settings import HEALTH_BIND_ADDR
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 #: Per-process default aux port offsets from the registered default host, so three
-#: default-configured processes on one host bind distinct ports (ADR-0090 §5).
-_PROCESS_DEFAULT_PORTS: dict[str, int] = {
+#: default-configured processes on one host bind distinct ports (ADR-0090 §5). Public
+#: because the live-stack skew preflight probes the same ports (ADR-0482 §3) and must
+#: not re-declare the map it would then drift from.
+PROCESS_DEFAULT_PORTS: dict[str, int] = {
     "server": 9464,
     "worker": 9465,
     "reconciler": 9466,
@@ -55,7 +57,7 @@ def resolve_health_bind(process: str = "server") -> tuple[str, int]:
     except ValueError as exc:
         raise _bad(raw) from exc
     if not explicit:
-        port = _PROCESS_DEFAULT_PORTS.get(process, port)
+        port = PROCESS_DEFAULT_PORTS.get(process, port)
     return host, port
 
 
