@@ -351,6 +351,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Parse the denial envelope the harness used to raise on
 - Do not dump a bare null when a failure carries no envelope
 - Resolve a project nested in a request payload
+- Name the staged base when the never-uploaded HEAD fires
 
 ### Build
 
