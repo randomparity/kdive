@@ -49,6 +49,13 @@ enforced: a `head` on a key resolves to that key or to nothing, so no sibling ca
 mtime. `list_prefix_with_mtime` keeps its unbounded pagination, which is right for its remaining
 caller — a root listing genuinely wants every key.
 
+> **Amended by [ADR-0498](0498-page-the-upload-orphan-sweep.md) (#1569).** The enumeration half of the
+> port is now `iter_prefix_pages_with_mtime`, which streams a root a page at a time;
+> `list_prefix_with_mtime` is no longer on this port at all and its remaining caller is the bounded
+> `images/` sweep. The split this section defends is unchanged and is now enforced by the port rather
+> than by convention — the sweep cannot ask for a whole root, and the re-read is still one `head`.
+> "A root listing genuinely wants every key" stays true; it wants them a page at a time.
+
 ### 2. `last_modified` is required, not optional
 
 `HeadObject` always returns `Last-Modified`; there is no S3-compatible response that omits it. A
