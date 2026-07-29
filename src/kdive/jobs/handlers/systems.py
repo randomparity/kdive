@@ -166,10 +166,29 @@ async def _record_system_failure(
     transition: str,
     tool: str,
     operation: str,
+    category: ErrorCategory,
 ) -> None:
+    """Drive ``system_id`` to ``failed`` and record **why**, in one transaction (ADR-0492).
+
+    ``category`` lands on ``systems.failure_category`` inside the same transaction as the
+    state change, so the two commit together or not at all. Before #1562 the reason had one
+    durable home — ``jobs.error_category``, written by ``queue.fail`` on a *different*
+    connection after this function returned and the handler re-raised — and a worker that
+    died in that window (or a ``queue.fail`` that raised, which ``_claim_loop`` swallows)
+    lost it permanently: the job was either stamped ``lease_expired`` by the reconciler or
+    reclaimed, re-entered this System while it was already terminal, and ended ``succeeded``.
+
+    The write is inside the ``try``, so it inherits this function's best-effort contract: a
+    failure to record the reason must never displace the provider error the caller re-raises.
+
+    Args:
+        category: The provider error's category — the System's own verdict, independent of
+            whatever the job row later comes to say.
+    """
     try:
         async with conn.transaction():
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+            await _record_failure_category(conn, system_id, category)
             await audit_transition(
                 conn,
                 job,
@@ -186,6 +205,22 @@ async def _record_system_failure(
             operation,
             system_id,
             exc_info=True,
+        )
+
+
+async def _record_failure_category(
+    conn: AsyncConnection, system_id: UUID, category: ErrorCategory
+) -> None:
+    """Stamp ``systems.failure_category``, guarded to the row this transaction just failed.
+
+    The ``state = 'failed'`` guard is redundant with the caller's transaction today and is
+    kept anyway: it makes the statement safe to run against a row some other writer has
+    since moved on, so a category can never land on a System that is not failed.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "UPDATE systems SET failure_category = %s WHERE id = %s AND state = %s",
+            (category.value, system_id, SystemState.FAILED.value),
         )
 
 
@@ -298,6 +333,7 @@ async def _execute_system_lifecycle_call(
             transition=failure_transition,
             tool=tool,
             operation=operation,
+            category=exc.category,
         )
         # The System is now terminally `failed`; dead-letter at once so a retry cannot mask it.
         exc.terminal = True
@@ -566,6 +602,7 @@ async def restore_handler(
             transition="restoring->failed",
             tool="systems.restore",
             operation="restore",
+            category=exc.category,
         )
         # Terminal: the System is now FAILED, so a retry would read `not RESTORING` and early-return
         # str(system_id), marking the RESTORE job succeeded while the System is actually FAILED.

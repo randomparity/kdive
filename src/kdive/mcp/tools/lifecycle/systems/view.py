@@ -147,7 +147,8 @@ def system_envelope(
     ``failing_job`` is the job that put the System in ``failed`` (ADR-0454); the failure
     envelope reports its category and reason instead of assuming one for every ``failed``
     System. Like the other get-only arguments it is a per-row query, so ``systems.list`` passes
-    none and keeps the ``infrastructure_failure`` default (ADR-0454 §4).
+    none — but the list path is no longer stuck on the default, because ``system.failure_category``
+    (ADR-0492) comes off the row both paths already read and needs no query at all.
 
     ``failure_attributed`` says the caller **ran** the lookup, which is not the same as it
     returning a job — and the difference is load-bearing. Every derived reason here is a positive
@@ -200,10 +201,10 @@ def _failed_system_envelope(
     *,
     attributed: bool,
 ) -> ToolResponse:
-    """Build the ``failed`` System envelope from its failing job's verdict (ADR-0454).
+    """Build the ``failed`` System envelope from the System's recorded verdict (ADR-0492/0454).
 
-    The category is the job's, defaulting to ``infrastructure_failure`` only when there is no
-    job to attribute or the job never recorded one.
+    The category is the System's own ``failure_category`` when the handler recorded one, else
+    the failing job's, defaulting to ``infrastructure_failure`` only when neither exists.
 
     ``detail`` is derived from the **resolved reason**, not from the presence of a job: a job
     with an empty ``failure_context`` is as reasonless as no job at all, and is in fact the
@@ -260,6 +261,15 @@ def _resolve_failure_verdict(
 ) -> tuple[ErrorCategory, Job | None, str]:
     """Resolve ``(category, citable job, fallback reason)`` for a ``failed`` System (ADR-0454).
 
+    ``systems.failure_category`` wins over the failing job's (ADR-0492): the handler writes it
+    in the same transaction as the ``failed`` transition, so it is the one statement that cannot
+    be separated from the failure it explains. The job's category is the fallback for the three
+    paths that record none — a System failed by the reconciler, a row from before the column
+    existed, and a non-``CategorizedError`` escape that dead-letters the job without touching
+    System state. The two agree on every normal path (both derive from the same exception); they
+    diverge exactly in the window #1562 describes, where the job says ``lease_expired`` or
+    ``succeeded`` and the System says what actually went wrong.
+
     Each flattening to the default is logged, because #1550 is a bug that survived precisely
     because the flattening was silent: an operator asking why a System still reads
     ``infrastructure_failure`` otherwise cannot tell a lookup that found nothing from a
@@ -267,28 +277,55 @@ def _resolve_failure_verdict(
     (``ops/queue.py``, ADR-0450). The no-job case needs no line — it is the expected shape.
     """
     job_category = failing_job.error_category if failing_job else None
-    if job_category is not None and suppressed_detail(job_category, None) is not None:
-        # A no-leak category is a statement the System envelope may not repeat (see above), so
-        # the whole job is dropped rather than half-quoted.
+    if _is_no_leak(system.failure_category):
+        # The System's own verdict is a reserved envelope-level meaning here, exactly as a
+        # job's would be, so it is dropped on the same rule rather than because of its source.
         _log.info(
-            "system %s: failing job %s carries no-leak category %s; reporting the default",
-            system.id,
-            failing_job.id if failing_job else None,
-            job_category.value,
+            "system %s: recorded failure category is no-leak; reporting the default", system.id
         )
         return (
             ErrorCategory.INFRASTRUCTURE_FAILURE,
             None,
             UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
         )
-    if failing_job is not None and job_category is None:
+    if _is_no_leak(job_category):
+        # A no-leak category is a statement the System envelope may not repeat (see above), so
+        # the whole job is dropped rather than half-quoted. The System's own recorded verdict
+        # survives that drop: it is a different fact, from a write this surface trusts.
+        _log.info(
+            "system %s: failing job %s carries no-leak category %s; reporting %s",
+            system.id,
+            failing_job.id if failing_job else None,
+            job_category.value if job_category else None,
+            system.failure_category.value if system.failure_category else "the default",
+        )
+        return (
+            system.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+            None,
+            UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
+        )
+    recorded = system.failure_category or job_category
+    if recorded is None and failing_job is not None:
         _log.info(
             "system %s: failing job %s has no error_category; degraded to infrastructure_failure",
             system.id,
             failing_job.id,
         )
-    category = job_category or ErrorCategory.INFRASTRUCTURE_FAILURE
-    return category, failing_job, _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
+    category = recorded or ErrorCategory.INFRASTRUCTURE_FAILURE
+    # The fallback reason describes the **job**, not the System's verdict: a lease-expired job
+    # explains why no message survived, which is complementary to the category the System kept.
+    reason_key = job_category or category
+    reason = _SYSTEM_FAILURE_DETAIL.get(reason_key, NO_JOB_SYSTEM_FAILURE_DETAIL)
+    return category, failing_job, reason
+
+
+def _is_no_leak(category: ErrorCategory | None) -> bool:
+    """Is ``category`` one ADR-0123 suppresses (``not_found`` / ``authorization_denied``)?
+
+    ``suppressed_detail(category, None)`` returns the fixed constant even when ``raw`` is
+    ``None``, so a non-``None`` result is exactly the suppressed set.
+    """
+    return category is not None and suppressed_detail(category, None) is not None
 
 
 async def _placement_for_system(
