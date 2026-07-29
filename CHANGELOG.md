@@ -99,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct _input_schemas' contract in its docstring
 - Give the wait timeout default and cap one home
 - Remove compact.py's unreachable bare-ToolResponse branch
+- Delete UsageTrackingMiddleware's dead denial arm
 
 ### Documentation
 
@@ -352,6 +353,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Do not dump a bare null when a failure carries no envelope
 - Resolve a project nested in a request payload
 - Name the staged base when the never-uploaded HEAD fires
+- Add general btree index on artifacts.object_key
+- Envelope the non-member denial in accounting.report
 
 ### Build
 
