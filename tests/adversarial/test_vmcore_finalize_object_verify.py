@@ -2,12 +2,18 @@
 
 The falsifying case is issue #1574, and it needs no re-mint. The vmcore lane's keys are
 deterministic per ``(run, method)`` and mint **no** upload window, so a first ``capture_vmcore``
-attempt that PUT the core and died before ``finalize_capture`` leaves
+attempt that wrote the core and died before ``finalize_capture`` leaves
 ``local/runs/<run>/vmcore-<method>`` rowless *and* manifest-less indefinitely. Past
 ``orphan_grace + upload_ttl`` it is a live candidate for the ADR-0455 sweep, which re-reads and
-re-classifies immediately before deleting — and a retried capture's presigned PUT landing inside
-that last gap is deleted anyway (ADR-0455 §3). The guest performs that PUT over a presigned URL, so
-it holds no lock any fence could contend on, and ``precheck_run`` has already released the Run lock.
+re-classifies immediately before deleting — and a retried capture's write landing inside that last
+gap is deleted anyway (ADR-0455 §3).
+
+The keys here are the **local-libvirt** shape on purpose: the sweep's roots derive from
+``UPLOAD_TENANT = "local"``, and local-libvirt is constructed with ``tenant="local"``, so its
+``put_stream`` core and ``put`` redacted sibling are the vmcore objects the sweep can reach.
+Remote-libvirt's presigned guest PUT writes under ``remote-libvirt/`` and is outside every swept
+root. Neither write is fenced by a lock the sweep contends on — ``precheck_run`` releases the Run
+lock before the capture by design (ADR-0244), and the sweep takes none.
 
 ADR-0497 does not stop the delete: the conditional delete that would have is inert on the MinIO
 releases this repo pins, so the sweep still destroys the bytes. What these tests pin is that the
@@ -47,6 +53,7 @@ _GRACE = timedelta(hours=1)
 _NO_TTL = timedelta(0)
 _RAW_ETAG = "etag-of-the-captured-core"
 _REDACTED_ETAG = "etag-of-the-captured-dmesg"
+_ABANDONED_ETAG = "etag-of-the-abandoned-first-attempt"
 
 
 class _VerifyStore:
@@ -61,6 +68,7 @@ class _VerifyStore:
         self._objects = dict(objects)
         self.headed_keys: list[str] = []
         self.deleted: list[str] = []
+        self.deleted_etags: list[str] = []
 
     @property
     def present(self) -> set[str]:
@@ -93,7 +101,9 @@ class _VerifyStore:
         ]
 
     def delete(self, key: str) -> None:
-        self._objects.pop(key, None)
+        entry = self._objects.pop(key, None)
+        if entry is not None:
+            self.deleted_etags.append(entry[0])
         self.deleted.append(key)
 
 
@@ -114,7 +124,7 @@ class _SweepInTheGapStore(_VerifyStore):
     def delete(self, key: str) -> None:
         if not self._fired:
             self._fired = True
-            # The retried capture's presigned PUT completes here, at the very key about to be
+            # The retried capture's put_stream completes here, at the very key about to be
             # deleted. Its artifacts row is still minutes away, so nothing protects these bytes.
             self.put(self._put_in_gap, _RAW_ETAG, timedelta(0))
         super().delete(key)
@@ -221,13 +231,15 @@ def test_the_sweep_destroys_a_put_landing_in_its_own_key_s_gap(migrated_url: str
             run_id, _job = await _seeded_capture_job(pool)
             raw = _raw_key(run_id)
             # The dead first attempt's leftovers: rowless, manifest-less, past the grace.
-            store = _SweepInTheGapStore(
-                {raw: ("etag-of-the-abandoned-first-attempt", _GRACE * 2)}, put_in_gap=raw
-            )
+            store = _SweepInTheGapStore({raw: (_ABANDONED_ETAG, _GRACE * 2)}, put_in_gap=raw)
             async with pool.connection() as conn:
                 assert await repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL) == 1
             assert store.deleted == [raw]
-            assert raw not in store.present  # the retried PUT's bytes are gone
+            # The identity is the point, not the absence: an aged rowless orphan being deleted is
+            # what the sweep is *for*. What this pins is that the bytes destroyed are the ones the
+            # gap PUT wrote, which the sweep never re-read and never decided on.
+            assert store.deleted_etags == [_RAW_ETAG]
+            assert raw not in store.present
 
     asyncio.run(_run())
 
@@ -249,13 +261,15 @@ def test_a_capture_whose_object_the_sweep_deleted_commits_no_row(migrated_url: s
             raw = _raw_key(run_id)
             store = _SweepInTheGapStore(
                 {
-                    raw: ("etag-of-the-abandoned-first-attempt", _GRACE * 2),
+                    raw: (_ABANDONED_ETAG, _GRACE * 2),
                     _redacted_key(run_id): (_REDACTED_ETAG, _GRACE * 2),
                 },
                 put_in_gap=raw,
             )
             async with pool.connection() as conn:
                 await repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL)
+            # The retried capture's bytes went, not the abandoned attempt's the sweep re-read.
+            assert store.deleted_etags[0] == _RAW_ETAG
             assert raw not in store.present
 
             retriever = _FakeRetriever(run_id)

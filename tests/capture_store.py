@@ -10,6 +10,14 @@ the provider and the bucket it wrote to — which is what the real pair does, an
 double cannot drift from the keys and etags the test itself put under test. Tests that are *about*
 the verify (``tests/adversarial/test_vmcore_finalize_object_verify.py``) build their own store
 instead, because they need to disagree with the capture on purpose.
+
+One consequence is worth naming, because a shared double is easy to over-read. When two
+concurrent handlers drive the *same* fake for the same Run, both record the same etag for the same
+key, so both finalizes agree with the store and both commit. In production that is the
+byte-identical-cores case: the two captures write the same deterministic key, and if their bytes
+differ the later write wins and the first finalize refuses (ADR-0497 Consequences). The refusal arm
+is pinned directly by ``test_an_object_replaced_since_the_capture_commits_no_row`` rather than by
+forcing that interleaving through a barrier.
 """
 
 from __future__ import annotations
