@@ -196,6 +196,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Note the #1635 interaction in ADR-0471
 - Disclose the in-guest helper exit-code narrowing
 - ADR-0476 — one home for the wait timeout constants
+- Correct the cost claim ADR-0485 rests on
+- Amend the design doc §6 was written from, and tighten the index row
+- The denial-plane skip is not de-duplication
 
 ### Fixed
 
@@ -335,6 +338,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Coerce numeric verb arguments at the parser seam
 - Let the guest helper's exit code name transience
 - Raise tempfail only when curl actually ran
+- Split META_TOOLS into purpose-keyed skip sets
 
 ### Build
 
