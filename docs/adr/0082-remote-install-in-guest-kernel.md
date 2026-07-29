@@ -63,6 +63,11 @@ fixed program. It exposes three subcommands the worker composes argv for:
   (the `kdive` slot) whose kernel cmdline is `<cmdline>` verbatim. It does **not** change the
   boot selection. For `--method kdump` it also enables the in-guest kdump capture service; for
   other methods it does not. Exit non-zero on any step's failure.
+
+  *Amended by [ADR-0489](0489-guest-helper-exit-code-names-transience.md) — "non-zero" is no
+  longer one undifferentiated code: the helper exits `75` (`EX_TEMPFAIL`) when the bundle did not
+  arrive from the presigned URL and `1` for every deterministic failure, so the worker can tell a
+  retryable condition from a permanent one.*
 - `boot-id` — print `/proc/sys/kernel/random/boot_id` (the kernel-minted per-boot UUID).
 - `boot` — select the `kdive` slot for the **next** boot only (grub one-shot) **and** trigger a
   **detached** reboot/kexec into it, atomically: the selection and the reboot are one in-guest
@@ -93,19 +98,27 @@ abandoned step claim converges to the same `/boot` + grub state instead of dupli
    hundreds of MB before gzip, ADR-0081), not the shortest possible window — a deliberate
    exception to "shortest expiry," still one object and one capability. If the URL expires
    mid-download the in-guest `curl` fails and the helper exits non-zero → `INSTALL_FAILURE`, which
-   is recoverable: a re-run mints a fresh URL.
+   is recoverable: a re-run mints a fresh URL. *Amended by
+   [ADR-0489](0489-guest-helper-exit-code-names-transience.md): that recovery stopped happening
+   on its own once a non-retryable category dead-lettered the job (ADR-0483), so an expired URL
+   now exits `75` → `INFRASTRUCTURE_FAILURE` and the re-run is the queue's own retry.*
 2. Runs `install --url … --cmdline <request.cmdline> --method <request.method>` through the
    issue-3 **`InTargetArtifactChannel`**, which registers the URL in the redaction registry
    **before** the exec, redacts+persists the captured transcript by exact value, and releases the
    per-op scope only after the persist (ADR-0078 §2). The cmdline is `request.cmdline` unchanged —
    the method-conditional crashkernel was already composed upstream (`cmdline_for`), so the
    crashkernel token is present iff `request.method` is `kdump`.
-3. Maps a non-zero helper exit to `INSTALL_FAILURE`; a guest-agent/transport fault propagates as
-   the seam's `TRANSPORT_FAILURE`. Note the worker **only mints** the presigned GET — it never
+3. Maps a non-zero helper exit to `INSTALL_FAILURE` (*amended by
+   [ADR-0489](0489-guest-helper-exit-code-names-transience.md): the mapping is now per exit code,
+   with `INSTALL_FAILURE` the fallback for an unrecognised one*); a guest-agent/transport fault
+   propagates as the seam's `TRANSPORT_FAILURE`. Note the worker **only mints** the presigned GET — it never
    fetches the object — so a **vanished `kernel_ref`** is not worker-observable (unlike the local
    plane, which fetches and raises `STALE_HANDLE`); it surfaces as the in-guest `curl` failing
    (HTTP 403/404) → a non-zero helper exit → `INSTALL_FAILURE`. `presign_get` itself only signs a
-   URL and does not validate object existence.
+   URL and does not validate object existence. *Amended by
+   [ADR-0489](0489-guest-helper-exit-code-names-transience.md): a failed fetch now exits `75`, so
+   a vanished object is retried a bounded number of times before dead-lettering — the accepted
+   cost of healing the far commoner expired-URL/store-blip case.*
 
 `install()` does **not** reboot or change the boot selection — it stages the bundle and replaces
 the `kdive` grub slot, mirroring the local plane's split so the install handler's `install` step
@@ -145,7 +158,9 @@ separately:
 - **Unit (no host):** assert `install()` composes the helper argv carrying `request.cmdline`, and
   that the cmdline carries the `crashkernel=` token **iff** `request.method` is `kdump` (the
   upstream `cmdline_for` composition is exercised at the install boundary), plus every error-path
-  mapping (non-zero helper exit → `INSTALL_FAILURE`, unreachable agent → `TRANSPORT_FAILURE`,
+  mapping (non-zero helper exit → `INSTALL_FAILURE`, per
+  [ADR-0489](0489-guest-helper-exit-code-names-transience.md) now one case per exit code plus the
+  unrecognised-code fallback; unreachable agent → `TRANSPORT_FAILURE`,
   lost-agent-on-reboot tolerated, never-fresh-boot → `BOOT_TIMEOUT`).
 - **`live_vm` (real host):** after install+boot, read the guest's `/proc/cmdline` and confirm the
   `crashkernel=` token is present for a kdump-method install and absent otherwise, and confirm the

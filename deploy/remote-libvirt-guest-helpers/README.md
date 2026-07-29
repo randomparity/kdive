@@ -26,10 +26,28 @@ All three pass `shellcheck` + `shfmt -i 2 -d` and are guarded in CI by `just lin
   gzip bundle (`boot/vmlinuz` + `lib/modules/<ver>`), install it, and **add-or-replace one
   deterministic grub slot** ("kdive") whose kernel cmdline is `<cmdline>` verbatim. Does NOT
   change the boot selection. `--method kdump` also enables the kdump service. Idempotent
-  (replace, not append). Exit non-zero on any failure.
+  (replace, not append). Exit non-zero on any failure, with the code naming whether the failure
+  is transient (below).
 - `boot-id` — print `/proc/sys/kernel/random/boot_id`.
 - `boot` — select the "kdive" slot for the **next boot only** (grub one-shot) and trigger a
   **detached** reboot into it, atomically.
+
+**Exit codes (ADR-0489).** The worker maps the helper's exit code onto a failure category, and
+since ADR-0483 that category decides whether the job may be retried at all — so the code is a
+contract, not a detail:
+
+| exit | condition | worker category | retryable |
+|---|---|---|---|
+| `0` | success | — | — |
+| `75` (`EX_TEMPFAIL`) | the bundle did not arrive from the presigned URL (`curl`) — object store down, guest network unsettled, or the URL expired | `infrastructure_failure` | yes — attempt 2 mints a fresh URL |
+| `1` | any deterministic failure: bad argv, bundle contents wrong, `tar`/`depmod`/`dracut`/`grubby`/`grub2-reboot` | `install_failure` | no |
+| any other | a `set -e` propagation from an unguarded command | `install_failure` | no |
+
+The codes are **additive**: a worker that has learned them still meets base images built before
+this contract, which exit `1` for everything. Unrecognised codes map to `install_failure`, so an
+old image degrades to the pre-ADR-0489 behaviour rather than being misclassified — and a code the
+worker has never heard of is never assumed retryable. **A guest image must be rebuilt to carry
+the new codes**; until then its installs are classified exactly as they were before.
 
 ### `kdive-capture-vmcore` (ADR-0084 §2)
 

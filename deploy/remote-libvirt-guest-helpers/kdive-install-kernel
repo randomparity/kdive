@@ -16,13 +16,34 @@
 #   boot
 #       select the "kdive" slot for the NEXT boot only (grub one-shot) AND trigger a detached
 #       reboot into it, atomically.
+#
+# Exit-code contract (ADR-0489). The worker maps each code onto a failure category, and the
+# category decides whether the job may be retried:
+#   0   success
+#   75  EX_TEMPFAIL — the bundle could not be fetched from the presigned URL. Transient: the
+#       object store blipped, the guest network was not settled, or the URL had expired. A retry
+#       mints a fresh URL and can succeed, so the worker reads this as infrastructure_failure.
+#   1   any other failure this helper decides — bad argv, a bundle whose contents are wrong,
+#       extract/depmod/dracut/grubby/grub2-reboot. Deterministic: a bare retry cannot fix it.
+#   *   any other non-zero (a `set -e` propagation from an unguarded command) is deterministic
+#       too; the worker maps every unrecognised code to install_failure.
+# Codes are ADDITIVE to this contract: the worker treats an unknown one as deterministic, so an
+# image built before this contract existed (exit 1 for everything) keeps its old behaviour.
 set -euo pipefail
 
 KDIVE_TITLE="kdive"
+readonly EX_DETERMINISTIC=1
+readonly EX_TEMPFAIL=75
 
 die() {
   echo "kdive-install-kernel: $*" >&2
-  exit 1
+  exit "$EX_DETERMINISTIC"
+}
+
+# A failure a bare retry can heal: the worker re-mints the presigned URL and runs install again.
+die_tempfail() {
+  echo "kdive-install-kernel: $*" >&2
+  exit "$EX_TEMPFAIL"
 }
 
 # Remove every existing grub entry titled "kdive" so install replaces a single slot.
@@ -62,7 +83,11 @@ do_install() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' RETURN
 
-  curl -fsSL --retry 3 "$url" -o "$tmp/bundle.tar.gz" || die "bundle download failed"
+  # curl's own --retry covers seconds; it does not cover an object store that is restarting or a
+  # presigned URL that has already expired. Those need the worker's retry, which mints a new URL.
+  curl -fsSL --retry 3 "$url" -o "$tmp/bundle.tar.gz" || die_tempfail "bundle download failed"
+  # Deterministic, not tempfail: curl already fails a short transfer, so bytes that arrived whole
+  # and still will not extract are a bad object, and re-downloading them yields the same bytes.
   tar xzf "$tmp/bundle.tar.gz" -C "$tmp" || die "bundle extract failed"
   [ -f "$tmp/boot/vmlinuz" ] || die "bundle missing boot/vmlinuz"
   [ -d "$tmp/lib/modules" ] || die "bundle missing lib/modules"

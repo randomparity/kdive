@@ -21,7 +21,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_categ
 from kdive.providers.ports.lifecycle import InstallRequest
 from kdive.providers.remote_libvirt.config import RemoteLibvirtConfig, TlsCertRefs
 from kdive.providers.remote_libvirt.guest.agent import AgentExecResult
-from kdive.providers.remote_libvirt.lifecycle.install import RemoteLibvirtInstall
+from kdive.providers.remote_libvirt.lifecycle.install import (
+    _HELPER_EX_TEMPFAIL,
+    RemoteLibvirtInstall,
+)
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
@@ -316,6 +319,53 @@ def test_install_nonzero_helper_exit_is_install_failure() -> None:
     assert excinfo.value.details["exit_status"] == 3
 
 
+def _install_failure_category(exit_status: int) -> CategorizedError:
+    """Drive one non-zero helper exit through install() and return the raised error."""
+    with pytest.raises(CategorizedError) as excinfo:
+        _install(
+            lambda _argv: AgentExecResult(exit_status, b"", b"helper stderr"),
+            _FakeStore(),
+            SecretRegistry(),
+        ).install(_request(CaptureMethod.HOST_DUMP, "console=ttyS0"))
+    return excinfo.value
+
+
+def test_helper_exit_code_decides_whether_the_install_may_be_retried() -> None:
+    # The whole point of #1653: since ADR-0483 the category decides dead-letter-on-attempt-1 vs a
+    # retry that re-mints the presigned GET and self-heals. Drive both codes down the SAME path
+    # and assert they land on OPPOSITE sides of the retry boundary — a lost bundle fetch is
+    # transient, dracut/grubby are not.
+    transient = _install_failure_category(_HELPER_EX_TEMPFAIL)
+    deterministic = _install_failure_category(1)
+
+    assert transient.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(transient.category) is True
+    assert deterministic.category is ErrorCategory.INSTALL_FAILURE
+    assert retryable_category(deterministic.category) is False
+
+
+@pytest.mark.parametrize(
+    ("exit_status", "condition"),
+    [
+        (1, "an OLD guest image, built before ADR-0489: exit 1 for every failure"),
+        (2, "a `set -e` propagation from an unguarded in-guest command"),
+        (137, "the helper was SIGKILLed (128+9)"),
+        (76, "a code a NEWER helper may add that this worker has not learned"),
+    ],
+)
+def test_unrecognised_helper_exit_keeps_the_pre_contract_install_failure(
+    exit_status: int, condition: str
+) -> None:
+    # The helper ships baked into an operator-built base image, so the worker and the code it
+    # reads are separately versioned in BOTH directions. Anything the worker does not recognise
+    # falls back to install_failure — exactly the pre-#1653 behaviour, so an old image degrades
+    # rather than being misclassified, and no unknown code is ever assumed retryable.
+    error = _install_failure_category(exit_status)
+    assert error.category is ErrorCategory.INSTALL_FAILURE, condition
+    assert retryable_category(error.category) is False
+    assert error.details["exit_status"] == exit_status
+
+
 def test_remote_domain_lookup_failure_is_retryable_infrastructure_failure() -> None:
     # This site had NO test and was `install_failure` — non-retryable, so under ADR-0483 a
     # libvirtd restart or network blip on the qemu+tls socket would have permanently stranded
@@ -522,6 +572,25 @@ def test_boot_nonzero_baseline_boot_id_is_install_failure() -> None:
         _boot_install(handler).boot(system_id)
     assert excinfo.value.category is ErrorCategory.INSTALL_FAILURE
     assert excinfo.value.details == {"system_id": str(system_id), "exit_status": 2}
+
+
+def test_boot_baseline_read_shares_the_helper_exit_code_contract() -> None:
+    # Both sites that read a helper exit go through one mapping (ADR-0489), so they cannot drift
+    # into disagreeing about what a code means: a tempfail exit from the baseline read is
+    # retryable here for the same reason it is on the install path.
+    system_id = uuid4()
+
+    def handler(argv: list[str]) -> AgentExecResult:
+        return AgentExecResult(_HELPER_EX_TEMPFAIL, b"", b"")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _boot_install(handler).boot(system_id)
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(excinfo.value.category) is True
+    assert excinfo.value.details == {
+        "system_id": str(system_id),
+        "exit_status": _HELPER_EX_TEMPFAIL,
+    }
 
 
 def test_boot_sleeps_the_configured_poll_interval_between_boot_id_polls() -> None:
