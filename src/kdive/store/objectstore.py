@@ -539,7 +539,8 @@ class ObjectStore:
     ) -> Iterator[list[artifact_types.ObjectListing]]:
         """Yield ``prefix``'s objects and their mtimes, one ``list_objects_v2`` page at a time.
 
-        The streaming primitive :meth:`list_prefix_with_mtime` flattens. It exists because a caller
+        This is the streaming primitive; :meth:`list_prefix_with_mtime` is what flattens it. It
+        exists because a caller
         sweeping an unbounded prefix must not hold the whole listing: `local/runs/` accumulates a
         vmcore per crashing run, a pcap per capture, and every chunked upload's parts for the life
         of the deployment, and the upload orphan sweep walks it every 30 seconds (ADR-0498). A page
