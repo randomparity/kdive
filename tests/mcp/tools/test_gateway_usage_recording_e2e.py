@@ -1,4 +1,11 @@
-"""End-to-end proof that one real gateway call records telemetry exactly once (#1625).
+"""End-to-end proof that a real gateway call writes one ``tool_invocation`` row (#1625).
+
+Pins ``usage.py``'s ``META_TOOLS`` skip, and only that. The other two consumers #1625 names
+stay unpinned end to end: ``telemetry.py``'s skip double-counts in metrics and spans rather
+than in a table, so deleting it leaves both tests below green (#1640), and
+``denial_audit.py``'s is unreachable for the separate reason under *Scope* (#1635).
+``tools.search``, the other ``META_TOOLS`` *member*, is not driven through the real gateway
+here either. A green run of this module is not an all-clear for the skip set as a whole.
 
 Epic #1576's criterion — *tool invocation and denial telemetry records the inner operation
 once, not the gateway wrapper plus the inner call* — was covered by two halves that never
@@ -24,30 +31,22 @@ Scope — narrower than #1625's full acceptance, in two ways worth stating plain
   ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
   class are deferred to #1635, which carries the fix and the assertions it unblocks.
 
-#1625 names three consumers of ``META_TOOLS``. This module pins only ``usage.py``'s.
-``telemetry.py``'s skip is unpinned end-to-end — deleting it leaves both tests below green,
-because it double-counts in metrics and spans, not in a table (#1640) — and
-``denial_audit.py``'s is unpinned for the separate reason above (#1635). ``tools.search``,
-the other ``META_TOOLS`` *member*, is not driven through the real gateway here either.
-
-Authentication binds the SDK's ``auth_context_var`` rather than patching ``current_context``.
-That is not quite the production write: ``fastmcp.server.dependencies.get_access_token``
-reads the HTTP request scope first and falls back to that context var, so an in-process call
-with no HTTP request exercises the fallback. It is still the closest reachable seam — every
-reader downstream (the inner tool, ``middleware.shared.request_context``, the denial audit)
-resolves through the unpatched production accessor and the real ``context_from_claims``.
-Patching ``current_context`` instead needs one patch per importing module, and each patch is
-a place the real lookup stops being under test.
+The identity half is real too: the token is minted, signed, and run through the same
+``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
+the ones verification produced. The only production step skipped is the ASGI request-scope
+lookup ``get_access_token`` prefers — with no HTTP request in-process it falls through to
+``auth_context_var``, which is what these tests set. Everything from there down is
+unpatched: ``current_context``, ``context_from_claims``, and the middleware-local
+``middleware.shared.request_context`` the recorder reads through.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Any, LiteralString
 
-from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
@@ -55,46 +54,48 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
 from kdive.security.secrets.secret_registry import SecretRegistry
-from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
+from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair, mint
 from tests.mcp.usage_support import recording_must_not_fail, warm_pool
 
 # A viewer on exactly one project: enough for session.whoami, and denied on any other
-# project — the two outcomes these tests need from one token. Every claim here that the
-# recorder writes to a column is asserted below, so none of them is decoration.
-_VIEWER_CLAIMS: dict[str, Any] = {
-    "sub": "viewer-user",
-    "agent_session": "sess-viewer",
-    "azp": "test-client",
-    "projects": ["proj-a"],
-    "roles": {"proj-a": "viewer"},
-}
+# project — the two outcomes these tests need from one token. Every claim the recorder
+# writes to an asserted column is here, so none of them is decoration.
+_PRINCIPAL = "viewer-user"
+_AGENT_SESSION = "sess-viewer"
+_CLIENT_ID = "test-client"
+_PROJECT = "proj-a"
 
 
-@contextlib.contextmanager
-def _authenticated(claims: dict[str, Any]) -> Iterator[None]:
-    """Bind ``claims`` to the verified-token context var the auth middleware sets.
+@contextlib.asynccontextmanager
+async def _authenticated_app(pool: AsyncConnectionPool) -> AsyncIterator[Any]:
+    """A real app, with a verified viewer token bound to the in-flight request context.
 
-    FastMCP's own ``AccessToken``, not the SDK base class: it is what ``JWTVerifier``
-    produces in production, and ``get_access_token`` returns it from an ``isinstance``
-    fast path rather than rebuilding it through the ``model_dump`` conversion shim it
-    keeps for foreign token types.
-
-    The model's own ``client_id`` field is required but inert here — ``context_from_claims``
-    reads the caller's client from the ``azp`` claim, so that is what ``_VIEWER_CLAIMS``
-    carries and what the recorded row is asserted against.
+    The token is minted and then verified by the *same* ``JWTVerifier`` instance the app is
+    built with, so the claims reaching the recorder are the ones token verification
+    produced rather than a literal dict injected past it. That keeps a future fastmcp
+    change to custom-claim handling — namespacing them, dropping unregistered ones,
+    altering ``azp`` — a failure here rather than a silent loss of attribution in
+    production.
     """
-    token = AccessToken(token="test-token", client_id="unused", scopes=[], claims=claims)
-    reset = auth_context_var.set(AuthenticatedUser(token))
-    try:
-        yield
-    finally:
-        auth_context_var.reset(reset)
-
-
-def _build_app(pool: AsyncConnectionPool) -> Any:
     keypair = make_keypair()
     verifier = JWTVerifier(public_key=keypair.public_key, issuer=ISSUER, audience=AUDIENCE)
-    return build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
+    token = await verifier.verify_token(
+        mint(
+            keypair,
+            subject=_PRINCIPAL,
+            agent_session=_AGENT_SESSION,
+            projects=[_PROJECT],
+            roles={_PROJECT: "viewer"},
+            client_id=_CLIENT_ID,
+        )
+    )
+    assert token is not None, "the app's own verifier rejected the minted viewer token"
+    reset = auth_context_var.set(AuthenticatedUser(token))
+    try:
+        yield app
+    finally:
+        auth_context_var.reset(reset)
 
 
 def _structured(result: Any) -> dict[str, Any]:
@@ -114,6 +115,10 @@ async def _fetch(pool: AsyncConnectionPool, query: LiteralString) -> list[tuple[
 # reads, and it is the one the sibling tests monkeypatch. Selecting only (tool, outcome)
 # would leave a row misattributed to a blank or stale principal indistinguishable from a
 # correct one — which is the whole value of the row (ADR-0148).
+#
+# `project` is deliberately absent: it is NULL on the denial call below, because
+# `_call_project` reads only top-level call arguments and `audit.query` nests its project
+# under `request` (#1644). Selecting it would pin that gap rather than the attribution.
 _USAGE_ROWS = (
     "SELECT tool, outcome, principal, agent_session, client_id FROM tool_invocation ORDER BY ts"
 )
@@ -123,9 +128,8 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     """A real tools.invoke dispatch writes exactly one tool_invocation row: the inner tool."""
 
     async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]]]:
-        async with warm_pool(migrated_url) as pool:
-            app = _build_app(pool)
-            with _authenticated(_VIEWER_CLAIMS), recording_must_not_fail():
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail():
                 result = await app.call_tool(
                     "tools.invoke", {"name": "session.whoami", "arguments": {}}
                 )
@@ -136,11 +140,11 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     # The inner tool really ran — an inner failure would still write a row, with outcome
     # "error", so this pins the row below to a successful dispatch.
     assert envelope["status"] == "ok"
-    assert envelope["data"]["principal"] == "viewer-user"
+    assert envelope["data"]["principal"] == _PRINCIPAL
 
-    # One row, keyed to the inner tool and attributed to the bound token. Without the
+    # One row, keyed to the inner tool and attributed to the verified token. Without the
     # META_TOOLS skip the outer chain also records "tools.invoke" and this is two rows.
-    assert rows == [("session.whoami", "ok", "viewer-user", "sess-viewer", "test-client")]
+    assert rows == [("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)]
 
 
 def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
@@ -164,9 +168,8 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     request = {"scope": "project", "project": "proj-not-granted"}
 
     async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]]]:
-        async with warm_pool(migrated_url) as pool:
-            app = _build_app(pool)
-            with _authenticated(_VIEWER_CLAIMS), recording_must_not_fail():
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail():
                 result = await app.call_tool(
                     "tools.invoke", {"name": "audit.query", "arguments": {"request": request}}
                 )
@@ -180,6 +183,6 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     # middleware derives the row's "denied" outcome from it, so the row already pins it.
     assert envelope["object_id"] == "audit.query"
 
-    # One row, keyed to the inner tool and attributed to the bound token. Without the
+    # One row, keyed to the inner tool and attributed to the verified token. Without the
     # META_TOOLS skip the outer chain also records a "tools.invoke" row and this is two.
-    assert usage_rows == [("audit.query", "denied", "viewer-user", "sess-viewer", "test-client")]
+    assert usage_rows == [("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)]
