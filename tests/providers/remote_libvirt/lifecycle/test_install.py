@@ -364,6 +364,10 @@ def test_unrecognised_helper_exit_keeps_the_pre_contract_install_failure(
     assert error.category is ErrorCategory.INSTALL_FAILURE, condition
     assert retryable_category(error.category) is False
     assert error.details["exit_status"] == exit_status
+    # Discriminating, not a restatement of the default: an old guest emitting a bare 1 for a
+    # transient bundle fetch must NOT be read as the code a new guest would have used for it.
+    # Widen the mapping to cover this code and the assertion below breaks.
+    assert error.category is not _install_failure_category(_HELPER_EX_TEMPFAIL).category
 
 
 def test_remote_domain_lookup_failure_is_retryable_infrastructure_failure() -> None:
