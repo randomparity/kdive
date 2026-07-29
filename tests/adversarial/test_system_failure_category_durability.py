@@ -310,3 +310,42 @@ def test_recorded_failure_category_is_committed_with_the_failed_transition(
             assert job_row["error_category"] is None
 
     asyncio.run(_run())
+
+
+def test_state_and_category_roll_back_together(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither write can land without the other, even on an autocommit connection.
+
+    The dispatch connection is in autocommit, so the atomicity rests entirely on
+    `_record_system_failure`'s explicit `conn.transaction()`. Failing the *last* statement in
+    that block — the audit write, which runs after both — proves the block is one unit: if
+    `update_state` or the category stamp were committing independently, the System would be
+    left `failed` (or `failed` with no category) after the rollback.
+    """
+    boom = RuntimeError("audit write failed")
+
+    async def _explode(*_args: object, **_kwargs: object) -> None:
+        raise boom
+
+    monkeypatch.setattr(systems_handlers, "audit_transition", _explode)
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            system_id, _ = await _seed_system(pool)
+            await _enqueue_provision(pool, system_id, max_attempts=3)
+            job = await _claim(pool)
+            # `_record_system_failure` swallows the audit error to preserve the provider error,
+            # so the handler still raises the original CategorizedError.
+            await _run_handler_until_it_raises(pool, job, _FailingProvisioner())
+
+            async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    "SELECT state, failure_category FROM systems WHERE id = %s", (system_id,)
+                )
+                row = await cur.fetchone()
+            assert row is not None
+            assert row["state"] == SystemState.PROVISIONING.value
+            assert row["failure_category"] is None
+
+    asyncio.run(_run())
