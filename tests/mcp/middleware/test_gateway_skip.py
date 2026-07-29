@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -100,6 +101,13 @@ class _Ctx:
 
 def _pool(value: object) -> AsyncConnectionPool:
     return cast("AsyncConnectionPool", value)
+
+
+def _envelope(result: Any) -> ToolResponse:
+    """The envelope carried by the denial boundary's ``ToolResult`` short-circuit (ADR-0486)."""
+    assert isinstance(result, ToolResult), f"not transport-serializable: {result!r}"
+    assert isinstance(result.structured_content, dict)
+    return ToolResponse.model_validate(result.structured_content)
 
 
 def _returning(value: Any) -> Any:
@@ -596,7 +604,5 @@ def test_denial_equivalence_direct_vs_gateway() -> None:
     assert result_error_category(gateway_result) == ErrorCategory.AUTHORIZATION_DENIED.value
 
     # Same object_id — keyed to the inner tool, NOT to tools.invoke
-    assert isinstance(direct_result, ToolResponse)
-    assert isinstance(gateway_result, ToolResponse)
-    assert direct_result.object_id == inner_tool
-    assert gateway_result.object_id == inner_tool
+    assert _envelope(direct_result).object_id == inner_tool
+    assert _envelope(gateway_result).object_id == inner_tool

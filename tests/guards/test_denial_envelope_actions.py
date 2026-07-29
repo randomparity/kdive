@@ -123,15 +123,12 @@ def test_a_denial_can_never_name_a_gated_tool() -> None:
 # here, so "I forgot the role" cannot ship silently.
 #
 # A per-plane helper that takes its role as a *required* argument and forwards it (the images and
-# resources `denied` helpers, `host_ops._denied`) is not listed: it always passes the keyword, and
-# the requirement lands on its callers, which cannot omit it.
+# resources `denied` helpers, `host_ops._denied`, and the dispatch boundary's `_denied_result`) is
+# not listed: it always passes the keyword, and the requirement lands on its callers, which cannot
+# omit it. `_denied_result` joined them with ADR-0486, which routed both of the boundary's arms
+# through one constructor — its `ProjectMembershipDenied` arm passes an explicit `None`, a stated
+# "no role would have helped" rather than an omitted argument.
 _ROLELESS_DENIALS: dict[str, tuple[int, str]] = {
-    "mcp/middleware/denial_audit.py": (
-        1,
-        "the ProjectMembershipDenied arm: the project is not granted at all, so no role would "
-        "have helped. (Its RoleDenied arm — which catches AFTER call_next, not before dispatch — "
-        "does name `denial.required`.)",
-    ),
     "mcp/tools/_common.py": (
         1,
         "authz_denied speaks ADR-0129's `missing_checks`; a role is only one of its factors",
@@ -255,6 +252,7 @@ def test_missing_roles_key_is_written_only_by_the_denial_constructor() -> None:
 # genuinely *required* and genuinely *forwarded*: giving the parameter a default, or hardcoding
 # an empty list, would let a caller silently drop the role with both other guards green.
 _ROLE_FORWARDING_HELPERS: tuple[tuple[str, str, str], ...] = (
+    ("mcp/middleware/denial_audit.py", "_denied_result", "missing"),
     ("mcp/tools/ops/images/_common.py", "denied", "role"),
     ("mcp/tools/ops/resources/_common.py", "denied", "role"),
     ("mcp/tools/ops/resources/host_ops.py", "_denied", "role"),

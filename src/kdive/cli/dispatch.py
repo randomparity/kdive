@@ -44,10 +44,13 @@ _PREFLIGHT_TIERS = frozenset({ToolTier.MUTATING, ToolTier.DESTRUCTIVE})
 async def run(args: argparse.Namespace) -> int:
     """Dispatch a parsed ``kdivectl`` invocation to its handler.
 
-    A tool that signals failure by *raising* ``ToolError`` (rather than returning a failure
-    envelope) — e.g. a project-not-granted call to ``allocations.list`` — is surfaced as a
-    one-line stderr message and a generic nonzero exit, never an uncaught traceback. Failures
-    returned as a ``ToolResponse`` envelope keep their mapped exit code (:mod:`kdive.cli.errors`).
+    A tool that signals failure by *raising* ``ToolError`` — a server fault with no typed
+    category behind it — is surfaced as a one-line stderr message and a generic nonzero exit,
+    never an uncaught traceback. Failures returned as a ``ToolResponse`` envelope keep their
+    mapped exit code (:mod:`kdive.cli.errors`), and since ADR-0486 an authorization denial is
+    always the second shape: the dispatch boundary unwraps FastMCP's ``ToolError`` and returns
+    the ``authorization_denied`` envelope, so a project-not-granted call to ``allocations.list``
+    exits 3 rather than landing here (ADR-0098).
 
     Returns:
         The process exit code (0 on success; see :mod:`kdive.cli.errors` for failures).

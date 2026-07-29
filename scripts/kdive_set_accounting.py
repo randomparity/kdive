@@ -53,6 +53,20 @@ def build_calls(ns: argparse.Namespace) -> list[tuple[str, dict[str, object]]]:
     ]
 
 
+def _failed(result: object) -> bool:
+    """True when the call failed, in either shape a KDIVE tool can signal one.
+
+    ``is_error`` is the transport flag, set when the tool *raised*. A tool that denies or fails
+    by *returning* a failure envelope leaves it False and reports ``error_category`` instead
+    (ADR-0089), which is the shape an authorization denial takes since ADR-0486 — before that
+    it raised, so this helper's ``is_error`` check happened to cover it.
+    """
+    if getattr(result, "is_error", False):
+        return True
+    structured = getattr(result, "structured_content", None)
+    return isinstance(structured, dict) and structured.get("error_category") is not None
+
+
 async def run(ns: argparse.Namespace) -> int:
     """Execute the onboarding calls; return a process exit code."""
     if not ns.token:
@@ -64,8 +78,9 @@ async def run(ns: argparse.Namespace) -> int:
     async with Client(transport) as client:
         for name, arguments in build_calls(ns):
             result = await client.call_tool(name, arguments, raise_on_error=False)
-            if getattr(result, "is_error", False):
+            if _failed(result):
                 print(f"error: tool {name} failed", file=sys.stderr)
+                print(json.dumps(result.structured_content, default=str), file=sys.stderr)
                 return 1
             print(json.dumps(result.structured_content, default=str))
     return 0

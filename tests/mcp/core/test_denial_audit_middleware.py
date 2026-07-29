@@ -16,6 +16,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
@@ -35,6 +36,18 @@ class _FakeMessage:
 class _FakeContext:
     def __init__(self, tool: str, arguments: dict[str, object] | None = None) -> None:
         self.message = _FakeMessage(tool, arguments)
+
+
+def _envelope(result: Any) -> ToolResponse:
+    """The envelope the boundary's ``ToolResult`` short-circuit carries (ADR-0486).
+
+    The short-circuit returns a ``ToolResult`` rather than a bare ``ToolResponse`` because
+    that is the only shape ``_call_tool_mcp``'s ``to_mcp_result()`` accepts — see
+    ``tests/mcp/middleware/test_denial_audit.py`` for the pin on that.
+    """
+    assert isinstance(result, ToolResult), f"not transport-serializable: {result!r}"
+    assert isinstance(result.structured_content, dict)
+    return ToolResponse.model_validate(result.structured_content)
 
 
 def _role_denied() -> RoleDenied:
@@ -111,7 +124,7 @@ def _drive_role_denied(
                     "SELECT principal, agent_session, project, tool, object_kind, "
                     "object_id, transition, reason FROM audit_log ORDER BY ts"
                 )
-                return result, await cur.fetchall()
+                return _envelope(result), await cur.fetchall()
 
     return asyncio.run(_run())
 
@@ -152,7 +165,7 @@ def test_role_denied_audit_failure_still_returns_envelope(
                 raise _role_denied()
 
             result = await mw.on_call_tool(_FakeContext("allocations.release"), _call_next)
-            assert result.error_category == "authorization_denied"
+            assert _envelope(result).error_category == "authorization_denied"
             async with pool.connection() as conn:
                 assert await _count_audit(conn) == 0
 
@@ -260,13 +273,14 @@ def test_project_membership_denied_envelopes_without_audit(migrated_url: str) ->
             async def _call_next(_ctx: Any) -> None:
                 raise ProjectMembershipDenied("project 'other' is not granted to 'alice'")
 
-            result = await mw.on_call_tool(_FakeContext("allocations.list"), _call_next)
-            assert isinstance(result, ToolResponse)
-            assert result.error_category == "authorization_denied"
+            envelope = _envelope(
+                await mw.on_call_tool(_FakeContext("allocations.list"), _call_next)
+            )
+            assert envelope.error_category == "authorization_denied"
             # No-leak (#450, ADR-0123): the seam collapses the denial to a generic constant; the
             # named project from the raised message must not ride on the envelope.
-            assert result.detail == "access denied"
-            assert "other" not in result.model_dump_json()
+            assert envelope.detail == "access denied"
+            assert "other" not in envelope.model_dump_json()
             async with pool.connection() as conn:
                 assert await _count_audit(conn) == 0
 

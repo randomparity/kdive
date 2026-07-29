@@ -7,6 +7,9 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+from fastmcp.exceptions import ToolError
+from fastmcp.tools.base import ToolResult
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
@@ -16,16 +19,33 @@ from kdive.mcp.middleware.denial_audit import (
     DenialAuditMiddleware,
     _audit_args_from_message,
     _current_agent_session,
+    _denied_result,
     _json_argument,
+    _wrapped_denial,
 )
 from kdive.mcp.middleware.shared import result_error_category
 from kdive.mcp.responses import ToolResponse
 from kdive.security.authz.errors import ProjectMembershipDenied
-from kdive.security.authz.rbac import Role, RoleDenied
+from kdive.security.authz.rbac import AuthorizationError, Role, RoleDenied
 
 
 def _denial() -> RoleDenied:
     return RoleDenied(principal="alice", project="demo", held=Role.VIEWER, required=Role.OPERATOR)
+
+
+def _wrapped(exc: BaseException) -> ToolError:
+    """The exception exactly as FastMCP hands it to the chain (server.py:1358)."""
+    try:
+        raise ToolError("Error calling tool 'admin.teardown'") from exc
+    except ToolError as wrapper:
+        return wrapper
+
+
+def _envelope(result: Any) -> ToolResponse:
+    """The envelope carried by a middleware short-circuit, as the transport would read it."""
+    assert isinstance(result, ToolResult), f"not transport-serializable: {result!r}"
+    assert isinstance(result.structured_content, dict)
+    return ToolResponse.model_validate(result.structured_content)
 
 
 # --- _current_agent_session -------------------------------------------------
@@ -146,8 +166,7 @@ def test_on_call_tool_audits_role_denied_and_envelopes() -> None:
     # so the role it names here is what most of the surface reports (ADR-0490). `RoleDenied`
     # fires only past `require_role`'s membership check, so the caller is a member and the
     # required role discloses nothing their own membership did not.
-    assert isinstance(result, ToolResponse)
-    assert result.data["missing_roles"] == [denial.required.value] == ["operator"]
+    assert _envelope(result).data["missing_roles"] == [denial.required.value] == ["operator"]
     (tool, recorded_denial, args) = recorded[0]
     assert tool == "admin.teardown"
     assert recorded_denial is denial
@@ -187,8 +206,104 @@ def test_on_call_tool_envelopes_project_membership_denied() -> None:
     assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
     assert recorded == []  # membership denial is enveloped, not RoleDenied-audited
     # The project is not granted at all: naming a role would confirm it exists (ADR-0490).
-    assert isinstance(result, ToolResponse)
-    assert "missing_roles" not in result.data
+    assert "missing_roles" not in _envelope(result).data
+
+
+# --- the ToolError-wrapped shape (ADR-0486) ---------------------------------
+
+
+def test_on_call_tool_audits_role_denied_wrapped_in_tool_error() -> None:
+    # The shape every real dispatch delivers: FastMCP demotes the denial to __cause__.
+    mw, recorded = _spy_middleware()
+    denial = _denial()
+
+    async def call_next(_ctx: Any) -> ToolResponse:
+        raise _wrapped(denial)
+
+    result = asyncio.run(mw.on_call_tool(_context(arguments={"force": True}), call_next))
+
+    assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
+    assert _envelope(result).data["missing_roles"] == ["operator"]
+    (tool, recorded_denial, args) = recorded[0]
+    assert (tool, args) == ("admin.teardown", {"force": True})
+    # The audited denial is the wrapped original, so its principal/project/reason are the real
+    # ones — not a value reconstructed from the wrapper's message.
+    assert recorded_denial is denial
+
+
+def test_on_call_tool_envelopes_wrapped_project_membership_denied() -> None:
+    mw, recorded = _spy_middleware()
+
+    async def call_next(_ctx: Any) -> ToolResponse:
+        raise _wrapped(ProjectMembershipDenied("not a member"))
+
+    result = asyncio.run(mw.on_call_tool(_context(name="runs.create"), call_next))
+
+    assert result_error_category(result) == ErrorCategory.AUTHORIZATION_DENIED.value
+    assert recorded == []
+    assert "missing_roles" not in _envelope(result).data
+
+
+def test_on_call_tool_reraises_tool_error_over_an_ordinary_failure() -> None:
+    # The unwrap must not turn every wrapped exception into a denial: a ToolError whose cause
+    # is an unrelated error keeps propagating, unchanged and unaudited.
+    mw, recorded = _spy_middleware()
+    wrapper = _wrapped(RuntimeError("disk on fire"))
+
+    async def call_next(_ctx: Any) -> ToolResponse:
+        raise wrapper
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(mw.on_call_tool(_context(), call_next))
+    assert excinfo.value is wrapper
+    assert recorded == []
+
+
+def test_on_call_tool_reraises_tool_error_over_a_non_role_authorization_error() -> None:
+    # `DestructiveOpDenied` and `require_platform_role` denials are audited by their own
+    # handlers; sweeping them in here would double-write (ADR-0062 §5).
+    mw, recorded = _spy_middleware()
+    wrapper = _wrapped(AuthorizationError("destructive op refused"))
+
+    async def call_next(_ctx: Any) -> ToolResponse:
+        raise wrapper
+
+    with pytest.raises(ToolError):
+        asyncio.run(mw.on_call_tool(_context(), call_next))
+    assert recorded == []
+
+
+def test_on_call_tool_reraises_bare_tool_error() -> None:
+    # A ToolError raised with no `from` has __cause__ None; the isinstance check must not
+    # mistake that for a denial.
+    mw, _recorded = _spy_middleware()
+    bare = ToolError("no cause at all")
+
+    async def call_next(_ctx: Any) -> ToolResponse:
+        raise bare
+
+    with pytest.raises(ToolError) as excinfo:
+        asyncio.run(mw.on_call_tool(_context(), call_next))
+    assert excinfo.value is bare
+
+
+def test_wrapped_denial_ignores_a_denial_reachable_only_through_a_second_hop() -> None:
+    # The unwrap reads the *immediate* cause only, like gateway.py and binding_errors.py. A
+    # handler that deliberately converted a denial (`raise Other from denial`) keeps its
+    # conversion rather than having the denial resurrected underneath it (ADR-0486).
+    conversion = RuntimeError("converted")
+    conversion.__cause__ = _denial()
+    assert _wrapped_denial(_wrapped(conversion)) is None
+
+
+def test_denied_result_is_serializable_by_the_transport() -> None:
+    # `_call_tool_mcp` calls `result.to_mcp_result()`; a bare ToolResponse has no such method,
+    # so an unwrapped envelope reaches the client as an AttributeError (ADR-0486).
+    mcp_result = _denied_result("admin.teardown", missing=_denial()).to_mcp_result()
+    assert isinstance(mcp_result, tuple), f"no structured content to serialize: {mcp_result!r}"
+    structured = mcp_result[1]
+    assert structured["error_category"] == ErrorCategory.AUTHORIZATION_DENIED.value
+    assert structured["data"]["missing_roles"] == ["operator"]
 
 
 # --- _record ----------------------------------------------------------------
