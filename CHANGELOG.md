@@ -317,6 +317,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match guest-exec as a whole element, not a substring
 - Fail test-live-remote when no test carries the marker
 - Advertise the RHEL-family kdump symbols
+- Add ToolResponse.denied with a public terminal affordance
+- Route every authorization_denied envelope through denied()
 - Reclaim an active allocation on an abandoned crashed System
 - Grade stale_restart on modified files, not bare mtimes
 
