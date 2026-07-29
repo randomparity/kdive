@@ -206,6 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct two claims ADR-0486's branch left overstated
 - Correct the _call_project claim #1644 made incomplete
 - Scope _call_project's totality claim to delivered args
+- Record report artifact byte-reproducibility as a non-goal
 
 ### Fixed
 
