@@ -147,10 +147,8 @@ async def _wait(tool: str, args: argparse.Namespace, id_key: str, object_id: str
     timeout = getattr(args, "timeout_s", None)
     if timeout is not None:
         if timeout < 0:
-            print(
-                f"error: --timeout-s must be a non-negative finite number, not {timeout!r}",
-                file=sys.stderr,
-            )
+            # "finite" is the parser's job now, so this says only what it still checks.
+            print(f"error: --timeout-s must be non-negative, not {timeout}", file=sys.stderr)
             return 2
         payload["timeout_s"] = timeout
     return await _record(tool, args, payload)

@@ -18,7 +18,8 @@ from _pytest.mark import ParameterSet
 
 from kdive.cli.__main__ import build_parser, main
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
-from kdive.cli.commands.registry import REGISTRY, _curated_flags
+from kdive.cli.commands.registry import _ARG_TYPES, REGISTRY, _curated_flags
+from kdive.cli.commands.verb_spec import GeneratedFlag, GeneratedVerb
 
 #: Every curated parameter whose generated counterpart is a JSON ``number``, with the argv tail
 #: that reaches it and the Python type it must land on the namespace as. Derived by hand here on
@@ -139,6 +140,47 @@ def test_curated_int_option_accepts_a_negative_value() -> None:
     assert args.seconds == -1
 
 
+def _required_tail(verb: GeneratedVerb, skip: str) -> list[str]:
+    """Argv satisfying every required argument of ``verb``'s *live* parser, except ``skip``.
+
+    Without this the parser exits 2 on the missing required argument rather than on the value
+    under test, which would make every assertion below pass no matter what ``_ARG_TYPES`` holds —
+    the exact vacuity this helper exists to prevent.
+
+    A curated ``Verb`` **replaces** the generated parser at its path, so ``jobs wait`` takes a
+    positional id and has no ``--job-id`` at all. The required surface therefore has to come from
+    whichever shape actually sits at the path, not from the generated descriptor unconditionally.
+    """
+    curated = {(v.group, v.sub): v for v in REGISTRY}.get((verb.group, verb.sub))
+    if curated is not None:
+        derived = _curated_flags(curated)
+
+        def value(name: str) -> str:
+            flag = derived.get(name)
+            if flag is None:
+                return f"{name}-val"
+            if flag.choices:
+                return flag.choices[0]
+            return "1" if flag.arg_type in {"int", "float"} else f"{name}-val"
+
+        argv = [value(name) for name in curated.positionals]
+        for option in curated.required_options:
+            if f"--{option.replace('_', '-')}" != skip:
+                argv += [f"--{option.replace('_', '-')}", value(option)]
+        return argv
+    argv = []
+    for flag in verb.flags:
+        if not flag.required or flag.name == skip:
+            continue
+        if flag.action in {"store_true", "bool_optional"}:
+            argv.append(flag.name)
+        elif flag.choices:
+            argv += [flag.name, flag.choices[0]]
+        else:
+            argv += [flag.name, "1" if flag.arg_type in {"int", "float"} else "x"]
+    return argv
+
+
 def _generated_float_flags() -> list[ParameterSet]:
     """Every generated flag the schema types as a JSON ``number``, as argv-ready params."""
     return [
@@ -150,18 +192,47 @@ def _generated_float_flags() -> list[ParameterSet]:
 
 
 @pytest.mark.parametrize(("verb", "flag"), _generated_float_flags())
-@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "Infinity"])
-def test_generated_float_flag_refuses_a_non_finite_value(verb, flag, value: str) -> None:
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "Infinity", "1e400"])
+def test_generated_float_flag_refuses_a_non_finite_value(
+    verb: GeneratedVerb, flag: GeneratedFlag, value: str, capsys
+) -> None:
     """The finite check is repo-wide, not scoped to the four curated parameters (decision 2).
 
     ``_ARG_TYPES`` is the one map both halves of the parser read, so every generated float flag
     is covered by construction. All six are timeouts or deadlines in seconds, where an infinite
     or undefined value has no meaning the wire format could carry.
+
+    The whole required surface is supplied and the *message* is asserted, not just the exit code:
+    an argv missing a required argument exits 2 on its own, which would make this pass with the
+    finite check reverted to the builtin ``float``. ``-inf`` is spelled with ``=`` because
+    argparse's negative-number heuristic only recognizes a leading digit or ``.``, so a bare
+    ``--flag -inf`` is rejected as an unknown option before any type callable runs.
     """
-    parser = build_parser()
+    argv = [verb.group, verb.sub, *_required_tail(verb, flag.name), f"{flag.name}={value}"]
     with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args([verb.group, verb.sub, flag.name, value])
+        build_parser().parse_args(argv)
     assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "must be a finite number" in err, err
+    assert flag.name in err, err
+
+
+@pytest.mark.parametrize(("verb", "flag"), _generated_float_flags())
+def test_generated_float_flag_accepts_a_finite_value(
+    verb: GeneratedVerb, flag: GeneratedFlag
+) -> None:
+    """The counterpart to the refusal above: a finite value still parses, and lands as a float.
+
+    Without this, tightening ``_ARG_TYPES["float"]`` all the way to "reject everything" would
+    satisfy every refusal assertion in this module.
+    """
+    argv = [verb.group, verb.sub, *_required_tail(verb, flag.name), f"{flag.name}=1.5"]
+    args = build_parser().parse_args(argv)
+    value = getattr(args, flag.dest, None)
+    if value is None:  # a curated verb overrides this path and keeps the bare dest
+        value = getattr(args, f"genarg_{flag.dest}", None)
+    assert value == 1.5
+    assert isinstance(value, float)
 
 
 def test_every_generated_float_flag_is_covered() -> None:
@@ -209,15 +280,21 @@ def test_curated_types_are_derived_not_restated() -> None:
     This is the acceptance criterion that the coercion is *derived*: a tool parameter that
     changes from ``integer`` to ``number`` in its schema must move the CLI with it, with no
     hand-written second copy to go stale.
+
+    Scope, stated so this is not read as more than it is: the assertion is that the parser hands
+    each parameter whatever ``_ARG_TYPES`` maps its schema type to — the *wiring*. It is
+    deliberately not a check on what that map contains, which would be circular here (remapping
+    an entry moves both sides at once). The map's content is pinned behaviourally instead, by the
+    refusal and acceptance tests above: remapping ``float`` to the builtin ``float`` or to ``int``
+    reddens those, not this.
     """
-    expected = {"str": str, "int": int, "float": float}
     parser = build_parser()
     actions = {
         (group, sub): {a.dest: a for a in choice._actions}  # noqa: SLF001 - argparse exposes no public read
         for group, group_parser in _subparser_choices(parser).items()
         for sub, choice in _subparser_choices(group_parser).items()
     }
-    checked = 0
+    numeric = 0
     for verb in REGISTRY:
         derived = _curated_flags(verb)
         by_dest = actions.get((verb.group, verb.sub), {})
@@ -226,12 +303,16 @@ def test_curated_types_are_derived_not_restated() -> None:
             action = by_dest.get(name)
             if flag is None or action is None or flag.arg_type is None:
                 continue
-            assert action.type is not None, f"{verb.group} {verb.sub} --{name} lost its type"
-            # str is argparse's identity default and may legitimately be spelled as None.
-            if flag.arg_type != "str":
-                assert action.type is not expected["str"]
-            checked += 1
-    assert checked >= 4, "the curated numeric surface vanished; this guard stopped guarding"
+            # Identity, not merely "some callable": the parser must hand this parameter the very
+            # object `_ARG_TYPES` maps its schema type to, so remapping that entry moves the CLI.
+            assert action.type is _ARG_TYPES[flag.arg_type], (
+                f"{verb.group} {verb.sub} --{name} is {action.type!r}, "
+                f"not the derived {_ARG_TYPES[flag.arg_type]!r}"
+            )
+            numeric += flag.arg_type != "str"
+    # Counts only the numeric params — the surface this guard exists for. Counting every curated
+    # param would let the numeric set fall to zero while the sentinel still read comfortably high.
+    assert numeric == 4, f"the curated numeric surface changed size ({numeric}); ADR-0474 lists 4"
 
 
 def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:

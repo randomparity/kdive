@@ -112,9 +112,18 @@ through, having no range bound of their own to enforce.
   Both are mutating verbs, and both now fail *before* any tool call rather than during payload
   assembly.
 - The error text for a malformed `--timeout-s` changes. `abc` and `inf` are now refused by
-  argparse (`argument --timeout-s: invalid …`), not by the handler's own message; a negative value
-  still produces the handler's `error: --timeout-s must be a non-negative finite number` on exit
-  `2`. The exit code is `2` in all three cases, before and after.
+  argparse (`argument --timeout-s: invalid float value` / `must be a finite number`), not by the
+  handler's own message. The handler's remaining message drops the word "finite", which it no
+  longer checks, and echoes the parsed number rather than the raw string:
+  `error: --timeout-s must be non-negative, not -5.0`. The exit code is `2` in all cases, before
+  and after.
+- `1e400` overflows to `inf` and is reported as `must be a finite number, not '1e400'`. The value
+  looks finite as written; the message names what it parsed to, which is the accurate answer.
+- A bare `--timeout-s -inf` is rejected by argparse as an *unknown option* rather than by
+  `_finite_float`, because argparse's negative-number heuristic recognizes only a leading digit
+  or `.`. The exit code is `2` either way. `--timeout-s=-inf` reaches the type callable and gets
+  the finite-number message; the tests use the `=` form for exactly this reason, since the bare
+  form would pass no matter what the callable did.
 - Anything scripting `--timeout-s inf` or a non-finite value on any of the six float flags now
   gets a usage error where it previously got the tool's default. This is the intended correction;
   it is called out here because it is the one input that used to "work".

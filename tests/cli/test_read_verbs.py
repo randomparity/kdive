@@ -419,18 +419,25 @@ def test_wait_verb_sends_the_timeout_as_a_number(
 
 
 @pytest.mark.parametrize("group", ["jobs", "allocations"])
-@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity"])
-def test_wait_verb_refuses_a_non_numeric_or_non_finite_timeout(group: str, value: str) -> None:
+@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity", "1e400"])
+def test_wait_verb_refuses_a_non_numeric_or_non_finite_timeout(
+    group: str, value: str, capsys
+) -> None:
     """A non-numeric or non-finite ``--timeout-s`` is refused by the parser, before dispatch.
 
     ADR-0474 moved this out of the handler: ``float()`` accepts ``inf``/``nan`` but JSON encodes
     neither — pydantic serializes both to ``null``, so the tool never sees a number to reject and
     silently applies its own 30-second default. The exit code is unchanged at ``2``; what changed
     is that argparse now says so before any tool call.
+
+    The value is attached with ``=``: argparse's negative-number heuristic matches only a leading
+    digit or ``.``, so a bare ``--timeout-s -inf`` is rejected as an unknown option and would
+    never reach the type callable this test exists to exercise.
     """
     with pytest.raises(SystemExit) as excinfo:
-        _wait_argv(group, "obj-1", "--timeout-s", value)
+        build_parser().parse_args([group, "wait", "obj-1", f"--timeout-s={value}"])
     assert excinfo.value.code == 2
+    assert "--timeout-s" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
