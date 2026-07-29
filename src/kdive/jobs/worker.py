@@ -27,7 +27,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.domain.capacity.state import JobState, RunState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.domain.operations.jobs import Job
 from kdive.jobs import queue
 from kdive.jobs.models import HandlerRegistry, JobHandler
@@ -241,7 +241,7 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - the worker turns any handler failure into a dead-letter/requeue
             span.set_outcome("error")
             category = _failure_category(exc)
-            terminal = isinstance(exc, CategorizedError) and exc.terminal
+            terminal = _is_terminal(exc, category)
             async with self._pool.connection() as conn:
                 failed_job = await queue.fail(
                     conn,
@@ -292,6 +292,32 @@ def _failure_category(exc: Exception) -> ErrorCategory:
     if isinstance(exc, PayloadValidationError):
         return ErrorCategory.CONFIGURATION_ERROR
     return ErrorCategory.INFRASTRUCTURE_FAILURE
+
+
+def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:
+    """Decide whether this failure dead-letters now or is re-dispatched for another attempt.
+
+    The **category** is the primary signal (ADR-0483): a category the taxonomy calls
+    non-retryable is permanent by construction — a denied guest-agent RPC, a malformed
+    payload, a host binary that is not installed — so re-dispatching it can only reproduce
+    the same failure, three times slower, under a category that already told the caller not
+    to retry. Requiring every such raise site to remember ``terminal=True`` made the safe
+    behaviour opt-in and it was widely missed (#1631).
+
+    ``CategorizedError.terminal`` remains as the **escalation**: it forces an immediate
+    dead-letter for a category that *is* retryable, where a retry would otherwise be
+    reasonable but this particular failure already drove the target to a terminal state.
+
+    Args:
+        exc: The exception the handler raised.
+        category: The category ``exc`` was classified as by :func:`_failure_category`.
+
+    Returns:
+        ``True`` to dead-letter immediately, ``False`` to requeue while attempts remain.
+    """
+    if isinstance(exc, CategorizedError) and exc.terminal:
+        return True
+    return not retryable_category(category)
 
 
 async def _compensate_run_failure(

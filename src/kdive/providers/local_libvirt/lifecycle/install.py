@@ -14,7 +14,8 @@ domain (`kdive-{system_id}`, minted by the provisioning plane, ADR-0025):
 - `boot(system_id)` power-cycles the domain into the staged `<kernel>` (`destroy` if running,
   then `create`) and polls the run-readiness preflight within a bounded window: the System
   never answering is `boot_timeout`; answering-but-failing a check is `readiness_failure`; a
-  libvirt error starting the domain is `install_failure`.
+  libvirt error starting the domain is `infrastructure_failure` — it crosses the libvirtd
+  socket, so a daemon restart can heal it and the queue must be free to retry (ADR-0483).
 
 DB-free: it owns no Postgres — the `runs.*` install/boot handlers drive the step ledger.
 The slow, host-bound seams (libvirt connect, object-store fetch, kdump/readiness checks, the
@@ -116,9 +117,33 @@ def _close(conn: _LibvirtConn) -> None:
 
 
 def _install_failure(verb: str, domain_name: str) -> CategorizedError:
+    """An install fault that will not clear on a bare retry (``INSTALL_FAILURE``).
+
+    Reserved for a deterministic condition: the in-guest install itself failed, or libvirtd
+    handed back a document this seam refuses to parse. ``INSTALL_FAILURE`` is non-retryable, so
+    since ADR-0483 it dead-letters the job on the first attempt — use
+    :func:`_libvirt_transport_failure` for anything that a libvirtd restart could heal.
+    """
     return CategorizedError(
         f"libvirt error {verb} domain",
         category=ErrorCategory.INSTALL_FAILURE,
+        details={"domain": domain_name},
+    )
+
+
+def _libvirt_transport_failure(verb: str, domain_name: str) -> CategorizedError:
+    """A libvirt *operation* fault that a retry may well clear (``INFRASTRUCTURE_FAILURE``).
+
+    Opening the connection, looking a domain up, power-cycling it, redefining it — these cross
+    the libvirtd socket, and a daemon restart or socket blip mid-install is exactly the transient
+    the queue's retry exists for. They were previously ``INSTALL_FAILURE``, which was harmless
+    while the worker retried every category regardless; under ADR-0483 a non-retryable category
+    dead-letters on attempt 1, so mislabelling a libvirtd blip as an install fault would strand
+    the Run permanently. The category now states which of the two it is.
+    """
+    return CategorizedError(
+        f"libvirt error {verb} domain",
+        category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={"domain": domain_name},
     )
 
@@ -127,14 +152,14 @@ def _open(connect: Connect, purpose: str) -> _LibvirtConn:
     try:
         return connect()
     except libvirt.libvirtError as exc:
-        raise _install_failure(f"connecting to libvirt {purpose}", "install") from exc
+        raise _libvirt_transport_failure(f"connecting to libvirt {purpose}", "install") from exc
 
 
 def _lookup(conn: _LibvirtConn, domain_name: str) -> _LibvirtDomain:
     try:
         return conn.lookupByName(domain_name)
     except libvirt.libvirtError as exc:
-        raise _install_failure("looking up", domain_name) from exc
+        raise _libvirt_transport_failure("looking up", domain_name) from exc
 
 
 class LocalLibvirtBooter:
@@ -161,8 +186,10 @@ class LocalLibvirtBooter:
         wait — a fast boot still returns the instant the readiness marker appears.
 
         Raises:
-            CategorizedError: ``INSTALL_FAILURE`` if the domain is absent or libvirt cannot
-                start it; ``BOOT_TIMEOUT`` if the System never answers within the boot window;
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` if the domain is absent or libvirt
+                cannot start it — a libvirtd blip is retryable, and since ADR-0483 the category
+                is what decides that; ``BOOT_TIMEOUT`` if the System never answers within the
+                boot window;
                 ``READINESS_FAILURE`` if it answers but a readiness check fails.
         """
         domain_name = domain_name_for(system_id)
@@ -203,7 +230,7 @@ class LocalLibvirtBooter:
                 domain.destroy()
             domain.create()
         except libvirt.libvirtError as exc:
-            raise _install_failure("power-cycling", domain_name) from exc
+            raise _libvirt_transport_failure("power-cycling", domain_name) from exc
 
     def _await_ready(self, system_id: UUID, polls: int) -> None:
         first_probe_error: str | None = None
@@ -284,7 +311,7 @@ class LocalLibvirtInstaller:
                 (method=kdump only, checked before any redefine) or the configured staging or
                 scratch root is not writable by the run user (a ``PermissionError`` on the per-Run
                 ``mkdir``, naming ``KDIVE_INSTALL_STAGING``/``KDIVE_INSTALL_SCRATCH`` + the path +
-                a remedy, ADR-0204); ``INSTALL_FAILURE`` on a libvirt redefine error;
+                a remedy, ADR-0204); ``INFRASTRUCTURE_FAILURE`` on a libvirt redefine error;
                 ``INFRASTRUCTURE_FAILURE`` on any other run-dir creation fault; any fetch error
                 category from the seam.
         """
@@ -317,7 +344,7 @@ class LocalLibvirtInstaller:
             try:
                 conn.defineXML(xml)
             except libvirt.libvirtError as exc:
-                raise _install_failure("redefining", domain_name) from exc
+                raise _libvirt_transport_failure("redefining", domain_name) from exc
         finally:
             _close(conn)
 
@@ -483,7 +510,7 @@ class LocalLibvirtInstaller:
             domain = _lookup(conn, domain_name)
             current = domain.XMLDesc(0)
         except libvirt.libvirtError as exc:
-            raise _install_failure("looking up", domain_name) from exc
+            raise _libvirt_transport_failure("looking up", domain_name) from exc
         # `XMLDesc` crosses the same libvirtd trust boundary the discovery plane parses
         # with defusedxml: parse it the same way so a DOCTYPE/entity-expansion document
         # cannot become a billion-laughs DoS here. A malformed/forbidden document is a

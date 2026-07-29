@@ -86,6 +86,55 @@ def suppressed_detail(category: ErrorCategory, raw: str | None) -> str | None:
     return _SUPPRESSED_DETAIL.get(category, raw)
 
 
+# Retryability is a pure function of the failure category (ADR-0118): a bare re-invocation may
+# succeed once a transient condition clears, with no caller change. Exhaustive over ErrorCategory;
+# the bias is non-retryable when transience is ambiguous, since the flag exists to stop a permanent
+# failure being hammered (#430).
+#
+# ONE table serves BOTH retry seams (ADR-0483): the `retryable` boolean on the MCP response
+# envelope, and the job queue's choice between dead-lettering a failed attempt and re-dispatching
+# it. It lives here, beside ErrorCategory, because `kdive.jobs` must not import `kdive.mcp` — a
+# second copy in the queue would be free to drift from the one agents are told to trust.
+RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
+    ErrorCategory.INFRASTRUCTURE_FAILURE: True,
+    ErrorCategory.PROVISIONING_FAILURE: True,
+    ErrorCategory.BOOT_TIMEOUT: True,
+    ErrorCategory.READINESS_FAILURE: True,
+    ErrorCategory.TRANSPORT_FAILURE: True,
+    ErrorCategory.TRANSPORT_CONFLICT: True,
+    ErrorCategory.DEBUG_ATTACH_FAILURE: True,
+    ErrorCategory.CONTROL_FAILURE: True,
+    ErrorCategory.CAPACITY_EXHAUSTED: True,
+    ErrorCategory.QUEUE_TIMEOUT: True,
+    ErrorCategory.CONFIGURATION_ERROR: False,
+    ErrorCategory.MISSING_DEPENDENCY: False,
+    ErrorCategory.BUILD_FAILURE: False,
+    ErrorCategory.INSTALL_FAILURE: False,
+    ErrorCategory.STALE_HANDLE: False,
+    ErrorCategory.LEASE_EXPIRED: False,
+    ErrorCategory.NOT_IMPLEMENTED: False,
+    ErrorCategory.NOT_FOUND: False,
+    ErrorCategory.SYMBOL_NOT_FOUND: False,
+    ErrorCategory.CONFLICT: False,
+    ErrorCategory.AUTHORIZATION_DENIED: False,
+    ErrorCategory.QUOTA_EXCEEDED: False,
+    ErrorCategory.ALLOCATION_DENIED: False,
+}
+
+
+def retryable_category(category: ErrorCategory) -> bool:
+    """Return whether a bare retry of a failure in ``category`` can succeed (ADR-0118).
+
+    Args:
+        category: The taxonomy category the failure was classified as.
+
+    Returns:
+        ``True`` when the condition is transient, so re-running the identical request may
+        succeed; ``False`` when it is permanent until something outside the request changes.
+    """
+    return RETRYABLE_BY_CATEGORY[category]
+
+
 class CategorizedError(Exception):
     """An error carrying the :class:`ErrorCategory` a failure response needs.
 
@@ -108,11 +157,12 @@ class CategorizedError(Exception):
             category: The taxonomy category this failure maps to.
             details: Optional structured context (must be free of secret material;
                 it may be surfaced in responses and logs).
-            terminal: Whether the job raising this error must dead-letter at once rather
-                than requeue, irrespective of category. Set when a retry cannot succeed
-                because the failure already drove the target to a terminal state (e.g. a
-                provision failure left the System ``failed``), so requeuing would only mask
-                the failure as a success on the next attempt.
+            terminal: Escalate a job failure in an otherwise **retryable** category to an
+                immediate dead-letter. Set when a retry cannot succeed because the failure
+                already drove the target to a terminal state (e.g. a provision failure left
+                the System ``failed``), so requeuing would only mask the failure as a success
+                on the next attempt. A category :data:`RETRYABLE_BY_CATEGORY` already calls
+                non-retryable dead-letters on its own (ADR-0483) and needs no flag.
         """
         super().__init__(message)
         self.category = category

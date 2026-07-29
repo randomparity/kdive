@@ -23,7 +23,7 @@ import kdive.config as config
 from kdive.artifacts.storage import FetchedArtifact, StreamedArtifact
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.providers.local_libvirt.lifecycle.boot import readiness as readiness_mod
 from kdive.providers.local_libvirt.lifecycle.boot.guest_kernel_writer import (
     GuestKernelWriter,
@@ -979,12 +979,16 @@ def test_verify_kernel_size_accepts_non_empty_upload() -> None:
 # --- install: failures ---------------------------------------------------------------
 
 
-def test_install_definexml_error_is_install_failure(tmp_path: Path) -> None:
+def test_install_definexml_error_is_retryable_infrastructure_failure(tmp_path: Path) -> None:
+    # `defineXML` crosses the libvirtd socket, so a daemon restart can heal it. Under ADR-0483
+    # the category decides whether the queue may retry, so this must NOT be the non-retryable
+    # INSTALL_FAILURE it used to be — that would strand the Run on a libvirtd blip.
     conn = _conn_with_existing(define_error=libvirt.VIR_ERR_INTERNAL_ERROR)
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.install(_request())
-    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(caught.value.category) is True
 
 
 def test_install_fetch_failure_leaves_no_final_file(tmp_path: Path) -> None:
@@ -1056,7 +1060,8 @@ def test_boot_answered_but_failed_is_readiness_failure(tmp_path: Path) -> None:
     assert caught.value.category is ErrorCategory.READINESS_FAILURE
 
 
-def test_boot_create_error_is_install_failure(tmp_path: Path) -> None:
+def test_boot_create_error_is_retryable_infrastructure_failure(tmp_path: Path) -> None:
+    # Same reasoning as defineXML: `create` is a libvirtd operation, not the in-guest install.
     domain = FakeDomain(
         domain_name=f"kdive-{_SYS}",
         system_id=str(_SYS),
@@ -1066,10 +1071,11 @@ def test_boot_create_error_is_install_failure(tmp_path: Path) -> None:
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
-    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(caught.value.category) is True
 
 
-def test_boot_powercycle_error_is_install_failure_naming_the_verb(tmp_path: Path) -> None:
+def test_boot_powercycle_error_is_infrastructure_failure_naming_the_verb(tmp_path: Path) -> None:
     # A running domain whose destroy fails surfaces a power-cycling install failure naming the
     # verb and the offending domain, so the message distinguishes it from a lookup/create fault.
     domain = FakeDomain(
@@ -1082,17 +1088,20 @@ def test_boot_powercycle_error_is_install_failure_naming_the_verb(tmp_path: Path
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
-    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(caught.value.category) is True
     assert str(caught.value) == "libvirt error power-cycling domain"
     assert caught.value.details["domain"] == f"kdive-{_SYS}"
 
 
-def test_boot_absent_domain_is_install_failure(tmp_path: Path) -> None:
+def test_boot_absent_domain_is_retryable_infrastructure_failure(tmp_path: Path) -> None:
+    # A lookup miss can mean libvirtd is mid-restart and has not re-read its config yet.
     conn = FakeLibvirtConn(lookup={})
     inst = _install(conn=conn, staging_root=tmp_path)
     with pytest.raises(CategorizedError) as caught:
         inst.boot(_SYS)
-    assert caught.value.category is ErrorCategory.INSTALL_FAILURE
+    assert caught.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert retryable_category(caught.value.category) is True
     # The lookup failure names the verb and carries the domain under the documented key.
     assert str(caught.value) == "libvirt error looking up domain"
     assert caught.value.details["domain"] == f"kdive-{_SYS}"

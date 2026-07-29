@@ -248,7 +248,7 @@ def test_stage_checksum_mismatch_is_infra_error_on_every_encoding(
     # ADR-0445 (#1523). Both staging paths end by comparing a hash they recomputed over the bytes
     # they read against the checksum the signed PUT bound. The object is byte-identically as
     # damaged either way, so the transport codec must not decide the category — and therefore must
-    # not decide the agent-visible `retryable` boolean `_RETRYABLE_BY_CATEGORY` derives from it.
+    # not decide the agent-visible `retryable` boolean `RETRYABLE_BY_CATEGORY` derives from it.
     # Parametrised on purpose: two separate tests would let the paths re-diverge and stay green.
     canonical = _QCOW2 + b"z" * 512
     stored = gzip.compress(canonical) if encoding == "gzip" else canonical

@@ -14,7 +14,12 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import CategorizedError, ErrorCategory, suppressed_detail
+from kdive.domain.errors import (
+    CategorizedError,
+    ErrorCategory,
+    retryable_category,
+    suppressed_detail,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.serialization import JsonValue, safe_error_details, validate_json_value
 
@@ -64,36 +69,6 @@ _FAILURE_STATUSES = frozenset({JobState.FAILED.value, "error"})
 #: can report to its operator.
 DENIAL_NEXT_ACTIONS: tuple[str, ...] = ("session.whoami",)
 
-# Retryability is a pure function of the failure category (ADR-0118): a bare
-# re-invocation may succeed once a transient condition clears, with no caller change.
-# Exhaustive over ErrorCategory; the bias is terminal when transience is ambiguous,
-# since the flag exists to stop an agent hammering a permanent failure (#430).
-_RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
-    ErrorCategory.INFRASTRUCTURE_FAILURE: True,
-    ErrorCategory.PROVISIONING_FAILURE: True,
-    ErrorCategory.BOOT_TIMEOUT: True,
-    ErrorCategory.READINESS_FAILURE: True,
-    ErrorCategory.TRANSPORT_FAILURE: True,
-    ErrorCategory.TRANSPORT_CONFLICT: True,
-    ErrorCategory.DEBUG_ATTACH_FAILURE: True,
-    ErrorCategory.CONTROL_FAILURE: True,
-    ErrorCategory.CAPACITY_EXHAUSTED: True,
-    ErrorCategory.QUEUE_TIMEOUT: True,
-    ErrorCategory.CONFIGURATION_ERROR: False,
-    ErrorCategory.MISSING_DEPENDENCY: False,
-    ErrorCategory.BUILD_FAILURE: False,
-    ErrorCategory.INSTALL_FAILURE: False,
-    ErrorCategory.STALE_HANDLE: False,
-    ErrorCategory.LEASE_EXPIRED: False,
-    ErrorCategory.NOT_IMPLEMENTED: False,
-    ErrorCategory.NOT_FOUND: False,
-    ErrorCategory.SYMBOL_NOT_FOUND: False,
-    ErrorCategory.CONFLICT: False,
-    ErrorCategory.AUTHORIZATION_DENIED: False,
-    ErrorCategory.QUOTA_EXCEEDED: False,
-    ErrorCategory.ALLOCATION_DENIED: False,
-}
-
 ResponseData = dict[str, JsonValue]
 ResponseDataInput = Mapping[str, JsonValue]
 
@@ -142,7 +117,9 @@ class ToolResponse(BaseModel):
         A failure status without a category, or any other status carrying one, is a
         producer bug — fail fast at construction (ADR-0019). ``retryable`` is a pure
         function of the category (ADR-0118), derived here so it can never drift and is
-        never caller-set; ``None`` on success, a ``bool`` on a classified failure.
+        never caller-set; ``None`` on success, a ``bool`` on a classified failure. The
+        table it reads is :data:`~kdive.domain.errors.RETRYABLE_BY_CATEGORY`, shared with
+        the job queue's dead-letter decision so both retry seams agree (ADR-0483).
         """
         is_failure = self.status in _FAILURE_STATUSES
         if is_failure and self.error_category is None:
@@ -150,7 +127,7 @@ class ToolResponse(BaseModel):
         if not is_failure and self.error_category is not None:
             raise ValueError(f"error_category set on non-failure status {self.status!r}")
         if is_failure and self.error_category is not None:
-            self.retryable = _RETRYABLE_BY_CATEGORY[ErrorCategory(self.error_category)]
+            self.retryable = retryable_category(ErrorCategory(self.error_category))
         else:
             self.retryable = None
         return self

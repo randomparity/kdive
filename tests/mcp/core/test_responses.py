@@ -9,10 +9,13 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.domain.capacity.state import JobState
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import (
+    RETRYABLE_BY_CATEGORY,
+    CategorizedError,
+    ErrorCategory,
+)
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.mcp.responses import (
-    _RETRYABLE_BY_CATEGORY,
     ResponseData,
     ToolResponse,
     current_status_data,
@@ -510,7 +513,7 @@ def test_common_job_envelope_preserves_job_fields_and_adds_object_key() -> None:
 
 def test_retryable_table_is_exhaustive_over_error_category() -> None:
     # Every category is classified; none stale. A new ErrorCategory must be a deliberate edit.
-    assert set(_RETRYABLE_BY_CATEGORY) == set(ErrorCategory)
+    assert set(RETRYABLE_BY_CATEGORY) == set(ErrorCategory)
 
 
 def test_retryable_is_none_on_success() -> None:
@@ -570,7 +573,7 @@ def test_every_category_has_an_explicit_expected_bool() -> None:
         ErrorCategory.QUOTA_EXCEEDED: False,
         ErrorCategory.ALLOCATION_DENIED: False,
     }
-    assert expected == _RETRYABLE_BY_CATEGORY
+    assert expected == RETRYABLE_BY_CATEGORY
 
 
 def test_failure_carries_optional_refs() -> None:

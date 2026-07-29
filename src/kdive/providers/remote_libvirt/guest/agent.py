@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any, NamedTuple, Protocol
@@ -73,6 +74,21 @@ BUILD_DETERMINISTIC_CONFIG_CODES: frozenset[int] = _DETERMINISTIC_CONFIG_CODES |
     {libvirt.VIR_ERR_AGENT_UNRESPONSIVE}
 )
 
+# An RPC the guest image excluded from qemu-guest-agent's `--allow-rpcs` allowlist is refused
+# INSIDE a healthy channel, not by dropping it: QEMU's `qmp_dispatch` answers with
+# `error_setg(..., "Command %s has been disabled%s%s")` (GenericError), and libvirt's
+# `qemuAgentCheckError` re-raises that as a libvirtError carrying VIR_ERR_INTERNAL_ERROR. That
+# code is deliberately NOT added to _DETERMINISTIC_CONFIG_CODES — it is libvirt's catch-all and
+# covers many genuinely transient conditions — so the denial is recognised by its message
+# instead (ADR-0483, #1631).
+#
+# Matching a QEMU string relayed through libvirt is fragile, so the match is deliberately ONE-WAY:
+# it can only UPGRADE an otherwise-retryable error to CONFIGURATION_ERROR, never downgrade one.
+# If QEMU rewords the message this classification silently reverts to the pre-#1631 behaviour
+# (TRANSPORT_FAILURE, retried) — slower and vaguer, but never a transient fault wrongly declared
+# permanent. `[Cc]` and the optional `: <reason>` suffix absorb the variation QEMU already emits.
+_RPC_DISABLED_RE = re.compile(r"[Cc]ommand\s+(?P<rpc>[A-Za-z0-9_-]+)\s+has been disabled")
+
 
 def classify_agent_libvirt_error(
     domain: GuestDomain, exc: libvirt.libvirtError, *, deterministic_codes: frozenset[int]
@@ -82,17 +98,30 @@ def classify_agent_libvirt_error(
     A libvirt error whose code is in ``deterministic_codes`` names a deterministic condition —
     the agent is not configured, the command is denied, the host cannot run it, or (for the
     post-readiness build transport) the agent has gone unresponsive — and is a permanent failure
-    (``CONFIGURATION_ERROR``, not retryable). Every other libvirt error, including a bare error
-    with no live code (``get_error_code()`` is ``None``), is a genuinely transient channel drop and
-    stays ``TRANSPORT_FAILURE`` (retryable). The libvirt error string and code go into ``details``
-    so the distinction is auditable downstream.
+    (``CONFIGURATION_ERROR``, not retryable). An allowlist denial is permanent too but arrives
+    under libvirt's catch-all ``VIR_ERR_INTERNAL_ERROR``, so it is recognised by its message
+    (``_RPC_DISABLED_RE``) and named after the RPC the guest refused. Every other libvirt error,
+    including a bare error with no live code (``get_error_code()`` is ``None``), is a genuinely
+    transient channel drop and stays ``TRANSPORT_FAILURE`` (retryable). The libvirt error string
+    and code go into ``details`` so the distinction is auditable downstream.
     """
     code = exc.get_error_code()
+    message = str(exc)
     details: dict[str, object] = {
         "domain": _domain_name(domain),
-        "libvirt_error": str(exc),
+        "libvirt_error": message,
         "libvirt_error_code": code,
     }
+    denial = _RPC_DISABLED_RE.search(message)
+    if denial is not None:
+        rpc = denial.group("rpc")
+        details["denied_rpc"] = rpc
+        return CategorizedError(
+            f"qemu-guest-agent refused the {rpc!r} RPC: the guest image's agent allowlist "
+            "(--allow-rpcs in /etc/sysconfig/qemu-ga) does not include it",
+            category=ErrorCategory.CONFIGURATION_ERROR,
+            details=details,
+        )
     if code in deterministic_codes:
         return CategorizedError(
             "qemu-guest-agent is not usable on this build host "
@@ -219,8 +248,9 @@ class GuestAgentExec:
 
         Raises:
             CategorizedError: ``CONFIGURATION_ERROR`` for an empty argv, a non-allowlisted
-                program, or a deterministic guest-agent libvirt error (agent not configured,
-                command denied, or unsupported — see ``_DETERMINISTIC_CONFIG_CODES``);
+                program, an RPC the guest agent's own ``--allow-rpcs`` allowlist denies, or a
+                deterministic guest-agent libvirt error (agent not configured, command denied,
+                or unsupported — see ``_DETERMINISTIC_CONFIG_CODES``);
                 ``TRANSPORT_FAILURE`` when the guest agent is transiently unreachable (a
                 libvirt error with no deterministic code) or the command does not exit within
                 the timeout; ``INFRASTRUCTURE_FAILURE`` for a malformed agent reply.

@@ -205,6 +205,13 @@ class RemoteLibvirtInstall:
                 owner_id=str(request.system_id),
             )
         if output.result.exit_status != 0:
+            # INSTALL_FAILURE is non-retryable, so since ADR-0483 this dead-letters the Run on
+            # attempt 1. That is right for the helper's deterministic failures (dracut, grubby)
+            # and WRONG for its transient one: `kdive-install-kernel` exits 1 for everything,
+            # including a `curl` bundle download that lost the object store or hit an expired
+            # presigned URL, which attempt 2 used to heal by re-minting it. Distinguishing them
+            # needs distinct exit codes from the helper — a guest-image contract change, tracked
+            # as #1653. Until then the conflation is deliberate and disclosed, not overlooked.
             raise CategorizedError(
                 "in-guest kernel install exited non-zero",
                 category=ErrorCategory.INSTALL_FAILURE,
@@ -226,7 +233,8 @@ class RemoteLibvirtInstall:
         ready until its capture kernel is actually loaded (see :meth:`_await_kdump_armed`).
 
         Raises:
-            CategorizedError: ``INSTALL_FAILURE`` for a domain lookup fault or a non-zero
+            CategorizedError: ``INFRASTRUCTURE_FAILURE`` for a domain lookup fault (retryable —
+                it crosses the libvirtd socket); ``INSTALL_FAILURE`` for a non-zero
                 boot-id baseline read; ``TRANSPORT_FAILURE`` when the guest agent is unreachable
                 before the reboot; ``BOOT_TIMEOUT`` when no fresh boot_id appears within the boot
                 window (a panic/hang manifests as the agent never reconnecting), or when a
@@ -410,9 +418,13 @@ class RemoteLibvirtInstall:
         try:
             return conn.lookupByName(domain_name)
         except libvirt.libvirtError as exc:
+            # INFRASTRUCTURE_FAILURE, not INSTALL_FAILURE: this crosses the qemu+tls socket to a
+            # remote libvirtd, so a daemon restart or a network blip mid-install is exactly the
+            # transient the queue's retry exists for. Under ADR-0483 the category decides whether
+            # the job may retry, so calling a lookup fault an install fault would strand the Run.
             raise CategorizedError(
                 "remote domain lookup failed for install/boot",
-                category=ErrorCategory.INSTALL_FAILURE,
+                category=ErrorCategory.INFRASTRUCTURE_FAILURE,
                 details={"domain": domain_name},
             ) from exc
 

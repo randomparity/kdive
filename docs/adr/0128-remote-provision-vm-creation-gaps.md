@@ -26,9 +26,18 @@ creation impossible to complete *and* impossible to diagnose:
    exists. `from_job` already surfaces a failed job's `failure_context`, so the real reason is
    available *iff* the job actually ends `failed`.
 
-The job-layer retry policy is deliberately distinct from the MCP `_RETRYABLE_BY_CATEGORY` flag
+~~The job-layer retry policy is deliberately distinct from the MCP `_RETRYABLE_BY_CATEGORY` flag
 (e.g. `BUILD_FAILURE` is non-retryable for the client but the worker still retries it to
-`max_attempts`), so the fix cannot key the worker's terminal decision on category.
+`max_attempts`), so the fix cannot key the worker's terminal decision on category.~~
+
+*Superseded by [ADR-0483](0483-non-retryable-category-dead-letters-a-job.md) — the worker's
+terminal decision now DOES key on the category, and the two policies are one table in
+`kdive/domain/errors.py`. Keeping them distinct did not keep them independent, it let them
+disagree (#1631: the envelope said `retryable: false` while the queue retried three times). The
+`INSTALL_FAILURE` concern below was real and is resolved by relabelling the libvirt
+connection/lookup sites `INFRASTRUCTURE_FAILURE`, not by keeping the queue category-blind. The
+rest of this ADR, including `terminal=True` on the provision-failure path, stands — ADR-0483
+preserves that flag precisely as the escalation for a retryable category.*
 
 ## Decision
 
@@ -58,9 +67,11 @@ The job-layer retry policy is deliberately distinct from the MCP `_RETRYABLE_BY_
 
 ## Alternatives considered
 
-- **Key the worker's terminal decision on `_RETRYABLE_BY_CATEGORY`**: conflates the client-retry
+- ~~**Key the worker's terminal decision on `_RETRYABLE_BY_CATEGORY`**: conflates the client-retry
   flag with job-retry policy and would change requeue behavior for `BUILD_FAILURE`/`INSTALL_FAILURE`
-  (today retried to `max_attempts`). Rejected.
+  (today retried to `max_attempts`). Rejected.~~
+  *Superseded by [ADR-0483](0483-non-retryable-category-dead-letters-a-job.md), which adopts this
+  alternative and rebuts the objection in its Decision 1.*
 - **Make the handler's terminal-state re-entry return failure instead of success**: closes the
   masking only after burning every retry, and the final `failure_context` is the re-entry message,
   not the original reason. The `terminal` flag fails on attempt 1 with the real reason. Rejected as

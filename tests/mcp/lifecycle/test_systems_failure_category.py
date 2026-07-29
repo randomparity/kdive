@@ -1,7 +1,7 @@
 """A `failed` System reports its failing job's real category, not a hard-coded one (#1550).
 
 `systems.get` used to render every `SystemState.FAILED` as `infrastructure_failure`, which
-`_RETRYABLE_BY_CATEGORY` turns into `retryable: true` — telling an agent to retry a
+`RETRYABLE_BY_CATEGORY` turns into `retryable: true` — telling an agent to retry a
 non-retryable configuration error. ADR-0454 resolves the category from the job that actually
 failed the System, keeping the default only for the path with no attributable job.
 """
