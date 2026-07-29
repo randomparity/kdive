@@ -178,6 +178,13 @@ handler would still be recorded `error`. Every such class is enveloped by its ha
 there is no observed loss; the arm is a defensive branch whose premise this ADR shows to be false,
 and it is left for a separate decision rather than widened here by inference.
 
+> **Amended by [ADR-0493](0493-envelope-the-non-member-denial-at-the-handler.md) (#1661).** The
+> unreachability claim above stands. **"There is no observed loss" was false**: a 52-site audit
+> found one handler — `accounting.report`'s granted-set branch — that let `require_role`'s
+> non-member base `AuthorizationError` escape, so that denial did reach the client as a raw
+> `ToolError` and was metered `error`. ADR-0493 envelopes it at the handler and takes the separate
+> decision this paragraph defers: the arm is **deleted**, not widened.
+
 **Every caller that branched on the transport's `is_error` flag alone now reads a denial as a
 success.** This is the widest-reaching consequence of the change, and the repo had two such
 callers.
