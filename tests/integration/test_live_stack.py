@@ -321,8 +321,12 @@ def test_viewer_denied_operator_op_over_the_wire() -> None:
     denied = asyncio.run(_run())
     assert denied.status == "error", "viewer was not denied the operator op"
     # Pins the CATEGORY, not merely that something failed: an incomplete request fails with
-    # `configuration_error` without ever reaching `require_role`, which is how this test
-    # silently passed for the wrong reason under its former `pytest.raises` assertion.
+    # `configuration_error` without ever reaching `require_role`. Under the former
+    # `pytest.raises(LiveStackToolError)` assertion that did not pass silently — it FAILED with
+    # DID NOT RAISE, because a sizing rejection is a *returned* envelope (`is_error` false) and
+    # the harness raises only on `is_error`. The test was red whenever it ran; it simply never
+    # ran, since `just test` excludes the `live_stack` marker. Category-pinning is what makes
+    # the difference visible when it does run.
     assert denied.error_category == "authorization_denied", "wrong denial category"
     # `allocations.request` builds no denial envelope of its own, so `contributor` can only have
     # come from the RoleDenied the dispatch boundary unwrapped (ADR-0486, ADR-0490).

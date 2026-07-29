@@ -198,9 +198,15 @@ form and the phase asserts `status == "error"` and `error_category == "authoriza
   would fail against the real tool. Verified against the tool's code, not assumed.
   *Amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635): the
   rejection stands and its scope widens. "What the `viewer` operator-op negative does" is no
-  longer true — that negative asserts an envelope now — so this alternative is not merely wrong
-  for this tool but wrong for every tool: no denial reaches a client as a raise on any dispatch
-  path.*
+  longer true — that negative asserts an envelope now — so this alternative is wrong not merely
+  for this tool but for every tool raising a denial the boundary owns: `RoleDenied` and
+  `ProjectMembershipDenied` (`denial_audit.py`'s `_DENIAL_TYPES`) are unwrapped and enveloped
+  there. This is scoped deliberately rather than stated as "no denial ever reaches a client as a
+  raise". That stronger form is true today but **unenforced**: `require_platform_role` raises a
+  bare `AuthorizationError`, which is not in `_DENIAL_TYPES`, so it is enveloped only because
+  every one of its call sites happens to catch it locally. A future site without a local catch
+  would falsify the stronger claim silently, which is the stated-but-untrue-invariant defect
+  ADR-0486 exists to correct. Closing that gap is tracked in #1661.*
 - **Hard-code the artifact path / default it inside the repo.** Rejected: a repo-local default
   is walked by whole-tree tooling and risks an accidental commit of a spend report. An
   env-overridable dir with an **out-of-tree** default avoids both and still lets an operator or

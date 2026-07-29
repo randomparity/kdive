@@ -135,10 +135,12 @@ def test_enabled_preserves_is_error_flag(monkeypatch: pytest.MonkeyPatch) -> Non
     assert out.is_error is True  # not flipped to False by the rebuild
 
 
-def test_enabled_compacts_the_denial_short_circuit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # DenialAuditMiddleware's short-circuit reaches this middleware as a ToolResult since
-    # ADR-0486 — the shape the transport can serialize. It used to hand over a bare
-    # ToolResponse, which this middleware normalized only when compaction was ON.
+def test_enabled_compacts_an_authorization_denied_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Generic failure-envelope compaction, driven from a hand-built ToolResult. It does NOT
+    # exercise DenialAuditMiddleware — the old name said "the denial short-circuit", which
+    # claimed coverage this test does not provide. The shape is the one that middleware now
+    # emits since ADR-0486 (a ToolResult, which the transport can serialize), so it stays a
+    # representative sample; it is not a route test.
     env = ToolResponse.failure("runs.create", ErrorCategory.AUTHORIZATION_DENIED)
     out = _drive(
         ToolResult(structured_content=env.model_dump(mode="json")),
