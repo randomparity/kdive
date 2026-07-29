@@ -346,6 +346,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unwrap the ToolError wrapper at the denial boundary
 - Parse the denial envelope the harness used to raise on
 - Do not dump a bare null when a failure carries no envelope
+- Resolve a project nested in a request payload
 
 ### Build
 
