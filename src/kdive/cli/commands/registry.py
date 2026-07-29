@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 import kdive.cli.commands.doctor as doctor
@@ -228,21 +228,41 @@ def _json_parent() -> argparse.ArgumentParser:
     return parent
 
 
-def _curated_choices(verb: Verb) -> dict[str, tuple[str, ...]]:
-    """Schema-derived enum ``choices`` for ``verb``'s parameters, keyed by parameter name.
+def _curated_flags(verb: Verb) -> dict[str, GeneratedFlag]:
+    """The generated verb's flags at ``verb``'s path, keyed by the parameter name they feed.
 
     A curated :class:`Verb` overrides the generated shape at its path, and the hand-written
-    shape has no place to spell an enum. Rather than restate the allowed values by hand — a
-    second copy that goes stale the moment the enum grows a member — the choices are read off
-    the *generated* verb at the same path, whose flags the generator derives from the live tool
-    schema and ``cli-verbs-check`` keeps in sync. A curated parameter with no generated
-    counterpart, or one whose schema property carries no ``enum``, contributes nothing
+    shape has no place to spell an enum or a per-parameter description. Rather than restate
+    either by hand — a second copy that goes stale the moment the enum grows a member or the
+    tool's docstring is reworded — both are read off the *generated* verb at the same path,
+    whose flags the generator derives from the live tool schema and ``cli-verbs-check`` keeps
+    in sync. A curated parameter with no generated counterpart contributes nothing
     (ADR-0469).
     """
     generated = _GENERATED_BY_PATH.get((verb.group, verb.sub))
     if generated is None:
         return {}
-    return {flag.dest: flag.choices for flag in generated.flags if flag.choices}
+    return {flag.dest: flag for flag in generated.flags}
+
+
+def _derived_choices(derived: Mapping[str, GeneratedFlag], name: str) -> tuple[str, ...] | None:
+    """``name``'s schema-derived enum values, or ``None`` when it is not enumerated.
+
+    Empty is normalized to ``None`` because argparse reads an empty ``choices`` as "no value is
+    legal", which would reject every command line for a non-enum parameter.
+    """
+    flag = derived.get(name)
+    return (flag.choices or None) if flag is not None else None
+
+
+def _derived_help(derived: Mapping[str, GeneratedFlag], name: str) -> str | None:
+    """``name``'s schema-derived ``--help`` text, or ``None`` when the schema describes none.
+
+    Empty is normalized to ``None`` so a described-nowhere parameter renders as a bare flag
+    rather than a blank help column.
+    """
+    flag = derived.get(name)
+    return (flag.help or None) if flag is not None else None
 
 
 def _verb_parser(
@@ -250,25 +270,36 @@ def _verb_parser(
 ) -> None:
     """Add ``verb``'s sub-subparser, declaring its positionals and ``--`` options."""
     parser = group_parser.add_parser(verb.sub, parents=[parent], help=verb.help or None)
-    choices = _curated_choices(verb)
+    derived = _curated_flags(verb)
     for positional in verb.positionals:
-        parser.add_argument(positional, choices=choices.get(positional))
+        parser.add_argument(
+            positional,
+            choices=_derived_choices(derived, positional),
+            help=_derived_help(derived, positional),
+        )
     for option in verb.options:
         parser.add_argument(
             f"--{option.replace('_', '-')}",
             dest=option,
             default=None,
-            choices=choices.get(option),
+            choices=_derived_choices(derived, option),
+            help=_derived_help(derived, option),
         )
     for option in verb.required_options:
         parser.add_argument(
             f"--{option.replace('_', '-')}",
             dest=option,
             required=True,
-            choices=choices.get(option),
+            choices=_derived_choices(derived, option),
+            help=_derived_help(derived, option),
         )
     for flag in verb.flags:
-        parser.add_argument(f"--{flag.replace('_', '-')}", dest=flag, action="store_true")
+        parser.add_argument(
+            f"--{flag.replace('_', '-')}",
+            dest=flag,
+            action="store_true",
+            help=_derived_help(derived, flag),
+        )
 
 
 def _add_generated_flag(parser: argparse.ArgumentParser, flag: GeneratedFlag) -> None:

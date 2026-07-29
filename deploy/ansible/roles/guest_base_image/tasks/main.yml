@@ -1,38 +1,75 @@
 ---
-- name: Assert this host selects at least one image
-  ansible.builtin.assert:
-    that: (kdive_requested_images | length) > 0
-    fail_msg: >-
-      host_images is empty for '{{ inventory_hostname }}'. Set host_images in
-      host_vars/{{ inventory_hostname }}.yml (or leave it unset to default to
-      host_images_default).
+# The admission decision — which of this host's selected images this host may build — is a
+# tagged block so deploy/ansible/tests/run-guest-base-image-admission.sh can drive the real
+# tasks in isolation, without running a build.
+- name: Admit this host's selected images
+  tags: [guest_base_image_admission]
+  block:
+    - name: Assert this host selects at least one image
+      ansible.builtin.assert:
+        that: (kdive_requested_images | length) > 0
+        fail_msg: >-
+          host_images is empty for '{{ inventory_hostname }}'. Set host_images in
+          host_vars/{{ inventory_hostname }}.yml (or leave it unset to default to
+          host_images_default).
 
-- name: Assert every selected image name exists in the catalog
-  ansible.builtin.assert:
-    that: item in (kdive_image_catalog | map(attribute='name') | list)
-    fail_msg: >-
-      host_images entry '{{ item }}' is not defined in kdive_image_catalog
-      (group_vars/all.yml).
-  loop: "{{ kdive_requested_images }}"
+    - name: Assert every selected image name exists in the catalog
+      ansible.builtin.assert:
+        that: item in (kdive_image_catalog | map(attribute='name') | list)
+        fail_msg: >-
+          host_images entry '{{ item }}' is not defined in kdive_image_catalog
+          (group_vars/all.yml).
+      loop: "{{ kdive_requested_images }}"
 
-- name: Assert host_default_image is one of this host's selected images
-  ansible.builtin.assert:
-    that: kdive_default_image in kdive_requested_images
-    fail_msg: >-
-      host_default_image '{{ kdive_default_image }}' is not in host_images
-      {{ kdive_requested_images }} for '{{ inventory_hostname }}'. The emitted
-      [[remote_libvirt]].base_image must name a staged [[image]] or the app
-      rejects systems.toml at load.
+    - name: Assert host_default_image is one of this host's selected images
+      ansible.builtin.assert:
+        that: kdive_default_image in kdive_requested_images
+        fail_msg: >-
+          host_default_image '{{ kdive_default_image }}' is not in host_images
+          {{ kdive_requested_images }} for '{{ inventory_hostname }}'. The emitted
+          [[remote_libvirt]].base_image must name a staged [[image]] or the app
+          rejects systems.toml at load.
 
-- name: Assert each selected image supports this host architecture
-  ansible.builtin.assert:
-    that: ansible_architecture in (item.arches | default(kdive_image_defaults.arches))
-    fail_msg: >-
-      image '{{ item.name }}' does not support arch {{ ansible_architecture }}
-      (arches={{ item.arches | default(kdive_image_defaults.arches) }}).
-  loop: "{{ kdive_selected_images }}"
-  loop_control:
-    label: "{{ item.name }}"
+    - name: Assert each selected image supports this host architecture
+      ansible.builtin.assert:
+        that: ansible_architecture in (item.arches | default(kdive_image_defaults.arches))
+        fail_msg: >-
+          image '{{ item.name }}' does not support arch {{ ansible_architecture }}
+          (arches={{ item.arches | default(kdive_image_defaults.arches) }}).
+      loop: "{{ kdive_selected_images }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Architecture is a property of the PRODUCT: asking for an x86_64-only image on ppc64le
+    # is an operator error with no correct outcome, so it stays fail-fast (above).
+    # `host_distros` is a property of the BUILDER: the entry is fine, this host's package
+    # repos just cannot produce it (ADR-0481, #1629). Skipping keeps the host's other images
+    # buildable, and because nothing is staged for a skipped entry, remote_libvirt_facts also
+    # declines to declare it (it emits only volumes it can confirm) — so a skip can never
+    # register a phantom `staged` catalog row. The default image is the one exception: a
+    # host that cannot build its own base_image has no working [[remote_libvirt]] block at
+    # all, so that is an operator error and fails fast.
+    - name: Assert the default image is buildable on this host
+      ansible.builtin.assert:
+        that: kdive_default_image in kdive_buildable_image_names
+        fail_msg: >-
+          host_default_image '{{ kdive_default_image }}' cannot be built on
+          '{{ inventory_hostname }}' ({{ ansible_distribution }}): its catalog entry
+          restricts host_distros to
+          {{ kdive_image_catalog | selectattr('name', 'equalto', kdive_default_image)
+             | map(attribute='host_distros') | first | default([]) }}.
+          Pick a host_default_image this host can build, or build it on a listed distro.
+
+    - name: Report the images skipped as unbuildable on this host
+      ansible.builtin.debug:
+        msg: >-
+          Skipping {{ item.name }} on {{ inventory_hostname }}: its catalog entry restricts
+          host_distros to {{ item.host_distros }} and this host is
+          {{ ansible_distribution }}. No volume is staged, so remote_libvirt_facts emits no
+          [[image]] block for it.
+      loop: "{{ kdive_unbuildable_images }}"
+      loop_control:
+        label: "{{ item.name }}"
 
 - name: Ensure the build working directory exists
   ansible.builtin.file:
@@ -49,9 +86,9 @@
     dest: "{{ guest_base_image_helper_dir }}/"
     mode: "0755"
 
-- name: Build and stage each selected image
+- name: Build and stage each buildable image
   ansible.builtin.include_tasks: build_one.yml
-  loop: "{{ kdive_selected_images }}"
+  loop: "{{ kdive_buildable_images }}"
   loop_control:
     loop_var: image
     label: "{{ image.name }}"

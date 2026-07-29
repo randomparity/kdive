@@ -71,8 +71,9 @@ ansible-playbook playbooks/image.yml
 shared fields (helper set, toggles, `arch_alias`, Fedora/RHEL package set). Each entry has
 a logical `name`, `distro`/`version`, a `source` (`virt-builder` / `cloud-image` /
 `scratch`), and optional per-entry overrides (`packages`, `helpers`, `arches`,
-`root_device`, `cloud_image_url`, `force`). The shipped catalog covers **fedora**
-(virt-builder), **ubuntu** + **rocky** (cloud-image), and a **bare** image (scratch).
+`host_distros`, `root_device`, `cloud_image_url`, `force`). The shipped catalog covers
+**fedora** (virt-builder), **ubuntu** + **rocky** (cloud-image), and a **bare** image
+(scratch).
 
 Each host picks images by name in `host_vars/<host>.yml`:
 
@@ -82,10 +83,37 @@ host_default_image: fedora-kdive-remote-base-43   # optional; defaults to host_i
 ```
 
 `image.yml` stages exactly that host's `host_images` (idempotent per staged volume unless
-`force_image_rebuild` or a per-entry `force`), and `remote_libvirt_facts` emits one
-`[[image]]` block per staged image with `host_default_image` as the `[[remote_libvirt]]`
-`base_image`. The role fails fast if a `host_images` name is absent from the catalog or its
-`arches` excludes the host arch.
+`force_image_rebuild` or a per-entry `force`). The role fails fast if a `host_images` name is
+absent from the catalog or its `arches` excludes the host arch.
+
+### Build-host admission (`host_distros`)
+
+Some entries can only be produced on some hosts. `bare-kdive-remote-base` is built with
+`dnf --installroot`/`debootstrap` from the host's own repos and needs `busybox`, which the
+RHEL/Rocky/Alma base repos do not carry — so it declares
+`host_distros: [Fedora, Debian, Ubuntu]` (`ansible_distribution` values, not
+`ansible_os_family`: Fedora and Rocky are both `RedHat` and differ on exactly this package).
+An entry with no `host_distros` is buildable anywhere.
+
+`image.yml` **skips** an entry this host cannot build, reports why, and builds the rest — one
+undeliverable entry no longer costs the host its other images. A `host_default_image` the
+host cannot build still fails fast, since that host would have no usable
+`[[remote_libvirt]]` block. See
+[ADR-0481](../../docs/adr/0481-build-host-image-admission-and-staged-volume-confirmation.md).
+
+### What the emitted `[[image]]` blocks claim
+
+`remote_libvirt_facts` stats each selected image's volume in `storage_pool_target` and emits
+an `[[image]]` block **only** for volumes that are actually there — `kind = "staged"` is a
+claim about the host, not about the inventory. Selected images with no volume are listed as
+`# OMITTED` in the artifact header.
+
+The facts play runs from `site.yml` (usage step 2), which never builds images, so on a fresh
+host the fragment starts out with no `[[image]]` blocks. **Re-run `site.yml` after
+`playbooks/image.yml`** to regenerate a complete one. If `host_default_image` is among the
+omitted, the fragment is marked `# INCOMPLETE`: pasting it in is rejected by the app at load
+(`base_image` names an undeclared image) rather than registering an image that only fails
+later when a System tries to boot it.
 
 ## Config surface (`inventory/group_vars/all.yml`)
 
@@ -117,7 +145,9 @@ with a clear message if it is not set in `host_vars/`.
   — **unvalidated / tracked separately**.
 - The **scratch/bare** path is implemented but **unvalidated** (no scratch-capable test
   host): it builds the rootfs from the host OS family but the bootloader install + boot
-  must be confirmed on hardware, like the ppc64le note below.
+  must be confirmed on hardware, like the ppc64le note below. It is admitted only on
+  Fedora/Debian-family hosts (`host_distros`, above), so that confirmation has to happen
+  on one of those.
 - ppc64le paths are implemented but **unvalidated** (no ppc64le test host).
 - `root_device` on a catalog entry is metadata only for remote-libvirt — the in-guest GRUB
   owns the real root (ADR-0183); the platform injects no `root=` for remote.

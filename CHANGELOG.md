@@ -321,6 +321,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Route every authorization_denied envelope through denied()
 - Reclaim an active allocation on an abandoned crashed System
 - Grade stale_restart on modified files, not bare mtimes
+- Gate the bare image on the build host's distro
 
 ### Build
 

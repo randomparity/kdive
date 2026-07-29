@@ -310,10 +310,13 @@ lint-ansible:
         uv run --with 'ansible-core==2.21.1' \
         ansible-playbook "$p" --syntax-check -i inventory/hosts.yml; done
 
-# Run the Ansible role regression harness (gdbstub_acl ufw prune, #616).
+# Run the Ansible role regression harnesses (gdbstub_acl ufw prune #616; image admission
+# + staged-volume confirmation #1629).
 test-ansible:
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-gdbstub-acl-prune.sh
     uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-github-runner-preflight.sh
+    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-guest-base-image-admission.sh
+    uv run --with 'ansible-core==2.21.1' ./deploy/ansible/tests/run-remote-libvirt-facts-render.sh
 
 # Lint and security-scan the GitHub Actions workflows.
 # actionlint-py bundles a prebuilt actionlint and upstream ships no ppc64le binary, so its
