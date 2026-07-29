@@ -44,6 +44,13 @@ satisfy that path.
    role fails fast if a selected name is absent from the catalog or its `arches` excludes
    `ansible_architecture`.
 
+   *Amended by [ADR-0481](0481-build-host-image-admission-and-staged-volume-confirmation.md)
+   (#1629) — an entry may also declare `host_distros`, the `ansible_distribution` values whose
+   package repos can build it. An entry this host cannot build is **skipped** rather than
+   failing the play (the `arches` rule above is unchanged, and an unbuildable
+   `host_default_image` still fails fast), and `remote_libvirt_facts` emits an `[[image]]`
+   block only for a volume it confirms is staged in the pool — not for every selected entry.*
+
 3. **Catalog ships fedora, ubuntu, rocky, and a bare image.** fedora keeps its native
    `virt-builder` path; ubuntu/rocky use the `cloud-image` path (download + `virt-customize`);
    the bare image uses a new `scratch` path.
@@ -54,6 +61,12 @@ satisfy that path.
    is needed. It is built **from the host OS family** (`dnf --installroot` on RedHat,
    `debootstrap` on Debian) into a minimal rootfs assembled into a partitioned bootable qcow2
    via guestfish.
+
+   *Amended by [ADR-0481](0481-build-host-image-admission-and-staged-volume-confirmation.md)
+   (#1629) — "busybox userland" here is a **build-host** constraint, not just an image
+   property: the RHEL/Rocky/Alma base repos carry no `busybox`, so `dnf --installroot` fails
+   there. The entry is therefore admitted only on Fedora and Debian-family hosts. The image's
+   definition is unchanged — busybox stays in the installroot.*
 
 5. **The helper/package contract is Fedora/RHEL-family; Ubuntu's install arc is scoped out.**
    The three in-guest helpers are a Fedora/RHEL reference implementation (`grubby` / `dracut`
