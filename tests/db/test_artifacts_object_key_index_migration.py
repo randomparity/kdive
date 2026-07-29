@@ -7,6 +7,7 @@ from uuid import uuid4
 import psycopg
 
 from kdive.db import migrate
+from kdive.store.objectstore import _LIST_PAGE_SIZE as _PAGE_WIDTH
 
 
 def _apply_before(conn: psycopg.Connection, version: str) -> None:
@@ -81,6 +82,43 @@ def test_general_index_is_usable_without_an_owner_kind_predicate(
     ).fetchall()
     plan_text = "\n".join(row[0] for row in plan)
     assert "artifacts_object_key_idx" in plan_text
+
+
+def test_a_page_wide_unnest_anti_join_is_index_served(pg_conn: psycopg.Connection) -> None:
+    """The orphan sweep classifies a listing page at a time now (#1569, ADR-0498 §5).
+
+    Paging turns one root-wide statement into several page-wide ones, and the worry that makes that
+    worth pinning is the planner picking a *worse* strategy at the narrower width — the driving
+    side's estimate tracks the array's real length, so the width is visible to the planner and the
+    choice genuinely can differ. It differs in the safe direction: at a page's width the anti-join
+    is a nested loop over migration ``0081``'s ``object_key`` btree, so N pages cost N pages' worth
+    of index probes and not N sequential scans of ``artifacts``.
+
+    Enough rows are inserted for the index to win on cost, so no ``enable_seqscan`` override is
+    needed and the plan asserted is the one production gets. The row count is not arbitrary: the
+    crossover on this schema sits right at 80k, close enough that a byte of row width flips it, and
+    200k puts the nested loop ~2x ahead. ADR-0498 §5 records that measurement and the wall-clock
+    comparison against the root-wide statement.
+    """
+    migrate.apply_migrations(pg_conn)
+    owner = uuid4()
+    pg_conn.execute(
+        "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, sensitivity, "
+        "retention_class) SELECT 'runs', %s, 'local/runs/' || %s || '/artifact-' || i, "
+        "'e', 'redacted', 'console' FROM generate_series(1, 200000) AS i",
+        (owner, str(owner)),
+    )
+    pg_conn.execute("ANALYZE artifacts")
+
+    page = [f"local/runs/{owner}/absent-{i:06d}" for i in range(_PAGE_WIDTH)]
+    plan = pg_conn.execute(
+        b"EXPLAIN SELECT c.key FROM unnest(%s::text[]) AS c(key) "
+        b"WHERE NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)",
+        (page,),
+    ).fetchall()
+    plan_text = "\n".join(row[0] for row in plan)
+    assert "artifacts_object_key_idx" in plan_text, plan_text
+    assert "Seq Scan on artifacts" not in plan_text, plan_text
 
 
 def test_object_key_round_trips_for_non_investigation_owner(pg_conn: psycopg.Connection) -> None:
