@@ -192,8 +192,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0480 reclaim an abandoned crashed System's allocation
 - Mark ADR-0456 §3 amended and fix the agent-index schema claim
 - Register KDIVE_STACK_SKEW_POLICY in the env reference
-- ADR-0476 — one home for the wait timeout constants
 - Note the #1635 interaction in ADR-0471
+- Disclose the in-guest helper exit-code narrowing
+- ADR-0476 — one home for the wait timeout constants
 
 ### Fixed
 
@@ -322,11 +323,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match guest-exec as a whole element, not a substring
 - Fail test-live-remote when no test carries the marker
 - Advertise the RHEL-family kdump symbols
-- Add ToolResponse.denied with a public terminal affordance
-- Route every authorization_denied envelope through denied()
 - Reclaim an active allocation on an abandoned crashed System
 - Grade stale_restart on modified files, not bare mtimes
+- A non-retryable category dead-letters its job on attempt 1
+- Classify a qemu-ga allowlist denial as configuration_error
+- Add ToolResponse.denied with a public terminal affordance
+- Route every authorization_denied envelope through denied()
 - Gate the bare image on the build host's distro
+- Libvirt connect/lookup faults are infrastructure, not install
 
 ### Build
 
