@@ -1,28 +1,32 @@
-"""The ``flock`` liveness gate both uploaded-rootfs partial sweeps unlink through (ADR-0446/0452).
+"""The ``flock`` liveness gate the uploaded-rootfs partial sweeps unlink through (ADR-0446/0452).
 
 A ``<token>.<uuid>.partial`` is written by exactly one fetcher and is a SENSITIVE multi-GiB file no
-``artifacts`` row owns, so two sweeps collect it: the opportunistic one on the next fetch of that
-base (``rootfs_upload_fetch._unlink_orphan_partials``) and the reclaim-side backstop when the
-investigation drains (``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``).
+``artifacts`` row owns, so three call sites collect it: the opportunistic one on the next fetch of
+that base (``rootfs_upload_fetch._unlink_orphan_partials``), the reclaim-side backstop when the
+investigation drains (``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``),
+and the row-driven reclaim's own per-checksum probe
+(``rootfs_reclaim._live_writer_holds_a_partial``), which reads the ``True`` return as "defer this
+checksum" and unlinks the crash orphans it passes over on the way.
 
-Neither can tell a crash orphan from a download in flight by looking at the filesystem, and both
-originally derived the distinction from state they hold: the fetch side from its per-(investigation,
-checksum) advisory lock, the reclaim side from "no rootfs row remains for this investigation".
-Both derivations are false — a session advisory lock belongs to a Postgres *connection* that is idle
-for the whole download and can be reaped from under a live writer (ADR-0446), and the row count
-reaches zero via a System-state classifier that ``PROVISIONING -> TORN_DOWN`` falsifies (ADR-0452).
+None can tell a crash orphan from a download in flight by looking at the filesystem, and each
+originally derived the distinction from state it holds: the fetch side from its per-(investigation,
+checksum) advisory lock, the drain sweep from "no rootfs row remains for this investigation", and
+the row-driven reclaim from the System-state pin classifier. All three derivations are false — a
+session advisory lock belongs to a Postgres *connection* that is idle for the whole download and can
+be reaped from under a live writer (ADR-0446), and both of the others rest on a classifier that
+``PROVISIONING -> TORN_DOWN`` falsifies (ADR-0452, ADR-0495).
 
 So liveness is asked of the kernel instead. A live writer holds an exclusive ``flock`` on its own
 partial for the whole download-verify-publish window
 (``rootfs_upload_fetch._flocked_partial``), and a candidate a sweep cannot lock is skipped. This
-module is that test, shared rather than duplicated so the two sweeps cannot drift, and placed under
+module is that test, shared rather than duplicated so the callers cannot drift, and placed under
 ``providers.shared`` because one caller is a job handler and ``src/kdive/jobs/`` must not reach into
 a provider's lifecycle package.
 
 What a sweep does where the gate **cannot exist** — a filesystem that cannot ``flock`` at all, on
-which the writer also staged unguarded — is the callers' answer, not this module's, because the two
+which the writer also staged unguarded — is the callers' answer, not this module's, because they
 differ: the fetch-side sweep is opportunistic and skipping there costs a bounded delay, while the
-reclaim-side one is the last collector and skipping there retires it outright.
+reclaim-side callers are the last collector and skipping there retires it outright.
 """
 
 from __future__ import annotations
@@ -52,11 +56,11 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
         partial: The ``<token>.<uuid>.partial`` candidate a sweep found.
         unlink_when_unlockable: What to do when the filesystem cannot ``flock`` at all
             (:data:`_UNLOCKABLE_FILESYSTEM_ERRNOS`). Deliberately has **no default** and is
-            answered differently by the two callers, because the question is "what happens when
-            this gate cannot exist" and inheriting an answer is how the gap below was created.
+            answered per call site, because the question is "what happens when this gate cannot
+            exist" and inheriting an answer is how the gap below was created.
             ``False`` for the fetch-side opportunistic sweep, which keeps ADR-0446 §4's conservative
-            skip: it is bounded by the next fetch and something else collects. ``True`` for the
-            reclaim-side backstop, where nothing else collects — skipping there would silently
+            skip: it is bounded by the next fetch and something else collects. ``True`` for both
+            reclaim-side callers, where nothing else collects — skipping there would silently
             retire the last collector for a SENSITIVE multi-GiB orphan on exactly the hosts where
             the fetch-side gate had already degraded, which is strictly worse than the
             pre-ADR-0446 behaviour it would be replacing. ``True`` **is** that pre-ADR-0446
@@ -67,9 +71,10 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
         unlinked, already gone, or left behind because it could not be evaluated. Only the ``True``
         case is *provably transient*, since the kernel releases an ``flock`` when the holding
         descriptor closes, including on process exit, normal or ``SIGKILL``. That is what makes it
-        the one outcome a caller may safely wait on: ADR-0452 §4 retains the reclaim drain marker on
-        it and clears the marker on everything else, so a permanently unsweepable file cannot pin an
-        investigation forever.
+        the one outcome a caller may safely wait on, and both reclaim-side readers rest on exactly
+        that: ADR-0452 §4 retains the reclaim drain marker on it and clears the marker on everything
+        else, and ADR-0495 defers a whole checksum on it and reclaims on everything else — so a
+        permanently unsweepable file cannot pin an investigation, or a base, forever.
 
     Five outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
 
@@ -77,8 +82,10 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
     correct action. It is also frequently the **only** externally visible symptom of the condition
     that produced it — on the fetch side a lost session lock, whose other consequence is a redundant
     multi-GiB download that reads as ordinary slowness; on the reclaim side a pin-dropping System
-    transition, whose other consequence is invisible. It is logged for the same reason ADR-0443 §4
-    logs a rejected base: the operation succeeds, so the log line is the only evidence it fired.
+    transition, whose other consequences are a deferred drain (ADR-0452) and, since ADR-0495, a
+    deferred checksum that its caller logs in its own right. It is logged for the same reason
+    ADR-0443 §4 logs a rejected base: the operation succeeds, so the log line is the only evidence
+    it fired.
 
     The message reports what was **observed** rather than either caller's inferred cause. The
     fetch-side text used to assert a lost Postgres session, which is simply false on the reclaim
@@ -102,7 +109,7 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
     caller answers it via ``unlink_when_unlockable`` rather than inheriting a policy.
 
     *Absent.* A candidate that vanishes between the glob and the ``open`` is the achieved
-    post-state, not a fault — the two sweeps walk the same directory.
+    post-state, not a fault — every caller walks the same directory.
 
     *Unlinkable.* The ``unlink``'s own fault, likeliest ``EPERM`` under a sticky-bit or foreign-uid
     staging directory, plus ``EROFS`` and ``EIO``. Handled here, per candidate, so one bad file

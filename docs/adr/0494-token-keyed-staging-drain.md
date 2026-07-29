@@ -66,7 +66,10 @@ staging directory is not swept either.
    it and ADR-0452 decision 2's kernel-answered liveness question remains the whole answer — the two
    gates are not re-derived from each other. Its *reach* is also left exactly where ADR-0442 §7 put
    it: a surviving rootfs row means a fetch of that base can legitimately be in flight, so the
-   partial glob is skipped while any row remains. Widening it is #1565's question.
+   partial glob is skipped while any row remains. Widening it is #1565's question — and
+   [ADR-0495](0495-reclaim-defers-a-live-held-checksum.md) answers that question "no": a tail that
+   unlinks files cannot retain the row a retry needs, so the probe went into `_reclaim_one_checksum`
+   instead and this decision is unchanged.
 
 3. **A live System's pin is read as a set; a pinned-but-unowned base is left in place, reported,
    and does *not* retain the drain marker.** `pinned_rootfs_tokens` enumerates the referencing
@@ -180,6 +183,15 @@ staging directory is not swept either.
   NULL and this ADR's new lane requires zero rootfs rows, which a pinned base does not satisfy. The
   new lane does give the *drained* half of that asymmetry a trigger, which narrows #1565's scope to
   the rows-still-present case.
+
+  **Amended by [ADR-0495](0495-reclaim-defers-a-live-held-checksum.md).** That rows-still-present case
+  is now fixed, and not by decision 2's "widening the partial glob" — the deferral went into
+  `_reclaim_one_checksum`, where retaining the `artifacts` row makes the existing TTL lane the retry.
+  Decision 2 stands as written: this tail's partial glob is still skipped while any row survives.
+  What this ADR *does* leave behind, and ADR-0495 does not fix, is decision 5's `s.created_at` age
+  gate: a freshly-created System reusing a long-staged, already-past-retention checksum can hold a
+  live partial before its own `systems` row ages into this lane's window, so the drained half stays
+  unretried for up to `investigation_rootfs_retention`.
 - **An `abandoned` investigation is reached by no lane, including this one.** All three require
   either `open`/`active` or a marker `investigations.close` sets, and `_close_locked` refuses to
   close an `abandoned` investigation. It is unreachable today — no writer transitions an
