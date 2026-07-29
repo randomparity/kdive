@@ -28,7 +28,7 @@ ALTER TABLE systems
             'build_failure', 'boot_timeout', 'readiness_failure',
             'debug_attach_failure', 'infrastructure_failure',
             'stale_handle', 'transport_conflict', 'not_implemented',
-            'not_found', 'conflict',
+            'not_found', 'conflict', 'symbol_not_found',
             'allocation_denied', 'quota_exceeded', 'lease_expired', 'queue_timeout',
             'provisioning_failure', 'install_failure',
             'transport_failure', 'control_failure',
