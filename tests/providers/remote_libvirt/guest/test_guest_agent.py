@@ -17,7 +17,7 @@ from typing import Any
 import libvirt
 import pytest
 
-from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory, retryable_category
 from kdive.providers.remote_libvirt.guest.agent import (
     BUILD_DETERMINISTIC_CONFIG_CODES,
     GuestAgentExec,
@@ -246,6 +246,75 @@ def test_transient_libvirt_error_stays_transport_failure(code: int) -> None:
         _exec_raising(libvirt_error(code)).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
     assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
     assert excinfo.value.details["libvirt_error_code"] == code
+
+
+def _rpc_disabled_error(message: str) -> libvirt.libvirtError:
+    """Reproduce a qemu-ga allowlist denial as libvirt actually delivers it.
+
+    qemu-ga answers the filtered RPC inside a healthy channel; libvirt's
+    ``qemuAgentCheckError`` re-raises QEMU's ``error_setg`` text under the catch-all
+    ``VIR_ERR_INTERNAL_ERROR`` (code 1), NOT under any deterministic-config code — which is
+    precisely why #1631's denial read as a retryable transport failure.
+    """
+    err = libvirt.libvirtError(message)
+    err.err = (libvirt.VIR_ERR_INTERNAL_ERROR, 0, message, 0, "", None, None, 0, 0)
+    return err
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The exact string the maintainer observed on every remote install against a Rocky 10
+        # guest whose /etc/sysconfig/qemu-ga allowlist omitted guest-exec (#1631, #1610).
+        "Command guest-exec has been disabled",
+        # QEMU appends qemu-ga's disable reason when it has one, and libvirt prefixes its own
+        # context; the match must survive both.
+        "Command guest-exec has been disabled: the command is not allowed",
+        "internal error: unable to execute QEMU agent command 'guest-exec': "
+        "Command guest-exec has been disabled",
+        "command guest-exec-status has been disabled",
+    ],
+)
+def test_rpc_allowlist_denial_maps_to_configuration_error(message: str) -> None:
+    # A denial is permanent — no retry can widen an allowlist — but it arrives under
+    # VIR_ERR_INTERNAL_ERROR, so it must be caught by message, not by code (ADR-0483).
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec_raising(_rpc_disabled_error(message)).run(
+            _DOMAIN, ["/usr/bin/curl", "https://store/obj"]
+        )
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    assert excinfo.value.details["libvirt_error_code"] == libvirt.VIR_ERR_INTERNAL_ERROR
+    denied_rpc = excinfo.value.details["denied_rpc"]
+    assert denied_rpc in {"guest-exec", "guest-exec-status"}
+    # The message names the RPC and the file an operator must edit, so the failure is
+    # actionable without reading the worker log (#1631).
+    assert isinstance(denied_rpc, str)
+    assert denied_rpc in str(excinfo.value)
+    assert "--allow-rpcs" in str(excinfo.value)
+
+
+def test_internal_error_without_a_denial_stays_transport_failure() -> None:
+    # The guard against over-broad detection: VIR_ERR_INTERNAL_ERROR is libvirt's catch-all and
+    # covers transient conditions too. Only the disabled-command message flips the category —
+    # adding the bare code to _DETERMINISTIC_CONFIG_CODES would have made every internal error
+    # permanently fatal.
+    raised = _rpc_disabled_error("internal error: connection closed while reading agent reply")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec_raising(raised).run(_DOMAIN, ["/usr/bin/curl", "https://store/obj"])
+    assert excinfo.value.category is ErrorCategory.TRANSPORT_FAILURE
+    assert "denied_rpc" not in excinfo.value.details
+
+
+def test_rpc_denial_is_not_retryable_at_the_queue() -> None:
+    # The end of the #1631 chain: classifying the denial is only half the fix. Assert the
+    # category the classifier picks is one the job queue dead-letters, so the denial cannot
+    # burn DEFAULT_MAX_ATTEMPTS however it reaches the worker (ADR-0483).
+    with pytest.raises(CategorizedError) as excinfo:
+        _exec_raising(_rpc_disabled_error("Command guest-exec has been disabled")).run(
+            _DOMAIN, ["/usr/bin/curl", "https://store/obj"]
+        )
+    assert retryable_category(excinfo.value.category) is False
 
 
 def _exec_raising_with_codes(exc: BaseException, codes: frozenset[int]) -> GuestAgentExec:
