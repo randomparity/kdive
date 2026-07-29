@@ -6,7 +6,8 @@ libguestfs build is offloaded via ``asyncio.to_thread`` so it never stalls the w
 loop), validates the built image against the guest contract, then publishes it through the
 row-first :func:`publish_image` two-write. A guest-contract validation failure raises a
 ``CategorizedError(CONFIGURATION_ERROR)``, which the worker turns into a dead-letter with that
-named category (no half-published row: validation gates the publish).
+named category (no half-published row: validation gates the publish) — since ADR-0483 the
+non-retryable category is itself what dead-letters the job, on the first attempt.
 """
 
 from __future__ import annotations

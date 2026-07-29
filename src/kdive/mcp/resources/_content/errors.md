@@ -69,3 +69,9 @@ errors.
   (resource://kdive/docs/guide/safety-and-rbac.md).
 - **`infrastructure_failure`** or **`provisioning_failure`** — retry if the job has
   remaining attempts; otherwise triage via `jobs.list` and the audit log.
+
+`retryable` also governs the job queue, not just your own re-invocation (ADR-0483): a job whose
+handler fails with `retryable=false` dead-letters on its **first** attempt rather than consuming
+`max_attempts`. So a `failed` job with `attempt: 1` and a terminal category is not a job that was
+denied its retries — it is a permanent failure the queue declined to repeat. Only a retryable
+category is re-dispatched, and `jobs.wait` / `jobs.list` show the attempt it reached.
