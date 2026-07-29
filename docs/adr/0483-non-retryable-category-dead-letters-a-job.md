@@ -204,6 +204,25 @@ in the code: `_install_failure` versus `_libvirt_transport_failure` in the local
 the general shape of the migration cost — the category was decorative at the queue before this
 ADR, so any site that picked a loose one now has to mean it.
 
+**One narrowing ships with this ADR and is not fixed by it (#1653).** The retained
+`install_failure` at `remote_libvirt/lifecycle/install.py:208` treats *any* non-zero in-guest
+helper exit as permanent, and the helper cannot support that reading:
+`deploy/remote-libvirt-guest-helpers/kdive-install-kernel` exits `1` for every failure — its
+`die()` is the single exit path — so `curl -fsSL --retry 3 "$url" || die "bundle download
+failed"` (`:65`) is indistinguishable from the genuinely permanent `dracut` (`:78`) and `grubby`
+(`:85`) failures.
+
+Stated plainly: **a transient bundle-download failure — an object-store blip, a guest whose
+network has not settled, or an expired presigned GET — now dead-letters the Run on attempt 1
+where it previously self-healed on attempt 2 by re-minting a fresh URL.** curl's own `--retry 3`
+covers seconds, not a MinIO restart or an already-expired URL. This is a real regression in a
+narrow case, disclosed rather than discovered later.
+
+It is not fixed here because the repair is a guest-image contract change — distinct exit codes
+from the helper (e.g. `EX_TEMPFAIL` for the fetch path), plus a compatibility rule so a server
+that knows the new codes still behaves correctly against an already-built base image that only
+ever exits `1`. That is tracked as #1653 and is out of scope for a queue-semantics change.
+
 The cost is real and worth naming: a failure that *was* transient but got classified into a
 non-retryable category now fails on the first attempt with no second chance. Before this change
 a misclassification was papered over by two extra attempts. Miscategorisation is now visible

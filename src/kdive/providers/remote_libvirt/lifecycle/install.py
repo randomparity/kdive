@@ -205,6 +205,13 @@ class RemoteLibvirtInstall:
                 owner_id=str(request.system_id),
             )
         if output.result.exit_status != 0:
+            # INSTALL_FAILURE is non-retryable, so since ADR-0483 this dead-letters the Run on
+            # attempt 1. That is right for the helper's deterministic failures (dracut, grubby)
+            # and WRONG for its transient one: `kdive-install-kernel` exits 1 for everything,
+            # including a `curl` bundle download that lost the object store or hit an expired
+            # presigned URL, which attempt 2 used to heal by re-minting it. Distinguishing them
+            # needs distinct exit codes from the helper — a guest-image contract change, tracked
+            # as #1653. Until then the conflation is deliberate and disclosed, not overlooked.
             raise CategorizedError(
                 "in-guest kernel install exited non-zero",
                 category=ErrorCategory.INSTALL_FAILURE,
