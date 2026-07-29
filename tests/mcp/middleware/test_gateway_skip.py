@@ -355,6 +355,11 @@ def test_telemetry_search_records_error_when_the_call_raises() -> None:
             },
         ),
     ]
+    # The duration histogram too: `_finish` records it beside the requests counter, so a
+    # regression that dropped it on the error arm alone would otherwise survive here.
+    assert [lbl for _, lbl in meter.histogram_records] == [
+        {"tool": "tools.search", "outcome": "error"}
+    ]
 
 
 def test_telemetry_invoke_still_passes_through_to_call_next() -> None:
@@ -405,14 +410,16 @@ def test_denial_audit_invoke_skips_row_on_role_denied(
 def test_denial_audit_search_writes_row_on_role_denied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RoleDenied on tools.search IS audited: the skip is re-entry-specific (ADR-0485 §2).
+    """RoleDenied on tools.search IS audited: only ``REENTRANT_TOOLS`` is skipped here.
 
-    The hazard the arm exists for — a second, misattributed row keyed to the dispatcher
-    instead of the denied tool — needs an inner call, and tools.search has none. This pins
-    the middleware's contract against ``REENTRANT_TOOLS``, not a production reachability
-    claim: ``tools.search`` is in ``CORE_TOOLS`` and RBAC-filters its matches internally via
-    ``tool_visible`` rather than raising, so whether a real dispatch can raise ``RoleDenied``
-    here is #1635's question, not this test's.
+    This pins the middleware's contract against the set, not a production reachability claim.
+    ``tools.search`` cannot raise ``RoleDenied`` in production at all — it is in
+    ``PUBLIC_TOOLS``, absent from ``_TOOL_SCOPES``, and ``tools_search`` calls no
+    ``require_role``; it filters its own matches with ``tool_visible`` and returns them. Nor
+    is the arm de-duplication: this middleware runs in the re-entered inner chain too, and
+    the inner instance *returns* an enveloped denial rather than re-raising, so no exception
+    can reach an outer instance to be audited twice (ADR-0485 §2). What the test pins is that
+    the guard keys off the re-entrant set alone, so a tool that is not in it is audited.
     """
     calls: list[Any] = []
 

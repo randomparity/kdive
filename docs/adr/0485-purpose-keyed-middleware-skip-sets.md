@@ -24,10 +24,12 @@ Its comment gave one reason for both members:
 
 **That mechanism is real for `tools.invoke`.** `tools_invoke` (`mcp/tools/gateway.py`)
 calls `app.call_tool(name, arguments or {}, run_middleware=True)`, so the inner tool runs
-the whole chain nested inside the outer `tools.invoke` chain. Every per-call recorder
-fires twice, and the second row is not merely redundant — on a denial it is
-*misattributed*, keyed to `tools.invoke` rather than to the tool that was actually denied.
-The skip is genuine de-duplication and ADR-0268 §6 is right about it.
+the whole chain nested inside the outer `tools.invoke` chain, and the usage and telemetry
+recorders each fire twice. The skip is genuine de-duplication on those two planes and
+ADR-0268 §6 is right about it there. It is **not** right about the denial plane — §6's
+"second, misattributed `platform_audit_log` row keyed to `tools.invoke`" cannot occur, for
+the reason set out in §2. That is a second false claim in the same paragraph, found by
+review of this ADR's own first draft, which had repeated it.
 
 **It is absent for `tools.search`.** `tools_search` reads `registered_tools(app)`, filters
 with `tool_visible`, ranks, and returns a `ToolResponse`. There is no `app.call_tool` on
@@ -85,11 +87,21 @@ conflation return.
 `app.call_tool(..., run_middleware=True)`, so the inner chain is the authoritative record
 and the outer chain must record nothing. That holds even when the inner dispatch never
 reaches a tool — FastMCP builds the middleware context and runs the chain *before*
-resolution, resolving inside `call_next` (`fastmcp/server/server.py`'s `call_tool`), so an
-unknown or disabled inner name raises `NotFoundError` out of `call_next` and is recorded by
-the inner chain as an `error` outcome keyed to the name that was asked for, before
-`tools_invoke` maps it to a `configuration_error` envelope. There is no pre-dispatch
-failure the skip silences. `UNMETERED_TOOLS` is the volume set: a member does
+resolution, resolving inside `call_next`, so an unknown or disabled inner name raises
+`NotFoundError` out of `call_next` and is recorded by the inner chain as an `error` outcome
+keyed to the name that was asked for, before `tools_invoke` maps it to a
+`configuration_error` envelope. There is no pre-dispatch failure the skip silences.
+
+That last point is a claim about a third-party internal, so it is pinned to a version:
+verified against **fastmcp 3.4.4**, `fastmcp/server/server.py`'s `FastMCP.call_tool`, where
+the `if run_middleware:` branch constructs the `MiddlewareContext` and calls
+`_run_middleware` with no prior resolution, and `call_next` recurses with
+`run_middleware=False` into the only branch that calls `get_tool` and raises `NotFoundError`.
+A dependency bump could invalidate it; a reader doubting the skip should re-check there
+first, because the natural reading — that a failed resolution never reaches the chain — is
+wrong and has been raised as a defect once already.
+
+`UNMETERED_TOOLS` is the volume set: a member does
 not re-enter and has no inner recorder, so skipping it is a deliberate choice to forgo the
 only record, taken because the per-call cost on that plane is not worth its signal.
 
@@ -99,22 +111,52 @@ only record, taken because the per-call cost on that plane is not worth its sign
 |---|---|---|
 | `UsageTrackingMiddleware` | `REENTRANT_TOOLS \| UNMETERED_TOOLS` | de-duplication *and* volume: a row is a per-call DB write |
 | `TelemetryMiddleware` | `REENTRANT_TOOLS` | de-duplication only; spans/metrics stay in-process |
-| `DenialAuditMiddleware` | `REENTRANT_TOOLS` | de-duplication only; the misattributed-row hazard is re-entry-specific |
+| `DenialAuditMiddleware` | `REENTRANT_TOOLS` | **not** de-duplication — see below; ordering-defensive, and unreachable today |
 
 The net behavioural change is exactly one thing: **`tools.search` is now traced and
-metered.** It emits an `mcp.tool/tools.search` span and its RED counter/histogram points
-like any other tool, so discovery latency and error rate become answerable from the
-telemetry that already exists. It still writes no `tool_invocation` row.
+metered** — pinned at unit level (see §3). It emits an `mcp.tool/tools.search` span and its
+RED counter/histogram points like any other tool, so discovery latency and error rate become
+answerable from the telemetry that already exists. It still writes no `tool_invocation` row.
 
-The `DenialAuditMiddleware` arm is a correctness alignment with no observed behaviour
-change: `tools.search` is in `CORE_TOOLS` (`mcp/exposure.py`) and RBAC-filters its results
-internally via `tool_visible` rather than raising, so a `RoleDenied` escaping it is not a
-path this ADR has pinned. No audit-row loss is claimed for it. It moves to
-`REENTRANT_TOOLS` because that is the set whose *reason* the arm implements — the
-misattributed second denial row is a re-entry hazard — not because a row is known to be
-lost today.
+De-duplication is a real hazard on exactly two of the three planes. `UsageTrackingMiddleware`
+and `TelemetryMiddleware` sit *outside* the re-entry (`mcp/assembly/app.py`), so without a
+skip each would record the dispatcher alongside the inner call. **`DenialAuditMiddleware`
+would not, and this ADR does not claim it would.** That middleware is registered in the same
+chain, so the re-entered inner call runs its own instance, and that instance *catches*
+`RoleDenied` and **returns** `ToolResponse.denied(inner_tool)` — it never re-raises. The
+exception therefore cannot reach an outer instance, and the "second, misattributed denial row
+keyed to `tools.invoke`" that ADR-0268 §6 warns about is structurally unreachable. This is
+independent of #1635: today what crosses the seam is a `ToolError` wrap, and once #1635 lands
+the inner arm absorbs it.
 
-### 3. What the usage plane still cannot answer, stated rather than implied
+`tools.invoke` stays in the skip regardless. The arm is kept as an **ordering-defensive**
+guard — it costs nothing and it stops a future middleware reordering, or a future re-raise on
+that path, from turning a dispatcher name into an audit row — but it is documented as
+unreachable rather than as de-duplication. Stating the hazard as real when it is not would be
+the same defect this ADR exists to remove.
+
+Nor is an audit-row *loss* claimed for `tools.search`. It cannot raise `RoleDenied` at all:
+it is in `PUBLIC_TOOLS` and absent from `_TOOL_SCOPES` (`mcp/exposure.py`), so no exposure
+scope gates it, and `tools_search` (`mcp/tools/gateway.py`) calls no `require_role` anywhere —
+it filters its own matches with `tool_visible` and returns them. (`CORE_TOOLS` membership is
+sometimes cited here; it is the default-*listed* set and has no bearing on whether a denial
+can be raised.)
+
+### 3. How far "now traced and metered" is pinned
+
+At **unit level only.** `tests/mcp/middleware/test_gateway_skip.py` drives
+`TelemetryMiddleware` directly, constructed over a fake tracer and meter with hand-built
+`SimpleNamespace` contexts; it never goes through `build_app`. So the tests prove the
+middleware emits a span and metric points for `tools.search` on both its success and its
+error exit — which is what this decision changes — and they do **not** prove the assembled
+app wires that middleware such that a real `tools.search` call reaches it.
+
+That end-to-end gap is not this ADR's to close: it is exactly #1640, which exists because
+`telemetry.py`'s skip has never been pinned through a real dispatch (deleting it leaves the
+suite green). Recording the limit here so a reader does not mistake a green run of the unit
+module for end-to-end proof.
+
+### 4. What the usage plane still cannot answer, stated rather than implied
 
 Declining the row means `tool_invocation` cannot answer *what are agents searching for*,
 *how often do they search before invoking*, or *which searches return nothing*. Those are
@@ -137,8 +179,13 @@ it will be a named question, not the absence itself.
 - **A third reason would need a third set,** not a third member of an existing one. That is
   the intended cost: it forces the reason to be stated before the skip is taken.
 - **The gateway's de-duplication guarantee is untouched.** `tools.invoke` remains in the
-  skip set of all three middlewares, so ADR-0268 §6's single-row-per-real-call property and
-  the audit-attribution correctness that depends on it are preserved exactly.
+  skip set of all three middlewares, so ADR-0268 §6's single-row-per-real-call property is
+  preserved exactly on the two planes where it was ever at stake.
+- **One of ADR-0268 §6's two hazards turns out never to have existed.** The denial-plane
+  double-audit it warns about cannot happen, so that skip is now documented as
+  ordering-defensive. Nothing is removed for it — the cost of keeping a guard against a
+  hazard that would become real under a reorder is a set lookup — but the *stated reason*
+  now matches the code, which is the whole point of this ADR.
 
 ## Rejected alternatives
 
