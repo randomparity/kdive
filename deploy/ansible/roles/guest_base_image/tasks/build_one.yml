@@ -118,8 +118,13 @@
 # kernel from a presigned object-store URL, so under enforcing SELinux every remote install
 # fails as `install_failure` with the helper seeing EACCES on connect (the domain is confined
 # enough that even security_getenforce() is denied, so the cause is not self-evident in-guest).
-# This ran ONLY in the virt-builder branch before, so cloud-image builds (rocky, ubuntu) stayed
-# enforcing and could never complete an install. Applied to every build path, once, here.
+# The connect() denial is not the only one: virt_qemu_ga_t also cannot read /lib/modules, and the
+# install helper's depmod/dracut/grubby children transition to further domains, so relaxing that
+# one domain would not be enough. This ran ONLY in the virt-builder branch before, so cloud-image
+# builds (rocky, ubuntu) stayed enforcing and could never complete an install. Applied to every
+# build path, once, here; the [ -f /etc/selinux/config ] guard no-ops on AppArmor (debian) images.
+# Permissive is an ACCEPTED posture, not a pending workaround — rationale, the security cost, and
+# the conditions for reversing it are in docs/adr/0484-guest-images-ship-selinux-permissive.md.
 - name: Relax SELinux to permissive for {{ image.name }}
   ansible.builtin.command: # noqa: command-instead-of-module
     # No Ansible module wraps virt-customize; the command module is the only option.
