@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import NamedTuple, Protocol
@@ -49,6 +50,10 @@ UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
 #: ``object_key`` btree (migration ``0081``) has made it an index scan rather than a sequential one.
 #: The budget is the drain side of the brake ADR-0453 §4 put on the reap side; the remainder is
 #: reclaimed 30 seconds later.
+#:
+#: Since the listing is paged (ADR-0498) the budget bounds the **listing** too: a root stops being
+#: paged once its allowance is examined, so a drain no longer enumerates a backlog it could not have
+#: acted on. What the budget counts is unchanged — one unit per candidate reaching the re-read.
 MAX_RECLAIMS_PER_ROOT = 200
 
 # The number of ``/``-separated components in an upload object key: ``<tenant>/<kind>/<id>/<name>``.
@@ -56,8 +61,14 @@ MAX_RECLAIMS_PER_ROOT = 200
 # this many and a key with any other shape was not written by the upload lane.
 _KEY_COMPONENTS = 4
 
-# One statement decides reclaimability, and it serves both the bulk classify and the per-key
+# One statement decides reclaimability, and it serves both the per-page classify and the per-key
 # re-check so the two cannot drift into disagreeing about what is safe to delete (ADR-0455 §2).
+# Its four parallel arrays are a listing **page** wide, not a root wide (ADR-0498). The width is
+# visible to the planner — ``unnest``'s row estimate tracks the array's real length — so the plan
+# does change with it, and it changes toward the index: at a page's width the ``artifacts`` anti-
+# join is a nested loop over #1570's ``object_key`` btree, where a root's width tipped it to a
+# hash anti-join over a sequential scan. Measured wall-clock time is flat across the widths
+# (ADR-0498 §5).
 # Every fence is evaluated against Postgres ``now()``, never a Python clock:
 #   * no ``artifacts`` row reaches the key — the object is unregistered;
 #   * the owner holds no ``upload_manifests`` row *at all* — not merely no live one. A lapsed
@@ -78,13 +89,18 @@ WHERE c.last_modified < now() - %s
 class UploadOrphanStore(UploadStore, Protocol):
     """The reaper's port plus the two reads the orphan sweep needs.
 
-    ``list_prefix_with_mtime`` enumerates a root; ``head`` stats one key. They are separate methods
-    because they answer separate questions: the sweep needs *every* key under a root once per pass,
-    and *one* key's current mtime immediately before each delete. Serving the second with the first
-    is what #1575 fixed.
+    ``iter_prefix_pages_with_mtime`` streams a root a page at a time; ``head`` stats one key. They
+    are separate methods because they answer separate questions: the sweep needs *every* key under a
+    root once per pass, and *one* key's current mtime immediately before each delete. Serving the
+    second with the first is what #1575 fixed.
+
+    The listing port is the **paged** one, not the flattened one, because a port that could hand
+    this sweep a whole root's listing is a port through which the cost #1569 fixed can return
+    (ADR-0498 §1). ``ObjectStore`` still offers ``list_prefix_with_mtime`` for the bounded
+    ``images/`` sweep; this port does not.
     """
 
-    def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]: ...
+    def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]: ...
     def head(self, key: str) -> HeadResult | None: ...
 
 
@@ -106,10 +122,11 @@ async def repair_leaked_upload_objects(
 ) -> int:
     """Delete objects under the upload roots that no ``artifacts`` or manifest row can reach.
 
-    Walks ``local/runs/`` and ``local/investigations/``, attributes each listed key to its owner by
-    parsing it, classifies the whole listing in one query, then re-runs that same predicate for
-    each reclaimable key immediately before deleting it — so a finalize or a re-mint that commits
-    between the listing and the delete protects its object.
+    Walks ``local/runs/`` and ``local/investigations/`` a listing page at a time, attributes each
+    listed key to its owner by parsing it, classifies each page in one query, then re-runs that same
+    predicate for each reclaimable key immediately before deleting it — so a finalize or a re-mint
+    that commits between the listing and the delete protects its object. Nothing is held for a whole
+    root: peak memory and the classify's parameter width are bounded by a page (ADR-0498).
 
     The reclaim threshold is ``orphan_grace + upload_ttl``, and the second term is not padding
     (ADR-0455 §2). The manifest fence protects an object only until the reaper deletes its window's
@@ -221,6 +238,27 @@ class _Tally:
         )
 
 
+@dataclass
+class _RootSweep:
+    """One root's in-flight state: its work budget, and the counts the drift warning reads.
+
+    The counts are accumulated across the root's pages rather than taken from one, because what
+    ADR-0455 §4 detects is a *root* whose key layout this parser no longer recognizes. Warning per
+    page would fire on any single page that happened to hold only unattributable keys, which under a
+    paged listing is a page boundary landing badly rather than the drift the warning names.
+    """
+
+    root: str
+    examined: int = 0
+    listed: int = 0
+    attributed: int = 0
+
+    @property
+    def budget_spent(self) -> bool:
+        """Whether this root has examined its whole allowance (ADR-0455 §6)."""
+        return self.examined >= MAX_RECLAIMS_PER_ROOT
+
+
 async def _sweep_root(
     conn: AsyncConnection,
     store: UploadOrphanStore,
@@ -228,32 +266,126 @@ async def _sweep_root(
     grace: timedelta,
     tally: _Tally,
 ) -> None:
-    """Reclaim one root's orphans, spending at most ``MAX_RECLAIMS_PER_ROOT`` units of work.
+    """Reclaim one root's orphans a page at a time, spending at most ``MAX_RECLAIMS_PER_ROOT`` work.
+
+    The root is streamed, not materialized (ADR-0498): each ``list_objects_v2`` page is attributed,
+    classified, and acted on before the next is fetched, so peak memory and the classify's array
+    parameters are bounded by a page and not by a bucket that never shrinks. The budget now also
+    stops the **listing**: a drain examines its allowance out of the first page or two and never
+    pages the remaining backlog it could not have acted on anyway.
 
     The budget is **per root**, not per pass, so a persistent fault under `local/runs/` — an object
     lock over a prefix, a scoped ``s3:DeleteObject`` deny — cannot consume the whole allowance on
     failures and leave `local/investigations/` unlisted on every pass forever, which is the
     starvation §5's skip-and-count exists to prevent (ADR-0455 §6). The two faults that end a root
-    outright — its listing and its classify — are skipped and counted for that same reason; see
-    :func:`_reclaimable_in_listing_order`.
+    — its listing and its classify — are skipped and counted for that same reason; see
+    :func:`_next_page_or_fault` and :func:`_reclaim_page`.
 
     It charges every candidate that reaches the re-read, not only the ones deleted: a declined
     re-check costs the same HEAD and query as a delete, and two overlapping passes (the daemon loop
     and an on-demand ``ops.reconcile``) see exactly that — the second finds every object already
     gone and would otherwise re-read the whole backlog uncapped.
     """
-    candidates = await _reclaimable_in_listing_order(conn, store, root, grace, tally)
-    if candidates is None:
-        return
-    for examined, candidate in enumerate(candidates):
-        if examined >= MAX_RECLAIMS_PER_ROOT:
-            _log.info(
-                "reconciler: upload orphan sweep stopped at its %d-object budget for %s; the "
-                "remaining backlog is reclaimed by the following passes",
-                MAX_RECLAIMS_PER_ROOT,
-                root,
-            )
-            return
+    sweep = _RootSweep(root)
+    pages = store.iter_prefix_pages_with_mtime(root)
+    while not sweep.budget_spent:
+        page = await _next_page_or_fault(pages, root, tally)
+        if page is None:
+            break  # the listing is exhausted, or it faulted and was counted
+        if not await _reclaim_page(conn, store, page, grace, tally=tally, sweep=sweep):
+            break  # the classify faulted and was counted; this root is done
+    if sweep.budget_spent:
+        _log.info(
+            "reconciler: upload orphan sweep stopped at its %d-object budget for %s; any remaining "
+            "backlog is reclaimed by the following passes",
+            MAX_RECLAIMS_PER_ROOT,
+            root,
+        )
+    _warn_if_wholly_unattributable(root, sweep.listed, sweep.attributed)
+
+
+async def _next_page_or_fault(
+    pages: Iterator[list[ObjectListing]], root: str, tally: _Tally
+) -> list[ObjectListing] | None:
+    """Pull the next listing page, or count a listing fault and return ``None`` to end the root.
+
+    A listing fault ends this root and not the **pass**: the roots' candidate sets are wholly
+    independent, so with no further listing there is nothing left to be partial about here and
+    nothing at all is implied about the sibling. Aborting instead would leave
+    `local/investigations/`, the rootfs upload lane's root, unswept on every pass for as long as the
+    fault lasted — the starvation ADR-0455 §5 skips-and-counts to prevent and §6 makes the budget
+    per root to prevent, arriving by the one path neither covers. A scoped ``s3:ListBucket`` deny
+    (an IAM ``s3:prefix`` condition is the standard way to scope list authority) is exactly that
+    fault, and it is the list-side twin of the per-prefix ``s3:DeleteObject`` deny the budget
+    already survives.
+
+    Since the listing is paged, the fault can also arrive **mid-root**, after earlier pages have
+    already deleted irreversibly (ADR-0498 §3). Those deletes stand and are counted; the root is
+    abandoned from the failed page on. That is strictly more progress than the whole-root listing
+    made — it lost every root whose listing faulted at any point — and it is safe for the same
+    reason a budget-truncated root is: this sweep commits nothing, so the next pass re-derives the
+    identical candidates from the page it stopped at.
+
+    ``None`` is returned for an exhausted listing and for a faulted one alike, because the caller
+    does the same thing with both; only the fault is counted.
+    """
+    try:
+        return await asyncio.to_thread(_next_page, pages)
+    except CategorizedError as exc:
+        _count_root_fault(root, tally, "list", exc)
+        return None
+
+
+def _next_page(pages: Iterator[list[ObjectListing]]) -> list[ObjectListing] | None:
+    """Advance ``pages`` one page, or return ``None`` at exhaustion — the blocking half of a page.
+
+    Named rather than a ``next(pages, None)`` at the ``to_thread`` call site so the sentinel's type
+    is declared once; the round trip lives here, which is why it is the part offloaded.
+    """
+    return next(pages, None)
+
+
+async def _reclaim_page(
+    conn: AsyncConnection,
+    store: UploadOrphanStore,
+    page: list[ObjectListing],
+    grace: timedelta,
+    *,
+    tally: _Tally,
+    sweep: _RootSweep,
+) -> bool:
+    """Classify one listing page and reclaim what it says is safe, in **page** order.
+
+    Page order is store order and the pages themselves arrive in store order, so acting page by page
+    deletes in exactly the sequence the flattened listing would have (ADR-0498 §2). The order is
+    taken from the page rather than from the classify's rows for the reason ADR-0455 §3 gives: the
+    planner is free to reorder an anti-join's output, the store is not, and a budget-truncated or
+    fault-truncated root is only reproducible if the prefix it got through is deterministic.
+
+    Only the database's own error class is caught for the classify — a bug in this module should
+    still abort the pass — and ``asyncio.CancelledError`` is not a ``psycopg.Error``, so shutdown
+    still ends the pass through the count-logging path. The classify is the fault ADR-0455 §5 called
+    root-correlated because `local/runs/`'s whole listing went in as one array parameter; a
+    page-wide parameter is what removes that correlation, and the skip-and-count stays because a
+    ``statement_timeout`` or a dropped connection is not made impossible by a narrower statement.
+
+    Returns:
+        Whether this root should keep paging. ``False`` means the classify faulted and was counted.
+    """
+    candidates = [c for c in (_attribute(listing) for listing in page) if c is not None]
+    sweep.listed += len(page)
+    sweep.attributed += len(candidates)
+    try:
+        reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
+    except psycopg.Error as exc:
+        _count_root_fault(sweep.root, tally, "classify", exc)
+        return False
+    for candidate in candidates:
+        if sweep.budget_spent:
+            break
+        if candidate.key not in reclaimable:
+            continue
+        sweep.examined += 1
         try:
             tally.deleted += int(await _delete_if_still_reclaimable(conn, store, candidate, grace))
         except CategorizedError as exc:
@@ -261,62 +393,7 @@ async def _sweep_root(
             _log.warning(
                 "reconciler: upload orphan sweep could not reclaim %s: %s", candidate.key, exc
             )
-
-
-async def _reclaimable_in_listing_order(
-    conn: AsyncConnection,
-    store: UploadOrphanStore,
-    root: str,
-    grace: timedelta,
-    tally: _Tally,
-) -> list[UploadOrphanCandidate] | None:
-    """List one root and classify it, or count the fault and return ``None`` to skip the root.
-
-    These are the two faults that end a root outright, and neither ends the **pass**. The roots'
-    candidate sets are wholly independent, so the rationale for abandoning one — with no listing
-    there is nothing to be partial about, with no classify nothing is known to be safe — says
-    nothing about the sibling. Aborting instead would leave `local/investigations/`, the rootfs
-    upload lane's root, unswept on every pass for as long as the fault lasted: the starvation
-    ADR-0455 §5 skips-and-counts to prevent and §6 makes the budget per root to prevent, arriving by
-    the two paths neither one covers.
-
-    Both faults are also **root-correlated in practice**, which is what would make that starvation
-    permanent rather than transient. Root order is fixed at import with `local/runs/` first, and a
-    scoped ``s3:ListBucket`` deny is the list-side twin of the per-prefix ``s3:DeleteObject`` deny
-    the budget already survives. The classify is the sharper case: `local/runs/` is the larger,
-    faster-growing root, and its whole listing goes in as one array parameter (#1569), so a
-    role-level ``statement_timeout`` fires on *that* root's scan and not on the smaller root's.
-    The root most likely to fail is structurally the one gating the other.
-
-    Only the database's own error class is caught for the classify — a bug in this module should
-    still abort the pass — and ``asyncio.CancelledError`` is not a ``psycopg.Error``, so shutdown
-    still ends the pass through the count-logging path.
-
-    Args:
-        conn: An async connection; the classify runs in its own short transaction.
-        store: The object store to list through.
-        root: The prefix to sweep.
-        grace: How long past its store mtime an object is protected.
-        tally: The pass's counts, incremented on a fault so the pass still raises at the end.
-
-    Returns:
-        The reclaimable candidates in **listing** order, or ``None`` if this root faulted. Listing
-        order rather than the classify query's row order keeps a partial pass reproducible: the
-        planner is free to reorder an anti-join's output, the store is not.
-    """
-    try:
-        listings = await asyncio.to_thread(store.list_prefix_with_mtime, root)
-    except CategorizedError as exc:
-        _count_root_fault(root, tally, "list", exc)
-        return None
-    candidates = [c for c in (_attribute(listing) for listing in listings) if c is not None]
-    _warn_if_wholly_unattributable(root, len(listings), len(candidates))
-    try:
-        reclaimable = set(await reclaimable_upload_keys(conn, candidates, grace))
-    except psycopg.Error as exc:
-        _count_root_fault(root, tally, "classify", exc)
-        return None
-    return [c for c in candidates if c.key in reclaimable]
+    return True
 
 
 def _count_root_fault(root: str, tally: _Tally, step: str, exc: Exception) -> None:
@@ -387,8 +464,8 @@ async def _reread_from_store(
 
     A single-object ``head``, not a LIST scoped to the key. Both are exact — a LIST on a full key
     plus an exact-match filter resolves to that key alone — but only one is a single round trip. A
-    chunked window's parts are ``<base>.partNNNN`` (ADR-0104 §1) and ``list_prefix_with_mtime``
-    paginates to exhaustion, so listing a leaked **base** key enumerated every one of its parts,
+    chunked window's parts are ``<base>.partNNNN`` (ADR-0104 §1) and a prefix listing paginates to
+    exhaustion, so listing a leaked **base** key enumerated every one of its parts,
     1000 per round trip, to retrieve one ``LastModified``. That shape is not a corner case: a
     row-first reap failing partway through a chunked window leaves the base and all of its parts
     rowless together, which is precisely the candidate set this sweep exists to drain (#1575).
@@ -408,13 +485,14 @@ async def reclaimable_upload_keys(
     no ``upload_manifests`` row at all, and its store mtime is older than ``grace`` measured
     against Postgres ``now()``.
 
-    This is deliberately usable for one key as well as for a whole listing: it is the per-key
+    This is deliberately usable for one key as well as for a listing page: it is the per-key
     re-check ADR-0453 §Consequences costed for its second residual (#1557), so wiring it into the
     reaper's ``_sweep_uncommitted_objects`` is a call rather than a rewrite.
 
     Args:
         conn: An async connection. One round trip is issued, whatever ``candidates``' length.
-        candidates: The listed objects, each already attributed to an upload owner.
+        candidates: The listed objects, each already attributed to an upload owner. The sweep passes
+            one listing page (ADR-0498); the length is what bounds the array parameters' width.
         grace: How long past its store mtime an object is protected.
 
     Returns:
@@ -446,6 +524,11 @@ def _warn_if_wholly_unattributable(root: str, listed: int, attributed: int) -> N
     of the bucket it is meant to drain looks exactly like a clean one. The one condition that can
     cause that without raising is a key layout this parser no longer recognizes, and it is
     distinguishable: objects listed, none attributed.
+
+    The counts are the root's totals over every page it got through, not one page's, and they are
+    reported once after the root rather than per page (ADR-0498 §2). A per-page warning would fire
+    for a page boundary that happened to isolate the unattributable keys, which is a listing
+    artifact and not the drift this names.
     """
     if listed and not attributed:
         _log.warning(

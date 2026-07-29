@@ -25,7 +25,7 @@ so the Run fails loudly instead of reporting success behind a dangling ``artifac
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -94,8 +94,9 @@ class _VerifyStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(key for key in self._objects if key.startswith(prefix))
 
-    def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]:
-        return [
+    def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
+        # One page: this fake's subject is the sweep's re-read→delete gap, not its paging.
+        yield [
             ObjectListing(key=key, last_modified=datetime.now(UTC) - age)
             for key, (_etag, age) in sorted(self._objects.items())
             if key.startswith(prefix)

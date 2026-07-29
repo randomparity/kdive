@@ -22,6 +22,7 @@ object-HEAD-gated s3 image).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -87,11 +88,12 @@ class _RecordingUploadStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return list(self._prefixed.get(prefix, []))
 
-    def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]:
+    def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
         # Freshly written, so the ADR-0455 grace protects every object from the orphan sweep and
-        # this test's assertions stay about the reaper and the GC sweeps.
+        # this test's assertions stay about the reaper and the GC sweeps. One page: this fake's
+        # subject is which prefixes get swept, not the paging ADR-0498 added.
         now = datetime.now(UTC)
-        return [
+        yield [
             ObjectListing(key=key, last_modified=now)
             for keys in self._prefixed.values()
             for key in keys
