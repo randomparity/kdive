@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -258,19 +259,22 @@ def test_delete_maps_transport_error_to_infrastructure_failure() -> None:
 
 
 class _MtimeListClient:
-    """A paginating list client that records the ``Prefix`` each paginate call was given."""
+    """A paginating list client recording the ``Prefix`` and ``PageSize`` of each paginate call."""
 
     def __init__(self, pages: list[dict[str, object]]) -> None:
         self._pages = pages
         self.prefixes: list[str] = []
+        self.page_sizes: list[object] = []
 
     def get_paginator(self, op: str) -> object:
         assert op == "list_objects_v2"
-        pages, prefixes = self._pages, self.prefixes
+        pages, prefixes, page_sizes = self._pages, self.prefixes, self.page_sizes
 
         class _Paginator:
             def paginate(self, **kwargs: object):
                 prefixes.append(str(kwargs["Prefix"]))
+                config = cast(dict[str, object], kwargs.get("PaginationConfig", {}))
+                page_sizes.append(config.get("PageSize"))
                 yield from pages
 
         return _Paginator()
@@ -290,6 +294,38 @@ def _mtime_pages() -> list[dict[str, object]]:
         },
         {},  # empty page (no Contents) tolerated
     ]
+
+
+def test_iter_prefix_pages_with_mtime_yields_a_page_at_a_time_in_store_order() -> None:
+    """ADR-0498 §1: the paged primitive hands each ``list_objects_v2`` page over as it arrives.
+
+    The page boundaries are what the upload orphan sweep's memory and parameter-width bound is made
+    of, so they have to survive the call rather than be flattened away — a method that returned
+    ``[[everything]]`` would satisfy an "is it an iterator" check and bound nothing. The empty final
+    page is yielded too: a caller counting pages must not read a prefix's last (or only) reply as no
+    request having been made.
+    """
+    client = _MtimeListClient(_mtime_pages())
+    store = ObjectStore(client, "bucket")
+    pages = [[listing.key for listing in page] for page in store.iter_prefix_pages_with_mtime("p/")]
+    assert pages == [["local/runs/r1/kernel"], ["local/runs/r1/stray"], []]
+    assert client.prefixes == ["p/"]
+    assert client.page_sizes == [1000]  # the bound is this module's, not boto3's default
+
+
+def test_iter_prefix_pages_with_mtime_maps_a_mid_listing_error_from_the_iterator() -> None:
+    """A paged listing's fault surfaces at the page that failed, still as a typed store failure.
+
+    The mapping has to live in the generator body rather than at the call, because with the flat
+    listing the whole enumeration happened inside the call and now it does not: a caller that has
+    already consumed pages must still see ``CategorizedError`` and not a raw botocore exception when
+    the next page fails, which is what lets the sweep count it as a root fault (ADR-0498 §3).
+    """
+    store = ObjectStore(_FailingListClient(), "bucket")
+    pages = store.iter_prefix_pages_with_mtime("local/runs/")
+    with pytest.raises(CategorizedError) as excinfo:
+        next(pages)
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
 
 
 def test_list_prefix_with_mtime_flattens_pages_and_scopes_to_the_prefix() -> None:
