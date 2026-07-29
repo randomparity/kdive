@@ -9,6 +9,7 @@ run as harmless no-ops without polluting ``report.failures``.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, cast
 
 from kdive.reconciler.cleanup.upload_orphans import UploadOrphanStore
@@ -34,8 +35,8 @@ class _NullUploadStore:
     def list_prefix(self, prefix: str) -> list[str]:
         return []
 
-    def list_prefix_with_mtime(self, prefix: str) -> list[Any]:
-        return []
+    def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[Any]]:
+        yield []  # one empty page, as list_objects_v2 replies for a prefix matching nothing
 
     def head(self, key: str) -> Any:
         return None
