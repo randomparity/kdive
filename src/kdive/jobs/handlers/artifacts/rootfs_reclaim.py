@@ -1,17 +1,20 @@
 """Worker handler for the internal ``reclaim_investigation_rootfs`` job (ADR-0442, #1522).
 
 Reclaims an investigation's committed uploaded-rootfs bases: for each due ``artifacts`` row, the
-ADR-0441 §6 liveness gate, then the staged base unlink, the object delete, and the row delete —
-in that order (ADR-0442 §4). The work runs on the worker rather than the reconciler because the
-worker created the staging tree: on a host-process local-libvirt deployment it runs as root while
-the reconciler runs as the invoking user, so a reconciler-side unlink raises ``PermissionError``
-after the object is already gone (#1522). Co-location is structural here — the worker that claims
-a local-libvirt job is the libvirt host, the same assumption ``provision``'s staging already
-makes — so the removed stat-based probe has nothing left to answer.
+ADR-0441 §6 pin gate and then the ADR-0495 in-flight-download gate, then the staged base unlink, the
+object delete, and the row delete — in that order (ADR-0442 §4). The work runs on the worker rather
+than the reconciler because the worker created the staging tree: on a host-process local-libvirt
+deployment it runs as root while the reconciler runs as the invoking user, so a reconciler-side
+unlink raises ``PermissionError`` after the object is already gone (#1522). Co-location is
+structural here — the worker that claims a local-libvirt job is the libvirt host, the same
+assumption ``provision``'s staging already makes — so the removed stat-based probe has nothing left
+to answer.
 
 Each checksum's gate-and-reclaim runs in one transaction under the ``INVESTIGATION`` advisory lock
 that System bind holds transaction-scoped until its row commits, so a bind either is seen as a
-pre-overlay referencer (pinning the base) or waits behind the reclaim.
+pre-overlay referencer (pinning the base) or waits behind the reclaim. The *fetch* is not serialized
+by that lock at all, which is why the second gate exists: it asks the kernel whether a download of
+this base is in flight instead of inferring it from a System state column (ADR-0495).
 """
 
 from __future__ import annotations
@@ -42,7 +45,10 @@ from kdive.providers.shared.runtime_paths import (
     staged_rootfs_marker_path,
     staged_rootfs_path,
 )
-from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
+from kdive.providers.shared.staging_partials import (
+    live_writer_holds_partial,
+    unlink_partial_if_unheld,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -266,8 +272,15 @@ def sweep_investigation_staging_dir(
     fetcher publishes between this pass's own globs and its ``rmdir``: the caller then clears the
     drain marker and nothing revisits the directory, so a single bounded re-pass is what converts
     that from a permanent leak into one extra ``readdir``. It is deliberately bounded at one rather
-    than looped: an unbounded retry is the never-terminating drain ADR-0452 §5 rejected, and #1558
-    removes the race that produces the window at all.
+    than looped: an unbounded retry is the never-terminating drain ADR-0452 §5 rejected.
+
+    ADR-0495 narrows the window rather than removing it, so the re-pass stays. A doomed fetcher that
+    holds an ``flock`` on its partial now defers its checksum in :func:`_reclaim_one_checksum`,
+    which keeps that row and turns this tail back at its ``drained`` test before either ``rmdir``.
+    What is left is a fetcher that had not yet *created* its partial when the reclaim probed, and
+    whose download then completes anyway because the object delete landed behind its reads — the
+    timed-out delete ADR-0442 records as still landing later, or a store that serves a deleted key.
+    Narrower than before and not empty.
     """
     inv_dir = Path(uploads_dir) / str(investigation_id)
     if not drained:
@@ -280,7 +293,11 @@ def sweep_investigation_staging_dir(
         # The *partial* glob deliberately does not. Its candidates are decided by the ``flock``
         # gate, not by ownership, and a surviving row means a fetch of that base can legitimately be
         # in flight; ADR-0442 §7's "a remaining row's in-flight download is never clobbered" is
-        # retained here unchanged. Widening it is #1565's question, not this one's.
+        # retained here unchanged. #1565 was **not** answered by widening it: ADR-0495 puts the
+        # liveness probe in `_reclaim_one_checksum`, per token, where deferring retains the row the
+        # TTL lane re-selects on. Widening it here would buy nothing that probe does not — this tail
+        # unlinks partials, it cannot retain a row — while unlinking a live sibling's partial is
+        # exactly what the row test above is protecting against.
         _collect_unowned_bases(inv_dir, protected_tokens)
         _unlink_completion_markers(inv_dir, protected_tokens)
         return True
@@ -518,8 +535,12 @@ def _unlink_unowned_base(base: Path) -> None:
     and this is skipped. That closes the residue ADR-0452 §6 recorded — an overlay created *after*
     the row was reclaimed, by the doomed fetcher whose partial an earlier pass skipped — which the
     zero-row precondition could not see, because that precondition read rows and the overlay is a
-    file. What remains conditional is the instant between the pin read and the unlink; #1558 removes
-    the publish-after-reclaim shape that produces such a System at all.
+    file. What remains conditional is the instant between the pin read and the unlink. ADR-0495
+    narrows the publish-after-reclaim shape that produces such a System — a fetcher holding its
+    partial's ``flock`` now defers the whole checksum, so its row is never reclaimed under it — down
+    to a fetcher that had not created its partial yet when the reclaim probed and whose download
+    outlived the object delete anyway. #1558's remaining half is the classifier itself, which still
+    cannot tell that a ``torn_down`` System was mid-provision.
 
     It should also rarely fire. :func:`_unlink_staged_base` removes each base as its own row drains,
     so a base surviving to here means one was published *without* a row — the shape the ``flock``
@@ -546,6 +567,73 @@ def _unlink_unowned_base(base: Path) -> None:
     )
 
 
+def _live_writer_holds_a_partial(uploads_dir: str, investigation_id: UUID, token: str) -> bool:
+    """Whether a live writer provably holds one of **this** checksum's staging partials.
+
+    The row-driven reclaim's own liveness question (ADR-0495, #1565/#1558). The ADR-0441 §6 pin gate
+    answers it from the referencing System's state column plus overlay presence, and that classifier
+    is falsified by the two transitions that drop the pin while the download continues:
+    :data:`_ROOTFS_REFERENCERS_SQL` excludes ``torn_down`` outright, ``failed`` is outside
+    :data:`_PRE_OVERLAY_STATE_VALUES`, and a ``provisioning`` System has no overlay file yet. So the
+    same question ADR-0446 and ADR-0452 both ended up asking the *kernel* is asked here too, one
+    step ahead of the first unlink, rather than re-derived from a state column a third time.
+
+    **Only a proven hold defers**, per
+    :func:`~kdive.providers.shared.staging_partials.live_writer_holds_partial`. A held ``flock`` is
+    the one answer that is provably transient; an unopenable partial or a filesystem that cannot
+    lock is permanent until an operator acts, and ADR-0452 §5 already settled that such a file must
+    not pin anything. Deferring on one here would be worse than the race it guards: the deferral
+    keeps the ``artifacts`` row, that row makes :func:`_finish_drained_investigation` compute
+    ``drained=False``, and that retires the drain tail's partial collector — so the orphan pins the
+    row and the row retires the orphan's only collector, permanently and *silently*, since the job
+    still succeeds. On those answers the reclaim proceeds exactly as it did before ADR-0495 and the
+    ``WARNING`` from the probe is the operator's signal; closing that gap needs #1558's option 2.
+
+    The walk is ``os.scandir`` rather than ``Path.glob`` for the same reason, and with the same
+    policy: ``Path.glob`` swallows an ``OSError`` and yields nothing, so an unreadable staging
+    directory would be silently indistinguishable from an empty one — and that is reachable, since
+    unlinking a known name needs write and execute on the directory, **not** read, so at mode
+    ``0o333`` :func:`_unlink_staged_base` behind it would still succeed. ``scandir`` makes the fault
+    visible; the reclaim still proceeds, because a permanently unreadable directory would otherwise
+    wedge *every* checksum of that investigation, this being keyed on the directory rather than on
+    one file. ``ENOENT`` is the achieved post-state for an investigation that never staged anything.
+
+    Scoped to this token's own ``<token>.*.partial`` — the shape the fetch-side sweep globs against
+    its own ``dest`` — not to every partial in the directory. The staging tree is per
+    *investigation* and content-addressed within it, so a sibling System downloading a different
+    base is a routine concurrent state; deferring this checksum on that file would stall it for the
+    length of an
+    unrelated multi-GiB download and re-create ADR-0442 §7's starvation keyed on an unrelated name.
+
+    Read-only: it never unlinks. A candidate it passes over is left for
+    :func:`sweep_investigation_staging_dir`, which is that file's collector and always was.
+    Unlinking on a filesystem that cannot ``flock`` would destroy the unguarded partial of a writer
+    that may well be live, on exactly the hosts where nothing can prove otherwise.
+    """
+    inv_dir = staged_rootfs_path(investigation_id, token, upload_dir=Path(uploads_dir)).parent
+    prefix, suffix = f"{token}.", ".partial"
+    try:
+        with os.scandir(inv_dir) as entries:
+            candidates = [
+                Path(entry.path)
+                for entry in entries
+                if entry.name.startswith(prefix) and entry.name.endswith(suffix)
+            ]
+    except FileNotFoundError:
+        return False
+    except OSError as err:
+        _log.warning(
+            "could not read the rootfs staging directory %s to test for an in-flight download of "
+            "%s (%s); reclaiming its checksum anyway, because deferring on a fault that is "
+            "permanent until an operator acts would strand this investigation's every checksum",
+            inv_dir,
+            token,
+            err.strerror,
+        )
+        return False
+    return any(live_writer_holds_partial(candidate) for candidate in candidates)
+
+
 async def _reclaim_one_checksum(
     conn: AsyncConnection,
     store: ArtifactObjectDeleter,
@@ -555,13 +643,36 @@ async def _reclaim_one_checksum(
     rootfs_dir: str,
     uploads_dir: str,
 ) -> bool | None:
-    """Gate and reclaim one due row under the investigation lock (ADR-0442 §3/§4).
+    """Gate and reclaim one due row under the investigation lock (ADR-0442 §3/§4, ADR-0495).
 
     Returns ``True`` when the checksum drained, ``False`` on a real fault (the caller fails the job
     once every other checksum has been attempted), and ``None`` when there was nothing to do — the
-    row already drained, or the gate pins the base, which is the expected steady state and not an
-    error. Order is staged base -> object -> row, so a fault leaves the re-downloadable copy rather
-    than an unreclaimable local base, and the row (the worklist anchor) outlives both.
+    row already drained, the gate pins the base, or a live writer provably holds one of this token's
+    staging partials. All three are expected steady states, not errors. Order is staged base ->
+    object -> row, so a fault leaves the re-downloadable copy rather than an unreclaimable local
+    base, and the row (the worklist anchor) outlives both.
+
+    **Two gates, in this order, and neither can stand in for the other.** The ADR-0441 §6 pin gate
+    asks whether a System's *overlay* is backed by this base; it reads rows and one ``stat``, and it
+    is the cheaper question, so it runs first. :func:`_live_writer_holds_a_partial` asks whether a
+    *download* of this base is in flight — which the pin gate provably cannot answer, because
+    ``PROVISIONING -> TORN_DOWN`` and ``PROVISIONING -> FAILED`` both drop the pin while the
+    detached, uncancellable ``asyncio.to_thread`` download keeps writing, and nothing serializes the
+    two (the fetch takes only its per-(investigation, checksum) session lock, never the
+    ``INVESTIGATION`` lock this holds).
+
+    Deferring on a held partial keeps **all three** copies: the row is not deleted, so the
+    investigation stays on whichever row-driven worklist selected it and the very next pass retries
+    (ADR-0495 §2) — no marker, no new lane, no ``systems.created_at`` age gate in the way. It is
+    also what stops the object delete from turning a live ranged-GET download into 404s that surface
+    as an ``INFRASTRUCTURE_FAILURE`` "failed to stage" pointing an operator at the object store.
+
+    The residuals are stated in ADR-0495 rather than claimed closed, and there are three. The
+    instant between the probe and the base unlink. A fetch that has resolved its ``artifacts`` row
+    but not yet created its partial — it waits on the fetch session lock in between, so that window
+    is not short. And a partial the probe cannot evaluate at all, where the reclaim proceeds as it
+    did before ADR-0495: deferring there would strand the checksum permanently and silently, per
+    :func:`_live_writer_holds_a_partial`. All three need #1558's option 2, not a longer wait.
     """
     async with (
         conn.transaction(),
@@ -575,6 +686,21 @@ async def _reclaim_one_checksum(
         object_key = str(row[0])
         token = _rootfs_token_from_key(object_key)
         if not await rootfs_base_reclaimable(conn, investigation_id, token, rootfs_dir=rootfs_dir):
+            return None
+        if await asyncio.to_thread(
+            _live_writer_holds_a_partial, uploads_dir, investigation_id, token
+        ):
+            # The observation is logged one frame down, on the file; this line is the *decision*,
+            # and it is the only evidence the reclaim fired at all — the job succeeds either way, so
+            # a silent return is indistinguishable from an already-drained row. Worded for what is
+            # retained, because that is what an operator needs to reconcile against the object
+            # store.
+            _log.warning(
+                "deferring the reclaim of %s: a live writer holds a staging partial for its "
+                "checksum, so its staged base, its object and its artifacts row are all retained "
+                "and the next sweep retries it once that writer exits",
+                object_key,
+            )
             return None
         try:
             await asyncio.to_thread(_unlink_staged_base, uploads_dir, investigation_id, token)
@@ -636,17 +762,34 @@ async def _finish_drained_investigation(
     pinning the marker on those resurrects the never-clearing marker and the re-fail-every-pass loop
     ADR-0442 was written about.
 
+    ADR-0495's row-driven gate is bound by that same rule, and has to be: a checksum it deferred
+    keeps its ``artifacts`` row, which makes ``drained`` false here, which turns this tail back
+    before its partial collector runs. So deferring on a *permanent* cause there would have the
+    orphan pin the row while the row retires the orphan's only collector — and, for a closed
+    investigation, retain this marker forever. :func:`_live_writer_holds_a_partial` therefore defers
+    on a held ``flock`` and on nothing else, which keeps the invariant above true rather than
+    merely intended.
+
     **The close-driven lane is no longer the only one that re-runs.** A TTL job runs against an
     ``open``/``active`` investigation whose marker is already NULL, so retaining is a no-op there,
     and that lane's worklist (``reconciler.cleanup.gc._TTL_ROOTFS_OBJECTS_SQL``) is a pure
     ``artifacts`` query over rows this job just deleted. ADR-0494 adds
     ``sweep_unowned_investigation_rootfs_staging``, whose worklist is the ``systems`` rows that
     reference an uploaded base rather than the ``artifacts`` rows that own one, so a never-closed
-    investigation whose rows have all drained keeps being revisited. What that still does not give
-    the TTL lane is a *retry for a live-held partial* while rows survive — #1565 tracks that. The
-    close marker is deliberately not overloaded onto an open investigation, because it is durable
-    state whose meaning is "this investigation was closed and its rootfs is being reclaimed".
-    """
+    investigation whose rows have all drained keeps being revisited.
+
+    **The rows-still-present half is answered in the row-driven path, not here** (ADR-0495, #1565).
+    A live-held partial for a checksum still under reclaim now defers that checksum inside
+    :func:`_reclaim_one_checksum`, which keeps its ``artifacts`` row — and that row is exactly what
+    ``reconciler.cleanup.gc._TTL_ROOTFS_OBJECTS_SQL`` selects on, so the retry is the existing lane
+    re-selecting the same investigation on its next pass. Nothing was added here: the deferral this
+    tail decides on is still only about the *staging directory*, and the close marker is
+    deliberately not overloaded onto an open investigation, because it is durable state whose
+    meaning is "this investigation was closed and its rootfs is being reclaimed".
+
+    What remains unreachable by every lane is an ``abandoned`` investigation (ADR-0494's
+    Consequences). No writer transitions one to that state today, so it is named rather than
+    guarded."""
     async with (
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),

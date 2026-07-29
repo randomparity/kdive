@@ -2,8 +2,9 @@
 
 The reclaim's filesystem half moved from the reconciler to the worker because a root-owned staging
 tree is not writable by an unprivileged reconciler. These cover the regression that motivated the
-move, the ADR-0441 §6 liveness gate the handler still enforces, the flipped file -> object -> row
-order, and the drain/marker bookkeeping that replaced the sweep's per-pass ``drained`` flag.
+move, the ADR-0441 §6 pin gate and the ADR-0495 in-flight-download gate the handler enforces ahead
+of it, the flipped file -> object -> row order, and the drain/marker bookkeeping that replaced the
+sweep's per-pass ``drained`` flag.
 
 Async-DB tests follow the in-repo pattern: a sync ``def test_(migrated_url)`` with an inner
 ``async def _run()`` driven by ``asyncio.run``.
@@ -22,7 +23,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -41,6 +42,8 @@ from kdive.jobs.handlers.artifacts.rootfs_reclaim import (
 )
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
+from kdive.reconciler.cleanup import gc
+from kdive.reconciler.cleanup.gc import sweep_expired_investigation_rootfs_reclaim
 from tests.reconciler.conftest import connect
 
 _FROZEN = datetime(2026, 7, 24, 0, 0, tzinfo=UTC)
@@ -116,15 +119,32 @@ async def _seed_system(conn: psycopg.AsyncConnection, inv: UUID, state: str, pro
 
 
 async def _seed_rootfs_row(
-    conn: psycopg.AsyncConnection, inv: UUID, key: str | None = None
+    conn: psycopg.AsyncConnection,
+    inv: UUID,
+    key: str | None = None,
+    *,
+    created_age: timedelta | None = None,
 ) -> UUID:
     artifact_id = uuid4()
     await conn.execute(
         "INSERT INTO artifacts (id, owner_kind, owner_id, object_key, etag, sensitivity, "
-        "retention_class) VALUES (%s, 'investigations', %s, %s, 'e', 'redacted', 'rootfs')",
-        (artifact_id, inv, key or _object_key(inv)),
+        "retention_class, created_at) VALUES (%s, 'investigations', %s, %s, 'e', 'redacted', "
+        "'rootfs', now() - %s)",
+        (artifact_id, inv, key or _object_key(inv), created_age or timedelta(0)),
     )
     return artifact_id
+
+
+async def _reclaim_worklist(conn: psycopg.AsyncConnection, inv: UUID) -> list[UUID]:
+    """The ``artifact_ids`` of the one reclaim job the sweeps hold for ``inv``."""
+    cur = await conn.execute(
+        "SELECT payload->'artifact_ids' FROM jobs WHERE kind = %s "
+        "AND payload->>'investigation_id' = %s",
+        (JobKind.RECLAIM_INVESTIGATION_ROOTFS.value, str(inv)),
+    )
+    rows = await cur.fetchall()
+    assert len(rows) == 1, f"expected exactly one reclaim slot for {inv}, got {len(rows)}"
+    return [UUID(raw) for raw in rows[0][0]]
 
 
 def _stage(uploads_dir: Path, inv: UUID) -> Path:
@@ -752,11 +772,11 @@ def test_reclaim_reconverges_when_both_targets_are_already_absent(
 
 
 @contextmanager
-def _held_partial(uploads: Path, inv: UUID) -> Iterator[Path]:
+def _held_partial(uploads: Path, inv: UUID, token: str = _TOKEN) -> Iterator[Path]:
     """A ``<token>.<uuid>.partial`` under an exclusive ``flock``, as a live fetcher holds it."""
     inv_dir = uploads / str(inv)
     inv_dir.mkdir(parents=True, exist_ok=True)
-    partial = inv_dir / f"{_TOKEN}.{uuid4().hex}.partial"
+    partial = inv_dir / f"{token}.{uuid4().hex}.partial"
     partial.write_bytes(b"a detached download is still writing this")
     fd = os.open(partial, os.O_RDONLY)
     try:
@@ -766,14 +786,18 @@ def _held_partial(uploads: Path, inv: UUID) -> Iterator[Path]:
         os.close(fd)
 
 
-def test_a_live_partial_survives_the_torn_down_ordering_and_retains_the_marker(
+def test_a_live_held_partial_defers_its_own_checksum_whole(
     migrated_url: str, tmp_path: Path
 ) -> None:
-    # #1544 end to end, on the exact ordering that falsifies the old derivation. The System that
-    # requested this base is torn_down, so _ROOTFS_REFERENCERS_SQL does not even consider it, the
-    # gate reclaims the last rootfs row, and the drain tail sweeps — while the detached,
-    # uncancellable download is still writing its partial. Before ADR-0452 the partial was unlinked
-    # here and the fetcher died at os.replace.
+    # #1565/#1558 end to end, on the exact ordering that falsifies the pin classifier. The System
+    # that requested this base is torn_down, so _ROOTFS_REFERENCERS_SQL does not even consider it
+    # and the ADR-0441 §6 gate calls the base reclaimable — while the detached, uncancellable
+    # download is still writing its partial. ADR-0452 stopped the drain *sweep* from destroying that
+    # partial, but _reclaim_one_checksum still ran first and unlinked the staged base, deleted the
+    # object and deleted the row out from under the download, which on the ranged-GET path turns the
+    # rest of that download into 404s. ADR-0495 asks the kernel the same question one step earlier,
+    # so the checksum defers whole: base, object and row all survive, and the surviving row is what
+    # keeps the investigation on the row-driven worklist for the next pass.
     inv = uuid4()
 
     async def _run() -> None:
@@ -793,22 +817,336 @@ def test_a_live_partial_survives_the_torn_down_ordering_and_retains_the_marker(
             result = await _run_handler(
                 migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
             )
-            assert result == "1"
-            assert live.exists(), "the reclaim sweep destroyed a live fetcher's partial"
+            assert result == "0"  # deferred, not drained — and the job still succeeded
+            # read_bytes rather than exists(): the gate is read-only, so the file must be intact,
+            # not merely present. exists() alone would also pass for a truncated-and-recreated one.
             assert live.read_bytes() == b"a detached download is still writing this"
+            assert staged.exists(), "the base was unlinked under a live download"
+            assert staged_rootfs_marker_path(staged).exists()
+            assert store.deleted == []  # the object the download is still reading is retained
+            check = await connect(migrated_url)
+            try:
+                assert await _row_exists(check, artifact_id)  # the worklist anchor survives
+                assert await _marker(check, inv) is not None
+            finally:
+                await check.close()
 
-        assert not staged.exists()  # the committed base is still reclaimed
+        # The writer is gone, so the same job drains with no manual repair: the deferral's whole
+        # claim is that it is provably transient (the kernel drops an flock when the holder exits).
+        assert await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == (
+            "1"
+        )
+        assert not staged.exists()
         assert store.deleted == [_object_key(inv)]
-        assert (uploads / str(inv)).exists()  # ENOTEMPTY: the held partial keeps the dir
+        assert not (uploads / str(inv)).exists()  # the now-orphan partial went with the drain
         check = await connect(migrated_url)
         try:
             assert not await _row_exists(check, artifact_id)
-            # Retained deliberately: the marker is the only thing that re-enqueues a reclaim for a
-            # closed investigation, so clearing it here would leave the skipped partial with no
-            # collector if its holder is then killed (ADR-0452 §4).
-            assert await _marker(check, inv) is not None
+            assert await _marker(check, inv) is None
         finally:
             await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_live_partial_of_another_token_does_not_defer_this_checksum(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The probe is scoped to the checksum being reclaimed, not to the directory: a sibling System
+    # downloading a *different* base into the same investigation-scoped staging tree must not stall
+    # this checksum's reclaim for the length of that download. Deferring on any partial in the
+    # directory would re-create the starvation ADR-0442 §7's early return already caused, keyed on
+    # an unrelated file. The drain tail's own flock gate (ADR-0452) still protects the sibling's
+    # partial, which is why the directory survives with the base and row of this token gone.
+    inv = uuid4()
+    other_token = rootfs_object_token(_CHECKSUM_Y)
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+
+        with _held_partial(uploads, inv, other_token) as live:
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+            assert result == "1"  # this checksum drained
+            assert not staged.exists()
+            assert store.deleted == [_object_key(inv)]
+            assert live.exists(), "the sibling's live partial was destroyed"
+            check = await connect(migrated_url)
+            try:
+                assert not await _row_exists(check, artifact_id)
+                assert await _marker(check, inv) is not None  # the held partial defers the drain
+            finally:
+                await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_crash_orphan_partial_of_the_same_token_does_not_defer_the_reclaim(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The probe answers "is a writer live", not "does a partial exist". A killed fetcher's partial
+    # holds no flock, so it is a crash orphan and does not defer: the checksum drains, and the file
+    # is collected by the drain tail's own sweep in the same job (the ADR-0495 gate is read-only and
+    # never unlinks anything). Deferring on its mere presence would leak the base, the object and
+    # the row for as long as that orphan sat there, which is unbounded — the leak #1565 exists to
+    # close, re-created by its own fix.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        orphan = uploads / str(inv) / f"{_TOKEN}.deadbeef.partial"
+        orphan.write_bytes(b"a killed fetcher left this")
+        store = _RecordingStore()
+
+        assert await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == (
+            "1"
+        )
+        assert not orphan.exists()
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        assert not (uploads / str(inv)).exists()
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_unopenable_partial_does_not_strand_the_checksum(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The rule that keeps ADR-0495's gate terminating, and the reason it is not "fail closed on
+    # anything you cannot evaluate". Deferring here keeps the artifacts row; that row makes
+    # _finish_drained_investigation compute drained=False; and that retires the drain tail's partial
+    # collector -- so the orphan would pin the row and the row would retire the orphan's only
+    # collector, permanently and silently, since the job still succeeds. It would also retain
+    # rootfs_cleanup_pending_at forever on a closed investigation, re-firing the close-driven lane
+    # every backoff: the never-clearing marker ADR-0442 was written about, which ADR-0452 section 5
+    # already ruled out for this exact errno. An EACCES partial is permanent until an operator acts,
+    # so the reclaim proceeds as it did before ADR-0495 and the WARNING is the signal.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        unopenable = uploads / str(inv) / f"{_TOKEN}.deadbeef.partial"
+        unopenable.write_bytes(b"present but not openable by this uid")
+        real_open = os.open
+
+        def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if Path(path) == unopenable:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        store = _RecordingStore()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "open", refusing_open)
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+
+        assert result == "1", "an unevaluable partial stranded its checksum"
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        assert unopenable.exists()  # left for an operator, never unlinked unchecked
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            # The termination property, and the assertion whose absence let the wrong policy
+            # through: the marker must clear, or the close-driven lane re-fires here forever.
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_unreadable_staging_dir_does_not_strand_the_checksum(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The same rule at directory scope, where it matters more: this walk is keyed on the directory,
+    # so deferring on a permanently faulting one would strand *every* checksum of the investigation.
+    # The walk is still `os.scandir` rather than `Path.glob` — glob swallows the OSError and yields
+    # nothing, so the fault would be invisible while `_unlink_staged_base` behind it still
+    # succeeded (unlinking a known name needs write+execute on the directory, not read) — but what
+    # scandir buys is the WARNING, not a deferral.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        real_scandir = os.scandir
+
+        def refusing_scandir(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
+            if Path(path) == staged.parent:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_scandir(path, *args, **kwargs)
+
+        store = _RecordingStore()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "scandir", refusing_scandir)
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+
+        assert result == "1", "an unreadable staging directory stranded its checksum"
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_host_that_cannot_flock_still_reclaims_rather_than_deferring_forever(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Third instance of the same rule, on the errno set where a *writer* cannot lock either: the
+    # writer's own `_flocked_partial` degraded and staged unguarded, so no answer is available for
+    # any file on that filesystem, ever. Deferring would refuse to reclaim any uploaded base on such
+    # a host for as long as it stayed mounted. That the gate does not *unlink* on the way there —
+    # which would destroy a possibly-live writer's only copy — is pinned directly on the primitive,
+    # in tests/providers/shared/test_staging_partials.py.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        unguarded = uploads / str(inv) / f"{_TOKEN}.deadbeef.partial"
+        unguarded.write_bytes(b"staged unguarded on a filesystem that cannot lock")
+        store = _RecordingStore()
+
+        def unlockable_flock(fd: int, operation: int) -> None:
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(fcntl, "flock", unlockable_flock)
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+
+        assert result == "1"  # proceeds rather than refusing forever on such a host
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_the_deferred_checksum_is_re_selected_by_the_ttl_lane_on_the_next_pass(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # #1565's acceptance criterion, across the process boundary the issue is actually about. The TTL
+    # lane's worklist (`_TTL_ROOTFS_OBJECTS_SQL`) is a pure `artifacts` query against an
+    # open/active investigation whose `rootfs_cleanup_pending_at` is NULL, so a handler that deleted
+    # the row left nothing for any lane to re-select and the skipped partial waited for a human to
+    # close the investigation — unbounded for a never-closed one. Retaining the row inside
+    # `_reclaim_one_checksum` is the whole retry: the same query selects the same investigation on
+    # the next pass, with no new marker, column or lane.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", closed=False)
+            artifact_id = await _seed_rootfs_row(seed, inv, created_age=timedelta(days=40))
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 1
+            assert await _reclaim_worklist(conn, inv) == [artifact_id]
+            with _held_partial(uploads, inv):
+                assert await _run_handler(
+                    migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+                ) == ("0")
+                # The worker settles the job it just ran; the lane's own backoff is what gates the
+                # re-issue, so it is zeroed rather than waited out.
+                await conn.execute(
+                    "UPDATE jobs SET state = 'succeeded' WHERE payload->>'investigation_id' = %s",
+                    (str(inv),),
+                )
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                    reissued = await sweep_expired_investigation_rootfs_reclaim(
+                        conn, timedelta(days=30)
+                    )
+                assert reissued == 1, "the deferred checksum fell off every worklist"
+                assert await _reclaim_worklist(conn, inv) == [artifact_id]
+
+            # Once the writer exits, that re-issued job drains it and the lane goes quiet.
+            assert await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            ) == ("1")
+            assert not staged.exists()
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(gc, "ROOTFS_RECLAIM_RETRY_BACKOFF", timedelta(0))
+                assert (
+                    await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
+                )
+        finally:
+            await conn.close()
 
     asyncio.run(_run())
 

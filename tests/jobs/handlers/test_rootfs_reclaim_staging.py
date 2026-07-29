@@ -9,6 +9,11 @@ uses: this sweep runs only once no rootfs row remains, but that state is reached
 TORN_DOWN`` falsifies, so "no row remains" is not evidence that no fetcher is still writing. The
 sweep reports whether a **live-held** partial was left behind, which is what decides the drain
 marker.
+
+ADR-0495 (#1565) puts the same kernel-answered question in the row-driven path as well, so a
+reclaim in flight no longer reaches this tail with the row already deleted. That gate is covered in
+``test_rootfs_reclaim.py``, against the handler; this file's contract is unchanged, including
+ADR-0494 decision 2's rule that the partial glob is skipped while any rootfs row survives.
 """
 
 from __future__ import annotations
