@@ -1,22 +1,24 @@
-"""Cover the usage-tracking middleware: outcome classification + usage-row construction."""
+"""Cover the usage-tracking middleware: outcome classification + usage-row construction.
+
+A pure unit module: every test here hand-builds a middleware context and calls the
+middleware directly, so nothing in it needs Postgres. The end-to-end counterparts — the
+project a *real* ``build_app`` dispatch carries reaching the row (#1644) — live in
+``tests/mcp/tools/test_gateway_usage_recording_e2e.py``, where the container tier and the
+authenticated-app helper already are. Keep new container-dependent tests there: parking
+one here traded this module's sub-second runtime for a ~10s one.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, LiteralString, cast
+from typing import Any, cast
 
 import pytest
-from fastmcp.server.auth.providers.jwt import JWTVerifier
-from mcp.server.auth.middleware.auth_context import auth_context_var
-from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.domain.errors import ErrorCategory
-from kdive.mcp.assembly.app import build_app
 from kdive.mcp.middleware import usage as usage_mod
 from kdive.mcp.middleware.shared import ToolOutcome
 from kdive.mcp.middleware.usage import UsageTrackingMiddleware, _call_project
@@ -25,12 +27,6 @@ from kdive.security.authz.rbac import AuthorizationError
 from kdive.security.secrets.redaction import Redactor
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.security.usage import digest_args
-from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair, mint
-from tests.mcp.usage_support import (
-    denial_audit_must_not_fail,
-    recording_must_not_fail,
-    warm_pool,
-)
 
 
 def _context(name: str = "runs.create", arguments: Any = None) -> Any:
@@ -299,118 +295,3 @@ def test_record_swallows_failures_best_effort_and_warns(
     assert args[0] == "usage recording failed for tool %s"
     assert args[1] == "runs.create"  # the tool name is logged
     assert kwargs["exc_info"] is True
-
-
-# --- end to end: the project a real call carried reaches the row (#1644) ---------------
-#
-# Everything above hand-builds a middleware context and calls the middleware directly, which
-# is exactly the shape #1635 found stayed green through a real regression: 26 such tests
-# passed while the denial boundary was broken end to end. The tests below drive `build_app`
-# over a real migrated pool instead, so the argument mapping the resolver reads is the one
-# FastMCP actually hands it for each wrapper shape, not one this module composed.
-
-_PRINCIPAL = "viewer-user"
-_AGENT_SESSION = "sess-viewer"
-_CLIENT_ID = "test-client"
-_PROJECT = "proj-a"
-
-# Every tool that nests its project inside a typed request payload, with the outcome a
-# viewer on `_PROJECT` gets from it. Both outcome classes are here on purpose: the issue's
-# acceptance names `ok` and `denied` alike, and a denial is the case ADR-0148 keeps the row
-# for — "who was denied on project X" is unanswerable while the column is NULL.
-#
-# The two denials are different denial classes, so neither stands in for the other:
-# inventory.list envelopes its own platform-role refusal, while audit.query's project form
-# re-raises `RoleDenied` and reaches the recorder through the boundary #1635 added.
-_NESTED_PROJECT_CALLS = (
-    ("investigations.list", {"request": {"project": _PROJECT}}, "ok"),
-    ("allocations.list", {"request": {"project": _PROJECT}}, "ok"),
-    ("debug.list_sessions", {"request": {"project": _PROJECT}}, "ok"),
-    ("accounting.usage", {"target": {"kind": "project", "project": _PROJECT}}, "ok"),
-    ("inventory.list", {"request": {"project": _PROJECT}}, "denied"),
-    ("audit.query", {"request": {"scope": "project", "project": _PROJECT}}, "denied"),
-)
-
-_PROJECT_ROWS: LiteralString = "SELECT tool, outcome, project FROM tool_invocation ORDER BY ts"
-
-
-@contextlib.asynccontextmanager
-async def _viewer_app(pool: AsyncConnectionPool) -> AsyncIterator[Any]:
-    """A real app with a verified viewer token on ``_PROJECT`` bound to the request context.
-
-    The token is verified by the same ``JWTVerifier`` the app is built with, so the claims
-    the recorder attributes a row to are the ones verification produced.
-    """
-    keypair = make_keypair()
-    verifier = JWTVerifier(public_key=keypair.public_key, issuer=ISSUER, audience=AUDIENCE)
-    app = build_app(pool, verifier=verifier, secret_registry=SecretRegistry())
-    token = await verifier.verify_token(
-        mint(
-            keypair,
-            subject=_PRINCIPAL,
-            agent_session=_AGENT_SESSION,
-            projects=[_PROJECT],
-            roles={_PROJECT: "viewer"},
-            client_id=_CLIENT_ID,
-        )
-    )
-    assert token is not None, "the app's own verifier rejected the minted viewer token"
-    reset = auth_context_var.set(AuthenticatedUser(token))
-    try:
-        yield app
-    finally:
-        auth_context_var.reset(reset)
-
-
-async def _rows(pool: AsyncConnectionPool, query: LiteralString) -> list[tuple[Any, ...]]:
-    async with pool.connection() as conn:
-        cur = await conn.execute(query)
-        return await cur.fetchall()
-
-
-def test_nested_project_is_recorded_for_every_wrapper_payload_tool(migrated_url: str) -> None:
-    """Each tool that nests ``project`` in a payload records it, on ``ok`` and ``denied``.
-
-    Pre-fix every one of these six rows lands with ``project`` NULL, so the whole assertion
-    is red. Reverting only the descent into non-``request`` keys leaves the accounting.usage
-    row red alone, which is what makes the ``target`` wrapper covered rather than incidental.
-    """
-
-    async def _run() -> list[tuple[Any, ...]]:
-        async with warm_pool(migrated_url) as pool, _viewer_app(pool) as app:
-            with recording_must_not_fail(), denial_audit_must_not_fail():
-                for name, arguments, _outcome in _NESTED_PROJECT_CALLS:
-                    await app.call_tool(name, arguments)
-            return await _rows(pool, _PROJECT_ROWS)
-
-    rows = asyncio.run(_run())
-
-    # The outcome column is asserted alongside the project so a call that stopped reaching
-    # its handler — a payload the wrapper rejects, say — cannot pass as a recorded project.
-    expected = [(name, outcome, _PROJECT) for name, _args, outcome in _NESTED_PROJECT_CALLS]
-    assert rows == expected
-
-
-def test_malformed_payload_records_a_null_project_rather_than_raising(
-    migrated_url: str,
-) -> None:
-    """A non-mapping payload still lands a row, with ``project`` NULL.
-
-    The resolver runs inside ADR-0148's best-effort recorder, so a payload it cannot walk
-    has to yield ``None``, never an exception — a raise here would be swallowed and the row
-    lost outright. Driven through the real app because only the app produces the argument
-    mapping a rejected payload leaves behind: the wrapper's own validation fails the call,
-    so the recorder sees the raw ``{"target": "proj-a"}`` on its error path.
-    """
-
-    async def _run() -> list[tuple[Any, ...]]:
-        async with warm_pool(migrated_url) as pool, _viewer_app(pool) as app:
-            with recording_must_not_fail(), contextlib.suppress(Exception):
-                await app.call_tool("accounting.usage", {"target": _PROJECT})
-            return await _rows(pool, _PROJECT_ROWS)
-
-    rows = asyncio.run(_run())
-
-    # One row, not zero: a raising resolver would be swallowed by the recorder and leave
-    # none, so the row's presence is the totality claim and the NULL is the resolver's.
-    assert rows == [("accounting.usage", "error", None)]
