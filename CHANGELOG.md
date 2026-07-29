@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report the deployed build on /readyz and preflight live-stack skew
 - Thread schema-derived help into curated verb flags
 - Bind the CLI wait default to its source constant
+- Name the missing role in an authorization_denied envelope
 
 ### Changed
 
