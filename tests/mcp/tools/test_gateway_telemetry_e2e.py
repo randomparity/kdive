@@ -59,10 +59,12 @@ from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
 from tests.mcp.usage_support import recording_must_not_fail, warm_pool
 
 # A viewer on exactly one project: enough for session.whoami, and denied on any other
-# project — the two outcomes these tests need from one token.
+# project — the two outcomes these tests need from one token. Every claim here that the
+# recorder writes to a column is asserted below, so none of them is decoration.
 _VIEWER_CLAIMS: dict[str, Any] = {
     "sub": "viewer-user",
     "agent_session": "sess-viewer",
+    "azp": "test-client",
     "projects": ["proj-a"],
     "roles": {"proj-a": "viewer"},
 }
@@ -76,8 +78,12 @@ def _authenticated(claims: dict[str, Any]) -> Iterator[None]:
     produces in production, and ``get_access_token`` returns it from an ``isinstance``
     fast path rather than rebuilding it through the ``model_dump`` conversion shim it
     keeps for foreign token types.
+
+    The model's own ``client_id`` field is required but inert here — ``context_from_claims``
+    reads the caller's client from the ``azp`` claim, so that is what ``_VIEWER_CLAIMS``
+    carries and what the recorded row is asserted against.
     """
-    token = AccessToken(token="test-token", client_id="test-client", scopes=[], claims=claims)
+    token = AccessToken(token="test-token", client_id="unused", scopes=[], claims=claims)
     reset = auth_context_var.set(AuthenticatedUser(token))
     try:
         yield
@@ -103,7 +109,14 @@ async def _fetch(pool: AsyncConnectionPool, query: LiteralString) -> list[tuple[
         return await cur.fetchall()
 
 
-_USAGE_ROWS = "SELECT tool, outcome FROM tool_invocation ORDER BY ts"
+# Attribution columns as well as the tool: the recorder resolves the caller through
+# middleware.shared.request_context(), a different symbol from the one the inner tool
+# reads, and it is the one the sibling tests monkeypatch. Selecting only (tool, outcome)
+# would leave a row misattributed to a blank or stale principal indistinguishable from a
+# correct one — which is the whole value of the row (ADR-0148).
+_USAGE_ROWS = (
+    "SELECT tool, outcome, principal, agent_session, client_id FROM tool_invocation ORDER BY ts"
+)
 
 
 def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: str) -> None:
@@ -125,9 +138,9 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     assert envelope["status"] == "ok"
     assert envelope["data"]["principal"] == "viewer-user"
 
-    # One row, keyed to the inner tool. Without the META_TOOLS skip the outer chain also
-    # records "tools.invoke" and this is two rows.
-    assert rows == [("session.whoami", "ok")]
+    # One row, keyed to the inner tool and attributed to the bound token. Without the
+    # META_TOOLS skip the outer chain also records "tools.invoke" and this is two rows.
+    assert rows == [("session.whoami", "ok", "viewer-user", "sess-viewer", "test-client")]
 
 
 def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
@@ -167,6 +180,6 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
     # middleware derives the row's "denied" outcome from it, so the row already pins it.
     assert envelope["object_id"] == "audit.query"
 
-    # One row, keyed to the inner tool. Without the META_TOOLS skip the outer chain also
-    # records ("tools.invoke", "denied") and this is two rows.
-    assert usage_rows == [("audit.query", "denied")]
+    # One row, keyed to the inner tool and attributed to the bound token. Without the
+    # META_TOOLS skip the outer chain also records a "tools.invoke" row and this is two.
+    assert usage_rows == [("audit.query", "denied", "viewer-user", "sess-viewer", "test-client")]
