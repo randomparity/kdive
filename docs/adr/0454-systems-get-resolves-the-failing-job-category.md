@@ -38,6 +38,14 @@ has no such column.
 
 ### 1. Resolve the failing job; do not add a column
 
+*Reversed by [ADR-0492](0492-system-records-its-own-failure-category.md) §1/§2 — `systems` now
+**does** carry `failure_category` (migration 0083), written in the transaction that commits the
+`failed` transition. The cost argument below is not disputed; its premise is: the value is not
+reliably derivable, because when attempts remain the reclaimed job re-enters a terminal System
+and ends `succeeded` with a NULL category (#1562). Everything else in this section — the
+attribution query, its scan cost, the follow-ups — stands, and the lookup remains the fallback
+for the paths that record no category.*
+
 `systems` gains no `failure_category` and no `failing_job_id`, and this change ships **no
 migration**. The failing job is already queryable: `jobs.error_category` exists, the system-scoped
 kinds carry `payload.system_id`, and `payload->>'system_id'` is an established join key
@@ -144,6 +152,11 @@ place owns a structured failure reason. All of it is gated on the ADR-0123 no-le
 
 ### 4. Scope is `systems.get`; the `systems.list` gap is disclosed, not silently left
 
+*Amended by [ADR-0492](0492-system-records-its-own-failure-category.md) — `systems.list` now
+reports the category for any System that recorded one, off the row it already reads and with no
+per-row query. The gap is narrowed, not closed: a System whose category is only on its job still
+lists as `infrastructure_failure`, and `detail` is still get-only.*
+
 `system_envelope` is shared by the get path and the list path, so resolving the failing job inside
 it would put a per-row query on `systems.list`. The job is therefore resolved by `get_system` and
 threaded in as an optional argument, matching the existing get-only convention in the same file for
@@ -212,7 +225,9 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
   `failing_job_id` on `systems` is what would make it one, and that needs the migration §1
   declines. There is no jobs retention sweep, so a row's disappearance is not among the
   residuals.
-- `systems.list` keeps the flattened category (§4).
+- ~~`systems.list` keeps the flattened category (§4).~~ *Amended by
+  [ADR-0492](0492-system-records-its-own-failure-category.md): it keeps the flattened category
+  only for a System that recorded none of its own.*
 - Each flattening to the default category is logged at INFO (a dropped no-leak verdict, a
   NULL-`error_category` row). #1550 survived because the flattening was silent — it was found by a
   human reading a live envelope — so shipping the fix with new silent flattening paths would
@@ -225,8 +240,10 @@ categories differ by design (ADR-0149 answers "can I re-provision?" — always
 
 ## Considered & rejected
 
-- **Denormalise `failure_category` onto `systems`.** A migration and a write on every failure path
-  to cache a derivable value (§1). Revisit only if `systems.list` needs it.
+- ~~**Denormalise `failure_category` onto `systems`.** A migration and a write on every failure
+  path to cache a derivable value (§1). Revisit only if `systems.list` needs it.~~ *Adopted by
+  [ADR-0492](0492-system-records-its-own-failure-category.md) — both revisit triggers fired
+  (#1562, and the `systems.list` gap of §4), and the value proved not to be derivable.*
 - **Take the newest failed job of any kind.** Simpler query, wrong answer: a routine failed
   `check_ssh_reachable` would be reported as the reason the System is `failed` (§2).
 - **Fold the lookup into `system_envelope` so `systems.list` benefits too.** A per-row N+1 on the

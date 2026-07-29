@@ -114,20 +114,30 @@ that cannot be separated from the failure it explains.
 
 Two consequences of that ordering are stated rather than left implicit:
 
-- **The `detail` fallback keys on the *job's* category, not the reported one.** In shape 1 the
-  System reports `configuration_error` while `ABANDONED_JOB_SYSTEM_FAILURE_DETAIL` explains that
-  its job's lease expired before recording a message. Those are complementary facts, not a
-  contradiction, and keying the reason on the reported category instead would have replaced a
-  true statement about the bookkeeping with `NO_JOB_SYSTEM_FAILURE_DETAIL` — a claim that no job
-  recorded a reason, which is a worse answer than the one it displaced.
-- **The no-leak rule (ADR-0454 §2a) applies to the recorded category on the same terms as a
-  job's.** `not_found` and `authorization_denied` are reserved envelope-level meanings for
-  `systems.get`, and that is a property of the *category*, not of where it was written; a
-  provider raising `NOT_FOUND` reaches `_record_system_failure` on the provision path. A recorded
-  no-leak category therefore degrades to the default with the unreportable reason. The converse
-  is not symmetric and is deliberate: a **job's** no-leak category still drops the job whole, but
-  the System's own recorded verdict survives that drop, because it is a different fact from a
-  write this surface trusts.
+- **A recorded category gets its own `detail`, because neither existing string is true beside
+  it.** `NO_JOB_SYSTEM_FAILURE_DETAIL` says no reason was recorded; `ABANDONED_JOB_SYSTEM_FAILURE_
+  DETAIL` says the original reason was not retained. Both are false in an envelope that reports
+  the retained verdict, and the second is exactly what shape 1 produces — a real category beside
+  a `lease_expired` job. `RECORDED_SYSTEM_FAILURE_DETAIL` says the one thing that is true: the
+  category is on the System, and only the redacted *message* — which lives on the job and nowhere
+  else — was lost. The job's own `failure_message` still wins when it has one, so this is a
+  fallback, not a replacement.
+- **The no-leak rule (ADR-0454 §2a) applies to the recorded category, but drops less.**
+  `not_found` and `authorization_denied` are reserved envelope-level meanings for `systems.get`,
+  and that is a property of the *category*, not of where it was written; a provider raising
+  `NOT_FOUND` reaches `_record_system_failure` on the provision path. A recorded no-leak category
+  is therefore not reported — but only the *category* is dropped, and resolution falls through to
+  the job, which may explain itself perfectly well. Discarding a citable job because the System's
+  column happened to hold a no-leak value would withhold a category, a message, and an id for no
+  gain. The converse stays as ADR-0454 set it: a **job's** no-leak category still drops the job
+  whole, and the System's own recorded verdict survives that drop.
+- **`suggested_next_actions` is unchanged.** ADR-0454 leads with `jobs.wait` whenever a job is
+  cited, and on shape 1 that job is a `lease_expired` stub with an empty `failure_context`. That
+  is not new — the same list was emitted for the same job before this change — and the job is
+  still the audit trail and still carries its own truthful verdict about the bookkeeping. The
+  envelope no longer *depends* on the agent following the pointer, because the category and
+  `retryable` are now in hand; re-deriving the action list from what the pointer would yield is a
+  separate change to an ADR-0454 surface and is not made here.
 
 ### 4. `repair_abandoned_jobs` keeps stamping `lease_expired`, and ADR-0128's re-entry stands
 
@@ -188,6 +198,12 @@ architecture, not on effort:
   exposure change: the tool arguments are untouched and only the failure envelope's category
   differs. `System.failure_category` is a new field on the domain record, serialized nowhere the
   envelope does not already control.
+- Category and `detail` can now come from different jobs, where ADR-0454 always took both from
+  one row. It needs a genuine race on the serialized system-lifecycle kinds: job B fails the
+  System (recording category B) while job A's provider call is in flight, so A hits the
+  `IllegalTransition` arm and writes no category but dead-letters newer, winning the attribution.
+  Disclosed as a residual of the same kind ADR-0454 already disclosed — the correlation is an
+  ordering argument over `created_at`, not an invariant the code enforces.
 - The same window still exists for **Runs**: `_compensate_run_failure` writes
   `runs.failure_category` on the worker's post-handler connection alongside `queue.fail`, so a
   worker that dies in the window leaves a Run without its category too. That is a different

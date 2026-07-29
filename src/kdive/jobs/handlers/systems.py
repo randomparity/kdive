@@ -211,16 +211,19 @@ async def _record_system_failure(
 async def _record_failure_category(
     conn: AsyncConnection, system_id: UUID, category: ErrorCategory
 ) -> None:
-    """Stamp ``systems.failure_category``, guarded to the row this transaction just failed.
+    """Stamp ``systems.failure_category`` on the row the caller just drove to ``failed``.
 
-    The ``state = 'failed'`` guard is redundant with the caller's transaction today and is
-    kept anyway: it makes the statement safe to run against a row some other writer has
-    since moved on, so a category can never land on a System that is not failed.
+    Deliberately unguarded on ``state``. The caller's transaction has already run
+    ``update_state``, whose ``SELECT … FOR UPDATE`` holds this row and whose ``UPDATE`` set it
+    to ``failed``; ``FAILED`` has an empty outbound transition set, so no concurrent writer can
+    move it. A ``WHERE state = 'failed'`` predicate could therefore never be false, and if it
+    somehow were it would fail *silently* — zero rows affected, no signal — which is worse than
+    the arrangement it claims to protect.
     """
     async with conn.cursor() as cur:
         await cur.execute(
-            "UPDATE systems SET failure_category = %s WHERE id = %s AND state = %s",
-            (category.value, system_id, SystemState.FAILED.value),
+            "UPDATE systems SET failure_category = %s WHERE id = %s",
+            (category.value, system_id),
         )
 
 
