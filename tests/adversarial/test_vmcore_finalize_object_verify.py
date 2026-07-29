@@ -35,6 +35,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts.storage import HeadResult, ObjectListing, StoredArtifact
+from kdive.db.repositories import RUNS
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -379,6 +380,10 @@ def test_the_idempotent_replay_needs_no_verify(migrated_url: str) -> None:
     existing redacted id. Heading again there would be a round trip that cannot change the outcome,
     and — worse — would make a replay fail on an object whose row already exists, which is the
     orphan sweep's own fence and not this handler's business.
+
+    This arm is the ``precheck_run`` short-circuit, which returns before ``finalize_capture`` is
+    entered at all; :func:`test_finalize_s_own_replay_arm_verifies_nothing_either` covers the
+    in-transaction one, which is the arm a verify placed at the top of the function would break.
     """
 
     async def _run() -> None:
@@ -398,6 +403,47 @@ def test_the_idempotent_replay_needs_no_verify(migrated_url: str) -> None:
                 )
             assert replay == first
             assert store.headed_keys == []
+            assert await _artifact_count(pool, run_id) == 2
+
+    asyncio.run(_run())
+
+
+def test_finalize_s_own_replay_arm_verifies_nothing_either(migrated_url: str) -> None:
+    """``finalize_capture``'s in-transaction replay must not stat the object either.
+
+    Driven directly rather than through ``capture_handler``, because the handler's second call
+    short-circuits in ``precheck_run`` and never enters this function — so the test above cannot
+    reach this arm, and cannot see a verify hoisted to the top of ``finalize_capture`` or added to
+    the ``existing is not None`` branch. Both would raise here, on a Run whose rows are already
+    committed and whose object is genuinely gone: a state the orphan sweep cannot create (a
+    committed ``artifacts`` row is its own fence) and which this handler must replay, not fail.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id, job = await _seeded_capture_job(pool)
+            store = _VerifyStore(_stored_capture(run_id))
+            async with pool.connection() as conn:
+                expected = await vmcore_plane.capture_handler(
+                    conn,
+                    job,
+                    resolver=provider_resolver(retriever=_FakeRetriever(run_id)),
+                    artifact_store=store,
+                )
+            empty = _VerifyStore({})  # nothing at all is in the bucket any more
+            async with pool.connection() as conn:
+                run = await RUNS.get(conn, UUID(run_id))
+                assert run is not None
+                replay = await vmcore_plane.finalize_capture(
+                    conn,
+                    job,
+                    run,
+                    _METHOD,
+                    _capture_output(run_id),
+                    artifact_store=empty,
+                )
+            assert replay == expected
+            assert empty.headed_keys == []
             assert await _artifact_count(pool, run_id) == 2
 
     asyncio.run(_run())
