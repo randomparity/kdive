@@ -116,17 +116,27 @@ def test_curated_float_option_keeps_a_fractional_value(value: str) -> None:
     assert isinstance(args.timeout_s, float)
 
 
-@pytest.mark.parametrize("value", ["1.5", "0.5", "-1"])
+@pytest.mark.parametrize("value", ["1.5", "0.5", "2e3"])
 def test_curated_int_option_refuses_a_non_integer(value: str) -> None:
-    """``--seconds`` is an int; a fractional value is a usage error rather than a silent trunc."""
-    argv = ["images", "extend", "img-1", "--reason", "r", "--seconds", value]
-    if value == "-1":
-        # A negative integer parses; it is a range question the parser cannot answer (decision 3).
-        assert build_parser().parse_args(argv).seconds == -1
-        return
+    """``--seconds`` is an int; a fractional value is a usage error, not a silent truncation."""
     with pytest.raises(SystemExit) as excinfo:
-        build_parser().parse_args(argv)
+        build_parser().parse_args(
+            ["images", "extend", "img-1", "--reason", "r", "--seconds", value]
+        )
     assert excinfo.value.code == 2
+
+
+def test_curated_int_option_accepts_a_negative_value() -> None:
+    """A negative integer parses: a range bound is not something the parser can answer.
+
+    ``GeneratedFlag`` carries no schema ``minimum`` (ADR-0474 decision 3), so the seam types the
+    value and stops there. Pinning this keeps the boundary honest — a future ``minimum`` would
+    have to be a deliberate change here, not an accident.
+    """
+    args = build_parser().parse_args(
+        ["images", "extend", "img-1", "--reason", "r", "--seconds", "-1"]
+    )
+    assert args.seconds == -1
 
 
 def _generated_float_flags() -> list[ParameterSet]:
