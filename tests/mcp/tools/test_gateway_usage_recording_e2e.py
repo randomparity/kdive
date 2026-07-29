@@ -457,6 +457,84 @@ def test_role_denial_reaches_the_live_stack_harness_as_an_envelope(migrated_url:
 
 
 # ============================================================
+# The project column: the project a real call carried reaches the row (#1644)
+# ============================================================
+#
+# `tests/mcp/middleware/test_usage.py` covers `_call_project` itself, but every test there
+# hand-builds a middleware context — the shape #1635 found stays green through a real
+# regression. The tests below drive `build_app` instead, so the argument mapping the
+# resolver reads is the one FastMCP actually hands it for each wrapper shape.
+
+# Every tool that nests its project inside a typed request payload, with the outcome a
+# viewer on `_PROJECT` gets from it. Both outcome classes are here on purpose: the issue's
+# acceptance names `ok` and `denied` alike, and a denial is the case ADR-0148 keeps the row
+# for — "who was denied on project X" is unanswerable while the column is NULL.
+#
+# The two denials are different denial classes, so neither stands in for the other:
+# inventory.list envelopes its own platform-role refusal, while audit.query's project form
+# re-raises `RoleDenied` and reaches the recorder through the boundary #1635 added.
+_NESTED_PROJECT_CALLS = (
+    ("investigations.list", {"request": {"project": _PROJECT}}, "ok"),
+    ("allocations.list", {"request": {"project": _PROJECT}}, "ok"),
+    ("debug.list_sessions", {"request": {"project": _PROJECT}}, "ok"),
+    ("accounting.usage", {"target": {"kind": "project", "project": _PROJECT}}, "ok"),
+    ("inventory.list", {"request": {"project": _PROJECT}}, "denied"),
+    ("audit.query", {"request": {"scope": "project", "project": _PROJECT}}, "denied"),
+)
+
+
+def test_nested_project_is_recorded_for_every_wrapper_payload_tool(migrated_url: str) -> None:
+    """Each tool that nests ``project`` in a payload records it, on ``ok`` and ``denied``.
+
+    Pre-fix every one of these rows lands with ``project`` NULL, so the whole assertion is
+    red. Reverting only the descent into non-``request`` keys leaves the accounting.usage
+    row red alone, which is what makes the ``target`` wrapper covered rather than incidental.
+    """
+
+    async def _run() -> list[tuple[Any, ...]]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                for name, arguments, _outcome in _NESTED_PROJECT_CALLS:
+                    await app.call_tool(name, arguments)
+            return await _fetch(pool, _USAGE_ROWS)
+
+    rows = asyncio.run(_run())
+
+    # The outcome column is asserted alongside the project so a call that stopped reaching
+    # its handler — a payload the wrapper rejects, say — cannot pass as a recorded project.
+    expected = [
+        (name, outcome, _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, _PROJECT)
+        for name, _args, outcome in _NESTED_PROJECT_CALLS
+    ]
+    assert rows == expected
+
+
+def test_malformed_payload_records_a_null_project_rather_than_raising(
+    migrated_url: str,
+) -> None:
+    """A non-mapping payload still lands a row, with ``project`` NULL.
+
+    The resolver runs inside ADR-0148's best-effort recorder, so a payload it cannot walk
+    has to yield ``None``, never an exception — a raise here would be swallowed and the row
+    lost outright. Driven through the real app because only the app produces the argument
+    mapping a rejected payload leaves behind: the wrapper's own validation fails the call,
+    so the recorder sees the raw ``{"target": "proj-a"}`` on its error path.
+    """
+
+    async def _run() -> list[tuple[Any, ...]]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), contextlib.suppress(Exception):
+                await app.call_tool("accounting.usage", {"target": _PROJECT})
+            return await _fetch(pool, _USAGE_ROWS)
+
+    rows = asyncio.run(_run())
+
+    # One row, not zero: a raising resolver would be swallowed by the recorder and leave
+    # none, so the row's presence is the totality claim and the NULL is the resolver's.
+    assert rows == [("accounting.usage", "error", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)]
+
+
+# ============================================================
 # The telemetry plane: spans and RED metrics through the real gateway (#1640)
 # ============================================================
 
