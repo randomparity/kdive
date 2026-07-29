@@ -293,22 +293,28 @@ def test_role_denial_reaches_a_real_client_as_an_envelope(migrated_url: str) -> 
     it, a method only ``ToolResult`` has. A short-circuit returning a bare ``ToolResponse``
     therefore satisfies every assertion above and still reaches the client as an
     ``AttributeError`` dressed up as a ``ToolError``. That is the shape ``kdivectl`` and every
-    MCP client see, and ``is_error=False`` with a mapped ``error_category`` is what turns the
+    MCP client see, and an enveloped result with a mapped ``error_category`` is what turns the
     denial into exit 3 rather than the generic exit 1 (``kdive.cli.errors``).
+
+    **The call returning at all is the transport assertion.** ``Client.call_tool`` defaults to
+    ``raise_on_error=True`` and raises before returning when ``isError`` is set
+    (``fastmcp/client/mixins/tools.py:421``), so a bare ``ToolResponse`` — or any other result
+    the transport cannot serialize — reddens this test by raising out of ``_run``. An explicit
+    ``assert result.is_error is False`` would be unreachable, not redundant, so it is absent
+    rather than merely omitted.
     """
 
-    async def _run() -> tuple[Any, bool]:
+    async def _run() -> Any:
         async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
             with recording_must_not_fail(), denial_audit_must_not_fail():
                 async with Client(app) as client:
                     result = await client.call_tool(
                         "audit.query", {"request": {"scope": "project", "project": _PROJECT}}
                     )
-            return result.structured_content, result.is_error
+            return result.structured_content
 
-    structured, is_error = asyncio.run(_run())
+    structured = asyncio.run(_run())
 
-    assert is_error is False, "a denial is an enveloped result, not a transport error"
     assert isinstance(structured, dict)
     assert structured["error_category"] == "authorization_denied"
     assert structured["data"]["missing_roles"] == ["admin"]
