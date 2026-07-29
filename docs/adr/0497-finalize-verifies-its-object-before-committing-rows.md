@@ -184,14 +184,26 @@ Two further arms are reachable and are disclosed rather than smoothed over:
   whole re-capture, which is a worse amplification than the round trip suggests. Bounding it with a
   HEAD retry is deliberately not done here — it is a second mechanism to get right, and the arm is
   transient and self-healing — but the disclosure is the record for whoever sees it in production.
-- **Two concurrent captures of the same Run whose bytes differ now fail one of the two dispatches.**
-  Both write the same deterministic key, so the later write wins; the handler that finalizes first
-  then heads the key, sees the other's etag, and refuses. Previously both committed, and one of the
-  two `artifacts` rows carried an `etag` that matched no bytes in the bucket — so failing is the more
-  truthful outcome, and `INFRASTRUCTURE_FAILURE` is retryable, so the retry replays into the row the
-  winner committed and nothing is lost. The cost is a spurious job failure and an error metric on a
-  race ADR-0244's dedup guard previously absorbed silently. Byte-identical cores still both succeed,
-  which is what `test_concurrent_same_run_capture_writes_one_core` pins.
+- **Two concurrent captures of the same Run whose bytes differ now fail one — or both — of the two
+  dispatches.** Both write the same two deterministic keys, so the later write to each key wins. When
+  one dispatch wins both keys, the other's finalize heads them, sees the winner's etags, refuses, and
+  its retry replays into the row the winner committed. But each capture writes the raw core and the
+  redacted dmesg as *separate* objects at different times, so the two writes can interleave in
+  opposite orders — `raw` from B, `redacted` from A — and then **neither** dispatch matches on both
+  objects, neither commits, and the retry re-captures from scratch rather than replaying. Previously
+  both committed and one row carried an `etag` matching no bytes in the bucket, so refusing is the
+  more truthful outcome either way, and `INFRASTRUCTURE_FAILURE` is retryable so nothing is lost —
+  but the cost in the interleaved case is a whole extra capture, not a replay. Byte-identical cores
+  still both succeed, which is what `test_concurrent_same_run_capture_writes_one_core` pins.
+- **The verify's HEADs run under the Run advisory lock with botocore's default retry budget.** The
+  store client is built with no explicit `Config`, so each HEAD can spend up to five attempts at a
+  60-second read timeout before raising. Against a store that completed the multi-GiB write and then
+  began blackholing HEADs, the finalize can therefore hold `LockScope.RUN` and one idle-in-transaction
+  pool backend for minutes before rolling back. There is precedent in this tree — `capture_traffic`'s
+  `_store_capture` holds the same lock across a full `put_artifact`, which is strictly heavier than a
+  HEAD — and the condition is a store already too degraded to serve the capture plane, so this ships
+  as a stated bound rather than a bespoke per-call timeout. Tightening it is a follow-on if a
+  deployment ever sees it.
 
 The sweep is untouched. ADR-0455 §3's residual paragraph is amended to record this resolution and to
 name the MinIO measurement, so the next reader does not re-derive the rejected option. A same-key
