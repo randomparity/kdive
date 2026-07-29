@@ -101,6 +101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give the wait timeout default and cap one home
 - Remove compact.py's unreachable bare-ToolResponse branch
 - Delete UsageTrackingMiddleware's dead denial arm
+- Stat the orphan sweep's re-read key instead of listing it
 
 ### Documentation
 
@@ -210,6 +211,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scope _call_project's totality claim to delivered args
 - Record report artifact byte-reproducibility as a non-goal
 - Record the jobs payload system_id index shape
+- Record ADR-0496 for the head-backed orphan-sweep re-read
+- Record that the head-backed re-read needs no new S3 grant
 
 ### Fixed
 
