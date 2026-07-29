@@ -215,6 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0496 for the head-backed orphan-sweep re-read
 - Record that the head-backed re-read needs no new S3 grant
 - Record the token-keyed staging drain (ADR-0494)
+- Record ADR-0497 for finalize-side object verification
+- Name local-libvirt's put_stream as the reachable racing write
+- Disclose the both-dispatches-fail arm and the HEAD retry budget
 
 ### Fixed
 
@@ -367,6 +370,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give a recorded failure category its own reason string
 - Key the staging drain on each file's own token
 - Decide the drain from the walk, not from the token set
+- Refuse to register a captured object the store no longer holds
 
 ### Build
 
