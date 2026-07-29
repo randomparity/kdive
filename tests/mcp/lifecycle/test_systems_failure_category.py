@@ -32,6 +32,7 @@ from kdive.mcp.tools.lifecycle.systems.view import (
     FAILED_SYSTEM_NEXT_ACTIONS,
     FAILED_SYSTEM_UNCITED_NEXT_ACTIONS,
     NO_JOB_SYSTEM_FAILURE_DETAIL,
+    RECORDED_SYSTEM_FAILURE_DETAIL,
     UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
     SystemsListRequest,
     get_system,
@@ -183,9 +184,12 @@ def test_recorded_category_outranks_a_lease_expired_job() -> None:
 
     assert resp.error_category == "configuration_error"
     assert resp.retryable is False
-    # The reason still describes the *job*: it explains why no message survived, which is a
-    # complementary fact rather than a contradiction of the category the System kept.
-    assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+    # The reason must not be either job-shaped string: this envelope *is* reporting a retained
+    # verdict, so "the original failure reason was not retained" and "no job recorded a reason"
+    # are both false beside it. Only the redacted message, which lives on the job, was lost.
+    assert resp.detail == RECORDED_SYSTEM_FAILURE_DETAIL
+    assert resp.detail != ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.detail != NO_JOB_SYSTEM_FAILURE_DETAIL
     assert resp.data["failing_job_id"] == str(job.id)
 
 
@@ -201,21 +205,37 @@ def test_recorded_category_answers_when_the_retry_ended_succeeded() -> None:
 
     assert resp.error_category == "configuration_error"
     assert resp.retryable is False
-    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.detail == RECORDED_SYSTEM_FAILURE_DETAIL
     assert "failing_job_id" not in resp.data
 
 
-def test_recorded_no_leak_category_is_dropped_like_a_jobs_would_be() -> None:
-    # ADR-0492 §3: the no-leak rule is a property of the category, not of where it was written.
-    # A provider raising NOT_FOUND reaches `_record_system_failure` on the provision path.
+def test_recorded_no_leak_category_falls_through_to_the_job() -> None:
+    # ADR-0492 §3: the no-leak rule is a property of the category, not of where it was written,
+    # so a recorded `not_found` is not reported. But *only* the category is dropped — the job
+    # still explains itself, and discarding its category, message, and id would buy nothing.
+    job = _failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": "volume not staged"})
+
     resp = system_envelope(
         _system(failure_category=ErrorCategory.NOT_FOUND),
-        failing_job=_failed_job(ErrorCategory.CONFIGURATION_ERROR, {"failure_message": "m"}),
+        failing_job=job,
+        failure_attributed=True,
+    )
+
+    assert resp.error_category == "configuration_error"
+    assert resp.detail == "volume not staged"
+    assert resp.data["failing_job_id"] == str(job.id)
+
+
+def test_recorded_no_leak_category_with_no_job_takes_the_default() -> None:
+    # Nothing to fall through to: the category is dropped and the default is all that is left.
+    resp = system_envelope(
+        _system(failure_category=ErrorCategory.AUTHORIZATION_DENIED),
+        failing_job=None,
         failure_attributed=True,
     )
 
     assert resp.error_category == "infrastructure_failure"
-    assert resp.detail == UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL
+    assert resp.detail == NO_JOB_SYSTEM_FAILURE_DETAIL
     assert "failing_job_id" not in resp.data
 
 

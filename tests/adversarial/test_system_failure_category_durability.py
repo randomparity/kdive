@@ -40,7 +40,12 @@ from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs import queue
 from kdive.jobs.handlers import systems as systems_handlers
 from kdive.jobs.payloads import SystemPayload
-from kdive.mcp.tools.lifecycle.systems.view import get_system
+from kdive.mcp.tools.lifecycle.systems.view import (
+    ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
+    NO_JOB_SYSTEM_FAILURE_DETAIL,
+    RECORDED_SYSTEM_FAILURE_DETAIL,
+    get_system,
+)
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.adversarial.conftest import seed_allocation, seed_resource
 from tests.mcp.systems_support import ctx as _ctx
@@ -195,9 +200,8 @@ def test_abandoned_job_does_not_erase_the_systems_failure_category(migrated_url:
 
     The job row truthfully records that *its* lease expired — that is not the defect and is
     asserted here so the fix is seen not to paper over it. The defect is that `systems.get`
-    used to read the System's verdict off that row, reporting a retryable
-    `infrastructure_failure`/`lease_expired` for a System failed by a non-retryable
-    configuration error.
+    used to read the System's verdict off that row, reporting `lease_expired` — a statement
+    about the bookkeeping — as the reason a System failed on a configuration error.
     """
 
     async def _run() -> None:
@@ -223,7 +227,13 @@ def test_abandoned_job_does_not_erase_the_systems_failure_category(migrated_url:
             )
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            # `retryable` alone cannot discriminate here: `lease_expired` is non-retryable too,
+            # so the pre-fix envelope also said False. The category is the assertion that bites.
+            assert resp.error_category != ErrorCategory.LEASE_EXPIRED.value
             assert resp.retryable is False
+            # The reason must not claim the verdict was lost in the envelope that reports it.
+            assert resp.detail == RECORDED_SYSTEM_FAILURE_DETAIL
+            assert resp.detail != ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
 
     asyncio.run(_run())
 
@@ -275,7 +285,10 @@ def test_reclaimed_job_that_re_enters_a_failed_system_keeps_the_real_category(
             )
             assert resp.status == "error"
             assert resp.error_category == ErrorCategory.CONFIGURATION_ERROR.value
+            assert resp.error_category != ErrorCategory.INFRASTRUCTURE_FAILURE.value
             assert resp.retryable is False
+            assert resp.detail == RECORDED_SYSTEM_FAILURE_DETAIL
+            assert resp.detail != NO_JOB_SYSTEM_FAILURE_DETAIL
 
     asyncio.run(_run())
 

@@ -74,6 +74,20 @@ ABANDONED_JOB_SYSTEM_FAILURE_DETAIL = (
 which reads as a verdict on the System rather than on the bookkeeping. Resource-free.
 """
 
+RECORDED_SYSTEM_FAILURE_DETAIL = (
+    "System failed with the category shown, recorded on the System itself; no job retained a "
+    "failure message for it, so there is no further reason to read"
+)
+"""``detail`` for a ``failed`` System reporting its **own** recorded category (ADR-0492 §3).
+
+Neither job-shaped string is usable here. :data:`NO_JOB_SYSTEM_FAILURE_DETAIL` says no reason was
+recorded and :data:`ABANDONED_JOB_SYSTEM_FAILURE_DETAIL` says the original reason was not
+retained — both are false in the same envelope that reports the retained verdict, and the second
+is exactly the shape #1562's headline case produces (a real category beside a `lease_expired`
+job). What was actually lost is the redacted *message*, which lives only on the job, so that is
+all this claims. Names no resource.
+"""
+
 _SYSTEM_FAILURE_DETAIL: dict[ErrorCategory, str] = {
     ErrorCategory.LEASE_EXPIRED: ABANDONED_JOB_SYSTEM_FAILURE_DETAIL,
 }
@@ -276,18 +290,17 @@ def _resolve_failure_verdict(
     NULL-category row from a dropped no-leak verdict. Sibling degradations already log
     (``ops/queue.py``, ADR-0450). The no-job case needs no line — it is the expected shape.
     """
-    job_category = failing_job.error_category if failing_job else None
-    if _is_no_leak(system.failure_category):
-        # The System's own verdict is a reserved envelope-level meaning here, exactly as a
-        # job's would be, so it is dropped on the same rule rather than because of its source.
+    recorded = system.failure_category
+    if _is_no_leak(recorded):
+        # The System's own verdict is a reserved envelope-level meaning here, exactly as a job's
+        # would be — the rule is a property of the category, not of where it was written. Only
+        # the category is dropped: unlike a no-leak *job*, there is nothing else to withhold,
+        # and discarding a citable job that explains itself perfectly well would buy nothing.
         _log.info(
-            "system %s: recorded failure category is no-leak; reporting the default", system.id
+            "system %s: recorded failure category is no-leak; falling back to the job", system.id
         )
-        return (
-            ErrorCategory.INFRASTRUCTURE_FAILURE,
-            None,
-            UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
-        )
+        recorded = None
+    job_category = failing_job.error_category if failing_job else None
     if _is_no_leak(job_category):
         # A no-leak category is a statement the System envelope may not repeat (see above), so
         # the whole job is dropped rather than half-quoted. The System's own recorded verdict
@@ -297,26 +310,27 @@ def _resolve_failure_verdict(
             system.id,
             failing_job.id if failing_job else None,
             job_category.value if job_category else None,
-            system.failure_category.value if system.failure_category else "the default",
+            recorded.value if recorded else "the default",
         )
         return (
-            system.failure_category or ErrorCategory.INFRASTRUCTURE_FAILURE,
+            recorded or ErrorCategory.INFRASTRUCTURE_FAILURE,
             None,
             UNREPORTABLE_JOB_SYSTEM_FAILURE_DETAIL,
         )
-    recorded = system.failure_category or job_category
-    if recorded is None and failing_job is not None:
+    if recorded is None and job_category is None and failing_job is not None:
         _log.info(
             "system %s: failing job %s has no error_category; degraded to infrastructure_failure",
             system.id,
             failing_job.id,
         )
-    category = recorded or ErrorCategory.INFRASTRUCTURE_FAILURE
-    # The fallback reason describes the **job**, not the System's verdict: a lease-expired job
-    # explains why no message survived, which is complementary to the category the System kept.
-    reason_key = job_category or category
-    reason = _SYSTEM_FAILURE_DETAIL.get(reason_key, NO_JOB_SYSTEM_FAILURE_DETAIL)
-    return category, failing_job, reason
+    category = recorded or job_category or ErrorCategory.INFRASTRUCTURE_FAILURE
+    if recorded is not None:
+        # The category came off the System's own row, so the reason must not repeat any of the
+        # job-shaped strings: `ABANDONED_JOB_SYSTEM_FAILURE_DETAIL` says the original reason was
+        # not retained and `NO_JOB_SYSTEM_FAILURE_DETAIL` says none was recorded — both false in
+        # the same envelope that reports the retained verdict. Only the *message* was lost.
+        return category, failing_job, RECORDED_SYSTEM_FAILURE_DETAIL
+    return category, failing_job, _SYSTEM_FAILURE_DETAIL.get(category, NO_JOB_SYSTEM_FAILURE_DETAIL)
 
 
 def _is_no_leak(category: ErrorCategory | None) -> bool:
