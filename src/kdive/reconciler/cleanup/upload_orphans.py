@@ -272,10 +272,9 @@ async def _reclaimable_in_listing_order(
     permanent rather than transient. Root order is fixed at import with `local/runs/` first, and a
     scoped ``s3:ListBucket`` deny is the list-side twin of the per-prefix ``s3:DeleteObject`` deny
     the budget already survives. The classify is the sharper case: `local/runs/` is the larger,
-    faster-growing root, its ``artifacts`` anti-join has no usable index (#1570) and its whole
-    listing goes in as one array parameter (#1569), so a role-level ``statement_timeout`` fires on
-    *that* root's scan and not on the smaller root's. The root most likely to fail is structurally
-    the one gating the other.
+    faster-growing root, and its whole listing goes in as one array parameter (#1569), so a
+    role-level ``statement_timeout`` fires on *that* root's scan and not on the smaller root's.
+    The root most likely to fail is structurally the one gating the other.
 
     Only the database's own error class is caught for the classify — a bug in this module should
     still abort the pass — and ``asyncio.CancelledError`` is not a ``psycopg.Error``, so shutdown
