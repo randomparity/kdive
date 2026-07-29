@@ -306,15 +306,23 @@ def test_viewer_denied_operator_op_over_the_wire() -> None:
     async def _run() -> ToolResponse:
         viewer = LiveStackClient.over_http(base_url, _token(issuer, role="viewer"))
         async with viewer:
+            # The sizing triple must be COMPLETE. `allocations.request` validates its sizing
+            # source before any `require_role`, so omitting `disk_gb` returns a
+            # `configuration_error` envelope ("supplied neither a shape nor a full
+            # {vcpus, memory_gb, disk_gb} triple") and the call never reaches the RBAC
+            # boundary this test exists to exercise.
             return await scalar(
                 viewer,
                 "allocations.request",
                 project=_PROJECT,
-                **{"vcpus": 1, "memory_gb": 1, "resource": {"mode": "kind"}},
+                **{"vcpus": 1, "memory_gb": 1, "disk_gb": 10, "resource": {"mode": "kind"}},
             )
 
     denied = asyncio.run(_run())
     assert denied.status == "error", "viewer was not denied the operator op"
+    # Pins the CATEGORY, not merely that something failed: an incomplete request fails with
+    # `configuration_error` without ever reaching `require_role`, which is how this test
+    # silently passed for the wrong reason under its former `pytest.raises` assertion.
     assert denied.error_category == "authorization_denied", "wrong denial category"
     # `allocations.request` builds no denial envelope of its own, so `contributor` can only have
     # come from the RoleDenied the dispatch boundary unwrapped (ADR-0486, ADR-0490).
