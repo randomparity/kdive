@@ -11,6 +11,12 @@
   `DenialAuditMiddleware`'s `REENTRANT_TOOLS` skip as *ordering-defensive and unreachable today*
   was written against the pre-fix chain. See Consequences for what survives that change and what
   does not.
+- **Amends:** [ADR-0045](0045-spine-driver-capability-grant-phase-naming.md) §2 and
+  [ADR-0046](0046-spine-report-phase-accounting-assertions-artifact.md) §3, which codify the
+  live-stack driver's **raised**-RBAC path — "a `require_role` denial **raises** (no authz
+  `ErrorCategory`), which fastmcp surfaces as a tool error", and the report negative's contrast
+  with "the raised-`LiveStackToolError` path the `viewer` operator-op negative" takes. That
+  premise is exactly what this ADR falsifies. See Consequences.
 - **Activates:** [ADR-0490](0490-denial-names-the-missing-role.md), whose Consequences state that
   its coverage of the ~40 non-locally-catching `require_role` sites is gated on this issue.
 - **Takes no position on:** [ADR-0471](0471-denial-envelope-terminal-affordance.md), which
@@ -200,7 +206,27 @@ Because that tier cannot gate this change, its behaviour is instead made predict
 normal CI run: `test_role_denial_reaches_the_live_stack_harness_as_an_envelope` drives the real
 `LiveStackClient` over a real `Client` against a real denial. It joins the two halves that would
 otherwise never meet — that a denial produces `is_error=False`, and that `is_error=False` takes
-the envelope-parsing branch (covered only over a fake client). Any out-of-repo consumer with the
+the envelope-parsing branch (covered only over a fake client).
+
+**That harness change falsifies a premise ADR-0045 §2 and ADR-0046 §3 state as fact**, which is
+why they are amended above rather than merely cited. ADR-0045 §2 introduced `LiveStackToolError`
+on the stated grounds that a `require_role` denial *raises* and so cannot be asserted as an
+envelope; ADR-0046 §3 then justified the report negative's envelope assertion **by contrast**
+with that raised path, and listed "assert the denial as a raised `LiveStackToolError`" among its
+rejected alternatives on the strength of that contrast. After this ADR the contrast is gone:
+every RBAC negative on the driver asserts an envelope, and `LiveStackToolError` covers only a
+genuine server fault carrying no typed category. Neither ADR's *decision* is reversed — the typed
+error still exists and still wraps the raising shape, and ADR-0046's rejection stands and in fact
+widens from wrong-for-this-tool to wrong-for-every-tool — but the example each used to motivate
+it is no longer an instance of it. Both files therefore carry an in-place `Amended by` note at
+the falsified passage, following ADR-0082 (amended by ADR-0489) and ADR-0268 §6 (amended by
+ADR-0485): a reader who lands on a 440-ADR-old file directly must not be misled, and a note the
+amending ADR alone carries is only discoverable from the wrong end.
+
+A sweep of all non-test `src/` and `scripts/` found no third caller of this pattern, and a
+sweep of `tests/` found no affected `is_error` branch outside the live-stack family: the
+remaining ones are input-schema rejections (ADR-0147), binding failures on an app built without
+this middleware, or fixtures that construct the flag directly. Any out-of-repo consumer with the
 same pattern has the same gap; it is ADR-0089's returned-envelope shape and not new, but a denial
 joining that set is what makes it bite.
 

@@ -10,6 +10,10 @@
 - **Depends on:** the merged `accounting.report` tool (#97, M1.1 P2) and the merged spine
   driver (#100, sub-issue D). This ADR adds the **`report` phase** appended to that spine.
 - **Spec:** [`../superpowers/specs/2026-06-05-accounting-assertions-report-artifact-design.md`](../archive/superpowers/specs/2026-06-05-accounting-assertions-report-artifact-design.md)
+- **§3 amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635):**
+  this phase's envelope assertion is unchanged and now universal. The *contrast* it was argued
+  by — the `viewer` operator-op negative's raised `LiveStackToolError` — is gone, because a
+  `require_role` denial is now an envelope too ([ADR-0045](0045-spine-driver-capability-grant-phase-naming.md) §2).
 
 ## Context
 
@@ -144,6 +148,18 @@ envelope), **not** the raised-`LiveStackToolError` path the `viewer` operator-op
 uses. A project-only token (member of `_PROJECT`, no `platform_roles`) drives the all-projects
 form and the phase asserts `status == "error"` and `error_category == "authorization_denied"`.
 
+> **Amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635).** What
+> this paragraph decides is unchanged and now holds more broadly: `accounting.report` still
+> catches its own `AuthorizationError` and returns the envelope, and the phase still asserts the
+> envelope shape. What is falsified is the **contrast** the argument leans on. "**not** the
+> raised-`LiveStackToolError` path the `viewer` operator-op negative uses" described a real
+> difference at the time; since ADR-0486 the dispatch boundary unwraps `ToolError.__cause__` and
+> answers a `require_role` denial with the same `authorization_denied` envelope, so the `viewer`
+> negative asserts an envelope too ([ADR-0045](0045-spine-driver-capability-grant-phase-naming.md)
+> §2). The distinction between a tool that catches its denial locally and one that lets it
+> propagate is no longer visible on the wire — which is the uniformity
+> [ADR-0098](0098-membership-denial-envelope.md) decision 2 always specified.
+
 ## Consequences
 
 - The spine gains its final ADR-0042 §4 phase; the M1.2 exit's report criterion (spec §7)
@@ -180,6 +196,11 @@ form and the phase asserts `status == "error"` and `error_category == "authoriza
   negative does. Rejected: it would not match the tool — the all-projects form *returns* an
   `authorization_denied` envelope (it catches the `AuthorizationError`); asserting a raise
   would fail against the real tool. Verified against the tool's code, not assumed.
+  *Amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635): the
+  rejection stands and its scope widens. "What the `viewer` operator-op negative does" is no
+  longer true — that negative asserts an envelope now — so this alternative is not merely wrong
+  for this tool but wrong for every tool: no denial reaches a client as a raise on any dispatch
+  path.*
 - **Hard-code the artifact path / default it inside the repo.** Rejected: a repo-local default
   is walked by whole-tree tooling and risks an accidental commit of a spend report. An
   env-overridable dir with an **out-of-tree** default avoids both and still lets an operator or

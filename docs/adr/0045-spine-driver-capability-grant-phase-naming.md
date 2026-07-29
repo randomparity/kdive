@@ -8,6 +8,11 @@
   [ADR-0020](0020-rbac-audit-gate-implementation.md)).
 - **Spec:** [`../superpowers/specs/2026-06-04-spine-driver-design.md`](../archive/superpowers/specs/2026-06-04-spine-driver-design.md)
   (sub-issue D / [#100](https://github.com/randomparity/kdive/issues/100)).
+- **§2 amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635):**
+  the "two wire mechanisms" below collapses to one. A `require_role` denial no longer reaches a
+  client as a raise; the dispatch boundary unwraps it and returns the `authorization_denied`
+  envelope, so every RBAC negative asserts the envelope. `LiveStackToolError` is unchanged and
+  still covers a genuine tool error.
 
 ## Context
 
@@ -75,6 +80,23 @@ error (`CallToolResult.is_error`) — the harness's `LiveStackClient.call_tool` 
 additively to raise a typed `LiveStackToolError` on that surface, leaving envelope parsing
 intact; a `force_crash` gate denial **returns** a `ToolResponse.failure(..., AUTHORIZATION_DENIED)`
 envelope (it audits first), asserted on `error_category`.
+
+> **Amended by [ADR-0486](0486-denial-boundary-unwraps-the-toolerror-wrapper.md) (#1635).** The
+> premise above — that a `require_role` denial *raises*, and that fastmcp surfaces it as
+> `CallToolResult.is_error` — was true only because `DenialAuditMiddleware`'s `except` arms were
+> dead: FastMCP builds the middleware chain outside the branch that runs the tool and wraps its
+> exception, so the denial escaped as an opaque `ToolError`. The boundary now unwraps
+> `ToolError.__cause__` and returns `ToolResponse.denied(...)`, so a `require_role` denial is an
+> `authorization_denied` envelope like the `force_crash` gate denial. **The two mechanisms this
+> paragraph distinguishes are now one**, and the driver's `viewer` operator-op negative
+> (`test_viewer_denied_operator_op_over_the_wire`) asserts the envelope rather than
+> `pytest.raises(LiveStackToolError)`.
+>
+> The *decision* stands: `LiveStackClient.call_tool` still raises the typed
+> `LiveStackToolError` on a tool-error result, and envelope parsing is still left intact. Only
+> its motivating example changes — an authorization denial is no longer an instance of the
+> raising shape, which is now reached by a genuine tool fault carrying no typed category
+> (`tests/integration/live_stack/test_harness_tool_error.py`).
 
 ## Consequences
 
