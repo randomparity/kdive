@@ -10,8 +10,9 @@ to the #97 acceptance bullets plus the ADR-0467 branch-authorization matrix:
   SoD denials (project viewer/contributor/admin token; platform_operator; platform_admin
   passes) — denial audited iff the caller holds ≥1 platform role.
 * granted-set: default to ctx.projects (role-less membership dropped), named non-member
-  rejected, zero-project empty rollup, audit-iff-shape (>1 project OR group_by=principal),
-  never a per-project audit_log row.
+  denied with an envelope and named role-less membership re-raised as ``RoleDenied``
+  (ADR-0493), zero-project empty rollup, audit-iff-shape (>1 project OR
+  group_by=principal), never a per-project audit_log row.
 * group_by=principal over a window, in both scope forms.
 """
 
@@ -34,6 +35,7 @@ from pydantic import TypeAdapter
 from kdive.db.repositories import ALLOCATIONS, RESOURCES
 from kdive.domain.capacity.state import AllocationState, ResourceStatus
 from kdive.domain.catalog.resources import Resource, ResourceKind
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.responses import ToolResponse
@@ -43,7 +45,7 @@ from kdive.mcp.tools.accounting.reports import (
     AccountingReportRequest,
     report,
 )
-from kdive.security.authz.rbac import AuthorizationError, PlatformRole, Role
+from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 from tests.mcp.json_data import data_str
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -480,32 +482,48 @@ def test_granted_set_all_roleless_memberships_empty_rollup(migrated_url: str) ->
     asyncio.run(_run())
 
 
-def test_granted_set_named_non_member_rejected(migrated_url: str) -> None:
+def test_granted_set_named_non_member_denied_with_an_envelope(migrated_url: str) -> None:
+    """A named non-member project is denied in-band, not by raising (#1661, ADR-0493).
+
+    ``require_role``'s non-member site raises the **base** ``AuthorizationError``, which
+    ``DenialAuditMiddleware`` does not own, so letting it escape reached the client as a raw
+    ``ToolError`` and metered as ``error``. The handler envelopes it instead. No role is named:
+    ``viewer`` here would confirm ``proj-z`` exists (ADR-0123).
+    """
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             ctx = _project_ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a",))
-            try:
-                await report_granted_set(pool, ctx, projects=["proj-a", "proj-z"])
-                raise AssertionError("expected AuthorizationError for a named non-member")
-            except AuthorizationError:
-                pass
+            resp = await report_granted_set(pool, ctx, projects=["proj-a", "proj-z"])
+            assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
+            assert resp.object_id == "report"
+            assert "missing_roles" not in resp.data
+            # Denied before any rollup ran, so the granted half of the named set leaked nothing.
+            assert _rows(resp) == []
             assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())
 
 
-def test_granted_set_named_roleless_project_rejected(migrated_url: str) -> None:
+def test_granted_set_named_roleless_project_keeps_raising_role_denied(migrated_url: str) -> None:
+    """A named role-less *membership* still propagates, so the boundary can audit it.
+
+    The counterpart to the test above and the reason ADR-0493's catch is two arms rather than
+    one: ``RoleDenied`` is re-raised so ``DenialAuditMiddleware`` writes ADR-0062 §5's
+    ``audit_log`` row and names the role. Widening the handler's catch to the base class alone
+    would swallow both this raise and that row.
+    """
+
     async def _run() -> None:
         async with _pool(migrated_url) as pool:
             await _seed_two_projects(pool)
             # proj-c is a bare membership (no role): naming it explicitly must raise.
             ctx = _project_ctx(roles={"proj-a": Role.VIEWER}, projects=("proj-a", "proj-c"))
-            try:
+            with pytest.raises(RoleDenied) as raised:
                 await report_granted_set(pool, ctx, projects=["proj-c"])
-                raise AssertionError("expected AuthorizationError for a named role-less project")
-            except AuthorizationError:
-                pass
+            assert raised.value.project == "proj-c"
+            assert raised.value.required is Role.VIEWER
 
     asyncio.run(_run())
 

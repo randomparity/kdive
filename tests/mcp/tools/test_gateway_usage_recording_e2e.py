@@ -108,6 +108,12 @@ _AGENT_SESSION = "sess-viewer"
 _CLIENT_ID = "test-client"
 _PROJECT = "proj-a"
 
+# The two projects `require_role` tells apart, and the reason #1661 needed both. A project in
+# `ctx.projects` with no role raises `RoleDenied`, which `DenialAuditMiddleware` owns; a project
+# the caller is not a member of raises the **base** `AuthorizationError`, which no boundary owns.
+_ROLELESS_PROJECT = "proj-roleless"
+_NON_MEMBER_PROJECT = "proj-not-granted"
+
 
 @dataclass(frozen=True, slots=True)
 class _Recorders:
@@ -176,6 +182,7 @@ async def _authenticated_app(
     pool: AsyncConnectionPool,
     *,
     recorders: _Recorders | None = None,
+    roleless_member: bool = False,
 ) -> AsyncIterator[Any]:
     """A real app, with a verified viewer token bound to the in-flight request context.
 
@@ -189,6 +196,11 @@ async def _authenticated_app(
     ``recorders`` routes ``TelemetryMiddleware``'s span and metric output to in-memory
     collectors through ADR-0487's ``build_app`` seam; left ``None``, the app reads the
     process-global providers exactly as production does.
+
+    ``roleless_member`` adds ``_ROLELESS_PROJECT`` to the token's ``projects`` **without** a
+    ``roles`` entry, which is the only way to reach ``require_role``'s member-over-reach site
+    from a token that is also a non-member of some other project. It is opt-in so the default
+    token every other test here mints is byte-for-byte unchanged.
     """
     keypair = make_keypair()
     verifier = JWTVerifier(public_key=keypair.public_key, issuer=ISSUER, audience=AUDIENCE)
@@ -204,7 +216,7 @@ async def _authenticated_app(
             keypair,
             subject=_PRINCIPAL,
             agent_session=_AGENT_SESSION,
-            projects=[_PROJECT],
+            projects=[_PROJECT, _ROLELESS_PROJECT] if roleless_member else [_PROJECT],
             roles={_PROJECT: "viewer"},
             client_id=_CLIENT_ID,
         )
@@ -454,6 +466,124 @@ def test_role_denial_reaches_the_live_stack_harness_as_an_envelope(migrated_url:
     # The named role survives the harness's parse, which is what the live-tier viewer negative
     # now asserts over real HTTP for `allocations.request`'s `contributor`.
     assert denied.data["missing_roles"] == ["admin"]
+
+
+# ============================================================
+# The denial class no boundary owns: a base `AuthorizationError` (#1661, ADR-0493)
+# ============================================================
+#
+# `accounting.report {scope: granted-set, projects: [...]}` is the one tool that hands a
+# **caller-named** project straight to `require_role` with no membership pre-guard and no
+# enclosing catch. `require_role`'s non-member site raises the base `AuthorizationError`, which
+# `DenialAuditMiddleware` deliberately does not own (`_DENIAL_TYPES` is `RoleDenied` +
+# `ProjectMembershipDenied`), so before ADR-0493 it left the handler, reached the client as a raw
+# `ToolError`, and was recorded `error` — `UsageTrackingMiddleware`'s `except AuthorizationError`
+# could not match a denial FastMCP had already wrapped, which is what ADR-0486 disclosed and
+# ADR-0493 falsifies the "no observed loss" half of.
+#
+# `_REPORT_OBJECT_ID` is the id the *handler* builds its envelope under; the boundary keys its
+# envelope to the tool name instead. The two tests below turn on exactly that difference, so the
+# ids are asserted rather than normalised away.
+_REPORT_ARGS = {"request": {"scope": "granted-set", "projects": [_NON_MEMBER_PROJECT]}}
+_ROLELESS_REPORT_ARGS = {"request": {"scope": "granted-set", "projects": [_ROLELESS_PROJECT]}}
+
+
+def test_non_member_named_project_report_is_enveloped_and_recorded_denied(
+    migrated_url: str,
+) -> None:
+    """A non-member's named-project report denies with an envelope, and records `denied`.
+
+    Against the unfixed handler both halves are red, and for the two different reasons the
+    issue names: ``app.call_tool`` raises ``ToolError`` before returning an envelope at all, and
+    the row ``UsageTrackingMiddleware`` did land says ``error``.
+
+    The row's ``project`` column is ``NULL`` and that is correct here rather than a second
+    defect: ``_call_project`` reads a ``project`` key, and this payload carries the plural
+    ``projects`` list. Asserting it pins the whole tuple so a resolver change cannot quietly
+    start attributing a *denied* project the caller was never granted.
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                result = await app.call_tool("accounting.report", _REPORT_ARGS)
+            return (
+                _structured(result),
+                await _fetch(pool, _USAGE_ROWS),
+                await _fetch(pool, _AUDIT_ROWS),
+            )
+
+    envelope, usage_rows, audit_rows = asyncio.run(_run())
+
+    assert envelope["error_category"] == "authorization_denied"
+    # The handler's own object id, which is what says this was enveloped locally rather than
+    # swept up by the dispatch boundary (which keys to the tool name).
+    assert envelope["object_id"] == "report"
+    # No role is named: `viewer` here would confirm the project exists and is merely not
+    # granted, the disclosure ADR-0123's seam exists to prevent. The key is absent, not empty
+    # (ADR-0490), so `not in` is the assertion and `== []` would be wrong.
+    assert "missing_roles" not in envelope["data"]
+
+    assert usage_rows == [
+        ("accounting.report", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)
+    ]
+    # The non-member denial is deliberately not audited (ADR-0043 §4, ADR-0098): auditing it
+    # would let any authenticated token amplify writes into `audit_log` on an openly-callable
+    # read. This can fail — the sibling test below lands a row on the same tool.
+    assert audit_rows == []
+
+
+def test_roleless_member_named_project_report_is_audited_at_the_dispatch_boundary(
+    migrated_url: str,
+) -> None:
+    """The *member* over-reach on the same tool keeps propagating to the boundary.
+
+    ADR-0493 envelopes only the base ``AuthorizationError`` locally and re-raises ``RoleDenied``,
+    because the boundary is the one place ADR-0062 §5's ``audit_log`` row is written. Catching
+    the subclass alongside the base — the shape ``reports/generate.py`` uses — would silently
+    drop that row, so this test is what makes the narrow catch load-bearing: it reddens on
+    ``audit_rows`` and on ``object_id`` the moment ``RoleDenied`` stops propagating.
+
+    ``object_id`` is the tool name here and ``"report"`` in the sibling test above. That is the
+    boundary's signature, not an inconsistency: the boundary is object-agnostic by contract and
+    keys to the call it intercepted.
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+        async with (
+            warm_pool(migrated_url) as pool,
+            _authenticated_app(pool, roleless_member=True) as app,
+        ):
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                result = await app.call_tool("accounting.report", _ROLELESS_REPORT_ARGS)
+            return (
+                _structured(result),
+                await _fetch(pool, _USAGE_ROWS),
+                await _fetch(pool, _AUDIT_ROWS),
+            )
+
+    envelope, usage_rows, audit_rows = asyncio.run(_run())
+
+    assert envelope["error_category"] == "authorization_denied"
+    assert envelope["object_id"] == "accounting.report"
+    # Safe to name: `RoleDenied` fires only for a member, so it confirms nothing the caller's
+    # own membership did not already tell them (ADR-0490).
+    assert envelope["data"]["missing_roles"] == ["viewer"]
+
+    assert audit_rows == [
+        (
+            "accounting.report",
+            _PRINCIPAL,
+            _AGENT_SESSION,
+            _ROLELESS_PROJECT,
+            "denied",
+            None,
+            None,
+        )
+    ]
+    assert usage_rows == [
+        ("accounting.report", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)
+    ]
 
 
 # ============================================================
