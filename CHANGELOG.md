@@ -357,6 +357,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the staged base when the never-uploaded HEAD fires
 - Add general btree index on artifacts.object_key
 - Envelope the non-member denial in accounting.report
+- Record a failed System's category atomically with its transition
+- Admit symbol_not_found in the systems failure-category CHECK
+- Give a recorded failure category its own reason string
 
 ### Build
 
