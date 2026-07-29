@@ -17,13 +17,13 @@ import asyncio
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import NamedTuple, Protocol
 from uuid import UUID
 
 import psycopg
 from psycopg import AsyncConnection
 
-from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.storage import HeadResult, ObjectListing
 from kdive.artifacts.upload_manifest import UPLOAD_TENANT
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.uploads import UPLOAD_OWNER_KINDS, UploadStore
@@ -43,8 +43,10 @@ UPLOAD_ORPHAN_ROOTS: tuple[str, ...] = tuple(
 #: sequentially on one connection with no per-pass deadline, so an unbounded drain — and the first
 #: pass after this ships is the largest this code will ever run, against a backlog accumulating
 #: since ADR-0453 — would stall allocation expiry, orphaned-System repair, and domain reaping behind
-#: it for as long as it took. Each examined candidate costs a LIST and a query whatever its outcome,
-#: and that query is the unindexed anti-join of #1570, so the cost is per key rather than per pass.
+#: it for as long as it took. Each examined candidate costs a HEAD and a query whatever its outcome,
+#: so the cost is per key rather than per pass, and neither term is free: the HEAD is a network
+#: round trip, and the query's ``artifacts`` anti-join is still a statement per key now that #1570's
+#: ``object_key`` btree (migration ``0081``) has made it an index scan rather than a sequential one.
 #: The budget is the drain side of the brake ADR-0453 §4 put on the reap side; the remainder is
 #: reclaimed 30 seconds later.
 MAX_RECLAIMS_PER_ROOT = 200
@@ -74,9 +76,16 @@ WHERE c.last_modified < now() - %s
 
 
 class UploadOrphanStore(UploadStore, Protocol):
-    """The reaper's port plus the mtime-bearing listing the orphan sweep needs."""
+    """The reaper's port plus the two reads the orphan sweep needs.
+
+    ``list_prefix_with_mtime`` enumerates a root; ``head`` stats one key. They are separate methods
+    because they answer separate questions: the sweep needs *every* key under a root once per pass,
+    and *one* key's current mtime immediately before each delete. Serving the second with the first
+    is what #1575 fixed.
+    """
 
     def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]: ...
+    def head(self, key: str) -> HeadResult | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,7 +235,7 @@ async def _sweep_root(
     :func:`_reclaimable_in_listing_order`.
 
     It charges every candidate that reaches the re-read, not only the ones deleted: a declined
-    re-check costs the same LIST and query as a delete, and two overlapping passes (the daemon loop
+    re-check costs the same HEAD and query as a delete, and two overlapping passes (the daemon loop
     and an on-demand ``ops.reconcile``) see exactly that — the second finds every object already
     gone and would otherwise re-read the whole backlog uncapped.
     """
@@ -340,42 +349,51 @@ async def _delete_if_still_reclaimable(
         Whether the object was deleted. ``False`` means the re-read declined it, or the object was
         already gone.
     """
-    current = await _with_current_mtime(store, candidate)
+    current = await _reread_from_store(store, candidate)
     if current is None:
         return False  # deleted by someone else between the listing and here
-    if not await reclaimable_upload_keys(conn, [current], grace):
+    if not await reclaimable_upload_keys(conn, [current.candidate], grace):
         return False  # a row landed, or the object was rewritten, after the classify
-    await asyncio.to_thread(store.delete, current.key)
+    await asyncio.to_thread(store.delete, current.candidate.key)
     _log.info(
-        "reconciler: leaked upload object %s deleted (no artifacts row, no upload window, "
-        "past grace)",
-        current.key,
+        "reconciler: leaked upload object %s (etag %s) deleted (no artifacts row, no upload "
+        "window, past grace)",
+        current.candidate.key,
+        current.etag,
     )
     return True
 
 
-async def _with_current_mtime(
-    store: UploadOrphanStore, candidate: UploadOrphanCandidate
-) -> UploadOrphanCandidate | None:
-    """Re-read ``candidate``'s store mtime, or ``None`` if the object is no longer there.
+class _CurrentObject(NamedTuple):
+    """One candidate as the store holds it *now*, read immediately before its delete.
 
-    Listing the exact key as a prefix is an exact re-read without a second store method: the LIST
-    is scoped to the full key, and the exact-match filter below is what makes it exact, because the
-    listing also carries every key this one prefixes.
-
-    Those siblings are not hypothetical and the filter is not a formality: a chunked window's parts
-    are ``<base>.partNNNN`` (ADR-0104 §1), so re-reading a leaked **base** key enumerates all of its
-    parts — which is exactly the shape a row-first reap that failed partway leaves behind. The
-    filter keeps that correct; it does not keep it O(1), because
-    ``list_prefix_with_mtime`` paginates the prefix to exhaustion, so this costs one round trip per
-    1000 siblings rather than the single one the §6 cost model assumes. Only base keys pay it — a
-    part key prefixes nothing — and #1575 tracks making the re-read exact in one round trip.
+    ``etag`` is the object's identity as observed in the very same round trip as ``candidate``'s
+    refreshed ``last_modified``, so the two cannot disagree about which bytes were examined. The
+    delete decision is made from this pair and the log line names it, which is what lets an
+    operator reading a reclaim line tell which version of a re-PUT key went.
     """
-    listings = await asyncio.to_thread(store.list_prefix_with_mtime, candidate.key)
-    for listing in listings:
-        if listing.key == candidate.key:
-            return replace(candidate, last_modified=listing.last_modified)
-    return None
+
+    candidate: UploadOrphanCandidate
+    etag: str
+
+
+async def _reread_from_store(
+    store: UploadOrphanStore, candidate: UploadOrphanCandidate
+) -> _CurrentObject | None:
+    """Stat ``candidate``'s key for its current mtime and etag, or ``None`` if it is gone.
+
+    A single-object ``head``, not a LIST scoped to the key. Both are exact — a LIST on a full key
+    plus an exact-match filter resolves to that key alone — but only one is a single round trip. A
+    chunked window's parts are ``<base>.partNNNN`` (ADR-0104 §1) and ``list_prefix_with_mtime``
+    paginates to exhaustion, so listing a leaked **base** key enumerated every one of its parts,
+    1000 per round trip, to retrieve one ``LastModified``. That shape is not a corner case: a
+    row-first reap failing partway through a chunked window leaves the base and all of its parts
+    rowless together, which is precisely the candidate set this sweep exists to drain (#1575).
+    """
+    head = await asyncio.to_thread(store.head, candidate.key)
+    if head is None:
+        return None
+    return _CurrentObject(replace(candidate, last_modified=head.last_modified), head.etag)
 
 
 async def reclaimable_upload_keys(

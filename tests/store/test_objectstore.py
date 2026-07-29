@@ -31,6 +31,7 @@ from kdive.store.objectstore import (
     _normalize_etag,
     object_store_from_env,
 )
+from tests.clock import STORE_MTIME
 
 
 def test_normalize_etag_strips_surrounding_quotes() -> None:
@@ -438,7 +439,12 @@ def test_head_client_error_without_response_metadata_is_infrastructure_failure()
 def test_head_invalid_sensitivity_metadata_returns_unknown_sensitivity() -> None:
     class _BadHeadMetaClient:
         def head_object(self, **_kwargs: object) -> dict[str, object]:
-            return {"ContentLength": 1, "ETag": '"etag"', "Metadata": {"sensitivity": "bogus"}}
+            return {
+                "ContentLength": 1,
+                "ETag": '"etag"',
+                "LastModified": STORE_MTIME,
+                "Metadata": {"sensitivity": "bogus"},
+            }
 
     head = ObjectStore(_BadHeadMetaClient(), "bucket").head("k")
 

@@ -43,6 +43,7 @@ from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetri
 from kdive.providers.shared.debug_common.core_file import DMESG_UNAVAILABLE
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.providers.remote_libvirt.conftest import RecordingBackend, libvirt_error
 
 _SID = UUID("00000000-0000-0000-0000-0000000000cc")
@@ -327,7 +328,12 @@ def _sha256_b64(payload: bytes) -> str:
 
 
 def _head_ok(payload: bytes = b"CORE-BYTES", *, checksum: str | None = None) -> HeadResult:
-    return HeadResult(size_bytes=len(payload), checksum_sha256=checksum, etag="etag-raw")
+    return HeadResult(
+        size_bytes=len(payload),
+        checksum_sha256=checksum,
+        etag="etag-raw",
+        last_modified=STORE_MTIME,
+    )
 
 
 def test_host_dump_volume_name_is_deterministic_per_system() -> None:

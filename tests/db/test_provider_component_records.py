@@ -32,6 +32,7 @@ from kdive.components.records import (
 from kdive.components.references import ComponentKind
 from kdive.components.visibility import Visibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from tests.clock import STORE_MTIME
 
 
 class _ObjectStore:
@@ -353,7 +354,12 @@ def test_component_upload_finalization_is_idempotent(migrated_url: str) -> None:
                 component_kind=ComponentKind.ROOTFS,
                 upload_id=upload_id,
             )
-            head = HeadResult(size_bytes=42, checksum_sha256="sha256:" + "2" * 64, etag="e")
+            head = HeadResult(
+                size_bytes=42,
+                checksum_sha256="sha256:" + "2" * 64,
+                etag="e",
+                last_modified=STORE_MTIME,
+            )
             store = _ObjectStore({key: head})
 
             first = await finalize_component_upload(pool, upload_id, object_store=store)
@@ -401,7 +407,14 @@ def test_expired_component_upload_cannot_finalize(migrated_url: str) -> None:
                 ),
             )
             store = _ObjectStore(
-                {key: HeadResult(size_bytes=42, checksum_sha256="sha256:" + "7" * 64, etag="e")}
+                {
+                    key: HeadResult(
+                        size_bytes=42,
+                        checksum_sha256="sha256:" + "7" * 64,
+                        etag="e",
+                        last_modified=STORE_MTIME,
+                    )
+                }
             )
 
             try:
@@ -451,7 +464,14 @@ def test_component_upload_finalization_uses_persisted_tenant(migrated_url: str) 
                 upload_id=upload_id,
             )
             store = _ObjectStore(
-                {key: HeadResult(size_bytes=42, checksum_sha256="sha256:" + "3" * 64, etag="e")}
+                {
+                    key: HeadResult(
+                        size_bytes=42,
+                        checksum_sha256="sha256:" + "3" * 64,
+                        etag="e",
+                        last_modified=STORE_MTIME,
+                    )
+                }
             )
 
             component_id = await finalize_component_upload(pool, upload_id, object_store=store)
@@ -489,6 +509,7 @@ def test_component_upload_finalization_accepts_s3_base64_sha256(migrated_url: st
                         size_bytes=42,
                         checksum_sha256=base64.b64encode(digest).decode("ascii"),
                         etag="e",
+                        last_modified=STORE_MTIME,
                     )
                 }
             )
@@ -531,6 +552,7 @@ def test_component_upload_finalization_rejects_s3_checksum_mismatch(
                         size_bytes=42,
                         checksum_sha256=base64.b64encode(wrong_digest).decode("ascii"),
                         etag="e",
+                        last_modified=STORE_MTIME,
                     )
                 }
             )

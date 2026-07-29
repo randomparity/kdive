@@ -37,6 +37,7 @@ from kdive.providers.core.resolver import ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime, RootfsCapabilities
 from kdive.providers.local_libvirt.profile_policy import LocalLibvirtProfilePolicy
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 
 _AUTHORIZING = Authorizing(principal="op", agent_session=None, project="platform")
 
@@ -83,7 +84,9 @@ class _FakeStore:
         data = self._objects.get(key)
         if data is None:
             return None
-        return artifact_types.HeadResult(size_bytes=len(data), checksum_sha256=None, etag="etag")
+        return artifact_types.HeadResult(
+            size_bytes=len(data), checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+        )
 
 
 def _all_present(_path: Path, candidates: Sequence[str]) -> set[str]:

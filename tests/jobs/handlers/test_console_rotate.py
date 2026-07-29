@@ -35,6 +35,7 @@ from kdive.providers.console_parts.rotation import RotationState, rotate
 from kdive.providers.console_parts.sidecar import read_sidecar
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
+from tests.clock import STORE_MTIME
 
 _CONSOLE = b"console-line payload bytes\n" * 6000  # ~158 KiB -> several rotation parts (64 KiB)
 
@@ -74,6 +75,7 @@ class _FakeStore:
             etag="etag",
             sensitivity=sensitivity,
             content_encoding=enc,
+            last_modified=STORE_MTIME,
         )
 
     def part_puts(self) -> list[str]:

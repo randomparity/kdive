@@ -47,6 +47,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
 )
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from kdive.store.objectstore import artifact_key
+from tests.clock import STORE_MTIME
 
 # A minimal canonical qcow2 base: the magic followed by arbitrary body bytes.
 _QCOW2 = b"QFI\xfb" + b"canonical-qcow2-body"
@@ -135,7 +136,12 @@ class _FakeStore:
         self.head_calls += 1
         if self._data is None:
             return None
-        return HeadResult(size_bytes=len(self._data), checksum_sha256=self._checksum, etag="e")
+        return HeadResult(
+            size_bytes=len(self._data),
+            checksum_sha256=self._checksum,
+            etag="e",
+            last_modified=STORE_MTIME,
+        )
 
     @contextmanager
     def get_artifact_stream(self, key: str, etag: str | None) -> Iterator[StreamedArtifact]:
@@ -1877,7 +1883,10 @@ class _CountingStore:
 
     def head(self, key: str) -> HeadResult:
         return HeadResult(
-            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+            size_bytes=len(self._data),
+            checksum_sha256=_sha256_b64(self._data),
+            etag="e",
+            last_modified=STORE_MTIME,
         )
 
     @contextmanager
@@ -2113,7 +2122,10 @@ class _StallingStore:
 
     def head(self, key: str) -> HeadResult:
         return HeadResult(
-            size_bytes=len(self._data), checksum_sha256=_sha256_b64(self._data), etag="e"
+            size_bytes=len(self._data),
+            checksum_sha256=_sha256_b64(self._data),
+            etag="e",
+            last_modified=STORE_MTIME,
         )
 
     @contextmanager

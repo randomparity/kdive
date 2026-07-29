@@ -21,6 +21,7 @@ from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.reads import ArtifactsGetRequest, artifacts_get
 from kdive.security.authz.rbac import Role
+from tests.clock import STORE_MTIME
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.json_data import data_bool, data_int, data_str
 
@@ -61,6 +62,7 @@ class _GzipStore:
             etag="e",
             sensitivity=self.sensitivity,
             content_encoding="gzip",
+            last_modified=STORE_MTIME,
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:
@@ -83,6 +85,7 @@ class _PlainStore:
             checksum_sha256=None,
             etag="e",
             sensitivity=self.sensitivity,
+            last_modified=STORE_MTIME,
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

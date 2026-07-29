@@ -147,7 +147,7 @@ class StreamedArtifact(NamedTuple):
 
 
 class HeadResult(NamedTuple):
-    """An object's stored size, base64 SHA-256 checksum if present, bare etag, and class.
+    """An object's stored size, base64 SHA-256 checksum if present, bare etag, mtime, and class.
 
     ``sensitivity`` is the class read from object metadata (``None`` when the metadata
     is absent or uninterpretable). It lets a caller gate on the object's own sensitivity
@@ -156,11 +156,18 @@ class HeadResult(NamedTuple):
     ``content_encoding`` is the value of the ``content-encoding`` user-metadata key
     (``None`` when absent), written by :meth:`~ObjectStore.put_artifact` when the caller
     sets :attr:`ArtifactWriteRequest.content_encoding`.
+
+    ``last_modified`` is the store's own mtime for the object — the same value
+    :class:`ObjectListing` carries, from a single-object stat rather than a prefix listing.
+    It is required rather than optional because `HeadObject` always returns `Last-Modified`,
+    so a caller fencing on age (the ADR-0455 orphan sweep's per-key re-read) has no
+    can't-happen branch to write.
     """
 
     size_bytes: int
     checksum_sha256: str | None
     etag: str
+    last_modified: datetime
     sensitivity: Sensitivity | None = None
     content_encoding: str | None = None
 

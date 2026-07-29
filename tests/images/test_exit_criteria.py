@@ -62,6 +62,7 @@ from kdive.reconciler.cleanup.images import (
 from kdive.services.images.publish import PublishRequest, publish_image
 from kdive.services.images.retention import repair_expired_private_images
 from kdive.services.images.upload import PrivateUploadRequest, register_private_upload
+from tests.clock import STORE_MTIME
 from tests.reconciler.conftest import connect, run_repair, seed_system
 
 _REQUIRED = ("kdump", "drgn")
@@ -103,7 +104,9 @@ class _FakeImageStore:
         entry = self._objects.get(key)
         if entry is None or key in self.deleted:
             return None
-        return artifact_types.HeadResult(size_bytes=len(entry[0]), checksum_sha256=None, etag="e")
+        return artifact_types.HeadResult(
+            size_bytes=len(entry[0]), checksum_sha256=None, etag="e", last_modified=STORE_MTIME
+        )
 
     def get_artifact(self, key: str, etag: str | None) -> artifact_types.FetchedArtifact:
         entry = self._objects.get(key)

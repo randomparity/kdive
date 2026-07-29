@@ -31,6 +31,7 @@ from kdive.providers.remote_libvirt.retrieve.kdump_capture import (
 from kdive.providers.remote_libvirt.retrieve.retriever import RemoteLibvirtRetriever
 from kdive.providers.shared.runtime_paths import domain_name_for
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.providers.remote_libvirt.conftest import RecordingBackend
 from tests.providers.remote_libvirt.fakes import FakeControlConn, FakeDomain
 
@@ -151,7 +152,11 @@ def _retrieve(
 
 def test_capture_two_phase_happy_path(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json())
-    store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
+    store = FakeStore(
+        head=HeadResult(
+            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+        )
+    )
     out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
 
     assert out.vmcore_build_id == "deadbeef"
@@ -175,7 +180,11 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
     # configuration_error, before any inspect/upload guest-agent round-trip (ADR-0105, #375).
     monkeypatch.setenv("KDIVE_S3_ENDPOINT_URL", "http://localhost:9000")
     agent = FakeAgentExec(inspect=_inspect_json())
-    store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
+    store = FakeStore(
+        head=HeadResult(
+            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+        )
+    )
     with pytest.raises(CategorizedError) as excinfo:
         _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
@@ -186,7 +195,11 @@ def test_capture_loopback_endpoint_fails_before_touching_the_guest(
 
 def test_capture_waits_out_a_rebooting_agent(tmp_path: Path) -> None:
     agent = FakeAgentExec(inspect=_inspect_json(), unreachable_before=2)
-    store = FakeStore(head=HeadResult(size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw"))
+    store = FakeStore(
+        head=HeadResult(
+            size_bytes=4096, checksum_sha256=_SHA, etag="etag-raw", last_modified=STORE_MTIME
+        )
+    )
     out = _retrieve(agent, store, tmp_path).capture(_SID, _RID, CaptureMethod.KDUMP)
     assert out.vmcore_build_id == "deadbeef"
 

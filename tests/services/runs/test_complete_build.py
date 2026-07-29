@@ -29,6 +29,7 @@ from kdive.services.runs.complete_build import (
     CompleteBuildFinalizer,
 )
 from kdive.services.runs.steps import BuildStepResult
+from tests.clock import STORE_MTIME
 from tests.mcp.complete_build_support import (
     FakeValidator,
     seed_external_run,
@@ -51,10 +52,10 @@ class _ChunkedStore:
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
             checksum = "wrong" if self.bad_head else "c0"
-            return HeadResult(5, checksum, "e1")
+            return HeadResult(5, checksum, "e1", last_modified=STORE_MTIME)
         if key.endswith(".part0002"):
-            return HeadResult(3, "c1", "e2")
-        return HeadResult(8, None, "final")
+            return HeadResult(3, "c1", "e2", last_modified=STORE_MTIME)
+        return HeadResult(8, None, "final", last_modified=STORE_MTIME)
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:
         del key
