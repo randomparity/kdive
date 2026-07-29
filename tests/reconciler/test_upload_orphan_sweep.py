@@ -63,11 +63,18 @@ class _FakeUploadStore:
 
     ``listed_prefixes`` and ``headed_keys`` record every store round trip in order, so a test can
     assert what the sweep *spent* and not only what it deleted (#1575).
+
+    An object's etag is derived from its key by default, because most tests here are about ages
+    and rows rather than identities. ``put`` can override it, and ``deleted_etags`` records the
+    etag each delete actually destroyed — which is how a test distinguishes deleting the bytes it
+    re-read from deleting a *newer* version that replaced them in the gap (#1574).
     """
 
     def __init__(self, objects: dict[str, timedelta]) -> None:
         self._objects = dict(objects)
+        self._etags: dict[str, str] = {}
         self.deleted: list[str] = []
+        self.deleted_etags: list[str] = []
         self.listed_prefixes: list[str] = []
         self.headed_keys: list[str] = []
 
@@ -75,8 +82,13 @@ class _FakeUploadStore:
     def present(self) -> set[str]:
         return set(self._objects)
 
-    def put(self, key: str, age: timedelta = timedelta(0)) -> None:
+    def put(self, key: str, age: timedelta = timedelta(0), etag: str | None = None) -> None:
         self._objects[key] = age
+        if etag is not None:
+            self._etags[key] = etag
+
+    def _etag(self, key: str) -> str:
+        return self._etags.get(key, f"etag-of-{key}")
 
     def forget(self, key: str) -> None:
         """Remove an object without recording a delete — another actor got there first."""
@@ -104,11 +116,13 @@ class _FakeUploadStore:
         return HeadResult(
             size_bytes=1,
             checksum_sha256=None,
-            etag=f"etag-of-{key}",
+            etag=self._etag(key),
             last_modified=self._mtime(age),
         )
 
     def delete(self, key: str) -> None:
+        if key in self._objects:
+            self.deleted_etags.append(self._etag(key))
         self._objects.pop(key, None)
         self.deleted.append(key)
 
@@ -702,22 +716,30 @@ def test_an_object_rewritten_between_the_listing_and_the_delete_is_not_reclaimed
     asyncio.run(_run())
 
 
-def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(migrated_url: str) -> None:
+def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """ADR-0455 §3's residual, for the key actually being deleted (#1574, ADR-0497).
 
     Every other concurrency test in this module fires its hook before a **different** key's delete,
     so what they pin is the re-check declining a *later* candidate — the gap this one is about was
     never exercised. Here the store holds one key, so the hook lands between that key's own
-    re-check and its own ``delete_object``, and the delete is unconditional: the fresh bytes go.
+    re-check and its own ``delete_object``.
+
+    The assertion is the version identity, not the deletion. A key going away proves nothing: an
+    aged rowless orphan is deleted by four earlier tests in this module. What is specific to this
+    race is the *pair* — the sweep's reclaim line names the etag it re-read and decided on, and the
+    etag it actually destroyed is a different, newer one. The delete is issued on bytes the sweep
+    never examined.
 
     This asserts the loss on purpose. ADR-0497 rejected the fix this test invites — S3 ``If-Match``
     on ``DeleteObject``, using the etag the re-read already observed — because both MinIO releases
     this repo pins accept the header, return success, and delete the object regardless, so a guard
-    built on it would leave this assertion true while reading as if the race were closed. The loss
-    is instead made *loud* one layer down, where ``finalize_capture`` refuses to commit a row
-    against the object this delete removed
-    (``tests/adversarial/test_vmcore_finalize_object_verify.py``). If this test ever fails because
-    the object survived, the store has gained the precondition and ADR-0497 §1 should be revisited.
+    built on it would leave this pair true while reading as if the race were closed. The loss is
+    instead made *loud* one layer down, where ``finalize_capture`` refuses to commit a row against
+    the object this delete removed
+    (``tests/adversarial/test_vmcore_finalize_object_verify.py``). If the two etags below ever stop
+    diverging, the store has gained the precondition and ADR-0497 §1 should be revisited.
     """
 
     async def _run() -> None:
@@ -725,19 +747,27 @@ def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(migrated_ur
         async with await connect(migrated_url) as seed:
             await upload_manifest.delete_manifest(seed, "runs", run_id)
         vmcore = f"{prefix}vmcore-kdump"
+        stale, fresh = "etag-of-the-abandoned-attempt", "etag-of-the-retried-capture"
         store: _FakeUploadStore
 
         def _the_retried_capture_s_put_completes() -> None:
-            store.put(vmcore, timedelta(seconds=0))
+            store.put(vmcore, timedelta(seconds=0), etag=fresh)
 
         # One key, so the hook fires in *this* key's gap rather than ahead of a sibling's.
         store = _HookedStore(
             {vmcore: _GRACE * 2}, before_delete=_the_retried_capture_s_put_completes
         )
+        store.put(vmcore, _GRACE * 2, etag=stale)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            assert await run_repair(pool, _sweep(store)) == 1
+            with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+                assert await run_repair(pool, _sweep(store)) == 1
         assert store.deleted == [vmcore]
-        assert vmcore not in store.present
+        # The bytes destroyed are the retry's, not the ones the re-read decided on.
+        assert store.deleted_etags == [fresh]
+        reclaims = [r.getMessage() for r in caplog.records if "deleted" in r.getMessage()]
+        assert len(reclaims) == 1
+        assert stale in reclaims[0], "the decision was made on the version that no longer existed"
+        assert fresh not in reclaims[0]
 
     asyncio.run(_run())
 
