@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the missing role in an authorization_denied envelope
 - Inject build_app's tracer and meter to pin telemetry skip
 - Index jobs on the payload system_id correlation key
+- Add a staging-drain lane keyed on systems
 
 ### Changed
 
@@ -213,6 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record the jobs payload system_id index shape
 - Record ADR-0496 for the head-backed orphan-sweep re-read
 - Record that the head-backed re-read needs no new S3 grant
+- Record the token-keyed staging drain (ADR-0494)
 
 ### Fixed
 
@@ -363,6 +365,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record a failed System's category atomically with its transition
 - Admit symbol_not_found in the systems failure-category CHECK
 - Give a recorded failure category its own reason string
+- Key the staging drain on each file's own token
+- Decide the drain from the walk, not from the token set
 
 ### Build
 
