@@ -68,16 +68,34 @@ staging directory is not swept either.
    it: a surviving rootfs row means a fetch of that base can legitimately be in flight, so the
    partial glob is skipped while any row remains. Widening it is #1565's question.
 
-3. **A live System's pin is read as a set, and a pinned-but-unowned base defers the drain.**
-   `pinned_rootfs_tokens` enumerates the referencing Systems once and returns every token pinned by
-   ADR-0441 §6's conditions (a) and (b); `rootfs_base_reclaimable` is re-expressed against it, so
-   the row-driven gate and the filesystem-keyed sweep cannot drift on what "pinned" means. A base
-   whose token is pinned but owned by no row is **left in place** and the drain marker retained.
+3. **A live System's pin is read as a set; a pinned-but-unowned base is left in place, reported,
+   and does *not* retain the drain marker.** `pinned_rootfs_tokens` enumerates the referencing
+   Systems once and returns every token pinned by ADR-0441 §6's conditions (a) and (b);
+   `rootfs_base_reclaimable` is re-expressed against it, so the row-driven gate and the
+   filesystem-keyed sweep cannot drift on what "pinned" means.
 
-   This closes ADR-0452's own recorded residue — an overlay created *after* the base's row was
-   reclaimed, which the zero-row precondition could not see because that precondition reads rows and
-   an overlay is a file. Retaining is safe in exactly the sense decision 5 of ADR-0452 requires: the
-   pin is a live System, and the reconciler drives every System to a terminal state.
+   Leaving the base closes ADR-0452's own recorded residue — an overlay created *after* the base's
+   row was reclaimed, which the zero-row precondition could not see because that precondition reads
+   rows and an overlay is a file.
+
+   Retaining the marker on it looks like the symmetric choice and is wrong.
+   `_ROOTFS_REFERENCERS_SQL` excludes only `torn_down`; `failed` is terminal with **no** transition
+   out of it (`domain/capacity/state.py`), and nothing removes a `failed` System's overlay —
+   `remove_overlay` runs from teardown, `_reclaim_materialized_on_failure` only undoes an overlay
+   its own call created, and `repair_leaked_domains` skips any System whose row is not `torn_down`.
+   So a pin can be **permanent**, and pinning the marker on it resurrects the never-clearing marker
+   and the re-fail-every-pass loop ADR-0442 was written about — the outcome ADR-0452 §5 rejects. The
+   marker clears with a `WARNING` naming the condition, exactly as an unremovable directory does.
+   The base is still never unlinked, which is the part that matters; what the marker would buy is
+   only *who* revisits it, and for an `open`/`active` investigation that is decision 5's lane, which
+   is not marker-keyed.
+
+   Both this and the held-partial deferral are decided from what the **walk observed**, never from
+   `protected_tokens` being non-empty. A non-empty set with an empty directory is the ordinary
+   steady state — the row-driven reclaim unlinks each base as its own row drains — so deriving
+   "a base was left behind" from the set would fire the survivor `WARNING` on every ordinary drain
+   and defer a drain that plainly completed. That is the inference-as-invariant defect ADR-0452 §4
+   removes one function over.
 
 4. **A failed `rmdir` re-runs the collection once, then gives up.** State (b) is a file that no glob
    this pass ever saw. One bounded re-pass converts a permanent leak into one extra `readdir`. It is
@@ -93,6 +111,10 @@ staging directory is not swept either.
    empty-worklist path `sweep_investigation_rootfs_reclaim` already relies on for a marker past
    grace with no rows left. No new job kind, no new payload, no migration.
 
+   It is gated on its **own** `ROOTFS_STAGING_DRAIN_BACKOFF` (6 hours) rather than the neighbouring
+   lanes' `ROOTFS_RECLAIM_RETRY_BACKOFF` (5 minutes), for the reason in the Consequences below: this
+   lane's worklist is a steady state rather than a condition that clears.
+
    The `systems` row is the *causal* record for a staged base: one is only ever staged for a System
    whose profile names an `upload` rootfs, and Systems are retired in place (`torn_down`) rather
    than deleted, so the trigger outlives every row the base itself had. The `NOT EXISTS` keeps this
@@ -107,14 +129,25 @@ staging directory is not swept either.
   DB-only and hands an empty worklist to the worker, which is the whole point of ADR-0442: on a
   host-process local-libvirt deployment the worker runs as root and the reconciler as the invoking
   user, so a reconciler-side `unlink` fails after the object is gone (#1522).
-- **The new lane cannot see whether there is anything to do, and issues a job regardless.** A
-  never-closed investigation with an upload-referencing System and no rootfs rows draws one reclaim
-  job per `ROOTFS_RECLAIM_RETRY_BACKOFF` (5 minutes) for as long as it stays open, whether or not
-  its staging directory holds anything. The cost is one job row, one `INVESTIGATION` lock
-  acquisition, and one `readdir` on a directory that is usually absent. This is the same shape the
-  TTL lane already has for a base the liveness gate pins, and it is accepted for the same reason.
-  Making it conditional would need durable per-investigation "the directory is empty" state whose
-  only reader is this sweep — a schema change to save a `readdir`.
+- **The new lane's worklist is a permanent steady state, not a condition that clears, and that is
+  its real cost.** `systems` rows are retired in place and never leave the match, so once an
+  `open`/`active` investigation's rootfs rows have TTL-drained, it is selected on *every* pass for
+  the rest of its life — whether or not its staging directory holds anything, which the reconciler
+  cannot see (it holds no filesystem, ADR-0442). This is **not** the shape the TTL lane has: that
+  lane is anchored on an `artifacts` row, so its churn ends when the row drains. Each pass costs a
+  `jobs` delete-and-insert, a worker dequeue/lease/complete cycle, an `INVESTIGATION` advisory-lock
+  transaction (the lock System bind contends on), one `pinned_rootfs_tokens` enumeration with an
+  `os.stat` per referencing System, and one `readdir`. At the shared 5-minute backoff that is ~288
+  passes a day per such investigation, growing linearly with the number of long-lived
+  investigations and never decreasing.
+
+  Two things bound it. The lane takes its own 6-hour `ROOTFS_STAGING_DRAIN_BACKOFF`, which cuts the
+  permanent rate ~72x while still converging far faster than the TTL policy in days that governs
+  the bytes it reclaims. And the settle path's `UPDATE investigations SET rootfs_cleanup_pending_at
+  = NULL` is now predicated on the column being non-NULL, so it stops writing a dead tuple per pass
+  on a table every System bind reads — that write was unconditional and is a no-op on both
+  marker-less lanes. Making the lane itself conditional would need durable per-investigation "the
+  directory is empty" state whose only reader is this sweep — a schema change to save a `readdir`.
 - **The trigger is a superset of the leak, not a detector of it, and it is bounded the one way that
   matters.** An investigation that never staged an uploaded base is excluded by the profile
   predicate, so the worklist does not grow with the whole `systems` table. What it does not exclude
@@ -128,10 +161,12 @@ staging directory is not swept either.
   keeps the lane off a System that is staging its base right now, between the `mkdir` and the row
   resolution, and it matches the policy the artifacts-keyed TTL lane already applies to the same
   bytes.
-- **A pinned-but-unowned base retains the drain marker, so a wedged System pins an investigation's
-  drain.** Bounded by the reconciler reaping that System, and strictly better than the alternative:
-  clearing would retire the last collector for the base while a guest is running off it, which is
-  the leak this ADR closes.
+- **A pinned-but-unowned base survives with its marker cleared, and for a *closed* investigation
+  nothing revisits it.** Decision 3's cost, stated rather than derived. The base is never unlinked,
+  so no running guest loses its backing file; what is lost is the follow-up, and only for a closed
+  investigation, whose Systems `investigations.close` has already coupled. For an `open`/`active`
+  one, decision 5's lane is the follow-up and is not marker-keyed. The `WARNING` names the condition
+  so an operator has the one signal there is. Retaining instead is rejected in decision 3.
 - **The drain tail now enumerates the staging directory on every pass rather than only on a
   complete drain.** Three `glob`s and a `rmdir` attempt per reclaim job, against a directory holding
   a handful of entries. It also runs while holding the `INVESTIGATION` lock, as it did before, so
@@ -145,6 +180,16 @@ staging directory is not swept either.
   NULL and this ADR's new lane requires zero rootfs rows, which a pinned base does not satisfy. The
   new lane does give the *drained* half of that asymmetry a trigger, which narrows #1565's scope to
   the rows-still-present case.
+- **An `abandoned` investigation is reached by no lane, including this one.** All three require
+  either `open`/`active` or a marker `investigations.close` sets, and `_close_locked` refuses to
+  close an `abandoned` investigation. It is unreachable today — no writer transitions an
+  investigation to `abandoned` — but the state is in the enum and the transition table, so adding
+  such a writer reopens #1559 for it. Named here rather than guarded against a state nothing sets.
+- **The lane has no supporting index.** There is none on `artifacts (owner_kind, retention_class,
+  owner_id)`, and `#>>` is not indexable without an expression index, so the lane sequentially scans
+  `systems` with a per-row jsonb extraction and anti-joins `artifacts`. Both tables are small at
+  this deployment's cardinality and the anti-join hashes into one `artifacts` scan, but the cost is
+  permanent per the steady-state consequence above rather than decaying.
 - No schema, no migration, no config setting, no new dependency, no MCP tool, no RBAC surface
   change. Not an AI surface. One new reconciler `repair_kind`
   (`unowned_investigation_rootfs_staging_drains_enqueued`), which joins `ALL_REPAIR_KINDS` and the
@@ -173,7 +218,14 @@ staging directory is not swept either.
 - **Run the `rmdir` unconditionally so the directory always drains.** Rejected. `rmdir` on an empty
   directory races a fetcher that has just `mkdir`ed and not yet created its partial, which fails
   that provision with a staging fault. Gating it on the investigation being row-drained is what
-  keeps that unreachable — a fetch requires an `artifacts` row to resolve at all.
+  keeps that *narrow*: a fetch resolves an `artifacts` row before it stages, and
+  `complete_rootfs_upload` takes the `INVESTIGATION` lock, so a newly-finalized upload cannot race
+  a drain that read zero rows under that lock. It is **not** unreachable, and the ADR does not claim
+  it is: the fetch resolves its row on a separate autocommit connection and never takes the
+  `INVESTIGATION` lock, so on ADR-0452 §6's own doomed-fetcher path the row is resolved, then
+  deleted by `_reclaim_one_checksum`, and the fetcher reaches its `mkdir` with the investigation now
+  row-drained. Unchanged from before this ADR except that decision 4 makes two `rmdir` attempts per
+  pass rather than one; #1558 removes the doomed-fetcher path that produces it.
 - **Retain the drain marker on every non-drain, so state (b) is revisited.** Rejected for ADR-0452
   decision 5's reason, unchanged: an unremovable directory or an unopenable partial is permanent
   until an operator acts, and pinning the marker on it resurrects the never-clearing marker and the

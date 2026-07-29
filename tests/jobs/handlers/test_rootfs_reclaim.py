@@ -986,7 +986,7 @@ def test_a_live_pinned_base_keeps_its_marker_while_an_orphan_beside_it_is_collec
     asyncio.run(_run())
 
 
-def test_an_orphan_base_pinned_by_a_live_system_is_left_and_defers_the_drain(
+def test_an_orphan_base_pinned_by_a_live_system_is_left_in_place(
     migrated_url: str, tmp_path: Path
 ) -> None:
     # ADR-0494 section 3's liveness half. A base whose row was reclaimed can still be backed by
@@ -1008,6 +1008,8 @@ def test_an_orphan_base_pinned_by_a_live_system_is_left_and_defers_the_drain(
         rootfs_dir, uploads = _dirs(tmp_path)
         (rootfs_dir / overlay_name(str(sys_id))).write_bytes(b"overlay")
         orphan, orphan_marker = _orphan_base(uploads, inv)
+        collectable = uploads / str(inv) / f"{_TOKEN}.qcow2"
+        collectable.write_bytes(b"neither owned nor pinned")
 
         assert (
             await _run_handler(migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads) == "0"
@@ -1015,9 +1017,13 @@ def test_an_orphan_base_pinned_by_a_live_system_is_left_and_defers_the_drain(
 
         assert orphan.exists(), "a base under a live overlay was unlinked"
         assert orphan_marker.exists()
+        assert not collectable.exists()  # ... while an unpinned orphan beside it still goes
         check = await connect(migrated_url)
         try:
-            assert await _marker(check, inv) is not None  # deferred, so a later pass revisits it
+            # The marker still clears: a pin by a failed System never heals, so retaining on it is
+            # the never-clearing marker ADR-0442 was written about. An open/active investigation is
+            # revisited by the staging-drain lane, which is not marker-keyed.
+            assert await _marker(check, inv) is None
         finally:
             await check.close()
 

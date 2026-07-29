@@ -73,6 +73,17 @@ DEFAULT_INVESTIGATION_ROOTFS_RETENTION = timedelta(days=30)
 #: inspectable and keeping a permission wall from becoming a retry storm against the object store.
 ROOTFS_RECLAIM_RETRY_BACKOFF = timedelta(minutes=5)
 
+#: How long the staging-drain lane's job holds the same slot (ADR-0494 §5). Deliberately much longer
+#: than :data:`ROOTFS_RECLAIM_RETRY_BACKOFF`, because that lane's worklist is a **steady state**
+#: rather than a condition that clears: a ``systems`` row is retired in place and never leaves the
+#: match, so every never-closed investigation that ever staged an uploaded base is selected on every
+#: pass for the rest of its life, whether or not its staging directory holds anything. At the shared
+#: 5-minute backoff that is ~288 jobs a day per such investigation, permanently. The bytes this lane
+#: reclaims are already governed in *days* by ``investigation_rootfs_retention``, so a six-hourly
+#: sweep converges just as fast against the leak it exists for while dropping the steady-state cost
+#: by ~72x. The other two lanes keep the short backoff: their worklists drain, so their churn ends.
+ROOTFS_STAGING_DRAIN_BACKOFF = timedelta(hours=6)
+
 #: Run-owned artifact retention classes the build-artifact sweeps reclaim (ADR-0234 §4, #768): the
 #: uploaded combined kernel tar / vmlinux / initrd (``build``) and an internally-built run kernel
 #: (``kernel-build``). Deliberately excludes ``build-log`` (run-owned build evidence, ADR-0238) and
@@ -350,19 +361,23 @@ async def sweep_unowned_investigation_rootfs_staging(
     That is the same empty-worklist path :func:`sweep_investigation_rootfs_reclaim` already relies
     on for a marker past grace with no rows left, so no new handler behaviour is introduced here.
 
-    A job is issued for every matching investigation each pass, subject to the shared
-    :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` slot — including ones whose staging directory is already
-    empty, which the reconciler cannot see (it holds no filesystem, ADR-0442). The cost of a
-    redundant pass is one ``readdir`` on the worker; the cost of a DB-side "is it empty" answer
-    would be durable per-investigation state whose only reader is this sweep. Returns the number of
-    jobs ensured this pass.
+    A job is issued for every matching investigation, including ones whose staging directory is
+    already empty — which the reconciler cannot see (it holds no filesystem, ADR-0442). That is a
+    **steady state**, not a condition that clears: a ``systems`` row is retired in place and never
+    leaves the match, so a never-closed investigation stays selected for the rest of its life. It is
+    therefore gated on :data:`ROOTFS_STAGING_DRAIN_BACKOFF` rather than on the neighbouring lanes'
+    5-minute slot, which caps the permanent cost at four passes a day per such investigation. A
+    DB-side "is it empty" answer would need durable per-investigation state whose only reader is
+    this sweep. Returns the number of jobs ensured this pass.
     """
     async with conn.cursor() as cur:
         await cur.execute(_UNOWNED_STAGING_INV_SQL, (retention,))
         candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
     enqueued = 0
     for investigation_id, project in candidates:
-        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, []):
+        if await _try_enqueue_rootfs_reclaim(
+            conn, investigation_id, project, [], backoff=ROOTFS_STAGING_DRAIN_BACKOFF
+        ):
             enqueued += 1
     if enqueued:
         _log.info("reconciler: enqueued %d unowned-rootfs-staging drain job(s)", enqueued)
@@ -379,7 +394,12 @@ async def _investigation_rootfs_artifact_ids(
 
 
 async def _try_enqueue_rootfs_reclaim(
-    conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
+    conn: AsyncConnection,
+    investigation_id: UUID,
+    project: str,
+    artifact_ids: list[UUID],
+    *,
+    backoff: timedelta | None = None,
 ) -> bool:
     """Issue one investigation's reclaim job, logging and skipping a fault rather than aborting.
 
@@ -388,7 +408,15 @@ async def _try_enqueue_rootfs_reclaim(
     continues with the next.
     """
     try:
-        return await _enqueue_rootfs_reclaim(conn, investigation_id, project, artifact_ids)
+        # Resolved here rather than as a default argument: a default is bound once at import, so
+        # a test monkeypatching the module attribute would silently keep the imported value.
+        return await _enqueue_rootfs_reclaim(
+            conn,
+            investigation_id,
+            project,
+            artifact_ids,
+            backoff=ROOTFS_RECLAIM_RETRY_BACKOFF if backoff is None else backoff,
+        )
     except Exception:  # noqa: BLE001 - one enqueue failure must not starve the rest
         _log.warning(
             "reconciler: enqueuing the rootfs reclaim for investigation %s failed; retry next pass",
@@ -399,7 +427,12 @@ async def _try_enqueue_rootfs_reclaim(
 
 
 async def _enqueue_rootfs_reclaim(
-    conn: AsyncConnection, investigation_id: UUID, project: str, artifact_ids: list[UUID]
+    conn: AsyncConnection,
+    investigation_id: UUID,
+    project: str,
+    artifact_ids: list[UUID],
+    *,
+    backoff: timedelta,
 ) -> bool:
     """Issue the one reclaim job for ``investigation_id``; return whether one was admitted.
 
@@ -427,7 +460,7 @@ async def _enqueue_rootfs_reclaim(
                 "SELECT state FROM jobs WHERE dedup_key = %s "
                 "AND (state NOT IN ('succeeded', 'failed', 'canceled') "
                 "     OR updated_at > now() - %s) FOR UPDATE",
-                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+                (dedup_key, backoff),
             )
             if await cur.fetchone() is not None:
                 return False
@@ -437,7 +470,7 @@ async def _enqueue_rootfs_reclaim(
             await cur.execute(
                 "DELETE FROM jobs WHERE dedup_key = %s "
                 "AND state IN ('succeeded', 'failed', 'canceled') AND updated_at <= now() - %s",
-                (dedup_key, ROOTFS_RECLAIM_RETRY_BACKOFF),
+                (dedup_key, backoff),
             )
         await queue.enqueue(
             conn,
