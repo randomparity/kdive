@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the crashed-idle reclaim distinctly in the log
 - Summary-first tools.search and a namespace authz signal
 - Report the deployed build on /readyz and preflight live-stack skew
+- Thread schema-derived help into curated verb flags
 
 ### Changed
 
