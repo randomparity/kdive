@@ -14,11 +14,18 @@ These tests pin each middleware against the sets whose reason applies to it:
   ``tools.search`` were put back in the telemetry skip.
 - ``DenialAuditMiddleware`` writes no denial row for tools.invoke, and **does** write one for
   tools.search.
-- A gateway call writes exactly ONE usage row (keyed to inner tool, not tools.invoke).
-- A denied gateway call writes exactly ONE denial-audit row (inner tool).
 
-The denial-equivalence test verifies that the client-visible denial shape from a gateway
-call is identical to a direct inner-tool denial.
+Every test here is a middleware unit: hand-built ``SimpleNamespace`` contexts driven straight
+into ``on_call_tool``. Nothing in this module goes through ``build_app``, so nothing in it
+reaches ``gateway.py``'s ``app.call_tool(..., run_middleware=True)`` re-entry — including the
+two ``test_simulated_reentry_*`` tests, which pay a real migrated-Postgres round trip and
+whose harness writes the rows they assert (#1640). The real-gateway pins live in
+``tests/mcp/tools/test_gateway_usage_recording_e2e.py``, which drives a real dispatch through
+a real app and asserts on all three planes — ``tool_invocation``, ``audit_log``, and, since
+#1640, spans and RED metrics.
+
+The denial-equivalence test verifies that the client-visible denial shape from a simulated
+gateway call is identical to a direct inner-tool denial.
 """
 
 from __future__ import annotations
@@ -463,14 +470,25 @@ def test_denial_audit_non_meta_tool_still_writes_row(
 
 
 # ============================================================
-# Integration: gateway call writes exactly one usage row (inner tool)
+# Simulated re-entry: one usage row against a real database (inner tool)
 # ============================================================
 
 
-def test_invoke_writes_one_usage_row_keyed_to_inner(
+def test_simulated_reentry_writes_one_usage_row_keyed_to_inner(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Gateway call writes exactly one tool_invocation row, keyed to the inner tool."""
+    """A hand-built outer/inner pair writes one tool_invocation row, keyed to the inner tool.
+
+    Not a gateway proof, despite the row counts: ``outer_call_next`` below calls
+    ``mw.on_call_tool`` on the inner context itself, so the harness writes the row it then
+    asserts and ``gateway.py``'s ``app.call_tool(..., run_middleware=True)`` re-entry is
+    never reached (#1640). What is falsifiable here is that the outer chain skips
+    ``tools.invoke`` — which ``test_usage_invoke_skips_recording_on_success`` already pins
+    with a spy and no database — plus the one thing that test cannot show: that the
+    recorder's write lands in a real migrated schema with the columns it claims.
+
+    ``tests/mcp/tools/test_gateway_usage_recording_e2e.py`` is the real-gateway pin.
+    """
     monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _request_ctx)
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
 
@@ -501,14 +519,23 @@ def test_invoke_writes_one_usage_row_keyed_to_inner(
 
 
 # ============================================================
-# Integration: denied gateway call writes exactly one denial row (inner tool)
+# Simulated re-entry: one denial row against a real database (inner tool)
 # ============================================================
 
 
-def test_denied_invoke_writes_one_denial_row_keyed_to_inner(
+def test_simulated_reentry_writes_one_denial_row_keyed_to_inner(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Denied gateway call: exactly one denial-audit row and one usage row, both inner-keyed."""
+    """A hand-built denied outer/inner pair: one denial-audit row and one usage row, inner-keyed.
+
+    A middleware-unit simulation like its sibling above, not a gateway proof: the harness
+    drives the inner ``DenialAuditMiddleware`` and ``UsageTrackingMiddleware`` itself rather
+    than re-entering through ``app.call_tool`` (#1640).
+
+    Kept for what nothing else covers — this is the only place ``DenialAuditMiddleware``'s
+    ``audit_log`` write runs against a real migrated schema through a ``RoleDenied`` raised
+    into it, the arm ADR-0486 rebuilt.
+    """
     monkeypatch.setattr("kdive.mcp.middleware.shared.current_context", _request_ctx)
     monkeypatch.setenv("KDIVE_CLI_CLIENT_ID", "cli-x")
 
