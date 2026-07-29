@@ -14,6 +14,7 @@ import json
 import pytest
 
 import kdive.cli.commands.reads as reads
+from kdive.cli.__main__ import build_parser
 from kdive.cli.commands.registry import REGISTRY
 
 
@@ -245,8 +246,8 @@ _READ_VERBS = [v for v in REGISTRY if v.read_only]
 _VERB_ARG_OVERRIDES: dict[tuple[str, str], dict[str, object]] = {
     ("accounting", "report"): {"scope": "granted-set"},
     ("accounting", "usage"): {"investigation_id": None},
-    ("jobs", "wait"): {"timeout_s": "0"},
-    ("allocations", "wait"): {"timeout_s": "0"},
+    ("jobs", "wait"): {"timeout_s": 0.0},
+    ("allocations", "wait"): {"timeout_s": 0.0},
 }
 
 
@@ -393,48 +394,70 @@ def test_wait_verb_omitting_timeout_sends_only_the_id(
     assert client.calls == [(tool, {key: "obj-1"})]
 
 
-@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
-def test_wait_verb_coerces_the_timeout_to_a_number(
-    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
-) -> None:
-    """``--timeout-s`` reaches the tool as a float, not the string argparse produced.
+def _wait_argv(group: str, object_id: str, *tail: str) -> argparse.Namespace:
+    """Parse a real ``kdivectl <group> wait`` command line, so the coercion under test runs."""
+    return build_parser().parse_args([group, "wait", object_id, *tail])
 
-    Curated options are declared with no ``type=``, so the namespace carries ``"1.5"``. Both
-    tools declare ``timeout_s`` as a JSON ``number``, so passing the string through emits a
-    payload the schema rejects (ADR-0470 decision 3).
+
+@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
+@pytest.mark.parametrize("value", ["1.5", "0", "30"])
+def test_wait_verb_sends_the_timeout_as_a_number(
+    handler, key: str, tool: str, value: str, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """``--timeout-s`` reaches the tool as a ``float``, driven through the real parser.
+
+    Both tools declare ``timeout_s`` as a JSON ``number``. The coercion now happens at the
+    parser seam, read off the generated verb at the same path (ADR-0474 decision 1), so this
+    drives ``build_parser`` rather than handing the handler a value argparse could not produce.
+    ``0`` is the documented point read and must arrive as ``0.0``, not be dropped.
     """
     client = _install_session(monkeypatch, _data_envelope({"state": "running"}))
-    asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "1.5"})))
-    assert client.calls == [(tool, {key: "obj-1", "timeout_s": 1.5})]
+    args = _wait_argv(tool.split(".")[0], "obj-1", "--timeout-s", value)
+    asyncio.run(handler(args))
+    assert client.calls == [(tool, {key: "obj-1", "timeout_s": float(value)})]
     assert isinstance(client.calls[0][1]["timeout_s"], float)
 
 
-@pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
-def test_wait_verb_point_read_sends_a_zero_timeout(
-    handler, key: str, tool: str, monkeypatch: pytest.MonkeyPatch, capsys
+@pytest.mark.parametrize("group", ["jobs", "allocations"])
+@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity", "1e400"])
+def test_wait_verb_refuses_a_non_numeric_or_non_finite_timeout(
+    group: str, value: str, capsys
 ) -> None:
-    """The documented point read ``--timeout-s 0`` reaches the tool as ``0.0``, not dropped."""
-    client = _install_session(monkeypatch, _data_envelope({"state": "succeeded"}))
-    asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": "0"})))
-    assert client.calls == [(tool, {key: "obj-1", "timeout_s": 0.0})]
+    """A non-numeric or non-finite ``--timeout-s`` is refused by the parser, before dispatch.
+
+    ADR-0474 moved this out of the handler: ``float()`` accepts ``inf``/``nan`` but JSON encodes
+    neither — pydantic serializes both to ``null``, so the tool never sees a number to reject and
+    silently applies its own 30-second default. The exit code is unchanged at ``2``; what changed
+    is that argparse now says so before any tool call.
+
+    The value is attached with ``=``: argparse's negative-number heuristic matches only a leading
+    digit or ``.``, so a bare ``--timeout-s -inf`` fails earlier with "expected one argument" and
+    would never reach the type callable this test exists to exercise.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args([group, "wait", "obj-1", f"--timeout-s={value}"])
+    assert excinfo.value.code == 2
+    # The usage line names every option, so the flag is matched as part of the error line itself.
+    assert "argument --timeout-s:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("handler", "key", "tool"), _WAIT_CASES)
-@pytest.mark.parametrize("value", ["soon", "inf", "-inf", "nan", "NaN", "infinity", "-5", "-0.5"])
-def test_wait_verb_rejects_a_negative_or_non_finite_timeout(
+@pytest.mark.parametrize("value", ["-5", "-0.5"])
+def test_wait_verb_rejects_a_negative_timeout(
     handler, key: str, tool: str, value: str, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """Only a non-negative finite ``--timeout-s`` reaches the wire (ADR-0470 decision 3).
+    """A negative ``--timeout-s`` parses but never reaches the wire (ADR-0470 decision 3).
 
-    Both refused classes would otherwise be silently reinterpreted rather than rejected.
-    ``float()`` accepts ``inf``/``nan``, but JSON encodes neither: pydantic serializes both to
-    ``null``, so the tool would be handed ``null`` for a declared ``number`` and the transport
-    would raise before the tool's own ``math.isfinite`` guard could answer. A negative is
-    clamped server-side to ``0``, quietly turning a requested wait into a point read — which is
-    how a poll loop computing ``--timeout-s`` from a passed deadline becomes a hot spin.
+    This is the half of the check the parser cannot make: ``GeneratedFlag`` carries no schema
+    ``minimum``, so ``-5`` is a perfectly good finite float and only the handler knows it is out
+    of range. A negative is clamped server-side to ``0``, quietly turning a requested wait into a
+    point read — which is how a poll loop computing ``--timeout-s`` from a passed deadline
+    becomes a hot spin.
     """
     client = _install_session(monkeypatch, _data_envelope({}))
-    code = asyncio.run(handler(_args(**{key: "obj-1", "timeout_s": value})))
+    args = _wait_argv(tool.split(".")[0], "obj-1", "--timeout-s", value)
+    assert args.timeout_s == float(value)
+    code = asyncio.run(handler(args))
     assert code == 2
     assert client.calls == []
     assert "--timeout-s" in capsys.readouterr().err

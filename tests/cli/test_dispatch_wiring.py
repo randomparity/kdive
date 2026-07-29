@@ -10,6 +10,7 @@ import pytest
 from kdive.cli import dispatch
 from kdive.cli.__main__ import build_parser
 from kdive.cli.commands.registry import REGISTRY
+from tests.cli.verb_argv import required_argv_for_curated
 
 
 def test_curated_verb_is_a_known_subcommand() -> None:
@@ -53,10 +54,9 @@ def test_json_absent_after_verb_does_not_clobber_top_level() -> None:
 def test_every_registry_verb_parses_through_the_built_parser() -> None:
     parser = build_parser()
     for verb in REGISTRY:
-        argv = [verb.group, verb.sub, *(f"{p}-val" for p in verb.positionals)]
-        for option in verb.required_options:
-            argv += [f"--{option.replace('_', '-')}", f"{option}-val"]
-        args = parser.parse_args(argv)
+        # Curated parameters take their type and enum from the generated verb at the same path
+        # (ADR-0469, ADR-0474), so a bare "<name>-val" no longer parses for a numeric one.
+        args = parser.parse_args([verb.group, verb.sub, *required_argv_for_curated(verb)])
         assert args.command == verb.group and args.subcommand == verb.sub
 
 
@@ -259,7 +259,10 @@ def test_documented_point_read_invocation_parses(
     """
     args = build_parser().parse_args(argv)
     assert getattr(args, dest) == expected_id
-    assert args.timeout_s == "0"
+    # The parser coerces it (ADR-0474); the runbook still spells the zero out rather than
+    # relying on a default, which is the part this test pins.
+    assert args.timeout_s == 0.0
+    assert isinstance(args.timeout_s, float)
     assert not [k for k in vars(args) if k.startswith("genarg")]
 
 

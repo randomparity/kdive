@@ -52,7 +52,7 @@ async def images_upload(args: argparse.Namespace) -> int:
     }
     lifetime = getattr(args, "lifetime_seconds", None)
     if lifetime is not None:
-        arguments["lifetime_seconds"] = int(lifetime)
+        arguments["lifetime_seconds"] = lifetime
     return await run_mutating_tool("images.upload", arguments, as_json=args.json)
 
 
@@ -75,8 +75,9 @@ async def images_prune(args: argparse.Namespace) -> int:
 
 
 async def images_extend(args: argparse.Namespace) -> int:
+    """Extend a private image's expiry; ``--seconds`` arrives already coerced (ADR-0474)."""
     return await run_mutating_tool(
         "images.extend",
-        {"image_id": args.image_id, "seconds": int(args.seconds), "reason": args.reason},
+        {"image_id": args.image_id, "seconds": args.seconds, "reason": args.reason},
         as_json=args.json,
     )
