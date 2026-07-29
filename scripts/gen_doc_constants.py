@@ -2,7 +2,8 @@
 
 Some agent-facing prose restates a value whose single source of truth is a Python
 constant: the effective single-PUT upload ceiling (``min`` of the S3 single-object cap and
-the ``KDIVE_MAX_UPLOAD_BYTES`` policy limit) and the approximate size of the tool catalog.
+the ``KDIVE_MAX_UPLOAD_BYTES`` policy limit), the approximate size of the tool catalog, and the
+``wait`` tools' default ``timeout_s`` (ADR-0476).
 Hand-copied, these drift silently as the source changes — the review that filed #1368 found
 ``agent-index.md`` claiming "~100 tools" while the live registry had grown well past that.
 
@@ -27,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kdive.config.core_settings import MAX_UPLOAD_BYTES
+from kdive.mcp.tools._common import DEFAULT_WAIT_S
 from kdive.mcp.tools.catalog.artifacts.uploads import SINGLE_PUT_MAX_BYTES
 from scripts.gen_tool_reference import _registry_tools
 
@@ -90,6 +92,13 @@ def bindings() -> list[Binding]:
             / "registrar.py",
             pattern=re.compile(r"the (\d+ GiB) single-PUT size limit"),
             expected=_effective_single_put_ceiling(),
+            writable=False,
+        ),
+        Binding(
+            label="CLI wait default",
+            path=_ROOT / "src" / "kdive" / "cli" / "commands" / "reads.py",
+            pattern=re.compile(r"the tool's own (\d+)-second\s+default"),
+            expected=str(int(DEFAULT_WAIT_S)),
             writable=False,
         ),
     ]
