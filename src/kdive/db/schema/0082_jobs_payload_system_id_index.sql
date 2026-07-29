@@ -1,0 +1,42 @@
+-- 0082_jobs_payload_system_id_index.sql — index the System correlation key on `jobs`
+-- (#1561, ADR-0491). Additive, forward-only (ADR-0015).
+--
+-- `jobs` carried no index beyond its primary key and the `dedup_key` UNIQUE constraint, so every
+-- read that correlates a job to a System — nine call sites across `jobs/queue.py`, four
+-- `reconciler` repairs/cleanups and `systems.snapshot` — was a sequential scan over the whole
+-- table. The table is effectively append-only (the only DELETE is `gc.py`'s single `dedup_key`
+-- delete), so that scan grows without bound.
+--
+-- `payload->>'system_id'` is a JSONB text extraction, so a plain btree on a column cannot serve
+-- it; this is an EXPRESSION index, and the planner matches it only when the query spells the
+-- expression exactly as written here.
+--
+-- SHAPE: one unpartitioned single-key expression index, deliberately NOT the partial
+-- `((payload->>'system_id'), created_at DESC) WHERE state = 'failed'` the issue suggested. Two
+-- measured reasons (ADR-0491 §Decision):
+--
+--   1. HOT updates. `state` appears in neither the key nor a predicate here, so a job's
+--      queued -> running -> terminal transitions and its heartbeats remain heap-only-tuple
+--      updates that touch no index — `payload` is written at enqueue (including the ADR-0447
+--      recycle) and never per attempt. A state-predicated partial index takes the opposite side
+--      of the queue's hottest write path: every transition then inserts and kills an index entry.
+--   2. Size. Appending `created_at DESC, id DESC` makes every key unique and so defeats btree
+--      deduplication, which this shape gets for free because a System's jobs share one key.
+--
+--   What the composite would buy is only the removal of a top-N sort over the handful of jobs
+--   belonging to one System — negligible next to the whole-table scan being removed here.
+--
+-- A single unpartitioned index also serves the correlated anti-joins in
+-- `reconciler/repairs/systems.py` and `reconciler/repairs/allocations.py`, which filter on no
+-- constant `state` at all and which a partial index could not serve.
+--
+-- Rows whose payload has no `system_id` (e.g. `build`) index as NULL rather than being excluded
+-- by a `WHERE (payload->>'system_id') IS NOT NULL` predicate: the predicate is provably implied
+-- by an equality on the expression, but it shrinks the index only in proportion to the
+-- system-less job share and it silently drops out from under any future call site whose
+-- predicate stops implying it.
+--
+-- BUILD LOCK: `apply_migrations` runs every migration inside one transaction (ADR-0015), so
+-- `CREATE INDEX CONCURRENTLY` is not available. This takes a brief ACCESS EXCLUSIVE lock on
+-- `jobs` for the build; migrations run at deploy time, before this build's workers claim.
+CREATE INDEX jobs_payload_system_id_idx ON jobs ((payload->>'system_id'));
