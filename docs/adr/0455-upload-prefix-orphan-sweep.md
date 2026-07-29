@@ -170,6 +170,17 @@ across the blocking LISTs and deletes — but the repair seam still holds one of
 pool's slots checked out for the whole sweep, which is #1554's to restructure, not a property this
 change can claim.
 
+> **Amended by [ADR-0498](0498-page-the-upload-orphan-sweep.md) (#1569).** The sweep no longer
+> materializes a root. It streams each root one `list_objects_v2` page at a time and classifies page
+> by page, so peak memory and the classify's array width are bounded by a page rather than by the
+> bucket — the disclosure this paragraph filed is discharged. Bulk-then-recheck is retained as the
+> ordering; "bulk" now means a page. Store order is preserved exactly, which is why the reproducibility
+> this section relies on still holds. Two things this paragraph could not have anticipated are recorded
+> there rather than here: a listing fault can now arrive mid-root after earlier pages have deleted, and
+> the narrower classify's plan was **measured** (it reaches #1570's `object_key` btree where a
+> root-wide parameter tipped Postgres to a sequential scan; wall-clock time is flat). The #1554 pool
+> slot is still checked out for the whole sweep.
+
 ### 4. A silently scoped-out sweep is distinguishable from a healthy one
 
 Zero deleted is this repair's healthy steady state, so a sweep that has been scoped out of the
@@ -236,10 +247,13 @@ immediately before the raise instead of being lost with it.
 
 ### 6. Each root examines at most `MAX_RECLAIMS_PER_ROOT` candidates
 
-> **Amended by [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (#1575) and #1570.** The
-> per-candidate cost is now a HEAD and a query, and that query is an index scan since migration
-> `0081` added the `artifacts (object_key)` btree. The budget itself is unchanged and was not
-> re-tuned.
+> **Amended by [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (#1575), #1570, and
+> [ADR-0498](0498-page-the-upload-orphan-sweep.md) (#1569).** The per-candidate cost is now a HEAD and
+> a query, and that query is an index scan since migration `0081` added the `artifacts (object_key)`
+> btree. Since the listing is paged, a spent budget also stops the **listing** — a drain no longer
+> enumerates a backlog it cannot act on — and the classify is no longer the root-correlated fault this
+> section's third paragraph describes, because its parameter is a page wide whatever the root's size.
+> What the budget counts, and its value, are unchanged and were not re-tuned.
 
 Each examined candidate costs a LIST and a query whatever its outcome, and that query is the
 unindexed `artifacts` anti-join filed as #1570 — so the cost is per key, not per pass, and the
@@ -279,6 +293,14 @@ setting because it bounds a loop rather than expressing a policy.
 once. The `ImageSweepStore` **port** deliberately keeps its prefix-free method: an image sweep has
 no business being able to list an arbitrary prefix, and widening the port to avoid one delegating
 line would trade a real authority bound for a cosmetic one.
+
+> **Amended by [ADR-0498](0498-page-the-upload-orphan-sweep.md) (#1569).** The primitive moved one
+> level down: `iter_prefix_pages_with_mtime(prefix)` holds the pagination loop and its error mapping,
+> and `list_prefix_with_mtime` is now the flattening delegate over it, leaving `list_image_objects` a
+> delegate of a delegate. This section's rule — the loop exists once — is what drove that rather than
+> being broken by it. The narrow-port argument is also applied a second time, to the sweep's own port:
+> `UploadOrphanStore` declares only the paged method, so handing this sweep a whole root's listing is
+> unrepresentable rather than merely avoided.
 
 ### 8. Both threshold terms are settings, resolved per pass
 
@@ -344,7 +366,11 @@ two, forces Postgres to scan `artifacts` once per classify. That is a repeating 
 grows with every run, on every pass, in steady state with zero leak. "No migration" is therefore a
 true statement about this diff and a misleading one about its cost; the index is filed as **#1570**.
 It is deliberately not taken here: the sweep is correct without it, and a schema change belongs in a
-change whose subject is the schema. The listing side of the same cost is **#1569**.
+change whose subject is the schema. The listing side of the same cost is **#1569**. Both are now
+taken: migration `0081` added the index (#1570), and
+[ADR-0498](0498-page-the-upload-orphan-sweep.md) paged the listing and the classify (#1569) — which
+also narrowed the classify's parameter enough that Postgres reaches for that index instead of the
+scan this paragraph describes.
 
 No schema, no migration, no MCP or RBAC surface, no change to either finalize path, and no change to
 the reaper. One new setting, `KDIVE_UPLOAD_ORPHAN_GRACE_SECONDS` — an exception to the
