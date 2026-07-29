@@ -1,40 +1,45 @@
-"""The ``flock`` liveness gate the uploaded-rootfs partial sweeps unlink through (ADR-0446/0452).
+"""The ``flock`` liveness test the uploaded-rootfs partial paths share (ADR-0446/0452/0495).
 
 A ``<token>.<uuid>.partial`` is written by exactly one fetcher and is a SENSITIVE multi-GiB file no
-``artifacts`` row owns, so three call sites collect it: the opportunistic one on the next fetch of
+``artifacts`` row owns. Three places ask about one: the opportunistic sweep on the next fetch of
 that base (``rootfs_upload_fetch._unlink_orphan_partials``), the reclaim-side backstop when the
 investigation drains (``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``),
-and the row-driven reclaim's own per-checksum probe
-(``rootfs_reclaim._live_writer_holds_a_partial``), which reads the ``True`` return as "defer this
-checksum" and unlinks the crash orphans it passes over on the way.
+and the row-driven reclaim's per-checksum gate
+(``rootfs_reclaim._live_writer_holds_a_partial``). The first two **collect** the file; the third
+only **reads** it and fails closed, which is why this module exposes two mappings over one probe.
 
-None can tell a crash orphan from a download in flight by looking at the filesystem, and each
-originally derived the distinction from state it holds: the fetch side from its per-(investigation,
-checksum) advisory lock, the drain sweep from "no rootfs row remains for this investigation", and
-the row-driven reclaim from the System-state pin classifier. All three derivations are false — a
-session advisory lock belongs to a Postgres *connection* that is idle for the whole download and can
-be reaped from under a live writer (ADR-0446), and both of the others rest on a classifier that
+None of them can tell a crash orphan from a download in flight by looking at the filesystem, and
+each originally derived the distinction from state it holds: the fetch side from its
+per-(investigation, checksum) advisory lock, the drain sweep from "no rootfs row remains for this
+investigation", and the row-driven reclaim from the System-state pin classifier. All three
+derivations are false — a session
+advisory lock belongs to a Postgres *connection* that is idle for the whole download and can be
+reaped from under a live writer (ADR-0446), and both of the others rest on a classifier that
 ``PROVISIONING -> TORN_DOWN`` falsifies (ADR-0452, ADR-0495).
 
 So liveness is asked of the kernel instead. A live writer holds an exclusive ``flock`` on its own
-partial for the whole download-verify-publish window
-(``rootfs_upload_fetch._flocked_partial``), and a candidate a sweep cannot lock is skipped. This
-module is that test, shared rather than duplicated so the callers cannot drift, and placed under
-``providers.shared`` because one caller is a job handler and ``src/kdive/jobs/`` must not reach into
-a provider's lifecycle package.
+partial for the whole download-verify-publish window (``rootfs_upload_fetch._flocked_partial``), and
+a candidate that cannot be locked is a download still in flight. :func:`_probed` is that test,
+shared rather than duplicated so the callers cannot drift on what the kernel's answers *mean*, and
+placed under ``providers.shared`` because one caller is a job handler and ``src/kdive/jobs/`` must
+not reach into a provider's lifecycle package.
 
-What a sweep does where the gate **cannot exist** — a filesystem that cannot ``flock`` at all, on
-which the writer also staged unguarded — is the callers' answer, not this module's, because they
-differ: the fetch-side sweep is opportunistic and skipping there costs a bounded delay, while the
-reclaim-side callers are the last collector and skipping there retires it outright.
+What differs between the callers is only the mapping from answer to **action**, and they genuinely
+disagree on three of five answers — most sharply on a filesystem that cannot ``flock`` at all, where
+the writer also staged unguarded. That is each caller's answer, not this module's: a collector that
+skips there collects nothing at all, while a gate that unlinks there destroys a possibly-live
+writer's only copy.
 """
 
 from __future__ import annotations
 
+import enum
 import errno
 import fcntl
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -49,71 +54,45 @@ _log = logging.getLogger(__name__)
 _UNLOCKABLE_FILESYSTEM_ERRNOS = frozenset({errno.ENOLCK, errno.EOPNOTSUPP})
 
 
-def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> bool:
-    """Unlink ``partial`` unless a live writer holds its ``flock``; every skip is logged.
+class _Liveness(enum.Enum):
+    """What the kernel said about one candidate — five answers rather than a ``bool``.
 
-    Args:
-        partial: The ``<token>.<uuid>.partial`` candidate a sweep found.
-        unlink_when_unlockable: What to do when the filesystem cannot ``flock`` at all
-            (:data:`_UNLOCKABLE_FILESYSTEM_ERRNOS`). Deliberately has **no default** and is
-            answered per call site, because the question is "what happens when this gate cannot
-            exist" and inheriting an answer is how the gap below was created.
-            ``False`` for the fetch-side opportunistic sweep, which keeps ADR-0446 §4's conservative
-            skip: it is bounded by the next fetch and something else collects. ``True`` for both
-            reclaim-side callers, where nothing else collects — skipping there would silently
-            retire the last collector for a SENSITIVE multi-GiB orphan on exactly the hosts where
-            the fetch-side gate had already degraded, which is strictly worse than the
-            pre-ADR-0446 behaviour it would be replacing. ``True`` **is** that pre-ADR-0446
-            behaviour, unchanged, applied only where the kernel refuses to answer.
+    A ``bool`` was enough while every caller was a *collector*, because there "not provably live"
+    and "could not be evaluated" call for the same inaction: leave the file alone. They stop meaning
+    the
+    same thing the moment a caller uses the answer to license deleting something **else**. The
+    ADR-0495 reclaim gate deletes a staged base, an object-store object and an ``artifacts`` row on
+    it, so the distinction the ``bool`` collapsed is named here instead.
+    """
 
-    Returns:
-        ``True`` when a live writer's ``flock`` kept the file, ``False`` in every other case —
-        unlinked, already gone, or left behind because it could not be evaluated. Only the ``True``
-        case is *provably transient*, since the kernel releases an ``flock`` when the holding
-        descriptor closes, including on process exit, normal or ``SIGKILL``. That is what makes it
-        the one outcome a caller may safely wait on, and both reclaim-side readers rest on exactly
-        that: ADR-0452 §4 retains the reclaim drain marker on it and clears the marker on everything
-        else, and ADR-0495 defers a whole checksum on it and reclaims on everything else — so a
-        permanently unsweepable file cannot pin an investigation, or a base, forever.
+    #: ``EWOULDBLOCK``: a live writer holds the ``flock``. The one *provably transient* answer,
+    #: since the kernel drops it when the holding descriptor closes, including on ``SIGKILL``.
+    HELD = "held"
+    #: Locked successfully, so no writer holds it: a crash orphan.
+    UNHELD = "unheld"
+    #: Gone between the walk and the ``open`` — the achieved post-state, not a fault.
+    ABSENT = "absent"
+    #: This candidate could not be evaluated (``EACCES``, ``EMFILE``, ``EIO``). **Not** evidence of
+    #: absence: a partial this process cannot open is one it cannot show is dead.
+    UNEVALUABLE = "unevaluable"
+    #: :data:`_UNLOCKABLE_FILESYSTEM_ERRNOS`: no file here can be locked, *including by the writer*,
+    #: so the protocol carries no information in either direction.
+    UNLOCKABLE = "unlockable"
 
-    Five outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
 
-    *Held.* ``EWOULDBLOCK`` means a writer is still staging this partial, and the skip is the
-    correct action. It is also frequently the **only** externally visible symptom of the condition
-    that produced it — on the fetch side a lost session lock, whose other consequence is a redundant
-    multi-GiB download that reads as ordinary slowness; on the reclaim side a pin-dropping System
-    transition, whose other consequences are a deferred drain (ADR-0452) and, since ADR-0495, a
-    deferred checksum that its caller logs in its own right. It is logged for the same reason
-    ADR-0443 §4 logs a rejected base: the operation succeeds, so the log line is the only evidence
-    it fired.
+@contextmanager
+def _probed(partial: Path) -> Iterator[_Liveness]:
+    """Classify ``partial``'s ``flock`` state, holding the descriptor for the caller's block.
 
-    The message reports what was **observed** rather than either caller's inferred cause. The
-    fetch-side text used to assert a lost Postgres session, which is simply false on the reclaim
-    path where no fetch lock exists at all; naming the observation keeps this from writing a
-    conditional down as an invariant, which is ``_release_fetch_lock``'s own stated principle in
-    this same subsystem and the defect class both ADRs exist to remove.
+    The descriptor stays open — and on :attr:`_Liveness.UNHELD` the lock stays *held* — for the
+    duration of the ``with``, so a collector's ``unlink`` runs under the same lock acquisition that
+    decided the file was dead rather than after releasing it.
 
-    *Cannot evaluate this candidate.* ``EACCES`` under a uid asymmetry of the shape ADR-0442
-    documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest exactly when
-    many stagings are in flight), a transient ``EIO``. This is a **narrowing** of the unconditional
-    ``unlink`` it replaces, which needed only write and execute on the *directory* and no permission
-    on the file. A partial this process cannot even open is one it cannot show is dead, and
-    unlinking it anyway is the bug being fixed. ``WARNING``, because on the reclaim side there is no
-    further backstop behind this skip.
-
-    *Cannot lock at all.* :data:`_UNLOCKABLE_FILESYSTEM_ERRNOS` is a different condition from the
-    one above and must not be folded into it, which is the mistake this argument exists to prevent.
-    It is not "this candidate resists evaluation" but "no file on this filesystem can be evaluated,
-    including by the writer" — the exact premise ``_flocked_partial`` degrades on, staging *without*
-    a lock. Skipping there protects nothing and only decides which sweep stops collecting, so the
-    caller answers it via ``unlink_when_unlockable`` rather than inheriting a policy.
-
-    *Absent.* A candidate that vanishes between the glob and the ``open`` is the achieved
-    post-state, not a fault — every caller walks the same directory.
-
-    *Unlinkable.* The ``unlink``'s own fault, likeliest ``EPERM`` under a sticky-bit or foreign-uid
-    staging directory, plus ``EROFS`` and ``EIO``. Handled here, per candidate, so one bad file
-    cannot abort the rest of a caller's pass.
+    Every branch logs the **observation** and nothing else. What to do about it belongs to the
+    caller, and naming an action here is how the fetch-side text came to assert a lost Postgres
+    session on a path that has no fetch lock at all — writing a conditional down as an invariant,
+    which is ``_release_fetch_lock``'s own stated principle in this same subsystem. A caller whose
+    decision needs its own line emits one (``_reclaim_one_checksum`` does).
 
     ``O_NONBLOCK`` is a no-op on a regular file and is there for the reason ADR-0443 §2 checks
     ``S_ISREG`` before opening a staged base: opening a FIFO for reading blocks until a writer
@@ -125,15 +104,16 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
     try:
         fd = os.open(partial, os.O_RDONLY | os.O_NONBLOCK)
     except FileNotFoundError:
-        return False
+        yield _Liveness.ABSENT
+        return
     except OSError as err:
         _log.warning(
-            "could not open the staging partial %s to test whether a live writer holds it (%s); "
-            "leaving it in place rather than unlinking it unchecked",
+            "could not open the staging partial %s to test whether a live writer holds it (%s)",
             partial,
             err.strerror,
         )
-        return False
+        yield _Liveness.UNEVALUABLE
+        return
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -144,22 +124,146 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
                 "collectable as soon as its holder's descriptor closes",
                 partial,
             )
-            return True
+            yield _Liveness.HELD
+            return
         except OSError as err:
-            if err.errno not in _UNLOCKABLE_FILESYSTEM_ERRNOS or not unlink_when_unlockable:
+            if err.errno in _UNLOCKABLE_FILESYSTEM_ERRNOS:
                 _log.warning(
-                    "could not test whether a live writer holds the staging partial %s (%s); "
-                    "leaving it in place rather than unlinking it unchecked",
+                    "this host cannot flock the staging partial %s (%s), so no writer here holds "
+                    "one either and the liveness gate cannot exist on this filesystem",
                     partial,
                     err.strerror,
                 )
-                return False
+                yield _Liveness.UNLOCKABLE
+                return
             _log.warning(
-                "this host cannot flock the staging partial %s (%s), so no writer here holds one "
-                "either and the liveness gate cannot exist; unlinking it as this sweep did before "
-                "the gate was added, because it is the last collector for it",
+                "could not test whether a live writer holds the staging partial %s (%s)",
                 partial,
                 err.strerror,
+            )
+            yield _Liveness.UNEVALUABLE
+            return
+        yield _Liveness.UNHELD
+    finally:
+        os.close(fd)
+
+
+def live_writer_may_hold_partial(partial: Path) -> bool:
+    """Whether ``partial`` may still be held by a live writer — read-only, and **fail-closed**.
+
+    The ADR-0495 reclaim gate's question, and deliberately *not*
+    :func:`unlink_partial_if_unheld` with its return re-read. That function is a collector
+    predicate:
+    its ``False`` means "dealt with, or leave it alone", and both are safe because the only thing it
+    acts on is the file itself. This caller acts on three *other* things — a staged base, an
+    object-store object, and an ``artifacts`` row — so it needs the two answers that predicate
+    merges kept apart.
+
+    Fail-closed on :attr:`_Liveness.UNEVALUABLE`, which is the whole point. An ``EACCES`` partial
+    under the uid asymmetry ADR-0442 documents in this same subsystem, or an ``EMFILE`` under
+    descriptor exhaustion (likeliest exactly when many stagings are in flight), is a file this
+    process **cannot show is dead**; reading that as "no writer" and then deleting the last copies
+    of a SENSITIVE base is the failure mode the gate exists to prevent. It matches
+    ``_overlay_pins_base`` — the gate one step earlier in the same function — which is fail-closed
+    on every stat fault but ``ENOENT``.
+
+    :attr:`_Liveness.UNLOCKABLE` reads as "may **not** be held", the one place this is deliberately
+    not conservative. There the writer's own ``_flocked_partial`` degraded and staged unguarded, so
+    no answer is available for any file on that filesystem, ever; deferring on it is not caution but
+    a
+    permanent refusal to reclaim any uploaded base on that host — the never-terminating shape
+    ADR-0452 §5 rejects. The reclaim degrades there to its pre-ADR-0495 behaviour, and the drain
+    tail's own collector is unaffected.
+
+    Read-only, unlike every other caller: it never unlinks. A crash orphan needs no collecting to
+    reach this verdict, since :attr:`_Liveness.UNHELD` does not defer either way, and unlinking on
+    :attr:`_Liveness.UNLOCKABLE` would destroy the unguarded partial of a writer that may well be
+    live, on exactly the hosts where nothing can prove otherwise.
+    :func:`~kdive.jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir` remains
+    that file's collector, unchanged.
+    """
+    with _probed(partial) as liveness:
+        return liveness in (_Liveness.HELD, _Liveness.UNEVALUABLE)
+
+
+def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> bool:
+    """Unlink ``partial`` unless a live writer holds its ``flock``; every skip is logged.
+
+    Args:
+        partial: The ``<token>.<uuid>.partial`` candidate a sweep found.
+        unlink_when_unlockable: What to do when the filesystem cannot ``flock`` at all
+            (:data:`_UNLOCKABLE_FILESYSTEM_ERRNOS`). Deliberately has **no default** and is
+            answered per call site, because the question is "what happens when this gate cannot
+            exist" and inheriting an answer is how the gap below was created.
+            ``False`` for the fetch-side opportunistic sweep, which keeps ADR-0446 §4's conservative
+            skip: it is bounded by the next fetch and something else collects. ``True`` for the
+            reclaim-side drain tail, where nothing else collects — skipping there would silently
+            retire the last collector for a SENSITIVE multi-GiB orphan on exactly the hosts where
+            the fetch-side gate had already degraded, which is strictly worse than the
+            pre-ADR-0446 behaviour it would be replacing. ``True`` **is** that pre-ADR-0446
+            behaviour, unchanged, applied only where the kernel refuses to answer.
+
+            The ADR-0495 reclaim gate is not a caller of this function at all, so it has no answer
+            here: it must not unlink anything, and it needs :attr:`_Liveness.UNEVALUABLE` kept apart
+            from :attr:`_Liveness.UNHELD`, which this ``bool`` merges. See
+            :func:`live_writer_may_hold_partial`.
+
+    Returns:
+        ``True`` when a live writer's ``flock`` kept the file, ``False`` in every other case —
+        unlinked, already gone, or left behind because it could not be evaluated. Only the ``True``
+        case is *provably transient*, since the kernel releases an ``flock`` when the holding
+        descriptor closes, including on process exit, normal or ``SIGKILL``. That is what makes it
+        the one outcome a caller may safely wait on: ADR-0452 §4 retains the reclaim drain marker on
+        it and clears the marker on everything else, so a permanently unsweepable file cannot pin an
+        investigation forever.
+
+    Five outcomes, deliberately not collapsed into one silent ``return`` (ADR-0446 §4):
+
+    *Held.* ``EWOULDBLOCK`` means a writer is still staging this partial, and the skip is the
+    correct action. It is also frequently the **only** externally visible symptom of the condition
+    that produced it — on the fetch side a lost session lock, whose other consequence is a redundant
+    multi-GiB download that reads as ordinary slowness; on the reclaim side a pin-dropping System
+    transition, whose other consequence is a deferred drain. :func:`_probed` logs it for the same
+    reason ADR-0443 §4 logs a rejected base: the operation succeeds, so the log line is the only
+    evidence it fired.
+
+    *Cannot evaluate this candidate.* ``EACCES`` under a uid asymmetry of the shape ADR-0442
+    documents in this same subsystem, ``EMFILE`` under descriptor exhaustion (likeliest exactly when
+    many stagings are in flight), a transient ``EIO``. This is a **narrowing** of the unconditional
+    ``unlink`` it replaces, which needed only write and execute on the *directory* and no permission
+    on the file. A partial this process cannot even open is one it cannot show is dead, and
+    unlinking it anyway is the bug being fixed. ``WARNING``, because on the reclaim side there is no
+    further backstop behind this skip. It is still reported as ``False`` here — for a collector
+    "leave it alone" and "it is already gone" call for the same inaction — which is exactly why the
+    ADR-0495 gate cannot read this return.
+
+    *Cannot lock at all.* :data:`_UNLOCKABLE_FILESYSTEM_ERRNOS` is a different condition from the
+    one above and must not be folded into it, which is the mistake this argument exists to prevent.
+    It is not "this candidate resists evaluation" but "no file on this filesystem can be evaluated,
+    including by the writer" — the exact premise ``_flocked_partial`` degrades on, staging *without*
+    a lock. Skipping there protects nothing and only decides which sweep stops collecting, so the
+    caller answers it via ``unlink_when_unlockable`` rather than inheriting a policy.
+
+    *Absent.* A candidate that vanishes between the walk and the ``open`` is the achieved
+    post-state, not a fault — every caller walks the same directory.
+
+    *Unlinkable.* The ``unlink``'s own fault, likeliest ``EPERM`` under a sticky-bit or foreign-uid
+    staging directory, plus ``EROFS`` and ``EIO``. Handled here, per candidate, so one bad file
+    cannot abort the rest of a caller's pass.
+    """
+    with _probed(partial) as liveness:
+        if liveness is _Liveness.HELD:
+            return True
+        if liveness is _Liveness.ABSENT or liveness is _Liveness.UNEVALUABLE:
+            return False
+        if liveness is _Liveness.UNLOCKABLE:
+            if not unlink_when_unlockable:
+                return False
+            _log.warning(
+                "unlinking the staging partial %s as this sweep did before the liveness gate was "
+                "added, because this host cannot answer the question and this is its last "
+                "collector",
+                partial,
             )
         try:
             partial.unlink(missing_ok=True)
@@ -169,6 +273,4 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
                 partial,
                 err.strerror,
             )
-    finally:
-        os.close(fd)
     return False

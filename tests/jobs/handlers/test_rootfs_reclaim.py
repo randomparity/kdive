@@ -818,7 +818,8 @@ def test_a_live_held_partial_defers_its_own_checksum_whole(
                 migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
             )
             assert result == "0"  # deferred, not drained — and the job still succeeded
-            assert live.exists(), "the reclaim destroyed a live fetcher's partial"
+            # read_bytes rather than exists(): the gate is read-only, so the file must be intact,
+            # not merely present. exists() alone would also pass for a truncated-and-recreated one.
             assert live.read_bytes() == b"a detached download is still writing this"
             assert staged.exists(), "the base was unlinked under a live download"
             assert staged_rootfs_marker_path(staged).exists()
@@ -895,10 +896,11 @@ def test_a_crash_orphan_partial_of_the_same_token_does_not_defer_the_reclaim(
     migrated_url: str, tmp_path: Path
 ) -> None:
     # The probe answers "is a writer live", not "does a partial exist". A killed fetcher's partial
-    # holds no flock, so it is a crash orphan: it is collected in the same pass (the probe unlinks
-    # through the shared reclaim-side gate) and the checksum drains. Deferring on its mere presence
-    # would leak the base, the object and the row for as long as that orphan sat there, which is
-    # unbounded — the leak #1565 exists to close, re-created by its own fix.
+    # holds no flock, so it is a crash orphan and does not defer: the checksum drains, and the file
+    # is collected by the drain tail's own sweep in the same job (the ADR-0495 gate is read-only and
+    # never unlinks anything). Deferring on its mere presence would leak the base, the object and
+    # the row for as long as that orphan sat there, which is unbounded — the leak #1565 exists to
+    # close, re-created by its own fix.
     inv = uuid4()
 
     async def _run() -> None:
@@ -927,6 +929,144 @@ def test_a_crash_orphan_partial_of_the_same_token_does_not_defer_the_reclaim(
         try:
             assert not await _row_exists(check, artifact_id)
             assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+async def _defers_with(
+    migrated_url: str,
+    tmp_path: Path,
+    *,
+    patch: pytest.MonkeyPatch,
+    make_partial: bool = True,
+) -> tuple[bool, list[str]]:
+    """Run one reclaim of a `torn_down`-referenced checksum; report whether it retained everything.
+
+    Shared by the fail-closed cases below, which differ only in *which* fault the monkeypatch
+    injects. Returns (everything retained, keys the store was asked to delete) so each case asserts
+    the whole retention contract rather than one file.
+    """
+    seed = await connect(migrated_url)
+    try:
+        inv = await _seed_investigation(seed, state="closed", closed=True)
+        artifact_id = await _seed_rootfs_row(seed, inv)
+        await _seed_system(seed, inv, "torn_down", _upload_profile())
+    finally:
+        await seed.close()
+    rootfs_dir, uploads = _dirs(tmp_path)
+    staged = _stage(uploads, inv)
+    if make_partial:
+        (uploads / str(inv) / f"{_TOKEN}.deadbeef.partial").write_bytes(b"cannot be evaluated")
+    store = _RecordingStore()
+    result = await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+    check = await connect(migrated_url)
+    try:
+        row_kept = await _row_exists(check, artifact_id)
+    finally:
+        await check.close()
+    del patch  # the caller owns the patch context; named so the dependency is explicit
+    retained = result == "0" and staged.exists() and not store.deleted and row_kept
+    return retained, store.deleted
+
+
+def test_a_partial_that_cannot_be_opened_defers_rather_than_reading_as_dead(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The distinction that makes this gate different from the drain tail's collector. EACCES (the
+    # uid asymmetry ADR-0442 documents here) or EMFILE means "this file cannot be shown to be dead",
+    # not "no writer" — but `unlink_partial_if_unheld` reports both as False, because for a
+    # *collector* "leave it alone" and "already gone" are the same inaction. Reading that False as a
+    # licence to delete the base, the object and the row is #1558's data loss with extra steps, so
+    # the gate uses the fail-closed `live_writer_may_hold_partial` instead, matching
+    # `_overlay_pins_base` one gate earlier. The staging *sweep* still leaves the file
+    # (test_an_unopenable_partial_...); what is new is that the reclaim no longer marches past it.
+    async def _run() -> None:
+        real_open = os.open
+
+        def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+            if str(path).endswith(".partial"):
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "open", refusing_open)
+            retained, deleted = await _defers_with(migrated_url, tmp_path, patch=patch)
+        assert retained, "an unevaluable partial was read as 'no live writer'"
+        assert deleted == []
+
+    asyncio.run(_run())
+
+
+def test_an_unreadable_staging_dir_defers_rather_than_reading_as_empty(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The directory-level half of the same rule, and the reason the walk is `os.scandir` rather than
+    # `Path.glob`. glob swallows the OSError and yields nothing, so an unreadable staging directory
+    # is indistinguishable from an empty one — while `_unlink_staged_base` behind it still SUCCEEDS,
+    # because unlinking a known name needs write+execute on the directory, not read. That is a real
+    # fail-open path (mode 0o333), not a theoretical one, so the walk fault defers.
+    async def _run() -> None:
+        real_scandir = os.scandir
+
+        def refusing_scandir(path: Any = ".", *args: Any, **kwargs: Any) -> Any:
+            if "rootfs-uploads" in str(path):
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_scandir(path, *args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "scandir", refusing_scandir)
+            retained, deleted = await _defers_with(
+                migrated_url, tmp_path, patch=patch, make_partial=False
+            )
+        assert retained, "an unreadable staging directory was read as holding no live writer"
+        assert deleted == []
+
+    asyncio.run(_run())
+
+
+def test_a_host_that_cannot_flock_still_reclaims_rather_than_deferring_forever(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The one place the gate is deliberately NOT conservative. On ENOLCK/EOPNOTSUPP the writer's own
+    # `_flocked_partial` degraded and staged unguarded, so no answer exists for any file on that
+    # filesystem, ever. Deferring would refuse to reclaim any uploaded base on such a host forever —
+    # the never-terminating shape ADR-0452 §5 rejects — so the reclaim proceeds, degrading to its
+    # pre-ADR-0495 behaviour. That the gate does not *unlink* the partial on the way there is pinned
+    # directly on the primitive, in tests/providers/shared/test_staging_partials.py.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        unguarded = uploads / str(inv) / f"{_TOKEN}.deadbeef.partial"
+        unguarded.write_bytes(b"staged unguarded on a filesystem that cannot lock")
+        store = _RecordingStore()
+
+        def unlockable_flock(fd: int, operation: int) -> None:
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(fcntl, "flock", unlockable_flock)
+            result = await _run_handler(
+                migrated_url, inv, [artifact_id], store, rootfs_dir, uploads
+            )
+
+        assert result == "1"  # proceeds rather than refusing forever on such a host
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
         finally:
             await check.close()
 
