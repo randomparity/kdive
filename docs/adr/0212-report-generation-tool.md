@@ -114,6 +114,19 @@ XLSX rendering adds one pinned dependency, `openpyxl`.
     variant below.
 - **Unchanged:** the existing per-domain read tools, `artifacts.get`'s System scope, the
   `ToolResponse` envelope, and the accounting RBAC/audit helpers, which the new plane reuses.
+- **Explicit non-goal: byte-reproducibility of report artifacts** (#1564). Each report gets a
+  fresh per-call `uuid4` `report_id` (`mcp/tools/reports/generate.py:247`) that becomes the
+  artifact's `owner_id` (`services/reports/artifacts.py:68-78`), so there is no content-addressed
+  storage or cross-run dedup for identical-content renders to serve — this ADR already rejected a
+  durable `reports` row above, which is the object that dedup or digest comparison would need.
+  `render_csv` is already deterministic; `render_xlsx` is not, since it saves through openpyxl's
+  `Workbook()`, which stamps `DocumentProperties.created`/`.modified` from wall clock and lets
+  `zipfile` stamp every archive member's mtime from `time.localtime()` — openpyxl offers no hook
+  to override either. Pinning both against the report's own `as_of` would make XLSX reproducible,
+  but nothing in this design consumes that property, so it is not pursued (ADR-0092 records an
+  analogous per-subsystem non-goal for rootfs image rebuilds; ADR-0072 shows the repo makes this
+  choice per subsystem rather than globally, since there reproducibility is load-bearing for
+  fault injection).
 
 ## Alternatives considered
 
