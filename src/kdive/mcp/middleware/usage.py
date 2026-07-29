@@ -66,13 +66,40 @@ def _call_arguments(context: Any) -> Mapping[str, object] | None:
     return arguments if isinstance(arguments, Mapping) else None
 
 
+def _project_in(mapping: Mapping[Any, Any]) -> str | None:
+    """One mapping's ``project`` entry, if it is a non-empty string."""
+    value = mapping.get("project")
+    return value if isinstance(value, str) and value else None
+
+
 def _call_project(context: Any) -> str | None:
-    """The call's ``project`` argument, if present as a non-empty string."""
+    """The call's ``project`` argument, at the top level or one level into a payload.
+
+    Read and list tools that take a typed request model carry the project one level down —
+    under ``request`` for most of them, under ``target`` for ``accounting.usage`` — so a
+    top-level-only lookup left every such row unattributed, including the denied ones
+    ADR-0148 keeps the row for (#1644). Descending into each ``Mapping``-valued argument
+    covers them all without a wrapper-key list that would drift as tools are added.
+
+    One level only: deeper, a ``project`` field on some nested sub-model would be attributed
+    as the call's project. The top level still wins, so a tool that names both is resolved by
+    its own argument rather than by its payload's.
+
+    Total by construction — it runs inside ADR-0148's best-effort recorder, where a raise
+    costs the whole row. Anything that is not a mapping carrying a non-empty string
+    ``project`` yields ``None``.
+    """
     arguments = _call_arguments(context)
-    if arguments is not None:
-        value = arguments.get("project")
-        if isinstance(value, str) and value:
-            return value
+    if arguments is None:
+        return None
+    top_level = _project_in(arguments)
+    if top_level is not None:
+        return top_level
+    for value in arguments.values():
+        if isinstance(value, Mapping):
+            nested = _project_in(value)
+            if nested is not None:
+                return nested
     return None
 
 
