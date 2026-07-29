@@ -30,6 +30,17 @@ Scope — narrower than #1625's full acceptance, in two ways worth stating plain
   the branch the chain wraps. So it writes no ``audit_log`` row *and* records
   ``tool_invocation.outcome`` as ``error`` rather than ``denied``. **Both** halves of that
   class are deferred to #1635, which carries the fix and the assertions it unblocks.
+* ``UsageTrackingMiddleware``'s exception-carried exits are not driven here — both cases
+  below land on its returned-result branch. Its ``META_TOOLS`` check is a single early
+  return ahead of the ``try``, so all three exits share one guard, but that path stays
+  unpinned end to end. Noted on #1635, whose fix is what makes its ``outcome`` assertable.
+
+Each test carries a **positive control**: it calls the same inner tool directly as well as
+through the gateway, and asserts two identical rows. Without it, "the outer chain ran and
+``META_TOOLS`` suppressed its row" and "the outer chain never ran" are the same observation —
+one absent row — and the redden proof above would evaporate silently if
+``app.call_tool``'s ``run_middleware`` default ever changed. With it, a dead outer chain
+yields one row and a stripped ``META_TOOLS`` yields three.
 
 The identity half is real too: the token is minted, signed, and run through the same
 ``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
@@ -133,6 +144,10 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
                 result = await app.call_tool(
                     "tools.invoke", {"name": "session.whoami", "arguments": {}}
                 )
+                # Positive control — the same tool, called directly. Its row is what proves
+                # the outer chain runs at all, so the gateway's missing outer row is a
+                # suppression rather than a chain that never executed.
+                await app.call_tool("session.whoami", {})
             return _structured(result), await _fetch(pool, _USAGE_ROWS)
 
     envelope, rows = asyncio.run(_run())
@@ -142,9 +157,11 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     assert envelope["status"] == "ok"
     assert envelope["data"]["principal"] == _PRINCIPAL
 
-    # One row, keyed to the inner tool and attributed to the verified token. Without the
-    # META_TOOLS skip the outer chain also records "tools.invoke" and this is two rows.
-    assert rows == [("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)]
+    # Two rows for two dispatches of the inner tool, each attributed to the verified token
+    # and neither keyed to the wrapper. One row means the outer chain never ran; three
+    # means "tools.invoke" left META_TOOLS and the wrapper recorded itself.
+    row = ("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    assert rows == [row, row]
 
 
 def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
@@ -173,16 +190,19 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
                 result = await app.call_tool(
                     "tools.invoke", {"name": "audit.query", "arguments": {"request": request}}
                 )
+                # Positive control — the same denial, called directly. See the success test.
+                await app.call_tool("audit.query", {"request": request})
             return _structured(result), await _fetch(pool, _USAGE_ROWS)
 
     envelope, usage_rows = asyncio.run(_run())
 
     # The client-visible envelope is keyed to the inner tool, not to the gateway wrapper.
-    # Independent of the row below: object_id is chosen by the handler, where the row's
+    # Independent of the rows below: object_id is chosen by the handler, where the row's
     # tool column comes from the MCP call name. Not asserting error_category here — the
-    # middleware derives the row's "denied" outcome from it, so the row already pins it.
+    # middleware derives the row's "denied" outcome from it, so the rows already pin it.
     assert envelope["object_id"] == "audit.query"
 
-    # One row, keyed to the inner tool and attributed to the verified token. Without the
-    # META_TOOLS skip the outer chain also records a "tools.invoke" row and this is two.
-    assert usage_rows == [("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)]
+    # Two rows for two dispatches of the inner tool. One means the outer chain never ran;
+    # three means "tools.invoke" left META_TOOLS and the wrapper recorded itself.
+    row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    assert usage_rows == [row, row]
