@@ -202,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The denial-plane skip is not de-duplication
 - Record the denial-boundary ToolError unwrap
 - Amend ADR-0045 §2 and ADR-0046 §3, which ADR-0486 falsifies
+- Correct two claims ADR-0486's branch left overstated
 
 ### Fixed
 
