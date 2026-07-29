@@ -72,6 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inject build_app's tracer and meter to pin telemetry skip
 - Index jobs on the payload system_id correlation key
 - Add a staging-drain lane keyed on systems
+- Yield listing pages instead of one flattened root
 
 ### Changed
 
@@ -218,6 +219,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0497 for finalize-side object verification
 - Name local-libvirt's put_stream as the reachable racing write
 - Disclose the both-dispatches-fail arm and the HEAD retry budget
+- Record ADR-0498 for paging the upload orphan sweep
+- Fix a garbled docstring and state two port contracts
+- Correct ADR-0498's identical-outcome claim, amend 0455 §5
 
 ### Fixed
 
@@ -371,6 +375,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Key the staging drain on each file's own token
 - Decide the drain from the walk, not from the token set
 - Refuse to register a captured object the store no longer holds
+- Sweep each upload root a listing page at a time
 
 ### Build
 
