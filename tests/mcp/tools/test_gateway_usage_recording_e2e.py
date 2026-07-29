@@ -139,11 +139,16 @@ async def _fetch(pool: AsyncConnectionPool, query: LiteralString) -> list[tuple[
 # would leave a row misattributed to a blank or stale principal indistinguishable from a
 # correct one — which is the whole value of the row (ADR-0148).
 #
-# `project` is deliberately absent: it is NULL on the denial call below, because
-# `_call_project` reads only top-level call arguments and `audit.query` nests its project
-# under `request` (#1644). Selecting it would pin that gap rather than the attribution.
+# `project` is selected too, since #1644 taught `_call_project` to descend one level into a
+# typed-request payload: `audit.query` nests its project under `request`, so the denial calls
+# below now attribute their rows to a project rather than to NULL. Reverting that fix reddens
+# both denial tests here — the attribution they already pinned is what the project rides on.
+# On the `session.whoami` row the column stays NULL and is a control rather than a claim
+# under test: that call carries no project at any depth, so no change to the resolver moves
+# it. It is spelled out only to keep every row here compared as a whole tuple.
 _USAGE_ROWS = (
-    "SELECT tool, outcome, principal, agent_session, client_id FROM tool_invocation ORDER BY ts"
+    "SELECT tool, outcome, principal, agent_session, client_id, project "
+    "FROM tool_invocation ORDER BY ts"
 )
 
 
@@ -172,7 +177,7 @@ def test_real_gateway_call_records_one_usage_row_keyed_to_inner(migrated_url: st
     # Two rows for two dispatches of the inner tool, each attributed to the verified token
     # and neither keyed to the wrapper. One row means the outer chain never ran; three
     # means "tools.invoke" left REENTRANT_TOOLS and the wrapper recorded itself.
-    row = ("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    row = ("session.whoami", "ok", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)
     assert rows == [row, row]
 
 
@@ -215,7 +220,7 @@ def test_real_gateway_denial_records_one_denied_usage_row_keyed_to_inner(
 
     # Two rows for two dispatches of the inner tool. One means the outer chain never ran;
     # three means "tools.invoke" left REENTRANT_TOOLS and the wrapper recorded itself.
-    row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, "proj-not-granted")
     assert usage_rows == [row, row]
 
 
@@ -281,7 +286,7 @@ def test_real_dispatch_role_denial_is_audited_enveloped_and_recorded_denied(
     audit_row = ("audit.query", _PRINCIPAL, _AGENT_SESSION, _PROJECT, "denied", None, None)
     assert audit_rows == [audit_row, audit_row]
 
-    usage_row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID)
+    usage_row = ("audit.query", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, _PROJECT)
     assert usage_rows == [usage_row, usage_row]
 
 
