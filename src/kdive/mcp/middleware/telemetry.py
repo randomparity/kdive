@@ -47,9 +47,10 @@ class TelemetryMiddleware(Middleware):
     ) -> Any:
         """Time and trace one tool call; record RED metrics; re-raise on failure."""
         tool = context.message.name
-        # De-duplication only (ADR-0485): a re-entrant dispatcher's inner call emits the span.
-        # UNMETERED_TOOLS is deliberately not skipped here — a span and three metric points are
-        # cheap and sampled, and they are where discovery latency and error rate are diagnosed.
+        # De-duplication only (ADR-0485): a re-entrant dispatcher's inner chain emits the span.
+        # UNMETERED_TOOLS is deliberately not skipped here — a span (sampled) and two metric
+        # points stay in process, unlike a tool_invocation row, and this is the plane where
+        # discovery latency and error rate are diagnosed.
         if tool in REENTRANT_TOOLS:
             return await call_next(context)
         started = time.perf_counter()

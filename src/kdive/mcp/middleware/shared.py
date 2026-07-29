@@ -13,17 +13,18 @@ from kdive.mcp.responses import ToolResponse
 # #1654; amends ADR-0268 §6, #866). A tool joins the set whose reason it satisfies.
 
 # De-duplication: each name re-enters the middleware chain via
-# app.call_tool(run_middleware=True), so the inner call is the authoritative record. Without
-# the skip the outer chain double-counts every usage/telemetry row, and on a denial writes a
-# *misattributed* audit row keyed to the dispatcher rather than the tool that was denied.
-# Every per-call recorder skips this set.
+# app.call_tool(run_middleware=True), so the inner chain is the authoritative record — including
+# for an unknown inner name, since FastMCP runs the chain before resolution and resolves inside
+# call_next. Without the skip the outer chain double-counts every usage/telemetry row, and on a
+# denial writes a *misattributed* audit row keyed to the dispatcher rather than the tool that
+# was denied. Every per-call recorder skips this set.
 REENTRANT_TOOLS: frozenset[str] = frozenset({"tools.invoke"})
 
 # Volume: each name does NOT re-enter and has no inner recorder, so skipping it forgoes the
 # only record that would ever exist. Taken deliberately for the usage plane alone, where a
 # row is a per-call Postgres write on the highest-frequency agent call. Telemetry and denial
-# audit do not skip this set — spans and metrics are cheap, sampled, and the plane where
-# discovery latency is diagnosed.
+# audit do not skip this set — a span and its metric points stay in process (the span is
+# sampled besides), and that is the plane where discovery latency is diagnosed.
 UNMETERED_TOOLS: frozenset[str] = frozenset({"tools.search"})
 
 
