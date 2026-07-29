@@ -245,7 +245,8 @@ def test_project_only_token_denied_unaudited(migrated_url: str) -> None:
             resp = await inventory_tools.list_inventory(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["inventory.list"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "inventory.list" not in resp.suggested_next_actions  # ADR-0471, #1596
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())

@@ -133,7 +133,8 @@ def test_project_only_token_denied_unaudited(migrated_url: str) -> None:
             resp = await diagnostics.run_diagnostics(pool, _factory(_HEALTHY), _PROJECT_ADMIN)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["ops.diagnostics"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "ops.diagnostics" not in resp.suggested_next_actions  # ADR-0471, #1596
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())

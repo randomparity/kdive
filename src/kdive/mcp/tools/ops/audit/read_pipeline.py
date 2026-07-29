@@ -9,7 +9,6 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.mcp.responses import JsonValue, ToolResponse
 from kdive.mcp.tools._common import InvalidCursor
 from kdive.mcp.tools._common import clamp_list_limit as _clamp_list_limit
@@ -53,9 +52,7 @@ async def query_platform_audited_page(
         require_platform_role(ctx, PlatformRole.PLATFORM_AUDITOR)
     except AuthorizationError:
         await _reads.audit_denial(pool, ctx, tool=tool, args=args)
-        return ToolResponse.failure(
-            object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-        )
+        return ToolResponse.denied(object_id)
 
     after: CursorAnchor | None = None
     if cursor:

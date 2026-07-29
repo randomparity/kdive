@@ -186,7 +186,8 @@ def test_set_paused_denied_for_auditor_is_audited(migrated_url: str, paused: boo
             ctx = _ctx(platform_roles=frozenset({PlatformRole.PLATFORM_AUDITOR}))
             resp = await ops_queue.set_queue_paused(pool, ctx, paused=paused)
         assert resp.status == "error"
-        assert resp.suggested_next_actions == ["ops.set_queue_paused"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "ops.set_queue_paused" not in resp.suggested_next_actions  # ADR-0471, #1596
         assert await _paused(migrated_url) is False
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1 and rows[0][1] == "platform_auditor"

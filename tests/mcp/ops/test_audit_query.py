@@ -326,7 +326,8 @@ def test_cross_project_project_only_token_denied_unaudited(migrated_url: str) ->
             resp = await audit_tools.query_all_projects(pool, ctx, request=_all_projects_query())
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["audit.query"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "audit.query" not in resp.suggested_next_actions  # ADR-0471, #1596
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())

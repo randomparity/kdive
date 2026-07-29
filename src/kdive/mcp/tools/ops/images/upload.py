@@ -72,9 +72,9 @@ async def upload(
             await audit_project_denial(
                 pool, ctx, tool=UPLOAD_TOOL, project=request.project, args={"name": request.name}
             )
-            return denied(request.name, UPLOAD_TOOL)
+            return denied(request.name)
         except AuthorizationError:
-            return denied(request.name, UPLOAD_TOOL)
+            return denied(request.name)
         if request.quarantine_key.startswith(PUBLISHED_IMAGE_PREFIX):
             return _config_error(
                 request.name, data={"reason": "quarantine_key in published prefix"}

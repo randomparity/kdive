@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 from fastmcp import FastMCP
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import (
     ALL_PROJECTS_SCOPE,
@@ -37,9 +36,7 @@ _OBJECT_ID = "secrets"
 
 
 def _denied() -> ToolResponse:
-    return ToolResponse.failure(
-        _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
-    )
+    return ToolResponse.denied(_OBJECT_ID)
 
 
 async def list_secrets_tool(

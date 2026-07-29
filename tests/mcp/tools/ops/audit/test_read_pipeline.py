@@ -117,5 +117,6 @@ def test_query_denies_and_read_audits_a_non_auditor(monkeypatch: pytest.MonkeyPa
 
     assert resp.object_id == "obj"
     assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-    assert resp.suggested_next_actions == ["audit.read"]
+    assert resp.suggested_next_actions == ["session.whoami"]
+    assert "audit.read" not in resp.suggested_next_actions  # ADR-0471, #1596
     assert denials == [(pool, ctx, "audit.read", {"a": 1})]

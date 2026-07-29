@@ -69,7 +69,7 @@ async def reconcile_systems(
 
     Returns:
         A success ``ToolResponse`` carrying the diff, or a
-        ``ToolResponse.failure(AUTHORIZATION_DENIED)`` when the caller lacks the role.
+        ``ToolResponse.denied`` envelope when the caller lacks the role.
     """
     with bind_context(principal=ctx.principal):
         try:
@@ -82,11 +82,7 @@ async def reconcile_systems(
                 scope=_BASE_SCOPE,
                 args={"tool": _RECONCILE_TOOL},
             )
-            return ToolResponse.failure(
-                _RECONCILE_OBJECT_ID,
-                ErrorCategory.AUTHORIZATION_DENIED,
-                suggested_next_actions=[_RECONCILE_TOOL],
-            )
+            return ToolResponse.denied(_RECONCILE_OBJECT_ID)
         try:
             diff = await _run_pass(pool, image_store)
         except InventoryError as exc:

@@ -164,7 +164,8 @@ def test_operator_is_denied_reconcile_systems(
             )
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == [_TOOL]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert _TOOL not in resp.suggested_next_actions  # ADR-0471, #1596
         # The denied call reconciled nothing.
         async with await _connect(migrated_url) as check, check.cursor() as cur:
             await cur.execute("SELECT count(*) FROM resources WHERE name = 'fi-recon'")

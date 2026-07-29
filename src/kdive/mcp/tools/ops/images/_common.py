@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
 from kdive.mcp.platform_auth import actor_for, audit_platform_denial, held_platform_roles
 from kdive.mcp.responses import ToolResponse
 from kdive.security import audit
@@ -20,10 +19,8 @@ PRUNE_OBJECT_ID = "expired-private"
 PRUNE_SCOPE = "all-private"
 
 
-def denied(object_id: str, tool: str) -> ToolResponse:
-    return ToolResponse.failure(
-        object_id, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[tool]
-    )
+def denied(object_id: str) -> ToolResponse:
+    return ToolResponse.denied(object_id)
 
 
 def blank(reason: str) -> bool:

@@ -66,7 +66,10 @@ errors.
   candidate hosts.
 - **`authorization_denied`** — the caller needs a higher role or the provisioning
   profile needs an opt-in. See the safety-and-RBAC guide
-  (resource://kdive/docs/guide/safety-and-rbac.md).
+  (resource://kdive/docs/guide/safety-and-rbac.md). Re-invoking the denied tool cannot
+  succeed (`retryable` is false), so a denial never names it in `suggested_next_actions`;
+  the breadcrumb is `session.whoami`, which reports the grants the caller actually holds so
+  the blocker can be reported to an operator ([ADR-0471](../adr/0471-denial-envelope-terminal-affordance.md)).
 - **`infrastructure_failure`** or **`provisioning_failure`** — retry if the job has
   remaining attempts; otherwise triage via `jobs.list` and the audit log.
 

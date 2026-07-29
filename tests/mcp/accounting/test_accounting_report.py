@@ -253,7 +253,8 @@ def test_all_projects_project_only_token_denied_unaudited(migrated_url: str) -> 
             resp = await report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["accounting.report"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "accounting.report" not in resp.suggested_next_actions  # ADR-0471, #1596
         assert await _count_platform_audit(migrated_url) == 0
 
     asyncio.run(_run())
@@ -269,7 +270,8 @@ def test_all_projects_operator_denied_but_audited(migrated_url: str) -> None:
             resp = await report_all_projects(pool, ctx)
         assert resp.status == "error"
         assert resp.error_category == "authorization_denied"
-        assert resp.suggested_next_actions == ["accounting.report"]
+        assert resp.suggested_next_actions == ["session.whoami"]
+        assert "accounting.report" not in resp.suggested_next_actions  # ADR-0471, #1596
         rows = await _platform_audit_rows(migrated_url)
         assert len(rows) == 1
         assert rows[0][1] == "platform_operator"

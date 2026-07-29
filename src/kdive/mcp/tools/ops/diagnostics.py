@@ -26,7 +26,6 @@ from pydantic import Field
 from kdive import version as service_version
 from kdive.diagnostics.checks import CheckResult, CheckStatus
 from kdive.diagnostics.service import DiagnosticsReport, DiagnosticsService
-from kdive.domain.errors import ErrorCategory
 from kdive.log import bind_context
 from kdive.mcp.auth import current_context
 from kdive.mcp.platform_auth import (
@@ -71,9 +70,7 @@ class ServiceFactory(Protocol):
 
 
 def _denied() -> ToolResponse:
-    return ToolResponse.failure(
-        _OBJECT_ID, ErrorCategory.AUTHORIZATION_DENIED, suggested_next_actions=[_TOOL]
-    )
+    return ToolResponse.denied(_OBJECT_ID)
 
 
 async def run_diagnostics(
