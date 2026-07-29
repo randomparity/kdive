@@ -139,6 +139,20 @@ make the residual sound rarer than it is. It is filed as **#1574** rather than l
 disclosed correctness residual with no tracking issue is indistinguishable from an unnoticed one,
 and #1574 is the sibling of #1557, which is this same race on the reaper's side.
 
+> **Resolved by [ADR-0497](0497-finalize-verifies-its-object-before-committing-rows.md) (#1574) as a
+> mitigation, not a closure.** The sweep still deletes such an object; this section's residual
+> stands as written. What changed is downstream: `finalize_capture` now heads both objects its
+> `CaptureOutput` names and refuses to commit any `artifacts` row unless the store still holds each
+> at the etag the capture observed, so the outcome is a failed `capture_vmcore` job naming the key
+> rather than a green Run carrying a dangling reference. The conditional delete this section's
+> residual invites — `If-Match` on `DeleteObject`, using the etag ADR-0496 put in scope at the
+> delete site — was rejected on measurement: both MinIO releases this repo pins accept the header,
+> return success, and delete the object regardless of the etag, so the guard would be inert exactly
+> where it is needed. Do not re-derive it. The only closing fix is a fence the writers and the
+> sweep share, which for the vmcore lane means minting an `upload_manifests` row before the
+> presigned PUT so this section's own manifest fence protects it; ADR-0497 §3 names it and leaves it
+> unowned.
+
 Bulk-then-recheck is also the cost decision, and the honest version of it is not "cheaper than the
 precedent". Steady state with no leak is one LIST and one query per root per pass; the per-key round
 trips are paid only for keys actually being deleted, which is normally none. `repair_leaked_images`
