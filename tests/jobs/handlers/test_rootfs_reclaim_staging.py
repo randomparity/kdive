@@ -51,6 +51,24 @@ def _held_partial(inv_dir: Path, token: str = _TOKEN) -> Iterator[Path]:
         os.close(fd)
 
 
+def _sweep(
+    uploads: Path,
+    inv: UUID,
+    *,
+    protected: frozenset[str] = frozenset(),
+    drained: bool = True,
+) -> bool:
+    """The sweep as the drain tail calls it, defaulting to the fully-drained investigation.
+
+    ``protected_tokens`` empty and ``drained`` true is the post-state ADR-0452 assumed was the only
+    one the sweep ever ran in; ADR-0494 made both explicit, and the cases that exercise the other
+    values pass them.
+    """
+    return sweep_investigation_staging_dir(
+        str(uploads), inv, protected_tokens=protected, drained=drained
+    )
+
+
 def _inv_dir(tmp_path: Path) -> tuple[UUID, Path]:
     inv = uuid4()
     inv_dir = tmp_path / str(inv)
@@ -64,7 +82,7 @@ def test_partial_sweep_unlinks_and_removes_empty_dir(tmp_path: Path) -> None:
     orphan = inv_dir / f"{_TOKEN}.{uuid4().hex}.partial"
     orphan.write_bytes(b"partial")
 
-    assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+    assert _sweep(tmp_path, inv) is False
 
     assert not orphan.exists()
     assert not inv_dir.exists()  # empty after the partial swept -> removed
@@ -84,7 +102,7 @@ def test_a_base_left_after_the_drain_is_unowned_and_collected(
     base.write_bytes(b"published after its own row was reclaimed")
 
     with caplog.at_level(logging.WARNING):
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert not base.exists()
     assert not inv_dir.exists()  # the dir now actually drains, so the rmdir stops failing silently
@@ -106,7 +124,7 @@ def test_an_unowned_base_that_cannot_be_unlinked_is_warned_not_raised(tmp_path: 
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "unlink", refusing_unlink)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert base.exists()
     assert inv_dir.exists()
@@ -119,7 +137,7 @@ def test_sweep_skips_a_partial_a_live_fetcher_still_holds(tmp_path: Path) -> Non
     inv, inv_dir = _inv_dir(tmp_path)
 
     with _held_partial(inv_dir) as live:
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert live.exists()
         assert live.read_bytes() == b"a live fetcher is still writing this"
 
@@ -131,7 +149,7 @@ def test_a_held_partial_keeps_the_staging_dir_and_is_reported(tmp_path: Path) ->
     inv, inv_dir = _inv_dir(tmp_path)
 
     with _held_partial(inv_dir):
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert inv_dir.exists()
 
 
@@ -144,7 +162,7 @@ def test_sweep_unlinks_only_the_orphan_when_a_live_partial_sits_beside_it(tmp_pa
     orphan.write_bytes(b"leaked by a killed worker")
 
     with _held_partial(inv_dir) as live:
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert live.exists()
     assert not orphan.exists()
 
@@ -167,7 +185,7 @@ def test_sweep_tolerates_a_candidate_that_vanishes_between_the_glob_and_the_open
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", vanishing_open)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert not orphan.exists()
     assert not inv_dir.exists()
@@ -190,7 +208,7 @@ def test_an_unopenable_partial_is_not_reported_as_live(tmp_path: Path) -> None:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", refusing_open)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert unopenable.exists()  # left for an operator rather than unlinked unchecked
 
@@ -216,14 +234,14 @@ def test_sweep_collects_a_partial_once_its_holder_process_dies(tmp_path: Path) -
     proc.start()
     try:
         assert locked.wait(timeout=60), "the child never took the flock"
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert partial.exists(), "a live holder's partial was swept"
     finally:
         proc.kill()
         proc.join(timeout=60)
     assert proc.exitcode is not None, "the flock holder did not exit"
 
-    assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+    assert _sweep(tmp_path, inv) is False
 
     assert not partial.exists()
     assert not inv_dir.exists()
@@ -246,7 +264,7 @@ def test_a_lockless_filesystem_still_collects_and_still_drains(
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", unlockable_flock)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert not orphan.exists()
     assert not inv_dir.exists()
@@ -255,7 +273,7 @@ def test_a_lockless_filesystem_still_collects_and_still_drains(
 def test_sweep_of_an_absent_staging_dir_reports_nothing_live(tmp_path: Path) -> None:
     # An investigation that never staged anything: the glob finds nothing, the rmdir raises ENOENT
     # into the suppress, and the marker must still clear.
-    assert sweep_investigation_staging_dir(str(tmp_path), uuid4()) is False
+    assert _sweep(tmp_path, uuid4()) is False
 
 
 def test_a_held_partial_does_not_suppress_the_unowned_base_collection(
@@ -271,7 +289,7 @@ def test_a_held_partial_does_not_suppress_the_unowned_base_collection(
     base.write_bytes(b"published after its own row was reclaimed")
 
     with caplog.at_level(logging.WARNING), _held_partial(inv_dir) as live:
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert live.exists()
 
     assert not base.exists()
@@ -292,7 +310,7 @@ def test_a_completion_marker_does_not_keep_the_staging_dir_alive(
     marker.touch()
 
     with caplog.at_level(logging.WARNING):
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert not marker.exists()
     assert not inv_dir.exists()
@@ -315,7 +333,7 @@ def test_the_marker_sweep_is_not_gated_on_an_flock(tmp_path: Path) -> None:
     fd = os.open(marker, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
     finally:
         os.close(fd)
 
@@ -341,7 +359,7 @@ def test_a_marker_that_cannot_be_unlinked_is_warned_not_raised(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "unlink", refusing_unlink)
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+        assert _sweep(tmp_path, inv) is False
 
     assert marker.exists()
     assert any("completion marker" in r.getMessage() for r in caplog.records), caplog.text
@@ -357,7 +375,7 @@ def test_a_held_partial_still_reports_live_with_a_marker_beside_it(tmp_path: Pat
     marker.touch()
 
     with _held_partial(inv_dir) as live:
-        assert sweep_investigation_staging_dir(str(tmp_path), inv) is True
+        assert _sweep(tmp_path, inv) is True
         assert live.exists()
 
     assert not marker.exists()
@@ -380,7 +398,7 @@ def test_a_staging_dir_the_sweep_cannot_read_is_named_rather_than_read_as_draine
     inv_dir.chmod(0o000)
     try:
         with caplog.at_level(logging.WARNING):
-            assert sweep_investigation_staging_dir(str(tmp_path), inv) is False
+            assert _sweep(tmp_path, inv) is False
     finally:
         inv_dir.chmod(0o700)
 
@@ -389,3 +407,133 @@ def test_a_staging_dir_the_sweep_cannot_read_is_named_rather_than_read_as_draine
     assert any("survived its investigation's drain" in r.getMessage() for r in caplog.records), (
         caplog.text  # ... and the pass said so
     )
+
+
+def test_a_base_an_artifacts_row_still_owns_is_left_alone(tmp_path: Path) -> None:
+    # ADR-0494 section 3. Once the sweep runs alongside surviving rows, the collection cannot be
+    # licensed by "no row remains" any more -- it has to test each file's own token. An
+    # unconditional glob here unlinks a live base out from under the row that owns it, and its
+    # ADR-0451
+    # marker too, which silently forces a multi-GiB re-download on the next provision.
+    inv, inv_dir = _inv_dir(tmp_path)
+    owned = inv_dir / f"{_TOKEN}.qcow2"
+    owned.write_bytes(b"a row still owns this")
+    owned_marker = inv_dir / f"{_TOKEN}.ready"
+    owned_marker.touch()
+    orphan = inv_dir / "b3RoZXItdG9rZW4.qcow2"
+    orphan.write_bytes(b"no row owns this")
+    orphan_marker = inv_dir / "b3RoZXItdG9rZW4.ready"
+    orphan_marker.touch()
+
+    assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=False) is True
+
+    assert owned.exists()
+    assert owned_marker.exists()
+    assert not orphan.exists()
+    assert not orphan_marker.exists()
+    assert inv_dir.exists()  # a surviving row keeps the directory; the row lane is the follow-up
+
+
+def test_a_pinned_but_unowned_base_defers_the_drain_instead_of_being_collected(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The one survivor a *drained* investigation may still have. Its token holds no artifacts row,
+    # so the old zero-row licence would unlink it -- underneath the overlay of a System that is
+    # still live. Deferring keeps the drain marker set, and the pin is transient in the sense
+    # ADR-0452 section 4 requires: the reconciler drives every System to a terminal state.
+    inv, inv_dir = _inv_dir(tmp_path)
+    pinned = inv_dir / f"{_TOKEN}.qcow2"
+    pinned.write_bytes(b"a live System's overlay is backed by this")
+
+    with caplog.at_level(logging.WARNING):
+        assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=True) is True
+
+    assert pinned.exists()
+    assert inv_dir.exists()
+    assert any("a live System still pins" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_a_base_published_between_the_glob_and_the_rmdir_is_collected_by_the_repass(
+    tmp_path: Path,
+) -> None:
+    # The window ADR-0494 section 4 closes. The caller clears the drain marker on a False, retiring
+    # every collector this investigation has, so a base that lands after this pass's own globs is a
+    # permanent SENSITIVE leak -- exactly #1559's shape. One bounded re-pass converts it into an
+    # extra readdir. Without the re-pass the base survives and the directory never drains.
+    inv, inv_dir = _inv_dir(tmp_path)
+    base = inv_dir / f"{_TOKEN}.qcow2"
+    real_rmdir = os.rmdir
+    published: list[int] = []
+
+    def publishing_rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == inv_dir and not published:
+            published.append(1)
+            base.write_bytes(b"a doomed fetcher published after the globs ran")
+        real_rmdir(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "rmdir", publishing_rmdir)
+        assert _sweep(tmp_path, inv) is False
+
+    assert published, "the rmdir seam never fired, so this proved nothing"
+    assert not base.exists()
+    assert not inv_dir.exists()
+
+
+def test_the_repass_is_bounded_at_one_and_still_clears_the_marker(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The boundedness half. An unbounded retry is the never-terminating drain ADR-0452 section 5
+    # rejected, so a directory that keeps refilling must stop after one extra pass, warn, and return
+    # False -- letting the caller clear the marker rather than pinning the investigation forever.
+    inv, inv_dir = _inv_dir(tmp_path)
+    real_rmdir = os.rmdir
+    calls: list[int] = []
+
+    def refilling_rmdir(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == inv_dir:
+            calls.append(1)
+            (inv_dir / f"{_TOKEN}.qcow2").write_bytes(b"published again")
+        real_rmdir(path, *args, **kwargs)
+
+    with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "rmdir", refilling_rmdir)
+        assert _sweep(tmp_path, inv) is False
+
+    assert len(calls) == 2, "the re-pass must run exactly once, not loop"
+    assert any("survived its investigation's drain" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
+
+
+def test_a_surviving_row_defers_without_warning_or_removing_the_dir(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A pinned base with its row intact is the expected steady state for the whole grace window, so
+    # this path must stay quiet: warning on it every pass would bury the line that reports a real
+    # survivor. It must also not rmdir -- the row lane is still going to use this directory.
+    inv, inv_dir = _inv_dir(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=False) is True
+
+    assert inv_dir.exists()
+    assert not caplog.records, caplog.text
+
+
+def test_a_surviving_row_leaves_the_partial_glob_alone(tmp_path: Path) -> None:
+    # ADR-0494 section 2's reach limit. The token-keyed collectors run while rows survive, but the
+    # partial glob does not: its candidates are decided by the flock gate rather than by ownership,
+    # and a surviving row means a fetch of that base can legitimately be in flight. Sweeping here
+    # would clobber it, which is ADR-0442 section 7's retained guarantee -- and widening it is
+    # #1565's question, not this one's.
+    inv, inv_dir = _inv_dir(tmp_path)
+    in_flight = inv_dir / f"{_TOKEN}.{uuid4().hex}.partial"
+    in_flight.write_bytes(b"an unheld partial of a base whose row survives")
+    orphan = inv_dir / "b3RoZXItdG9rZW4.qcow2"
+    orphan.write_bytes(b"no row owns this")
+
+    assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=False) is True
+
+    assert in_flight.exists()
+    assert not orphan.exists()  # ... while the token-keyed collection still reaches the orphan

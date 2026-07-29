@@ -887,3 +887,173 @@ def test_a_base_published_after_its_row_was_reclaimed_is_collected(
             await check.close()
 
     asyncio.run(_run())
+
+
+def _orphan_base(uploads: Path, inv: UUID) -> tuple[Path, Path]:
+    """A staged base of some *other* checksum with no artifacts row, plus its ADR-0451 marker.
+
+    The #1559 shape: a fetcher published onto a path whose row had already been reclaimed, or a
+    worker died between the publish and the row commit. Nothing in the tree owns it.
+    """
+    orphan = uploads / str(inv) / f"{rootfs_object_token(_CHECKSUM_Y)}.qcow2"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_bytes(b"published with no row to own it")
+    marker = staged_rootfs_marker_path(orphan)
+    marker.touch()
+    return orphan, marker
+
+
+def test_an_orphan_base_is_collected_even_though_a_faulting_checksum_keeps_its_row(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # Residual (c) of #1559. A store that refuses the delete keeps the checksum's row, and
+    # ADR-0442's drain tail returned early on any surviving row -- so the staging directory was
+    # never swept again and an orphan base beside it was collected by nothing, indefinitely.
+    # ADR-0494 keys the
+    # collection on each file's own token, so the orphan goes while the faulting row's own base and
+    # marker (already unlinked here, ahead of the failed store delete) are untouched.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            await _seed_system(seed, inv, "torn_down", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        _stage(uploads, inv)
+        orphan, orphan_marker = _orphan_base(uploads, inv)
+        store = _RecordingStore(fail_on=_object_key(inv))
+
+        with pytest.raises(CategorizedError):
+            await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+
+        assert not orphan.exists(), "the orphan base outlived a pass that could see it"
+        assert not orphan_marker.exists()
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)  # the faulting row is still retained ...
+            assert await _marker(check, inv) is not None  # ... and so is the drain marker
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_live_pinned_base_keeps_its_marker_while_an_orphan_beside_it_is_collected(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The other half of running the sweep alongside surviving rows: the pinned base is the
+    # expected steady state for the whole grace window, so an unconditional marker glob would
+    # strip the ADR-0451 completion marker off a perfectly good base every pass -- making the
+    # reuse gate reject it and re-download it, silently, since the re-stage succeeds.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            sys_id = await _seed_system(seed, inv, "ready", _upload_profile())
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        (rootfs_dir / overlay_name(str(sys_id))).write_bytes(b"overlay")  # pins the base
+        staged = _stage(uploads, inv)
+        orphan, orphan_marker = _orphan_base(uploads, inv)
+        store = _RecordingStore()
+
+        assert (
+            await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == "0"
+        )
+
+        assert staged.exists()
+        assert staged_rootfs_marker_path(staged).exists(), "a live base lost its completion marker"
+        assert not orphan.exists()
+        assert not orphan_marker.exists()
+        assert store.deleted == []
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is not None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_orphan_base_pinned_by_a_live_system_is_left_and_defers_the_drain(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # ADR-0494 section 3's liveness half. A base whose row was reclaimed can still be backed by
+    # a per-System overlay created after that reclaim, the residue ADR-0452 section 6 recorded
+    # and could not see -- the zero-row precondition reads rows and the overlay is a file.
+    # Unlinking
+    # it pulls the backing file out from under a running guest, so the sweep leaves it and retains
+    # the drain marker instead.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            sys_id = await _seed_system(seed, inv, "ready", _upload_profile(_CHECKSUM_Y))
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        (rootfs_dir / overlay_name(str(sys_id))).write_bytes(b"overlay")
+        orphan, orphan_marker = _orphan_base(uploads, inv)
+
+        assert (
+            await _run_handler(migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads) == "0"
+        )
+
+        assert orphan.exists(), "a base under a live overlay was unlinked"
+        assert orphan_marker.exists()
+        check = await connect(migrated_url)
+        try:
+            assert await _marker(check, inv) is not None  # deferred, so a later pass revisits it
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_orphan_base_drains_a_closed_investigation_that_has_no_rows_left(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The empty-worklist path both the close-driven lane and ADR-0494's new staging-drain lane use:
+    # the reclaim loop has nothing to do, and the whole job is the drain tail. The orphan goes, the
+    # directory goes, and the marker clears.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            await _seed_system(seed, inv, "torn_down", _upload_profile(_CHECKSUM_Y))
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        orphan, orphan_marker = _orphan_base(uploads, inv)
+
+        assert (
+            await _run_handler(migrated_url, inv, [], _RecordingStore(), rootfs_dir, uploads) == "0"
+        )
+
+        assert not orphan.exists()
+        assert not orphan_marker.exists()
+        assert not orphan.parent.exists()
+        check = await connect(migrated_url)
+        try:
+            assert await _marker(check, inv) is None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
