@@ -205,6 +205,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Amend ADR-0045 §2 and ADR-0046 §3, which ADR-0486 falsifies
 - Correct two claims ADR-0486's branch left overstated
 - Correct the _call_project claim #1644 made incomplete
+- Scope _call_project's totality claim to delivered args
 
 ### Fixed
 
