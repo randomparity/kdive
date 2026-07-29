@@ -11,14 +11,20 @@ worklists, and the stable per-investigation dedup slot.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import re
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 
+from kdive.artifacts.content_address import rootfs_object_token
 from kdive.domain.operations.jobs import JobKind
+from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.reconciler.cleanup import gc
 from kdive.reconciler.cleanup.gc import (
     sweep_expired_investigation_rootfs_reclaim,
@@ -29,6 +35,14 @@ from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.reconciler.conftest import connect
 
 _TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
+
+#: The JSON path `_UNOWNED_STAGING_INV_SQL` reaches into `systems.provisioning_profile`, named once
+#: so the test below can walk a real serialized profile with it and assert the SQL spells it too.
+_STAGING_LANE_JSON_PATH = ("provider", "local-libvirt", "rootfs", "kind")
+
+
+def _b64_sha256(seed: bytes) -> str:
+    return base64.b64encode(hashlib.sha256(seed).digest()).decode("ascii")
 
 
 def _object_key(inv: UUID, token: str = _TOKEN) -> str:
@@ -618,3 +632,48 @@ def test_staging_drain_lane_issues_one_job_for_an_investigation_with_several_sys
             await conn.close()
 
     asyncio.run(_run())
+
+
+def test_the_lanes_json_path_matches_what_a_real_profile_actually_serializes_to() -> None:
+    # `_UNOWNED_STAGING_INV_SQL` re-derives, in SQL, the path `_referenced_token` walks in Python:
+    # `#>> '{provider,local-libvirt,rootfs,kind}'`. Nothing else ties either to the model, and the
+    # guard's failure mode is emitting nothing -- so a renamed serialization alias would silently
+    # select zero rows with every test still green. That is the duplicated-derivation trap
+    # `runtime_paths.py` names (#1383/ADR-0412's ELF-magic check became dead exactly this way).
+    profile = ProvisioningProfile.model_validate(
+        {
+            "schema_version": 1,
+            "arch": "x86_64",
+            "vcpu": 2,
+            "memory_mb": 2048,
+            "disk_gb": 10,
+            "boot_method": "direct-kernel",
+            "kernel_source_ref": "git+https://git.kernel.org#v6.9",
+            "provider": {
+                "local-libvirt": {
+                    "rootfs": {"kind": "upload", "checksum_sha256": _b64_sha256(b"rootfs")}
+                }
+            },
+        }
+    )
+    serialized: Any = dump_profile(profile)
+
+    node: Any = serialized
+    for key in _STAGING_LANE_JSON_PATH:
+        assert isinstance(node, dict), f"the lane's JSON path breaks at {key!r}: {serialized}"
+        assert key in node, f"the lane's JSON path breaks at {key!r}: {serialized}"
+        node = node[key]
+    assert node == "upload"
+    assert f"'{{{','.join(_STAGING_LANE_JSON_PATH)}}}'" in gc._UNOWNED_STAGING_INV_SQL
+
+
+def test_a_content_address_token_never_contains_a_dot() -> None:
+    # The staging sweep tests each candidate by `Path.stem`, so a token containing a `.` would make
+    # the stem drop a segment and leave EVERY base and marker unprotected -- a mass unlink of live
+    # bases, not a benign miss. The property holds because `rootfs_object_token` emits unpadded
+    # base64url, whose alphabet is [A-Za-z0-9_-]; it is asserted rather than assumed.
+    for seed in (b"", b"rootfs", b"\x00" * 64, bytes(range(256)), b"\xff" * 32):
+        token = rootfs_object_token(_b64_sha256(seed))
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", token), token
+        assert Path(f"{token}.qcow2").stem == token
+        assert Path(f"{token}.ready").stem == token

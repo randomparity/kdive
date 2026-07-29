@@ -434,23 +434,45 @@ def test_a_base_an_artifacts_row_still_owns_is_left_alone(tmp_path: Path) -> Non
     assert inv_dir.exists()  # a surviving row keeps the directory; the row lane is the follow-up
 
 
-def test_a_pinned_but_unowned_base_defers_the_drain_instead_of_being_collected(
+def test_a_pinned_but_unowned_base_is_left_reported_and_still_clears_the_marker(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The one survivor a *drained* investigation may still have. Its token holds no artifacts row,
     # so the old zero-row licence would unlink it -- underneath the overlay of a System that is
-    # still live. Deferring keeps the drain marker set, and the pin is transient in the sense
-    # ADR-0452 section 4 requires: the reconciler drives every System to a terminal state.
+    # still live. It must be left. It must NOT pin the drain marker: `_ROOTFS_REFERENCERS_SQL`
+    # excludes only `torn_down`, `failed` is terminal with no transition out of it, and nothing
+    # removes a failed System's overlay -- so the pin can be permanent, and retaining on it is the
+    # never-clearing marker ADR-0442 was written to kill. An unprotected orphan sits beside it, so
+    # this cannot pass on an implementation that returns early without walking the directory.
     inv, inv_dir = _inv_dir(tmp_path)
     pinned = inv_dir / f"{_TOKEN}.qcow2"
     pinned.write_bytes(b"a live System's overlay is backed by this")
+    orphan = inv_dir / "b3RoZXItdG9rZW4.qcow2"
+    orphan.write_bytes(b"no row and no pin")
 
     with caplog.at_level(logging.WARNING):
-        assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=True) is True
+        assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=True) is False
 
     assert pinned.exists()
+    assert not orphan.exists()
     assert inv_dir.exists()
-    assert any("a live System still pins" in r.getMessage() for r in caplog.records), caplog.text
+    assert any("a live System pins" in r.getMessage() for r in caplog.records), caplog.text
+
+
+def test_an_empty_dir_does_not_report_a_pinned_base_just_because_the_set_is_non_empty(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # `protected_tokens` is routinely non-empty with nothing left on disk -- the row-driven reclaim
+    # unlinks each base as its own row drains, so that is the ordinary steady state. Deriving "a
+    # base was left behind" from the set rather than from the walk would fire the survivor WARNING
+    # on every ordinary drain and, worse, defer a drain that has plainly completed.
+    inv, inv_dir = _inv_dir(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        assert _sweep(tmp_path, inv, protected=frozenset({_TOKEN}), drained=True) is False
+
+    assert not inv_dir.exists()
+    assert not caplog.records, caplog.text
 
 
 def test_a_base_published_between_the_glob_and_the_rmdir_is_collected_by_the_repass(
