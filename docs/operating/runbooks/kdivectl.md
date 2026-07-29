@@ -165,8 +165,10 @@ kdivectl inventory list [--project <project>]
 
 There is no `jobs get` / `allocations get` verb: `jobs.get` and `allocations.get` were removed
 ([ADR-0468](../../adr/0468-wait-as-the-single-point-read.md)). `wait` is both the poll and the
-point read. Omitting `--timeout-s` waits for the tool's default of **30 seconds** — the CLI
-never picks the timeout for you — and the server clamps any larger value to **300 seconds**.
+point read. Omitting `--timeout-s` waits for the tool's own default — the CLI never picks the
+timeout for you — and the server clamps a larger value rather than refusing it. Both figures
+are rendered from the server constants into `kdivectl jobs wait --help` and
+`kdivectl allocations wait --help`; read them there rather than from this page.
 The point read is therefore the zero timeout spelled out, which does one lookup and returns
 without blocking:
 
