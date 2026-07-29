@@ -120,11 +120,13 @@ async def verify_objects_still_stored(
     """Raise unless the store still holds each ``stored`` object at the etag the capture observed.
 
     This is the ADR-0497 fence against a lost write. The vmcore lane's keys are deterministic per
-    ``(run, method)`` and mint **no** upload window, so between a first attempt that PUT the core
-    and died before this finalize and a retry that PUTs it again, the key is a live candidate for
+    ``(run, method)`` and mint **no** upload window, so between a first attempt that wrote the core
+    and died before this finalize and a retry that writes it again, the key is a live candidate for
     the ADR-0455 orphan sweep: rowless, manifest-less, and past the grace. The sweep re-reads and
-    re-classifies immediately before deleting, but a PUT landing inside that last gap is deleted
-    anyway (ADR-0455 §3), and the guest's presigned PUT holds no lock any fence could contend on.
+    re-classifies immediately before deleting, but a write landing inside that last gap is deleted
+    anyway (ADR-0455 §3). The reachable lane is **local-libvirt**, whose keys sit under the swept
+    ``local/`` tenant and whose ``put_stream`` runs with no lock held — ``precheck_run`` releases
+    the Run lock before the capture by design (ADR-0244) — while the sweep takes no Run lock.
     Without this check the retry then commits ``artifacts`` rows against bytes that no longer
     exist — a dangling reference on a Run reporting success — and nothing raises.
 

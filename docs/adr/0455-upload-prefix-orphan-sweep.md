@@ -148,10 +148,13 @@ and #1574 is the sibling of #1557, which is this same race on the reaper's side.
 > residual invites — `If-Match` on `DeleteObject`, using the etag ADR-0496 put in scope at the
 > delete site — was rejected on measurement: both MinIO releases this repo pins accept the header,
 > return success, and delete the object regardless of the etag, so the guard would be inert exactly
-> where it is needed. Do not re-derive it. The only closing fix is a fence the writers and the
-> sweep share, which for the vmcore lane means minting an `upload_manifests` row before the
-> presigned PUT so this section's own manifest fence protects it; ADR-0497 §3 names it and leaves it
-> unowned.
+> where it is needed. Do not re-derive it. ADR-0497 also narrows *which* vmcore write is the path
+> in: it is the **local-libvirt** `put_stream` this section already names, because the swept roots
+> come from `UPLOAD_TENANT = "local"` while remote-libvirt's presigned guest PUT writes under
+> `remote-libvirt/` and so is outside every root this sweep lists. The only closing fix is a fence
+> the writers and the sweep share — an `upload_manifests` row committed before the capture's write,
+> so this section's own manifest fence protects it; ADR-0497 §3 names it, weighs it against a shared
+> advisory lock, and leaves both unowned.
 
 Bulk-then-recheck is also the cost decision, and the honest version of it is not "cheaper than the
 precedent". Steady state with no leak is one LIST and one query per root per pass; the per-key round
