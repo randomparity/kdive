@@ -80,7 +80,10 @@ async def run(ns: argparse.Namespace) -> int:
             result = await client.call_tool(name, arguments, raise_on_error=False)
             if _failed(result):
                 print(f"error: tool {name} failed", file=sys.stderr)
-                print(json.dumps(result.structured_content, default=str), file=sys.stderr)
+                # Only when there is something to show: the `is_error` path carries no
+                # structured content, and a bare `null` on stderr is noise, not a diagnostic.
+                if result.structured_content is not None:
+                    print(json.dumps(result.structured_content, default=str), file=sys.stderr)
                 return 1
             print(json.dumps(result.structured_content, default=str))
     return 0
