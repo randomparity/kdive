@@ -24,6 +24,7 @@ from kdive.mcp.auth import RequestContext
 from kdive.mcp.tools.catalog.artifacts.raw_fetch import RawAsset, fetch_raw
 from kdive.security.authz.rbac import Role, RoleDenied
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
@@ -44,7 +45,13 @@ class _FakeStore:
     def head(self, key: str) -> HeadResult | None:
         if self.missing_head:
             return None
-        return HeadResult(size_bytes=self.size, checksum_sha256=None, etag="e", sensitivity=None)
+        return HeadResult(
+            size_bytes=self.size,
+            checksum_sha256=None,
+            etag="e",
+            sensitivity=None,
+            last_modified=STORE_MTIME,
+        )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:
         self.presigned_keys.append(key)

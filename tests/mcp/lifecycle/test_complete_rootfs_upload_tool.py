@@ -31,6 +31,7 @@ from kdive.mcp.tools.lifecycle.investigations.complete_rootfs_upload import (
     complete_rootfs_upload,
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
+from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -60,6 +61,7 @@ class _HeadStore:
             checksum_sha256=self.checksum,
             etag=self.etag,
             sensitivity=Sensitivity.SENSITIVE,
+            last_modified=STORE_MTIME,
         )
 
 

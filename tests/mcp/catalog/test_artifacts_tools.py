@@ -27,6 +27,7 @@ from kdive.mcp.tools.catalog.artifacts.reads import (
 )
 from kdive.security.authz.rbac import AuthorizationError, Role
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 from tests.integration._seed import seed_unbound_running_run
 from tests.mcp._seed import seed_crashed_system
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair
@@ -140,6 +141,7 @@ class _SearchStore:
             checksum_sha256=None,
             etag="e",
             sensitivity=self.head_sensitivity,
+            last_modified=STORE_MTIME,
         )
 
     def get_artifact(self, key: str, etag: str | None) -> FetchedArtifact:

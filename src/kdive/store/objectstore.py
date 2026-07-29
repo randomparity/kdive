@@ -297,12 +297,14 @@ class ObjectStore:
             raise _infrastructure_error("head_bucket", self._bucket, err) from err
 
     def head(self, key: str) -> artifact_types.HeadResult | None:
-        """Return the object's size/checksum/etag/sensitivity, or ``None`` if it is absent.
+        """Return the object's size/checksum/etag/mtime/sensitivity, or ``None`` if it is absent.
 
         Requests ``ChecksumMode="ENABLED"`` so a checksum written at PUT is returned. The
         ``sensitivity`` is read from object metadata (``None`` when absent or
         uninterpretable), so a caller can gate on the object's own class without fetching
-        the body.
+        the body. ``last_modified`` makes this the single-object stat the ADR-0455 orphan
+        sweep re-reads a candidate's mtime with, in one round trip whatever else sits under
+        that key's prefix (#1575).
 
         Raises:
             CategorizedError: any non-404 store error
@@ -326,6 +328,7 @@ class ObjectStore:
             size_bytes=int(resp["ContentLength"]),
             checksum_sha256=resp.get("ChecksumSHA256"),
             etag=_normalize_etag(resp["ETag"]),
+            last_modified=resp["LastModified"],
             sensitivity=sensitivity,
             content_encoding=metadata.get("content-encoding"),
         )

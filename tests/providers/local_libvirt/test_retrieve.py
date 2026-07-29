@@ -32,6 +32,7 @@ from kdive.providers.ports.retrieve import (
 from kdive.providers.shared.runtime_paths import WORKER_READABILITY_REMEDIATION
 from kdive.security.artifacts.crash_commands import crash_command_rejection_reason
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.clock import STORE_MTIME
 
 _ALLOW = frozenset({"bt", "log", "ps", "p", "rd"})
 
@@ -100,6 +101,7 @@ class _FakeStore:
             checksum_sha256=request.sha256_b64,
             etag="etag-" + request.name,
             sensitivity=request.sensitivity,
+            last_modified=STORE_MTIME,
         )
         return StoredArtifact(
             key, "etag-" + request.name, request.sensitivity, request.retention_class
@@ -241,6 +243,7 @@ def test_capture_verifies_stored_checksum(tmp_path: Path) -> None:
                 checksum_sha256="mismatch",
                 etag=base.etag,
                 sensitivity=base.sensitivity,
+                last_modified=STORE_MTIME,
             )
 
     with pytest.raises(CategorizedError) as exc:
@@ -446,6 +449,7 @@ def test_capture_host_dump_verifies_stored_checksum(tmp_path: Path) -> None:
                 checksum_sha256="mismatch",
                 etag=base.etag,
                 sensitivity=base.sensitivity,
+                last_modified=STORE_MTIME,
             )
 
     with pytest.raises(CategorizedError) as exc:

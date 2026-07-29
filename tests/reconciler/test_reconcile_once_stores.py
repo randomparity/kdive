@@ -29,7 +29,7 @@ import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.storage import HeadResult, ObjectListing
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.providers.infra.reaping import NullReaper
@@ -97,6 +97,14 @@ class _RecordingUploadStore:
             for key in keys
             if key.startswith(prefix)
         ]
+
+    def head(self, key: str) -> HeadResult | None:
+        # Same freshly-written mtime as the listing, for the same reason.
+        if not any(key in keys for keys in self._prefixed.values()):
+            return None
+        return HeadResult(
+            size_bytes=1, checksum_sha256=None, etag="e", last_modified=datetime.now(UTC)
+        )
 
     def delete(self, key: str) -> None:
         self.deleted.append(key)

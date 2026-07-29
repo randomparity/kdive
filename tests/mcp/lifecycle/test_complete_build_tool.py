@@ -539,8 +539,10 @@ def test_complete_build_omits_nudge_when_effective_config_present(migrated_url: 
             store = _ValidationStore(
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
-                    kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k"),
-                    config_key: HeadResult(len(config), "cc", "e-c"),
+                    kernel_key: HeadResult(
+                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                    ),
+                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
                 },
             )
             resp = await CompleteBuildHandlers(
@@ -649,8 +651,10 @@ def test_complete_build_writes_effective_config_artifact(
             store = _ValidationStore(
                 {kernel_key: _KERNEL_TAR, config_key: config},
                 {
-                    kernel_key: HeadResult(len(_KERNEL_TAR), "ck", "e-k"),
-                    config_key: HeadResult(len(config), "cc", "e-c"),
+                    kernel_key: HeadResult(
+                        len(_KERNEL_TAR), "ck", "e-k", last_modified=STORE_MTIME
+                    ),
+                    config_key: HeadResult(len(config), "cc", "e-c", last_modified=STORE_MTIME),
                 },
             )
 
@@ -680,6 +684,7 @@ import psycopg  # noqa: E402
 
 from kdive.artifacts.uploads import ChunkEntry  # noqa: E402
 from kdive.domain.catalog.artifacts import Sensitivity  # noqa: E402
+from tests.clock import STORE_MTIME  # noqa: E402
 
 _CHUNKED_KERNEL = ManifestEntry(
     "kernel", "whole", 8, chunks=(ChunkEntry("c0", 5), ChunkEntry("c1", 3))
@@ -695,11 +700,13 @@ class _ReassemblyStore:
 
     def head(self, key: str) -> HeadResult | None:
         if key.endswith(".part0001"):
-            return HeadResult(5, "c0", "e")
+            return HeadResult(5, "c0", "e", last_modified=STORE_MTIME)
         if key.endswith(".part0002"):
-            return HeadResult(3, "c1", "e")
+            return HeadResult(3, "c1", "e", last_modified=STORE_MTIME)
         if key.endswith("/kernel"):
-            return HeadResult(8, None, "final-etag")  # reassembled: composite/None checksum
+            return HeadResult(
+                8, None, "final-etag", last_modified=STORE_MTIME
+            )  # reassembled: composite/None checksum
         return None
 
     def get_range(self, key: str, *, start: int, length: int) -> bytes:

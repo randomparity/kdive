@@ -12,6 +12,7 @@ from kdive.artifacts.storage import HeadResult
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from tests.clock import STORE_MTIME
 
 _PREFIX = "local/runs/x/"
 _FINAL = "local/runs/x/vmlinux"
@@ -30,7 +31,9 @@ class _FakeStore:
         }
         if key in sizes:
             size, sha = sizes[key]
-            return HeadResult(size_bytes=size, checksum_sha256=sha, etag="e")
+            return HeadResult(
+                size_bytes=size, checksum_sha256=sha, etag="e", last_modified=STORE_MTIME
+            )
         return None
 
     def create_multipart_upload(

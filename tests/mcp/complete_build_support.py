@@ -26,6 +26,7 @@ from kdive.domain.catalog.resources import Resource, ResourceKind
 from kdive.domain.lifecycle.records import Allocation, Investigation, Run, System
 from kdive.mcp.auth import RequestContext
 from kdive.security.authz.rbac import Role
+from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provisioning_profile as _provisioning_profile
 
 TEST_DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -181,5 +182,8 @@ class FakeValidator:
         self.last_arch = arch
         if isinstance(self._output, Exception):
             raise self._output
-        heads = {name: HeadResult(size_bytes=1, checksum_sha256="c", etag="e") for name in keys}
+        heads = {
+            name: HeadResult(size_bytes=1, checksum_sha256="c", etag="e", last_modified=STORE_MTIME)
+            for name in keys
+        }
         return ValidatedUpload(output=self._output, heads=heads)

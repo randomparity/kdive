@@ -37,6 +37,7 @@ from kdive.providers.console_parts.sidecar import sidecar_object_name
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.objectstore import ObjectStore
 from tests.adversarial.conftest import seed_allocation, seed_resource
+from tests.clock import STORE_MTIME
 from tests.mcp.systems_support import provider_resolver
 
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -78,6 +79,7 @@ class _FakeStore:
             etag="etag",
             sensitivity=sensitivity,
             content_encoding=enc,
+            last_modified=STORE_MTIME,
         )
 
     def delete(self, key: str) -> None:

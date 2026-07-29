@@ -18,6 +18,7 @@ from kdive.artifacts.storage import HeadResult
 from kdive.mcp.tools.catalog import kernel_config as kernel_config_tools
 from kdive.security.authz.context import RequestContext
 from kdive.security.authz.rbac import Role
+from tests.clock import STORE_MTIME
 
 
 def _ctx(*projects: str) -> RequestContext:
@@ -51,7 +52,9 @@ class _FakeStore:
     def head(self, key: str) -> HeadResult | None:
         if key not in self._present:
             return None
-        return HeadResult(size_bytes=self._size, checksum_sha256=None, etag="etag")
+        return HeadResult(
+            size_bytes=self._size, checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+        )
 
     def presign_get(self, key: str, *, expires_in: int) -> str:
         self.presigned.append(key)

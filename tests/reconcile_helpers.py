@@ -37,6 +37,9 @@ class _NullUploadStore:
     def list_prefix_with_mtime(self, prefix: str) -> list[Any]:
         return []
 
+    def head(self, key: str) -> Any:
+        return None
+
     def delete(self, key: str) -> None:
         return None
 

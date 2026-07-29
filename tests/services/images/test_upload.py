@@ -40,6 +40,7 @@ from kdive.services.images.upload import (
     _reject_oversize_upload,
     register_private_upload,
 )
+from tests.clock import STORE_MTIME
 
 _REQUIRED = ("kdump", "drgn")
 _DT = datetime(2026, 1, 1, tzinfo=UTC)
@@ -96,7 +97,9 @@ class _FakeStore:
         data = self._objects.get(key)
         if data is None:
             return None
-        return artifact_types.HeadResult(size_bytes=len(data), checksum_sha256=None, etag="etag")
+        return artifact_types.HeadResult(
+            size_bytes=len(data), checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+        )
 
 
 async def _connect(url: str) -> psycopg.AsyncConnection:

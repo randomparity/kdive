@@ -36,6 +36,7 @@ from kdive.services.images.publish import (
     kernel_config_object_key,
     publish_image,
 )
+from tests.clock import STORE_MTIME
 
 _QCOW2 = b"qcow2-bytes-for-publish-test"
 _DIGEST = "sha256:" + hashlib.sha256(_QCOW2).hexdigest()
@@ -82,7 +83,9 @@ class _FakeStore:
         data = self._objects.get(key)
         if data is None:
             return None
-        return artifact_types.HeadResult(size_bytes=len(data), checksum_sha256=None, etag="etag")
+        return artifact_types.HeadResult(
+            size_bytes=len(data), checksum_sha256=None, etag="etag", last_modified=STORE_MTIME
+        )
 
 
 _PUBLIC_REQUEST = PublishRequest(

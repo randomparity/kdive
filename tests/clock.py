@@ -21,11 +21,19 @@ the *same* frozen instant, so the billed interval is exact regardless of run-tim
 The alternative — asserting a tolerance band (``5.9 < net < 6.1``) — is correct when the
 exact value is not load-bearing; several reconcile/sweep tests use it. Prefer the frozen
 clock when the exactness of the amount is itself the thing under test.
+This module also holds :data:`STORE_MTIME`, the fixed instant a fake object store hands back
+as an object's ``last_modified`` when the mtime is not what the test is about. It is here for
+the same reason ``FrozenClock`` is: a fake that samples its own wall clock makes the value
+non-reproducible between runs for no benefit. A test that *is* about the mtime — the ADR-0455
+orphan sweep's grace fence — builds its own value relative to ``now`` instead.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+
+#: An arbitrary but fixed aware instant for a fake store's ``HeadResult.last_modified``.
+STORE_MTIME = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
 
 class FrozenClock:

@@ -20,6 +20,7 @@ from kdive.store.objectstore import (
     artifact_key,
     owner_prefix,
 )
+from tests.clock import STORE_MTIME
 
 
 class _HeadClient:
@@ -53,12 +54,15 @@ def test_head_returns_size_checksum_and_etag() -> None:
                 "ContentLength": 42,
                 "ChecksumSHA256": "Zm9vYmFy",
                 "ETag": '"abc123"',
+                "LastModified": STORE_MTIME,
             }
         ),
         "bucket",
     )
     result = store.head("t/runs/r1/kernel")
-    assert result == HeadResult(size_bytes=42, checksum_sha256="Zm9vYmFy", etag="abc123")
+    assert result == HeadResult(
+        size_bytes=42, checksum_sha256="Zm9vYmFy", etag="abc123", last_modified=STORE_MTIME
+    )
 
 
 def test_head_missing_object_returns_none() -> None:
@@ -67,7 +71,9 @@ def test_head_missing_object_returns_none() -> None:
 
 
 def test_head_without_checksum_metadata_yields_none_checksum() -> None:
-    store = ObjectStore(_HeadClient({"ContentLength": 7, "ETag": '"e"'}), "bucket")
+    store = ObjectStore(
+        _HeadClient({"ContentLength": 7, "ETag": '"e"', "LastModified": STORE_MTIME}), "bucket"
+    )
     result = store.head("t/runs/r1/kernel")
     assert result is not None and result.checksum_sha256 is None
 

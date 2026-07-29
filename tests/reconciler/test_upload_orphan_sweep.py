@@ -30,7 +30,7 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
-from kdive.artifacts.storage import ObjectListing
+from kdive.artifacts.storage import HeadResult, ObjectListing
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.config.core_settings import UPLOAD_ORPHAN_GRACE, UPLOAD_TTL_SECONDS
 from kdive.domain.capacity.state import RunState
@@ -58,13 +58,18 @@ class _FakeUploadStore:
     """A store stand-in over ``key -> age``; the absolute mtime is ``now - age``.
 
     Satisfies both the reaper's port (``list_prefix``/``delete``) and the sweep's
-    (``list_prefix_with_mtime``/``delete``), so one instance can carry a failed reap's aftermath
-    straight into the sweep.
+    (``list_prefix_with_mtime``/``head``/``delete``), so one instance can carry a failed reap's
+    aftermath straight into the sweep.
+
+    ``listed_prefixes`` and ``headed_keys`` record every store round trip in order, so a test can
+    assert what the sweep *spent* and not only what it deleted (#1575).
     """
 
     def __init__(self, objects: dict[str, timedelta]) -> None:
         self._objects = dict(objects)
         self.deleted: list[str] = []
+        self.listed_prefixes: list[str] = []
+        self.headed_keys: list[str] = []
 
     @property
     def present(self) -> set[str]:
@@ -77,16 +82,31 @@ class _FakeUploadStore:
         """Remove an object without recording a delete — another actor got there first."""
         self._objects.pop(key, None)
 
+    def _mtime(self, age: timedelta) -> datetime:
+        return datetime.now(UTC) - age
+
     def list_prefix(self, prefix: str) -> list[str]:
         return sorted(key for key in self._objects if key.startswith(prefix))
 
     def list_prefix_with_mtime(self, prefix: str) -> list[ObjectListing]:
-        now = datetime.now(UTC)
+        self.listed_prefixes.append(prefix)
         return [
-            ObjectListing(key=key, last_modified=now - age)
+            ObjectListing(key=key, last_modified=self._mtime(age))
             for key, age in sorted(self._objects.items())
             if key.startswith(prefix)
         ]
+
+    def head(self, key: str) -> HeadResult | None:
+        self.headed_keys.append(key)
+        age = self._objects.get(key)
+        if age is None:
+            return None
+        return HeadResult(
+            size_bytes=1,
+            checksum_sha256=None,
+            etag=f"etag-of-{key}",
+            last_modified=self._mtime(age),
+        )
 
     def delete(self, key: str) -> None:
         self._objects.pop(key, None)
@@ -808,14 +828,14 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
 def test_the_mtime_re_read_takes_the_exact_key_not_a_sibling_it_prefixes(
     migrated_url: str,
 ) -> None:
-    """The re-read LISTs the candidate key as a *prefix*, so its siblings come back with it.
+    """The re-read resolves to the candidate's own mtime, never a sibling's.
 
     A chunked window's parts are ``<base>.partNNNN``, and a row-first reap that failed partway
     leaves the base and its parts rowless together — so this shape is the sweep's own subject
-    matter, not a curiosity. If the re-read took any listing rather than the exact match, a young
-    part would lend its mtime to an old base (protecting bytes that should drain) or an old base
-    would lend its mtime to a young part (deleting a PUT that just landed). Only the exact key's
-    own mtime may decide.
+    matter, not a curiosity. If the re-read resolved to any key under the candidate's prefix, a
+    young part would lend its mtime to an old base (protecting bytes that should drain) or an old
+    base would lend its mtime to a young part (deleting a PUT that just landed). Only the exact
+    key's own mtime may decide.
     """
 
     async def _run() -> None:
@@ -830,6 +850,35 @@ def test_the_mtime_re_read_takes_the_exact_key_not_a_sibling_it_prefixes(
         # The old base drained on its own mtime; the freshly written part kept its grace.
         assert store.deleted == [base]
         assert store.present == {part}
+
+    asyncio.run(_run())
+
+
+def test_the_mtime_re_read_costs_one_head_and_never_a_listing(migrated_url: str) -> None:
+    """The re-read is a single ``head``, so a base key does not enumerate its parts (#1575).
+
+    The whole point is that the cost is independent of how many keys the candidate prefixes: a
+    LIST-backed re-read of ``<base>`` returns ``<base>`` plus every ``<base>.partNNNN``, paginated
+    to exhaustion. Both halves of that are asserted — one ``head`` per examined candidate, and
+    **no** listing beyond the one per root the sweep opens with — because a re-read that merely
+    got cheaper (a bounded LIST) would still pass a call-count-only assertion.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        base = f"{prefix}vmcore"
+        parts = [f"{base}.part{n:04d}" for n in range(1, 4)]
+        keys = [base, *parts]
+        store = _FakeUploadStore(dict.fromkeys(keys, _GRACE * 2))
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            assert await run_repair(pool, _sweep(store)) == len(keys)
+        assert sorted(store.deleted) == sorted(keys)
+        # One listing per root, and not one more: the re-read never lists.
+        assert store.listed_prefixes == list(UPLOAD_ORPHAN_ROOTS)
+        # Exactly one head per examined candidate, the base's no dearer than a part's.
+        assert sorted(store.headed_keys) == sorted(keys)
 
     asyncio.run(_run())
 
