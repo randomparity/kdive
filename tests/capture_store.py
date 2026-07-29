@@ -14,10 +14,11 @@ instead, because they need to disagree with the capture on purpose.
 One consequence is worth naming, because a shared double is easy to over-read. When two
 concurrent handlers drive the *same* fake for the same Run, both record the same etag for the same
 key, so both finalizes agree with the store and both commit. In production that is the
-byte-identical-cores case: the two captures write the same deterministic key, and if their bytes
-differ the later write wins and the first finalize refuses (ADR-0497 Consequences). The refusal arm
-is pinned directly by ``test_an_object_replaced_since_the_capture_commits_no_row`` rather than by
-forcing that interleaving through a barrier.
+byte-identical-cores case. When the bytes differ, the later write to each of the two keys wins, and
+one or both finalizes refuse — both when the raw and redacted writes interleave in opposite orders
+(ADR-0497 Consequences). The refusal arm is pinned directly by
+``test_an_object_replaced_since_the_capture_commits_no_row`` rather than by forcing that
+interleaving through a barrier.
 """
 
 from __future__ import annotations
