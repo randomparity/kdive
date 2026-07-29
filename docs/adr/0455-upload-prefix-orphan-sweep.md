@@ -124,8 +124,10 @@ than the one this section's cost model assumes. Correct, not O(1); #1575 tracks 
 
 > **Amended by [ADR-0496](0496-orphan-sweep-re-read-is-a-head.md) (#1575).** The re-read is a
 > single `store.head`, not a LIST and a filter, so it is one round trip for every key shape and
-> the exactness is structural rather than filtered. The `re-read → re-check → delete` ordering
-> and the residual the next paragraph states are unchanged.
+> the exactness is structural rather than filtered. It is also the sweep's only `head_object`,
+> which makes it a per-key failure site in its own right — §5's fourth. The
+> `re-read → re-check → delete` ordering and the residual the next paragraph states are
+> unchanged.
 
 The residual it leaves is narrow and stated rather than implied: a PUT that lands between that
 re-read and the `delete_object` is deleted. That is a single re-read→delete gap, for a key that has

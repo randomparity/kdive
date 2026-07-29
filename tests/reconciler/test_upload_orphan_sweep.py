@@ -146,6 +146,21 @@ class _FailingListStore(_FakeUploadStore):
         return super().list_prefix_with_mtime(prefix)
 
 
+class _FailingHeadStore(_FakeUploadStore):
+    """Raises ``CategorizedError`` from ``head`` for the named keys — a per-key HEAD deny."""
+
+    def __init__(self, objects: dict[str, timedelta], *, fail_keys: set[str]) -> None:
+        super().__init__(objects)
+        self._fail_keys = fail_keys
+
+    def head(self, key: str) -> HeadResult | None:
+        if key in self._fail_keys:
+            raise CategorizedError(
+                f"head_object failed for {key}", category=ErrorCategory.INFRASTRUCTURE_FAILURE
+            )
+        return super().head(key)
+
+
 class _HookedStore(_FakeUploadStore):
     """Runs ``before_delete`` from inside ``delete``, once, on the ``to_thread`` worker.
 
@@ -748,7 +763,7 @@ def test_one_pass_reclaims_at_most_the_per_root_budget(migrated_url: str) -> Non
     """ADR-0455 §6: an unbounded drain would stall every other repair behind it.
 
     The reconciler runs its catalog sequentially on one connection with no per-pass deadline, and
-    each reclaim costs a LIST, a query, and a delete — so the first pass against a backlog that has
+    each reclaim costs a HEAD, a query, and a delete — so the first pass against a backlog that has
     accumulated since ADR-0453 would hold allocation expiry, orphaned-System repair, and domain
     reaping for as long as it took. The remainder is reclaimed by the following passes.
     """
@@ -772,7 +787,7 @@ def test_one_pass_reclaims_at_most_the_per_root_budget(migrated_url: str) -> Non
 def test_the_per_root_budget_counts_every_examined_candidate(migrated_url: str) -> None:
     """The budget bounds *work*, not successes.
 
-    A failed key — and equally a key whose re-check declines — still costs the re-read LIST and the
+    A failed key — and equally a key whose re-check declines — still costs the re-read HEAD and the
     re-check query, so a budget that only counted deletes would leave a pass against a wholly
     undeletable backlog, or a pass overlapping another that already deleted everything, unbounded
     again. Those are the degraded modes the budget exists for, not exotic ones.
@@ -825,17 +840,19 @@ def test_a_wholly_stuck_first_root_does_not_starve_the_second(migrated_url: str)
     asyncio.run(_run())
 
 
-def test_the_mtime_re_read_takes_the_exact_key_not_a_sibling_it_prefixes(
-    migrated_url: str,
-) -> None:
-    """The re-read resolves to the candidate's own mtime, never a sibling's.
+def test_each_key_under_one_prefix_is_aged_on_its_own_mtime(migrated_url: str) -> None:
+    """Sibling keys sharing a prefix are aged independently; membership alone condemns nothing.
 
     A chunked window's parts are ``<base>.partNNNN``, and a row-first reap that failed partway
     leaves the base and its parts rowless together — so this shape is the sweep's own subject
-    matter, not a curiosity. If the re-read resolved to any key under the candidate's prefix, a
-    young part would lend its mtime to an old base (protecting bytes that should drain) or an old
-    base would lend its mtime to a young part (deleting a PUT that just landed). Only the exact
-    key's own mtime may decide.
+    matter, not a curiosity. What it pins is the **classify**: ``_RECLAIMABLE_SQL`` compares each
+    candidate's own ``last_modified``, so an old base drains while a part written seconds ago
+    keeps its grace. A predicate that took any single mtime for the group would either protect
+    bytes that should drain or delete a PUT that just landed.
+
+    It does *not* pin the per-key re-read, and it never did much: since #1575 the re-read is a
+    ``head`` on the exact key, so resolving to a sibling is not a mistake the code can make. The
+    re-read's own behaviour is pinned by the rewrite, already-deleted, and cost tests below.
     """
 
     async def _run() -> None:
@@ -883,16 +900,73 @@ def test_the_mtime_re_read_costs_one_head_and_never_a_listing(migrated_url: str)
     asyncio.run(_run())
 
 
+def test_a_re_read_failure_is_skipped_and_counted_like_every_other_per_key_fault(
+    migrated_url: str,
+) -> None:
+    """The re-read is a fourth per-key failure site, and it fails the same way the others do.
+
+    Since #1575 it is also the only store call in the sweep that needs ``s3:GetObject`` rather
+    than ``s3:ListBucket``, so a credential that can list and delete but not HEAD faults *here*
+    and nowhere else. It must not delete on a re-read it could not make, and it must not abort
+    the pass: the key is skipped, counted, and the pass raises once at the end (ADR-0455 §5).
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        denied, reachable = f"{prefix}vmcore", f"{prefix}kernel"
+        store = _FailingHeadStore({denied: _GRACE * 2, reachable: _GRACE * 2}, fail_keys={denied})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with pytest.raises(CategorizedError) as excinfo:
+                await run_repair(pool, _sweep(store))
+        assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+        # The un-HEADable key survives — a re-read that failed is not a licence to delete — and
+        # the key behind it is still reclaimed.
+        assert store.deleted == [reachable]
+        assert store.present == {denied}
+
+    asyncio.run(_run())
+
+
+def test_the_reclaim_log_names_the_etag_the_delete_decision_was_made_on(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The re-read observes an identity, not just an age, and the record says which one.
+
+    ``head`` returns the object's etag in the same round trip as its mtime, so the two cannot
+    disagree about which bytes were examined. Naming it on the reclaim line is what lets an
+    operator investigating a wrongly-drained key tell whether the deleted version is the one they
+    expect — the alternative is a log that says an object was deleted and nothing about which.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_run_with_window(migrated_url, timedelta(seconds=-1))
+        async with await connect(migrated_url) as seed:
+            await upload_manifest.delete_manifest(seed, "runs", run_id)
+        key = f"{prefix}vmcore"
+        store = _FakeUploadStore({key: _GRACE * 2})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            with caplog.at_level(logging.INFO, logger="kdive.reconciler.cleanup.upload_orphans"):
+                assert await run_repair(pool, _sweep(store)) == 1
+        reclaims = [r.getMessage() for r in caplog.records if "deleted" in r.getMessage()]
+        assert len(reclaims) == 1
+        assert key in reclaims[0]
+        assert f"etag-of-{key}" in reclaims[0]
+
+    asyncio.run(_run())
+
+
 def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADR-0455 §5: the classify is the third failure site, and it is the root-correlated one.
 
-    ``local/runs/`` is the larger, faster-growing root, its ``artifacts`` anti-join has no usable
-    index (#1570) and its whole listing goes in as one array parameter (#1569) — so a role-level
+    ``local/runs/`` is the larger, faster-growing root and its whole listing goes in as one array
+    parameter (#1569) — so a role-level
     ``statement_timeout`` fires on *that* root's scan and not on the smaller root's. Aborting the
     pass on it would leave ``local/investigations/`` unswept on every pass while the condition held,
-    and the two deferred cost items make that more likely over time, not less.
+    and #1569's whole-root array parameter makes that more likely over time, not less.
     """
     real_classify = upload_orphans.reclaimable_upload_keys
 

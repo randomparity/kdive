@@ -122,12 +122,15 @@ async def repair_leaked_upload_objects(
     code cannot see — a reconciler provisioned without ``KDIVE_UPLOAD_TTL_SECONDS`` while the
     minting server raises it — which is the one way the margin can still go negative (ADR-0455 §2).
 
-    A root has three failure sites — its listing, its bulk classify, and each per-key delete — and
-    all three are logged, counted, and skipped, with the pass raising once at the end (ADR-0455 §5);
-    each root gets its own work budget (§6). Aborting at the first failure would let one
-    permanently undeletable object — an S3 Object Lock hold, a per-key deny — or one unlistable or
-    unclassifiable prefix starve every candidate behind it and the whole second root, on every pass
-    forever, which is the leak this repair exists to drain. Raising at the end
+    A root has four failure sites — its listing, its bulk classify, and each per-key re-read and
+    delete — and all four are logged, counted, and skipped, with the pass raising once at the end
+    (ADR-0455 §5); each root gets its own work budget (§6). The re-read is worth naming separately
+    from the delete because since #1575 it is the sweep's only ``head_object``, so it is the one
+    call a credential scoped to ``s3:ListBucket`` and ``s3:DeleteObject`` cannot make. Aborting at
+    the first failure would let one permanently undeletable object — an S3 Object Lock hold, a
+    per-key deny — or one unlistable or unclassifiable prefix starve every candidate behind it and
+    the whole second root, on every pass forever, which is the leak this repair exists to drain.
+    Raising at the end
     still reaches the ADR-0190 group-E error counter via ``_run_repair_plan``'s ``failures``, and
     nothing is lost by either path: this sweep commits nothing, so the next pass re-derives the
     identical candidates.
