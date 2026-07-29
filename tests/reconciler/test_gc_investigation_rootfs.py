@@ -23,6 +23,7 @@ from kdive.reconciler.cleanup import gc
 from kdive.reconciler.cleanup.gc import (
     sweep_expired_investigation_rootfs_reclaim,
     sweep_investigation_rootfs_reclaim,
+    sweep_unowned_investigation_rootfs_staging,
 )
 from kdive.reconciler.repairs.jobs import repair_abandoned_jobs
 from tests.reconciler.conftest import connect
@@ -414,6 +415,205 @@ def test_a_dead_worker_recovers_via_the_abandoned_jobs_repair(
             assert len(jobs) == 1
             assert jobs[0]["state"] == "queued"
             assert jobs[0]["id"] != job_id  # a fresh, re-dated row
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+_UPLOAD_PROFILE = (
+    '{"provider": {"local-libvirt": {"rootfs": {"kind": "upload", "checksum_sha256": "c"}}}}'
+)
+_CATALOG_PROFILE = '{"provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "r"}}}}'
+
+
+async def _seed_upload_system(
+    conn: psycopg.AsyncConnection,
+    inv: UUID,
+    *,
+    state: str = "torn_down",
+    profile: str = _UPLOAD_PROFILE,
+    age: timedelta = timedelta(days=40),
+) -> UUID:
+    resource_id, alloc_id, system_id = uuid4(), uuid4(), uuid4()
+    await conn.execute(
+        "INSERT INTO resources (id, kind, pool, cost_class, status, host_uri) "
+        "VALUES (%s, 'local-libvirt', 'p', 'c', 'available', 'qemu:///system')",
+        (resource_id,),
+    )
+    await conn.execute(
+        "INSERT INTO allocations (id, resource_id, state, principal, project) "
+        "VALUES (%s, %s, 'active', 'p', 'proj')",
+        (alloc_id, resource_id),
+    )
+    await conn.execute(
+        "INSERT INTO systems (id, allocation_id, investigation_id, state, provisioning_profile, "
+        "principal, project, created_at) VALUES (%s, %s, %s, %s, %s::jsonb, 'p', 'proj', "
+        "now() - %s)",
+        (system_id, alloc_id, inv, state, profile, age),
+    )
+    return system_id
+
+
+def test_neither_row_keyed_lane_reaches_a_never_closed_investigation_with_no_rows(
+    migrated_url: str,
+) -> None:
+    # #1559's residual (a), pinned as the gap itself. This is the state a leaked base sits in: the
+    # investigation was never closed, so `rootfs_cleanup_pending_at` is NULL and the close-driven
+    # lane cannot see it; its rootfs rows have all drained, so the TTL lane's pure `artifacts` join
+    # selects nothing either. Both lanes report zero, forever, and the base is reclaimed by nothing.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 0
+            assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_enqueues_an_empty_worklist_for_that_investigation(
+    migrated_url: str,
+) -> None:
+    # ADR-0494 section 2: the lane that closes the gap above. Keyed on the `systems` row that
+    # referenced an uploaded base -- the causal record, which outlives every artifacts row the base
+    # had -- and carrying an empty worklist, so the handler falls straight through to the drain tail
+    # that sweeps the staging directory.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == []
+            assert jobs[0]["dedup_key"] == f"rootfs-reclaim:{inv}"
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_is_disjoint_from_the_ttl_lane(migrated_url: str) -> None:
+    # The two share the per-investigation dedup slot, so a worklist overlap would have them fight
+    # over it every pass -- one deleting the other's settled job and re-issuing a different payload.
+    # `NOT EXISTS` is what keeps them apart: a surviving rootfs row is the TTL lane's business.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv)
+            await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await sweep_expired_investigation_rootfs_reclaim(conn, timedelta(days=30)) == 1
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_is_disjoint_from_the_close_driven_lane(migrated_url: str) -> None:
+    # The other half of the disjointness: a closed investigation is the close-driven lane's, keyed
+    # on the marker only `investigations.close` sets, and is in neither `open` nor `active`.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+            )
+            await _seed_upload_system(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await sweep_investigation_rootfs_reclaim(conn, timedelta(days=1)) == 1
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_ignores_an_investigation_that_never_used_an_uploaded_rootfs(
+    migrated_url: str,
+) -> None:
+    # The worklist bound. A base is only ever staged for a System whose profile names an `upload`
+    # rootfs, so a catalog-only investigation has no staging directory to drain and must not draw a
+    # job every pass for the rest of its life.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv, profile=_CATALOG_PROFILE)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_leaves_a_system_inside_retention_alone(migrated_url: str) -> None:
+    # The TTL half. A System provisioned minutes ago may be staging its base right now, between the
+    # `mkdir` and the publish, with its artifacts row not yet resolved -- so the retention window is
+    # what keeps the lane off a live provision rather than racing it.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv, state="provisioning", age=timedelta(minutes=1))
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_issues_one_job_for_an_investigation_with_several_systems(
+    migrated_url: str,
+) -> None:
+    # The worklist is per-System while the dedup slot is per-investigation, so N sibling Systems
+    # must still yield one job and one counted enqueue. (`DISTINCT` in the query is an efficiency
+    # measure on top of this, not the guarantee: the in-flight dedup in `_enqueue_rootfs_reclaim`
+    # would collapse the duplicates anyway, which is what this pins.)
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            await _seed_upload_system(seed, inv)
+            await _seed_upload_system(seed, inv)
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 1
+            assert len(await _reclaim_jobs(conn, inv)) == 1
         finally:
             await conn.close()
 
