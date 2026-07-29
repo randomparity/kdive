@@ -25,6 +25,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.domain.capacity.state import SystemState
 from kdive.mcp.assembly.app import build_app
 from kdive.mcp.tools import _docmeta
+from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from kdive.profiles.build import BuildProfile
 from kdive.security.secrets.secret_registry import SecretRegistry
 from scripts.gen_tool_reference import (
@@ -500,14 +501,33 @@ def test_jobs_wait_description_conveys_retry_contract() -> None:
     timeout_desc = wait.parameters["properties"]["timeout_s"]["description"].lower()
     # The surfaced default and cap are derived from the source constants, so the number an
     # agent reads cannot drift from the value the handler actually enforces.
-    from kdive.mcp.tools.jobs import DEFAULT_WAIT_S, MAX_WAIT_S
-
     assert str(int(DEFAULT_WAIT_S)) in timeout_desc
     assert str(int(MAX_WAIT_S)) in timeout_desc
     # Warns that a large value risks an intermediary proxy severing the held stream, and steers
     # toward repeated short waits over one long hold.
     assert "proxy" in timeout_desc
     assert "short" in timeout_desc
+
+
+@pytest.mark.parametrize("tool_name", ["jobs.wait", "allocations.wait"])
+def test_both_wait_tools_state_the_same_timeout_default_and_cap(tool_name: str) -> None:
+    # #1622 / ADR-0476: `allocations.wait` stated only the cap and never its default, so the
+    # schema text one agent read disagreed with the other's about the same parameter — and with
+    # the runbook. Both figures now come from one pair of constants in `tools._common`, and both
+    # tools must surface both: a per-tool copy is exactly what let them diverge. Asserting the
+    # *schema default* too is what makes this bite on the bare `= 30.0` this issue removed —
+    # the description could interpolate the constant while the signature still hardcoded 30.
+    tools = {t.name: t for t in TOOLS}
+    timeout = tools[tool_name].parameters["properties"]["timeout_s"]
+    description = timeout["description"].lower()
+
+    assert str(int(DEFAULT_WAIT_S)) in description, (
+        f"{tool_name} timeout_s never states its default: {description}"
+    )
+    assert str(int(MAX_WAIT_S)) in description, (
+        f"{tool_name} timeout_s never states its cap: {description}"
+    )
+    assert timeout["default"] == DEFAULT_WAIT_S
 
 
 def test_upload_tools_state_deadline_scope_and_non_constraint() -> None:

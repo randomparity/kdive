@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Summary-first tools.search and a namespace authz signal
 - Report the deployed build on /readyz and preflight live-stack skew
 - Thread schema-derived help into curated verb flags
+- Bind the CLI wait default to its source constant
 
 ### Changed
 
@@ -94,6 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fold fixtures.list into images.list
 - Replace debug step variants with debug.advance
 - Correct _input_schemas' contract in its docstring
+- Give the wait timeout default and cap one home
 
 ### Documentation
 
@@ -190,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADR-0480 reclaim an abandoned crashed System's allocation
 - Mark ADR-0456 §3 amended and fix the agent-index schema claim
 - Register KDIVE_STACK_SKEW_POLICY in the env reference
+- ADR-0476 — one home for the wait timeout constants
 - Note the #1635 interaction in ADR-0471
 
 ### Fixed

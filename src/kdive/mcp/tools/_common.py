@@ -19,6 +19,20 @@ from kdive.serialization import JsonValue
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 200
 
+DEFAULT_WAIT_S = 30.0
+"""The ``timeout_s`` default shared by ``jobs.wait`` and ``allocations.wait`` (ADR-0476).
+
+One constant, not one per tool: ADR-0470 decision 2 rests on the two ``wait`` tools and the
+CLI verbs over them all waiting for the *same* length of time, so a per-tool copy would let
+them silently disagree. Interpolate it into agent-facing text; never retype the number.
+"""
+
+MAX_WAIT_S = 300.0
+"""The ``timeout_s`` server-side clamp shared by both ``wait`` tools (ADR-0476).
+
+Companion to :data:`DEFAULT_WAIT_S`; see ADR-0138 for why the ceiling sits at 300 s.
+"""
+
 
 class ConfigErrorReason(StrEnum):
     """Closed vocabulary of machine-readable `configuration_error` reasons (ADR-0174).
@@ -290,7 +304,9 @@ def job_envelope(job: Job, object_key: str, object_id: UUID) -> ToolResponse:
 
 __all__ = [
     "DEFAULT_LIST_LIMIT",
+    "DEFAULT_WAIT_S",
     "MAX_LIST_LIMIT",
+    "MAX_WAIT_S",
     "ConfigErrorReason",
     "InvalidCursor",
     "as_uuid",

@@ -51,6 +51,7 @@ from kdive.cli.__main__ import build_parser
 from kdive.cli.commands._generated_verbs import GENERATED_VERBS
 from kdive.cli.commands.registry import REGISTRY, Verb
 from kdive.cli.commands.verb_spec import GeneratedVerb
+from kdive.mcp.tools._common import DEFAULT_WAIT_S, MAX_WAIT_S
 from scripts import gen_cli_verbs as gen
 
 _OK_ENVELOPE = {"object_id": "o", "status": "ok", "data": {}, "items": []}
@@ -353,23 +354,34 @@ def test_curated_parameter_carries_its_generated_help(
         )
 
 
+@pytest.mark.parametrize("group", ["jobs", "allocations"])
 def test_wait_verb_help_states_its_timeout_default_and_cap(
-    parser: argparse.ArgumentParser,
+    parser: argparse.ArgumentParser, group: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``kdivectl jobs wait --help`` states the 30-second default and the 300-second cap.
+    """``kdivectl <group> wait --help`` states the wait default and the cap.
 
     The per-parameter guard above compares descriptor to argparse action; this one drives the
     formatter, because the timeout is the wait verbs' whole semantic surface and neither figure
     reached the user anywhere else (#1618). The sentence is read back out of the descriptor so a
     reworded tool docstring does not redden this, but both figures are asserted directly — losing
-    either is the regression, whatever the wording. argparse re-wraps to the terminal width, so
-    the comparison is over whitespace-collapsed text.
+    either is the regression, whatever the wording. ``COLUMNS`` is pinned wide because argparse
+    re-wraps to the terminal width and hyphen-breaks on the way ("non-terminal" becomes
+    "non-\\nterminal"), which no amount of whitespace collapsing puts back together; the
+    comparison is still over whitespace-collapsed text.
+
+    Both figures are read from the constants the handlers enforce rather than retyped (ADR-0476):
+    a hand-typed ``300`` here would redden on a deliberate bump and say nothing about whether the
+    rendered help actually tracked it. Both verbs are covered because ``allocations.wait`` stated
+    only the cap until #1622 — a gap a ``jobs``-only assertion could not see.
     """
-    flag = next(f for f in _GENERATED_BY_PATH["jobs", "wait"].flags if f.dest == "timeout_s")
-    rendered = " ".join(_subparser_for(parser, "jobs", "wait").format_help().split())
+    monkeypatch.setenv("COLUMNS", "400")
+    flag = next(f for f in _GENERATED_BY_PATH[group, "wait"].flags if f.dest == "timeout_s")
+    rendered = " ".join(_subparser_for(parser, group, "wait").format_help().split())
     assert " ".join(flag.help.split()) in rendered
-    assert re.search(r"\b30\b", rendered), f"no 30-second default in: {rendered}"
-    assert re.search(r"\b300\b", rendered), f"no 300-second cap in: {rendered}"
+    for label, value in (("default", DEFAULT_WAIT_S), ("cap", MAX_WAIT_S)):
+        assert re.search(rf"\b{int(value)}\b", rendered), (
+            f"{group} wait --help states no {int(value)}-second {label}: {rendered}"
+        )
 
 
 def _child_parser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
