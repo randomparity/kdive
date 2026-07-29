@@ -262,8 +262,10 @@ splits into `REENTRANT_TOOLS` (skipped by all three) and `UNMETERED_TOOLS` (skip
 and the denial bullet above is unreachable, because the inner `DenialAuditMiddleware` returns an
 enveloped denial rather than re-raising, so nothing reaches an outer instance to double-audit.
 One
-row per real call, keyed to the inner tool with correct project/outcome (`_call_project` already
-reads `arguments["project"]`, which on the re-entered inner call is the real argument dict). A test
+row per real call, keyed to the inner tool with correct project/outcome (`_call_project` reads the
+call's arguments, which on the re-entered inner call are the real argument dict — since #1644 it
+looks at `arguments["project"]` first and then one level into any `Mapping`-valued argument, so a
+tool carrying its project inside a typed request payload is attributed too). A test
 asserts a gateway-denied call writes exactly one denial audit row, attributed to the inner tool.
 `BindingErrorMiddleware` and `ToolExposureMiddleware` record nothing per call, so they need no
 skip.
