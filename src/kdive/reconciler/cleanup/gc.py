@@ -38,6 +38,27 @@ _TTL_ROOTFS_OBJECTS_SQL = (
     "WHERE a.owner_kind = 'investigations' AND a.retention_class = 'rootfs' "
     "AND a.created_at < now() - %s AND i.state IN ('open', 'active')"
 )
+#: Staging-drain backstop scope (ADR-0494 §2, #1559): a **never-closed** investigation
+#: (``open``/``active``) that once provisioned a System off an uploaded rootfs and whose rootfs
+#: ``artifacts`` rows have since **all** drained. Keyed on ``systems`` rather than on ``artifacts``
+#: precisely because there is no row left to key on — a base orphaned in that state (published
+#: after its own reclaim, or left by a worker killed between the publish and the row commit) is
+#: reached by neither :data:`_CLOSE_DRIVEN_INV_SQL`, whose marker only ``investigations.close``
+#: sets, nor :data:`_TTL_ROOTFS_OBJECTS_SQL`, which is a pure ``artifacts`` join.
+#:
+#: The ``systems`` row is the *causal* record: a base is only ever staged for a System whose
+#: profile names an ``upload`` rootfs, and Systems are retired in place (``torn_down``) rather than
+#: deleted, so the trigger outlives every row the base itself had. The ``NOT EXISTS`` keeps this
+#: worklist disjoint from the TTL lane's, and the ``open``/``active`` predicate keeps it disjoint
+#: from the close-driven one, so the three never contend for the shared per-investigation dedup key.
+_UNOWNED_STAGING_INV_SQL = (
+    "SELECT DISTINCT s.investigation_id, i.project FROM systems s "
+    "JOIN investigations i ON i.id = s.investigation_id "
+    "WHERE i.state IN ('open', 'active') AND s.created_at < now() - %s "
+    "AND s.provisioning_profile #>> '{provider,local-libvirt,rootfs,kind}' = 'upload' "
+    "AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.owner_kind = 'investigations' "
+    "AND a.retention_class = 'rootfs' AND a.owner_id = s.investigation_id)"
+)
 
 DEFAULT_IDEMPOTENCY_RETENTION = timedelta(days=7)
 DEFAULT_DUMP_VOLUME_GRACE = timedelta(minutes=30)
@@ -309,6 +330,42 @@ async def sweep_expired_investigation_rootfs_reclaim(
             enqueued += 1
     if enqueued:
         _log.info("reconciler: enqueued %d past-TTL rootfs reclaim job(s)", enqueued)
+    return enqueued
+
+
+async def sweep_unowned_investigation_rootfs_staging(
+    conn: AsyncConnection, retention: timedelta
+) -> int:
+    """Enqueue a staging-drain job per never-closed investigation whose rootfs rows all drained.
+
+    The filesystem-drain backstop (ADR-0494 §2, #1559). Both existing lanes are anchored on state a
+    leaked base does not have: the close-driven lane needs ``rootfs_cleanup_pending_at``, which only
+    ``investigations.close`` sets, and the TTL lane is a pure ``artifacts`` join that selects
+    nothing once the rows are gone. So a base orphaned in a never-closed investigation whose rows
+    have drained is reclaimed by nothing at all until a human closes it.
+
+    This lane's worklist is :data:`_UNOWNED_STAGING_INV_SQL` — the ``systems`` rows that reference
+    an uploaded base — and the job it issues carries an **empty** ``artifact_ids``, so the handler
+    falls straight through its reclaim loop to the drain tail that sweeps the staging directory.
+    That is the same empty-worklist path :func:`sweep_investigation_rootfs_reclaim` already relies
+    on for a marker past grace with no rows left, so no new handler behaviour is introduced here.
+
+    A job is issued for every matching investigation each pass, subject to the shared
+    :data:`ROOTFS_RECLAIM_RETRY_BACKOFF` slot — including ones whose staging directory is already
+    empty, which the reconciler cannot see (it holds no filesystem, ADR-0442). The cost of a
+    redundant pass is one ``readdir`` on the worker; the cost of a DB-side "is it empty" answer
+    would be durable per-investigation state whose only reader is this sweep. Returns the number of
+    jobs ensured this pass.
+    """
+    async with conn.cursor() as cur:
+        await cur.execute(_UNOWNED_STAGING_INV_SQL, (retention,))
+        candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
+    enqueued = 0
+    for investigation_id, project in candidates:
+        if await _try_enqueue_rootfs_reclaim(conn, investigation_id, project, []):
+            enqueued += 1
+    if enqueued:
+        _log.info("reconciler: enqueued %d unowned-rootfs-staging drain job(s)", enqueued)
     return enqueued
 
 

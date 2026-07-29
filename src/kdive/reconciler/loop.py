@@ -107,6 +107,7 @@ _gc_investigation_artifacts = gc_repairs.gc_investigation_artifacts
 _gc_expired_build_artifacts = gc_repairs.gc_expired_build_artifacts
 _sweep_investigation_rootfs_reclaim = gc_repairs.sweep_investigation_rootfs_reclaim
 _sweep_expired_investigation_rootfs_reclaim = gc_repairs.sweep_expired_investigation_rootfs_reclaim
+_sweep_unowned_investigation_rootfs_staging = gc_repairs.sweep_unowned_investigation_rootfs_staging
 _promote_pending = allocation_promotion.promote_pending
 _reap_console_collectors = gc_repairs.reap_console_collectors
 _reap_orphaned_dump_volumes = gc_repairs.reap_orphaned_dump_volumes
@@ -208,6 +209,7 @@ class ReconcileReport:
     expired_build_artifacts_gc_count: int = 0
     investigation_rootfs_reclaims_enqueued: int = 0
     expired_investigation_rootfs_reclaims_enqueued: int = 0
+    unowned_investigation_rootfs_staging_drains_enqueued: int = 0
     #: The raw per-kind repair counts, keyed by ``_RepairSpec.name`` (ADR-0190 A). The scalar
     #: fields above feed callers that read named categories; this dict feeds the repairs
     #: counter with the exact spec names so ``repair_kind`` == ``ALL_REPAIR_KINDS``. Excluded
@@ -342,6 +344,14 @@ def _expired_investigation_rootfs_reclaim_repair(
     )
 
 
+def _unowned_investigation_rootfs_staging_repair(
+    _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
+) -> _RepairFn | None:
+    return lambda conn: _sweep_unowned_investigation_rootfs_staging(
+        conn, config.investigation_rootfs_retention
+    )
+
+
 def _console_collectors_repair(
     _reaper: InfraReaper, config: ReconcileConfig, _image_publish_grace: timedelta
 ) -> _RepairFn | None:
@@ -432,6 +442,14 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
         "expired_investigation_rootfs_reclaims_enqueued",
         _expired_investigation_rootfs_reclaim_repair,
     ),
+    # Runs after both row-keyed lanes so an investigation either of them just enqueued for holds the
+    # shared per-investigation slot and this one skips it. Ordering is a courtesy, not the
+    # correctness argument: `_UNOWNED_STAGING_INV_SQL`'s `NOT EXISTS` already makes the worklists
+    # disjoint (ADR-0494 §2).
+    _RepairCatalogEntry(
+        "unowned_investigation_rootfs_staging_drains_enqueued",
+        _unowned_investigation_rootfs_staging_repair,
+    ),
     _RepairCatalogEntry("console_collectors_reaped", _console_collectors_repair),
     _RepairCatalogEntry("reconcile_inventory", _reconcile_inventory_repair, "reconciled_inventory"),
     _RepairCatalogEntry("leaked_images", _leaked_images_repair),
@@ -486,6 +504,7 @@ _REPORT_FIELDS: tuple[str, ...] = (
     "expired_build_artifacts_gc_count",
     "investigation_rootfs_reclaims_enqueued",
     "expired_investigation_rootfs_reclaims_enqueued",
+    "unowned_investigation_rootfs_staging_drains_enqueued",
 )
 
 
