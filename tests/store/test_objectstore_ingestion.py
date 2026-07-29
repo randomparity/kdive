@@ -17,6 +17,7 @@ from kdive.artifacts.storage import (
 from kdive.domain.catalog.artifacts import Sensitivity
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.store.objectstore import (
+    _LIST_PAGE_SIZE,
     ObjectStore,
     artifact_key,
     owner_prefix,
@@ -280,6 +281,25 @@ class _MtimeListClient:
         return _Paginator()
 
 
+class _FaultAfterOnePageClient:
+    """Yields one good page, then raises — the mid-listing fault a flat listing could not have."""
+
+    def get_paginator(self, _op: str) -> object:
+        class _Paginator:
+            def paginate(self, **_kwargs: object):
+                yield {
+                    "Contents": [
+                        {
+                            "Key": "local/runs/r1/kernel",
+                            "LastModified": datetime(2026, 1, 1, tzinfo=UTC),
+                        }
+                    ]
+                }
+                raise EndpointConnectionError(endpoint_url="http://x")
+
+        return _Paginator()
+
+
 def _mtime_pages() -> list[dict[str, object]]:
     return [
         {
@@ -310,19 +330,24 @@ def test_iter_prefix_pages_with_mtime_yields_a_page_at_a_time_in_store_order() -
     pages = [[listing.key for listing in page] for page in store.iter_prefix_pages_with_mtime("p/")]
     assert pages == [["local/runs/r1/kernel"], ["local/runs/r1/stray"], []]
     assert client.prefixes == ["p/"]
-    assert client.page_sizes == [1000]  # the bound is this module's, not boto3's default
+    # The bound is the store's own constant, not whatever boto3 defaults to next.
+    assert client.page_sizes == [_LIST_PAGE_SIZE]
 
 
 def test_iter_prefix_pages_with_mtime_maps_a_mid_listing_error_from_the_iterator() -> None:
-    """A paged listing's fault surfaces at the page that failed, still as a typed store failure.
+    """A fault *after* a delivered page still surfaces as the typed store failure.
 
-    The mapping has to live in the generator body rather than at the call, because with the flat
-    listing the whole enumeration happened inside the call and now it does not: a caller that has
-    already consumed pages must still see ``CategorizedError`` and not a raw botocore exception when
-    the next page fails, which is what lets the sweep count it as a root fault (ADR-0498 §3).
+    The mapping has to live in the generator body rather than around the call, because with the flat
+    listing the whole enumeration happened inside the call and now it does not. So the case that
+    distinguishes the two placements is a fault the caller reaches **after** consuming a page — a
+    `try` wrapped only around the setup would let a raw ``EndpointConnectionError`` escape from the
+    second ``next``, and the sweep would abort the pass instead of counting a root fault
+    (ADR-0498 §3). The first page is asserted to arrive intact so the fault really is the second
+    round trip and not the first.
     """
-    store = ObjectStore(_FailingListClient(), "bucket")
+    store = ObjectStore(_FaultAfterOnePageClient(), "bucket")
     pages = store.iter_prefix_pages_with_mtime("local/runs/")
+    assert [listing.key for listing in next(pages)] == ["local/runs/r1/kernel"]
     with pytest.raises(CategorizedError) as excinfo:
         next(pages)
     assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE

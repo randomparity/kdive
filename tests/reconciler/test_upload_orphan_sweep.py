@@ -74,6 +74,10 @@ class _FakeUploadStore:
 
     ``listed_prefixes``, ``pages_yielded`` and ``headed_keys`` record every store round trip in
     order, so a test can assert what the sweep *spent* and not only what it deleted (#1575, #1569).
+    ``events`` is the same round trips in one interleaved sequence — ``page:<n>`` for each page
+    handed over and ``delete:<key>`` for each delete — which is what distinguishes acting *per page*
+    from draining the iterator and then slicing the result into page-shaped calls. Both produce
+    identical ``pages_yielded``; only the interleaving differs.
 
     An object's etag is derived from its key by default, because most tests here are about ages
     and rows rather than identities. ``put`` can override it, and ``deleted_etags`` records the
@@ -90,6 +94,7 @@ class _FakeUploadStore:
         self.listed_prefixes: list[str] = []
         self.pages_yielded: list[list[str]] = []
         self.headed_keys: list[str] = []
+        self.events: list[str] = []
 
     @property
     def present(self) -> set[str]:
@@ -127,6 +132,7 @@ class _FakeUploadStore:
         for start in range(0, max(len(listing), 1), self._page_size):
             page = listing[start : start + self._page_size]
             self.pages_yielded.append([listed.key for listed in page])
+            self.events.append(f"page:{len(page)}")
             yield page
 
     def head(self, key: str) -> HeadResult | None:
@@ -146,6 +152,7 @@ class _FakeUploadStore:
             self.deleted_etags.append(self._etag(key))
         self._objects.pop(key, None)
         self.deleted.append(key)
+        self.events.append(f"delete:{key}")
 
 
 class _FailingDeleteStore(_FakeUploadStore):
@@ -190,13 +197,16 @@ class _FailingListStore(_FakeUploadStore):
         if prefix not in self._fail_list_prefixes:
             yield from super().iter_prefix_pages_with_mtime(prefix)
             return
-        self.listed_prefixes.append(prefix)  # the request was issued; it is the reply that failed
-        listing = self._listing(prefix)
-        for start in range(0, self._fail_after_pages * self._page_size, self._page_size):
-            page = listing[start : start + self._page_size]
-            if not page:
+        pages = super().iter_prefix_pages_with_mtime(prefix)
+        if not self._fail_after_pages:
+            # Fail before the first page, as a scoped s3:ListBucket deny does. `pages` is never
+            # advanced, so the base fake records nothing; the attempted request is recorded here
+            # instead, because it is the reply that failed and not the request.
+            self.listed_prefixes.append(prefix)
+        for _ in range(self._fail_after_pages):
+            page = next(pages, None)
+            if page is None:
                 break
-            self.pages_yielded.append([listed.key for listed in page])
             yield page
         raise CategorizedError(
             f"list_objects_v2 failed for {prefix}",
@@ -1074,13 +1084,13 @@ def test_the_reclaim_log_names_the_etag_the_delete_decision_was_made_on(
 def test_a_classify_failure_on_the_first_root_does_not_starve_the_second(
     migrated_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADR-0455 §5: the classify is the third failure site, and it is the root-correlated one.
+    """ADR-0455 §5: the classify is a failure site, and it ends its root without ending the pass.
 
-    ``local/runs/`` is the larger, faster-growing root and its whole listing goes in as one array
-    parameter (#1569) — so a role-level
-    ``statement_timeout`` fires on *that* root's scan and not on the smaller root's. Aborting the
-    pass on it would leave ``local/investigations/`` unswept on every pass while the condition held,
-    and #1569's whole-root array parameter makes that more likely over time, not less.
+    A ``statement_timeout`` or a dropped pool connection out of the anti-join is not made impossible
+    by the narrower statement #1569 brought — the parameter is a listing page wide now rather than a
+    whole root's, so the fault is no longer *preferentially* `local/runs/`'s, but it is still
+    reachable on either root. Aborting the pass on it would leave ``local/investigations/`` unswept
+    on every pass while the condition held, which is the starvation skip-and-count prevents.
     """
     real_classify = upload_orphans.reclaimable_upload_keys
 
@@ -1142,19 +1152,18 @@ def test_a_listing_failure_on_the_first_root_does_not_starve_the_second(
     asyncio.run(_run())
 
 
-def _recording_classify(
-    monkeypatch: pytest.MonkeyPatch, *, reverse: bool = False
-) -> list[list[str]]:
-    """Patch the classify to record the keys of every call, optionally reversing what it returns.
+def _recording_classify(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Patch the classify to record the candidate keys of every call, changing nothing else.
 
     The recorded calls are the sweep's two uses of one predicate: a per-page classify, and the
     single-key re-check before each delete. A page's call is therefore the one whose width can
     exceed one, which is what #1569 is about.
 
-    ``reverse`` exists because the sweep must not take its delete order from the classify's rows —
-    ADR-0455 §3 keeps store order because a planner may reorder an anti-join's output. Handing back
-    a deliberately reversed subset is the only way to tell "iterates the listing and filters" from
-    "iterates the query result", since a faithful stub returns both in the same order.
+    It deliberately does not perturb the returned order. Reordering the result would prove nothing:
+    ``_reclaim_page`` puts it straight into a ``set``, so any order a stub returned is discarded
+    before use. What pins the delete order is that the sequence matches the *pages*, asserted
+    against enough keys that a ``set``'s hash order is not lexicographic — verified by mutation,
+    not assumed.
     """
     real = upload_orphans.reclaimable_upload_keys
     calls: list[list[str]] = []
@@ -1163,8 +1172,7 @@ def _recording_classify(
         conn: psycopg.AsyncConnection, candidates: list[UploadOrphanCandidate], grace: timedelta
     ) -> list[str]:
         calls.append([c.key for c in candidates])
-        keys = await real(conn, candidates, grace)
-        return list(reversed(keys)) if reverse else keys
+        return await real(conn, candidates, grace)
 
     monkeypatch.setattr(upload_orphans, "reclaimable_upload_keys", _classify)
     return calls
@@ -1186,13 +1194,15 @@ def test_the_classify_never_sees_more_than_one_listing_page_of_candidates(
     The whole-root version built one ``candidates`` list per root and passed it to
     ``reclaimable_upload_keys`` as four parallel arrays sized to the entire listing — a six-figure
     Python list and a multi-megabyte psycopg parameter payload every 30 seconds under a prefix that
-    only ever grows. Both halves of the bound are asserted, because either alone is satisfiable
-    without the other: the widest classify is a page, **and** the sweep really did fetch each page
-    separately rather than slice one materialized listing into page-shaped calls.
+    only ever grows. Two independent halves are asserted, because neither implies the other: no
+    statement is wider than a page, **and** the sweep acted on each page before fetching the next.
+    The second needs the interleaving and not the page count — draining the iterator and then
+    slicing the result into page-shaped calls produces identical page counts and identical
+    statement widths, and is exactly the shape that would leave the whole root in memory.
     """
 
     async def _run() -> None:
-        prefix, keys = await _seed_reaped_run_orphans(
+        _prefix, keys = await _seed_reaped_run_orphans(
             migrated_url, [f"orphan-{i:02d}" for i in range(10)]
         )
         store = _FakeUploadStore(dict.fromkeys(keys, _GRACE * 2))
@@ -1203,7 +1213,19 @@ def test_the_classify_never_sees_more_than_one_listing_page_of_candidates(
         # 10 keys at 3 per page: four pages for this root, plus the empty sibling root's one.
         assert [len(page) for page in store.pages_yielded] == [3, 3, 3, 1, 0]
         assert sorted(store.deleted) == sorted(keys)
-        assert prefix in keys[0]
+        # Every page's deletes land before the next page is fetched. A drain-then-slice
+        # implementation yields all five pages first and this sequence would not alternate.
+        assert store.events == [
+            "page:3",
+            *(f"delete:{k}" for k in keys[0:3]),
+            "page:3",
+            *(f"delete:{k}" for k in keys[3:6]),
+            "page:3",
+            *(f"delete:{k}" for k in keys[6:9]),
+            "page:1",
+            *(f"delete:{k}" for k in keys[9:10]),
+            "page:0",
+        ]
 
     asyncio.run(_run())
 
@@ -1216,8 +1238,10 @@ def test_the_delete_order_is_store_order_across_page_boundaries(
     Store order is an acceptance criterion, not a nicety: a pass truncated by the per-root budget or
     by a mid-root listing fault is only reproducible — the same prefix of the same sequence every
     pass — if the order comes from the store. Postgres guarantees no ordering for an anti-join's
-    output, so this hands back a **reversed** reclaimable subset and requires the deletes out in
-    store order regardless, across page boundaries and not merely within one page.
+    output, and ``_reclaim_page`` puts the approved keys into a ``set``, so an implementation that
+    iterated *that* would emit hash order. Eight keys is enough that hash order is not
+    lexicographic, which is what gives this assertion its bite; the mutation that iterates the set
+    instead of the page is confirmed to redden it.
     """
 
     async def _run() -> None:
@@ -1225,13 +1249,14 @@ def test_the_delete_order_is_store_order_across_page_boundaries(
             migrated_url, [f"orphan-{i:02d}" for i in range(8)]
         )
         store = _FakeUploadStore(dict.fromkeys(keys, _GRACE * 2))
-        calls = _recording_classify(monkeypatch, reverse=True)
+        calls = _recording_classify(monkeypatch)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _sweep(store)) == len(keys)
         # Store order is lexicographic by key, and that is exactly the delete sequence.
         assert store.deleted == sorted(keys)
         # And it really did span pages — otherwise this pins order within one listing, not across.
         assert len([call for call in calls if len(call) > 1]) > 1
+        assert store.events.count("page:3") > 1
 
     asyncio.run(_run())
 
