@@ -466,13 +466,19 @@ def test_role_denial_reaches_the_live_stack_harness_as_an_envelope(migrated_url:
 # resolver reads is the one FastMCP actually hands it for each wrapper shape.
 
 # Every tool that nests its project inside a typed request payload, with the outcome a
-# viewer on `_PROJECT` gets from it. Both outcome classes are here on purpose: the issue's
-# acceptance names `ok` and `denied` alike, and a denial is the case ADR-0148 keeps the row
-# for — "who was denied on project X" is unanswerable while the column is NULL.
+# viewer on `_PROJECT` gets from it. All three outcome classes are here on purpose: the
+# issue's acceptance names `ok`, `error` and `denied` alike, and a denial is the case
+# ADR-0148 keeps the row for — "who was denied on project X" is unanswerable while the
+# column is NULL.
 #
 # The two denials are different denial classes, so neither stands in for the other:
 # inventory.list envelopes its own platform-role refusal, while audit.query's project form
 # re-raises `RoleDenied` and reaches the recorder through the boundary #1635 added.
+#
+# The `error` row is a genuine tool failure rather than a denial: `investigations.list`
+# reaches its handler and returns ADR-0192's `invalid_cursor` configuration_error, which
+# `_classify` maps to `error`. It shares `investigations.list` with the `ok` row above it,
+# so the two are told apart by the outcome column.
 _NESTED_PROJECT_CALLS = (
     ("investigations.list", {"request": {"project": _PROJECT}}, "ok"),
     ("allocations.list", {"request": {"project": _PROJECT}}, "ok"),
@@ -480,11 +486,12 @@ _NESTED_PROJECT_CALLS = (
     ("accounting.usage", {"target": {"kind": "project", "project": _PROJECT}}, "ok"),
     ("inventory.list", {"request": {"project": _PROJECT}}, "denied"),
     ("audit.query", {"request": {"scope": "project", "project": _PROJECT}}, "denied"),
+    ("investigations.list", {"request": {"project": _PROJECT, "cursor": "bogus"}}, "error"),
 )
 
 
 def test_nested_project_is_recorded_for_every_wrapper_payload_tool(migrated_url: str) -> None:
-    """Each tool that nests ``project`` in a payload records it, on ``ok`` and ``denied``.
+    """Each tool that nests ``project`` in a payload records it, on all three outcomes.
 
     Pre-fix every one of these rows lands with ``project`` NULL, so the whole assertion is
     red. Reverting only the descent into non-``request`` keys leaves the accounting.usage
