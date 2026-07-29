@@ -39,9 +39,16 @@ contract, not a detail:
 | exit | condition | worker category | retryable |
 |---|---|---|---|
 | `0` | success | — | — |
-| `75` (`EX_TEMPFAIL`) | the bundle did not arrive from the presigned URL (`curl`) — object store down, guest network unsettled, or the URL expired | `infrastructure_failure` | yes — attempt 2 mints a fresh URL |
-| `1` | any deterministic failure: bad argv, bundle contents wrong, `tar`/`depmod`/`dracut`/`grubby`/`grub2-reboot` | `install_failure` | no |
-| any other | a `set -e` propagation from an unguarded command | `install_failure` | no |
+| `75` (`EX_TEMPFAIL`) | `curl` **ran** and did not get the bundle — object store down, guest network unsettled, or the presigned URL expired | `infrastructure_failure` | yes — attempt 2 mints a fresh URL |
+| `1` | every `die` site: bad argv or subcommand, **curl missing or unexecutable**, `tar` extract failure, bundle contents wrong, `dracut`, `grubby`, `grub2-reboot` | `install_failure` | no |
+| any other | the exit status of an unguarded command `set -e` propagated — `install`, `rm -rf`, `cp -a`, `depmod` carry no `\|\| die` | `install_failure` | no |
+
+A missing `curl` is checked **before** the fetch and a shell `126`/`127` is discriminated from
+curl's own statuses, so "curl could not run" can never be reported as the retryable code. One case
+does still land on `75` while being permanent: an SELinux-**enforcing** base image confines the
+agent to `virt_qemu_ga_t`, which cannot `connect()`, and curl reports that as exit `7` exactly like
+a real connect blip. Such an install is retried and still fails — build the image permissive
+(ADR-0484); the cost is disclosed in ADR-0489's Consequences.
 
 The codes are **additive**: a worker that has learned them still meets base images built before
 this contract, which exit `1` for everything. Unrecognised codes map to `install_failure`, so an

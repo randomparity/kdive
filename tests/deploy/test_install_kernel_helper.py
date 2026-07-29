@@ -35,11 +35,11 @@ requires_curl = pytest.mark.skipif(
 )
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
+def _run(*args: str, path: str = "/usr/bin:/bin") -> subprocess.CompletedProcess[str]:
     assert BASH is not None, "bash is required to run the helper"
     return subprocess.run(
         [BASH, str(HELPER), *args],
-        env={"PATH": "/usr/bin:/bin"},
+        env={"PATH": path},
         capture_output=True,
         text=True,
         check=False,
@@ -69,8 +69,33 @@ def test_fetched_but_unextractable_bundle_exits_deterministic(tmp_path: Path) ->
     bundle.write_bytes(b"not a gzip tarball")
     proc = _run(*_install_args(f"file://{bundle}"))
     assert proc.returncode == 1
-    assert proc.returncode != _HELPER_EX_TEMPFAIL
     assert "bundle extract failed" in proc.stderr
+
+
+def test_absent_curl_exits_deterministic_not_tempfail(tmp_path: Path) -> None:
+    """A guest image with no curl is an image defect, and no number of retries installs one.
+
+    Without the preflight, `curl … || die_tempfail` swallows the shell's 127 for a program it
+    could not find and reports a permanent image defect as the retryable code — which would make
+    the most-documented setup mistake in this repo burn the whole retry budget.
+    """
+    empty_path = tmp_path / "bin"
+    empty_path.mkdir()
+    proc = _run(*_install_args("file:///dev/null"), path=str(empty_path))
+    assert proc.returncode == 1
+    assert "curl is not installed" in proc.stderr
+
+
+@requires_curl
+def test_refused_connection_exits_tempfail() -> None:
+    """curl ran and could not reach the store: the transient this contract exists to name.
+
+    Port 1 on loopback refuses instantly, and curl does not retry a refused connection without
+    `--retry-connrefused`, so this costs no wall time.
+    """
+    proc = _run(*_install_args("http://127.0.0.1:1/bundle.tar.gz"))
+    assert proc.returncode == _HELPER_EX_TEMPFAIL
+    assert "bundle download failed" in proc.stderr
 
 
 def test_missing_required_argument_exits_deterministic() -> None:
