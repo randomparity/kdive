@@ -1,5 +1,12 @@
 # ADR 0178 — The build-VM network-readiness gate tolerates a transient agent drop
 
+> **Premise no longer holds** (2026-07-28, #1657) — this ADR's context assumes the build transport
+> classifies agent errors with `BUILD_DETERMINISTIC_CONFIG_CODES` (ADR-0168 decision 2). That
+> constant and the `deterministic_codes` parameter behind it were removed as dead code; code 86 is
+> now retryable `transport_failure` everywhere, which is what this ADR wanted for the network gate.
+> The gate itself (`_wait_for_network` in `EphemeralBuildVm.session`) had already gone with the
+> server-build lane ([ADR-0316](0316-remove-server-build-lane.md)). Retained as history.
+
 - **Status:** Accepted
 - **Date:** 2026-06-18
 - **Deciders:** KDIVE maintainers
