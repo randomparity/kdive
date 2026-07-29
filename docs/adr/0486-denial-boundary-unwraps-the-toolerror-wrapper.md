@@ -172,15 +172,34 @@ handler would still be recorded `error`. Every such class is enveloped by its ha
 there is no observed loss; the arm is a defensive branch whose premise this ADR shows to be false,
 and it is left for a separate decision rather than widened here by inference.
 
-**A caller that only checked the transport's `is_error` flag now sees a denial as a success.**
-`scripts/kdive_set_accounting.py` did exactly that, and its contract test caught it: a `viewer`
-running the onboarding helper used to exit 1 on the first denied call and now ran to completion
-and exited 0, having written nothing. The helper is fixed here to treat a returned failure
-envelope as a failure, and keeps exiting 1 rather than adopting `kdive/cli/errors.py`'s mapped 3,
-so its observable contract is byte-identical to what it was before this change. Any other
-out-of-repo consumer that branches on `is_error` alone has the same latent gap, which is
-ADR-0089's returned-envelope shape and not new — a denial simply joins the set of failures that
-take it.
+**Every caller that branched on the transport's `is_error` flag alone now reads a denial as a
+success.** This is the widest-reaching consequence of the change, and the repo had two such
+callers.
+
+`scripts/kdive_set_accounting.py` was one, and its contract test caught it: a `viewer` running
+the onboarding helper used to exit 1 on the first denied call and now ran to completion and
+exited 0, having written nothing. It is fixed here to treat a returned failure envelope as a
+failure, and keeps exiting 1 rather than adopting `kdive/cli/errors.py`'s mapped 3, so its
+observable contract is byte-identical to what it was before this change.
+
+`LiveStackClient.call_tool` (`src/kdive/mcp/dev_harness.py`) was the other, and **no gate in
+`just ci` could have caught it**: `just test` excludes the `live_stack` marker, so the driver
+that consumes it is never run there. Its viewer negative
+(`tests/integration/test_live_stack.py::test_viewer_denied_operator_op_over_the_wire`) asserted
+`pytest.raises(LiveStackToolError)` on `allocations.request`, which calls
+`require_role(ctx, project, Role.CONTRIBUTOR)` and does not catch it — the one wire test that
+reaches this middleware. That denial is now an envelope, so the assertion inverts. The test is
+rewritten to assert the envelope and, additionally, ADR-0490's named `contributor`, which makes
+it the live-tier proof of both ADRs; the harness's own docstrings, which cited an authz denial as
+the example of the raising shape, are corrected.
+
+Because that tier cannot gate this change, its behaviour is instead made predictable from a
+normal CI run: `test_role_denial_reaches_the_live_stack_harness_as_an_envelope` drives the real
+`LiveStackClient` over a real `Client` against a real denial. It joins the two halves that would
+otherwise never meet — that a denial produces `is_error=False`, and that `is_error=False` takes
+the envelope-parsing branch (covered only over a fake client). Any out-of-repo consumer with the
+same pattern has the same gap; it is ADR-0089's returned-envelope shape and not new, but a denial
+joining that set is what makes it bite.
 
 **`CompactResponseMiddleware`'s bare-`ToolResponse` branch becomes dead.** `_compact_result`
 handles both a `ToolResult` and a bare `ToolResponse`, and cites this middleware's short-circuit

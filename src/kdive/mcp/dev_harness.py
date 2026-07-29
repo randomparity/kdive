@@ -59,12 +59,17 @@ __all__ = [
 
 
 class LiveStackToolError(RuntimeError):
-    """A tool call returned an error result over the wire (e.g. a raised authz denial).
+    """A tool call returned an error result over the wire — a handler that *raised*.
 
-    fastmcp surfaces a handler that *raises* (rather than returning a :class:`ToolResponse`)
-    as a tool-error ``CallToolResult`` (``is_error`` true, no ``structured_content``). The
-    driver asserts the RBAC raised-path on this typed error rather than on an
-    ``error_category`` (ADR-0045 §2).
+    fastmcp surfaces a handler that raises (rather than returning a :class:`ToolResponse`) as a
+    tool-error ``CallToolResult`` (``is_error`` true, no ``structured_content``), and the driver
+    asserts that shape on this typed error rather than on an ``error_category`` (ADR-0045 §2).
+
+    An **authorization denial is not this shape**: since ADR-0486 the dispatch boundary unwraps
+    FastMCP's ``ToolError`` and returns the uniform ``authorization_denied`` envelope, so a
+    denial arrives with ``is_error`` false and is parsed like any other failure envelope. It
+    used to raise, which is why the driver's viewer negative asserted this error; that test now
+    asserts the envelope. What is left here is a genuine server fault with no typed category.
     """
 
     def __init__(self, tool: str, message: str) -> None:
@@ -225,9 +230,10 @@ class LiveStackClient:
         it is a FastMCP-generated plain class (``Root``), not a pydantic model, so it has no
         ``model_dump``.
 
-        A tool-error result (``is_error`` true — a handler that *raised*, e.g. an authz denial
-        that surfaces as a raise rather than a ``ToolResponse``) raises
-        :class:`LiveStackToolError` before the structured-content parse (ADR-0045 §2).
+        A tool-error result (``is_error`` true — a handler that *raised*, leaving no typed
+        category behind) raises :class:`LiveStackToolError` before the structured-content parse
+        (ADR-0045 §2). An authorization denial is no longer such a result: it takes the envelope
+        branch below (ADR-0486), so a caller must read ``error_category`` to see it.
 
         ``raise_on_error=False`` is required: fastmcp's ``Client.call_tool`` otherwise raises
         its own ``fastmcp.exceptions.ToolError`` on an error result, defeating the typed

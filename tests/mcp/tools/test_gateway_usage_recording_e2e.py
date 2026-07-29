@@ -41,9 +41,11 @@ well as through the gateway, and asserts two identical rows. Without it, "the ou
 and ``REENTRANT_TOOLS`` suppressed its row" and "the outer chain never ran" are the same
 observation — one absent row — and the redden proof above would evaporate silently if
 ``app.call_tool``'s ``run_middleware`` default ever changed. With it, a dead outer chain
-yields one row and a stripped ``REENTRANT_TOOLS`` yields three. The last test is the
-exception: it drives one call through a real ``Client`` to pin the transport shape of the
-denial, where a second dispatch would add nothing.
+yields one row and a stripped ``REENTRANT_TOOLS`` yields three. The last two tests are the
+exception: each drives one call through a real ``Client`` to pin the transport shape of the
+denial — once as the SDK returns it, once as ``LiveStackClient`` parses it — where a second
+dispatch would add nothing. The harness one stands in for the ``live_stack`` tier, which
+``just test`` excludes entirely and which would otherwise absorb this change unobserved.
 
 The identity half is real too: the token is minted, signed, and run through the same
 ``JWTVerifier`` the app is built with, so the claims the recorder attributes a row to are
@@ -68,6 +70,8 @@ from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
+from kdive.mcp.dev_harness import LiveStackClient
+from kdive.mcp.responses import ToolResponse
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER, make_keypair, mint
 from tests.mcp.usage_support import (
@@ -308,3 +312,38 @@ def test_role_denial_reaches_a_real_client_as_an_envelope(migrated_url: str) -> 
     assert isinstance(structured, dict)
     assert structured["error_category"] == "authorization_denied"
     assert structured["data"]["missing_roles"] == ["admin"]
+
+
+def test_role_denial_reaches_the_live_stack_harness_as_an_envelope(migrated_url: str) -> None:
+    """``LiveStackClient`` parses the denial instead of raising ``LiveStackToolError``.
+
+    The live-stack driver branches on the transport's ``is_error`` flag alone, so before
+    ADR-0486 a `RoleDenied` reached it as a raise and its viewer negative asserted
+    ``pytest.raises(LiveStackToolError)``. The denial is now an envelope, which flips that
+    branch — and the whole live_stack tier is excluded from ``just test``, so nothing else in
+    normal CI would notice.
+
+    This is the deterministic stand-in for the wire test, joining the two halves that would
+    otherwise never meet: that a real denial produces ``is_error=False`` (the test above) and
+    that ``is_error=False`` takes the envelope-parsing branch
+    (``tests/integration/live_stack/test_harness_tool_error.py``, over a fake client). Driving
+    the real harness over a real denial is what makes the live-tier assertion predictable from
+    a green CI run rather than from reading the code.
+    """
+
+    async def _run() -> ToolResponse | list[ToolResponse]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                harness = LiveStackClient(Client(app))
+                async with harness:
+                    return await harness.call_tool(
+                        "audit.query", request={"scope": "project", "project": _PROJECT}
+                    )
+
+    denied = asyncio.run(_run())
+
+    assert isinstance(denied, ToolResponse), "the harness raised instead of parsing the denial"
+    assert denied.error_category == "authorization_denied"
+    # The named role survives the harness's parse, which is what the live-tier viewer negative
+    # now asserts over real HTTP for `allocations.request`'s `contributor`.
+    assert denied.data["missing_roles"] == ["admin"]
