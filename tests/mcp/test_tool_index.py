@@ -15,7 +15,12 @@ from fastmcp.server.auth.providers.jwt import JWTVerifier, RSAKeyPair
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
-from kdive.mcp.schema.tool_index import RETIRED_TOOL_NAMES, TOOL_KEYWORDS, retired_names_for
+from kdive.mcp.schema.tool_index import (
+    NAMESPACE_TOC,
+    RETIRED_TOOL_NAMES,
+    TOOL_KEYWORDS,
+    retired_names_for,
+)
 from kdive.security.secrets.secret_registry import SecretRegistry
 from tests.mcp.conftest import AUDIENCE, ISSUER
 
@@ -85,15 +90,22 @@ def test_every_retired_name_is_reachable_from_its_replacement() -> None:
 
 
 def test_instructions_cover_every_live_namespace() -> None:
-    """build_instructions() mentions every live namespace and the gateway tools."""
+    """NAMESPACE_TOC covers every live namespace, and build_instructions() renders it.
+
+    The membership check against NAMESPACE_TOC is the one that carries the guarantee: a
+    bare substring check against the rendered text would pass for a namespace missing
+    from NAMESPACE_TOC entirely whenever its name also occurs in the surrounding prose
+    (e.g. "session", "tools"), which is a discoverability hole (#1621).
+    """
     app = _built_app()
     text = app.instructions or ""
     live_ns = {name.split(".")[0] for name in _registered_tool_names_from(app)}
     for ns in live_ns:
-        assert ns in text, (
-            f"Namespace {ns!r} is missing from server instructions.\n"
+        assert ns in NAMESPACE_TOC, (
+            f"Namespace {ns!r} is missing from NAMESPACE_TOC.\n"
             "Add it to NAMESPACE_TOC in src/kdive/mcp/schema/tool_index.py."
         )
+        assert ns in text, f"NAMESPACE_TOC entry {ns!r} did not render into instructions"
     assert "tools.search" in text, "instructions must mention tools.search"
     assert "tools.invoke" in text, "instructions must mention tools.invoke"
 

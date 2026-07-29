@@ -33,24 +33,34 @@ caught and converted to ``configuration_error`` envelopes.
 
 `implemented` · `read-only`
 
-Find tools by capability phrase or namespace; returns full schemas for tools.invoke.
+Find tools by capability phrase or namespace; returns compact summaries by default.
 
 Two modes:
 - ``query``: lexical ranking over name, description, curated keywords, and bounded schema
   text (property names/descriptions, enum values, and discriminators); returns tools
-  matching the query, highest-scoring first.
+  matching the query, highest-scoring first. A query that is exactly a tool name ranks
+  that tool first.
 - ``namespace``: enumerate all tools in one plane (e.g. ``"debug"``); returns them
   sorted by name. Use this as a safety net when a query misses.
 
-Results are RBAC-filtered to only tools the caller could invoke. Each match carries
-``name``, ``description``, ``input_schema``, ``annotations``, and ``maturity`` so you can
-immediately call ``tools.invoke`` with the right arguments and safety tier.
+Results are RBAC-filtered to only tools the caller could invoke. Search broadly first,
+then fetch one schema: ``tools.search(query="runs.boot", detail="full", limit=1)``
+returns exactly that tool with the ``input_schema`` ``tools.invoke`` needs. Every match
+carries ``annotations`` and ``maturity`` in both modes, so you can always classify a
+tool's safety tier before invoking it.
 
 ``truncated: true`` signals that more results exist beyond the returned ``limit``.
-When ``query`` produces zero results, the miss is logged for keyword curation.
+
+In ``namespace`` mode the response also carries ``namespace_status``: ``"ok"`` when the
+plane has tools you can see, ``"unauthorized"`` when it is live but every tool in it is
+filtered for your grants (with ``namespace_required_grants`` naming the grants that
+would reveal one), and ``"unknown"`` when no tool carries that prefix — so an empty
+plane is never confused with a misspelled one. Query and namespace misses are logged
+for vocabulary curation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
+| `detail` | `summary`, `full` | no | How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first. |
 | `limit` | integer | no | Maximum matches to return (1-50). |
 | `namespace` | string (nullable) | no | Browse one tool plane by prefix, e.g. 'debug' or 'runs'. |
 | `query` | string (nullable) | no | Capability phrase to search for (e.g. 'boot a built kernel'). |

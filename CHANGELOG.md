@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolve stranded defined Systems in migration 0080
 - Retire the staged System definition lane
 - Add test-live-stack-remote
+- Name the crashed-idle reclaim distinctly in the log
+- Summary-first tools.search and a namespace authz signal
 
 ### Changed
 
@@ -180,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the transport outcome in the wait poll rule
 - Correct the no-envelope retry rule and the inf/nan mechanism
 - Ratify ADR-0457 and correct ADR-0326's dead tool cites
+- ADR-0478 RHEL-guest kdump config requirements
+- Name the RHEL-family kdump CONFIG_* set
+- Record SELinux permissive as the accepted guest posture
+- ADR-0480 reclaim an abandoned crashed System's allocation
+- Mark ADR-0456 §3 amended and fix the agent-index schema claim
 
 ### Fixed
 
@@ -306,6 +313,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Assert the ASSEMBLED console artifact, and unwrap artifacts.list
 - Let the arming timeout name what it observed
 - Match guest-exec as a whole element, not a substring
+- Fail test-live-remote when no test carries the marker
+- Advertise the RHEL-family kdump symbols
+- Reclaim an active allocation on an abandoned crashed System
 
 ### Build
 

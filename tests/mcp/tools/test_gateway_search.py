@@ -5,12 +5,17 @@ Coverage:
 * Namespace browse returns all tools in that plane.
 * The result set is hard-capped and ``truncated`` is True when results were cut.
 * RBAC filters: admin-only tools do not appear for a viewer-role caller.
-* Each match carries the full ``input_schema`` so ``tools.invoke`` can be called.
+* Matches are summaries by default; ``detail="full"`` restores the ``input_schema``
+  and the complete description so ``tools.invoke`` can be called (ADR-0472).
+* An exact tool-name query ranks that tool first, so a one-tool schema fetch is
+  deterministic (ADR-0472).
+* Namespace mode distinguishes an unauthorized plane from a nonexistent one (ADR-0472).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -488,7 +493,7 @@ def test_results_rbac_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A match for runs.get carries its full input_schema (including 'run_id')."""
+    """A detail='full' match for runs.get carries its full input_schema (including 'run_id')."""
     import kdive.mcp.tools.gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "current_context", _operator_ctx)
@@ -497,7 +502,9 @@ def test_match_includes_full_input_schema(monkeypatch: pytest.MonkeyPatch) -> No
     app = build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
 
     async def _run() -> Any:
-        return await app.call_tool("tools.search", {"query": "get a run", "limit": 50})
+        return await app.call_tool(
+            "tools.search", {"query": "get a run", "limit": 50, "detail": "full"}
+        )
 
     result = asyncio.run(_run())
     content = _call_result(result)
@@ -618,7 +625,9 @@ def test_projection_failure_falls_back_to_original_tool_schema(
     monkeypatch.setattr(gateway_module, "project_listed_tool", _project_or_raise)
 
     async def _run() -> Any:
-        return await app.call_tool("tools.search", {"namespace": "allocations", "limit": 50})
+        return await app.call_tool(
+            "tools.search", {"namespace": "allocations", "limit": 50, "detail": "full"}
+        )
 
     with caplog.at_level(logging.WARNING, logger="kdive.mcp.tools.gateway"):
         result = asyncio.run(_run())
@@ -794,3 +803,244 @@ def test_define_vocabulary_finds_the_one_create_lane(
     assert "systems.provision" in names, f"query {query!r} did not surface it: {names}"
     assert "systems.define" not in names
     assert "systems.provision_defined" not in names
+
+
+# ---------------------------------------------------------------------------
+# Summary-first matches; full detail is opt-in (ADR-0472, #1597)
+# ---------------------------------------------------------------------------
+
+
+def _search(app: Any, args: dict[str, Any]) -> dict[str, Any]:
+    async def _run() -> Any:
+        return await app.call_tool("tools.search", args)
+
+    content = _call_result(asyncio.run(_run()))
+    assert content["status"] == "ok", f"expected ok, got {content}"
+    return content
+
+
+def _build(monkeypatch: pytest.MonkeyPatch, ctx_factory: Any) -> Any:
+    import kdive.mcp.tools.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "current_context", ctx_factory)
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    return build_app(pool, verifier=_verifier(), secret_registry=_secret_registry())
+
+
+def test_default_match_omits_schema_and_full_description(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every default match carries name/summary/annotations/maturity and nothing heavier."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "boot a built kernel"})
+
+    matches = content["data"]["matches"]
+    assert matches, "expected at least one match"
+    for match in matches:
+        assert set(match) == {"name", "summary", "annotations", "maturity"}, (
+            f"unexpected default match keys for {match.get('name')}: {sorted(match)}"
+        )
+
+
+def test_summary_is_the_first_paragraph_on_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``summary`` is the description's first paragraph, not a byte-truncated prefix.
+
+    ``tools.invoke`` has a five-paragraph description whose first paragraph is one short
+    sentence, so a summary equal to that sentence can only come from paragraph splitting.
+    """
+    app = _build(monkeypatch, _operator_ctx)
+
+    summary_match = next(
+        m
+        for m in _search(app, {"query": "tools.invoke"})["data"]["matches"]
+        if m["name"] == "tools.invoke"
+    )
+    full_match = next(
+        m
+        for m in _search(app, {"query": "tools.invoke", "detail": "full"})["data"]["matches"]
+        if m["name"] == "tools.invoke"
+    )
+
+    description = full_match["description"]
+    assert summary_match["summary"] == "Call any registered tool by name (gateway dispatch)."
+    assert "\n" not in summary_match["summary"]
+    assert description.startswith(summary_match["summary"])
+    assert len(description) > 5 * len(summary_match["summary"]), (
+        "the fixture tool no longer has a long multi-paragraph description"
+    )
+
+
+def test_summary_match_still_carries_safety_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """annotations + maturity ride a summary match, so a found tool is always classifiable."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "power reset"})
+
+    control_power = next(m for m in content["data"]["matches"] if m["name"] == "control.power")
+    assert control_power["annotations"] == {"readOnlyHint": False, "destructiveHint": False}
+    assert control_power["maturity"] == "implemented"
+
+
+def test_detail_full_adds_schema_and_complete_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """detail='full' is additive: the summary keys survive and two more appear."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"query": "boot a built kernel", "detail": "full"})
+
+    matches = content["data"]["matches"]
+    assert matches, "expected at least one match"
+    for match in matches:
+        assert set(match) == {
+            "name",
+            "summary",
+            "annotations",
+            "maturity",
+            "description",
+            "input_schema",
+        }, f"unexpected full match keys for {match.get('name')}: {sorted(match)}"
+
+
+def test_default_query_is_far_cheaper_than_full_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default envelope for the issue's own query is a fraction of the full one.
+
+    This is the defect #1597 reports, so the assertion is on serialized bytes rather than
+    on the presence of a key: a future change that re-inlines schemas under another name
+    has to fail here.
+    """
+    app = _build(monkeypatch, _operator_ctx)
+
+    query = {"query": "boot a built kernel", "limit": 10}
+    default_bytes = len(json.dumps(_search(app, query)))
+    full_bytes = len(json.dumps(_search(app, {**query, "detail": "full"})))
+
+    assert full_bytes > 20_000, f"fixture drift: full envelope is only {full_bytes} bytes"
+    assert default_bytes * 4 < full_bytes, (
+        f"default envelope {default_bytes}B is not materially cheaper than full {full_bytes}B"
+    )
+
+
+@pytest.mark.parametrize("name", ["runs.get", "jobs.wait", "runs.list"])
+def test_exact_tool_name_query_ranks_that_tool_first(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """query=<exact name> + limit=1 fetches that tool's schema, not a same-score neighbour.
+
+    All three names lose the plain (score, name) tiebreak: every hit scores 1, so without the
+    exact-name rule ``limit=1`` returns ``artifacts.create_run_upload`` for ``runs.get``,
+    ``control.capture_traffic`` for ``jobs.wait``, and ``runs.create`` for ``runs.list``.
+    """
+    app = _build(monkeypatch, _every_scope_ctx)
+
+    content = _search(app, {"query": name, "detail": "full", "limit": 1})
+
+    matches = content["data"]["matches"]
+    assert [m["name"] for m in matches] == [name], (
+        f"limit=1 fetch for {name!r} returned {[m['name'] for m in matches]}"
+    )
+    assert matches[0]["input_schema"]["type"] == "object"
+
+
+def test_exact_name_first_does_not_drop_the_other_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ranking the exact name first reorders the hit list; it does not filter it."""
+    app = _build(monkeypatch, _every_scope_ctx)
+
+    content = _search(app, {"query": "runs.get", "limit": 50})
+
+    names = _match_names(content)
+    assert names[0] == "runs.get"
+    assert len(names) > 1, f"expected sibling hits alongside the exact match: {names}"
+    assert "artifacts.create_run_upload" in names, (
+        "the tool that outranks runs.get without the exact-name rule must still be returned"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Namespace status: unauthorized is distinguishable from unknown (ADR-0472, #1597)
+# ---------------------------------------------------------------------------
+
+
+def test_authorized_namespace_reports_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _build(monkeypatch, _operator_ctx)
+
+    content = _search(app, {"namespace": "debug", "limit": 50})
+
+    assert content["data"]["namespace_status"] == "ok"
+    assert "namespace_required_grants" not in content["data"]
+
+
+def test_unauthorized_namespace_names_the_grant_without_naming_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live-but-entirely-filtered plane says so and names the grants, never the tools."""
+    app = _build(monkeypatch, _viewer_ctx)
+
+    content = _search(app, {"namespace": "ops", "limit": 50})
+
+    data = content["data"]
+    assert data["matches"] == []
+    assert data["namespace_status"] == "unauthorized"
+    assert data["namespace_required_grants"] == [
+        "platform_admin",
+        "platform_auditor",
+        "platform_operator",
+    ]
+    serialized = json.dumps(data)
+    for leaked in ("ops.diagnostics", "ops.force_teardown", "ops.tool_trail"):
+        assert leaked not in serialized, f"{leaked} leaked into an unauthorized-namespace response"
+
+
+def test_unknown_namespace_is_not_reported_as_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build(monkeypatch, _viewer_ctx)
+
+    content = _search(app, {"namespace": "no_such_plane", "limit": 50})
+
+    assert content["data"]["matches"] == []
+    assert content["data"]["namespace_status"] == "unknown"
+    assert "namespace_required_grants" not in content["data"]
+
+
+def test_query_mode_carries_no_namespace_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The namespace keys describe a namespace argument, so query mode must not carry them."""
+    app = _build(monkeypatch, _operator_ctx)
+
+    data = _search(app, {"query": "boot a built kernel"})["data"]
+
+    assert "namespace_status" not in data
+    assert "namespace_required_grants" not in data
+
+
+@pytest.mark.parametrize(
+    ("namespace", "status"),
+    [("ops", "unauthorized"), ("no_such_plane", "unknown")],
+)
+def test_namespace_miss_is_logged_for_curation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, namespace: str, status: str
+) -> None:
+    """A namespace miss reaches the log the query miss already reached (#1597)."""
+    app = _build(monkeypatch, _viewer_ctx)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"namespace": namespace, "limit": 50})
+
+    record = next(
+        (r for r in caplog.records if r.getMessage() == "tool_search_namespace_miss"), None
+    )
+    assert record is not None, f"no namespace-miss log for {namespace!r}: {caplog.text}"
+    assert record.__dict__["namespace"] == namespace
+    assert record.__dict__["namespace_status"] == status
+
+
+def test_authorized_namespace_logs_no_miss(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = _build(monkeypatch, _operator_ctx)
+
+    with caplog.at_level(logging.INFO, logger="kdive.mcp.tools.gateway"):
+        _search(app, {"namespace": "debug", "limit": 50})
+
+    assert "tool_search_namespace_miss" not in caplog.text

@@ -92,6 +92,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 DEFAULT_QUEUE_MAX_WAIT = allocation_repairs.DEFAULT_QUEUE_MAX_WAIT
+DEFAULT_CRASHED_IDLE_GRACE = allocation_repairs.DEFAULT_CRASHED_IDLE_GRACE
 DEFAULT_IDEMPOTENCY_RETENTION = gc_repairs.DEFAULT_IDEMPOTENCY_RETENTION
 DEFAULT_DUMP_VOLUME_GRACE = gc_repairs.DEFAULT_DUMP_VOLUME_GRACE
 DEFAULT_REPORT_ARTIFACT_RETENTION = gc_repairs.DEFAULT_REPORT_ARTIFACT_RETENTION
@@ -248,6 +249,10 @@ class ReconcileConfig:
     investigation_rootfs_retention: timedelta = DEFAULT_INVESTIGATION_ROOTFS_RETENTION
     queue_max_wait: timedelta = DEFAULT_QUEUE_MAX_WAIT
     dump_volume_grace: timedelta = DEFAULT_DUMP_VOLUME_GRACE
+    #: How long a `crashed` System's crash investigation must show no activity before its
+    #: still-`active` allocation is reclaimed (ADR-0480). The operator's brake on the one repair
+    #: that can end a live investigation: raise it where investigations idle for long stretches.
+    crashed_idle_grace: timedelta = DEFAULT_CRASHED_IDLE_GRACE
     heartbeat: Heartbeat | None = None
     heartbeat_tick: timedelta = timedelta(seconds=1)
     heartbeat_sleep_until_stop: Callable[[asyncio.Event, float], Awaitable[None]] = (
@@ -349,7 +354,12 @@ def _console_collectors_repair(
 _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
     _RepairCatalogEntry("expired_allocations", lambda _r, _c, _g: _sweep_expired_allocations),
     _RepairCatalogEntry(
-        "reaped_active_allocations", lambda _r, _c, _g: _reap_orphaned_active_allocations
+        "reaped_active_allocations",
+        lambda _r, c, _g: (
+            lambda conn: _reap_orphaned_active_allocations(
+                conn, crashed_idle_grace=c.crashed_idle_grace
+            )
+        ),
     ),
     _RepairCatalogEntry(
         "promoted_allocations",

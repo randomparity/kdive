@@ -100,6 +100,27 @@ def test_feature_config_manifest_is_included_without_internal_gate_set() -> None
     assert "gate_required" not in crash
 
 
+def test_served_contract_advertises_the_rhel_guest_kdump_symbols_ungated() -> None:
+    # #1626: the symbols ADR-0213/ADR-0183 had put in the deleted kdump build-config fragment must
+    # reach the agent through the one surface that replaced it. Advertised, never gated — kdive
+    # cannot tell a RHEL guest from any other, so refusing on these would block installs that
+    # capture fine elsewhere.
+    features = _doc()["feature_config_requirements"]["features"]
+    rhel = next(f for f in features if f["feature"] == "crash_capture_rhel_guest")
+    assert rhel["gated"] is False
+    advertised = json.dumps(rhel["requirements"])
+    for symbol in (
+        "XFS_FS",
+        "SQUASHFS",
+        "SQUASHFS_ZSTD",
+        "EROFS_FS",
+        "OVERLAY_FS",
+        "BLK_DEV_LOOP",
+        "KEXEC_FILE",
+    ):
+        assert symbol in advertised
+
+
 def test_resource_reads_back_generated_json() -> None:
     app = FastMCP("external-build-contract-test")
     register(app, resolver=cast(ProviderResolver, _Resolver()))

@@ -196,18 +196,19 @@ contract (recorded in the plane's provenance); add them per your kdump needs. Ad
 `kernel-debuginfo` to the `--install` set if you intend to drive **live drgn** (`kdive-drgn`
 needs the running kernel's DWARF to attach).
 
-**SELinux must not confine the guest agent.** The Install/Retrieve/drgn helpers run **privileged
-system mutations via `guest-exec`** (the install helper writes `/boot` + `/lib/modules` and runs
-`depmod`/`dracut`/`grubby`). Fedora's targeted policy confines the agent to `virt_qemu_ga_t`,
-which **cannot even read `/lib/modules`** — so an enforcing base image fails `runs.install` at the
-helper's privileged `/boot` + `/lib/modules` mutation steps right after the bundle is extracted
-(surfaced as a non-zero in-guest exit, now visible via the `install_failure` transcript, #386).
-The `SELINUX=permissive` line above is the simplest fix for a test base image and is the form
-verified end-to-end. To keep the rest of the guest enforcing you can instead try making **only**
-the agent domain permissive (needs `policycoreutils-python-utils`):
-`--run-command "semanage permissive -a virt_qemu_ga_t"` — but verify it on your image first: the
-helper's `dracut`/`grubby`/`depmod` children may transition to other SELinux domains that a
-per-domain permissive does not cover.
+**The `SELINUX=permissive` line is required, not optional.** The Install/Retrieve/drgn helpers run
+privileged system mutations via `guest-exec`, so they inherit the confined `virt_qemu_ga_t` domain
+and an enforcing base image fails `runs.install` (surfaced as a non-zero in-guest exit via the
+`install_failure` transcript, #386). This is a deliberate, accepted posture — a kdive guest runs
+with SELinux not enforcing — with the full rationale, the accepted security cost, and the
+conditions for ever reversing it in
+[ADR-0484](../../adr/0484-guest-images-ship-selinux-permissive.md). Do not substitute a per-domain
+`semanage permissive -a virt_qemu_ga_t`; ADR-0484 §Context explains why it does not cover the
+helpers' child processes.
+
+If you build the base image with the Ansible role instead of by hand — `playbooks/image.yml`, see
+[`deploy/ansible/README.md`](../../../deploy/ansible/README.md) — the role already applies this
+change for every image source, so the step above is a manual-path instruction only.
 
 ### 5a. Install the in-guest helpers (REQUIRED — install/capture/debug fail without them)
 

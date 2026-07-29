@@ -222,22 +222,19 @@ path = "/var/lib/kdive/rootfs/local/fedora-kdive-ready-43.qcow2"
 [[cost_class]]
 name = "local"
 coeff = "1.0"
-
-# Provider-agnostic kernel-config fragment, applied to local builds. The file is
-# authoritative — a declared fragment overrides a live `buildconfig.set`.
-[[build_config]]
-name = "kdump"
-description = "kdump/debuginfo kernel-config fragment"
-content = """
-CONFIG_KEXEC=y
-CONFIG_CRASH_DUMP=y
-CONFIG_DEBUG_INFO=y
-"""
 ```
 
 Place the file at the XDG default `~/.config/kdive/systems.toml` (or set
 `KDIVE_SYSTEMS_TOML` to another path). With no `[[remote_libvirt]]` blocks, the stack
 stays local-only.
+
+There is no `[[build_config]]` section: ADR-0316 removed the server-build lane and with it the
+kernel-config fragment machinery, so kdive never merges a `.config` for you. You build the kernel
+yourself and upload it, and the `CONFIG_*` your investigation needs are advertised — not injected —
+by `resource://kdive/contracts/external-build` (ADR-0318, ADR-0478). Start from
+[the build-lane recipe](../../docs/operating/external-build-upload.md); if you intend to capture a
+vmcore on a RHEL-family guest, read its kdump section before you build, because that set fails only
+at capture time.
 
 ## Security notes
 
