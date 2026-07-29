@@ -59,9 +59,13 @@ listed by that caller's profile. This keeps a compact agent `list_tools` from hi
 that are intentionally gateway-reachable.
 
 Search results must include enough information to invoke and classify the selected operation:
-projected input schema, description, annotations, and maturity metadata. Retired or consolidated
-operation names remain curated search vocabulary for their replacement so agents can discover the
-new entry point without compatibility aliases.
+~~projected input schema, description,~~ annotations, and maturity metadata. Retired or
+consolidated operation names remain curated search vocabulary for their replacement so agents can
+discover the new entry point without compatibility aliases.
+
+*Amended by [ADR-0472](0472-summary-first-tool-search.md) — the projected input schema and the
+complete description are returned only for `detail: "full"`; annotations and maturity stay on
+every match, so classification remains unconditional.*
 
 ### 4. Operator annotation access
 

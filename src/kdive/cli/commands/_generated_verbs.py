@@ -3911,7 +3911,7 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
         tool="tools.search",
         read_only=True,
         destructive=False,
-        help="Find tools by capability phrase or namespace; returns full schemas for tools.invoke.",
+        help="Find tools by capability phrase or namespace; returns compact summaries by default.",
         unwrap_request=False,
         flags=(
             GeneratedFlag(
@@ -3940,6 +3940,15 @@ GENERATED_VERBS: tuple[GeneratedVerb, ...] = (
                 arg_type="int",
                 action=None,
                 choices=(),
+            ),
+            GeneratedFlag(
+                name="--detail",
+                dest="detail",
+                required=False,
+                help="How much per-match metadata to return. 'summary' (the default) returns name, summary, annotations, and maturity — enough to choose a tool and judge its safety tier. 'full' additionally returns the complete description and the input_schema you need to build arguments; it is several times larger per match, so narrow the query or the limit first.",
+                arg_type="str",
+                action=None,
+                choices=("summary", "full"),
             ),
         ),
         json_params=(),

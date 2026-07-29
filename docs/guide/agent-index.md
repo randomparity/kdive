@@ -11,7 +11,8 @@ Calling tools **directly by name** (surfaced by lazy-loading hosts as `mcp__kdiv
 the canonical path — by default the server lists its full catalog. If a capability you need
 is not a callable tool in your client — including lazy-loading hosts that materialize only
 some of the ~120 tools and may never bind `tools.invoke` — reach it through the gateway:
-`tools.search` finds the name and schema, and `tools.invoke(name, arguments)` executes any
+`tools.search` finds the name — matches are compact summaries, so pass `detail="full"` (with a
+small `limit`) to get the schema — and `tools.invoke(name, arguments)` executes any
 registered tool. `tools.search` and `tools.invoke` are always available. Both paths enforce
 the same RBAC. If an operator enables the core-set gateway, only a small core set is listed
 directly, so reach everything else through `tools.search` / `tools.invoke`.
