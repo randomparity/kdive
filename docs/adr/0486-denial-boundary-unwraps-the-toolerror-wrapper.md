@@ -201,10 +201,16 @@ the envelope-parsing branch (covered only over a fake client). Any out-of-repo c
 same pattern has the same gap; it is ADR-0089's returned-envelope shape and not new, but a denial
 joining that set is what makes it bite.
 
-**`CompactResponseMiddleware`'s bare-`ToolResponse` branch becomes dead.** `_compact_result`
-handles both a `ToolResult` and a bare `ToolResponse`, and cites this middleware's short-circuit
-as the reason the second shape exists. After decision 2 nothing produces it. The branch is
-harmless (it fails safe) and `compact.py` is untouched here; removing it is a separate cleanup.
+**`CompactResponseMiddleware`'s bare-`ToolResponse` branch is removed, not left inert.**
+`_compact_result` handled both a `ToolResult` and a bare `ToolResponse`, citing this middleware's
+short-circuit as the reason the second shape existed. After decision 2 nothing produces it. It is
+deleted rather than kept as a fail-safe because it never was one: it could only run with
+`KDIVE_COMPACT_RESPONSES` **on**, and with the flag off — the default — a bare `ToolResponse`
+still reached `to_mcp_result()` and died. Keeping it would leave a wire-invalid shape looking
+supported in the outermost middleware, which is precisely how the `to_mcp_result` defect this ADR
+fixes stayed latent. A test now pins the fail-safe that replaces it: an unrecognised object
+passes through untouched and is *not* converted to a `ToolResult`, so a regression fails at the
+transport on every path rather than only when compaction happens to be on.
 
 No schema, no migration, no configuration setting, no change to the tool list, and no change to
 any tool's arguments or output schema. The only client-visible change is the one ADR-0062 §5 and
