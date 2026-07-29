@@ -32,7 +32,7 @@ from typing import Any, cast
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.domain.errors import ErrorCategory
+from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.mcp.middleware import denial_audit as da_mod
 from kdive.mcp.middleware.denial_audit import DenialAuditMiddleware
 from kdive.mcp.middleware.shared import (
@@ -140,7 +140,7 @@ def test_skip_sets_state_disjoint_reasons() -> None:
 
 
 # ============================================================
-# UsageTrackingMiddleware: skip for meta-tools
+# UsageTrackingMiddleware: skips both sets
 # ============================================================
 
 
@@ -181,6 +181,22 @@ def test_usage_search_skips_recording_on_success() -> None:
     assert recorded == []
 
 
+def test_usage_search_skips_recording_when_the_call_raises() -> None:
+    """The usage skip covers the exception exit too: no row on any tools.search outcome.
+
+    ADR-0485's "``tool_invocation`` contents are unchanged" is a claim about every exit, not
+    just the returned-result one the success test above drives. ``UsageTrackingMiddleware``
+    has three (return, ``AuthorizationError``, ``Exception``); this pins the third, which
+    would otherwise record a row for a tool the decision says is never recorded.
+    """
+    mw, recorded = _spy_usage()
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(mw.on_call_tool(_context("tools.search"), _raising(RuntimeError("boom"))))
+
+    assert recorded == []
+
+
 def test_usage_invoke_skips_recording_on_denial_envelope() -> None:
     """Outer tools.invoke result is authorization_denied — still no row."""
     mw, recorded = _spy_usage()
@@ -192,7 +208,7 @@ def test_usage_invoke_skips_recording_on_denial_envelope() -> None:
 
 
 def test_usage_non_meta_tool_still_records() -> None:
-    """Regular tools are unaffected by the meta-tool guard."""
+    """A tool in neither skip set is unaffected by the guard."""
     mw, recorded = _spy_usage()
     result = ToolResponse.success("session.whoami", "ok")
 
@@ -202,7 +218,7 @@ def test_usage_non_meta_tool_still_records() -> None:
 
 
 # ============================================================
-# TelemetryMiddleware: skip for meta-tools
+# TelemetryMiddleware: skips REENTRANT_TOOLS only
 # ============================================================
 
 
@@ -308,6 +324,39 @@ def test_telemetry_search_emits_span_and_metrics() -> None:
     assert [lbl for _, lbl in meter.histogram_records] == [labels]
 
 
+def test_telemetry_search_records_error_when_the_call_raises() -> None:
+    """The error arm is instrumented for tools.search too, not just the success arm.
+
+    ADR-0485 sells the telemetry skip's removal on discovery latency *and error rate*, and
+    ``tools_search`` really can raise — it calls ``current_context()``, ``registered_tools``,
+    ``tool_visible``, ``_rank`` and ``describe_tool`` outside any try. A skip narrowed later
+    to the error path alone would leave the success test above green, so pin this exit
+    separately: the ``REENTRANT_TOOLS`` check is one early return ahead of the span, but
+    "one guard today" is not something a test should assume on the plane's behalf.
+
+    The ``error_category`` label comes from the raised type, so a ``CategorizedError`` pins
+    that it is the exception's own category rather than the infrastructure_failure default.
+    """
+    mw, meter, tracer = _telemetry_mw()
+    boom = CategorizedError("registry unavailable", category=ErrorCategory.INFRASTRUCTURE_FAILURE)
+
+    with pytest.raises(CategorizedError):
+        asyncio.run(mw.on_call_tool(_context("tools.search"), _raising(boom)))
+
+    assert tracer.span_names == ["mcp.tool/tools.search"]
+    assert meter.counter_adds == [
+        (1, {"tool": "tools.search", "outcome": "error"}),
+        (
+            1,
+            {
+                "tool": "tools.search",
+                "outcome": "error",
+                "error_category": ErrorCategory.INFRASTRUCTURE_FAILURE.value,
+            },
+        ),
+    ]
+
+
 def test_telemetry_invoke_still_passes_through_to_call_next() -> None:
     """Skipping telemetry still forwards context to call_next and returns the result."""
     mw, _, _ = _telemetry_mw()
@@ -329,7 +378,7 @@ def test_telemetry_non_meta_tool_still_emits_span() -> None:
 
 
 # ============================================================
-# DenialAuditMiddleware: skip row for meta-tools
+# DenialAuditMiddleware: skips REENTRANT_TOOLS only
 # ============================================================
 
 
@@ -382,7 +431,7 @@ def test_denial_audit_search_writes_row_on_role_denied(
 def test_denial_audit_non_meta_tool_still_writes_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-meta-tools are unaffected by the guard."""
+    """A tool in neither skip set is unaffected by the guard."""
     calls: list[Any] = []
 
     async def _mock_record_denial(_conn: Any, *, event: Any) -> None:

@@ -55,9 +55,11 @@ flattened away:
   that serves real work.
 - A span and two metric points (three on an error outcome) are **in-process** — no network
   round-trip, no durable write, nothing taken from the connection pool that serves real
-  work — and the span is additionally **sampled**, at `OTEL_TRACES_SAMPLER_RATIO`, default
-  0.1 (`observability/facade.py`). The metric points are not sampled; they are counter and
-  histogram updates in local memory, aggregated before export. And this is the plane where
+  work — and the span is additionally **sampled**: `ParentBased(TraceIdRatioBased(ratio))`
+  with `ratio` from `OTEL_TRACES_SAMPLER_RATIO`, default 0.1 (`observability/facade.py`),
+  so the ratio governs root spans and a span under an already-sampled parent is kept. The
+  metric points are not sampled; they are counter and histogram updates in local memory,
+  aggregated before export. And this is the plane where
   discovery is actually diagnosed: search latency, error rate, and — via the existing
   `tool_search_miss` structured log alongside them — zero-result queries.
 
@@ -71,8 +73,11 @@ UNMETERED_TOOLS: frozenset[str] = frozenset({"tools.search"})
 ```
 
 Each set's name *is* its justification, so a future member is added to the set whose reason
-it actually satisfies, and a reader of any one skip site can see which reason applies
-without reconstructing it. `META_TOOLS` is removed outright rather than aliased — a name
+it actually satisfies, and a reader of a skip site can see which reason applies without
+reconstructing it. The usage plane is the one site that skips both, and it names the union
+`_UNRECORDED_TOOLS` after what it does rather than after a reason — the two reasons are
+stated on the union's definition, which is the only place both apply at once.
+`META_TOOLS` is removed outright rather than aliased — a name
 that meant "both reasons at once" is the defect, so keeping it available would let the
 conflation return.
 
