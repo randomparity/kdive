@@ -147,8 +147,15 @@ attach(gdb-MI direct TCP) → force-crash → two-phase KDUMP capture →
 introspect(`from_vmcore`) → release → reconciler teardown → accounting report, each step under a
 per-project role token.
 
-Two operational notes:
+Three operational notes:
 
+- **The app tier does not hot-reload.** Only the *libvirt host* is remote here; the kdive
+  server, worker and reconciler are the same host processes from the
+  [live-stack runbook](live-stack.md) §4, and they load your source once, at start. A source fix
+  does not reach a running worker until you re-run `scripts/live-stack/up.sh`. A remote spine
+  driven against a worker that predates its own fix produced a meaningless green during #1610;
+  the version-skew preflight (ADR-0482, live-stack runbook §5) now names that case at preflight
+  time instead. `KDIVE_STACK_SKEW_POLICY=off` disables it.
 - **Capture budget.** The capture phase drains a job that waits out a ~300s server-side readiness
   window while the guest reboots out of the kdump capture kernel, then uploads. The spine budgets
   900s for it; if the operator's reboot is slower, raise `_CAPTURE_DEADLINE_S` in the remote test.

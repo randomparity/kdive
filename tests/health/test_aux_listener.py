@@ -17,6 +17,7 @@ from kdive.health.aux_listener import build_aux_app
 from kdive.health.heartbeat import Heartbeat
 from kdive.health.metrics_text import CONTENT_TYPE
 from kdive.health.probe import BackendCheck, HealthProbe
+from kdive.version import version_info
 
 
 def _client(app: object) -> httpx.AsyncClient:
@@ -67,6 +68,62 @@ def test_readyz_503_when_a_check_fails() -> None:
             resp = await client.get("/readyz")
             assert resp.status_code == 503
             assert resp.json()["ready"] is False
+
+    asyncio.run(_run())
+
+
+def test_readyz_carries_the_deployed_build() -> None:
+    async def _run() -> None:
+        async def ok() -> None:
+            return None
+
+        probe = HealthProbe(checks=[BackendCheck(name="pg", probe=ok)])
+        app = build_aux_app(heartbeat=_fresh_hb(), probe=probe, metric_reader=None)
+        async with _client(app) as client:
+            body = (await client.get("/readyz")).json()
+            # `version` is a sibling of the pre-existing keys, which keep their shape.
+            assert body["ready"] is True
+            assert body["checks"] == {"pg": True}
+            assert set(body["version"]) == {"version", "commit", "is_release", "started_at"}
+            # Mirrors version_info(), not an independent resolution (ADR-0482 §1).
+            info = version_info()
+            assert body["version"]["commit"] == info.commit
+            assert body["version"]["version"] == info.version
+            assert body["version"]["is_release"] == info.is_release
+
+    asyncio.run(_run())
+
+
+def test_readyz_carries_the_deployed_build_even_when_not_ready() -> None:
+    # The load-bearing edge: a stack whose backends are down is exactly when someone needs to
+    # know whether they are chasing a defect or a stale build. A 503 must still carry `version`,
+    # or the preflight goes blind precisely when it matters most (ADR-0482 §1).
+    async def _run() -> None:
+        async def down() -> None:
+            raise RuntimeError("pg down")
+
+        probe = HealthProbe(checks=[BackendCheck(name="pg", probe=down)])
+        app = build_aux_app(heartbeat=_fresh_hb(), probe=probe, metric_reader=None)
+        async with _client(app) as client:
+            resp = await client.get("/readyz")
+            assert resp.status_code == 503
+            assert resp.json()["ready"] is False
+            assert resp.json()["version"]["commit"] == version_info().commit
+
+    asyncio.run(_run())
+
+
+def test_readyz_reports_one_stable_start_instant_across_requests() -> None:
+    # `started_at` is the *process* start, resolved once when the app is built. If it were
+    # recomputed per request it would always equal "now" and could never read as stale, which
+    # is the whole signal the local skew variant depends on (ADR-0482 §1/§3).
+    async def _run() -> None:
+        app = build_aux_app(heartbeat=_fresh_hb(), probe=HealthProbe(checks=[]), metric_reader=None)
+        async with _client(app) as client:
+            first = (await client.get("/readyz")).json()["version"]["started_at"]
+            await asyncio.sleep(1.05)
+            second = (await client.get("/readyz")).json()["version"]["started_at"]
+            assert first == second
 
     asyncio.run(_run())
 

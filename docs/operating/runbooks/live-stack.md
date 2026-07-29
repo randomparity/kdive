@@ -227,6 +227,16 @@ The default MCP URL is `http://127.0.0.1:8000/mcp`. Override the bind address wi
 > [`scripts/live-stack/up.sh`](../../../scripts/live-stack/up.sh) — the path at the top of this
 > section, and the one both `live.yml` gates use.
 
+### The app tier does not hot-reload — re-run `up.sh` after editing source
+
+The three host processes are plain Python; they load your source once, at start. Editing a file
+under `src/kdive/` does **not** reach a running server, worker or reconciler. Driving the suite
+against a process that predates your own fix produces a green (or a red) that means nothing —
+this is the local half of issue #1630. Re-run `scripts/live-stack/up.sh` after any source change;
+it is idempotent and restarts the app tier in place.
+
+The suite now checks this for you (§5).
+
 ## 5. Run the suite
 
 ```bash
@@ -235,7 +245,37 @@ just test-live-stack
 
 This runs `pytest -m live_stack`. The `live_stack` preflight skips cleanly with an
 actionable reason when the fixtures or the stack are absent — so the recipe is safe to run
-on any host. When **no** `live_stack` test is collected yet (the marked spine driver lands
+on any host.
+
+### The version-skew preflight (ADR-0482)
+
+Every `live_stack` test goes through `require_stack()`, which reads the build each app process
+reports on its aux `/readyz` (`127.0.0.1:9464`/`9465`/`9466`) and grades it against your
+checkout. Read a stale stack straight out of the skip/warning instead of rediscovering it as a
+confusing test failure:
+
+| verdict | meaning | what happens |
+|---|---|---|
+| `fresh` | the process is at `HEAD` and started after your last edit | runs, silently |
+| `stale_restart` | at `HEAD`, but source changed after it started | **skips** — run `scripts/live-stack/up.sh` |
+| `behind` | the deployed commit is an ancestor of `HEAD` | warns, names the commit distance |
+| `diverged` | not an ancestor of `HEAD` (other branch, or `HEAD` rewritten) | warns |
+| `unknown` | the process reports no build, or is not answering | warns |
+
+Only `stale_restart` skips, because it is the one verdict that cannot be a false positive and
+its remedy is one command. `behind` and `diverged` warn, so a deliberate run against an older
+deployment is never blocked.
+
+Override with `KDIVE_STACK_SKEW_POLICY`:
+
+```bash
+KDIVE_STACK_SKEW_POLICY=warn just test-live-stack     # never skip, warn only
+KDIVE_STACK_SKEW_POLICY=strict just test-live-stack   # skip on anything but fresh
+KDIVE_STACK_SKEW_POLICY=off just test-live-stack      # do not probe at all
+```
+
+A stack whose processes predate this feature reports `unknown` and only warns, so the preflight
+never blocks an older deployment. When **no** `live_stack` test is collected yet (the marked spine driver lands
 in a later sub-issue), the recipe reports `no live_stack tests collected — skipping
 cleanly` and exits 0.
 

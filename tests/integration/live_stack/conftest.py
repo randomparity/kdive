@@ -7,6 +7,7 @@ import platform
 import shutil
 import urllib.error
 import urllib.request
+import warnings
 from collections.abc import Callable
 
 import pytest
@@ -17,6 +18,14 @@ from kdive.diagnostics.guest_arch_accel import (
     resolved_libvirt_uri,
 )
 from kdive.mcp.dev_harness import OidcIssuer, oidc_issuer_from_env
+from tests.integration.live_stack.skew import (
+    POLICY_ENV,
+    ProcessSkew,
+    SkewPolicy,
+    partition,
+    probe_stack_skew,
+    skew_policy,
+)
 
 
 def _issuer_reachable(issuer: OidcIssuer) -> bool:
@@ -39,11 +48,41 @@ def require_issuer() -> OidcIssuer:
 
 
 def require_stack() -> str:
-    """Skip unless a kdive server base URL is configured (the live_stack tier)."""
+    """Skip unless a kdive server base URL is configured and the stack is not stale.
+
+    Beyond the URL check, this grades the build each app process reports on its aux
+    ``/readyz`` against the working tree (ADR-0482 §3, issue #1630) — a stale stack is
+    otherwise symptomatically identical to a defect. Only ``stale_restart`` skips by default;
+    ``behind``/``diverged``/``unknown`` warn. ``KDIVE_STACK_SKEW_POLICY`` overrides.
+    """
     base_url = os.environ.get("KDIVE_STACK_BASE_URL")
     if not base_url:
         pytest.skip("KDIVE_STACK_BASE_URL unset; bring up the stack (see the live-stack runbook)")
+    _enforce_stack_freshness(base_url)
     return base_url
+
+
+# Session-memoized per base URL: require_stack() is called from dozens of tests, and the skew
+# answer cannot change while the same processes keep running.
+_SKEW_CACHE: dict[str, list[ProcessSkew]] = {}
+
+
+def _enforce_stack_freshness(base_url: str) -> None:
+    """Skip or warn on a stack that predates the working tree (ADR-0482 §3)."""
+    policy = skew_policy()
+    if policy is SkewPolicy.OFF:
+        return
+    if base_url not in _SKEW_CACHE:
+        _SKEW_CACHE[base_url] = probe_stack_skew(base_url)
+    skip, warn = partition(_SKEW_CACHE[base_url], policy)
+    for result in warn:
+        warnings.warn(f"live-stack version skew — {result}", stacklevel=3)
+    if skip:
+        pytest.skip(
+            "live-stack version skew: "
+            + "; ".join(str(r) for r in skip)
+            + f" [set {POLICY_ENV}=warn to run anyway]"
+        )
 
 
 def expected_accel(
