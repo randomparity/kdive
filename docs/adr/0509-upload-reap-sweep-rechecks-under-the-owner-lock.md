@@ -104,6 +104,12 @@ ADR-0453 said the two decisions had to be settled together. This one is first, s
 - The pass-level aggregation (§3's raise, §4's brake) must sum across workers, and `declined` must
   stay out of both.
 
+**The two phases now treat contention differently, deliberately.** Phase 1 still *blocks* on the
+owner lock, because a reap that gave up on a contended owner would never claim it — the manifest row
+is the pass's only record that the window is past its deadline. Phase 2 does not block, because by
+then the row is already gone and the objects have a second collector. The asymmetry is the
+difference between an obligation and an optimisation, not an oversight.
+
 **Cost.** One lock acquisition, one statement and one round trip per doomed key. That is strictly
 less than `_claim_abandoned_prefix`, which already holds `LockScope.RUN` across a whole paginating
 `list_prefix`, and it is the same per-key cost `_delete_if_still_reclaimable` has carried since

@@ -91,8 +91,8 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
 class ReapOutcome(NamedTuple):
     """What one owner's reap did: whether the row went, and how the object sweep fared.
 
-    ``attempted`` counts the keys that reached ``store.delete``, which since ADR-0509 is fewer than
-    the keys phase 1 doomed: a key the per-key re-check declined never reaches the store at all.
+    ``attempted`` counts the keys this sweep tried to delete, which since ADR-0509 is fewer than the
+    keys phase 1 doomed: a key the per-key re-check declined is never tried at all.
     ``declined`` carries those separately, because a decline is the guard working rather than a
     fault — it must not raise at the end of the pass and must not trip the ADR-0453 §4 brake.
     """

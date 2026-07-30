@@ -80,14 +80,12 @@ def _noop() -> None:
 
 async def _seed_expired_run(url: str) -> tuple[UUID, str]:
     """A CREATED Run whose upload window is already past its deadline."""
-    prefix_holder: list[str] = []
     async with await connect(url) as seed:
         system_id = await seed_system(seed)
         run_id = await seed_run(seed, system_id, run_state=RunState.CREATED)
         prefix = f"{UPLOAD_TENANT}/{RUN_UPLOAD_OWNER}/{run_id}/"
-        prefix_holder.append(prefix)
         await _insert_manifest(seed, RUN_UPLOAD_OWNER, run_id, prefix, timedelta(seconds=-1))
-    return run_id, prefix_holder[0]
+    return run_id, prefix
 
 
 async def _seed_expired_investigation(url: str) -> tuple[UUID, str]:
