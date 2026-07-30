@@ -248,6 +248,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Put 0509 in the canonical record shape
 - State the expiry guard's limits rather than overclaiming
 - Record ADR-0511 — cap upload-window extension at the mint
+- Fix Accepted-ADR grep to match both status shapes
 
 ### Fixed
 
