@@ -31,17 +31,23 @@ exist, and each of the 46 sites belongs to exactly one:
   real transaction regardless of what ran before it. 22 of the 46 are here
   (`jobs/handlers/control/{control,diagnostic_sysrq,capture_traffic}.py`,
   `jobs/handlers/systems.py`, `jobs/handlers/artifacts/vmcore.py`,
-  `jobs/handlers/runs/install.py`, `jobs/handlers/console/console_rotate.py`,
-  `jobs/worker.py`). The issue cited `finalize_capture` in `vmcore.py` as a known-live
-  instance; on the autocommit dispatch connection it is not one. That claim in the issue body
-  is wrong, and correcting it is part of what this record is for — the next reader should not
-  re-derive it.
-- **Reconciler repairs — safe by pattern.** `reconciler/loop.py:605` opens a fresh
-  `pool.connection()` per repair and the repair's candidate SELECT is wrapped in
-  `conn.transaction()` (`reconciler/repairs/systems.py:42` is the reference shape), so each
-  per-candidate block starts idle. 5 sites (`reconciler/repairs/systems.py`,
-  `reconciler/cleanup/uploads.py`, `artifacts/write_lease.py`), two of which already assert
-  the requirement (`artifacts/write_lease.py:82`, `reconciler/cleanup/upload_orphans.py:490`).
+  `jobs/handlers/runs/install.py`, `jobs/handlers/console/console_rotate.py`, and
+  `artifacts/write_lease.py` — whose only caller is `vmcore.py:289`, on that same connection;
+  it asserts the requirement anyway, at `write_lease.py:82`). The issue cited
+  `finalize_capture` in `vmcore.py` as a known-live instance; on the autocommit dispatch
+  connection it is not one. That claim in the issue body is wrong, and correcting it is part
+  of what this record is for — the next reader should not re-derive it.
+- **Sites reached on a freshly taken connection — safe by pattern.** `reconciler/loop.py:605`
+  opens a fresh `pool.connection()` per repair and the repair's candidate SELECT is wrapped in
+  `conn.transaction()` (`reconciler/repairs/systems.py:41` is the reference shape), so each
+  per-candidate block starts idle. 5 sites: `reconciler/repairs/systems.py` (3),
+  `reconciler/cleanup/uploads.py` (1), and `jobs/worker.py:369` (1) — that last one is *not*
+  covered by the autocommit dispatch above, because `_fail_job_and_run` is reached from
+  `worker.py:161` and `worker.py:249`, each of which takes its own `pool.connection()` and
+  runs only pure-Python code before the lock. None of the 5 asserts the requirement. The one
+  reconciler site that does, `reconciler/cleanup/upload_orphans.py:490`, is not among the 46
+  at all: it locks with `try_advisory_xact_lock`, which the grep does not match — another way
+  the 46 undercounts.
 - **The MCP server request path — not judged here.** `db/pool.py:52` sets no `autocommit`, so
   `pool.connection()` in a tool handler yields a **non-autocommit** connection, and a handler
   that reads before it locks demotes its own transaction. 18 sites, across
@@ -59,7 +65,7 @@ exist, and each of the 46 sites belongs to exactly one:
 That leaves **one** file where the demotion is not a longer hold but a broken contract:
 `services/allocation/promotion.py`. Both of its sweeps candidate-SELECT with a bare
 `conn.cursor()` outside any transaction (`:84`, `:407`), dirtying the pooled connection for
-the whole pass; `_promote_one`'s own `SELECT project` (`:118`) dirties it a second time even
+the whole pass; `_promote_one`'s own `SELECT project` (`:119`) dirties it a second time even
 if the first were fixed. Every subsequent `conn.transaction()` is a savepoint, so no
 candidate's locks are ever released. Measured on the unfixed tree with the test added here,
 candidate 2 of a two-candidate pass enters holding **3** advisory locks — candidate 1's
@@ -86,11 +92,19 @@ candidate's locks are still held and this one is about to invert the order. Outs
 candidate from its siblings; a savepoint-demoted connection is a fault of the pass, not of the
 candidate, and must abort the pass rather than be logged 200 times and retried next tick.
 
-Prove each assertion by mutation, and prove the hazard rather than the guard. The
-lock-accumulation test records, from a **second** connection, how many granted advisory locks
-the sweep's backend holds at the entry of each candidate — probing from the sweep's own
-connection would issue the statement that opens the transaction under test. On the fixed tree
-the recorded list is `[0, 0]`; on the unfixed tree it is `[0, 3]`.
+Prove each of the four assertions by deleting it and watching a test fail, and prove the
+hazard rather than the guard. The four are the entry and per-candidate guard of each sweep;
+each was removed on its own and each took exactly one test red with it, so no guard is
+carried by a test that was really pinning a different one.
+
+The lock tests read `pg_locks` from a **second** connection, filtered to the sweep backend's
+pid — probing from the sweep's own connection would issue the statement that opens the
+transaction under test. They compare lock *identities*, not counts: `pg_locks` exposes an
+advisory key as `(classid, objid)`, which `_advisory_lock_oids(_lock_key(scope, key))` maps
+back to a `LockScope`, so the test can assert that the locks still held when candidate 2 is
+refused are exactly candidate 1's PROJECT, RESOURCE and ALLOCATION. A count would show
+accumulation; only the identities show the inversion. Measured at the entry of each candidate
+on the fixed tree the held count is `[0, 0]`; on the unfixed tree it is `[0, 3]`.
 
 ## Consequences
 
@@ -98,18 +112,26 @@ the recorded list is `[0, 0]`; on the unfixed tree it is `[0, 3]`.
   and say so in their `Args`/`Raises`. The reconciler already satisfies this; a future caller
   that does not gets a `RuntimeError` naming the fix instead of silent lock accumulation.
 - A demoted connection aborts the whole pass. `_run_repair_plan` catches it, records the
-  repair as failed for the pass, and the next tick retries on a fresh connection — so the
-  failure is visible in the repair-failure list rather than absorbed into a per-candidate
-  warning.
-- The six tests added to `tests/services/allocation/test_promotion.py` are the first in that
+  repair as failed for the pass, and the next tick retries on a connection the pool has reset
+  — so the failure is visible in the repair-failure list rather than absorbed into a
+  per-candidate warning. The pass's count is lost with it: candidates that committed before
+  the abort keep their grants, but `_run_repair_plan` reports the repair's count as 0, so the
+  promoted total under-reports on exactly the passes that fail. Accepted — the grants are
+  durable and the failure is already surfaced; a partial count would need a mutable
+  accumulator threaded through both sweeps to fix an observability gap on an error path.
+- The seven tests added to `tests/services/allocation/test_promotion.py` are the first in that
   file to run on a non-autocommit connection. The 16 that preceded them use autocommit, where
   the trap cannot appear; that is why the defect survived them. New tests for lock lifetime or
   commit boundaries in this area must use `_pooled_conn`, not `_conn`.
 - 22 sites are recorded as immune and 5 as safe-by-pattern, with the reason in each case, so
   they read as judged rather than unexamined. Both judgements are conditional on their
-  supplier: if `jobs/worker.py` stopped setting `set_autocommit(True)`, or a reconciler repair
+  supplier: if `jobs/worker.py:240` stopped setting `set_autocommit(True)`, or a repair
   stopped opening a fresh connection, 27 sites change class at once and nothing here would
-  fail. That coupling is the residual risk this record does not remove.
+  fail. That coupling is the residual risk this record does not remove — and note that a
+  site's group is a property of its *callers*, so adding a second caller to a helper can move
+  it between groups without touching the helper. `artifacts/write_lease.py` is the one to
+  watch: it sits in the immune group only because `vmcore.py:289` is its sole caller, and its
+  own assertion is what would catch a second one.
 - The 18 server-path sites remain unclassified by this record, by scope. Whoever classifies
   them inherits the finding above: their connection is non-autocommit, so the question at each
   is not "does it commit" but "what does its lock span".

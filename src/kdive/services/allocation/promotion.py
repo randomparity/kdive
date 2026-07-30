@@ -79,21 +79,23 @@ async def promote_pending(conn: AsyncConnection, metrics: AdmissionMetrics | Non
     Candidate-selects every ``requested`` allocation oldest-first (the partial index), then
     attempts each in its own committed transaction. Returns the number promoted to
     ``granted`` this pass. A budget recheck failure terminates a request to ``failed``
-    (counted as not promoted); a per-candidate error rolls that candidate back and leaves it
-    ``requested`` for the next pass without starving its siblings.
-
-    ``metrics`` (default the no-op) records a grant decision + the request→grant wait
-    (``now - created_at``) per promoted allocation (ADR-0190 D).
+    (counted as not promoted); a per-candidate *operational* error rolls that candidate back
+    and leaves it ``requested`` for the next pass without starving its siblings. A
+    transaction-state fault is the one exception — it is a fault of the pass, not of the
+    candidate, so it aborts the remaining candidates (see ``Raises``).
 
     Args:
         conn: An async connection with **no** transaction open; every transaction here is
             opened and committed by this function. On a connection already in one, each
             ``conn.transaction()`` below would be a savepoint that commits nothing and
             releases no advisory lock (ADR-0506), so that is rejected rather than run.
-        metrics: The admission metrics sink.
+        metrics: The metrics sink (default the no-op); records a grant decision + the
+            request→grant wait (``now - created_at``) per promoted allocation (ADR-0190 D).
 
     Raises:
         RuntimeError: ``conn`` is already in a transaction, on entry or between candidates.
+            Candidates already committed keep their grants, but the returned count is lost
+            with the pass.
     """
     metrics = metrics or AdmissionMetrics.disabled()
     require_top_level_transaction(conn, "the promotion sweep's candidate select")
