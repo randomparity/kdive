@@ -88,7 +88,8 @@ stop_daemons() {
   done
   # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
   # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
-  # in require_workers_alive, and this list is likewise what an operator would act on. Sleep FIRST
+  # in require_workers_alive later in this file, and this list is likewise what an operator would
+  # act on. Sleep FIRST
   # so the surviving scan is the last thing observed rather than one already half a second stale.
   # The price is one extra 0.5s poll when every daemon exits immediately; the gain is that the
   # pids the WARN hands the operator were still there when it decided to warn.
@@ -382,7 +383,9 @@ require_workers_alive() {
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
       echo "  gives up the same way. So either wait for the in-flight job to finish and re-run"
       echo "  (that only helps if the SIGTERM landed — if it did not, the worker keeps claiming"
-      echo "  new jobs and waiting never ends it), or end these yourself and re-run:"
+      echo "  new jobs and waiting never ends it; and this run's own workers above are claiming"
+      echo "  jobs meanwhile, so a re-run can land on this same surplus), or end these in one"
+      echo "  step and re-run:"
       echo "    sudo kill -9 ${pids[*]}"
       echo "  Killing abandons that job mid-flight: another worker reclaims it once its lease"
       echo "  lapses, spending one of its bounded attempts."

@@ -78,7 +78,9 @@ def _start_workers(tmp_path: Path, worker_count: str) -> list[Path]:
     """Really run `restart_host_processes` against a stub interpreter; return the worker logs.
 
     Stubs only the environment the launch loop cannot have in a unit test — the interpreter, the
-    log directory, and the three helpers that touch the live process table — so the loop itself,
+    log directory, and the four helpers that touch the live process table or the HTTP port
+    (`stop_daemons`, `require_free_http_port`, `wait_for_daemons_to_settle` and
+    `require_workers_alive`, the last of which would otherwise find no live workers) — so the loop,
     the per-worker log naming, and the per-worker health-bind override are the code under test.
     The stub records the aux bind address it was handed, which is the collision this guards.
     """
