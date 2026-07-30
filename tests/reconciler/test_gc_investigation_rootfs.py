@@ -23,6 +23,7 @@ import psycopg
 import pytest
 
 from kdive.artifacts.content_address import rootfs_object_token
+from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.profiles.provisioning import ProvisioningProfile, dump_profile
 from kdive.reconciler.cleanup import gc
@@ -50,20 +51,30 @@ def _object_key(inv: UUID, token: str = _TOKEN) -> str:
 
 
 async def _seed_investigation(
-    conn: psycopg.AsyncConnection, *, state: str, rootfs_marker_age: timedelta | None
+    conn: psycopg.AsyncConnection,
+    *,
+    state: str,
+    rootfs_marker_age: timedelta | None,
+    age: timedelta = timedelta(0),
 ) -> UUID:
+    """Seed one investigation `age` old, optionally carrying the close-driven rootfs marker.
+
+    `age` drives `investigations.created_at`, which ADR-0501 makes the staging-drain lane's age
+    gate, so a test that wants that lane to select has to age the investigation and not only its
+    System. It defaults to zero, which is what every lane keyed on something else wants.
+    """
     inv_id = uuid4()
     if rootfs_marker_age is None:
         await conn.execute(
-            "INSERT INTO investigations (id, principal, project, title, state) "
-            "VALUES (%s, 'p', 'proj', 't', %s)",
-            (inv_id, state),
+            "INSERT INTO investigations (id, principal, project, title, state, created_at) "
+            "VALUES (%s, 'p', 'proj', 't', %s, now() - %s)",
+            (inv_id, state, age),
         )
     else:
         await conn.execute(
-            "INSERT INTO investigations (id, principal, project, title, state, "
-            "rootfs_cleanup_pending_at) VALUES (%s, 'p', 'proj', 't', %s, now() - %s)",
-            (inv_id, state, rootfs_marker_age),
+            "INSERT INTO investigations (id, principal, project, title, state, created_at, "
+            "rootfs_cleanup_pending_at) VALUES (%s, 'p', 'proj', 't', %s, now() - %s, now() - %s)",
+            (inv_id, state, age, rootfs_marker_age),
         )
     return inv_id
 
@@ -440,6 +451,11 @@ _UPLOAD_PROFILE = (
 )
 _CATALOG_PROFILE = '{"provider": {"local-libvirt": {"rootfs": {"kind": "catalog", "name": "r"}}}}'
 
+#: Older than the 30-day `investigation_rootfs_retention` every staging-drain test below passes, so
+#: ADR-0501's `investigations.created_at` gate is satisfied and each test's assertion has exactly
+#: one cause — the predicate it is actually about — rather than passing on a young investigation.
+_PAST_RETENTION = timedelta(days=40)
+
 
 async def _seed_upload_system(
     conn: psycopg.AsyncConnection,
@@ -504,7 +520,9 @@ def test_staging_drain_lane_enqueues_an_empty_worklist_for_that_investigation(
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
             await _seed_upload_system(seed, inv)
         finally:
             await seed.close()
@@ -528,7 +546,9 @@ def test_staging_drain_lane_is_disjoint_from_the_ttl_lane(migrated_url: str) -> 
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
             await _seed_upload_system(seed, inv)
             await _seed_rootfs_object(seed, inv, created_age=timedelta(days=40))
         finally:
@@ -550,7 +570,10 @@ def test_staging_drain_lane_is_disjoint_from_the_close_driven_lane(migrated_url:
         seed = await connect(migrated_url)
         try:
             inv = await _seed_investigation(
-                seed, state="closed", rootfs_marker_age=timedelta(days=2)
+                seed,
+                state="closed",
+                rootfs_marker_age=timedelta(days=2),
+                age=_PAST_RETENTION,
             )
             await _seed_upload_system(seed, inv)
         finally:
@@ -574,7 +597,9 @@ def test_staging_drain_lane_ignores_an_investigation_that_never_used_an_uploaded
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
             await _seed_upload_system(seed, inv, profile=_CATALOG_PROFILE)
         finally:
             await seed.close()
@@ -588,14 +613,81 @@ def test_staging_drain_lane_ignores_an_investigation_that_never_used_an_uploaded
     asyncio.run(_run())
 
 
-def test_staging_drain_lane_leaves_a_system_inside_retention_alone(migrated_url: str) -> None:
-    # The TTL half. A System provisioned minutes ago may be staging its base right now, between the
-    # `mkdir` and the publish, with its artifacts row not yet resolved -- so the retention window is
-    # what keeps the lane off a live provision rather than racing it.
+def test_staging_drain_lane_retries_a_long_staged_investigation_whose_system_is_young(
+    migrated_url: str,
+) -> None:
+    # #1686, and the whole point of ADR-0501. Under content-addressed reuse (ADR-0441) a System
+    # minutes old attaches to a checksum staged in this investigation months ago, so keying the age
+    # gate on `systems.created_at` stranded the drained half for up to the full 30-day retention
+    # window -- 120x the `ROOTFS_STAGING_DRAIN_BACKOFF` cadence the lane is designed around. The
+    # investigation is what has aged past retention, and it is what governs the bytes, so it is the
+    # gate. RED before ADR-0501: the 1-minute-old `systems` row failed `s.created_at < now() - 30d`
+    # and the sweep returned 0.
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
+            await _seed_upload_system(seed, inv, state="ready", age=timedelta(minutes=1))
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 1
+            jobs = await _reclaim_jobs(conn, inv)
+            assert len(jobs) == 1
+            assert jobs[0]["payload"]["artifact_ids"] == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("system_state", sorted(gc._MID_MATERIALIZE_STATE_VALUES))
+def test_staging_drain_lane_leaves_an_investigation_with_a_mid_materialize_system_alone(
+    migrated_url: str, system_state: str
+) -> None:
+    # ADR-0501 section 2. What the discarded `systems.created_at` gate was really proxying for: a
+    # System between its staging `mkdir` and its artifacts-row resolution, which the drain tail's
+    # `rmdir` would fail out from under. Replacing an age proxy with an explicit state predicate is
+    # only an improvement if the predicate actually bites, so the investigation here is well past
+    # retention -- the age gate cannot be what excludes it. Drop the anti-join from
+    # `_UNOWNED_STAGING_INV_SQL` and every parametrization reddens.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
+            await _seed_upload_system(seed, inv, state=system_state, age=timedelta(minutes=1))
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_staging_drain_lane_excludes_a_whole_investigation_not_just_the_busy_system(
+    migrated_url: str,
+) -> None:
+    # The anti-join is investigation-scoped rather than per-System row, and that is load-bearing:
+    # the job it issues carries an empty worklist, so the drain tail sweeps the ONE
+    # per-investigation staging directory every one of these Systems shares. A per-row exclusion
+    # would let a settled sibling re-admit the job and `rmdir` under the provisioning one -- so a
+    # settled System alongside a mid-materialize one must still yield nothing.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
+            await _seed_upload_system(seed, inv, state="torn_down", age=_PAST_RETENTION)
             await _seed_upload_system(seed, inv, state="provisioning", age=timedelta(minutes=1))
         finally:
             await seed.close()
@@ -609,6 +701,41 @@ def test_staging_drain_lane_leaves_a_system_inside_retention_alone(migrated_url:
     asyncio.run(_run())
 
 
+def test_staging_drain_lane_leaves_a_young_investigation_alone(migrated_url: str) -> None:
+    # The retention half survives ADR-0501, just re-keyed: an investigation created minutes ago has
+    # not accumulated anything the retention policy governs, and its Systems may be staging right
+    # now. Pinned in its own right because every other staging-drain test now ages its
+    # investigation, which would otherwise leave the new gate asserted in one direction only.
+    async def _run() -> None:
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=timedelta(minutes=1)
+            )
+            await _seed_upload_system(seed, inv, state="torn_down", age=timedelta(minutes=1))
+        finally:
+            await seed.close()
+        conn = await connect(migrated_url)
+        try:
+            assert await sweep_unowned_investigation_rootfs_staging(conn, timedelta(days=30)) == 0
+            assert await _reclaim_jobs(conn, inv) == []
+        finally:
+            await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_the_lanes_mid_materialize_states_are_the_curated_pre_overlay_set() -> None:
+    # The anti-join must not drift from the reclaim's own pin gate on what "needs the base with no
+    # overlay yet" means, so it reads ADR-0441 section 6's curated set rather than restating it.
+    # That set is guarded by `test_reclaim_classification_is_exhaustive`, so a new non-terminal
+    # SystemState added without being classified reddens there -- and this lane inherits that guard
+    # instead of silently keeping a two-element list someone wrote by hand.
+    curated = tuple(sorted(state.value for state in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES))
+    assert curated == gc._MID_MATERIALIZE_STATE_VALUES
+    assert set(curated) == {"provisioning", "reprovisioning", "restoring"}
+
+
 def test_staging_drain_lane_issues_one_job_for_an_investigation_with_several_systems(
     migrated_url: str,
 ) -> None:
@@ -619,7 +746,9 @@ def test_staging_drain_lane_issues_one_job_for_an_investigation_with_several_sys
     async def _run() -> None:
         seed = await connect(migrated_url)
         try:
-            inv = await _seed_investigation(seed, state="open", rootfs_marker_age=None)
+            inv = await _seed_investigation(
+                seed, state="open", rootfs_marker_age=None, age=_PAST_RETENTION
+            )
             await _seed_upload_system(seed, inv)
             await _seed_upload_system(seed, inv)
         finally:

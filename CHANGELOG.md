@@ -223,6 +223,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0498 for paging the upload orphan sweep
 - Fix a garbled docstring and state two port contracts
 - Correct ADR-0498's identical-outcome claim, amend 0455 §5
+- Condense the ADR-0499 index row to three sentences
+- Point ADR-0494's age-gate entry at ADR-0501
 
 ### Fixed
 
@@ -380,7 +382,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Defer a checksum whose partial a live writer holds
 - Make the reclaim liveness gate read-only and fail-closed
 - Defer only on a proven hold, per ADR-0452 §5
+- Answer a gated doc read as not-found, not code 0
 - Pin OTel sampler in gateway usage-recording e2e test (#1683)
+- Age the staging-drain lane on the investigation
 
 ### Build
 
