@@ -35,7 +35,7 @@ from kdive.mcp.tools.reports.generate import (
     generate,
 )
 from kdive.security.authz.context import RequestContext
-from kdive.security.authz.rbac import PlatformRole, Role
+from kdive.security.authz.rbac import PlatformRole, Role, RoleDenied
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.services.reports.artifacts import ReportArtifactStore
@@ -202,17 +202,27 @@ def test_granted_set_viewer_returns_all_sections_and_refs(migrated_url: str) -> 
     asyncio.run(_run())
 
 
-def test_granted_set_role_less_named_project_denied(migrated_url: str) -> None:
-    # A *member* of "proj" holding no role: RoleDenied, so the denial names the `viewer` floor
-    # it fell short of (ADR-0490).
-    async def _run() -> None:
-        async with _pool(migrated_url) as pool:
-            resp = await _generate(pool, _ctx(role=None), projects=["proj"], formats=["csv"])
-        assert resp.status == "error"
-        assert resp.error_category == ErrorCategory.AUTHORIZATION_DENIED.value
-        assert resp.data["missing_roles"] == ["viewer"]
+def test_granted_set_role_less_named_project_propagates_role_denied(migrated_url: str) -> None:
+    """A *member* of "proj" holding no role: `RoleDenied` leaves the handler unenveloped.
 
-    asyncio.run(_run())
+    The handler deliberately does **not** answer this one. `DenialAuditMiddleware` is the only
+    place ADR-0062 §5's `audit_log` row is written and it sees a denial only if the denial keeps
+    propagating, so the arm re-raises (ADR-0508, amending ADR-0493). This module calls the
+    handler directly, below every middleware, so the exception is all it can observe; the
+    envelope the caller actually receives — and the audit row — are pinned over a real dispatch
+    by `test_roleless_member_named_project_generate_is_audited_at_the_dispatch_boundary` in
+    `tests/mcp/tools/test_gateway_usage_recording_e2e.py`.
+    """
+
+    async def _run() -> RoleDenied:
+        async with _pool(migrated_url) as pool:
+            with pytest.raises(RoleDenied) as excinfo:
+                await _generate(pool, _ctx(role=None), projects=["proj"], formats=["csv"])
+        return excinfo.value
+
+    denial = asyncio.run(_run())
+    assert denial.required == Role.VIEWER
+    assert denial.project == "proj"
 
 
 def test_granted_set_non_member_named_project_names_no_role(migrated_url: str) -> None:
