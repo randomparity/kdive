@@ -408,16 +408,19 @@ would mean the lock ran and achieved nothing.
 | Assert | Where | Why it is required |
 |--------|-------|--------------------|
 | Two rows sharing one `(classid, objid)`: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity`, above | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
-| Two **running** provision jobs, both with a non-NULL `jobs.worker_id`, and the two values **different** | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' AND state = 'running' ORDER BY heartbeat_at DESC NULLS LAST LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock rows above were something else |
+| Both of **your two** provision jobs `running`, each with a non-NULL `jobs.worker_id`, and the two values **different** | `SELECT id, state, worker_id FROM jobs WHERE id IN ('<job1>', '<job2>')` — the two ids the provisions returned as `object_id` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock rows above were something else |
 | Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
 
-The `state = 'running'` filter and the non-NULL requirement in row 2 are both
-load-bearing, and a query without them inverts the arm. An unclaimed job has a
-NULL `worker_id` and a NULL `heartbeat_at`, and Postgres sorts NULLs *first* under
-`DESC` — so on the one-worker stack this arm exists to detect, the plain query
-returns the still-`queued` job ahead of the running one, and their `worker_id`
-values differ because one of them is NULL. The check would pass on exactly the
-serialization it is meant to catch.
+Name the two job ids explicitly in row 2; do not reach for the newest provision
+rows. Every relaxation of that query passes on the serialization the row exists to
+catch. Ordering by `heartbeat_at DESC` picks up an unclaimed job first, because it
+has a NULL `heartbeat_at` and Postgres sorts NULLs first under `DESC` — and its
+`worker_id` is NULL too, so it "differs" from the running job's. Dropping the id
+filter lets any other running provision on the stack supply the second row, and
+this arm manufactures those: it parks a worker inside a multi-GiB download, a
+worker does not act on `SIGTERM` until its job ends, and a re-claimed job whose
+lease lapsed is a running provision with a fresh `worker_id`. Both ids, both
+`running`, both non-NULL, values different — nothing weaker.
 
 Do not substitute a file count for that third row. Counting `.qcow2` files in the
 staging dir proves nothing: both fetchers download into a private
