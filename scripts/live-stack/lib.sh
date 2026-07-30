@@ -294,8 +294,9 @@ wait_for_daemons_to_settle() {
       # something foreign dies on an exclusive uvicorn bind, which leaves a bind traceback rather
       # than a database message — and the stack silently comes up with fewer workers than asked
       # for, which is the single-worker serialization a multi-worker run exists to escape.
-      echo "on a multi-worker stack, an 'address already in use' traceback in one worker's own" >&2
-      echo "log means its aux health port (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is taken, not that the backend is down" >&2
+      echo "on a multi-worker stack, an 'address already in use' traceback at the END of one" >&2
+      echo "worker's own log (the root launch appends) means its aux health port" >&2
+      echo "(${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is taken, not that the backend is down" >&2
       return 1
     fi
   done
@@ -313,13 +314,32 @@ wait_for_daemons_to_settle() {
 require_workers_alive() {
   local want="$1" have
   have="$(worker_pids | grep -c . || true)"
-  ((have >= want)) && return 0
+  ((have == want)) && return 0
+  # Exact, not `>=`. A surplus is the failure this function was written about: stop_daemons warns
+  # and returns 0 after ten seconds, and a worker does not act on SIGTERM until its job ends — so
+  # a worker parked inside a multi-GiB fetch (which the contention arm creates deliberately)
+  # routinely outlives it. That survivor is from THIS checkout and is counted here, so a `>=`
+  # comparison lets it stand in for a new worker that died, which is exactly the substitution the
+  # count exists to prevent. The two directions need different remedies, so they say different
+  # things.
+  if ((have > want)); then
+    {
+      echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
+      echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
+      echo "  until its current job ends, and the ten-second wait only warns. It may be running"
+      echo "  older code, and it masks a new worker that failed to start. Stop them and re-run:"
+      echo "    scripts/live-stack/down.sh --yes"
+      echo "  Live worker pids: $(worker_pids | tr '\n' ' ')"
+    } >&2
+    return 1
+  fi
   {
     echo "ERROR: asked for ${want} worker(s) but only ${have} from this checkout are running."
-    echo "  Each worker writes its own log under ${log_dir} — read the one with no 'starting kdive'"
-    echo "  line, or a traceback at its end. An 'address already in use' there means that worker's"
-    echo "  aux health port (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is held by something else, which is a local port"
-    echo "  conflict rather than a backend problem."
+    echo "  Each worker writes its own log under ${log_dir}. The root launch APPENDS, so look at"
+    echo "  each log's tail: the failing one ends in a traceback rather than in this run's startup"
+    echo "  line. An 'address already in use' there means that worker's aux health port"
+    echo "  (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is held by something else — a local port conflict, not a backend"
+    echo "  problem."
   } >&2
   return 1
 }

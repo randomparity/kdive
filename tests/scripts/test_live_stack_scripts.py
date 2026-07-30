@@ -248,8 +248,26 @@ def test_bring_up_fails_when_a_worker_did_not_come_up(tmp_path: Path) -> None:
     assert "asked for 2 worker(s) but only 0" in result.stderr, result.stderr
     # The message must reach the aux-port cause, which is otherwise a silent local port conflict.
     assert "address already in use" in result.stderr, result.stderr
-    # A satisfied count passes.
+    # An exact count passes.
     assert _lib(f'py="{tmp_path}/no-such-python"\nrequire_workers_alive 0\n').returncode == 0
+
+
+def test_bring_up_fails_on_a_surplus_worker_too(tmp_path: Path) -> None:
+    """A survivor of stop_daemons is from THIS checkout, so `>=` would let it mask a dead worker.
+
+    stop_daemons warns and returns 0 after ten seconds, and a worker ignores SIGTERM until its
+    job ends — which the contention arm arranges by parking workers inside a multi-GiB fetch. So
+    a leftover worker is the expected state here, not an edge case, and it may be running older
+    code. The two directions need different remedies, so the surplus must fail on its own.
+    """
+    surplus = _lib(
+        f'py="{tmp_path}/no-such-python"\nworker_pids() {{ echo 111; echo 222; }}\n'
+        "require_workers_alive 1\n"
+    )
+    assert surplus.returncode != 0, "a surplus must fail, not pass as 'at least enough'"
+    assert "but 2 from this checkout are running" in surplus.stderr, surplus.stderr
+    assert "outlived stop_daemons" in surplus.stderr, "the surplus remedy differs from a shortfall"
+    assert "111" in surplus.stderr and "222" in surplus.stderr, "name the pids to stop"
 
 
 def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
