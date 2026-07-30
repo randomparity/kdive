@@ -746,6 +746,16 @@ async def _create_upload(
 
             prefix = owner_prefix(_TENANT, spec.owner_kind, str(uid))
             try:
+                # `spec.project` above already ran a statement on this non-autocommit pooled
+                # connection, so this `transaction()` is a SAVEPOINT and the owner lock is held to
+                # the end of the request rather than to the end of this block (ADR-0506). Known
+                # and harmless here, so this site is deliberately not guarded with
+                # `require_top_level_transaction`: the block spans no external I/O. Minting a
+                # presigned PUT is local SigV4 signing (`store/objectstore.py`
+                # `generate_presigned_url`) — no network call, so this is not the ADR-0244
+                # lock-across-an-unbounded-external-call shape that ADR-0516 pins shut for
+                # `services/images/upload.py`. Adding object-store I/O inside this block would
+                # make it one.
                 async with conn.transaction(), advisory_xact_lock(conn, spec.lock_scope, uid):
                     if not await spec.accepts_upload(conn, uid, resolver):
                         return _config_error(
