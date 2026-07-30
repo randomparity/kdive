@@ -108,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline single-use context helper and dedupe docstrings
 - Give systems.failure_category a single writer
 - Flatten the job-category null check
+- Share the upload delete fences between both sweeps
 
 ### Documentation
 
@@ -233,6 +234,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-point the two loss tests at the unleased path
 - Record the savepoint-demotion class of each advisory-lock site
 - Record ADR-0513 for the restore-limbo failure category
+- Record ADR-0509 and the #1557 design spec
+- Name the two phases' deliberate contention asymmetry
+- Put 0509 in the canonical record shape
 
 ### Fixed
 
@@ -405,6 +409,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the leaked locks and verify the reaper's guard
 - Record restore_incomplete on a stalled restore
 - Do not let the limbo verdict displace a job's own
+- Re-check each reaped upload key under the owner lock
 
 ### Build
 
