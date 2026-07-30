@@ -11,8 +11,10 @@ returned sensitivity).
 from __future__ import annotations
 
 import io
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from typing import IO, Any, cast
 
 import boto3
@@ -81,6 +83,102 @@ def _local_stream_error(key: str, path: str, err: OSError) -> CategorizedError:
         category=ErrorCategory.INFRASTRUCTURE_FAILURE,
         details={"op": "put_stream", "key": key, "path": path},
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _StoreReply:
+    """A **successful** store response, read through a contract that says what it must carry.
+
+    Every field this module reads out of a reply is one boto3 parsed against the S3 service model,
+    so on a store that implements the API it is present and correctly typed. A store that omits one
+    — or returns it as some other type — must not surface as a bare ``KeyError`` or
+    ``AttributeError``, because that is not the ``CategorizedError`` this module's callers handle.
+    The ADR-0455 upload orphan sweep is the case that makes it matter: its per-key and per-root
+    fault handlers catch ``CategorizedError`` alone and *deliberately* let anything else abort the
+    whole pass, so that a real bug in the sweep stays loud (#1685). Converting a malformed reply
+    here — at the boundary that produced it, and to the category the callers already skip and count
+    — is what lets one unreadable reply cost one key instead of the pass, without widening any
+    caller's ``except`` to swallow its own bugs.
+
+    The policy is decided once for every field rather than per field, so no reply read in this
+    module can be the inconsistent one. An *optional* field gets the same treatment when it is
+    present (:meth:`optional`): absent is normal and yields the caller's default, but a present
+    value of the wrong type is as malformed as a missing required one, and in the case of
+    ``Metadata`` it is the shape that actually raises — a non-mapping there makes the sensitivity
+    read a ``TypeError`` that no ``except`` on this path catches.
+
+    It applies to the reads only; the write and multipart calls subscript their replies too, but
+    each of those is one request's own result with no per-item fault handler above it, so a
+    malformed reply there already fails exactly the one operation it belongs to.
+    """
+
+    op: str
+    bucket: str
+    #: The request's subject — an object key, or the prefix for a listing entry, which has no key
+    #: of its own to name in a failure message until ``Key`` is itself read.
+    subject: str
+    body: Mapping[str, Any]
+
+    def required[T](self, field: str, expected: type[T]) -> T:
+        """Return ``field``'s value, or raise if the store omitted it or gave it another type.
+
+        Args:
+            field: The response field name, as the S3 API spells it.
+            expected: The type the API promises. Checked rather than coerced: a coercion would
+                turn a nonsense value into a plausible one, and the point here is to name the
+                field that is wrong.
+
+        Returns:
+            The field's value, narrowed to ``expected``.
+
+        Raises:
+            CategorizedError: the field is absent or is not an ``expected``
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        try:
+            value = self.body[field]
+        except KeyError as err:
+            raise self._malformed(field, f"omitted the required {field!r}") from err
+        if not isinstance(value, expected):
+            raise self._malformed(
+                field, f"returned {field!r} as {type(value).__name__}, not {expected.__name__}"
+            )
+        return value
+
+    def optional[T](self, field: str, expected: type[T]) -> T | None:
+        """Return ``field``'s value, ``None`` if the store omitted it, or raise if it is ill-typed.
+
+        The absent case is normal — an object written before checksums were requested carries no
+        ``ChecksumSHA256``, and one with no user metadata may carry no ``Metadata`` — so only a
+        *present* value is held to the contract.
+
+        Args:
+            field: The response field name, as the S3 API spells it.
+            expected: The type the API promises when the field is present.
+
+        Returns:
+            The field's value, or ``None`` when the store omitted it.
+
+        Raises:
+            CategorizedError: the field is present and is not an ``expected``
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        if field not in self.body:
+            return None
+        return self.required(field, expected)
+
+    def _malformed(self, field: str, problem: str) -> CategorizedError:
+        return CategorizedError(
+            f"object-store {self.op} for {self.subject!r} in bucket {self.bucket!r} {problem}; "
+            f"the endpoint is not returning S3-compatible {self.op} replies",
+            category=ErrorCategory.INFRASTRUCTURE_FAILURE,
+            details={
+                "op": self.op,
+                "bucket": self.bucket,
+                "key": self.subject,
+                "field": field,
+            },
+        )
 
 
 class _StreamingBodyReader(io.RawIOBase):
@@ -314,8 +412,9 @@ class ObjectStore:
         that key's prefix (#1575).
 
         Raises:
-            CategorizedError: any non-404 store error
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+            CategorizedError: any non-404 store error, or a reply that omits or mistypes one of the
+                fields ``HeadObject`` is required to return
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`; see :class:`_StoreReply`).
         """
         try:
             resp = self._client.head_object(Bucket=self._bucket, Key=key, ChecksumMode="ENABLED")
@@ -326,16 +425,20 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
-        metadata = resp.get("Metadata", {})
+        reply = _StoreReply("head_object", self._bucket, key, resp)
+        # An absent ``Metadata`` is normal, but a present non-mapping one would make the
+        # sensitivity read below a ``TypeError`` that neither this ``except`` nor any caller's
+        # catches — the same escape as a missing required field, by way of an optional one.
+        metadata: Mapping[str, Any] = reply.optional("Metadata", dict) or {}
         try:
             sensitivity = Sensitivity(metadata["sensitivity"])
         except (KeyError, ValueError) as _exc:
             sensitivity = None
         return artifact_types.HeadResult(
-            size_bytes=int(resp["ContentLength"]),
-            checksum_sha256=resp.get("ChecksumSHA256"),
-            etag=_normalize_etag(resp["ETag"]),
-            last_modified=resp["LastModified"],
+            size_bytes=reply.required("ContentLength", int),
+            checksum_sha256=reply.optional("ChecksumSHA256", str),
+            etag=_normalize_etag(reply.required("ETag", str)),
+            last_modified=reply.required("LastModified", datetime),
             sensitivity=sensitivity,
             content_encoding=metadata.get("content-encoding"),
         )
@@ -509,15 +612,16 @@ class ObjectStore:
         """Return every object key under ``prefix`` (paginated), or ``[]``.
 
         Raises:
-            CategorizedError: the listing fails
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+            CategorizedError: the listing fails, or an entry omits its ``Key``
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`; see :class:`_StoreReply`).
         """
         keys: list[str] = []
         try:
             paginator = self._client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
-                    keys.append(obj["Key"])
+                    reply = _StoreReply("list_objects_v2", self._bucket, prefix, obj)
+                    keys.append(reply.required("Key", str))
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("list_objects_v2", prefix, err) from err
         return keys
@@ -557,8 +661,9 @@ class ObjectStore:
         prefix that matches nothing; a caller counting pages must not read that as no request made.
 
         Raises:
-            CategorizedError: the listing fails, raised from the iterator at the page that failed
-                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+            CategorizedError: the listing fails, or an entry omits its ``Key`` or ``LastModified``,
+                raised from the iterator at the page that failed
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`; see :class:`_StoreReply`).
         """
         try:
             paginator = self._client.get_paginator("list_objects_v2")
@@ -568,12 +673,24 @@ class ObjectStore:
                 PaginationConfig={"PageSize": _LIST_PAGE_SIZE},
             )
             for page in pages:
-                yield [
-                    artifact_types.ObjectListing(key=obj["Key"], last_modified=obj["LastModified"])
-                    for obj in page.get("Contents", [])
-                ]
+                yield [self._listed_object(obj, prefix) for obj in page.get("Contents", [])]
         except (BotoCoreError, ClientError) as err:
             raise _infrastructure_error("list_objects_v2", prefix, err) from err
+
+    def _listed_object(self, obj: Mapping[str, Any], prefix: str) -> artifact_types.ObjectListing:
+        """Read one ``list_objects_v2`` entry, or raise if the store's entry is malformed.
+
+        The same boundary contract :meth:`head` applies to its reply, applied to the sweep's *other*
+        read: this iterator is the orphan sweep's per-root listing, and ``_next_page_or_fault``
+        catches ``CategorizedError`` alone. A bare ``KeyError`` out of an entry would escape it and
+        end the pass — worse than the ``head`` case, because it would also leave the sibling root
+        unswept (#1685).
+        """
+        reply = _StoreReply("list_objects_v2", self._bucket, prefix, obj)
+        return artifact_types.ObjectListing(
+            key=reply.required("Key", str),
+            last_modified=reply.required("LastModified", datetime),
+        )
 
     def list_prefix_with_mtime(self, prefix: str) -> list[artifact_types.ObjectListing]:
         """Return every object under ``prefix`` with its store mtime (paginated), or ``[]``.
