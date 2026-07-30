@@ -223,7 +223,7 @@ async def _restore_limbo_category(conn: AsyncConnection, system_id: UUID) -> Err
             (JobKind.RESTORE.value, str(system_id), list(_ACTIVE_JOB_STATE_VALUES)),
         )
         row = await cur.fetchone()
-    recorded = None if row is None or row["error_category"] is None else row["error_category"]
+    recorded = row["error_category"] if row is not None else None
     if recorded is not None and recorded != ErrorCategory.LEASE_EXPIRED.value:
         _log.info(
             "reconciler: stalled restoring system %s has a job category (%s); recording none",
