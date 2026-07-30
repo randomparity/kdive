@@ -331,6 +331,11 @@ async def fail(
     ``job.attempt`` has reached ``job.max_attempts``; otherwise requeues
     (``running → queued``, clearing the lease) for another attempt.
 
+    The worker calls this from inside a transaction that also carries the owning Run's terminal
+    transition (ADR-0500), so the ``conn.transaction()`` below nests as a SAVEPOINT there and the
+    two writes commit together. The fence is what keeps that safe: a reclaimed job's stale worker
+    gets no row back, so the caller sees the job still ``running`` and leaves the Run alone.
+
     Returns:
         The job's post-write state, or the unchanged ``job`` when the fence missed
         (another worker reclaimed it).

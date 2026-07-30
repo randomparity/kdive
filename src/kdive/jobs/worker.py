@@ -3,10 +3,15 @@
 A :class:`Worker` owns an ``AsyncConnectionPool`` and processes one job per
 :meth:`Worker.run_once`: ``dequeue`` claims and charges an attempt, a background
 heartbeat renews the lease on a second connection, the registered handler runs on a
-dispatch connection, and ``complete``/``fail`` finalize on fresh connections (so a
-handler that poisoned its connection cannot block finalization). The worker holds no
-transaction across the handler — a handler runs 30+ minutes and commits its own steps
-(ADR-0018 decision 7).
+dispatch connection, and ``complete``/:func:`_fail_job_and_run` finalize on fresh
+connections (so a handler that poisoned its connection cannot block finalization). The
+worker holds no transaction across the handler — a handler runs 30+ minutes and commits
+its own steps (ADR-0018 decision 7).
+
+The failure path finalizes both of its writes — the job's dead-letter/requeue and the
+owning Run's terminal transition — in **one** transaction on that fresh connection
+(ADR-0500). That is not a transaction across the handler: it opens after the handler has
+returned and its dispatch connection has been released.
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -154,10 +159,9 @@ class Worker:
         handler = self._registry.get(job.kind)
         if handler is None:
             async with self._pool.connection() as conn:
-                failed_job = await queue.fail(
+                failed_job = await _fail_job_and_run(
                     conn, job, ErrorCategory.NOT_IMPLEMENTED, terminal=True
                 )
-                await _compensate_run_failure(conn, failed_job, ErrorCategory.NOT_IMPLEMENTED)
             self._telemetry.record_job_failure(failed_job, ErrorCategory.NOT_IMPLEMENTED)
             _log.warning("no handler for job %s kind %s; dead-lettered", job.id, job.kind)
             return job
@@ -243,14 +247,13 @@ class Worker:
             category = _failure_category(exc)
             terminal = _is_terminal(exc, category)
             async with self._pool.connection() as conn:
-                failed_job = await queue.fail(
+                failed_job = await _fail_job_and_run(
                     conn,
                     job,
                     category,
                     terminal=terminal,
                     failure_context=_failure_context(exc, self._secret_registry),
                 )
-                await _compensate_run_failure(conn, failed_job, category)
             self._telemetry.record_job_failure(failed_job, category)
             if failed_job.state is JobState.QUEUED:
                 self._telemetry.record_job_retry(job.kind.value)
@@ -320,29 +323,89 @@ def _is_terminal(exc: Exception, category: ErrorCategory) -> bool:
     return not retryable_category(category)
 
 
-async def _compensate_run_failure(
+async def _fail_job_and_run(
     conn: AsyncConnection,
     job: Job,
     category: ErrorCategory,
-) -> None:
-    if job.state is not JobState.FAILED:
-        return
+    *,
+    terminal: bool,
+    failure_context: Mapping[str, str] | None = None,
+) -> Job:
+    """Finalize a failed ``job`` and its owning Run as one transaction (ADR-0500).
+
+    ``queue.fail`` dead-letters or requeues the job; :func:`_mark_run_failed` transitions the
+    Run the payload names. Splitting those across two transactions is the #1684 defect: a
+    dead-lettered job whose Run transition never landed leaves the Run in ``created``/
+    ``running`` **permanently**, because the worker is the only writer of ``RunState.FAILED``
+    besides ``repair_abandoned_jobs``, and that sweep selects on ``jobs.state = 'running'`` —
+    which an already-``failed`` job can never satisfy. Committing them together means a
+    torn-down worker or a faulting statement rolls **both** back, leaving the job ``running``
+    with its lease still set: the state ``dequeue`` reclaims and the reconciler sweeps.
+
+    The Run's advisory lock is taken **before** ``queue.fail``, not after it, because
+    ``runs.boot``/``runs.install`` hold ``LockScope.RUN`` and then row-lock this very job
+    (``queue.enqueue``'s ``recycle_terminal`` ``UPDATE`` on ``dedup_key = f"{run_id}:{step}"``).
+    Row-locking the job first and then waiting on that lock would be an ABBA deadlock; this
+    order matches every other RUN-scoped writer. Non-run-bearing kinds take no lock and open no
+    outer transaction — ``queue.fail`` self-commits as it does for every other caller.
+
+    Args:
+        conn: A fresh finalize connection, not the handler's (ADR-0018 decision 7).
+        job: The claimed job as this worker last saw it; its ``worker_id`` is the fence.
+        category: The failure's category, recorded on both rows.
+        terminal: Dead-letter now rather than requeue (see :func:`_is_terminal`).
+        failure_context: Redacted context for the job row; ignored on a requeue.
+
+    Returns:
+        The job's post-write state, or the unchanged ``job`` when ``queue.fail``'s
+        ``worker_id`` fence missed — in which case the Run is left alone, because a worker
+        that lost its lease must not fail the Run another worker now owns.
+    """
+    run_id = _compensation_run_id(job)
+    if run_id is None:
+        return await queue.fail(
+            conn, job, category, terminal=terminal, failure_context=failure_context
+        )
+    async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run_id):
+        failed_job = await queue.fail(
+            conn, job, category, terminal=terminal, failure_context=failure_context
+        )
+        await _mark_run_failed(conn, failed_job, category, run_id)
+        return failed_job
+
+
+def _compensation_run_id(job: Job) -> UUID | None:
+    """Return the Run this job's failure transitions, or ``None`` when there is none.
+
+    ``None`` covers both a kind that carries no ``run_id`` and a persisted payload that no
+    longer validates — the latter is logged rather than raised, so a malformed payload
+    degrades to "the job is finalized, the Run is not reached" instead of escaping the
+    ``except`` block and leaving the job unfinalized too.
+    """
     try:
-        run_id = run_id_from_payload(job.kind, job.payload)
+        return run_id_from_payload(job.kind, job.payload)
     except PayloadValidationError as exc:
         _log.warning(
             "job %s has invalid payload; skipping Run compensation: %s",
             job.id,
             exc,
         )
+        return None
+
+
+async def _mark_run_failed(
+    conn: AsyncConnection, job: Job, category: ErrorCategory, run_id: UUID
+) -> None:
+    """Transition ``run_id`` to ``failed`` with ``category``, if ``job`` dead-lettered.
+
+    Assumes the caller holds the transaction and the Run's advisory lock
+    (:func:`_fail_job_and_run`). A requeued job — or one whose ``worker_id`` fence missed, which
+    ``queue.fail`` reports by returning it still ``running`` — leaves the Run untouched. The
+    ``state = ANY(...)`` guard keeps an already-terminal Run terminal.
+    """
+    if job.state is not JobState.FAILED:
         return
-    if run_id is None:
-        return
-    async with (
-        conn.transaction(),
-        advisory_xact_lock(conn, LockScope.RUN, run_id),
-        conn.cursor(row_factory=dict_row) as cur,
-    ):
+    async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "UPDATE runs SET state = %s, failure_category = %s, failing_job_id = %s "
             "WHERE id = %s AND state = ANY(%s) "
