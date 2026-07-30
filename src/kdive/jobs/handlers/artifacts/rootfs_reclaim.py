@@ -586,6 +586,17 @@ def _live_writer_holds_a_partial(uploads_dir: str, investigation_id: UUID, token
     same question ADR-0446 and ADR-0452 both ended up asking the *kernel* is asked here too, one
     step ahead of the first unlink, rather than re-derived from a state column a third time.
 
+    **Kept alongside ADR-0515's lease, and neither sufficient nor redundant.** This probe **fails
+    open**: a held ``flock`` can only ever *withhold* a reclaim, never license one, so it can only
+    add pins on top of the ``rootfs_fetch_leases`` gate's and never remove one. That is what makes
+    it safe to keep on any topology — where the fetcher and this reclaim do not share a filesystem
+    it simply finds nothing and contributes nothing, and where they are co-located it is a same-node
+    fast path more precise than any deadline, because the kernel releases an ``flock`` at process
+    exit while a lease row waits out its TTL. Do not retire it as redundant: it costs one
+    ``scandir`` and can only make the gate more conservative. Do not treat it as sufficient either
+    — a question answered on one node cannot be the only thing between a reclaim and a live
+    download, which is precisely why ADR-0515 put the durable evidence in the database.
+
     **Only a proven hold defers**, per
     :func:`~kdive.providers.shared.staging_partials.live_writer_holds_partial`. A held ``flock`` is
     the one answer that is provably transient; an unopenable partial or a filesystem that cannot
