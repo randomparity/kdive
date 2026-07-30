@@ -257,6 +257,14 @@ async def refresh_deadline(
         it as the identity of the window it is committing against (ADR-0448 §2): a later re-read
         finding a different value is a manifest some other call replaced.
     """
+    # The `RETURNING` equality is exact, not a comparison hoping two clocks agree: `now()` is
+    # `transaction_timestamp()`, so every occurrence below — the one `LEAST` clamps against and the
+    # one the predicate re-reads — is the same timestamp, and `timestamptz` arithmetic on it is
+    # exact. `deadline = now() + ttl` therefore holds precisely when `GREATEST`/`LEAST` selected
+    # that term, which is the definition of a full grant; anything else is a capped one. Testing
+    # `<>` rather than `<` is what makes `GREATEST` report: it holds a standing deadline stamped
+    # under a larger historical `ttl` *above* `now() + ttl`, granting nothing, and `<` read that as
+    # uncapped (#1724).
     async with conn.cursor() as cur:
         await cur.execute(
             "UPDATE upload_manifests SET deadline = "
