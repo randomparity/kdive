@@ -109,6 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Give systems.failure_category a single writer
 - Flatten the job-category null check
 - Share the upload delete fences between both sweeps
+- Share one expiry predicate across both finalize lanes
 
 ### Documentation
 
@@ -237,6 +238,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0509 and the #1557 design spec
 - Name the two phases' deliberate contention asymmetry
 - Put 0509 in the canonical record shape
+- State the expiry guard's limits rather than overclaiming
 
 ### Fixed
 
