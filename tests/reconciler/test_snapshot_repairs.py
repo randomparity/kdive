@@ -18,6 +18,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from kdive.db.repositories import SNAPSHOTS
 from kdive.domain.capacity.state import JobState, SnapshotState, SystemState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import Snapshot
 from kdive.reconciler.repairs.systems import (
     repair_stalled_creating_snapshots,
@@ -73,6 +74,14 @@ async def _system_state(conn: psycopg.AsyncConnection, system_id: UUID) -> str:
     return str(row[0])
 
 
+async def _system_failure_category(conn: psycopg.AsyncConnection, system_id: UUID) -> str | None:
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT failure_category FROM systems WHERE id = %s", (system_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
+
+
 async def _snapshot_state(conn: psycopg.AsyncConnection, snapshot_id: UUID) -> str:
     async with conn.cursor() as cur:
         await cur.execute("SELECT state FROM snapshots WHERE id = %s", (snapshot_id,))
@@ -91,6 +100,9 @@ def test_recovers_restoring_with_no_active_restore_job(migrated_url: str) -> Non
             recovered = await run_repair(pool, repair_stalled_restoring_systems)
         assert recovered == 1
         assert await _system_state(conn, sid) == SystemState.FAILED.value
+        # ADR-0513: the repair records *why*, so the System does not fall back to the
+        # `infrastructure_failure` default the envelope uses for a category-less failed row.
+        assert await _system_failure_category(conn, sid) == ErrorCategory.RESTORE_INCOMPLETE.value
         await conn.close()
 
     asyncio.run(_run())
@@ -106,6 +118,9 @@ def test_leaves_restoring_with_active_restore_job(migrated_url: str) -> None:
             recovered = await run_repair(pool, repair_stalled_restoring_systems)
         assert recovered == 0
         assert await _system_state(conn, sid) == SystemState.RESTORING.value
+        # The category is written only by the transition that earns it: a System left for the
+        # retry path must not be labelled as though its restore had already been abandoned.
+        assert await _system_failure_category(conn, sid) is None
         await conn.close()
 
     asyncio.run(_run())
@@ -142,6 +157,9 @@ def test_recovers_multiple_restoring_systems_all_counted(migrated_url: str) -> N
         assert recovered == 3  # every recovered System counted, not a fixed 1
         for sid in ids:
             assert await _system_state(conn, sid) == SystemState.FAILED.value
+            assert (
+                await _system_failure_category(conn, sid) == ErrorCategory.RESTORE_INCOMPLETE.value
+            )
         await conn.close()
 
     asyncio.run(_run())

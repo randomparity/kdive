@@ -9,8 +9,9 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.db.locks import LockScope, advisory_xact_lock
-from kdive.db.repositories import SNAPSHOTS, SYSTEMS
+from kdive.db.repositories import SNAPSHOTS, SYSTEMS, record_system_failure_category
 from kdive.domain.capacity.state import AllocationState, JobState, SnapshotState, SystemState
+from kdive.domain.errors import ErrorCategory
 from kdive.domain.lifecycle.records import System
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
@@ -142,6 +143,12 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
     (`queued`/`running`), the handler stopped before committing, and a half-reverted guest is
     indeterminate, so resolve to `failed` (never back to `ready`). A still-active job is left to the
     normal retry path. Runs after `repair_abandoned_jobs`, which dead-letters an exhausted job.
+
+    The `failed` transition carries `restore_incomplete` on `systems.failure_category`, written in
+    this transaction (ADR-0513). This repair has no exception to classify and leaves no failed job
+    to attribute, so without the stamp the System reported the flattened `infrastructure_failure`
+    default — and its `retryable: true`, which invites an agent to re-drive a System whose disk is
+    indeterminate and which is fenced from every lifecycle op anyway.
     """
     async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
@@ -163,6 +170,7 @@ async def repair_stalled_restoring_systems(conn: AsyncConnection) -> int:
             if system is None or system.state is not SystemState.RESTORING:
                 continue
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
+            await record_system_failure_category(conn, system_id, ErrorCategory.RESTORE_INCOMPLETE)
             await audit.record_system(
                 conn,
                 principal=SYSTEM_RECONCILER_PRINCIPAL,
