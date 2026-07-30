@@ -186,13 +186,9 @@ def _name_status(root: Path, base_ref: str) -> list[str]:
     wrapping a non-ASCII path in quotes and octal escapes, which would no longer match the
     schema prefix and would drop the file from the comparison silently.
     """
+    argv = ["git", "-c", "core.quotePath=false", "diff", "--name-status", "-M"]
     result = subprocess.run(
-        # fmt: off
-        [
-            "git", "-c", "core.quotePath=false",
-            "diff", "--name-status", "-M", base_ref, "--", _SCHEMA_PREFIX,
-        ],
-        # fmt: on
+        [*argv, base_ref, "--", _SCHEMA_PREFIX],
         cwd=root,
         capture_output=True,
         text=True,
