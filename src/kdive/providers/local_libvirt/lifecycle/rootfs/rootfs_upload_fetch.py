@@ -90,6 +90,7 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     UploadFetch,
     staged_rootfs_path,
 )
+from kdive.providers.shared.rootfs_fetch_leases import acquire_fetch_lease, release_fetch_lease
 from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
 from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
 from kdive.store.objectstore import artifact_key, object_store_from_env
@@ -198,6 +199,35 @@ def fetch_uploaded_rootfs(
     """
     token = rootfs_object_token(upload.checksum_sha256)
     investigation_id = _resolve_investigation(conn, upload.system_id)
+    # Before _resolve_object, not after, and that ordering is the whole point (ADR-0515, #1702).
+    # The instant this fetch resolves its artifacts row it is a download a reclaim must not delete
+    # under, and it then waits on the session advisory lock below — behind a sibling's entire
+    # multi-GiB transfer — before it creates the partial ADR-0495's probe looks for. Taking the
+    # lease one line later would leave exactly that window open while looking correct.
+    lease_id = acquire_fetch_lease(conn, investigation_id, token, system_id=upload.system_id)
+    try:
+        return _fetch_under_lease(
+            conn, store, upload, investigation_id=investigation_id, token=token
+        )
+    finally:
+        if lease_id is not None:
+            release_fetch_lease(conn, lease_id)
+
+
+def _fetch_under_lease(
+    conn: psycopg.Connection,
+    store: UploadObjectStore,
+    upload: RootfsUploadContext,
+    *,
+    investigation_id: UUID,
+    token: str,
+) -> Path:
+    """Resolve the object and stage it, with this fetch's lease already recorded.
+
+    Split from :func:`fetch_uploaded_rootfs` so the lease brackets **every** exit of this body —
+    including the reuse fast path, whose early ``return`` would otherwise need its own release —
+    without nesting the whole function in a ``try``.
+    """
     resolved = _resolve_object(conn, investigation_id, token, upload)
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
     rejection = _staged_base_rejection(dest, system_id=upload.system_id)

@@ -13,8 +13,12 @@ to answer.
 Each checksum's gate-and-reclaim runs in one transaction under the ``INVESTIGATION`` advisory lock
 that System bind holds transaction-scoped until its row commits, so a bind either is seen as a
 pre-overlay referencer (pinning the base) or waits behind the reclaim. The *fetch* is not serialized
-by that lock at all, which is why the second gate exists: it asks the kernel whether a download of
-this base is in flight instead of inferring it from a System state column (ADR-0495).
+by that lock at all, which is why the later gates exist: they ask whether a download of this base is
+in flight instead of inferring it from a System state column. ADR-0515 (#1702) asks it of the
+``rootfs_fetch_leases`` row a fetcher holds from before it resolves its ``artifacts`` row until it
+returns; ADR-0495 asks the kernel about an ``flock`` on the fetcher's partial. The first brackets
+the second, and together they are #1558's option 2 — satisfied by durable state rather than by
+widening the state classifier, which could not be bounded.
 """
 
 from __future__ import annotations
@@ -37,6 +41,10 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.models import HandlerRegistry
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload, load_payload
+from kdive.providers.shared.rootfs_fetch_leases import (
+    fetch_lease_pins_base,
+    reap_expired_fetch_leases,
+)
 from kdive.providers.shared.runtime_paths import (
     ROOTFS_DIR,
     STAGED_ROOTFS_MARKER_SUFFIX,
@@ -667,12 +675,20 @@ async def _reclaim_one_checksum(
     also what stops the object delete from turning a live ranged-GET download into 404s that surface
     as an ``INFRASTRUCTURE_FAILURE`` "failed to stage" pointing an operator at the object store.
 
-    The residuals are stated in ADR-0495 rather than claimed closed, and there are three. The
-    instant between the probe and the base unlink. A fetch that has resolved its ``artifacts`` row
-    but not yet created its partial — it waits on the fetch session lock in between, so that window
-    is not short. And a partial the probe cannot evaluate at all, where the reclaim proceeds as it
-    did before ADR-0495: deferring there would strand the checksum permanently and silently, per
-    :func:`_live_writer_holds_a_partial`. All three need #1558's option 2, not a longer wait.
+    ADR-0495 stated three residuals rather than claiming them closed, and ADR-0515 (#1702) closes
+    the substantive one: a fetch that had resolved its ``artifacts`` row but not yet created its
+    partial now holds a ``rootfs_fetch_leases`` row throughout — including while it waits on the
+    fetch session lock, which is why that window was not short — so
+    :func:`~kdive.providers.shared.rootfs_fetch_leases.fetch_lease_pins_base` sees it.
+
+    Two remain, both unchanged. The instant between the last probe and the base unlink, which is
+    sub-syscall. And a partial the ``flock`` probe cannot evaluate at all, where the reclaim
+    proceeds as it did before ADR-0495: deferring there would strand the checksum permanently and
+    silently, per :func:`_live_writer_holds_a_partial`.
+
+    ADR-0515 adds one of its own, and it is the price of keeping the evidence in the database: a
+    fetcher killed by ``SIGKILL`` releases nothing, so its lease pins this base until the row
+    expires (``ROOTFS_FETCH_LEASE_TTL``). Bounded and visible, not silent.
     """
     async with (
         conn.transaction(),
@@ -686,6 +702,21 @@ async def _reclaim_one_checksum(
         object_key = str(row[0])
         token = _rootfs_token_from_key(object_key)
         if not await rootfs_base_reclaimable(conn, investigation_id, token, rootfs_dir=rootfs_dir):
+            return None
+        if await fetch_lease_pins_base(conn, investigation_id, token):
+            # ADR-0515's gate, ahead of ADR-0495's because it is the cheaper question — one indexed
+            # EXISTS on a connection already open, against a `scandir` of the staging tree — and
+            # because it is the wider one: the lease is held from before the artifacts row is
+            # resolved until the fetch returns, so it brackets the partial's window rather than
+            # overlapping it. Logged as its own line because it retains a base, an object and a row,
+            # and the job still succeeds, so nothing else records that the reclaim fired at all.
+            _log.warning(
+                "deferring the reclaim of %s: an unexpired rootfs fetch lease says a download of "
+                "its checksum is in flight, so its staged base, its object and its artifacts row "
+                "are all retained; the next sweep retries it once that fetch releases the lease or "
+                "the lease expires",
+                object_key,
+            )
             return None
         if await asyncio.to_thread(
             _live_writer_holds_a_partial, uploads_dir, investigation_id, token
@@ -794,6 +825,11 @@ async def _finish_drained_investigation(
         conn.transaction(),
         advisory_xact_lock(conn, LockScope.INVESTIGATION, investigation_id),
     ):
+        # Hygiene, not correctness: an expired lease is already inert to the gate above. Done here
+        # because this frame already holds the INVESTIGATION lock, so a host that repeatedly kills
+        # fetchers does not accumulate dead rows for the life of the investigation, and no
+        # reconciler lane has to exist for it.
+        await reap_expired_fetch_leases(conn, investigation_id)
         owned = await _owned_rootfs_tokens(conn, investigation_id)
         pinned = await pinned_rootfs_tokens(conn, investigation_id, rootfs_dir=rootfs_dir)
         deferred = await asyncio.to_thread(

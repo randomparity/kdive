@@ -224,3 +224,47 @@ def test_torn_down_referencer_is_excluded(migrated_url: str, tmp_path: Path) -> 
     inv, sys_id = asyncio.run(_seed())
     _write_overlay(tmp_path, sys_id)  # even with an overlay, torn_down is not enumerated
     assert _reclaimable(migrated_url, inv, tmp_path)
+
+
+def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The AC-8 reconciliation for #1702/ADR-0515, asserted rather than left implicit.
+    #
+    # The issue's title proposes widening *this* classifier so a torn_down/failed System keeps
+    # pinning. That is the one shape AC-8 forbids: `failed` is terminal with no transition out of
+    # it, nothing removes a failed System's overlay, and `torn_down` is the achieved post-state — so
+    # a state-keyed pin on either has nothing that can ever release it, and the base leaks until an
+    # operator intervenes. ADR-0515 therefore puts the new evidence in a deadline-bounded
+    # rootfs_fetch_leases row read by the per-checksum gate, and leaves this classifier alone.
+    #
+    # This pins that separation of duties. A live fetch lease exists for the very token this failed
+    # System references, and `rootfs_base_reclaimable` still says "reclaimable" — because answering
+    # the liveness question is not its job. Were someone to "simplify" ADR-0515 by adding FAILED to
+    # ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, this reddens alongside
+    # test_failed_referencer_with_overlay_gone_drains above.
+    async def _seed() -> UUID:
+        conn = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(conn)
+            alloc = await _seed_allocation(conn)
+            system_id = await _seed_system(
+                conn,
+                allocation_id=alloc,
+                investigation_id=inv,
+                state="failed",
+                profile=_upload_profile(_CHECKSUM_X),
+            )
+            await conn.execute(
+                "INSERT INTO rootfs_fetch_leases "
+                "(id, investigation_id, token, system_id, expires_at) "
+                "VALUES (%s, %s, %s, %s, now() + interval '6 hours')",
+                (uuid4(), inv, _TOKEN_X, system_id),
+            )
+            return inv
+        finally:
+            await conn.close()
+
+    inv = asyncio.run(_seed())
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    assert _reclaimable(migrated_url, inv, tmp_path)
