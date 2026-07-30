@@ -78,8 +78,10 @@ re-mint reset, and a row inserted without the column.
 
 Service-level, through `CompleteBuildFinalizer` with the MCP handler's swallow-inside-the-connection
 shape: a first failing chunked finalize still commits its extension; after the budget is spent a
-second failing finalize commits nothing, and the capped warning is logged.
+second failing finalize commits nothing, and the capped warning is logged. A multiple of 1 pins the
+knob to the behavior — a cap test run at the built-in default cannot distinguish a wired setting
+from an ignored one — and the parser rejects 0 and negatives.
 
 Mutation-verified on the real tree: removing `LEAST` reddens four tests, removing `GREATEST`
-reddens two, dropping the `window_started_at` restamp from the upsert reddens the re-mint test. The
-restored tree is green.
+reddens two, dropping the `window_started_at` restamp from the upsert reddens the re-mint test, and
+hard-coding the multiple reddens the configuration test. The restored tree is green.

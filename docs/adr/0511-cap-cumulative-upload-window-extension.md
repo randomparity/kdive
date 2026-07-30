@@ -81,6 +81,12 @@ That converts a retention bound into data loss, which is the worst failure a bou
 it, a spent budget is a no-op: the deadline stands, the reassembly proceeds under the `RUN` lock it
 already holds, and the window simply does not outlive its deadline a second time.
 
+`GREATEST` does not weaken the bound. Its other argument is the clamped grant, which is
+`≤ window_started_at + max_window` by construction, and the only other value it can select is the
+standing deadline — which the mint stamped at `window_started_at + ttl`, and `ttl ≤ max_window`
+because the multiple is at least 1. So `deadline ≤ window_started_at + max_window` holds after
+every refresh, not merely on average.
+
 Every comparison is Postgres's `now()`. The reaper measures `deadline` against the same clock, and
 DB `now()` is session-TZ dependent, so a Python-side comparison here would be subtly wrong for the
 reason ADR-0444 and ADR-0448 both already rejected it.
@@ -141,7 +147,9 @@ second vocabulary for it would give agents two strings to match for one conditio
 - **`refresh_deadline` gains test coverage, from none.** Extension, decline on an absent row,
   decline on a lapsed window, the cap binding partially, the cap spent, monotonicity, the re-mint
   reset, and a row that predates the column. Each was mutation-verified: removing `LEAST` reddens
-  four tests, removing `GREATEST` reddens two, dropping the re-mint restamp reddens one.
+  four tests, removing `GREATEST` reddens two, dropping the re-mint restamp reddens one, and
+  hard-coding the multiple instead of reading it reddens one — the last because a cap test run at
+  the built-in default cannot tell a wired knob from an ignored one.
 - **The return type changed** from `datetime | None` to `WindowRefresh | None`. One caller.
 - **A table rewrite on upgrade.** `ADD COLUMN ... NOT NULL DEFAULT now()` is a volatile default, so
   Postgres rewrites `upload_manifests`. The table holds one row per *in-flight* upload window and is
