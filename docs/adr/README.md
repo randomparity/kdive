@@ -64,7 +64,15 @@ supersedes an earlier decision, the one-line banner in that record's status (bel
 Browse `docs/adr/` directly, or:
 
 ```sh
-ls docs/adr/                                   # every ADR, numbered and titled
-grep -l 'Status:\*\* Accepted' docs/adr/*.md   # by status
-grep -rl 'some-topic' docs/adr/                # by topic
+ls docs/adr/                                          # every ADR, numbered and titled
+rg -Ul -e '^-?\s*\*{0,2}Status:?\*{0,2}\s*Accepted' \
+      -e '## Status\n\nAccepted' docs/adr/*.md        # by status
+grep -rl 'some-topic' docs/adr/                       # by topic
 ```
+
+The status search matches both shapes the corpus carries: the pre-0504 inline
+`- **Status:** Accepted` bullet (grandfathered, see
+[docs/debt/0001-legacy-adr-shape-is-grandfathered.md](../debt/0001-legacy-adr-shape-is-grandfathered.md))
+and the `## Status` section the records gate requires from 0504 on. A plain `grep -l` on the
+bullet form alone misses every record in the newer shape without any signal that the result
+is incomplete.
