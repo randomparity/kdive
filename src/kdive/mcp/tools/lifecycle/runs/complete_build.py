@@ -8,6 +8,7 @@ from uuid import UUID
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from kdive.artifacts.upload_manifest import UPLOAD_WINDOW_EXPIRED
 from kdive.db.repositories import RUNS
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.external_provenance import external_source_provenance
@@ -26,7 +27,6 @@ from kdive.security.authz.rbac import Role, require_role
 from kdive.serialization import JsonValue
 from kdive.services.runs.complete_build import (
     NO_UPLOAD_MANIFEST,
-    UPLOAD_WINDOW_EXPIRED,
     UPLOAD_WINDOW_REPLACED,
     CompleteBuildConfigurationError,
     CompleteBuildExpiredWindowError,

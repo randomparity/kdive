@@ -78,13 +78,11 @@ NO_UPLOAD_MANIFEST = "no_upload_manifest"
 UPLOAD_WINDOW_REPLACED = "upload_window_replaced"
 """A re-mint replaced the window this finalize validated (ADR-0448 §2)."""
 
-UPLOAD_WINDOW_EXPIRED = "upload_window_expired"
-"""The window's deadline had passed when this finalize arrived (ADR-0448 §1).
-
-Raised as :class:`CompleteBuildExpiredWindowError` rather than through
-:class:`CompleteBuildConfigurationError`, because the response layer needs the clock pair to
-render the self-correcting payload; the reason string is shared from here all the same.
-"""
+# The expired-window rejection is raised as `CompleteBuildExpiredWindowError` rather than through
+# `CompleteBuildConfigurationError`, because the response layer needs the clock pair to render the
+# self-correcting payload. Its reason string is `upload_manifest.UPLOAD_WINDOW_EXPIRED`, which
+# lives beside the predicate that decides it so the investigations lane can name the same constant
+# without importing a runs service module (ADR-0512).
 
 # Every exception below is `eq=False` and unfrozen, deliberately. `contextlib` assigns
 # `__traceback__` to an exception it re-raises out of an async context manager, so a *frozen*
@@ -283,7 +281,7 @@ async def _require_open_window(
         CompleteBuildExpiredWindowError: The window closed before this finalize arrived.
     """
     stamp = await upload_manifest.deadline_stamp(conn, manifest_row)
-    if stamp.deadline < stamp.server_time:
+    if stamp.expired:
         _log.info(
             "runs.complete_build rejected: upload window expired (run %s, deadline %s, "
             "server_time %s)",
@@ -531,7 +529,6 @@ async def _cleanup_chunks_and_manifest(
 
 __all__ = [
     "NO_UPLOAD_MANIFEST",
-    "UPLOAD_WINDOW_EXPIRED",
     "UPLOAD_WINDOW_REPLACED",
     "CompleteBuildConfigurationError",
     "CompleteBuildExpiredWindowError",

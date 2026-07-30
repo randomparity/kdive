@@ -46,6 +46,16 @@ _LOCK_SCOPES: dict[UploadOwnerKind, LockScope] = {
 #: derives the object-store roots it walks from this, so its scope cannot drift from the reaper's.
 UPLOAD_OWNER_KINDS: tuple[UploadOwnerKind, ...] = tuple(_LOCK_SCOPES)
 
+UPLOAD_WINDOW_EXPIRED = "upload_window_expired"
+"""The window's deadline had passed when a finalize arrived (ADR-0444, ADR-0448 §1).
+
+The agent-facing reason string both finalize lanes emit. It lives beside :attr:`ManifestStamp
+.expired` — the predicate that decides it — rather than in either lane, because the lanes sit at
+different layers: the runs finalize enforces in the service layer, the investigations finalize in
+the MCP tool layer, and this is the only module both can import without one reaching into the
+other's stack (ADR-0512).
+"""
+
 
 class UploadManifest(NamedTuple):
     """A persisted manifest: the declared entries, the key prefix, and the deadline."""
@@ -65,6 +75,25 @@ class ManifestStamp(NamedTuple):
 
     server_time: datetime
     deadline: datetime
+
+    @property
+    def expired(self) -> bool:
+        """Whether the upload window had already closed at ``server_time`` (ADR-0512).
+
+        The single expiry rule both finalize lanes ask. Each used to write its own comparison,
+        and they were spelled as exact logical negations — ``deadline < server_time`` in the runs
+        service, ``deadline >= server_time`` in the investigations tool — so a later change to the
+        rule would have landed on one lane only (#1555).
+
+        A bare ``bool``, deliberately: the runs lane raises on it from the service layer and the
+        investigations lane returns a ``ToolResponse`` from the MCP tool layer, so the shared
+        verdict can carry neither lane's signalling type.
+
+        A deadline **equal** to the reference clock is open, not expired. That matches
+        :func:`refresh_deadline`'s and the reaper's ``deadline >= now()`` arm, so a finalize and
+        the reaper cannot reach opposite verdicts on one manifest at that instant.
+        """
+        return self.deadline < self.server_time
 
 
 @dataclass(frozen=True)
