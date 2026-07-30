@@ -258,6 +258,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Note that a re-run can hit the same surplus
 - State precisely why the flock lease was not taken
 - Record the base-branch comparison as ADR-0518
+- Be fair to the rejection this record overturns
 
 ### Fixed
 
