@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 
+from kdive.db.locks import LockScope, _advisory_lock_oids, _lock_key
 from kdive.db.repositories import ALLOCATIONS, BUDGETS, QUOTAS, RESOURCES
 from kdive.domain.accounting.cost import Selector
 from kdive.domain.accounting.records import Budget, Quota
@@ -25,6 +26,7 @@ from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.domain.lifecycle.records import Allocation
 from kdive.mcp.auth import RequestContext
 from kdive.security.audit import args_digest
+from kdive.services.allocation import promotion
 from kdive.services.allocation.admission.core import (
     AFFINITY_DENIAL_REASON,
     BUDGET_DENIAL_REASON,
@@ -576,3 +578,258 @@ def test_reap_queue_timeouts_writes_queue_timeout_failure_category(
         args_digest({"reason": "queue_timeout", "project": "proj"}),
     )
     assert f"reconciler: queued allocation {aged} -> failed (queue_timeout)" in infos
+
+
+# --- The savepoint trap (ADR-0506) ---------------------------------------------------------
+#
+# Every test above runs the sweeps on an autocommit connection, where the trap cannot appear:
+# there `conn.transaction()` is a real transaction no matter what ran before it. The
+# reconciler's `create_pool` sets no `autocommit`, so `_run_repair_plan` hands each pass a
+# **non-autocommit** connection — the one shape on which a statement issued before a
+# `conn.transaction()` silently demotes it to a savepoint that commits nothing and releases no
+# `pg_advisory_xact_lock`. These tests use that connection.
+
+
+@asynccontextmanager
+async def _pooled_conn(url: str) -> AsyncIterator[psycopg.AsyncConnection]:
+    """A non-autocommit connection, as ``create_pool`` hands each reconciler repair."""
+    conn = await psycopg.AsyncConnection.connect(url, autocommit=False)
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+async def _backend_pid(conn: psycopg.AsyncConnection) -> int:
+    cur = await conn.execute("SELECT pg_backend_pid()")
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _advisory_locks_held(observer: psycopg.AsyncConnection, pid: int) -> set[tuple[int, int]]:
+    """Granted advisory locks held by backend ``pid``, as the ``(classid, objid)`` pairs.
+
+    Read from *another* connection: probing from the sweep's own would issue the statement
+    that opens the transaction under test. Postgres splits a single-bigint advisory key into
+    those two oid columns, so ``_advisory_lock_oids(_lock_key(scope, key))`` names which lock
+    a row is — the identity is what pins an out-of-order acquisition, not the count.
+    """
+    cur = await observer.execute(
+        "SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory' AND pid = %s AND granted",
+        (pid,),
+    )
+    return {(int(row[0]), int(row[1])) for row in await cur.fetchall()}
+
+
+def _scope_lock(scope: LockScope, key: UUID | str) -> tuple[int, int]:
+    """The ``(classid, objid)`` pair ``pg_locks`` shows for ``advisory_xact_lock(scope, key)``."""
+    return _advisory_lock_oids(_lock_key(scope, key))
+
+
+async def _two_queued_on_freed_hosts(
+    conn: psycopg.AsyncConnection,
+) -> tuple[tuple[UUID, UUID], tuple[Resource, Resource]]:
+    """Two queued requests, one per single-slot host, with both slots freed again.
+
+    The sweep orders candidates by ``created_at``, so the returned pairs are in the order it
+    will attempt them — which is what lets a test name the locks the first candidate took.
+    """
+    first = await _resource(conn)
+    second = await _resource(conn)
+    await _quota(conn)
+    holders = [await _granted(conn, first.id), await _granted(conn, second.id)]
+    queued = (
+        await _queued(conn, first, created_offset=timedelta(minutes=-10)),
+        await _queued(conn, second, created_offset=timedelta(minutes=-5)),
+    )
+    for holder in holders:
+        await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASING)
+        await ALLOCATIONS.update_state(conn, holder.id, AllocationState.RELEASED)
+    return queued, (first, second)
+
+
+def test_promote_pending_enters_each_candidate_holding_no_advisory_lock(migrated_url: str) -> None:
+    # The out-of-order acquisition this pins: under the savepoint trap a candidate's
+    # PROJECT/RESOURCE/ALLOCATION locks are never released, so candidate 2 takes PROJECT while
+    # still holding candidate 1's RESOURCE and ALLOCATION — the reverse of the order a
+    # concurrent `admit` takes them in (PROJECT then RESOURCE), which is an ABBA deadlock.
+    async def _run() -> tuple[int, list[int]]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            await _two_queued_on_freed_hosts(conn)
+            pid = await _backend_pid(conn)
+            await conn.commit()  # the setup is the caller's transaction, not the sweep's
+
+            held_on_entry: list[int] = []
+            real_promote_one = promotion._promote_one
+
+            async def _recording(c: psycopg.AsyncConnection, alloc_id: UUID) -> Allocation | None:
+                held_on_entry.append(len(await _advisory_locks_held(observer, pid)))
+                return await real_promote_one(c, alloc_id)
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(promotion, "_promote_one", _recording)
+                promoted = await promote_pending(conn)
+            return promoted, held_on_entry
+
+    promoted, held_on_entry = asyncio.run(_run())
+    # Both candidates must actually have run, or the per-entry list would be vacuously clean.
+    assert promoted == 2
+    assert held_on_entry == [0, 0]
+
+
+def test_promote_pending_commits_each_grant_before_the_pass_returns(migrated_url: str) -> None:
+    # Read from a second connection while the sweep's is still open: under the trap every
+    # grant sits in one transaction the sweep never commits, so an observer sees `requested`
+    # — falsifying the module docstring's "each in its own committed transaction".
+    async def _run() -> tuple[int, list[str]]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            queued, _ = await _two_queued_on_freed_hosts(conn)
+            await conn.commit()
+            promoted = await promote_pending(conn)
+            states = [await _state(observer, alloc_id) for alloc_id in queued]
+        return promoted, states
+
+    assert asyncio.run(_run()) == (2, ["granted", "granted"])
+
+
+def test_promote_pending_rejects_a_connection_already_in_a_transaction(migrated_url: str) -> None:
+    # The mutation that proves the entry guard fires: one bare `execute` ahead of the sweep,
+    # which is exactly how a caller dirties a pooled connection.
+    async def _run() -> tuple[str, list[str]]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            queued, _ = await _two_queued_on_freed_hosts(conn)
+            await conn.commit()
+            await conn.execute("SELECT 1")
+            with pytest.raises(RuntimeError) as excinfo:
+                await promote_pending(conn)
+            states = [await _state(observer, alloc_id) for alloc_id in queued]
+        return str(excinfo.value), states
+
+    message, states = asyncio.run(_run())
+    assert "would open a savepoint" in message
+    assert states == ["requested", "requested"]  # refused, not run under the trap
+
+
+def test_promote_pending_stops_when_a_candidate_leaves_its_transaction_open(
+    migrated_url: str,
+) -> None:
+    # The per-candidate guard, distinct from the entry guard. `_promote_one` is wrapped to
+    # reproduce the pre-fix shape exactly — its `SELECT project` ran before the
+    # `conn.transaction()` — so candidate 1's locks are still held when candidate 2 starts.
+    # The pass must abort rather than take PROJECT on top of them.
+    async def _run() -> tuple[str, set[tuple[int, int]], set[tuple[int, int]], str]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            queued, resources = await _two_queued_on_freed_hosts(conn)
+            pid = await _backend_pid(conn)
+            await conn.commit()
+            real_promote_one = promotion._promote_one
+
+            async def _dirtying(c: psycopg.AsyncConnection, alloc_id: UUID) -> Allocation | None:
+                await c.execute("SELECT 1")  # where the pre-fix project read ran
+                return await real_promote_one(c, alloc_id)
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(promotion, "_promote_one", _dirtying)
+                with pytest.raises(RuntimeError) as excinfo:
+                    await promote_pending(conn)
+            leaked = await _advisory_locks_held(observer, pid)
+            first_state = await _state(observer, queued[0])
+        expected = {
+            _scope_lock(LockScope.PROJECT, "proj"),
+            _scope_lock(LockScope.RESOURCE, resources[0].id),
+            _scope_lock(LockScope.ALLOCATION, queued[0]),
+        }
+        return str(excinfo.value), leaked, expected, first_state
+
+    message, leaked, expected, first_state = asyncio.run(_run())
+    assert "would open a savepoint" in message
+    # Named, not counted: these are candidate 1's three locks, still held at the moment
+    # candidate 2 was refused. An empty set here would mean the guard fired on a harmless
+    # state; a count alone would not show that PROJECT is co-held with RESOURCE/ALLOCATION,
+    # which is the inversion itself.
+    assert leaked == expected
+    assert first_state == "requested"  # its grant is uncommitted, as the trap implies
+
+
+def test_reap_queue_timeouts_commits_each_row_before_the_pass_returns(migrated_url: str) -> None:
+    async def _run() -> tuple[int, list[str]]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            resource = await _resource(conn)
+            await _quota(conn)
+            await _granted(conn, resource.id)  # fill the slot so both rows enqueue
+            aged = (
+                await _queued(conn, resource, created_offset=timedelta(hours=-48)),
+                await _queued(conn, resource, created_offset=timedelta(hours=-49)),
+            )
+            await conn.commit()
+            reaped = await reap_queue_timeouts(conn, timedelta(hours=24))
+            states = [await _state(observer, alloc_id) for alloc_id in aged]
+        return reaped, states
+
+    assert asyncio.run(_run()) == (2, ["failed", "failed"])
+
+
+def test_reap_queue_timeouts_rejects_a_connection_already_in_a_transaction(
+    migrated_url: str,
+) -> None:
+    async def _run() -> tuple[str, str]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            resource = await _resource(conn)
+            await _quota(conn)
+            await _granted(conn, resource.id)
+            aged = await _queued(conn, resource, created_offset=timedelta(hours=-48))
+            await conn.commit()
+            await conn.execute("SELECT 1")
+            with pytest.raises(RuntimeError) as excinfo:
+                await reap_queue_timeouts(conn, timedelta(hours=24))
+            state = await _state(observer, aged)
+        return str(excinfo.value), state
+
+    message, state = asyncio.run(_run())
+    assert "would open a savepoint" in message
+    assert state == "requested"
+
+
+def test_reap_queue_timeouts_stops_when_a_row_leaves_its_transaction_open(
+    migrated_url: str,
+) -> None:
+    # The reaper's per-candidate guard, distinct from its entry guard: with `_reap_one`
+    # wrapped to dirty the connection first, row 1's PROJECT + ALLOCATION are still held when
+    # row 2 starts, so the pass must abort rather than take PROJECT on top of them. The
+    # candidate select here has no ORDER BY, so the test names the PROJECT lock exactly and
+    # requires the retained ALLOCATION lock to be one of the two rows'.
+    async def _run() -> tuple[str, set[tuple[int, int]], set[tuple[int, int]], list[str]]:
+        async with _pooled_conn(migrated_url) as conn, _conn(migrated_url) as observer:
+            resource = await _resource(conn)
+            await _quota(conn)
+            await _granted(conn, resource.id)
+            aged = (
+                await _queued(conn, resource, created_offset=timedelta(hours=-48)),
+                await _queued(conn, resource, created_offset=timedelta(hours=-49)),
+            )
+            pid = await _backend_pid(conn)
+            await conn.commit()
+            real_reap_one = promotion._reap_one
+
+            async def _dirtying(
+                c: psycopg.AsyncConnection, alloc_id: UUID, project: str, max_wait: timedelta
+            ) -> bool:
+                await c.execute("SELECT 1")
+                return await real_reap_one(c, alloc_id, project, max_wait)
+
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(promotion, "_reap_one", _dirtying)
+                with pytest.raises(RuntimeError) as excinfo:
+                    await reap_queue_timeouts(conn, timedelta(hours=24))
+            leaked = await _advisory_locks_held(observer, pid)
+            states = [await _state(observer, alloc_id) for alloc_id in aged]
+        either_allocation = {_scope_lock(LockScope.ALLOCATION, alloc_id) for alloc_id in aged}
+        return str(excinfo.value), leaked, either_allocation, states
+
+    message, leaked, either_allocation, states = asyncio.run(_run())
+    assert "would open a savepoint" in message
+    assert leaked == {_scope_lock(LockScope.PROJECT, "proj")} | (leaked & either_allocation)
+    assert len(leaked & either_allocation) == 1  # exactly one row's ALLOCATION, still held
+    # Neither flip committed: row 1's is inside the leaked transaction, row 2 never ran.
+    assert states == ["requested", "requested"]

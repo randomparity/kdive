@@ -8,7 +8,7 @@ from uuid import uuid4
 import psycopg
 
 from kdive.db import migrate
-from kdive.reconciler.cleanup.upload_orphans import _RECLAIMABLE_SQL
+from kdive.reconciler.cleanup.upload_fences import _RECLAIMABLE_SQL
 from kdive.store.objectstore import _LIST_PAGE_SIZE as _PAGE_WIDTH
 
 
