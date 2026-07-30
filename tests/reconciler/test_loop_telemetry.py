@@ -15,7 +15,6 @@ from typing import cast
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
@@ -26,6 +25,7 @@ from kdive.reconciler import loop as reconciler_loop
 from kdive.reconciler.loop import Reconciler, ReconcileReport
 from kdive.reconciler.loop_telemetry import ReconcilerTelemetry
 from tests.reconcile_helpers import make_reconcile_config
+from tests.support.otel import tracer_provider
 
 
 def _empty_report() -> ReconcileReport:
@@ -52,7 +52,7 @@ def _telemetry() -> tuple[ReconcilerTelemetry, InMemoryMetricReader, InMemorySpa
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
     exporter = InMemorySpanExporter()
-    tp = TracerProvider()
+    tp = tracer_provider()
     tp.add_span_processor(SimpleSpanProcessor(exporter))
     return ReconcilerTelemetry(tracer=tp.get_tracer("test"), meter=meter), reader, exporter
 

@@ -15,13 +15,13 @@ from typing import Any
 from fastmcp.tools.base import ToolResult
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.domain.errors import ErrorCategory
 from kdive.mcp.middleware.telemetry import TelemetryMiddleware
 from kdive.mcp.responses import ToolResponse
+from tests.support.otel import tracer_provider
 
 
 class _FakeMessage:
@@ -36,12 +36,12 @@ class _FakeContext:
 
 def _harness() -> tuple[TelemetryMiddleware, InMemorySpanExporter, InMemoryMetricReader]:
     span_exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider()
-    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    provider = tracer_provider()
+    provider.add_span_processor(SimpleSpanProcessor(span_exporter))
     reader = InMemoryMetricReader()
     meter_provider = MeterProvider(metric_readers=[reader])
     mw = TelemetryMiddleware(
-        tracer=tracer_provider.get_tracer("test"),
+        tracer=provider.get_tracer("test"),
         meter=meter_provider.get_meter("test"),
     )
     return mw, span_exporter, reader
@@ -186,14 +186,12 @@ def test_secret_in_exception_does_not_leak_through_span() -> None:
         registry = SecretRegistry()
         registry.register("super-secret-token", scope=None)
         inner = InMemorySpanExporter()
-        tracer_provider = TracerProvider()
-        tracer_provider.add_span_processor(
-            SimpleSpanProcessor(RedactingSpanExporter(inner, registry))
-        )
+        provider = tracer_provider()
+        provider.add_span_processor(SimpleSpanProcessor(RedactingSpanExporter(inner, registry)))
         reader = InMemoryMetricReader()
         meter_provider = MeterProvider(metric_readers=[reader])
         mw = TelemetryMiddleware(
-            tracer=tracer_provider.get_tracer("test"),
+            tracer=provider.get_tracer("test"),
             meter=meter_provider.get_meter("test"),
         )
 

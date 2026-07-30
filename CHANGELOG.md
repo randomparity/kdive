@@ -389,6 +389,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Commit a Run's terminal transition with its job's dead-letter
 - Convert a malformed store reply at the boundary
 - Hold a present optional reply field to the same contract
+- Pin the OTel sampler in one place, guard the constructor (#1693)
 
 ### Build
 
