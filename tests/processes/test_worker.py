@@ -70,6 +70,9 @@ def test_run_worker_wires_runtime_registry_probe_and_worker(
             assert config.heartbeat == "heartbeat"
             assert config.readiness is not None
             assert config.telemetry is not None
+            # Not merely present: `WorkerTelemetry.disabled()` is a non-None inert
+            # stand-in, so wiring one would satisfy the check above (#1695).
+            assert config.telemetry.enabled
             events.append("init")
 
         async def run(self, worker_stop: asyncio.Event) -> None:

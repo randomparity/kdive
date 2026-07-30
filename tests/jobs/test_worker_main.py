@@ -99,3 +99,6 @@ def test_run_worker_wires_heartbeat_readiness_and_telemetry(
     assert config.heartbeat is not None
     assert config.readiness is not None
     assert config.telemetry is not None
+    # Not merely present: `WorkerTelemetry.disabled()` is a non-None inert stand-in,
+    # so wiring one would satisfy the check above (#1695).
+    assert config.telemetry.enabled
