@@ -575,10 +575,10 @@ def test_roleless_member_named_project_report_is_audited_at_the_dispatch_boundar
     """The *member* over-reach on the same tool keeps propagating to the boundary.
 
     ADR-0493 envelopes only the base ``AuthorizationError`` locally and re-raises ``RoleDenied``,
-    because the boundary is the one place ADR-0062 §5's ``audit_log`` row is written. Catching
-    the subclass alongside the base — the shape ``reports/generate.py`` uses — would silently
-    drop that row, so this test is what makes the narrow catch load-bearing: it reddens on
-    ``audit_rows`` and on ``object_id`` the moment ``RoleDenied`` stops propagating.
+    because the boundary is the one place ADR-0062 §5's ``audit_log`` row is written. Enveloping
+    the subclass locally instead — the shape ``reports/generate.py`` used until ADR-0508 — would
+    silently drop that row, so this test is what makes the narrow catch load-bearing: it reddens
+    on ``audit_rows`` and on ``object_id`` the moment ``RoleDenied`` stops propagating.
 
     ``object_id`` is the tool name here and ``"report"`` in the sibling test above. That is the
     boundary's signature, not an inconsistency: the boundary is object-agnostic by contract and
@@ -620,6 +620,112 @@ def test_roleless_member_named_project_report_is_audited_at_the_dispatch_boundar
     assert usage_rows == [
         ("accounting.report", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)
     ]
+
+
+# ============================================================
+# The second tool on the same path: `reports.generate` (#1680, ADR-0508)
+# ============================================================
+#
+# ADR-0493 disclosed `reports/generate.py`'s granted-set branch as carrying the defect this
+# module's `accounting.report` pair pins the fix for: it caught `RoleDenied` locally and built the
+# envelope itself, so a member over-reach produced a correct envelope and no `audit_log` row. That
+# arm now re-raises, and the pin has to live here rather than beside the handler's own tests —
+# `tests/mcp/tools/reports/test_generate.py` calls `generate` directly, below every middleware, so
+# it can observe the exception but never the row the boundary writes for it.
+_ROLELESS_GENERATE_ARGS = {"request": {"scope": "granted-set", "projects": [_ROLELESS_PROJECT]}}
+
+
+def test_roleless_member_named_project_generate_is_audited_at_the_dispatch_boundary(
+    migrated_url: str,
+) -> None:
+    """`reports.generate`'s member over-reach reaches the boundary and lands its audit row.
+
+    The proof for #1680, and it can only be made from here. Against the unfixed handler the
+    call returns cleanly with a role-named envelope and ``audit_rows`` is empty — the defect
+    ADR-0493 disclosed and left alone — so ``audit_rows`` is the assertion that reddens, while
+    ``error_category`` and ``missing_roles`` stay green either way. ``object_id`` reddens too,
+    and is the boundary's fingerprint: the handler keyed its envelope to ``"report"``, the
+    boundary keys to the tool name, exactly as on ``accounting.report`` above.
+
+    ``missing_roles`` is asserted because the envelope is agent-visible and had to survive the
+    move: the handler named ``viewer`` off ``RoleDenied.required``, and the boundary reads the
+    same field off the same exception (ADR-0490). Naming it is safe here and nowhere near the
+    non-member arm, which still envelopes locally and still names nothing (ADR-0123).
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+        async with (
+            warm_pool(migrated_url) as pool,
+            _authenticated_app(pool, roleless_member=True) as app,
+        ):
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                result = await app.call_tool("reports.generate", _ROLELESS_GENERATE_ARGS)
+            return (
+                _structured(result),
+                await _fetch(pool, _USAGE_ROWS),
+                await _fetch(pool, _AUDIT_ROWS),
+            )
+
+    envelope, usage_rows, audit_rows = asyncio.run(_run())
+
+    # Asserted first, and deliberately: it is the only one of these that is red against the
+    # unfixed handler for the reason #1680 was filed. `object_id` below reddens too, but on the
+    # boundary's fingerprint rather than on the missing row, so leading with it would report a
+    # cosmetic difference as the failure.
+    assert audit_rows == [
+        (
+            "reports.generate",
+            _PRINCIPAL,
+            _AGENT_SESSION,
+            _ROLELESS_PROJECT,
+            "denied",
+            None,
+            None,
+        )
+    ]
+
+    assert envelope["error_category"] == "authorization_denied"
+    assert envelope["object_id"] == "reports.generate"
+    assert envelope["data"]["missing_roles"] == ["viewer"]
+    # ADR-0123's constant, unchanged by the role disclosure above (ADR-0490).
+    assert envelope["detail"] == "access denied"
+
+    # NULL project, for the same reason as the `accounting.report` rows: `_call_project` reads a
+    # singular `project` key and this payload carries the plural `projects` list.
+    assert usage_rows == [
+        ("reports.generate", "denied", _PRINCIPAL, _AGENT_SESSION, _CLIENT_ID, None)
+    ]
+
+
+def test_non_member_named_project_generate_still_envelopes_at_the_handler(
+    migrated_url: str,
+) -> None:
+    """The other arm is untouched: no role named, no audit row, enveloped by the handler.
+
+    The control that bounds #1680's change to the subclass. Both arms fired from the same
+    `try` before, so "the `RoleDenied` arm re-raises" and "the whole `except` block re-raises"
+    would be indistinguishable from the test above alone — this one separates them. Its
+    ``object_id`` is the handler's ``"report"``, which is what says the denial never reached the
+    boundary, and ``audit_rows`` stays empty because the non-member denial is deliberately not
+    audited (ADR-0043 §4, ADR-0098).
+    """
+
+    async def _run() -> tuple[dict[str, Any], list[tuple[Any, ...]]]:
+        async with warm_pool(migrated_url) as pool, _authenticated_app(pool) as app:
+            with recording_must_not_fail(), denial_audit_must_not_fail():
+                result = await app.call_tool(
+                    "reports.generate",
+                    {"request": {"scope": "granted-set", "projects": [_NON_MEMBER_PROJECT]}},
+                )
+            return _structured(result), await _fetch(pool, _AUDIT_ROWS)
+
+    envelope, audit_rows = asyncio.run(_run())
+
+    assert envelope["error_category"] == "authorization_denied"
+    assert envelope["object_id"] == "report"
+    assert "missing_roles" not in envelope["data"]
+    assert _NON_MEMBER_PROJECT not in str(envelope)
+    assert audit_rows == []
 
 
 # ============================================================

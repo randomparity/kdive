@@ -148,7 +148,8 @@ _ROLELESS_DENIALS: dict[str, tuple[int, str]] = {
     ),
     "mcp/tools/reports/generate.py": (
         1,
-        "the non-member arm of the granted-set branch; the RoleDenied arm above does name it",
+        "non-member arm of the granted-set branch (RoleDenied is re-raised so the boundary "
+        "still audits it, ADR-0508); naming a role would confirm the caller-named project exists",
     ),
 }
 
