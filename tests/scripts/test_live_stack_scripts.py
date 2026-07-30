@@ -2,6 +2,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Generator
 from contextlib import closing, contextmanager
@@ -126,6 +127,19 @@ def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
         assert "positive integer" in result.stderr
 
 
+def test_configured_worker_count_is_ceilinged() -> None:
+    """Each worker is a root process with its own pool; the loop asks for no confirmation.
+
+    The aux port the runbook prints a few lines from the knob is 9470, so a transposition typo
+    into the count would fork thousands of root processes on the operator's host.
+    """
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="8").stdout == "8"
+    for over in ("9", "9470", "99999999999999999999"):
+        result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=over)
+        assert result.returncode != 0, f"{over!r} must be refused"
+        assert "ceiling" in result.stderr, result.stderr
+
+
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
     """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
 
@@ -178,6 +192,106 @@ def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
     assert user_logs[0].endswith("/worker.log")
     assert len(set(root_logs)) == 3, root_logs
     assert len(set(user_logs)) == 3, user_logs
+
+
+def _build_stamps(tmp_path: Path, logs: dict[str, str]) -> list[str]:
+    """Run report_build_stamps against a seeded log dir; return its output lines."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
+    for name, body in logs.items():
+        (log_dir / name).write_text(body)
+    result = _lib(f'log_dir="{log_dir}"\nreport_build_stamps\n')
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
+def test_build_stamps_report_one_row_per_worker_log(tmp_path: Path) -> None:
+    """Every worker gets a row, and the header states how many are actually alive.
+
+    The deferral record for the ADR-0482 preflight's single-worker probe set nominates this
+    block as the standing mitigation, so it has to be readable in both directions: a worker
+    running different code must not be omitted, and a stale log left by a stack that has since
+    been downgraded must not read as a live, graded process.
+    """
+    stamp = '{"msg": "starting kdive 0.4.1-dev+gcafe1234 (worker)"}\n'
+    rows = _build_stamps(
+        tmp_path,
+        {"worker-root.log": stamp, "worker-root-2.log": stamp, "server.log": stamp},
+    )
+    header = rows[0]
+    assert "build stamps" in header and "worker process(es) live" in header, header
+    labels = [line.split()[0] for line in rows[1:] if line.startswith("  ")]
+    assert labels == ["server", "reconciler", "worker-root", "worker-root-2"], labels
+    # No live workers from this checkout during a unit test, so the count exposes both rows as
+    # stale logs rather than as graded processes.
+    assert "0 worker process(es) live" in header, header
+
+
+def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
+    """An empty log dir must still print a worker row, not silently drop the process."""
+    rows = _build_stamps(tmp_path, {})
+    labels = [line.split()[0] for line in rows[1:] if line.startswith("  ")]
+    assert labels == ["server", "reconciler", "worker"], labels
+    assert all("<no startup log line>" in line for line in rows[1:]), rows
+
+
+def test_worker_pids_are_scoped_to_this_checkout(tmp_path: Path) -> None:
+    """A worker from a sibling worktree must not inflate the live count.
+
+    Several worktrees run on this host, and `stop_daemons` deliberately matches every checkout's
+    daemons. Counting them here too would let a foreign worker mask a stale log — the blindness
+    the header exists to expose — so this matcher is anchored on the resolved interpreter.
+
+    Runs a REAL process whose argv is exactly `<venv>/bin/python -m kdive worker`, against a stub
+    `kdive` package that just sleeps, so the matcher is exercised rather than the source text.
+    """
+    root = tmp_path / "other"
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    python = venv_bin / "python"
+    python.symlink_to(sys.executable)
+    stub_pkg = root / "kdive"
+    stub_pkg.mkdir()
+    (stub_pkg / "__init__.py").write_text("")
+    (stub_pkg / "__main__.py").write_text("import time\ntime.sleep(120)\n")
+
+    # A hermetic env: PYTHONPATH pins the stub package, and PYTHONSAFEPATH is cleared because it
+    # would drop the cwd `-m` relies on. Inheriting pytest's environment let the real installed
+    # kdive answer `-m kdive`, and that process exits on its own once it cannot reach a database.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONSAFEPATH", "PYTHONHOME")}
+    env["PYTHONPATH"] = str(root)
+
+    with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        [str(python), "-m", "kdive", "worker"], cwd=root, env=env
+    ) as proc:
+        try:
+            deadline = time.monotonic() + 30
+            counted = ""
+            while time.monotonic() < deadline:
+                assert proc.poll() is None, (
+                    f"the stub worker exited early (rc={proc.returncode}); `-m kdive` did not "
+                    "resolve to the sleeping stub, so the matcher was never exercised"
+                )
+                counted = _lib(f'py="{python}"\nworker_pids\n').stdout
+                if counted.strip():
+                    break
+                time.sleep(0.1)
+            assert str(proc.pid) in counted, (
+                f"a worker launched from py={python} must be counted, got {counted!r}"
+            )
+            other = _lib(f'py="{tmp_path}/elsewhere/.venv/bin/python"\nworker_pids\n').stdout
+            assert str(proc.pid) not in other, (
+                f"a worker from another checkout must NOT be counted, got {other!r}"
+            )
+            # ps truncates each line to COLUMNS, and a checkout path plus " -m kdive worker" runs
+            # well past 80. Without `-ww` every daemon matcher here finds NOTHING in an ordinary
+            # 80-column shell — stop_daemons reports none running and bring-up counts zero alive.
+            narrow = _lib(f'py="{python}"\nworker_pids\ndaemon_pids\n', COLUMNS="80").stdout
+            assert str(proc.pid) in narrow, (
+                f"COLUMNS=80 truncated ps and lost the worker: {narrow!r}"
+            )
+        finally:
+            proc.kill()
 
 
 def test_restart_host_processes_starts_one_worker_by_default(tmp_path: Path) -> None:

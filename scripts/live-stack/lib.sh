@@ -41,18 +41,32 @@ grafana_supports_arch() {
 # dot, so awk's dynamic-regex engine does not warn about an unescaped metacharacter.
 _daemon_match='[.]venv/bin/python -m kdive (server|worker|reconciler)'
 
+# `-ww` is required, not cosmetic: ps truncates each line to COLUMNS when that is set, and a
+# checkout path plus " -m kdive reconciler" runs past 80 characters for any ordinary worktree. In
+# an 80-column shell the untruncated form finds NO daemons, so stop_daemons reports none running
+# and wait_for_daemons_to_settle counts zero alive — a bring-up that fails on a display setting.
+# shellcheck disable=SC2054 # the commas are ps's own -o field separator, not array separators
+_PS_WIDE=(ps -ww -eo "pid=,comm=,args=")
+
 # PIDs of the real python daemons only — comm must be python, so a `bash -c '... kdive worker'`
 # launcher wrapper (whose argv also matches) is excluded.
 daemon_pids() {
-  ps -eo pid=,comm=,args= | awk -v re="$_daemon_match" '$2 ~ /^python/ && $0 ~ re {print $1}'
+  "${_PS_WIDE[@]}" | awk -v re="$_daemon_match" '$2 ~ /^python/ && $0 ~ re {print $1}'
 }
 
 # The worker subset of daemon_pids(), one pid per line. There is no per-worker identity in the
 # argv — every worker runs the same `-m kdive worker` — so this counts them rather than naming
 # them, which is all the build-stamp header needs to expose a stale log.
+#
+# Scoped to THIS checkout's interpreter, unlike daemon_pids: the two want opposite things. A
+# bring-up must stop every kdive daemon on the host whatever checkout started it, so daemon_pids
+# stays deliberately broad. A build-stamp count compared against rows of THIS log dir must not be
+# inflated by a worker from a sibling worktree — several run on this host — or a dead worker's
+# stale log reads as a live, graded process. `index()` is a literal match, so the interpreter path
+# needs no regex escaping.
 worker_pids() {
-  ps -eo pid=,comm=,args= | awk -v re='[.]venv/bin/python -m kdive worker' \
-    '$2 ~ /^python/ && $0 ~ re {print $1}'
+  "${_PS_WIDE[@]}" | awk -v needle="${py} -m kdive worker" \
+    '$2 ~ /^python/ && index($0, needle) {print $1}'
 }
 
 stop_daemons() {
@@ -116,10 +130,23 @@ require_free_http_port() {
 # therefore the only way to make the local stack exercise a cross-worker path — the
 # per-(investigation, checksum) rootfs fetch advisory lock is the one the live-testing runbook
 # drives. Default 1 keeps the ordinary stack byte-identical to the single-worker shape.
+#
+# Ceilinged because every worker is a root process with its own database pool and its own aux
+# port, and the loop that starts them asks for no confirmation. A transposition typo — the aux
+# port 9470 typed into the count — would fork thousands of root processes on the operator's host.
+# Every documented use is 2 or 3.
+MAX_WORKER_COUNT=8
+
 configured_worker_count() {
   local count="${KDIVE_WORKER_COUNT:-1}"
   [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
     echo "KDIVE_WORKER_COUNT must be a positive integer, got '${count}'" >&2
+    return 1
+  }
+  ((count <= MAX_WORKER_COUNT)) || {
+    echo "KDIVE_WORKER_COUNT=${count} exceeds the ceiling of ${MAX_WORKER_COUNT}. Each worker is a" >&2
+    echo "root process with its own database pool and aux health port; the live-testing runbook's" >&2
+    echo "contention arm needs 2. Raise MAX_WORKER_COUNT in lib.sh if you genuinely need more." >&2
     return 1
   }
   printf '%s' "$count"
@@ -282,15 +309,19 @@ wait_for_daemons_to_settle() {
 # above it means at least one row is a stale log, not a worker.
 report_build_stamps() {
   local head_sha log found=0 name live
+  local -A seen=()
   head_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
   live="$(worker_pids | grep -c . || true)"
   echo "=== build stamps (expect g${head_sha}; ${live} worker process(es) live) ==="
   _report_build_stamp server "${log_dir}/server.log"
   _report_build_stamp reconciler "${log_dir}/reconciler.log"
-  # Each row is labelled by its own log's name rather than by a running counter, so the label
-  # survives any glob ordering and names the file to read when a stamp looks wrong.
-  for log in "${log_dir}"/worker.log "${log_dir}"/worker-*.log; do
+  # Each row is labelled by its own log's name rather than by a running counter, so it names the
+  # file to read when a stamp looks wrong. Worker 1's two possible names lead, because the glob
+  # alone sorts `worker-root-2.log` ahead of `worker-root.log`; `seen` dedupes the overlap.
+  for log in "${log_dir}"/worker.log "${log_dir}"/worker-root.log "${log_dir}"/worker-*.log; do
     [[ -f "$log" ]] || continue
+    [[ -n "${seen[$log]:-}" ]] && continue
+    seen["$log"]=1
     found=1
     name="${log##*/}"
     _report_build_stamp "${name%.log}" "$log"
