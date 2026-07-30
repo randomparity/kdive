@@ -48,10 +48,10 @@ it; that is the immutability guard's job. A newly added `*.sql` whose name does 
 
 Every way the comparison can come up empty is a hard failure, never a clean run: an unreadable
 base ref, a base ref carrying no migrations, a missing or empty schema directory, a cwd
-outside the repository. This matters more than the ordering rule itself. A guard that reports success over
-nothing is worse than no guard, because it also retires the attention that would have caught
-the problem (#1723), and every one of those states is a bug in how the guard was invoked
-rather than evidence that the branch is clean.
+outside the repository. This matters more than the ordering rule itself. A guard that reports
+success over nothing is worse than no guard, because it also retires the attention that would
+have caught the problem (#1723), and every one of those states is a bug in how the guard was
+invoked rather than evidence that the branch is clean.
 
 The guard itself is offline: it reads a local ref and never fetches, so it reproduces exactly
 from a checkout and does not put a network round-trip inside the check (ADR-0505). Making the
@@ -71,10 +71,17 @@ Two branches that pre-assign adjacent numbers and merge out of order now fail CI
 one instead of merging green. The fix is mechanical — rename the file to the next free number
 — and the failure message names the offending file, its version, and the current maximum.
 
-The check is against `origin/main` as it stands at CI time, not the PR's merge base, so a PR
-can go from green to red when a sibling merges a higher-numbered migration underneath it.
-That is the intended behaviour: it is exactly the #1553 situation, and the PR genuinely does
-need renumbering before it lands.
+The check is against `origin/main` as it stands when the job runs, not against the PR's merge
+base, which is what lets it see a sibling that merged after the PR opened.
+
+It does not close #1720 on its own, and the gap is worth stating plainly. A verdict is only as
+fresh as the PR's last CI run: `pull_request` fires on a head change, never on a push to the
+base branch, and the "protect main" ruleset does not require branches to be up to date
+(`strict_required_status_checks_policy` is false). So two PRs numbered 0085 and 0086 over a
+main at 0084 both go green, and if 0086 merges first, the 0085 PR keeps a green check that was
+computed before the collision existed. Re-running the job, rebasing, or merging main into the
+branch produces the correct red. Requiring branches to be current is what would make the guard
+airtight; that is a repository-settings change, tracked separately in #1734.
 
 Because the comparison needs `origin/main`, the guard is one of the few that is not hermetic
 with respect to the checkout. Local runs use whatever `origin/main` was last fetched, so a

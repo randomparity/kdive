@@ -138,11 +138,12 @@ jobs:
         run: just env-docs-check
 
       - name: Fetch the base branch for the migration-ordering guard
-        # This job's checkout is shallow and its refspec covers only the PR ref, so
-        # refs/remotes/origin/main does not exist. The guard needs one tree, not history,
-        # so fetch that single ref at depth 1 rather than putting fetch-depth: 0 on the
-        # whole job. The repository is public and this step needs no credentials, which is
-        # why persist-credentials: false on the checkout does not break it.
+        # On a PR the checkout's refspec covers only the PR ref, so refs/remotes/origin/main
+        # does not exist; on a push to main it exists but may be behind. The leading `+`
+        # force-updates it, which covers both. The guard needs one tree, not history, so
+        # fetch that single ref at depth 1 rather than putting fetch-depth: 0 on the whole
+        # job. The repository is public and this step needs no credentials, which is why
+        # persist-credentials: false on the checkout does not break it.
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Migration ordering guard

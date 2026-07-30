@@ -143,16 +143,17 @@ def repo(tmp_path: Path) -> Path:
 
 
 def _run(
-    repo: Path, cwd: Path | None = None, base_ref: str = "base"
+    repo: Path, cwd: Path | None = None, base_ref: str | None = "base"
 ) -> subprocess.CompletedProcess[str]:
     """Invoke the guard's entry point as a subprocess, so the exit code is the real one.
 
+    ``base_ref=None`` omits the argument entirely, exercising DEFAULT_BASE_REF — which is
+    how `just migration-order-check` invokes it, and therefore the only path CI takes.
     Running it as `python3` with no venv also holds it to its stdlib-only contract.
     """
     guard = Path(__file__).resolve().parents[2] / "scripts/migration_ordering_guard.py"
-    return subprocess.run(
-        ["python3", str(guard), base_ref], cwd=cwd or repo, capture_output=True, text=True
-    )
+    argv = ["python3", str(guard)] + ([] if base_ref is None else [base_ref])
+    return subprocess.run(argv, cwd=cwd or repo, capture_output=True, text=True)
 
 
 def test_end_to_end_a_migration_below_the_base_maximum_is_rejected(repo: Path) -> None:
@@ -211,6 +212,25 @@ def test_end_to_end_outside_a_repository_is_a_failure(repo: Path) -> None:
 
 def test_end_to_end_a_clean_branch_is_accepted(repo: Path) -> None:
     assert _run(repo).returncode == 0
+
+
+def test_end_to_end_the_default_base_ref_is_the_one_ci_compares_against(repo: Path) -> None:
+    # `just migration-order-check` passes no argument, so DEFAULT_BASE_REF is the only
+    # base CI ever uses. Every other test here names a ref explicitly, which would leave
+    # the constant free to drift to something that compares the head against itself —
+    # `HEAD`, say — and pass every PR forever.
+    #
+    # The migration is committed, not just written, because that is the state CI checks
+    # out. It is also what makes the assertion discriminate: against `origin/main` the
+    # file is an addition, while against `HEAD` it is already in the base.
+    _git(repo, "update-ref", "refs/remotes/origin/main", "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "src/kdive/db/schema/0084_late.sql").write_text("-- SELECT 1;\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a migration below the base maximum")
+    result = _run(repo, base_ref=None)
+    assert result.returncode == 1
+    assert "0084_late.sql" in result.stderr
 
 
 def test_parse_version_reads_the_four_digit_prefix() -> None:
