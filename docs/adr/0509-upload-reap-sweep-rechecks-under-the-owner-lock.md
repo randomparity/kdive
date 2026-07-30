@@ -1,8 +1,8 @@
-# ADR 0509 — The upload reap's object sweep re-checks each key under the owner lock, and declines the store-mtime grace
+# 0509 — The upload reap's object sweep re-checks each key under the owner lock, and declines the store-mtime grace
 
-- **Status:** Accepted
-- **Date:** 2026-07-30
-- **Deciders:** KDIVE maintainers
+## Status
+
+Accepted (2026-07-30)
 
 ## Context
 
