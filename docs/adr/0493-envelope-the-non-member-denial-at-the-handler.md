@@ -194,6 +194,19 @@ deliberately out of scope here — it needs to distinguish a caller-named projec
 row-resolved one, which is a dataflow property, not a grep. Recorded so the next reader knows the
 audit is the evidence for *this* change and not a standing guarantee.
 
+> **Superseded by [ADR-0507](0507-structural-guard-over-the-bare-authorization-error.md)
+> (2026-07-30, #1681).** The guard now exists:
+> `tests/guards/test_require_role_membership_guard.py` fails any `require_role` that can reach its
+> non-member arm with no membership check and no handler that envelopes the base
+> `AuthorizationError`, and pins the same property for `require_platform_role`. It sidesteps the
+> dataflow problem named above rather than solving it — it requires a mitigation at *every* call
+> site instead of deciding which projects are caller-named, because the premise that a
+> row-resolved project is safe turns out not to hold, and the row-resolving tools already carry
+> the membership check that satisfies the rule. The residual that remains is the analysis's own
+> boundary: it is intra-procedural plus one level of intra-module call graph, and the sites it
+> cannot resolve are listed with a prose reason rather than passed silently. ADR-0507 records what
+> it can and cannot see.
+
 **`doc_exposure.py` raises a bare `AuthorizationError` too**, on `on_read_resource`. That is the
 resources plane, which `UsageTrackingMiddleware` does not hook and `DenialAuditMiddleware` does not
 see, so it is unaffected by both decisions here. Noted because a future reader weighing "envelope
