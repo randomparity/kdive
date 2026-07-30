@@ -331,8 +331,22 @@ def _fetch_version(url: str) -> dict[str, object] | None:
     return version if isinstance(version, dict) else None
 
 
-def probe_stack_skew(base_url: str, *, facts: RepoFacts | None = None) -> list[ProcessSkew]:
-    """Grade every app process reachable behind ``base_url``'s host (ADR-0482 §3)."""
+def probe_stack_skew(
+    base_url: str,
+    *,
+    facts: RepoFacts | None = None,
+    fetch: Callable[[str], dict[str, object] | None] = _fetch_version,
+) -> list[ProcessSkew]:
+    """Grade every app process reachable behind ``base_url``'s host (ADR-0482 §3).
+
+    Args:
+        base_url: The stack URL whose host carries the aux listeners.
+        facts: Checkout-side facts to grade against; the live checkout's when omitted.
+        fetch: Reads one process's build from its aux ``/readyz``; the real HTTP probe when
+            omitted. Injected so a test can construct the no-answer case outright — staging it
+            on a port cannot, because binding an ephemeral port and closing it releases the
+            port back to a range a busy host's wildcard listeners answer on (#1713).
+    """
     resolved = facts if facts is not None else repo_facts()
     if resolved is None:
         return [
@@ -340,7 +354,7 @@ def probe_stack_skew(base_url: str, *, facts: RepoFacts | None = None) -> list[P
         ]
     results = []
     for process, url in readyz_urls(base_url).items():
-        version = _fetch_version(url)
+        version = fetch(url)
         if version is None:
             results.append(
                 ProcessSkew(

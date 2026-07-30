@@ -98,3 +98,12 @@ def test_zero_and_subsecond_durations_are_recorded() -> None:
     pts = _points(reader, "kdive.debug.session.duration")
     assert pts, "zero / sub-second durations must be recorded, not dropped"
     assert sum(p.count for p in pts) == 2
+
+
+def test_enabled_reports_whether_instruments_are_wired() -> None:
+    # The public flag the assembly-site tests assert on: without it a `.disabled()`
+    # substitution at a wiring site emits nothing and is invisible to every test.
+    reader = InMemoryMetricReader()
+    live = DebugSessionTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    assert live.enabled is True
+    assert DebugSessionTelemetry.disabled().enabled is False

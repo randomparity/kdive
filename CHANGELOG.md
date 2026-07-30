@@ -249,6 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - State the expiry guard's limits rather than overclaiming
 - Record ADR-0511 — cap upload-window extension at the mint
 - Fix Accepted-ADR grep to match both status shapes
+- Condition ADR-0511's extension cap on a stable upload TTL
+- Restate ADR-0511's TTL caveat as an append, not a rewrite
 
 ### Fixed
 

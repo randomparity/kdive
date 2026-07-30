@@ -87,6 +87,21 @@ standing deadline — which the mint stamped at `window_started_at + ttl`, and `
 because the multiple is at least 1. So `deadline ≤ window_started_at + max_window` holds after
 every refresh, not merely on average.
 
+That proof holds **provided `KDIVE_UPLOAD_TTL_SECONDS` has been stable since the window's mint**.
+Both the mint and every refresh read it live, so `ttl` above is implicitly "whatever the config
+says right now" — for the mint that stamped the standing deadline, and separately for the refresh
+computing the clamp it is measured against. An operator lowering `KDIVE_UPLOAD_TTL_SECONDS` after
+a window's mint, or a row migration `0085`'s backfill lands on that was minted under a larger
+historical TTL, breaks the agreement: the standing deadline was stamped at the *old*, larger
+`ttl`, and can exceed `window_started_at` plus the *new*, smaller `max_window` a later refresh
+computes. `GREATEST` then keeps that already-too-large deadline standing indefinitely, because
+every subsequent refresh's clamped grant is smaller still and is never the greater of the two. This
+is a bounded **leak**, never an exposure — the window decays out at the old bound rather than
+snapping to the new one, no refresh ever moves the deadline later than the mint already placed it,
+and a second refresh after the budget is spent moves nothing. Retention after a TTL decrease is
+governed by whatever `ttl` was live at each affected row's mint, not by the operator's newly
+configured value, until that row's window is next re-minted.
+
 Every comparison is Postgres's `now()`. The reaper measures `deadline` against the same clock, and
 DB `now()` is session-TZ dependent, so a Python-side comparison here would be subtly wrong for the
 reason ADR-0444 and ADR-0448 both already rejected it.
