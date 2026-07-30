@@ -147,6 +147,33 @@ def test_head_still_returns_a_result_when_only_the_optional_fields_are_absent() 
     assert head.content_encoding is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "got", "want"),
+    [("Metadata", ["sensitivity"], "list", "dict"), ("ChecksumSHA256", 7, "int", "str")],
+)
+def test_head_rejects_a_present_but_ill_typed_optional_field(
+    field: str, value: object, got: str, want: str
+) -> None:
+    """An optional field is exempt from being *present*, not from being the right type.
+
+    ``Metadata`` is the one that matters and the reason this arm exists. It is read as a mapping
+    two lines later, so a list or a string there raises ``TypeError`` — a class neither ``head``'s
+    own ``except (KeyError, ValueError)`` nor the orphan sweep's per-key handler catches. That is
+    the same escape a missing required field caused, arriving by way of an optional one, so leaving
+    it would have made the contract's "every field a read returns" claim false.
+    """
+    store = ObjectStore(_CannedHeadClient({**_HEAD_REPLY, field: value}), "the-bucket")
+
+    with pytest.raises(CategorizedError) as excinfo:
+        store.head("k")
+
+    assert excinfo.value.category is ErrorCategory.INFRASTRUCTURE_FAILURE
+    assert str(excinfo.value) == (
+        f"object-store head_object for 'k' in bucket 'the-bucket' returned {field!r} as {got}, "
+        f"not {want}; the endpoint is not returning S3-compatible head_object replies"
+    )
+
+
 @pytest.mark.parametrize("field", [name for name, _v, _got, _want in _LISTING_FIELDS])
 def test_a_paged_listing_entry_omitting_a_required_field_raises_a_categorized_error(
     field: str,

@@ -101,10 +101,15 @@ class _StoreReply:
     caller's ``except`` to swallow its own bugs.
 
     The policy is decided once for every field rather than per field, so no reply read in this
-    module can be the inconsistent one. It applies to the reads only; the write and multipart calls
-    subscript their replies too, but each of those is one request's own result with no per-item
-    fault handler above it, so a malformed reply there already fails exactly the one operation it
-    belongs to.
+    module can be the inconsistent one. An *optional* field gets the same treatment when it is
+    present (:meth:`optional`): absent is normal and yields the caller's default, but a present
+    value of the wrong type is as malformed as a missing required one, and in the case of
+    ``Metadata`` it is the shape that actually raises — a non-mapping there makes the sensitivity
+    read a ``TypeError`` that no ``except`` on this path catches.
+
+    It applies to the reads only; the write and multipart calls subscript their replies too, but
+    each of those is one request's own result with no per-item fault handler above it, so a
+    malformed reply there already fails exactly the one operation it belongs to.
     """
 
     op: str
@@ -139,6 +144,28 @@ class _StoreReply:
                 field, f"returned {field!r} as {type(value).__name__}, not {expected.__name__}"
             )
         return value
+
+    def optional[T](self, field: str, expected: type[T]) -> T | None:
+        """Return ``field``'s value, ``None`` if the store omitted it, or raise if it is ill-typed.
+
+        The absent case is normal — an object written before checksums were requested carries no
+        ``ChecksumSHA256``, and one with no user metadata may carry no ``Metadata`` — so only a
+        *present* value is held to the contract.
+
+        Args:
+            field: The response field name, as the S3 API spells it.
+            expected: The type the API promises when the field is present.
+
+        Returns:
+            The field's value, or ``None`` when the store omitted it.
+
+        Raises:
+            CategorizedError: the field is present and is not an ``expected``
+                (:attr:`ErrorCategory.INFRASTRUCTURE_FAILURE`).
+        """
+        if field not in self.body:
+            return None
+        return self.required(field, expected)
 
     def _malformed(self, field: str, problem: str) -> CategorizedError:
         return CategorizedError(
@@ -398,15 +425,18 @@ class ObjectStore:
             raise _infrastructure_error("head_object", key, err) from err
         except BotoCoreError as err:
             raise _infrastructure_error("head_object", key, err) from err
-        metadata = resp.get("Metadata", {})
+        reply = _StoreReply("head_object", self._bucket, key, resp)
+        # An absent ``Metadata`` is normal, but a present non-mapping one would make the
+        # sensitivity read below a ``TypeError`` that neither this ``except`` nor any caller's
+        # catches — the same escape as a missing required field, by way of an optional one.
+        metadata: Mapping[str, Any] = reply.optional("Metadata", dict) or {}
         try:
             sensitivity = Sensitivity(metadata["sensitivity"])
         except (KeyError, ValueError) as _exc:
             sensitivity = None
-        reply = _StoreReply("head_object", self._bucket, key, resp)
         return artifact_types.HeadResult(
             size_bytes=reply.required("ContentLength", int),
-            checksum_sha256=resp.get("ChecksumSHA256"),
+            checksum_sha256=reply.optional("ChecksumSHA256", str),
             etag=_normalize_etag(reply.required("ETag", str)),
             last_modified=reply.required("LastModified", datetime),
             sensitivity=sensitivity,

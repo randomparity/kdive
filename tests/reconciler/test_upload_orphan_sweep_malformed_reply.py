@@ -256,20 +256,23 @@ def test_a_fault_that_is_not_a_store_fault_still_aborts_the_whole_pass(migrated_
     instead leaves this property intact, and this test is what fails if someone widens that
     ``except`` later.
 
-    A ``RuntimeError`` out of ``head`` stands in for any such bug: it must reach the caller
-    unchanged, and it must not be counted as a reclaimable-key fault.
+    The bug is deliberately a ``KeyError`` and not some unrelated exception class: ``KeyError`` is
+    the one that widening would admit, so a ``RuntimeError`` here would stay green through exactly
+    the change this test exists to catch. It is also the shape the pre-fix defect took, which is
+    what makes "convert it at the store, do not catch it at the sweep" the distinction being
+    pinned — the sweep must still abort on a ``KeyError`` that did *not* come from a store reply.
     """
 
     class _BuggyStore(ObjectStore):
         def head(self, key: str) -> Any:
-            raise RuntimeError(f"a bug in the sweep, not a store fault, on {key}")
+            raise KeyError(f"a bug in the sweep, not a store reply, on {key}")
 
     async def _run() -> None:
         _, prefix = await _seed_rowless_upload_prefix(migrated_url)
         client = _FakeS3([f"{prefix}aaa-vmcore"], age=_GRACE * 2)
         store = _BuggyStore(client, _BUCKET)
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            with pytest.raises(RuntimeError):
+            with pytest.raises(KeyError):
                 await run_repair(
                     pool,
                     lambda conn: repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL),
