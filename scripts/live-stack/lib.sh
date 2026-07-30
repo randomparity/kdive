@@ -121,17 +121,22 @@ configured_worker_count() {
 #
 # uvicorn's bind is exclusive, so a second worker inheriting the first one's port dies at startup
 # instead of claiming jobs — the failure this override exists to prevent. Worker 1 keeps the
-# untouched environment so it lands on the registered per-process default (9465) where the
-# ADR-0482 skew preflight probes for it, and so an operator's explicit KDIVE_HEALTH_BIND_ADDR still
-# wins. Extras are numbered from their own base rather than stepping up from the worker default,
-# which would put worker 2 on the reconciler's 9466.
-EXTRA_WORKER_HEALTH_PORT_BASE=9470
+# untouched environment so it lands on whatever ADR-0090 §5 resolves for it: the registered
+# per-process default 9465, where the ADR-0482 skew preflight probes, or an explicit
+# KDIVE_HEALTH_BIND_ADDR, which wins for every process.
+#
+# Extras step off WORKER 1's resolved port, not off a constant — an operator who sets
+# KDIVE_HEALTH_BIND_ADDR would otherwise have their port honored for worker 1 and silently
+# discarded for the rest, landing two workers on one port again if the value they chose happened
+# to be the constant. The gap clears the whole registered block (server 9464, worker 9465,
+# reconciler 9466) so the default stack's worker 2 does not land on the reconciler.
+EXTRA_WORKER_HEALTH_PORT_GAP=5
 
 extra_worker_health_bind() {
   local index="$1" addr
   ((index > 1)) || return 0
   addr="${KDIVE_HEALTH_BIND_ADDR:-127.0.0.1:9465}"
-  printf '%s:%s' "${addr%:*}" "$((EXTRA_WORKER_HEALTH_PORT_BASE + index - 2))"
+  printf '%s:%s' "${addr%:*}" "$((${addr##*:} + EXTRA_WORKER_HEALTH_PORT_GAP + index - 2))"
 }
 
 # Log file for worker <index>. Worker 1 keeps the historical unsuffixed name so the runbooks and
@@ -232,21 +237,31 @@ wait_for_daemons_to_settle() {
   done
 }
 
-# worker-root.log is append-only, so report the LAST stamp of each service's own log. Every
-# configured worker gets its own row: a skew check that reported one worker's stamp would pass on a
+# worker-root.log is append-only, so report the LAST stamp of each service's own log. EVERY worker
+# log present gets its own row: a skew check that reported one worker's stamp would pass on a
 # multi-worker stack whose other workers are running different code (ADR-0482).
+#
+# The worker set comes from the log directory, not from KDIVE_WORKER_COUNT. status.sh is a bare
+# read-only command an operator runs in a fresh shell long after bring-up, where that variable is
+# gone — reading it there would report one worker for a stack started with several, which is the
+# exact blind spot this per-worker reporting exists to close. A row whose stamp is stale relative
+# to the `=== host daemons ===` process list above it is visible; a row that was never printed is
+# not.
 report_build_stamps() {
-  local head_sha worker_count index label
+  local head_sha log found=0 name
   head_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  worker_count="$(configured_worker_count)" || return 1
   echo "=== build stamps (expect g${head_sha}) ==="
   _report_build_stamp server "${log_dir}/server.log"
   _report_build_stamp reconciler "${log_dir}/reconciler.log"
-  for ((index = 1; index <= worker_count; index++)); do
-    label="worker"
-    ((worker_count > 1)) && label="worker[${index}]"
-    _report_build_stamp "$label" "$(_existing_worker_log "$index")"
+  # Each row is labelled by its own log's name rather than by a running counter, so the label
+  # survives any glob ordering and names the file to read when a stamp looks wrong.
+  for log in "${log_dir}"/worker.log "${log_dir}"/worker-*.log; do
+    [[ -f "$log" ]] || continue
+    found=1
+    name="${log##*/}"
+    _report_build_stamp "${name%.log}" "$log"
   done
+  ((found)) || _report_build_stamp worker "$(worker_log_path 1)"
 }
 
 _report_build_stamp() {
@@ -254,22 +269,6 @@ _report_build_stamp() {
   stamp="$(grep -h 'starting kdive' "$2" 2>/dev/null | tail -1 |
     grep -oE 'g[0-9a-f]+ [(][a-z]+[)]' || true)"
   printf '  %-11s %s\n' "$1" "${stamp:-<no startup log line>}"
-}
-
-# The log worker <index> actually wrote. worker_log_path() answers for the CURRENT
-# KDIVE_WORKER_AS_ROOT, but status.sh may run against a stack started under the other setting, so
-# fall back to the sibling name when the computed one is absent.
-_existing_worker_log() {
-  local path sibling
-  path="$(worker_log_path "$1")"
-  [[ -f "$path" ]] && {
-    printf '%s' "$path"
-    return 0
-  }
-  sibling="${path/worker-root/worker}"
-  [[ "$sibling" == "$path" ]] && sibling="${path/worker/worker-root}"
-  [[ -f "$sibling" ]] && path="$sibling"
-  printf '%s' "$path"
 }
 
 # Returns 0 iff the host MCP server answers 401 (= up, auth required).

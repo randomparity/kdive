@@ -126,6 +126,14 @@ def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
         assert "positive integer" in result.stderr
 
 
+def _worker_binds(count: int, **env: str) -> list[str]:
+    """The effective aux bind of workers 1..count, with worker 1 resolved as ADR-0090 §5 would."""
+    worker_1 = env.get("KDIVE_HEALTH_BIND_ADDR", f"127.0.0.1:{PROCESS_DEFAULT_PORTS['worker']}")
+    return [worker_1] + [
+        _lib(f"extra_worker_health_bind {index}", **env).stdout for index in range(2, count + 1)
+    ]
+
+
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
     """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
 
@@ -142,9 +150,24 @@ def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> No
     assert not ports & set(PROCESS_DEFAULT_PORTS.values()), (
         f"extra-worker ports {ports} collide with the registered defaults {PROCESS_DEFAULT_PORTS}"
     )
-    # An explicit operator bind still wins for worker 1, so extras must step off ITS host.
-    explicit = _lib("extra_worker_health_bind 2", KDIVE_HEALTH_BIND_ADDR="0.0.0.0:9500").stdout
-    assert explicit.startswith("0.0.0.0:")
+
+
+def test_extra_worker_binds_step_off_an_explicit_operator_bind() -> None:
+    """An explicit KDIVE_HEALTH_BIND_ADDR wins for worker 1, so extras must offset from ITS port.
+
+    Deriving extras from a constant instead put worker 2 back on worker 1's port whenever the
+    operator's chosen value happened to equal that constant — the exact bind collision the
+    override exists to prevent, reintroduced only under an explicit setting.
+    """
+    for explicit in ("127.0.0.1:9470", "127.0.0.1:9471", "0.0.0.0:9500"):
+        binds = _worker_binds(4, KDIVE_HEALTH_BIND_ADDR=explicit)
+        assert len(set(binds)) == len(binds), f"{explicit}: workers share a bind: {binds}"
+        assert all(b.startswith(explicit.rsplit(":", 1)[0] + ":") for b in binds), (
+            f"{explicit}: extras must keep the operator's host: {binds}"
+        )
+    # And the default configuration stays pairwise distinct from the other processes' defaults.
+    binds = _worker_binds(4)
+    assert len(set(binds)) == len(binds), binds
 
 
 def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
@@ -171,6 +194,48 @@ def test_restart_host_processes_starts_every_configured_worker(tmp_path: Path) -
     assert binds.count("<unset>") == 1, f"exactly one worker keeps the default bind: {binds}"
     explicit = [b for b in binds if b != "<unset>"]
     assert len(set(explicit)) == 2, f"extra workers must not share a bind: {binds}"
+
+
+def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path: Path) -> None:
+    """The DEFAULT launch branch is the sudo-root one, and it is what the runbook arm runs.
+
+    The per-worker bind is spliced into a quoted `sudo bash -c` string there, and it must land
+    AFTER `source scripts/live-stack/env.sh` — sourced first, env.sh's `:-` defaulting would
+    already have set the variable and the export would be the thing overriding it, but spliced
+    before, env.sh re-defaults over the top and every worker inherits one port. A regression
+    there degrades a two-worker stack back to serialization, which is the failure the whole
+    change exists to remove.
+    """
+    sudo_stub = tmp_path / "sudo"
+    sudo_stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{tmp_path}/sudo-argv"\n')
+    sudo_stub.chmod(0o755)
+    result = _lib(
+        f'py="/nonexistent/python"\n'
+        f'log_dir="{tmp_path}/logs"\n'
+        'mkdir -p "$log_dir"\n'
+        "start_worker 1 builduser /src/linux\n"
+        "start_worker 2 builduser /src/linux\n"
+        "start_worker 3 builduser /src/linux\n",
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        KDIVE_WORKER_AS_ROOT="1",
+        KDIVE_DATABASE_URL="postgresql://x/y",
+        KDIVE_S3_ENDPOINT_URL="http://x",
+    )
+    assert result.returncode == 0, result.stderr
+    launches = (tmp_path / "sudo-argv").read_text().splitlines()
+    assert len(launches) == 3, launches
+
+    assert "KDIVE_HEALTH_BIND_ADDR" not in launches[0], "worker 1 must keep the process default"
+    binds = []
+    for launch in launches[1:]:
+        assert "export KDIVE_HEALTH_BIND_ADDR=" in launch, f"extra worker got no bind: {launch}"
+        assert launch.index("source scripts/live-stack/env.sh") < launch.index(
+            "export KDIVE_HEALTH_BIND_ADDR="
+        ), "the bind export must come after env.sh, or env.sh re-defaults over it"
+        binds.append(launch.split("export KDIVE_HEALTH_BIND_ADDR=")[1].split("'")[1])
+    assert len(set(binds)) == 2, f"extra workers must not share a bind: {binds}"
+    # Each worker still writes its own log, so an observation is attributable to one process.
+    assert len({launch.split(">>")[1] for launch in launches}) == 3, launches
 
 
 def test_live_stack_env_exports_required_defaults() -> None:
