@@ -17,6 +17,7 @@ from kdive.artifacts import upload_manifest
 from kdive.artifacts.storage import HeadResult, chunk_key
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
+from kdive.config.core_settings import UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.db.repositories import RUNS
 from kdive.domain.capacity.state import RunState
 from kdive.domain.catalog.artifacts import Sensitivity
@@ -526,6 +527,53 @@ def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
         assert run.state is RunState.CREATED
 
     asyncio.run(_run())
+
+
+def test_the_cap_multiple_is_read_from_configuration(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A multiple of 1 makes the mint's own deadline the whole budget (ADR-0511 decision 3).
+
+    This is what pins the knob to the behavior. A fresh window's deadline is already
+    `window_started_at + ttl`, so at a multiple of 1 the clamp lands on the value already there and
+    the very first refresh is a no-op — an operator choice that forbids extension outright. Ignore
+    the setting and fall back to the built-in 3 and the refresh grants a full TTL instead, so the
+    assertion below is the one that would catch an unwired knob.
+    """
+    monkeypatch.setenv("KDIVE_UPLOAD_TTL_SECONDS", "3600")
+    monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "1")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            minted = await _window_deadline(pool, run_id)
+            await _complete_swallowing_failure(
+                pool,
+                run_id,
+                CompleteBuildFinalizer(
+                    validate_complete_build=FakeValidator(_output(run_id)),
+                    object_store_factory=lambda: _ChunkedStore(bad_head=True),
+                ),
+            )
+            after = await _window_deadline(pool, run_id)
+
+        assert after == minted
+
+    asyncio.run(_run())
+
+
+def test_the_cap_multiple_rejects_a_value_at_or_below_zero() -> None:
+    """Zero or negative puts the cap at or before the mint, making every refresh a no-op.
+
+    That does not merely tighten the bound — it silently removes the extension the chunked finalize
+    relies on to keep the reaper off an in-flight reassembly's chunk objects. Rejecting it in the
+    parser puts the failure at `config validate` rather than at the first reassembly.
+    """
+    assert UPLOAD_WINDOW_MAX_TTL_MULTIPLE.parse("1") == 1
+    for raw in ("0", "-1"):
+        with pytest.raises(ValueError, match="must be >= 1"):
+            UPLOAD_WINDOW_MAX_TTL_MULTIPLE.parse(raw)
 
 
 def test_complete_build_finalizer_keeps_manifest_when_chunk_cleanup_fails(
