@@ -62,7 +62,22 @@ BUILD_HOST_ADDED = {
 DEBUG_ADDED = {
     "symbol_not_found",
 }
-M0_ALL = M0_PORTED | M0_DISTRIBUTED | M1_ADDED | LOOKUP_ADDED | BUILD_HOST_ADDED | DEBUG_ADDED
+# Snapshot-restore limbo (#1560, ADR-0513): a `restoring` System the reconciler drives to `failed`
+# because its restore job can never run again. Distinct from `infrastructure_failure` (the
+# unclassified fallback, and retryable) because the guest's disk is indeterminate, and it is the
+# one failure path with no exception to classify and no failed job to attribute.
+RESTORE_ADDED = {
+    "restore_incomplete",
+}
+M0_ALL = (
+    M0_PORTED
+    | M0_DISTRIBUTED
+    | M1_ADDED
+    | LOOKUP_ADDED
+    | BUILD_HOST_ADDED
+    | DEBUG_ADDED
+    | RESTORE_ADDED
+)
 
 
 def test_taxonomy_is_exactly_the_m0_set() -> None:

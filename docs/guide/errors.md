@@ -31,6 +31,7 @@ errors.
 | `readiness_failure` | A readiness preflight check failed after boot. |
 | `debug_attach_failure` | The debug transport could not be attached. |
 | `symbol_not_found` | `debug.resolve_symbol` could not resolve the name to an address — the symbol is inlined / optimized away, or is an addressless enum/macro constant. The attach is fine and retrying will not help; `data.hint` suggests disassembling the caller. |
+| `restore_incomplete` | A `systems.restore` stopped part-way through reverting the guest to its snapshot and can never resume — the worker died mid-revert, or the restore job dead-lettered or was canceled. The System is `failed` and its disk state is indeterminate, so retrying the restore cannot help; tear the System down and provision a new one. |
 | `infrastructure_failure` | An unclassified failure in the underlying infrastructure layer. The fallback when no more specific category applies. |
 | `stale_handle` | The referenced object (System, DebugSession) no longer exists or has been torn down. The handle is invalid; create a new object. |
 | `transport_conflict` | Two attaches contended for the same debug transport simultaneously. |
@@ -52,6 +53,10 @@ errors.
   the state advances.
 - **`stale_handle`** — the target object is gone; create a new Run or provision a
   new System.
+- **`restore_incomplete`** — the guest was left part-way between its live state and the
+  snapshot, so no operation on it has a defined starting point (`retryable` is false, and
+  the System is `failed`, which fences every lifecycle op anyway). Call `systems.teardown`
+  and provision a replacement; the snapshot itself is unharmed and can be restored onto it.
 - **`transport_conflict`** — wait for the existing session to detach, then retry
   `debug.start_session`.
 - **`transport_failure`** — a console/debug transport or held long-poll stream failed; it is
