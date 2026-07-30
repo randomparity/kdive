@@ -257,6 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drop a misapplied ADR-0449 citation from stop_daemons
 - Note that a re-run can hit the same surplus
 - State precisely why the flock lease was not taken
+- Record the base-branch comparison as ADR-0518
 
 ### Fixed
 
@@ -454,6 +455,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep the lease degrade off the real error's context
 - Pin a base while its fetch is in flight
 - Record no lease on a non-autocommit connection
+- Diff the schema-immutability guard against origin/main
+- Compare against the PR's base commit, not main's tip
 
 ### Build
 
@@ -466,6 +469,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rewrap docstring paragraphs left ragged by the reflow
 - Reflow the stop_daemons poll comment
+- Let ruff format the git argv
 
 ## [0.4.0] - 2026-07-23
 
