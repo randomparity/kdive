@@ -400,6 +400,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the github-actions group with 2 updates
 - Bump the python-dependencies group with 4 updates
 - Bump the docker-images group across 1 directory with 2 updates
+- Pin the ppc64le uv wheel to 0.11.31
 
 ### Style
 
