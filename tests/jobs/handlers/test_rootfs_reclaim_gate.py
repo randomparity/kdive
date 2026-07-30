@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -21,6 +23,7 @@ import psycopg
 from kdive.artifacts.content_address import rootfs_object_token
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import rootfs_base_reclaimable
 from kdive.providers.local_libvirt.lifecycle.storage import overlay_name
+from kdive.providers.shared.runtime_paths import staged_rootfs_fetch_lease_path
 from tests.reconciler.conftest import connect
 
 
@@ -224,3 +227,51 @@ def test_torn_down_referencer_is_excluded(migrated_url: str, tmp_path: Path) -> 
     inv, sys_id = asyncio.run(_seed())
     _write_overlay(tmp_path, sys_id)  # even with an overlay, torn_down is not enumerated
     assert _reclaimable(migrated_url, inv, tmp_path)
+
+
+def test_the_state_classifier_is_not_widened_by_the_fetch_lease(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The AC-8 reconciliation for #1702/ADR-0515, asserted rather than left implicit.
+    #
+    # The issue's title proposes widening *this* classifier so a torn_down/failed System keeps
+    # pinning. That is the one shape AC-8 forbids: `failed` is terminal with no transition out of
+    # it, nothing removes a failed System's overlay, and `torn_down` is the achieved post-state — so
+    # a state-keyed pin on either has nothing that can ever release it, and the base leaks until an
+    # operator intervenes. ADR-0515 therefore puts the new evidence in the per-checksum liveness
+    # gate, keyed on a flock the kernel releases, and leaves this classifier byte-for-byte alone.
+    #
+    # This test pins that separation of duties. A live fetch lease sits in the staging tree for the
+    # very token this failed System references, and `rootfs_base_reclaimable` still says
+    # "reclaimable" — because answering the liveness question is not its job. Were someone to
+    # "simplify" ADR-0515 by adding FAILED to ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, this reddens
+    # alongside test_failed_referencer_with_overlay_gone_drains above.
+    async def _seed() -> UUID:
+        conn = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(conn)
+            alloc = await _seed_allocation(conn)
+            await _seed_system(
+                conn,
+                allocation_id=alloc,
+                investigation_id=inv,
+                state="failed",
+                profile=_upload_profile(_CHECKSUM_X),
+            )
+            return inv
+        finally:
+            await conn.close()
+
+    inv = asyncio.run(_seed())
+    uploads = tmp_path / "uploads"
+    lease = staged_rootfs_fetch_lease_path(uploads / str(inv) / f"{_TOKEN_X}.qcow2", "cafebabe")
+    lease.parent.mkdir(parents=True, exist_ok=True)
+    lease.touch()
+    fd = os.open(lease, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rootfs_dir = tmp_path / "rootfs"
+        rootfs_dir.mkdir(parents=True, exist_ok=True)
+        assert _reclaimable(migrated_url, inv, rootfs_dir)
+    finally:
+        os.close(fd)

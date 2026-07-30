@@ -33,6 +33,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from kdive.jobs.handlers.artifacts.rootfs_reclaim import sweep_investigation_staging_dir
+from kdive.providers.shared.runtime_paths import STAGED_ROOTFS_FETCH_LEASE_SUFFIX
 
 _TOKEN = "dGVzdC10b2tlbg"  # an arbitrary base64url content-address token
 
@@ -564,3 +565,35 @@ def test_a_surviving_row_leaves_the_partial_glob_alone(tmp_path: Path) -> None:
 
     assert in_flight.exists()
     assert not orphan.exists()  # ... while the token-keyed collection still reaches the orphan
+
+
+def test_an_orphan_fetch_lease_does_not_keep_the_staging_dir_alive(tmp_path: Path) -> None:
+    # ADR-0515 adds a second file a fetcher leaves behind, and it is collected on exactly the terms
+    # the partial is. Without this the sweep's rmdir would fail ENOTEMPTY on every investigation
+    # that ever staged a base, leaking one directory apiece — the failure mode
+    # `_unlink_completion_markers` was added for one file-kind over, re-created by a new one.
+    inv, inv_dir = _inv_dir(tmp_path)
+    orphan = inv_dir / f"{_TOKEN}.deadbeef{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"
+    orphan.touch()  # created, never flocked: a killed fetcher's leftover
+
+    assert _sweep(tmp_path, inv) is False
+    assert not inv_dir.exists()
+
+
+def test_a_held_fetch_lease_defers_the_drain_like_a_held_partial(tmp_path: Path) -> None:
+    # The lease is the partial's equal for the drain decision, which it has to be: it is held over
+    # the window in which the partial does not exist yet, so a sweep that ignored it would retire
+    # the drain marker — and with it every collector this investigation has — while a fetcher was
+    # still about to publish into the directory. That is the SENSITIVE leak ADR-0452 §4 keeps the
+    # marker for, arriving through the one file that gate could not see.
+    inv, inv_dir = _inv_dir(tmp_path)
+    lease = inv_dir / f"{_TOKEN}.{uuid4().hex}{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"
+    lease.touch()
+    fd = os.open(lease, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert _sweep(tmp_path, inv) is True  # deferred: the drain marker is retained
+        assert lease.exists(), "a live fetcher's lease was collected out from under it"
+        assert inv_dir.exists()
+    finally:
+        os.close(fd)

@@ -268,11 +268,11 @@ Traps this run hit, in the order they bite:
   Be precise about what is left uncovered, because it is narrower than "the lock
   never runs". The arm's *first* provision is a cold fetch, so it does take
   `pg_advisory_lock`, does re-run the staged-base check under it, and does call
-  `_unlink_orphan_partials` — uncontended, on one worker, every time. What a
+  `_unlink_orphan_staging` — uncontended, on one worker, every time. What a
   one-worker stack can never reach are the **contended branches**: the "a sibling
   fetcher finished while we waited on the lock" early return, the "a sibling
   published a staged rootfs base that does not verify" warning, and
-  `_unlink_orphan_partials`'s skip of a partial whose `flock` a live writer still
+  `_unlink_orphan_staging`'s skip of a partial whose `flock` a live writer still
   holds. Each needs a second fetcher that exists at the same moment. To reach
   them, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
   below, which needs a second worker process.
@@ -333,7 +333,7 @@ That is one branch, and claiming more would repeat the defect this arm was
 written to fix. Two neighbours stay uncovered locally even here, because each
 needs a fault the arm does not engineer. The "a sibling published a staged rootfs
 base that does not verify" warning needs the holder to publish a base that fails
-the marker or qcow2 gate. `_unlink_orphan_partials` skipping a live writer's
+the marker or qcow2 gate. `_unlink_orphan_staging` skipping a live writer's
 `flock` needs a partial that is still held when a sibling sweeps — but the holder
 unlinks its own partial before it releases the fetch lock, and the waiter returns
 early without ever reaching the sweep, so a plain two-worker race cannot produce

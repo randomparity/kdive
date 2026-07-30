@@ -90,7 +90,11 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.materialize import (
     UploadFetch,
     staged_rootfs_path,
 )
-from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
+from kdive.providers.shared.runtime_paths import (
+    STAGED_ROOTFS_FETCH_LEASE_SUFFIX,
+    staged_rootfs_fetch_lease_path,
+    staged_rootfs_marker_path,
+)
 from kdive.providers.shared.staging_partials import unlink_partial_if_unheld
 from kdive.store.objectstore import artifact_key, object_store_from_env
 
@@ -198,8 +202,127 @@ def fetch_uploaded_rootfs(
     """
     token = rootfs_object_token(upload.checksum_sha256)
     investigation_id = _resolve_investigation(conn, upload.system_id)
-    resolved = _resolve_object(conn, investigation_id, token, upload)
     dest = staged_rootfs_path(investigation_id, token, upload_dir=upload.upload_dir)
+    with _fetch_lease(dest, system_id=upload.system_id):
+        return _fetch_under_lease(
+            conn, store, upload, investigation_id=investigation_id, token=token, dest=dest
+        )
+
+
+@contextmanager
+def _fetch_lease(dest: Path, *, system_id: UUID) -> Iterator[None]:
+    """Hold this fetch's ``flock``-guarded in-flight lease for the whole call (ADR-0515, #1702).
+
+    The durable evidence ADR-0495 said option 2 needed. Its Consequences deferred widening the pin
+    classifier because ``torn_down`` and ``failed`` carry no "was provisioning" evidence — but the
+    evidence does not have to live on the System row, and on that row it could not be **bounded**:
+    a column set by a fetcher that is then ``SIGKILL``\\ ed is never cleared, and a base pinned by a
+    dead fetcher forever is the disk-exhaustion regression ``test_failed_referencer_with_overlay
+    _gone_drains`` exists to catch. So the evidence is a file whose holder the *kernel* releases.
+
+    The lease is taken **before** :func:`_resolve_object` and released only when the fetch returns
+    or raises, so it strictly contains ADR-0495's residual window 2: a fetch that has resolved its
+    ``artifacts`` row but has not yet created its ``<token>.<uuid>.partial``. That window is not
+    short — the fetch waits on the per-(investigation, checksum) session lock inside it, behind a
+    sibling's multi-GiB download — which is why the partial's own ``flock`` could not close it.
+
+    **What clears it, on every exit path.** A normal return, a ``CategorizedError``, and an
+    ``OSError`` all unwind this ``finally``, which closes the descriptor and unlinks the file. A
+    killed worker unwinds nothing — ``SIGTERM`` sets an asyncio stop Event rather than raising into
+    this thread, and ``SIGKILL`` runs nothing at all — so for that case the kernel drops the
+    ``flock`` on process exit and the lease stops pinning *immediately*, while the leftover file is
+    collected by the same two sweeps that collect an orphaned partial. Those are the only two
+    outcomes: pinning ends either with this ``finally`` or with the holding process, and neither
+    can outlive a dead fetcher.
+
+    Degrading rather than failing is :func:`_flocked_partial`'s own ``ENOLCK`` precedent, applied
+    twice. A staging directory this call cannot create or write leaves the fetch unleased, which is
+    exactly the pre-ADR-0515 behavior; turning a host quirk that disables an advisory *pin* into a
+    total uploaded-rootfs outage costs availability for no safety. Same for a filesystem that cannot
+    ``flock`` at all, where the reclaim's probe cannot read the lease either.
+    """
+    lease = staged_rootfs_fetch_lease_path(dest, uuid4().hex)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # 0o600, not the partial's 0o666: this file is never ``os.replace``\\ d onto a base QEMU
+        # reads as the unprivileged hypervisor user, and its whole content is its existence.
+        fd = os.open(lease, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as err:
+        _log.warning(
+            "could not take the rootfs fetch lease at %s (%s); staging unleased for system %s — a "
+            "concurrent reclaim cannot see this download until its partial exists (ADR-0495's "
+            "window 2 stays open for this fetch), which is the behavior before ADR-0515",
+            lease,
+            err.strerror,
+            system_id,
+        )
+        yield
+        return
+    try:
+        _hold_fetch_lease(fd, lease, system_id=system_id)
+        yield
+    finally:
+        os.close(fd)
+        with suppress(OSError):
+            lease.unlink()
+
+
+def _hold_fetch_lease(fd: int, lease: Path, *, system_id: UUID) -> None:
+    """Take the exclusive ``flock`` on a freshly created lease, warning on each way it cannot pin.
+
+    Split out so :func:`_fetch_lease`'s ``finally`` still runs for every branch: the descriptor is
+    already open here, so a raise past this point would leak both it and the file.
+
+    Two conditions leave the fetch unpinned and each is reported, because in both the reclaim gate
+    reverts to its pre-ADR-0515 reach and the log line is the only evidence:
+
+    *The filesystem cannot ``flock``.* :func:`_flocked_partial` stages unguarded on exactly these
+    errnos and a sweep there cannot lock either, so the lease carries no information in either
+    direction — the same degrade, not a new one.
+
+    *A sweep took the lease in the create-then-lock gap.* ``open`` and ``flock`` are two syscalls
+    (ADR-0446 §3), and in between the file is genuinely unheld, so a concurrent sweep's own
+    ``flock``-and-unlink can win it. The ``flock`` then succeeds on an unlinked inode that no
+    ``scandir`` will ever list. Retrying is deliberately not done: this is an *advisory* pin whose
+    loss costs the ADR-0495 residual and nothing more, the partial's own ``flock`` still guards the
+    transfer itself, and a retry loop against a sweeper is how ADR-0452 §5's never-terminating drain
+    was written the first time.
+    """
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as err:
+        _log.warning(
+            "could not flock the rootfs fetch lease %s (%s); staging unleased for system %s, so a "
+            "concurrent reclaim cannot see this download until its partial exists",
+            lease,
+            err.strerror,
+            system_id,
+        )
+        return
+    if os.fstat(fd).st_nlink == 0:
+        _log.warning(
+            "a concurrent staging sweep took the rootfs fetch lease %s between its creation and "
+            "its lock; staging unleased for system %s",
+            lease,
+            system_id,
+        )
+
+
+def _fetch_under_lease(
+    conn: psycopg.Connection,
+    store: UploadObjectStore,
+    upload: RootfsUploadContext,
+    *,
+    investigation_id: UUID,
+    token: str,
+    dest: Path,
+) -> Path:
+    """Resolve the object and stage it, with :func:`_fetch_lease` already held for this fetch.
+
+    Split from :func:`fetch_uploaded_rootfs` only so the lease brackets **every** exit of this body
+    — including the reuse fast path, whose early ``return`` would otherwise need its own release.
+    """
+    resolved = _resolve_object(conn, investigation_id, token, upload)
     rejection = _staged_base_rejection(dest, system_id=upload.system_id)
     if rejection is None:
         return dest
@@ -238,7 +361,7 @@ def fetch_uploaded_rootfs(
                 investigation_id,
                 upload.system_id,
             )
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
         stage_uploaded_rootfs(
             store,
             object_key=resolved.object_key,
@@ -347,8 +470,8 @@ def _resolve_object(
     )
 
 
-def _unlink_orphan_partials(dest: Path) -> None:
-    """Glob-unlink each **unheld** crash-orphaned ``<token>.*.partial`` (ADR-0446).
+def _unlink_orphan_staging(dest: Path) -> None:
+    """Glob-unlink each **unheld** crash-orphaned staging file of this base (ADR-0446, ADR-0515).
 
     A killed worker's ``.partial`` is a SENSITIVE multi-GiB leak no row owns, so ADR-0441 §5 has a
     live fetcher collect it opportunistically — bounding it by the *next fetch* of that base rather
@@ -377,17 +500,25 @@ def _unlink_orphan_partials(dest: Path) -> None:
     opportunistic and bounded by the next fetch, so a skip needs no follow-up. The reclaim-side
     backstop consumes it, because there the skip decides whether the investigation's drain marker
     clears (ADR-0452 §4).
+
+    ADR-0515's ``<token>.<uuid>.fetching`` lease is collected on the same terms and by the same
+    gate, because it is the same kind of object: a zero-byte file no row owns, whose live holder is
+    proven only by the ``flock``. It **must** be collected somewhere — an uncollected lease keeps
+    the investigation's staging directory non-empty forever, which is the ``ENOTEMPTY`` leak
+    ``_unlink_completion_markers`` was added for one file-kind over. This caller's own live lease is
+    among the candidates and is skipped by the gate, held as it is for the whole call.
     """
     with suppress(OSError):
-        for orphan in dest.parent.glob(f"{dest.stem}.*.partial"):
-            unlink_partial_if_unheld(orphan, unlink_when_unlockable=False)
+        for suffix in (".partial", STAGED_ROOTFS_FETCH_LEASE_SUFFIX):
+            for orphan in dest.parent.glob(f"{dest.stem}.*{suffix}"):
+                unlink_partial_if_unheld(orphan, unlink_when_unlockable=False)
 
 
 @contextmanager
 def _flocked_partial(partial: Path) -> Iterator[int]:
     """Create this fetcher's partial and hold an exclusive ``flock`` on it while it stages.
 
-    The liveness marker :func:`_unlink_orphan_partials` reads. Two *writers* never contend, because
+    The liveness marker :func:`_unlink_orphan_staging` reads. Two *writers* never contend, because
     partial names carry a ``uuid4``, so no two fetchers ever name the same file; the only contender
     is a sibling's sweep, handled below. The descriptor is held across the download, the verify, and
     :func:`_durable_replace`, which is exactly the window in which a sweep must not touch the file.

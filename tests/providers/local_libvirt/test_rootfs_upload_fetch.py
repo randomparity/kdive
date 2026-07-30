@@ -41,11 +41,14 @@ from kdive.providers.local_libvirt.lifecycle.rootfs.rootfs_upload_fetch import (
     _STREAM_CHUNK_BYTES,
     _fetch_lock_name,
     _starts_with_qcow2_magic,
-    _unlink_orphan_partials,
+    _unlink_orphan_staging,
     fetch_uploaded_rootfs,
     stage_uploaded_rootfs,
 )
-from kdive.providers.shared.runtime_paths import staged_rootfs_marker_path
+from kdive.providers.shared.runtime_paths import (
+    STAGED_ROOTFS_FETCH_LEASE_SUFFIX,
+    staged_rootfs_marker_path,
+)
 from kdive.store.objectstore import artifact_key
 from tests.clock import STORE_MTIME
 
@@ -1999,7 +2002,7 @@ def test_sweep_skips_a_partial_a_live_sibling_still_holds(tmp_path: Path) -> Non
     # unconditionally, destroying a multi-GiB download that was still in flight.
     dest = _dest(tmp_path)
     with _held_partial(dest) as live:
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
         assert live.exists()
         assert live.read_bytes() == b"a live sibling is still writing this"
 
@@ -2011,7 +2014,7 @@ def test_sweep_unlinks_an_unheld_crash_orphan(tmp_path: Path) -> None:
     orphan = dest.parent / f"{_TOKEN}.deadbeef.partial"
     orphan.write_bytes(b"leaked by a killed worker")
 
-    _unlink_orphan_partials(dest)
+    _unlink_orphan_staging(dest)
 
     assert not orphan.exists()
 
@@ -2025,7 +2028,7 @@ def test_sweep_unlinks_only_the_orphan_when_a_live_partial_sits_beside_it(tmp_pa
     orphan.write_bytes(b"leaked")
 
     with _held_partial(dest) as live:
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
         assert live.exists()
     assert not orphan.exists()
 
@@ -2048,7 +2051,7 @@ def test_sweep_tolerates_a_candidate_that_vanishes_between_the_glob_and_the_open
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", vanishing_open)
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
 
     assert not orphan.exists()
 
@@ -2074,14 +2077,14 @@ def test_sweep_collects_a_partial_once_its_holder_process_dies(tmp_path: Path) -
     proc.start()
     try:
         assert locked.wait(timeout=60), "the child never took the flock"
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
         assert partial.exists(), "a live holder's partial was swept"
     finally:
         proc.kill()
         proc.join(timeout=60)
     assert proc.exitcode is not None, "the flock holder did not exit"
 
-    _unlink_orphan_partials(dest)
+    _unlink_orphan_staging(dest)
 
     assert not partial.exists()
 
@@ -2169,7 +2172,7 @@ def test_a_staging_fetchers_own_partial_survives_a_concurrent_sweep(tmp_path: Pa
         assert reached.wait(timeout=60), "the staging thread never reached the stall"
         partials = list(dest.parent.glob(f"{_TOKEN}.*.partial"))
         assert len(partials) == 1, f"expected one in-flight partial, found {partials}"
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
         assert partials[0].exists(), "the sweep destroyed a live fetcher's own partial"
     finally:
         release.set()
@@ -2234,7 +2237,7 @@ def test_sweep_warns_when_it_skips_a_partial_a_live_sibling_holds(
     # a reclaim-side caller where no fetch lock exists at all.
     dest = _dest(tmp_path)
     with caplog.at_level(logging.WARNING), _held_partial(dest) as live:
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
 
     assert live.exists()
     assert any(
@@ -2264,7 +2267,7 @@ def test_sweep_warns_and_skips_a_candidate_it_cannot_open(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", denying_open)
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
 
     assert orphan.exists()  # left for the reclaim backstop, not unlinked unchecked
     assert any("could not open the staging partial" in r.getMessage() for r in caplog.records), (
@@ -2290,7 +2293,7 @@ def test_the_fetch_side_sweep_still_skips_on_a_filesystem_that_cannot_lock(
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", unlockable_flock)
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
 
     assert orphan.exists()
 
@@ -2342,7 +2345,7 @@ def test_the_partial_stays_locked_after_the_stagers_writer_closes(tmp_path: Path
     real_require = rootfs_upload_fetch._require_qcow2_magic
 
     def sweeping_require(staged: Path, *, system_id: str) -> None:
-        _unlink_orphan_partials(dest)  # a sibling sweeps between the writer close and the publish
+        _unlink_orphan_staging(dest)  # a sibling sweeps between the writer close and the publish
         swept.append(list(dest.parent.glob(f"{_TOKEN}.*.partial")))
         real_require(staged, system_id=system_id)
 
@@ -2532,7 +2535,7 @@ def test_sweep_warns_and_continues_when_one_candidate_cannot_be_unlinked(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(Path, "unlink", sticky_unlink)
-        _unlink_orphan_partials(dest)
+        _unlink_orphan_staging(dest)
 
     assert stuck.exists()
     assert not collectable.exists(), "one unsweepable candidate truncated the rest of the pass"
@@ -2631,3 +2634,68 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
     assert "while it was being downloaded" in str(error.value)
     assert "the usual cause is a stage the filesystem could not flock" in str(error.value)
     assert not dest.exists()
+
+
+def _held_by_another_descriptor(path: Path) -> bool:
+    """Whether some *other* open description holds ``path``'s flock, from a fresh descriptor."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def test_the_fetch_lease_is_held_before_the_artifacts_row_is_resolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0515's load-bearing ordering claim (#1702). The reclaim gate can only see a fetch that
+    # already left evidence, so the lease must exist and be *held* by the time the artifacts row is
+    # resolved — that instant is the start of ADR-0495's residual window 2, and everything after it
+    # (the session-lock wait, in particular, which can be a sibling's whole multi-GiB download) is
+    # unprotected without it. Taking the lease one line later than this would leave the window open
+    # while looking correct.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    inv_dir = tmp_path / str(inv)
+    observed: list[tuple[Path, bool]] = []
+    real_resolve = rootfs_upload_fetch._resolve_object
+
+    def _observing_resolve(*args: Any, **kwargs: Any) -> Any:
+        leases = sorted(inv_dir.glob(f"*{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"))
+        observed.extend((lease, _held_by_another_descriptor(lease)) for lease in leases)
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(rootfs_upload_fetch, "_resolve_object", _observing_resolve)
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2
+    assert len(observed) == 1, "exactly one lease must be live while the row is resolved"
+    lease, held = observed[0]
+    assert held, "the lease existed but nothing held its flock, so the reclaim gate would ignore it"
+    # Named for the base it pins, so the reclaim's per-token probe selects it by prefix rather than
+    # deferring this checksum on an unrelated sibling's download.
+    assert lease.name.startswith(f"{_TOKEN}.")
+    # Cleared on the success exit path: a lease that outlived its fetch would pin the base until an
+    # operator removed it, which is the unbounded pin AC-8 forbids.
+    assert not lease.exists()
+    assert not list(inv_dir.glob(f"*{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"))
+
+
+def test_the_fetch_lease_is_cleared_when_the_fetch_raises(tmp_path: Path) -> None:
+    # The other half of "cleared on every exit path". A fetch that raises — here an unresolvable
+    # checksum, the CONFIGURATION_ERROR raised from inside the leased region — must leave nothing
+    # behind. A lease leaked on the error path is worse than one leaked on success, because the
+    # error paths are the ones that actually fire in production.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=None)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with pytest.raises(CategorizedError):
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert not list((tmp_path / str(inv)).glob(f"*{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"))
