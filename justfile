@@ -346,7 +346,8 @@ served-doc-links:
     ./scripts/check-served-doc-links.sh
 
 # Guard the ADR status lifecycle: valid status, index in sync, no shipped-but-Proposed
-# drift (docs/adr/README.md ratification rule). Stdlib-only (plain python3, no uv sync).
+# drift (docs/adr/README.md ratification rule); record shape/anti-erasure is the `records`
+# workflow (ADR-0504). Stdlib-only (plain python3, no uv sync).
 adr-status-check:
     python3 scripts/check_adr_status.py
 

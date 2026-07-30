@@ -106,9 +106,10 @@ jobs:
         # so adding it only to `just ci` would not gate PRs.
         run: just served-doc-links
 
-      - name: ADR status in sync
-        # An ADR's Status must match its index row, and no Proposed ADR may be cited in
-        # src/ (docs/adr ratification rule). Listed here because CI invokes recipes
+      - name: ADR status lifecycle
+        # Every ADR's Status keyword parses, and no Proposed ADR is cited in src/ or tests/
+        # (docs/adr ratification rule). Record *shape* and anti-erasure are the separate
+        # `records` workflow's job (ADR-0504). Listed here because CI invokes recipes
         # individually, so adding it only to `just ci` would not gate PRs.
         run: just adr-status-check
 
