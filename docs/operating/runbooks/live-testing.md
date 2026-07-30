@@ -439,16 +439,20 @@ the sweep collected the object, staged base, staging dir and `artifacts` row —
 the same checks the Reclaim arm asserts, including its one-day grace trap.
 
 **2026-07-30 run** (branch `feat/multi-worker-fetch-lock-1551`, both workers
-build-stamped identically): a **partial pass** — rows 1 and 2 confirmed, row 3 not
-run. The two provisions were claimed 91 µs apart by two different workers
-(`…:3870543` and `…:3870590`); 30 ms later one backend held the fetch lock and the
-other was blocked on it with `wait_event_type=Lock`, `wait_event=advisory`; the
-holder released ~4.4 s later, after writing a 1,468,465,152-byte base and its
-`.ready` marker. No store trace was running, so the run evidences real contention
-and says nothing about the dedup outcome. Both provisions then failed at
-baseline-kernel extraction, because the workspace venv has no `guestfs` binding;
-that does not affect the arm, since the fetch and its lock both complete before
-that step. A full pass still needs a run with `mc admin trace` attached.
+build-stamped identically): all three rows pass.
+
+| | Observed |
+|---|---|
+| Claim | Both provision jobs claimed at `18:13:36.979407`, the same microsecond, by `homer…:1194523` and `homer…:1194534` — the two live worker pids |
+| Lock | `18:13:37.009654` pid 244 takes `(classid, objid) = (486701297, 24917193)`, `granted=t`; 237 µs later pid 245 blocks on the same key, `granted=f`, `wait_event_type=Lock`, `wait_event=advisory` |
+| Download | One `s3.GetObject` for the rootfs key, `18:13:37.015`→`18:13:39.545`, `200 OK`, ↓ 1.4 GiB in 2.53 s. The whole trace holds exactly one `GetObject` and one `HeadObject` for that key |
+| Teardown | `investigations.close` with `force`, then the sweep at `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS=0`: `reclaim_investigation_rootfs` reached `succeeded`, and the staging dir, the object, and the `artifacts` row are gone with `rootfs_cleanup_pending_at` cleared |
+
+So the waiter blocked on the lock for the full duration of the holder's download
+and then took the base rather than fetching its own — contention and the dedup
+outcome, not one standing in for the other. Both provisions still failed
+afterwards at baseline-kernel extraction, because the workspace venv has no
+`guestfs` binding; that is downstream of the fetch and does not affect the arm.
 
 One limit to record: the ADR-0482 skew preflight probes one worker. Its URL set is
 built from the registered per-process ports, so workers 2..N are outside it and a
