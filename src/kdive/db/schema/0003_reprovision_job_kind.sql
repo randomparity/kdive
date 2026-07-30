@@ -7,3 +7,4 @@ ALTER TABLE jobs DROP CONSTRAINT jobs_kind_check;
 ALTER TABLE jobs ADD CONSTRAINT jobs_kind_check
     CHECK (kind IN ('provision', 'reprovision', 'teardown', 'build', 'install',
                     'boot', 'force_crash', 'power', 'capture_vmcore'));
+-- proof mutation for #1723; this branch is thrown away
