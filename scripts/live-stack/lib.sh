@@ -71,6 +71,7 @@ worker_pids() {
 
 stop_daemons() {
   local pids pid owner
+  local -a remaining
   mapfile -t pids < <(daemon_pids)
   ((${#pids[@]})) || {
     echo "no kdive daemons running"
@@ -85,11 +86,15 @@ stop_daemons() {
       kill "$pid" 2>/dev/null || true
     fi
   done
+  # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
+  # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
+  # in require_workers_alive, and this list is likewise what an operator would act on.
   for _ in {1..20}; do
-    [[ -z "$(daemon_pids)" ]] && return 0
+    mapfile -t remaining < <(daemon_pids)
+    ((${#remaining[@]})) || return 0
     sleep 0.5
   done
-  echo "WARN: daemons still running after stop: $(daemon_pids | tr '\n' ' ')" >&2
+  echo "WARN: daemons still running after stop: ${remaining[*]}" >&2
 }
 
 # Fail (return 1) if KDIVE_HTTP_PORT is already held by a foreign listener, printing the holder so
@@ -143,14 +148,20 @@ configured_worker_count() {
     echo "KDIVE_WORKER_COUNT must be a positive integer, got '${count}'" >&2
     return 1
   }
-  # BOTH ends, deliberately. The regex above bounds sign and format but NOT magnitude, and bash
-  # arithmetic is 64-bit signed — so a value past int64 wraps, and a one-sided `<=` accepted every
-  # value that wrapped below zero (2^63 lands on INT64_MIN, 2^64 lands on 0). That did not merely
-  # skip the bound: the unwrapped string flowed on to the launch loop, whose `index <= count` ran
-  # zero times, and to `DAEMON_COUNT="$((2 + count))"`, which went negative and made the settle
-  # gate's `alive < DAEMON_COUNT` unreachable. A stack with no workers then took the SURPLUS branch
-  # below and reported one for a condition that was not occurring.
-  ((count >= 1 && count <= MAX_WORKER_COUNT)) || {
+  # Bound the MAGNITUDE before doing any arithmetic on it. The regex above bounds sign and format
+  # but not size, and bash arithmetic is 64-bit signed, so any value past int64 silently wraps and
+  # the comparison then judges the wrapped number rather than the one the operator typed: 2^63
+  # lands on INT64_MIN, 2^64 on 0, and 2^64+1 .. 2^64+8 land inside the accepted range. No numeric
+  # comparison can screen those, because by the time `((...))` sees the value it has already
+  # wrapped — hence the digit-count test, which is exact here and needs no arithmetic at all: the
+  # regex forbids a leading zero, so for two decimal strings more digits means strictly greater.
+  #
+  # Left unbounded this was not a cosmetic slip. The unwrapped string flowed on to the launch loop,
+  # whose `index <= count` ran zero times, and to `DAEMON_COUNT="$((2 + count))"`, which went
+  # negative and made the settle gate's `alive < DAEMON_COUNT` unreachable — so a stack with no
+  # workers at all reached the SURPLUS branch below and reported one for a condition that was not
+  # occurring.
+  ((${#count} <= ${#MAX_WORKER_COUNT} && count <= MAX_WORKER_COUNT)) || {
     echo "KDIVE_WORKER_COUNT=${count} is outside 1..${MAX_WORKER_COUNT}. A value past the ceiling —" >&2
     echo "or one so large it wraps bash's signed 64-bit arithmetic — is refused: each worker is a" >&2
     echo "root process with its own database pool and aux health port; the live-testing runbook's" >&2
@@ -341,20 +352,31 @@ require_workers_alive() {
     # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
     # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
     # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
-    # (`--yes` gates only the --wipe prompt, so `down.sh --yes` is `down.sh` here.) Escalating
-    # inside stop_daemons was rejected: it runs on EVERY bring-up, and SIGKILLing a worker parked
-    # in a provision abandons its libvirt domain and qcow2 overlay, which nothing outside
-    # `down.sh --wipe` reaps. Waiting vs. killing is the operator's call, so state both.
+    # (`--yes` gates only the --wipe prompt, so `down.sh --yes` is `down.sh` here.)
+    #
+    # Escalating to SIGKILL inside stop_daemons was the alternative, and is rejected on two counts.
+    # It runs on EVERY bring-up, not just teardown, so it would hard-kill a worker legitimately
+    # mid-job — discarding a multi-GiB fetch or a kernel build that was about to finish. And
+    # daemon_pids matches every kdive daemon, so the escalation would take the RECONCILER down the
+    # same way: the drift-repair loop (ADR-0021) that reclaims the abandoned job's lease, repairs
+    # the orphaned System and reaps its leaked domain is precisely what cleans up after an
+    # abruptly-killed worker, so hard-killing it alongside the damage is the wrong trade.
+    #
+    # Which leaves the operator the judgement call, so give them both options and the consequence.
     {
       echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
       echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
       echo "  until its current job ends, and the ten-second wait only warns. It may be running"
       echo "  older code, and it masks a new worker that failed to start."
       echo "  Live worker pids: ${pids[*]}"
+      echo "  Those are every worker from this checkout, INCLUDING the ones this run just started"
+      echo "  — the survivor is whichever has the older start time (ps -o pid,lstart,etime -p ...)."
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
-      echo "  gives up the same way. Either wait for the in-flight job to finish and re-run, or"
-      echo "  end those processes yourself (they are root unless KDIVE_WORKER_AS_ROOT=0):"
+      echo "  gives up the same way. So either wait for the in-flight job to finish and re-run,"
+      echo "  or end these yourself (root unless KDIVE_WORKER_AS_ROOT=0) and re-run:"
       echo "    sudo kill -9 ${pids[*]}"
+      echo "  Killing abandons that job mid-flight; the reconciler's drift repair reclaims its"
+      echo "  lease and reaps anything it left behind once the stack is running again."
     } >&2
     return 1
   fi

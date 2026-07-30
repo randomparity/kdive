@@ -161,10 +161,18 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
     `DAEMON_COUNT` went negative and disabled the settle gate — so a stack with no workers at all
     reported a *surplus*. The ceiling must therefore bound BOTH ends, not just the upper one.
     """
-    # Both of these defeat the one-sided check: 2^63 wraps to INT64_MIN, 2^64 wraps to 0. A
-    # value that wraps back to a large positive (e.g. 1e20) does NOT belong here — it is caught
-    # by the upper bound and would pass this test without the fix.
-    for wrapping in ("9223372036854775808", "18446744073709551616"):
+    # Every one of these defeats a purely numeric check, because each has already wrapped by the
+    # time `((...))` sees it: 2^63 -> INT64_MIN, 2^64 -> 0, and 2^64+1 / 2^64+8 land squarely
+    # INSIDE the accepted 1..8 range. The last two are why a two-sided numeric bound is not
+    # enough on its own and the digit-count test carries the magnitude. A value that wraps back
+    # to a large positive (e.g. 1e20) does NOT belong here — the upper bound catches it, so it
+    # would pass this test with or without the fix.
+    for wrapping in (
+        "9223372036854775808",
+        "18446744073709551616",
+        "18446744073709551617",
+        "18446744073709551624",
+    ):
         result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=wrapping)
         assert result.returncode != 0, f"{wrapping!r} wraps past int64 and must be refused"
         assert "ceiling" in result.stderr, result.stderr
@@ -326,7 +334,19 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
     assert "kill -9 111 222" in surplus.stderr, (
         f"the remedy must name the pids it just printed: {surplus.stderr}"
     )
-    assert "wait" in surplus.stderr, "the non-destructive option must be offered first"
+    # Not a bare `"wait" in stderr` — the pre-fix message already said "the ten-second wait only
+    # warns", so that substring passes against the very message this test exists to reject.
+    assert surplus.stderr.index("wait for the in-flight job") < surplus.stderr.index("kill -9"), (
+        f"the non-destructive option must be offered before the destructive one: {surplus.stderr}"
+    )
+    # Killing abandons a running job, so the message must not stop at the command: it has to say
+    # what picks up the pieces, or the operator is left guessing whether they have to wipe.
+    assert "reconciler" in surplus.stderr, (
+        f"the consequence of kill -9 and what repairs it must be stated: {surplus.stderr}"
+    )
+    # The pid list is every worker from this checkout, not only the survivor — telling the
+    # operator otherwise sends them to kill -9 a set the prose has mislabelled.
+    assert "INCLUDING the ones this run just started" in surplus.stderr, surplus.stderr
 
 
 def test_the_surplus_report_scans_the_process_table_exactly_once(tmp_path: Path) -> None:
@@ -353,6 +373,35 @@ def test_the_surplus_report_scans_the_process_table_exactly_once(tmp_path: Path)
     assert "but 2 from this checkout are running" in surplus.stderr, surplus.stderr
     assert "222" in surplus.stderr, (
         f"the pid list must match the count it reported: {surplus.stderr}"
+    )
+
+
+def test_stop_daemons_warns_with_the_set_it_actually_polled(tmp_path: Path) -> None:
+    """The WARN must report the scan that decided to warn, not a fresh one taken after it.
+
+    A second `ps` there is the same skew just fixed in require_workers_alive, one function below:
+    a daemon exiting between the last poll and the WARN leaves the operator a list that never
+    matched the check that produced it. The stub returns a different set once the poll loop is
+    over, so any trailing scan shows up in the message.
+
+    `kill` and `sleep` are stubbed because this function really signals pids and really waits ten
+    seconds — 111/222 could belong to someone on this host.
+    """
+    counter = tmp_path / "scans"
+    result = _lib(
+        "kill() { :; }\n"
+        "sleep() { :; }\n"
+        f'daemon_pids() {{ echo scan >>"{counter}"\n'
+        f'  if (( $(wc -l <"{counter}") > 21 )); then echo 999; else printf "111\\n222\\n"; fi\n'
+        "}\n"
+        "stop_daemons\n"
+    )
+    # One scan builds the kill list, then the poll loop runs 20 times. A 22nd means the WARN
+    # went back to `ps` instead of reusing what the loop had already read.
+    assert counter.read_text().count("scan") == 21, counter.read_text().count("scan")
+    assert "still running after stop: 111 222" in result.stderr, result.stderr
+    assert "999" not in result.stderr, (
+        f"the WARN re-scanned after the poll loop instead of reusing it: {result.stderr}"
     )
 
 
