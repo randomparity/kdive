@@ -284,8 +284,9 @@ def test_a_held_owner_lock_leaves_the_key_for_the_orphan_sweep(migrated_url: str
     """A writer holding the owner lock is not waited on: the key is declined, not failed.
 
     Phase 2 is driven directly because the lock has to be taken *after* phase 1 commits — phase 1
-    blocks on the same lock, so a holder spanning the whole pass would stall the claim rather than
-    the sweep. A reconciler pass has no deadline, so waiting here would put allocation expiry and
+    takes the same lock, so a holder spanning the whole pass makes the claim defer (ADR-0510) and
+    the sweep is never reached. A reconciler pass has no deadline, so waiting here would put
+    allocation expiry and
     orphaned-System repair behind whatever the holder is doing (ADR-0455 §5); the key is left for
     ``repair_leaked_upload_objects``, which drains exactly this residue.
     """
@@ -350,9 +351,9 @@ def test_declines_alone_never_look_like_a_refusing_store() -> None:
     A pass that stopped claiming candidates because one owner's keys were all spared would let a
     single long-running writer stall the entire past-deadline backlog, every 30 seconds, forever.
     """
-    spared = ReapOutcome(reaped=True, attempted=0, declined=3, undeleted=0)
-    refused = ReapOutcome(reaped=True, attempted=3, declined=0, undeleted=3)
-    partly = ReapOutcome(reaped=True, attempted=3, declined=2, undeleted=1)
+    spared = ReapOutcome(reaped=True, deferred=False, attempted=0, declined=3, undeleted=0)
+    refused = ReapOutcome(reaped=True, deferred=False, attempted=3, declined=0, undeleted=3)
+    partly = ReapOutcome(reaped=True, deferred=False, attempted=3, declined=2, undeleted=1)
     assert spared.store_refused_everything is False
     assert refused.store_refused_everything is True
     assert partly.store_refused_everything is False
