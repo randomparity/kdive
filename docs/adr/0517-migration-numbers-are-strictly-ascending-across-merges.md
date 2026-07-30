@@ -47,8 +47,8 @@ it; that is the immutability guard's job. A newly added `*.sql` whose name does 
 `NNNN_*.sql` is itself a violation rather than a file the guard passes over.
 
 Every way the comparison can come up empty is a hard failure, never a clean run: an unreadable
-base ref, a base ref carrying no migrations, a missing schema directory, a cwd outside the
-repository. This matters more than the ordering rule itself. A guard that reports success over
+base ref, a base ref carrying no migrations, a missing or empty schema directory, a cwd
+outside the repository. This matters more than the ordering rule itself. A guard that reports success over
 nothing is worse than no guard, because it also retires the attention that would have caught
 the problem (#1723), and every one of those states is a bug in how the guard was invoked
 rather than evidence that the branch is clean.

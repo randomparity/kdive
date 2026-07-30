@@ -21,8 +21,8 @@ Making the base ref resolvable is the caller's job; CI fetches it in the step be
 one, and locally ``git fetch origin`` before ``just ci`` is the existing convention.
 
 Every way the comparison can come up empty is a hard failure, never a clean run: an
-unreadable base ref, a base ref carrying no migrations, a missing schema directory, a cwd
-outside the repository. A guard that cannot fail is worthless (#1723).
+unreadable base ref, a base ref carrying no migrations, a missing or empty schema directory,
+a cwd outside the repository. A guard that cannot fail is worthless (#1723).
 
 Stdlib-only (``subprocess`` + ``git``) so it runs without a synced venv. Exit 0 clean,
 1 on violations or on any of those failures.
@@ -110,9 +110,17 @@ def find_violations(
 
 
 def _fetch_hint(base_ref: str) -> str:
-    """The ``git fetch`` command that would make ``base_ref`` resolvable."""
-    remote, _, branch = base_ref.rpartition("/")
-    return f"git fetch {remote or 'origin'} {branch}"
+    """How to make ``base_ref`` resolvable, given only its shape.
+
+    A ref of the form ``<remote>/<branch>`` names its own remote, so the command can be
+    exact — splitting on the *first* slash, since a branch may contain more of them. Any
+    other shape (a bare branch, a SHA, ``HEAD~1``) tells us nothing about where it comes
+    from, so suggesting a specific fetch would be a guess.
+    """
+    remote, _, branch = base_ref.partition("/")
+    if not branch:
+        return f"make {base_ref!r} resolvable (it names no remote, so there is no fetch to suggest)"
+    return f"run 'git fetch {remote} {branch}'"
 
 
 def _repo_root() -> Path:
@@ -137,9 +145,8 @@ def _base_filenames(base_ref: str) -> list[str]:
     )
     if result.returncode != 0:
         raise GuardError(
-            f"cannot read {SCHEMA_SUBDIR}/ at {base_ref!r}: {result.stderr.strip()}. "
-            f"Run '{_fetch_hint(base_ref)}' first — this guard reads a local ref and "
-            "never fetches on its own"
+            f"cannot read {SCHEMA_SUBDIR}/ there: {result.stderr.strip()}. "
+            f"{_fetch_hint(base_ref)} — this guard reads a local ref and never fetches"
         )
     return [name for name in result.stdout.splitlines() if name.endswith(".sql")]
 
@@ -149,7 +156,10 @@ def _head_filenames(root: Path) -> list[str]:
     schema_dir = root / SCHEMA_SUBDIR
     if not schema_dir.is_dir():
         raise GuardError(f"{schema_dir} is not a directory — the guard has nothing to check")
-    return [path.name for path in schema_dir.glob("*.sql")]
+    names = [path.name for path in schema_dir.glob("*.sql")]
+    if not names:
+        raise GuardError(f"{schema_dir} holds no *.sql — the guard has nothing to check")
+    return names
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,7 +169,10 @@ def main(argv: list[str] | None = None) -> int:
         root = _repo_root()
         violations = find_violations(_base_filenames(base_ref), _head_filenames(root))
     except GuardError as exc:
-        print(f"::error::migration-ordering guard could not run: {exc}", file=sys.stderr)
+        print(
+            f"::error::migration-ordering guard could not run against {base_ref!r}: {exc}",
+            file=sys.stderr,
+        )
         return 1
     for violation in violations:
         print(f"::error::{violation.message()}", file=sys.stderr)

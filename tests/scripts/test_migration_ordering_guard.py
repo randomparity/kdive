@@ -6,12 +6,15 @@ collisions but not *ordering* ones: 0085 merged after 0086 was already on `origi
 because those two happened to be independent. The guard rejects a newly added migration
 numbered at or below the highest version already on the base branch.
 
-The comparison logic is exercised directly here; `just migration-order-check` wires it
-to git.
+The comparison logic is exercised directly; the entry point is exercised end to end against
+a throwaway repo, because the guard's dangerous failure is not a wrong verdict but a clean
+run over nothing — an unreadable ref, an empty base, an empty schema directory, or a cwd
+that makes git report either as empty.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -108,23 +111,35 @@ def test_unparseable_violation_message_names_the_expected_shape() -> None:
     assert "NNNN_" in hits[0].message()
 
 
+# The fixture repo must not inherit the developer's global git config: a global
+# commit.gpgsign or core.hooksPath would break `git commit` here for reasons that have
+# nothing to do with the guard.
+_ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        env=os.environ | _ISOLATED_GIT,
+    )
 
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """A throwaway repo whose `base` branch carries migrations 0085 and 0086."""
-    schema = tmp_path / "src/kdive/db/schema"
+    repo_dir = tmp_path / "repo"
+    schema = repo_dir / "src/kdive/db/schema"
     schema.mkdir(parents=True)
     for name in ("0085_a.sql", "0086_b.sql"):
         (schema / name).write_text("-- SELECT 1;\n")
-    _git(tmp_path, "init", "-q", "-b", "base")
-    _git(tmp_path, "config", "user.email", "guard@test")
-    _git(tmp_path, "config", "user.name", "guard")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-qm", "base migrations")
-    return tmp_path
+    _git(repo_dir, "init", "-q", "-b", "base")
+    _git(repo_dir, "config", "user.email", "guard@test")
+    _git(repo_dir, "config", "user.name", "guard")
+    _git(repo_dir, "add", "-A")
+    _git(repo_dir, "commit", "-qm", "base migrations")
+    return repo_dir
 
 
 def _run(
@@ -163,10 +178,35 @@ def test_end_to_end_names_the_violation_when_invoked_from_a_subdirectory(repo: P
     assert "0084_late.sql" in result.stderr
 
 
-def test_end_to_end_an_unresolvable_base_ref_is_a_failure_with_a_fetch_hint(repo: Path) -> None:
+def test_end_to_end_an_unresolvable_remote_ref_is_a_failure_with_a_fetch_hint(repo: Path) -> None:
+    result = _run(repo, base_ref="origin/no-such-branch")
+    assert result.returncode == 1
+    assert "git fetch origin no-such-branch" in result.stderr
+
+
+def test_end_to_end_an_unresolvable_bare_ref_fails_without_guessing_a_remote(repo: Path) -> None:
+    # A bare name names no remote, so there is no honest fetch command to suggest.
     result = _run(repo, base_ref="no-such-ref")
     assert result.returncode == 1
-    assert "git fetch" in result.stderr
+    assert "no-such-ref" in result.stderr
+    assert "git fetch" not in result.stderr
+
+
+def test_end_to_end_an_empty_schema_directory_is_a_failure(repo: Path) -> None:
+    # The head-side twin of an empty base: nothing added is indistinguishable from
+    # nothing read, so it must not be reported as a clean run.
+    for path in (repo / "src/kdive/db/schema").glob("*.sql"):
+        path.unlink()
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "nothing to check" in result.stderr
+
+
+def test_end_to_end_outside_a_repository_is_a_failure(repo: Path) -> None:
+    # tmp_path itself is outside the fixture repo, and outside this checkout.
+    result = _run(repo, cwd=repo.parent)
+    assert result.returncode == 1
+    assert "not inside a git repository" in result.stderr
 
 
 def test_end_to_end_a_clean_branch_is_accepted(repo: Path) -> None:
