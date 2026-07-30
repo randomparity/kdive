@@ -10,6 +10,7 @@ from uuid import UUID
 
 from psycopg import AsyncConnection
 
+from kdive.domain.capacity.state import ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES
 from kdive.domain.operations.jobs import JobKind
 from kdive.jobs import queue
 from kdive.jobs.payloads import ReclaimInvestigationRootfsPayload
@@ -38,6 +39,15 @@ _TTL_ROOTFS_OBJECTS_SQL = (
     "WHERE a.owner_kind = 'investigations' AND a.retention_class = 'rootfs' "
     "AND a.created_at < now() - %s AND i.state IN ('open', 'active')"
 )
+#: The :class:`~kdive.domain.capacity.state.SystemState`\ s in which a System legitimately needs its
+#: rootfs base with no overlay file yet — read from ADR-0441 §6's curated set rather than
+#: restated, so this lane's anti-join and the reclaim's own pin gate cannot drift on what
+#: "mid-materialize" means
+#: and a new non-terminal state added without being classified reddens that set's exhaustiveness
+#: guard instead of silently escaping here. Sorted so the bound parameter is deterministic.
+_MID_MATERIALIZE_STATE_VALUES: tuple[str, ...] = tuple(
+    sorted(state.value for state in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES)
+)
 #: Staging-drain backstop scope (ADR-0494 §2, #1559): a **never-closed** investigation
 #: (``open``/``active``) that once provisioned a System off an uploaded rootfs and whose rootfs
 #: ``artifacts`` rows have since **all** drained. Keyed on ``systems`` rather than on ``artifacts``
@@ -51,13 +61,31 @@ _TTL_ROOTFS_OBJECTS_SQL = (
 #: deleted, so the trigger outlives every row the base itself had. The ``NOT EXISTS`` keeps this
 #: worklist disjoint from the TTL lane's, and the ``open``/``active`` predicate keeps it disjoint
 #: from the close-driven one, so the three never contend for the shared per-investigation dedup key.
+#:
+#: The age gate is ``investigations.created_at``, **not** the ``systems`` row's (ADR-0501, #1686).
+#: Content-addressed reuse (ADR-0441) lets a System minutes old attach to a checksum this
+#: investigation staged months ago, and a System-keyed gate then withheld the drained half's only
+#: retry until that System itself aged past retention — up to 30 days against a lane whose intended
+#: cadence is :data:`ROOTFS_STAGING_DRAIN_BACKOFF`. The investigation is what outlives every base it
+#: staged and what the same retention policy already governs, so it is what the gate reads.
+#:
+#: The second ``NOT EXISTS`` carries, explicitly, the one protection the discarded System-age gate
+#: was proxying for: a System between its staging ``mkdir`` and its ``artifacts``-row resolution,
+#: which the drain tail's ``rmdir`` would otherwise fail out from under (ADR-0494's own rejected
+#: "run the ``rmdir`` unconditionally"). It is **investigation**-scoped rather than per-row because
+#: the job carries an empty worklist and the tail sweeps the one staging directory every System of
+#: the investigation shares — so a settled sibling must not re-admit it. An age proxy could not
+#: express that anyway: on ``main`` a past-retention sibling already admitted the job while another
+#: System provisioned.
 _UNOWNED_STAGING_INV_SQL = (
     "SELECT DISTINCT s.investigation_id, i.project FROM systems s "
     "JOIN investigations i ON i.id = s.investigation_id "
-    "WHERE i.state IN ('open', 'active') AND s.created_at < now() - %s "
+    "WHERE i.state IN ('open', 'active') AND i.created_at < now() - %s "
     "AND s.provisioning_profile #>> '{provider,local-libvirt,rootfs,kind}' = 'upload' "
     "AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.owner_kind = 'investigations' "
-    "AND a.retention_class = 'rootfs' AND a.owner_id = s.investigation_id)"
+    "AND a.retention_class = 'rootfs' AND a.owner_id = s.investigation_id) "
+    "AND NOT EXISTS (SELECT 1 FROM systems m WHERE m.investigation_id = s.investigation_id "
+    "AND m.state = ANY(%s))"
 )
 
 DEFAULT_IDEMPOTENCY_RETENTION = timedelta(days=7)
@@ -369,9 +397,16 @@ async def sweep_unowned_investigation_rootfs_staging(
     5-minute slot, which caps the permanent cost at four passes a day per such investigation. A
     DB-side "is it empty" answer would need durable per-investigation state whose only reader is
     this sweep. Returns the number of jobs ensured this pass.
+
+    ``retention`` is applied to ``investigations.created_at``, and a System in one of
+    :data:`_MID_MATERIALIZE_STATE_VALUES` excludes its whole investigation for as long as it sits
+    there (ADR-0501, #1686). Both are properties of :data:`_UNOWNED_STAGING_INV_SQL`; the reasoning
+    is there.
     """
     async with conn.cursor() as cur:
-        await cur.execute(_UNOWNED_STAGING_INV_SQL, (retention,))
+        await cur.execute(
+            _UNOWNED_STAGING_INV_SQL, (retention, list(_MID_MATERIALIZE_STATE_VALUES))
+        )
         candidates = [(row[0], str(row[1])) for row in await cur.fetchall()]
     enqueued = 0
     for investigation_id, project in candidates:
