@@ -263,9 +263,18 @@ Traps this run hit, in the order they bite:
   default, so the second provision sits `queued` until the first has finished
   staging; there is no sibling to block on `pg_advisory_lock`. That still tests
   something real — the fast path collapses the redundant download, and since
-  ADR-0443 it verifies the base rather than trusting its presence — but the
-  post-lock re-check and `_unlink_orphan_partials` are never entered. To exercise
-  those, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
+  ADR-0443 it verifies the base rather than trusting its presence.
+
+  Be precise about what is left uncovered, because it is narrower than "the lock
+  never runs". The arm's *first* provision is a cold fetch, so it does take
+  `pg_advisory_lock`, does re-run the staged-base check under it, and does call
+  `_unlink_orphan_partials` — uncontended, on one worker, every time. What a
+  one-worker stack can never reach are the **contended branches**: the "a sibling
+  fetcher finished while we waited on the lock" early return, the "a sibling
+  published a staged rootfs base that does not verify" warning, and
+  `_unlink_orphan_partials`'s skip of a partial whose `flock` a live writer still
+  holds. Each needs a second fetcher that exists at the same moment. To reach
+  them, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
   below, which needs a second worker process.
 - **The catalog images are too big to upload as-is.** They are 6 GiB virtual,
   over the 5 GiB single-PUT cap, so a declaration is rejected at
@@ -313,10 +322,13 @@ share a uid (compose, Helm) will not reproduce this class of defect.
 
 ### Fetch-lock contention (needs two workers)
 
-The four arms above never reach the per-(investigation, checksum) fetch lock,
-because a one-worker stack cannot produce two simultaneous stagings. This arm
-does, and it is the only local procedure that enters the post-`pg_advisory_lock`
-re-check and `_unlink_orphan_partials` (ADR-0443, ADR-0446).
+The four arms above take the per-(investigation, checksum) fetch lock on every
+cold fetch, but always uncontended — a one-worker stack cannot produce two
+simultaneous stagings. This arm can, and it is the only local procedure that
+reaches the lock's *contended* branches: the sibling-finished-while-waiting early
+return, the sibling-published-a-base-that-does-not-verify warning, and
+`_unlink_orphan_partials` skipping a partial a live writer still holds an `flock`
+on (ADR-0443, ADR-0446).
 
 Bring the stack up with two workers. `KDIVE_WORKER_COUNT` is the local stack's
 only job-concurrency knob — worker *processes* are the concurrency unit, since a
@@ -370,21 +382,46 @@ The arm passes on **both** of these, and neither alone:
 |--------|-------|-----------------------------|
 | Two rows on one advisory key: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity` | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
 | The two provision jobs carry **different** `jobs.worker_id` values, claimed within milliseconds of each other | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' ORDER BY heartbeat_at DESC LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock row above was something else |
+| Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
 
-A single `.qcow2` under the investigation's staging dir, written once and
-followed by its `.ready` marker, confirms the lock did its job: the waiter
-re-checked after acquiring and returned the base the holder had just published
-rather than downloading it again.
+Do not substitute a file count for that third row. Counting `.qcow2` files in the
+staging dir proves nothing: both fetchers download into a private
+`<token>.<uuid>.partial` and publish by rename, and a fetcher that finds the base
+already published discards its own copy without touching `dest`. A waiter that
+re-downloaded the whole object therefore still leaves exactly one `.qcow2` with
+an unchanged mtime. The store's request count is what separates one download from
+two; the waiter's own log is the corroborating signal, since the ADR-0446 "a
+sibling published the staged rootfs base … the fetch lock was lost mid-transfer"
+warning appears only when it did re-download.
+
+Finish by reclaiming the state. The arm requires a fresh multi-GiB object every
+run and by construction can reuse nothing, so repeat runs accumulate in
+`/var/lib/kdive/rootfs-uploads/<investigation>/` and in the object store until the
+staging filesystem tightens and starts failing *unrelated* provisions with a
+free-space shortfall that points at the wrong run. Close the investigation with
+`force` (the arm's Systems outlive their provisions and need reaping) and confirm
+the sweep collected the object, staged base, staging dir and `artifacts` row —
+the same checks the Reclaim arm asserts, including its one-day grace trap.
 
 **2026-07-30 run** (branch `feat/multi-worker-fetch-lock-1551`, both workers
-build-stamped identically): contention confirmed. The two provisions were claimed
-91 µs apart by two different workers (`…:3870543` and `…:3870590`); 30 ms later
-one backend held the fetch lock and the other was blocked on it with
-`wait_event_type=Lock`, `wait_event=advisory`; the holder released ~4.4 s later,
-after writing the single 1,468,465,152-byte base and its `.ready` marker. Both
-provisions then failed at baseline-kernel extraction — the workspace venv has no
-`guestfs` binding — which does not affect this arm: the fetch and its lock both
-complete before that step.
+build-stamped identically): contention confirmed on the first two rows. The two
+provisions were claimed 91 µs apart by two different workers (`…:3870543` and
+`…:3870590`); 30 ms later one backend held the fetch lock and the other was
+blocked on it with `wait_event_type=Lock`, `wait_event=advisory`; the holder
+released ~4.4 s later, after writing a 1,468,465,152-byte base and its `.ready`
+marker. The third row was **not** checked — no store trace was running — so this
+run evidences the contention, not the dedup outcome. Both provisions then failed
+at baseline-kernel extraction, because the workspace venv has no `guestfs`
+binding; that does not affect the arm, since the fetch and its lock both complete
+before that step.
+
+Two limits to record. The ADR-0482 skew preflight probes one worker: its URL set
+is built from the registered per-process ports, so workers 2..N are outside it and
+a `fresh` verdict grades only worker 1. On a multi-worker stack, read the
+`=== build stamps ===` block — it prints a row per worker log — rather than
+treating that verdict as covering the whole stack. And an explicit
+`KDIVE_HEALTH_BIND_ADDR` collapses the aux listener to one port for *every*
+process, which the host-process layout cannot satisfy; leave it unset here.
 
 ## Hard-won quirks
 
