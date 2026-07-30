@@ -19,7 +19,6 @@ from opentelemetry.sdk._logs import LoggerProvider, ReadableLogRecord
 from opentelemetry.sdk._logs._internal import LogRecord
 from opentelemetry.sdk._logs.export import LogRecordExportResult, SimpleLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.util.types import AnyValue
 
@@ -27,6 +26,7 @@ from kdive.observability.stdout_exporter import (
     StdoutJsonLogExporter,
     format_log_record_json,
 )
+from tests.support.otel import tracer_provider
 
 _ADR0014_FIELDS = ("ts", "level", "logger", "msg")
 
@@ -80,7 +80,7 @@ def _emit(logger_name: str, span: bool = False) -> dict:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     if span:
-        tracer = TracerProvider().get_tracer("t")
+        tracer = tracer_provider().get_tracer("t")
         with tracer.start_as_current_span("s"):
             logger.info("hello in span")
     else:

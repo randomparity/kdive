@@ -24,13 +24,13 @@ from opentelemetry.sdk.metrics.export import (
     MetricsData,
     PeriodicExportingMetricReader,
 )
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from kdive.observability import redaction as orx
 from kdive.security.secrets.redaction import REDACTION
 from kdive.security.secrets.secret_registry import SecretRegistry
+from tests.support.otel import tracer_provider
 
 _SECRET = "sk-super-secret-value"  # pragma: allowlist secret - test fixture value
 
@@ -65,7 +65,7 @@ def test_secret_in_log_body_is_redacted_before_export() -> None:
 def test_secret_in_span_attribute_is_redacted_before_export() -> None:
     registry = _registry()
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = tracer_provider()
     provider.add_span_processor(SimpleSpanProcessor(orx.RedactingSpanExporter(exporter, registry)))
     tracer = provider.get_tracer("kdive.test.redact.span")
 
@@ -82,7 +82,7 @@ def test_secret_in_span_attribute_is_redacted_before_export() -> None:
 def test_secret_in_span_event_is_redacted_before_export() -> None:
     registry = _registry()
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = tracer_provider()
     provider.add_span_processor(SimpleSpanProcessor(orx.RedactingSpanExporter(exporter, registry)))
     tracer = provider.get_tracer("kdive.test.redact.span.event")
 

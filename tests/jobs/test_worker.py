@@ -13,7 +13,6 @@ import psycopg
 import pytest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
@@ -41,6 +40,7 @@ from tests.integration._seed import (
     seed_system,
 )
 from tests.providers.remote_libvirt.conftest import libvirt_error
+from tests.support.otel import tracer_provider
 
 _AUTHORIZING = Authorizing(principal="p", agent_session=None, project="a")
 
@@ -1083,7 +1083,7 @@ def _telemetry_worker(
 ) -> tuple[Worker, InMemoryMetricReader]:
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
     telemetry = WorkerTelemetry(tracer=tracer, meter=meter)
     w = _worker(pool, registry, worker_id="w1", config=WorkerConfig(telemetry=telemetry))
     return w, reader

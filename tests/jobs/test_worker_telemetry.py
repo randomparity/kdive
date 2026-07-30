@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -20,6 +19,7 @@ from kdive.domain.capacity.state import JobState
 from kdive.domain.errors import ErrorCategory
 from kdive.domain.operations.jobs import Job, JobKind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
+from tests.support.otel import tracer_provider
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -43,7 +43,7 @@ def _telemetry() -> tuple[WorkerTelemetry, InMemoryMetricReader, InMemorySpanExp
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
     exporter = InMemorySpanExporter()
-    tp = TracerProvider()
+    tp = tracer_provider()
     tp.add_span_processor(SimpleSpanProcessor(exporter))
     return WorkerTelemetry(tracer=tp.get_tracer("test"), meter=meter), reader, exporter
 
@@ -236,7 +236,7 @@ def _points_for(reader: InMemoryMetricReader, family_name: str) -> list[Any]:
 def test_provider_op_duration_recorded_when_kind_tagged() -> None:
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
     telem = WorkerTelemetry(tracer=tracer, meter=meter)
     from kdive.jobs.provider_context import set_provider_kind
 
@@ -255,7 +255,7 @@ def test_provider_op_duration_recorded_when_kind_tagged() -> None:
 def test_provider_op_error_increments_error_counter_and_tags_outcome() -> None:
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
     telem = WorkerTelemetry(tracer=tracer, meter=meter)
     from kdive.jobs.provider_context import set_provider_kind
 
@@ -275,7 +275,7 @@ def test_provider_op_error_increments_error_counter_and_tags_outcome() -> None:
 def test_provider_op_not_recorded_for_untagged_job_and_no_leak() -> None:
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
     telem = WorkerTelemetry(tracer=tracer, meter=meter)
     from kdive.jobs.provider_context import set_provider_kind
 
