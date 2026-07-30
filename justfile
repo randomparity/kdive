@@ -490,7 +490,9 @@ env-docs-check:
 # Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
 # (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);
 # a cosmetic edit breaks upgrades of any DB migrated by an earlier build (#1218). Diffs
-# against HEAD, so a clean tree passes and a staged edit fails. Stdlib-only (git only).
+# against origin/main, so a committed edit fails on a clean checkout too — diffing against
+# HEAD passed every PR CI ever ran (#1723). Offline by design (ADR-0505): it reads the local
+# origin/main, so `git fetch origin main` first. Stdlib-only (git only).
 schema-guard:
     python3 scripts/schema_immutable_guard.py
 

@@ -137,13 +137,14 @@ jobs:
         # adding it only to `just ci` would not gate PRs.
         run: just env-docs-check
 
-      - name: Fetch the base branch for the migration-ordering guard
+      - name: Fetch the base branch for the migration guards
         # On a PR the checkout's refspec covers only the PR ref, so refs/remotes/origin/main
         # does not exist; on a push to main it exists but may be behind. The leading `+`
-        # force-updates it, which covers both. The guard needs one tree, not history, so
+        # force-updates it, which covers both. The guards need one tree, not history, so
         # fetch that single ref at depth 1 rather than putting fetch-depth: 0 on the whole
         # job. The repository is public and this step needs no credentials, which is why
-        # persist-credentials: false on the checkout does not break it.
+        # persist-credentials: false on the checkout does not break it. Both the ordering
+        # guard and the immutability guard below read this one ref.
         run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
 
       - name: Migration ordering guard
@@ -152,6 +153,15 @@ jobs:
         # from merging out of order (#1720). Listed here because CI invokes recipes
         # individually, so adding it only to `just ci` would not gate PRs.
         run: just migration-order-check
+
+      - name: Schema immutability guard
+        # No modify/delete/rename of a migration already on origin/main — applied files are
+        # byte-immutable (ADR-0015) and a cosmetic edit breaks every DB migrated by an
+        # earlier build (#1218). The guard lived only in the prek hook and the `ci:`
+        # aggregate, neither of which gates a PR: the CI pre-commit job runs on a clean tree,
+        # where the old HEAD-relative diff was empty by construction and passed every PR
+        # (#1723). It needs the fetch step above.
+        run: just schema-guard
 
       - name: Doc-resource snapshot guard
         # The packaged MCP doc-resource snapshots (src/kdive/mcp/resources/_content) must
@@ -291,8 +301,12 @@ jobs:
         # keep this job venv-free. lint-ansible is the same shape (it shells out to
         # `just lint-ansible`, and `just` is not installed in this job) and is covered
         # by the lint-type-test job's "Lint Ansible" step, so skip it here too.
+        # schema-immutable is the same shape: it compares against origin/main, which this
+        # job never fetches, and the lint-type-test job's "Schema immutability guard" step
+        # runs the identical script after fetching that ref. Running it here as well would
+        # be a second copy of one gate that could only ever disagree by breaking (#1723).
         env:
-          SKIP: ty,lint-ansible
+          SKIP: ty,lint-ansible,schema-immutable
         run: uvx prek@0.4.3 run --all-files --show-diff-on-failure
 
   workflow-hygiene:
