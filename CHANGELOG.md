@@ -410,6 +410,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record restore_incomplete on a stalled restore
 - Do not let the limbo verdict displace a job's own
 - Re-check each reaped upload key under the owner lock
+- Make the worker a StatefulSet with per-replica scratch volumes
+- Pin the kubeVersion floor and narrow the scratch-volume claim
 
 ### Build
 
