@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index jobs on the payload system_id correlation key
 - Add a staging-drain lane keyed on systems
 - Yield listing pages instead of one flattened root
+- Add a worker-count knob for real job concurrency
 - Add the restore_incomplete failure category
 
 ### Changed
@@ -233,6 +234,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trim the ADR-0500 index row and record its mutation checks
 - Record ADR-0502, a write lease closes the sweep's delete race
 - Re-point the two loss tests at the unleased path
+- Correct trap 1 and add a real fetch-lock contention arm
+- State what a one-worker stack does reach, and add teardown
+- Claim one contended branch, not three, and fix the pass rule
+- Fix the worker_id query, which passed on one worker
+- Record the contention arm's full pass
+- Scope the worker_id check to the arm's own two jobs
+- Pin the identity lane and drop the duplicated worker check
 - Record the savepoint-demotion class of each advisory-lock site
 - Record ADR-0513 for the restore-limbo failure category
 - Record ADR-0509 and the #1557 design spec
@@ -407,6 +415,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the OTel sampler in one place, guard the constructor (#1693)
 - The sourced profile files are not executables
 - Satisfy ty 0.0.62's stricter union and protocol checks
+- Respect an explicit health bind and report every worker
+- Refuse an explicit health bind above one worker
+- Pass ps -ww, scope the worker count, ceiling the knob
+- Assert the configured workers actually came up
+- Fail on a surplus worker, not just a shortfall
 - Rewrite the ADR template in the canonical record shape
 - Commit each promotion candidate so its locks release
 - Name the leaked locks and verify the reaper's guard
