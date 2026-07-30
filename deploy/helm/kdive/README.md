@@ -85,7 +85,9 @@ transition deterministic:
 ```sh
 # 1. Stop the workers and wait for the pods to go away.
 kubectl scale deployment/<release>-kdive-worker --replicas=0 -n <ns>
-kubectl wait --for=delete pod -l app=<release>-kdive-worker -n <ns> --timeout=5m
+# `|| true` because `kubectl wait` exits non-zero on "no matching resources found", which is
+# exactly the state you want if the workers were already drained or the step is re-run.
+kubectl wait --for=delete pod -l app=<release>-kdive-worker -n <ns> --timeout=5m || true
 
 # 2. Upgrade. Helm removes the drained Deployment and the two shared PVCs, and creates the
 #    StatefulSet with a fresh pair of claims per ordinal.
@@ -117,9 +119,18 @@ Two things change size after the migration:
 outside `replicas`, `template`, `updateStrategy`, `minReadySeconds`, `ordinals` and the PVC
 retention policy — so a size change fails the upgrade rather than silently doing nothing.
 
-Scaling down or uninstalling now **deletes** the per-replica claims
-(`persistentVolumeClaimRetentionPolicy` is `Delete`/`Delete`), because they hold only scratch.
-This is the one place the chart removes storage on your behalf.
+Scaling down or uninstalling now **deletes** the departing replicas' claims
+(`persistentVolumeClaimRetentionPolicy` is `Delete`/`Delete`), because they hold only scratch:
+the build tree rebuilds, and install staging is pushed into the guest and not read again. This
+is the one place the chart removes storage on your behalf, so `Chart.yaml` requires Kubernetes
+`>=1.27` — the field is gated behind `StatefulSetAutoDeletePVC`, off by default before then, and
+an older API server would prune it silently and leak the claims instead.
+
+> The scratch claim does **not** hold on the local-libvirt path, where the staged
+> `kernel`/`initrd` are the domain XML's direct-boot files and durable for the System's
+> lifetime. This chart cannot reach that path — it sets `KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`
+> and mounts neither a libvirt socket nor `/dev/kvm`. If you wire one up anyway, scaling the
+> worker down un-boots the Systems installed by the departing ordinals until you reinstall them.
 
 ## Bundled backends (demo only)
 
