@@ -40,11 +40,10 @@ _TTL_ROOTFS_OBJECTS_SQL = (
     "AND a.created_at < now() - %s AND i.state IN ('open', 'active')"
 )
 #: The :class:`~kdive.domain.capacity.state.SystemState`\ s in which a System legitimately needs its
-#: rootfs base with no overlay file yet — read from ADR-0441 §6's curated set rather than
-#: restated, so this lane's anti-join and the reclaim's own pin gate cannot drift on what
-#: "mid-materialize" means
-#: and a new non-terminal state added without being classified reddens that set's exhaustiveness
-#: guard instead of silently escaping here. Sorted so the bound parameter is deterministic.
+#: rootfs base with no overlay file yet — read from ADR-0441 §6's curated set rather than restated,
+#: so this lane's anti-join and the reclaim's own pin gate cannot drift on what "mid-materialize"
+#: means, and a new non-terminal state added without being classified reddens that set's
+#: exhaustiveness guard instead of silently escaping here. Sorted so the parameter is deterministic.
 _MID_MATERIALIZE_STATE_VALUES: tuple[str, ...] = tuple(
     sorted(state.value for state in ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES)
 )

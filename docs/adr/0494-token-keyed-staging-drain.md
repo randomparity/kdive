@@ -164,6 +164,15 @@ staging directory is not swept either.
   keeps the lane off a System that is staging its base right now, between the `mkdir` and the row
   resolution, and it matches the policy the artifacts-keyed TTL lane already applies to the same
   bytes.
+
+  **Amended by [ADR-0501](0501-investigation-keyed-staging-drain-age-gate.md).** The retention window
+  stands; the row it is read from does not. Content-addressed reuse (ADR-0441) breaks the claimed
+  equivalence with the artifacts-keyed TTL lane for `systems` specifically — a System minutes old can
+  reference a checksum staged months ago — so the gate now reads `investigations.created_at`, and the
+  `mkdir` ↔ row-resolution protection this entry credits it with became an explicit anti-join over
+  `ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES` rather than an age proxy. The proxy was in fact never
+  sufficient for that purpose: a past-retention sibling System admitted the job while another System
+  of the same investigation was mid-`mkdir`.
 - **A pinned-but-unowned base survives with its marker cleared, and for a *closed* investigation
   nothing revisits it.** Decision 3's cost, stated rather than derived. The base is never unlinked,
   so no running guest loses its backing file; what is lost is the follow-up, and only for a closed
