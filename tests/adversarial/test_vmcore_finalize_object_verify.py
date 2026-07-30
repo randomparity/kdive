@@ -219,13 +219,19 @@ async def _seeded_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
 def test_the_sweep_destroys_a_put_landing_in_its_own_key_s_gap(migrated_url: str) -> None:
     """ADR-0455 §3's residual, asserted rather than assumed, for the **same** key.
 
-    This is the loss ADR-0497 mitigates but does not close, so it is pinned as a *fact about the
-    sweep* rather than as a fix: the re-PUT lands between the per-key re-check and the delete, and
-    the delete runs unconditionally, so the fresh bytes are destroyed. It is unconditional because
-    the etag fence that would have stopped it — S3 ``If-Match`` on ``DeleteObject`` — is accepted
-    and ignored by both MinIO releases this repo pins (ADR-0497 §1), so shipping it would have made
+    This is the loss ADR-0497 mitigates but does not close, pinned as a *fact about the sweep*
+    rather than as a fix: the re-PUT lands between the per-key re-check and the delete, and the
+    delete runs unconditionally, so the fresh bytes are destroyed. It is unconditional because the
+    etag fence that would have stopped it — S3 ``If-Match`` on ``DeleteObject`` — is accepted and
+    ignored by both MinIO releases this repo pins (ADR-0497 §1), so shipping it would have made
     this assertion pass while the object still went. If this test ever starts failing because the
     object survived, the conditional delete has become viable and ADR-0497 §1 should be revisited.
+
+    ADR-0502 closes the race for a writer that declares itself, and no lease is minted here — this
+    module drives the sweep directly against an abandoned attempt's leftovers, with no capture in
+    flight. So the loss below is still the correct behaviour, and it is the *unleased* residual it
+    now pins. The leased path, where a claimed capture's in-flight write survives this same sweep,
+    is proven in ``tests/adversarial/test_vmcore_capture_write_lease.py``.
     """
 
     async def _run() -> None:

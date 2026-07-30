@@ -786,12 +786,20 @@ def test_a_put_inside_the_same_key_s_re_read_delete_gap_is_destroyed(
     etag it actually destroyed is a different, newer one. The delete is issued on bytes the sweep
     never examined.
 
-    This asserts the loss on purpose. ADR-0497 rejected the fix this test invites — S3 ``If-Match``
-    on ``DeleteObject``, using the etag the re-read already observed — because both MinIO releases
-    this repo pins accept the header, return success, and delete the object regardless, so a guard
-    built on it would leave this pair true while reading as if the race were closed. The loss is
-    instead made *loud* one layer down, where ``finalize_capture`` refuses to commit a row against
-    the object this delete removed
+    This asserts the loss on purpose, and since ADR-0502 it pins the **unleased** path
+    specifically. A fence can only protect a writer that declares itself, and the writer here
+    declares nothing: no ``object_write_leases`` row exists for this owner, so the sweep is
+    behaving correctly in deleting an aged rowless orphan. The capture lane no longer takes this
+    path — it holds a write lease across its ``put_stream``, proven end to end against this same
+    sweep in ``tests/adversarial/test_vmcore_capture_write_lease.py``. What remains true here is
+    the raw store-level residual, and it is kept as the regression test for the sweep's behaviour
+    toward an undeclared writer.
+
+    ADR-0497 rejected the other fix this test invites — S3 ``If-Match`` on ``DeleteObject``, using
+    the etag the re-read already observed — because both MinIO releases this repo pins accept the
+    header, return success, and delete the object regardless, so a guard built on it would leave
+    this pair true while reading as if the race were closed. The loss is also made *loud* one layer
+    down, where ``finalize_capture`` refuses to commit a row against the object this delete removed
     (``tests/adversarial/test_vmcore_finalize_object_verify.py``). If the two etags below ever stop
     diverging, the store has gained the precondition and ADR-0497 §1 should be revisited.
     """
