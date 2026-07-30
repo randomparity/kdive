@@ -327,9 +327,15 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
         "require_workers_alive 1\n"
     )
     assert surplus.returncode != 0
-    assert "down.sh" not in surplus.stderr, (
+    # Scoped to the prescription, not to the string: `down.sh --wipe` is named further down as
+    # what forces a leaked VM's System to torn_down, which is true and useful. What must be gone
+    # is `down.sh --yes` offered as the way to clear the surplus.
+    assert "down.sh --yes" not in surplus.stderr, (
         f"down.sh cannot clear a SIGTERM-ignoring worker; it must not be the remedy: "
         f"{surplus.stderr}"
+    )
+    assert "Tearing the stack down will NOT clear it" in surplus.stderr, (
+        f"the message must say outright that teardown does not fix this: {surplus.stderr}"
     )
     assert "kill -9 111 222" in surplus.stderr, (
         f"the remedy must name the pids it just printed: {surplus.stderr}"
@@ -340,13 +346,16 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
         f"the non-destructive option must be offered before the destructive one: {surplus.stderr}"
     )
     # Killing abandons a running job, so the message must not stop at the command: it has to say
-    # what picks up the pieces, or the operator is left guessing whether they have to wipe.
-    assert "reconciler" in surplus.stderr, (
-        f"the consequence of kill -9 and what repairs it must be stated: {surplus.stderr}"
+    # what picks up the pieces, or the operator is left guessing whether they have to wipe. The
+    # mechanism is the queue, NOT the reconciler — `dequeue` reclaims a `running` row whose
+    # lease has lapsed and charges an attempt; the reconciler's leaked-domain pass is gated off
+    # while a non-torn_down System row exists, so it does not clean this up.
+    assert "another worker reclaims it once its lease" in surplus.stderr, (
+        f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
     )
-    # The pid list is every worker from this checkout, not only the survivor — telling the
+    # The pid list is every worker sharing this interpreter, not only the survivor — telling the
     # operator otherwise sends them to kill -9 a set the prose has mislabelled.
-    assert "INCLUDING the ones this run just started" in surplus.stderr, surplus.stderr
+    assert "INCLUDING the ones this run started" in surplus.stderr, surplus.stderr
 
 
 def test_the_surplus_report_scans_the_process_table_exactly_once(tmp_path: Path) -> None:
