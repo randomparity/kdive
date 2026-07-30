@@ -13,6 +13,8 @@ from psycopg import AsyncConnection
 from kdive.artifacts.read_model import raw_vmcore_key, redacted_vmcore_artifact_id
 from kdive.artifacts.registration import register_artifact_row
 from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER
+from kdive.artifacts.write_lease import hold_write_lease, release_write_lease
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS, RUNS, SYSTEMS
 from kdive.domain.capture import CaptureMethod
@@ -135,9 +137,12 @@ async def verify_objects_still_stored(
     but is not the object the row would claim, and committing would write an ``etag`` column that
     never matched any bytes.
 
-    This does not prevent the delete — the sweep still destroys the object, because the conditional
-    delete that would have stopped it is inert on the MinIO releases this repo pins (ADR-0497 §1).
-    It converts a silent dangling row into a failed job naming the key.
+    This does not prevent the delete, and did not when it shipped: the conditional delete that
+    would have stopped it is inert on the MinIO releases this repo pins (ADR-0497 §1), so all this
+    did was convert a silent dangling row into a failed job naming the key. ADR-0502's write lease
+    is what prevents it, and this stays as the backstop — it is what still catches a lost write on
+    the paths a lease does not cover (a writer that takes none) and in the window where a lease's
+    holding job has stopped being live.
 
     Args:
         store: The object store to stat through.
@@ -195,8 +200,22 @@ async def finalize_capture(
     this handler from the length of a multi-GiB PUT to a HEAD plus a commit round trip. The replay
     arm needs no verify: it commits no new row, and the object it returns an id for is already
     row-protected.
+
+    Since ADR-0502 the verify is a backstop rather than the only guard: this transaction also
+    releases the write lease ``capture_handler`` minted before the capture, so the sweep was fenced
+    off the key for the whole PUT and the fence lifts in the same commit that makes the object
+    row-protected. The verify stays because the lease covers only the writers that take one, and
+    because it is what turns any lost write — leased or not — into a failed job rather than a
+    dangling row.
     """
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, run.id):
+        # Released here rather than after the inserts so both arms drop it, and inside this
+        # transaction so it lands atomically with whatever the arm commits: a verify that raises
+        # below rolls the release back with the rows, leaving the lease standing over objects that
+        # gained no ``artifacts`` row (ADR-0502). The replay arm commits no row but needs the
+        # release too — the core it found is already row-protected, and its own write reused that
+        # same key.
+        await release_write_lease(conn, RUN_UPLOAD_OWNER, run.id, job.id)
         existing = await raw_vmcore_key(conn, run.id)
         if existing is not None:
             ensure_method_match(existing, method, run.id)
@@ -241,6 +260,13 @@ async def capture_handler(
     :func:`verify_objects_still_stored` stats through, and a ``None`` default that skipped the
     verify would be a data-loss guard that silently does nothing — the same failure mode ADR-0497
     §1 rejects the conditional delete for.
+
+    A write lease is held over the Run's object prefix across the capture (ADR-0502), minted
+    after ``precheck_run`` and released by :func:`finalize_capture`. The ``except`` below
+    deliberately does **not** release it: a worker killed mid-write would release nothing anyway,
+    so relying on an ``except`` here would be a fence that holds only for the failures Python got
+    to observe.
+    ``reap_stale_write_leases`` collects it instead, off the holding job's own liveness.
     """
     payload = load_payload(job, CaptureVmcorePayload)
     run_id = UUID(payload.run_id)
@@ -249,6 +275,18 @@ async def capture_handler(
     if isinstance(precheck, ExistingCapture):
         return precheck.redacted_artifact_id
     run, system = precheck
+    # Declared and committed *before* the first byte, because the ADR-0455 orphan sweep fences on
+    # committed rows: this is the only thing standing between a multi-GiB ``put_stream`` under
+    # ``local/runs/`` and a sweep that decides the deterministic key reclaimable and deletes it
+    # (ADR-0502). It is not released on the failure path below — see ``reap_stale_write_leases``.
+    #
+    # It goes *here*, ahead of the resolver, and not merely for tidiness: ``precheck_run`` has just
+    # committed, so the connection is transaction-free and the mint's own transaction is a real one.
+    # One statement earlier — the resolver's read is enough — leaves a non-autocommit connection in
+    # an open transaction, and then the mint degrades to a savepoint that commits nothing until this
+    # handler returns while holding ``LockScope.RUN`` across the whole capture. ``hold_write_lease``
+    # raises rather than allowing that, so the ordering cannot rot silently.
+    await hold_write_lease(conn, RUN_UPLOAD_OWNER, run.id, job.id)
     binding = await resolver.binding_for_system(conn, system.id)
     set_provider_kind(binding.kind.value)
     retriever = binding.runtime.retriever

@@ -11,21 +11,11 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 
 from kdive.artifacts import upload_manifest
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.artifacts.upload_manifest import UPLOAD_OWNER_KINDS, lock_scope_for
+from kdive.db.locks import advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
 
 _log = logging.getLogger(__name__)
-
-# The owner kinds the reaper handles, and the advisory-lock scope each is reaped under. It is
-# also the candidate-select filter: the reaper can only reap what it can take the owner's lock on.
-_LOCK_SCOPES: dict[upload_manifest.UploadOwnerKind, LockScope] = {
-    upload_manifest.RUN_UPLOAD_OWNER: LockScope.RUN,
-    upload_manifest.INVESTIGATION_UPLOAD_OWNER: LockScope.INVESTIGATION,
-}
-
-#: The owner kinds an upload window can be minted for, in reap order. The orphan sweep (ADR-0455)
-#: derives the object-store roots it walks from this, so its scope cannot drift from the reaper's.
-UPLOAD_OWNER_KINDS: tuple[upload_manifest.UploadOwnerKind, ...] = tuple(_LOCK_SCOPES)
 
 
 @runtime_checkable
@@ -67,7 +57,7 @@ async def repair_abandoned_uploads(conn: AsyncConnection, store: UploadStore) ->
         await cur.execute(
             "SELECT owner_kind, owner_id FROM upload_manifests "
             "WHERE deadline < now() AND owner_kind = ANY(%s)",
-            (list(_LOCK_SCOPES),),
+            (list(UPLOAD_OWNER_KINDS),),
         )
         candidates = await cur.fetchall()
     reaped = 0
@@ -252,15 +242,3 @@ async def _sweep_uncommitted_objects(store: UploadStore, keys: list[str]) -> int
             failed += 1
             _log.warning("reconciler: upload reap could not delete %s: %s", key, exc)
     return failed
-
-
-def lock_scope_for(owner_kind: upload_manifest.UploadOwnerKind) -> LockScope:
-    """Return the advisory-lock scope for an upload owner kind, failing loud on an unknown one.
-
-    An owner kind the reaper does not recognize must never be locked under a guessed scope — that
-    would take a lock no writer of that owner holds and reap under no mutual exclusion at all.
-    """
-    scope = _LOCK_SCOPES.get(owner_kind)
-    if scope is None:
-        raise ValueError(f"unsupported upload owner kind: {owner_kind}")
-    return scope

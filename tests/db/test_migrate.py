@@ -11,6 +11,7 @@ from typing import LiteralString
 import psycopg
 import pytest
 
+from kdive.artifacts.upload_manifest import UPLOAD_OWNER_KINDS
 from kdive.components.records import ComponentUploadState
 from kdive.db import migrate
 from kdive.domain import errors
@@ -184,6 +185,7 @@ def test_rerun_is_a_noop(pg_conn: psycopg.Connection) -> None:
         "0081",
         "0082",
         "0083",
+        "0084",
     ]
     assert second == []
 
@@ -358,6 +360,43 @@ def test_inventory_overrides_disposition_check_admits_exactly_the_enum(
     assert row is not None, "inventory_overrides_disposition_check constraint is missing"
     admitted = set(re.findall(r"'([^']+)'", row[0]))
     assert admitted == {d.value for d in InventoryOverrideDisposition}
+
+
+def test_object_write_leases_owner_kind_check_admits_exactly_the_upload_owner_kinds(
+    pg_conn: psycopg.Connection,
+) -> None:
+    """0084's CHECK equals UPLOAD_OWNER_KINDS exactly, in both directions (ADR-0502, #1687).
+
+    The write lease is keyed by upload owner, and every mint site derives its owner kind from that
+    curated tuple. A CHECK narrower than the tuple turns a legitimate mint into a runtime
+    CheckViolation on a lane nobody tested; a CHECK wider than it admits a kind ``lock_scope_for``
+    refuses, so the row would exist with no scope any writer locks under — a fence honoured by the
+    sweep and taken by nobody. Migrations are immutable, so the drift would land in a *later* file
+    and this is what fails when the two stop agreeing.
+    """
+    migrate.apply_migrations(pg_conn)
+    row = pg_conn.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'object_write_leases_owner_kind_check'"
+    ).fetchone()
+    assert row is not None, "object_write_leases_owner_kind_check constraint is missing"
+    admitted = set(re.findall(r"'([^']+)'", row[0]))
+    assert admitted == set(UPLOAD_OWNER_KINDS)
+
+
+def test_object_write_leases_requires_a_jobs_row(pg_conn: psycopg.Connection) -> None:
+    """A lease's liveness is read from ``jobs``, so the FK is what stops an unreadable one existing.
+
+    Without it a lease naming a job that never existed would satisfy the sweep's ``NOT EXISTS``
+    fence — i.e. fence nothing — while being invisible to ``reap_stale_write_leases``' intent and
+    permanent. The ``ON DELETE CASCADE`` half is covered in the reconciler suite.
+    """
+    migrate.apply_migrations(pg_conn)
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        pg_conn.execute(
+            "INSERT INTO object_write_leases (owner_kind, owner_id, job_id) "
+            "VALUES ('runs', gen_random_uuid(), gen_random_uuid())"
+        )
 
 
 def test_inventory_overrides_disposition_check_rejects_unknown(pg_conn: psycopg.Connection) -> None:
@@ -651,6 +690,7 @@ def test_0042_backfills_target_kind_from_resource_kind(
         "0081",
         "0082",
         "0083",
+        "0084",
     ]
     assert _scalar("SELECT target_kind FROM runs") == "remote-libvirt"
 
@@ -1012,6 +1052,7 @@ def test_advisory_lock_serializes_migrators(pg_conn: psycopg.Connection, postgre
         "0081",
         "0082",
         "0083",
+        "0084",
     ]
 
 

@@ -97,6 +97,76 @@ async def advisory_xact_lock(
     yield
 
 
+def require_top_level_transaction(conn: AsyncConnection, operation: str) -> None:
+    """Raise unless ``conn`` is transaction-free, so the next ``transaction()`` really commits.
+
+    ``conn.transaction()`` opens a real transaction only on an **idle** connection; on one that is
+    already in a transaction it opens a ``SAVEPOINT`` instead, and releasing a savepoint commits
+    nothing and releases no ``pg_advisory_xact_lock``. A non-autocommit connection enters that state
+    invisibly — one bare ``execute`` outside any ``transaction()`` block starts a transaction that
+    lives until the pool returns the connection.
+
+    So a block that means "commit this, and hold a lock only while I do" silently becomes "defer
+    this to my caller's commit, and hold the lock until then" if anything ran a statement first.
+    For a mint that has to be visible to another process *before* a multi-GiB write, and for a lock
+    ADR-0244 forbids holding across that write, those are opposite behaviours with no observable
+    difference at the call site — which is why this is checked rather than documented.
+
+    Args:
+        conn: The connection about to open a transaction.
+        operation: What the caller is doing, for the message.
+
+    Raises:
+        RuntimeError: ``conn`` is already in a transaction (or in a failed one).
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise RuntimeError(
+            f"{operation} needs a transaction-free connection: this one is already in a "
+            "transaction, so `conn.transaction()` would open a savepoint, commit nothing on "
+            "release, and hold any advisory xact lock until the caller's own commit. Commit or "
+            "close the enclosing transaction first, or move this call ahead of whatever opened it."
+        )
+
+
+async def try_advisory_xact_lock(conn: AsyncConnection, scope: LockScope, key: UUID | str) -> bool:
+    """Take the transaction-scoped lock for ``(scope, key)`` if it is free, else report ``False``.
+
+    The non-blocking sibling of :func:`advisory_xact_lock`, for a caller whose correct response to
+    contention is to do nothing and try again later rather than to wait. The reconciler's upload
+    orphan sweep is that caller (ADR-0502): a held owner lock means a writer is active on that
+    owner, so the sweep skips the key and the next pass re-derives it — where blocking would stall a
+    reconciler pass that has no deadline behind whatever the holder is doing.
+
+    Not a context manager, because there is nothing to release on exit: a granted lock is held to
+    the surrounding transaction's end, exactly like the blocking helper, and a refused one was never
+    held. Call it inside ``async with conn.transaction()`` and branch on the result.
+
+    Args:
+        conn: An async connection with an open transaction.
+        scope: The lock scope.
+        key: The object id (a :class:`~uuid.UUID`) the lock protects, or the ``project`` string
+            for :attr:`LockScope.PROJECT`.
+
+    Returns:
+        Whether this transaction now holds the lock.
+
+    Raises:
+        RuntimeError: After the attempt, the connection is not in a transaction — so a granted
+            lock has already auto-released and a ``True`` would be a lie. Checked after rather
+            than before for the same reason the blocking helper does: the transaction is only
+            observably open once a statement has run in it.
+    """
+    cur = await conn.execute("SELECT pg_try_advisory_xact_lock(%s)", (_lock_key(scope, key),))
+    row = await cur.fetchone()
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise RuntimeError(
+            "try_advisory_xact_lock must run inside an open transaction; any lock it took has "
+            "already auto-released because no transaction is in progress (ADR-0005). Wrap the "
+            "call in `async with conn.transaction()` or use a non-autocommit connection."
+        )
+    return bool(row is not None and row[0])
+
+
 # The leadership name for the single reconciler that hosts console collectors (ADR-0095).
 CONSOLE_HOSTING_LEADER = "console-hosting-leader"
 
