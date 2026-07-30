@@ -106,10 +106,9 @@ def require_top_level_transaction(conn: AsyncConnection, operation: str) -> None
     invisibly — one bare ``execute`` outside any ``transaction()`` block starts a transaction that
     lives until the pool returns the connection.
 
-    So a block that means "commit this, and hold a lock only while I do" silently becomes
-    "defer this to my caller's commit, and hold the lock until then" if anything ran a statement
-    first. For a
-    mint that has to be visible to another process *before* a multi-GiB write, and for a lock
+    So a block that means "commit this, and hold a lock only while I do" silently becomes "defer
+    this to my caller's commit, and hold the lock until then" if anything ran a statement first.
+    For a mint that has to be visible to another process *before* a multi-GiB write, and for a lock
     ADR-0244 forbids holding across that write, those are opposite behaviours with no observable
     difference at the call site — which is why this is checked rather than documented.
 

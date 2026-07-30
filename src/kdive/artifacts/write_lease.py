@@ -7,12 +7,11 @@ deletes holding nothing. A write landing after that decision and before the dele
 ADR-0497 §3's disclosed residual, which its finalize-side verify turns into a failed job rather than
 preventing.
 
-A lease is that missing declaration, and the fence is only half of the mechanism. The other half
-is the **lock**: :func:`hold_write_lease` mints under the owner's advisory lock, and the sweep
-takes the same lock before it deletes, so a mint either precedes the sweep's classify (which then
-sees it) or blocks until the delete is already done (so the write follows the delete).
-Mint-before-write and
-classify-before-delete become totally ordered, which is what makes this a closure rather than a
+A lease is that missing declaration, and the fence is only half of the mechanism. The other half is
+the **lock**: :func:`hold_write_lease` mints under the owner's advisory lock, and the sweep takes
+the same lock before it deletes, so a mint either precedes the sweep's classify (which then sees
+it) or blocks until the delete is already done (so the write follows the delete). Mint-before-write
+and classify-before-delete become totally ordered, which is what makes this a closure rather than a
 fourth mitigation.
 
 The lease carries **no deadline of its own**. Its liveness is its holding job's — the lease the
@@ -59,11 +58,9 @@ async def hold_write_lease(
     nothing, so a caller cannot usefully batch this into a later transaction — and it *checks* that
     it can, via :func:`~kdive.db.locks.require_top_level_transaction`. On a connection already in a
     transaction this whole block would degrade to a savepoint: the lease would stay invisible for
-    the
-    entire write it exists to fence, and the owner lock would be held until the caller's commit,
-    which is precisely the multi-GiB lock hold ADR-0244 forbids. Both failures are silent at the
-    call
-    site, so the precondition is enforced rather than documented.
+    the entire write it exists to fence, and the owner lock would be held until the caller's
+    commit, which is precisely the multi-GiB lock hold ADR-0244 forbids. Both failures are silent
+    at the call site, so the precondition is enforced rather than documented.
 
     The owner's advisory lock — the one the sweep's per-key delete also takes — is held over the
     insert. That is not for row-level safety (the upsert is atomic on its own) but for the ordering

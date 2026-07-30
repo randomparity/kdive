@@ -453,23 +453,21 @@ async def _delete_if_still_reclaimable(
     written. That is the one fence that has to come from the store rather than from Postgres, and
     it is why this is not simply ``repair_leaked_images``' row re-check.
 
-    The re-classify and the delete run inside **one transaction holding the owner's advisory lock**,
-    and that is what turns three fences into a closure (ADR-0502). Re-reading committed state and
-    then deleting under no lock leaves a gap the re-read cannot see into: a writer that commits its
-    fence after the re-classify and PUTs before the delete is still destroyed, which is
+    The re-classify and the delete run inside **one transaction holding the owner's advisory
+    lock**, and that is what turns three fences into a closure (ADR-0502). Re-reading committed
+    state and then deleting under no lock leaves a gap the re-read cannot see into: a writer that
+    commits its fence after the re-classify and PUTs before the delete is still destroyed, which is
     ADR-0455 §3's residual and ADR-0497 §3's "mitigates … does not close". ``hold_write_lease``
     mints under this same lock, so a mint either precedes the re-classify — which then sees the
-    lease and declines —
-    or waits until this transaction ends, by which point the delete has already happened and the
-    write that follows it is not the one being deleted.
+    lease and declines — or waits until this transaction ends, by which point the delete has
+    already happened and the write that follows it is not the one being deleted.
 
     The lock is attempted, not waited on. A held owner lock means a writer or a reaper is active on
     that owner, so the key is left for a later pass: neither deleted nor counted as a fault, since
     nothing failed. Waiting instead would put a reconciler pass that has no deadline behind
     whatever the holder is doing — ``capture_traffic`` holds ``LockScope.RUN`` across a whole
     ``put_artifact`` — ahead of allocation expiry and orphaned-System repair, which is the
-    starvation ADR-0455 §5 and
-    §6 exist to prevent.
+    starvation ADR-0455 §5 and §6 exist to prevent.
 
     The cost is one snapshot held across one ``delete_object``, which is the property
     :func:`reclaimable_upload_keys` documents avoiding on the page classify. Per key that is a lock
