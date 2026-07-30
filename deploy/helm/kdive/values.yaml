@@ -79,8 +79,14 @@ server:
 reconciler:
   replicas: 1
 
+# The worker runs as a StatefulSet, not a Deployment (ADR-0514): each replica gets its OWN
+# build and install volume from volumeClaimTemplates, so scaling out no longer multi-attaches
+# one pair of ReadWriteOnce claims. The default is 2 because the job queue is built for
+# parallel workers (`FOR UPDATE SKIP LOCKED`, ADR-0018) and a one-worker default never
+# exercises it. persistence.* sizes are PER REPLICA, and volumeClaimTemplates is immutable
+# after install — changing a size needs the migration in the chart README, not `helm upgrade`.
 worker:
-  replicas: 1
+  replicas: 2
   persistence:
     build:
       size: 10Gi
