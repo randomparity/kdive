@@ -81,11 +81,25 @@ That converts a retention bound into data loss, which is the worst failure a bou
 it, a spent budget is a no-op: the deadline stands, the reassembly proceeds under the `RUN` lock it
 already holds, and the window simply does not outlive its deadline a second time.
 
-`GREATEST` does not weaken the bound. Its other argument is the clamped grant, which is
-`≤ window_started_at + max_window` by construction, and the only other value it can select is the
-standing deadline — which the mint stamped at `window_started_at + ttl`, and `ttl ≤ max_window`
-because the multiple is at least 1. So `deadline ≤ window_started_at + max_window` holds after
-every refresh, not merely on average.
+`GREATEST` does not weaken the bound *provided `KDIVE_UPLOAD_TTL_SECONDS` has been stable since the
+mint*. Its other argument is the clamped grant, which is `≤ window_started_at + max_window` by
+construction — both read from whatever is live at refresh time. The only other value `GREATEST`
+can select is the standing deadline, which the mint stamped at `window_started_at + ttl` using
+*its own* `ttl`, not the refresh's. When the two agree, `ttl ≤ max_window` because the multiple is
+at least 1, so `deadline ≤ window_started_at + max_window` holds after every refresh, not merely on
+average. When they do not — an operator lowers `KDIVE_UPLOAD_TTL_SECONDS` after the mint, or a row
+migration `0085`'s backfill lands on was minted under a since-changed value — the standing deadline
+was computed against the *old*, larger `ttl` and can exceed `window_started_at` plus the *new*,
+smaller `max_window`. `GREATEST` then keeps that already-too-large deadline standing indefinitely,
+because every later refresh's clamped grant is smaller still and never gets selected.
+
+That is a bounded leak, not an exposure: the window decays out at the old bound rather than
+snapping to the new one, no refresh ever moves it later than the mint already placed it, and a
+second refresh after the budget is spent moves nothing. Nothing on this path writes a deadline that
+exposes an in-flight upload to the reaper — the failure mode `GREATEST` exists to prevent is
+unchanged. It does mean retention after a TTL decrease is governed by whatever `ttl` was live at
+each row's mint, not by the operator's newly configured value, until that row's window is next
+re-minted.
 
 Every comparison is Postgres's `now()`. The reaper measures `deadline` against the same clock, and
 DB `now()` is session-TZ dependent, so a Python-side comparison here would be subtly wrong for the

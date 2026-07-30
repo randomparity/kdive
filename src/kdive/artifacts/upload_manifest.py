@@ -199,7 +199,8 @@ async def refresh_deadline(
     Refreshing the deadline under the per-Run lock the reaper also takes is what stops the reaper
     from reclaiming an in-flight reassembly's chunk objects (ADR-0104 §6 step A).
 
-    The extension is **bounded and monotonic** (ADR-0511)::
+    The extension is **bounded and monotonic** (ADR-0511), provided ``KDIVE_UPLOAD_TTL_SECONDS`` has
+    been stable since the window's mint::
 
         deadline := GREATEST(deadline, LEAST(now() + ttl, window_started_at + max_window))
 
@@ -209,6 +210,14 @@ async def refresh_deadline(
     what keeps a spent budget from *shortening* an open window — a refresh that moved the deadline
     backward would hand the reaper the very chunk objects this call exists to protect, converting
     a retention bound into data loss.
+
+    That same ``GREATEST`` is why the cap only holds under a stable ``ttl``: a decrease after the
+    mint (or a row migration ``0085``'s backfill lands on, minted under a larger historical TTL)
+    leaves the standing deadline — stamped at the mint's own ``window_started_at + ttl`` — larger
+    than the *new*, smaller ``window_started_at + max_window``, and every later refresh's clamped
+    grant is smaller still, so ``GREATEST`` never selects it. The window then decays out at the old
+    bound rather than the new one: a bounded leak, never an exposure, since no refresh moves the
+    deadline later than the mint already placed it.
 
     ``window_started_at`` is restamped only by :func:`replace_manifest`, so a re-mint through
     ``artifacts.create_run_upload`` starts a new window with a full budget. That is deliberate:
