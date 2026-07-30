@@ -325,10 +325,20 @@ share a uid (compose, Helm) will not reproduce this class of defect.
 The four arms above take the per-(investigation, checksum) fetch lock on every
 cold fetch, but always uncontended — a one-worker stack cannot produce two
 simultaneous stagings. This arm can, and it is the only local procedure that
-reaches the lock's *contended* branches: the sibling-finished-while-waiting early
-return, the sibling-published-a-base-that-does-not-verify warning, and
-`_unlink_orphan_partials` skipping a partial a live writer still holds an `flock`
-on (ADR-0443, ADR-0446).
+reaches a *contended* outcome: the waiter's "a sibling fetcher finished while we
+waited on the lock" early return, after really blocking on `pg_advisory_lock`
+(ADR-0443).
+
+That is one branch, and claiming more would repeat the defect this arm was
+written to fix. Two neighbours stay uncovered locally even here, because each
+needs a fault the arm does not engineer. The "a sibling published a staged rootfs
+base that does not verify" warning needs the holder to publish a base that fails
+the marker or qcow2 gate. `_unlink_orphan_partials` skipping a live writer's
+`flock` needs a partial that is still held when a sibling sweeps — but the holder
+unlinks its own partial before it releases the fetch lock, and the waiter returns
+early without ever reaching the sweep, so a plain two-worker race cannot produce
+it. Both are lost-lock and crash paths (ADR-0446), reachable by killing a worker
+mid-download or reaping its Postgres backend, not by concurrency alone.
 
 Bring the stack up with two workers. `KDIVE_WORKER_COUNT` is the local stack's
 only job-concurrency knob — worker *processes* are the concurrency unit, since a
@@ -348,7 +358,10 @@ pgrep -fa 'python -m kdive worker'
 
 Two rows. The second worker binds its aux health listener on `:9470` rather than
 the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
-under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log.
+under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log. Leave
+`KDIVE_HEALTH_BIND_ADDR` unset: an explicit value applies to every process, so it
+cannot coexist with more than one worker, and bring-up refuses the combination
+rather than starting workers that die on an exclusive bind.
 
 Drive it as the Reuse arm — one investigation, one uploaded rootfs, two
 `systems.provision` calls issued together — with two changes:
@@ -376,10 +389,13 @@ SELECT l.pid, l.granted, a.wait_event_type, a.wait_event, a.query
 
 (The compose backend carries `psql`; the host generally does not.)
 
-The arm passes on **both** of these, and neither alone:
+The arm passes on **all three** of these. The first two are the discriminators —
+together they separate contention from serialization, and neither does it alone.
+The third is the outcome: contention that did not collapse the second download
+would mean the lock ran and achieved nothing.
 
-| Assert | Where | Why it is the discriminator |
-|--------|-------|-----------------------------|
+| Assert | Where | Why it is required |
+|--------|-------|--------------------|
 | Two rows on one advisory key: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity` | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
 | The two provision jobs carry **different** `jobs.worker_id` values, claimed within milliseconds of each other | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' ORDER BY heartbeat_at DESC LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock row above was something else |
 | Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
@@ -404,24 +420,24 @@ the sweep collected the object, staged base, staging dir and `artifacts` row —
 the same checks the Reclaim arm asserts, including its one-day grace trap.
 
 **2026-07-30 run** (branch `feat/multi-worker-fetch-lock-1551`, both workers
-build-stamped identically): contention confirmed on the first two rows. The two
-provisions were claimed 91 µs apart by two different workers (`…:3870543` and
-`…:3870590`); 30 ms later one backend held the fetch lock and the other was
-blocked on it with `wait_event_type=Lock`, `wait_event=advisory`; the holder
-released ~4.4 s later, after writing a 1,468,465,152-byte base and its `.ready`
-marker. The third row was **not** checked — no store trace was running — so this
-run evidences the contention, not the dedup outcome. Both provisions then failed
-at baseline-kernel extraction, because the workspace venv has no `guestfs`
-binding; that does not affect the arm, since the fetch and its lock both complete
-before that step.
+build-stamped identically): a **partial pass** — rows 1 and 2 confirmed, row 3 not
+run. The two provisions were claimed 91 µs apart by two different workers
+(`…:3870543` and `…:3870590`); 30 ms later one backend held the fetch lock and the
+other was blocked on it with `wait_event_type=Lock`, `wait_event=advisory`; the
+holder released ~4.4 s later, after writing a 1,468,465,152-byte base and its
+`.ready` marker. No store trace was running, so the run evidences real contention
+and says nothing about the dedup outcome. Both provisions then failed at
+baseline-kernel extraction, because the workspace venv has no `guestfs` binding;
+that does not affect the arm, since the fetch and its lock both complete before
+that step. A full pass still needs a run with `mc admin trace` attached.
 
-Two limits to record. The ADR-0482 skew preflight probes one worker: its URL set
-is built from the registered per-process ports, so workers 2..N are outside it and
-a `fresh` verdict grades only worker 1. On a multi-worker stack, read the
-`=== build stamps ===` block — it prints a row per worker log — rather than
-treating that verdict as covering the whole stack. And an explicit
-`KDIVE_HEALTH_BIND_ADDR` collapses the aux listener to one port for *every*
-process, which the host-process layout cannot satisfy; leave it unset here.
+One limit to record: the ADR-0482 skew preflight probes one worker. Its URL set is
+built from the registered per-process ports, so workers 2..N are outside it and a
+`fresh` verdict grades only worker 1 — tracked in
+[deferral record 0002](../../debt/0002-skew-preflight-probes-one-worker.md). On a
+multi-worker stack, read the `=== build stamps ===` block instead: it prints a row
+per worker log and a live worker count in its header, so a row without a live
+worker behind it is visible as a stale log rather than read as a graded process.
 
 ## Hard-won quirks
 
