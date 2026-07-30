@@ -251,6 +251,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix Accepted-ADR grep to match both status shapes
 - Condition ADR-0511's extension cap on a stable upload TTL
 - Restate ADR-0511's TTL caveat as an append, not a rewrite
+- Explain why the capped equality is exact
 
 ### Fixed
 
@@ -436,6 +437,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cap cumulative upload-window extension against the mint
 - Pin the private-upload publish to a top-level transaction
 - Tighten the upload-lock record and pin the denial commit
+- Report capped when a refresh grants nothing
+- Stop the capped warning naming the wrong cause
 
 ### Build
 
