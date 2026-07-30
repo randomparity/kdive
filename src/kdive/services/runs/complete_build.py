@@ -22,7 +22,7 @@ from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
-from kdive.config.core_settings import UPLOAD_TTL_SECONDS
+from kdive.config.core_settings import UPLOAD_TTL_SECONDS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import RunState
@@ -306,15 +306,36 @@ async def _reassemble_chunked_artifacts(
     drop it: the lock is held for the rest of the request. That is deliberate — it is what keeps
     the reaper off the chunk objects for the whole reassembly — and it is why the unlocked stretch
     ``_require_unreaped_window`` guards exists only on the single-PUT path.
+
+    The savepoint also commits the extension independently of the rest of the finalize, which is
+    why the extension has to be bounded here rather than unwound later. Every failure past this
+    point — a reassembly error, a validation rejection — is caught at the MCP tool layer and
+    returned as a ``ToolResponse``, so the pooled connection exits its ``async with`` cleanly and
+    psycopg commits. Nothing undoes the refresh, so an unbounded one let a retry loop hold its
+    uncommitted objects forever (#1553); ``max_window`` is the bound (ADR-0511).
     """
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
+    max_window = ttl * config.require(UPLOAD_WINDOW_MAX_TTL_MULTIPLE)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
-        refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, ttl)
+        refreshed = await upload_manifest.refresh_deadline(
+            conn, "runs", uid, ttl, max_window=max_window
+        )
     if refreshed is None:
         # `_require_open_window` passed on this transaction's clock, and `now()` is
         # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
         # a declined refresh here means the row is gone, reaped between the two reads.
         raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
+    if refreshed.capped:
+        # The one place a spent extension budget is visible. The reassembly still runs — it holds
+        # the `RUN` lock the reaper needs — but this window will not outlive its deadline again,
+        # so an operator watching a Run retry in a loop sees why it eventually stops.
+        _log.warning(
+            "runs.complete_build: upload window extension capped at %s past its mint "
+            "(run %s, deadline %s); artifacts.create_run_upload re-mints a fresh window",
+            max_window,
+            uid,
+            refreshed.deadline,
+        )
     try:
         await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
@@ -322,7 +343,7 @@ async def _reassemble_chunked_artifacts(
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
-    return refreshed
+    return refreshed.deadline
 
 
 async def _reassemble_artifacts(

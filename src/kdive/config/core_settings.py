@@ -72,6 +72,14 @@ def _nonnegative_int(raw: str) -> int:
     return value
 
 
+def _positive_int(raw: str) -> int:
+    """Parse a count that is meaningless at zero or below."""
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"must be >= 1, got {value}")
+    return value
+
+
 def _always(env: Mapping[str, str]) -> bool:
     return True
 
@@ -234,6 +242,29 @@ UPLOAD_ORPHAN_GRACE = Setting(
         "effect when the process restarts; config is snapshotted at startup."
     ),
     suggest="a non-negative integer number of seconds, e.g. 86400",
+)
+UPLOAD_WINDOW_MAX_TTL_MULTIPLE = Setting(
+    name="KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE",
+    # A multiple of the TTL rather than an absolute number of seconds, so the cap can never be
+    # configured *below* the window it bounds. An absolute cap smaller than KDIVE_UPLOAD_TTL_SECONDS
+    # would clamp every refresh to the deadline the mint already stamped, silently disabling the
+    # reassembly protection the refresh exists to provide — the failure mode a bound must not have.
+    # Rejecting 0 and negatives for the same reason: they would put the cap at or before the mint.
+    parse=_positive_int,
+    default="3",
+    group="upload",
+    processes=_SERVER,
+    help=(
+        "Cap on how long one minted upload window may live, as a multiple of "
+        "KDIVE_UPLOAD_TTL_SECONDS measured from the mint (ADR-0511). The chunked "
+        "runs.complete_build extends its window by a full TTL before server-side reassembly, and "
+        "that extension commits even when the finalize then fails, so repeated failing retries "
+        "would otherwise roll the window forward without bound. An extension is clamped to this "
+        "multiple and never shortens an open window; 1 forbids extension entirely. Re-minting via "
+        "artifacts.create_run_upload starts a new window and a fresh budget, so this bounds "
+        "silent drift, not the agent's reach."
+    ),
+    suggest="an integer >= 1, e.g. 3",
 )
 MAX_UPLOAD_BYTES = Setting(
     name="KDIVE_MAX_UPLOAD_BYTES",
@@ -745,6 +776,7 @@ SETTINGS = [
     PROVISION_PREMUTATION_TIMEOUT_S,
     UPLOAD_TTL_SECONDS,
     UPLOAD_ORPHAN_GRACE,
+    UPLOAD_WINDOW_MAX_TTL_MULTIPLE,
     MAX_UPLOAD_BYTES,
     ARTIFACT_INLINE_MAX_BYTES,
     ARTIFACT_DOWNLOAD_TTL_SECONDS,

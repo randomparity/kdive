@@ -442,6 +442,92 @@ def test_complete_build_finalizer_returns_recorded_success_after_reassembly_fail
     asyncio.run(_run())
 
 
+async def _complete_swallowing_failure(
+    pool: AsyncConnectionPool,
+    run_id: Any,
+    finalizer: CompleteBuildFinalizer,
+) -> None:
+    """Finalize, swallowing the failure *inside* the connection block as the MCP handler does.
+
+    `mcp/tools/lifecycle/runs/complete_build.py` catches every finalize failure and returns a
+    `ToolResponse`, so its `async with pool.connection()` exits cleanly and psycopg **commits** —
+    including the deadline extension `_reassemble_chunked_artifacts` already landed in its own
+    savepoint before reassembly ran. The other helpers here re-raise out of the block, which rolls
+    that extension back; reproducing #1553 requires the production shape, not theirs.
+    """
+    run = await _run_by_id(pool, run_id)
+    async with pool.connection() as conn:
+        try:
+            await finalizer.complete(conn, _ctx(), run, build_id=None, cmdline="console=ttyS0")
+        except CategorizedError:
+            return
+    raise AssertionError("the chunked finalize was expected to fail in reassembly")
+
+
+async def _window_deadline(pool: AsyncConnectionPool, run_id: Any) -> Any:
+    row = await _fetchone(
+        pool,
+        "SELECT deadline FROM upload_manifests WHERE owner_kind = 'runs' AND owner_id = %s",
+        (run_id,),
+    )
+    return row[0]
+
+
+def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The #1553 regression, end to end through the finalize service (ADR-0511).
+
+    A chunked finalize refreshes the window before reassembly and commits that refresh in its own
+    savepoint; the failure that follows is swallowed at the MCP layer, so the extension survives.
+    The first failing attempt therefore still buys a full TTL — that is the behavior ADR-0448 §4
+    kept, and this asserts it is unchanged. What is new is the second attempt: once the window has
+    reached `KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE` TTLs from its mint, a failing retry buys
+    nothing, and the retry loop can no longer hold uncommitted objects indefinitely.
+
+    Remove the `LEAST(..., window_started_at + max_window)` clamp from `refresh_deadline` and the
+    second attempt stamps `now() + ttl` again — `after_second == after_first` fails.
+    """
+    monkeypatch.setenv("KDIVE_UPLOAD_TTL_SECONDS", "3600")
+    monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "2")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            finalizer = CompleteBuildFinalizer(
+                validate_complete_build=FakeValidator(_output(run_id)),
+                object_store_factory=lambda: _ChunkedStore(bad_head=True),
+            )
+            minted = await _window_deadline(pool, run_id)
+
+            await _complete_swallowing_failure(pool, run_id, finalizer)
+            after_first = await _window_deadline(pool, run_id)
+
+            # Spend the budget without waiting for it: backdate the mint past the cap, leaving
+            # the deadline (and so the window) untouched and open.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "UPDATE upload_manifests SET window_started_at = now() - interval '10 hours' "
+                    "WHERE owner_kind = 'runs' AND owner_id = %s",
+                    (run_id,),
+                )
+
+            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+                await _complete_swallowing_failure(pool, run_id, finalizer)
+            after_second = await _window_deadline(pool, run_id)
+
+            run = await _run_by_id(pool, run_id)
+
+        assert after_first > minted  # a failing finalize still commits its first extension
+        assert after_second == after_first  # and the cap stops every later one
+        assert "upload window extension capped" in caplog.text
+        assert run.state is RunState.CREATED
+
+    asyncio.run(_run())
+
+
 def test_complete_build_finalizer_keeps_manifest_when_chunk_cleanup_fails(
     migrated_url: str,
     caplog: pytest.LogCaptureFixture,
