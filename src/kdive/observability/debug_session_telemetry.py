@@ -37,6 +37,11 @@ class DebugSessionTelemetry:
         instance._enabled = False
         return instance
 
+    @property
+    def enabled(self) -> bool:
+        """Whether instruments are wired; callers skip costly samples when ``False``."""
+        return self._enabled
+
     def record(self, transport: str, outcome: DebugSessionOutcome, seconds: float) -> None:
         if not self._enabled or seconds < 0.0:
             return

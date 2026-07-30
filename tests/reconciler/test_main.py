@@ -10,6 +10,8 @@ from typing import cast
 import pytest
 
 from kdive.__main__ import build_parser
+from kdive.observability.console_telemetry import ConsoleTelemetry
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.observability.facade import Telemetry
 from kdive.processes.runtime import (
     POOL_CLOSE_TIMEOUT_SECONDS,
@@ -107,6 +109,7 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     expected_resetter = object()
     expected_dump_volume_reaper = object()
     expected_registry = SecretRegistry()
+    constructed: dict[str, object] = {}
 
     class _FakeProviderComposition:
         def __init__(self, *, secret_registry: SecretRegistry | None = None) -> None:
@@ -130,18 +133,20 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
             enable_remote_libvirt: bool | None = None,
             console_telemetry: object | None = None,
         ) -> None:
-            del enable_remote_libvirt, console_telemetry
+            del enable_remote_libvirt
+            # Capture rather than discard: the runner builds this instance from the
+            # process meter, so a fake that drops it lets the wiring go dead unseen.
+            constructed["console_telemetry"] = console_telemetry
             return None
 
     monkeypatch.setattr(composition, "ProviderComposition", _FakeProviderComposition)
-
-    constructed: dict[str, object] = {}
 
     def _fake_init(self: object, pool: object, reaper: object, **kw: object) -> None:
         constructed["reaper"] = reaper
         config = cast(ReconcileConfig, kw["config"])
         constructed["resetter"] = config.resetter
         constructed["dump_volume_reaper"] = config.dump_volume_reaper
+        constructed["debug_session_telemetry"] = config.debug_session_telemetry
 
     async def _fake_run(self: object, stop: object) -> None:
         events.append("run")
@@ -160,3 +165,13 @@ def test_run_reconciler_builds_and_runs(monkeypatch: pytest.MonkeyPatch) -> None
     assert constructed["reaper"] is expected_reaper
     assert constructed["resetter"] is expected_resetter
     assert constructed["dump_volume_reaper"] is expected_dump_volume_reaper
+
+    # Assembly must hand both telemetry planes a *live* instance built from the process
+    # meter. Both classes default to a no-op `.disabled()` elsewhere, so asserting the
+    # object merely exists would pass for silently dead instrumentation (issue #1705).
+    console_telemetry = constructed["console_telemetry"]
+    assert isinstance(console_telemetry, ConsoleTelemetry)
+    assert console_telemetry.enabled
+    debug_session_telemetry = constructed["debug_session_telemetry"]
+    assert isinstance(debug_session_telemetry, DebugSessionTelemetry)
+    assert debug_session_telemetry.enabled
