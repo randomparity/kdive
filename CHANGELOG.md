@@ -112,6 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Flatten the job-category null check
 - Share the upload delete fences between both sweeps
 - Share one expiry predicate across both finalize lanes
+- Replace the flock fetch lease with durable DB state
 
 ### Documentation
 
@@ -448,6 +449,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the count bound and correct the surplus consequence
 - State the real recovery path for a killed worker
 - Stop the new test signalling real host pids
+- Pin a base while its fetch is in flight
+- Keep the lease degrade off the real error's context
+- Pin a base while its fetch is in flight
+- Record no lease on a non-autocommit connection
 
 ### Build
 
