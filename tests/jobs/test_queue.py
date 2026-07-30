@@ -146,7 +146,12 @@ def test_enqueue_rejects_blank_dispatch_lane(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("kind", sorted(RETIRED_JOB_KINDS, key=lambda item: item.value))
+# Named rather than sorted inline: inside the decorator the element type comes from
+# parametrize's argvalues, which widens to `object` and hides `JobKind.value`.
+_RETIRED_KINDS: list[JobKind] = sorted(RETIRED_JOB_KINDS, key=lambda kind: kind.value)
+
+
+@pytest.mark.parametrize("kind", _RETIRED_KINDS)
 def test_enqueue_rejects_retired_job_kinds(migrated_url: str, kind: JobKind) -> None:
     async def _run() -> None:
         async with await _connect(migrated_url) as conn:

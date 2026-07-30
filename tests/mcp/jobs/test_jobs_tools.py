@@ -1014,7 +1014,12 @@ def test_list_jobs_filters_by_kind(migrated_url: str) -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("kind", sorted(RETIRED_JOB_KINDS, key=lambda item: item.value))
+# Named rather than sorted inline: inside the decorator the element type comes from
+# parametrize's argvalues, which widens to `object` and hides `JobKind.value`.
+_RETIRED_KINDS: list[JobKind] = sorted(RETIRED_JOB_KINDS, key=lambda kind: kind.value)
+
+
+@pytest.mark.parametrize("kind", _RETIRED_KINDS)
 def test_jobs_list_payload_rejects_retired_kind_filters(kind: JobKind) -> None:
     with pytest.raises(ValueError, match="retired job kind"):
         jobs_tools._JobsListPayload(kind=kind)

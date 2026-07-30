@@ -295,7 +295,15 @@ def open_remote_console(
     try:
         domain = conn.lookupByName(domain_name_for(system_id))
         stream = conn.newStream(libvirt.VIR_STREAM_NONBLOCK)
-        domain.openConsole(None, stream, libvirt.VIR_DOMAIN_CONSOLE_FORCE)
+        # libvirt-python annotates dev_name as `str`, but its own docstring documents that
+        # omitting it opens the first console or serial device — which is what NULL selects.
+        # The generated annotation is missing the Optional, so the None is correct and the
+        # stub is not; ignore rather than invent a device alias we do not want to pin.
+        domain.openConsole(
+            None,  # ty: ignore[invalid-argument-type]
+            stream,
+            libvirt.VIR_DOMAIN_CONSOLE_FORCE,
+        )
     except libvirt.libvirtError:
         _closer()
         raise

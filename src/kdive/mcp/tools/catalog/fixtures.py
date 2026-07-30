@@ -58,10 +58,12 @@ async def validate_fixtures_tool(path: Path | None = None) -> ToolResponse:
             suggested_next_actions=[_VALIDATE_TOOL],
             data={"path": str(resolved), "reason": reason},
         )
-    profiles: list[JsonValue] = sorted(
-        ({"provider": p.provider, "name": p.name, "arch": p.arch} for p in catalog.profiles),
-        key=lambda row: (row["provider"], row["name"], row["arch"]),
-    )
+    # Order the typed profiles, then project. Sorting the projected rows instead keys off a
+    # `JsonValue`, which is not known to be a mapping and so cannot be subscripted.
+    ordered = sorted(catalog.profiles, key=lambda p: (p.provider, p.name, p.arch))
+    profiles: list[JsonValue] = [
+        {"provider": p.provider, "name": p.name, "arch": p.arch} for p in ordered
+    ]
     return ToolResponse.success(
         _OBJECT_ID,
         "valid",
