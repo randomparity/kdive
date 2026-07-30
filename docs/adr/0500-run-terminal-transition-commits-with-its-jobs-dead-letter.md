@@ -223,7 +223,16 @@ envelope a caller sees on a Run that failed normally.
   `failed`, which is the orphaning state itself.
 - The lock-order requirement of §4 is pinned by its own test, and that test asserts `queue.fail`
   was never *reached*, not merely that the job survived: a rollback leaves the job `running`
-  under either ordering, so the job's state cannot discriminate them.
+  under either ordering, so the job's state cannot discriminate them. Verified by mutation rather
+  than asserted — moving the lock back after `queue.fail` while keeping the transaction reddens
+  that test and only that test, and its job-state assertion keeps passing, which is the claim.
+- The tests are also mutation-checked in the other direction, because RED-before-GREEN-after alone
+  does not rule out a *positive* assertion that holds for the wrong reason. Neutralizing
+  `_mark_run_failed` while leaving everything else in place reddens the "the Run ends `failed` with
+  the handler's category" assertion on all three columns, and reddens the two contention tests with
+  `DID NOT RAISE LockNotAvailable` — which is the useful signal: it proves the fault those tests
+  inject is the Run's own `UPDATE`, so the window they claim to open is genuinely open rather than
+  incidentally satisfied by the fixture.
 - **A new failure mode replaces the old one, and it is the loud kind.** Where a faulting Run
   `UPDATE` used to leave a silently orphaned Run and a finalized job, it now leaves the job
   unfinalized, so the same fault costs one more attempt (or, at the last attempt, a
