@@ -159,7 +159,9 @@ def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
     minimal such value, landing exactly on INT64_MIN. It did not merely bypass the bound: the
     unwrapped string reached the launch loop, whose `index <= count` ran ZERO times, while
     `DAEMON_COUNT` went negative and disabled the settle gate — so a stack with no workers at all
-    reported a *surplus*. The ceiling must therefore bound BOTH ends, not just the upper one.
+    reported a *surplus*. The ceiling must therefore bound the value's MAGNITUDE before any
+    arithmetic touches it: a numeric bound at either end is evaluated after the wrap and cannot
+    see it, which is why 2^64+1 below slips a two-sided numeric check as readily as a one-sided one.
     """
     # Every one of these defeats a purely numeric check, because each has already wrapped by the
     # time `((...))` sees it: 2^63 -> INT64_MIN, 2^64 -> 0, and 2^64+1 / 2^64+8 land squarely
@@ -327,12 +329,9 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
         "require_workers_alive 1\n"
     )
     assert surplus.returncode != 0
-    # Scoped to the prescription, not to the string: `down.sh --wipe` is named further down as
-    # what forces a leaked VM's System to torn_down, which is true and useful. What must be gone
-    # is `down.sh --yes` offered as the way to clear the surplus.
-    assert "down.sh --yes" not in surplus.stderr, (
-        f"down.sh cannot clear a SIGTERM-ignoring worker; it must not be the remedy: "
-        f"{surplus.stderr}"
+    assert "down.sh" not in surplus.stderr, (
+        f"down.sh cannot clear a SIGTERM-ignoring worker; it must not be the remedy, and "
+        f"--wipe must not be dangled as recovery for an abandoned job either: {surplus.stderr}"
     )
     assert "Tearing the stack down will NOT clear it" in surplus.stderr, (
         f"the message must say outright that teardown does not fix this: {surplus.stderr}"
@@ -347,9 +346,10 @@ def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Pa
     )
     # Killing abandons a running job, so the message must not stop at the command: it has to say
     # what picks up the pieces, or the operator is left guessing whether they have to wipe. The
-    # mechanism is the queue, NOT the reconciler — `dequeue` reclaims a `running` row whose
-    # lease has lapsed and charges an attempt; the reconciler's leaked-domain pass is gated off
-    # while a non-torn_down System row exists, so it does not clean this up.
+    # mechanism is the queue, NOT the reconciler — `dequeue` reclaims a `running` row whose lease
+    # has lapsed and charges an attempt. The message deliberately claims nothing beyond that: two
+    # earlier drafts asserted a downstream cleanup path the source contradicted, so the scope of
+    # what it promises is itself the thing under test.
     assert "another worker reclaims it once its lease" in surplus.stderr, (
         f"the consequence of kill -9 and what recovers it must be stated: {surplus.stderr}"
     )
@@ -393,17 +393,28 @@ def test_stop_daemons_warns_with_the_set_it_actually_polled(tmp_path: Path) -> N
     matched the check that produced it. The stub returns a different set once the poll loop is
     over, so any trailing scan shows up in the message.
 
-    `kill` and `sleep` are stubbed because this function really signals pids and really waits ten
-    seconds — 111/222 could belong to someone on this host.
+    This function really signals pids, and 111/222 belong to someone on any busy host — on the
+    machine this was written, 222 was a root kernel thread. Both kill paths must therefore be
+    stubbed, and a shell function covers only one of them: in `sudo kill "$pid"` the `kill` is an
+    argument to sudo, not a command the shell resolves, so a `kill()` function never sees it and
+    the root-owner branch would run for real. Which branch is taken otherwise depends on whether
+    111/222 exist on the host and who owns them, so `id` is stubbed to pin it to the same-user
+    branch that `kill()` covers; `sudo` is stubbed on PATH regardless, so even a future change to
+    that condition cannot signal a real process. `sleep()` keeps the ten-second poll free.
     """
     counter = tmp_path / "scans"
+    sudo_stub = tmp_path / "sudo"
+    sudo_stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"{tmp_path}/sudo-argv"\n')
+    sudo_stub.chmod(0o755)
     result = _lib(
         "kill() { :; }\n"
         "sleep() { :; }\n"
+        "id() { echo root; }\n"
         f'daemon_pids() {{ echo scan >>"{counter}"\n'
         f'  if (( $(wc -l <"{counter}") > 21 )); then echo 999; else printf "111\\n222\\n"; fi\n'
         "}\n"
-        "stop_daemons\n"
+        "stop_daemons\n",
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
     )
     # One scan builds the kill list, then the poll loop runs 20 times. A 22nd means the WARN
     # went back to `ps` instead of reusing what the loop had already read.
