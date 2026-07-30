@@ -88,10 +88,10 @@ stop_daemons() {
   done
   # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
   # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
-  # in require_workers_alive, and this list is likewise what an operator would act on. Sleep
-  # FIRST so the surviving scan is the last thing observed: checking before the sleep would
-  # report a set already half a second stale, and nothing dies in the instant after SIGTERM
-  # anyway — a daemon's bounded pool teardown alone is seconds (ADR-0449).
+  # in require_workers_alive, and this list is likewise what an operator would act on. Sleep FIRST
+  # so the surviving scan is the last thing observed rather than one already half a second stale.
+  # The price is one extra 0.5s poll when every daemon exits immediately; the gain is that the
+  # pids the WARN hands the operator were still there when it decided to warn.
   for _ in {1..20}; do
     sleep 0.5
     mapfile -t remaining < <(daemon_pids)
