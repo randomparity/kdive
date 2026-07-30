@@ -415,6 +415,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make the worker a StatefulSet with per-replica scratch volumes
 - Pin the kubeVersion floor and narrow the scratch-volume claim
 - Re-raise reports.generate's member over-reach to the auditor
+- Defer a locked owner in the upload reap instead of waiting
 
 ### Build
 
