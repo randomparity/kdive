@@ -253,6 +253,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Condition ADR-0511's extension cap on a stable upload TTL
 - Restate ADR-0511's TTL caveat as an append, not a rewrite
 - Explain why the capped equality is exact
+- Drop a misapplied ADR-0449 citation from stop_daemons
+- Note that a re-run can hit the same surplus
 
 ### Fixed
 
@@ -442,6 +444,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop the capped warning naming the wrong cause
 - Close two silent-pass paths in the migration-ordering guard
 - Fail the migration guard on an empty schema dir and stop guessing remotes
+- Bound the worker count at both ends and fix the surplus remedy
+- Close the count bound and correct the surplus consequence
+- State the real recovery path for a killed worker
+- Stop the new test signalling real host pids
 
 ### Build
 
@@ -453,6 +459,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Style
 
 - Rewrap docstring paragraphs left ragged by the reflow
+- Reflow the stop_daemons poll comment
 
 ## [0.4.0] - 2026-07-23
 
