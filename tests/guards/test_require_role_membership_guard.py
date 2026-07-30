@@ -28,13 +28,20 @@ costs no allowlist entries over covering only the caller-named ones, and it clos
 row-resolved hazard too. Precision comes from the mitigations being real, not from narrowing
 which sites are asked.
 
+A same-function mitigation must name the **same project expression** the call authorizes, so a
+``require_project`` on some other project — or a membership check on a different attribute of the
+row — does not clear the site. That match is textual, which is weaker than "the same value", but
+weak in the safe direction: it can refuse a site that is in fact fine, and the allowlist absorbs
+that; it cannot accept one whose check names a different object.
+
 **What this analysis cannot resolve.** It is intra-procedural plus one level of intra-module call
-graph. It cannot follow a project argument across two frames, across modules, or through a
-container, and it does not know that a repository ``get`` is membership-scoped. Those sites are
-not silently passed — they fail, and clearing one requires an entry in
-:data:`_UNCOVERED_REQUIRE_ROLE` stating the cross-frame fact the analysis could not see. The
-allowlist is where this guard's dataflow limits are written down, per site, in prose. ADR-0507
-records the tradeoff.
+graph, over syntax. It cannot follow a project argument across two frames, across modules, or
+through a container; it does not know that a repository ``get`` is membership-scoped; and it
+reasons about lexical position, not reachability, so a mitigation on a branch that does not
+dominate the call still counts. Those sites are not silently passed — they fail, and clearing one
+requires an entry in :data:`_UNCOVERED_REQUIRE_ROLE` stating the cross-frame fact the analysis
+could not see. The allowlist is where this guard's dataflow limits are written down, per site, in
+prose. ADR-0507 records the tradeoff.
 
 Scope boundary. ``test_denial_envelope_actions.py`` walks ``ToolResponse.denied(...)`` calls —
 envelope *construction*. A bare ``AuthorizationError`` builds no envelope at all, so it is
@@ -148,22 +155,39 @@ def _enveloped_by_enclosing_try(function: ast.AST, line: int) -> bool:
     return False
 
 
-def _membership_established_before(function: ast.AST, line: int) -> bool:
+def _membership_established_before(
+    function: ast.AST, line: int, project: ast.expr | None = None
+) -> bool:
     """True if ``function`` establishes membership at a statement preceding ``line``.
 
     Either an explicit ``require_project(ctx, ...)`` — which raises ``ProjectMembershipDenied``,
     a class the dispatch boundary *does* envelope — or an ``in``/``not in`` test against
     ``ctx.projects``, which is how the row-resolving tools gate before they authorize.
+
+    When ``project`` is given, the check must name **that** expression: a
+    ``require_project(ctx, other)`` above an unrelated ``require_role(ctx, project, ...)``
+    establishes nothing about ``project`` and must not clear the site. Comparison is on the
+    unparsed source, so it holds only for a syntactically identical expression — ``run.project``
+    matching ``run.project``, never ``run.project`` matching ``system.project``.
+
+    ``project`` is left None for the one-level call-graph rule, where the caller's own
+    expression is a different binding in a different scope and text equality would be
+    meaningless. That looseness is why :func:`_caller_covered` also demands that *every* call
+    site be covered.
     """
+    wanted = ast.unparse(project) if project is not None else None
     for node in ast.walk(function):
         if getattr(node, "lineno", line) >= line:
             continue
         if isinstance(node, ast.Call) and _call_name(node) == _REQUIRE_PROJECT:
-            return True
+            checked = [ast.unparse(arg) for arg in node.args[1:]]
+            if wanted is None or wanted in checked:
+                return True
         if (
             isinstance(node, ast.Compare)
             and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops)
             and any(map(_is_ctx_projects, node.comparators))
+            and (wanted is None or ast.unparse(node.left) == wanted)
         ):
             return True
     return False
@@ -272,7 +296,7 @@ def _coverage(
     """The rule that covers this ``require_role`` site, or None if none does."""
     if _iterates_ctx_projects(function, project_arg):
         return "iterates ctx.projects"
-    if _membership_established_before(function, line):
+    if _membership_established_before(function, line, project_arg):
         return "membership checked before the call"
     if _enveloped_by_enclosing_try(function, line):
         return "enclosing except AuthorizationError"
