@@ -1713,6 +1713,78 @@ MD
   run_case "README.md grows an index table" 0 W-INDEX-TABLE "$d" BASE_SHA="$b" \
     RECORD_PROFILES=adr
 
+  # 0000-template.md is exempt despite being record-shaped, so the immutability rules do not
+  # reach it. This is the case the ADR template could not pass while it was a record: a legacy
+  # template committed at the base ref, then reshaped in place — a rewritten H1, a renamed
+  # section, a gutted preamble, all at once. As a record that is four err_full findings
+  # (E-HEADING-REWRITTEN, E-REWRITE, E-PREAMBLE-REWRITTEN) and no way to ever correct it.
+  d=$(adr_dir adr_template_reshaped)
+  cat >"$d/docs/adr/0000-template.md" <<'MD'
+# ADR NNNN — <title>
+
+- **Status:** Proposed
+- **Date:** <YYYY-MM-DD>
+
+## Context
+
+What forces are at play.
+
+## Decision
+
+We will ….
+
+## Consequences
+
+What follows from it.
+
+## Alternatives considered
+
+Each rejected option.
+MD
+  git -C "$d" add -A
+  git -C "$d" commit -qm "a legacy-shaped template"
+  b=$(base_of "$d")
+  write_adr "$d" "0000-template.md" "Proposed"
+  run_case "template reshaped in place" 0 - "$d" BASE_SHA="$b" RECORD_PROFILES=adr
+
+  # The exemption is not a hole: it takes the template out of check_sections too, so
+  # E-TEMPLATE-DRIFT is the only thing left holding it to REQUIRED_SECTIONS. A template short a
+  # required section is what the ADR profile shipped for the whole life of the 0504 gate, and it
+  # never once failed a run.
+  d=$(adr_dir adr_template_missing_section)
+  write_adr "$d" "0000-template.md" "Proposed"
+  grep -v '^## Considered & rejected$' "$d/docs/adr/0000-template.md" >"$d/.tpl"
+  mv "$d/.tpl" "$d/docs/adr/0000-template.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm "a template that lost a section"
+  b=$(base_of "$d")
+  run_case "template missing a required section" 1 E-TEMPLATE-DRIFT "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # Exactly, not at least. A superset would satisfy any "has every required section" check, and
+  # a record copied from it inherits the extra heading into APPEND_ONLY_SECTIONS, where it is
+  # pinned for the life of the record.
+  d=$(adr_dir adr_template_extra_section)
+  write_adr "$d" "0000-template.md" "Proposed"
+  printf '\n## Notes\n\nAnything else.\n' >>"$d/docs/adr/0000-template.md"
+  git -C "$d" add -A
+  git -C "$d" commit -qm "a template with a section the gate does not require"
+  b=$(base_of "$d")
+  run_case "template declares a section too many" 1 E-TEMPLATE-DRIFT "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
+  # Exempt is per exact path, and only for the names the profile lists. A record-shaped file
+  # that merely resembles the template is a record, immutable like any other.
+  d=$(adr_dir adr_template_lookalike)
+  write_adr "$d" "0002-template.md" "Proposed"
+  git -C "$d" add -A
+  git -C "$d" commit -qm "a record whose name ends in template"
+  b=$(base_of "$d")
+  grep -v '^What we decided.$' "$d/docs/adr/0002-template.md" >"$d/.rec"
+  mv "$d/.rec" "$d/docs/adr/0002-template.md"
+  run_case "a record named like the template is a record" 1 E-REWRITE "$d" BASE_SHA="$b" \
+    RECORD_PROFILES=adr
+
   # APPEND_ONLY_SECTIONS="*" protects every level-2 section the base ref had, not a fixed
   # list — ADRs are not section-uniform, and a fixed list leaves the extra sections guttable.
   d=$(adr_dir adr_extra_section)
