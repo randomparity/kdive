@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
-from fastmcp import FastMCP
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import NotFoundError
 from mcp.shared.exceptions import McpError
+from mcp.types import ErrorData
 from psycopg_pool import AsyncConnectionPool
 from pydantic import AnyUrl
 
@@ -161,15 +161,22 @@ def _gated_app(monkeypatch: pytest.MonkeyPatch) -> FastMCP:
     return build_app(pool, verifier=_verifier(), secret_registry=SecretRegistry())
 
 
-def _wire_error(app: FastMCP, uri: str) -> Any:
-    """The JSON-RPC ``ErrorData`` a ``resources/read`` of ``uri`` produces.
+def _wire_error(app: FastMCP, uri: str) -> ErrorData:
+    """The JSON-RPC ``ErrorData`` a real client receives for ``resources/read`` of ``uri``.
 
-    Driven through ``_read_resource_mcp`` — the handler FastMCP registers with the MCP SDK —
-    because that is the frame that decides the client-visible error code. The kind of
-    exception the middleware raises only matters through what this frame does with it.
+    Driven through an in-memory ``Client`` rather than the middleware or FastMCP's handler,
+    because the frame that turned this bug into a ``code 0`` was the MCP SDK's
+    ``Server._handle_request`` catch-all — *above* both. A test below that frame cannot
+    observe the defect #1682 reports. The transport carries no access token, which is exactly
+    the non-platform caller the gate is for.
     """
+
+    async def _read() -> None:
+        async with Client(app) as client:
+            await client.read_resource(uri)
+
     with pytest.raises(McpError) as raised:
-        asyncio.run(app._read_resource_mcp(uri))
+        asyncio.run(_read())
     return raised.value.error
 
 
@@ -192,10 +199,11 @@ def test_operator_doc_denied_end_to_end_through_built_app(monkeypatch: pytest.Mo
 def test_denied_operator_doc_read_is_not_an_internal_error_on_the_wire(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The defect #1682 actually produced: the bare `AuthorizationError` matched no `except` in
-    # `_read_resource_mcp`, escaped to the SDK's `Server._handle_request` catch-all, and reached
-    # the client as `ErrorData(code=0)` — the internal-error shape, not a denial. Reddens
-    # against the unfixed raise site, which never reaches `McpError` at all.
+    # The defect #1682 actually produced, reproduced through a real client before the fix was
+    # written: the bare `AuthorizationError` matched no `except` in `_read_resource_mcp`,
+    # escaped to the SDK's `Server._handle_request` catch-all, and arrived as
+    # `code=0, message="<uri> requires a platform role"` — the internal-error shape, leaking
+    # the gate. -32002 is `resources/read`'s not-found code, the answer the listing implies.
     error = _wire_error(_gated_app(monkeypatch), _OPERATOR_URI)
     assert error.code == -32002
     # Independent of the code: `_read_resource_mcp` interpolates the exception into the wire

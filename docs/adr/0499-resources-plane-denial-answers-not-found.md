@@ -94,6 +94,12 @@ nothing to unify.
   "not found" for a doc that exists. That cost is accepted: the caller cannot distinguish it from a
   typo'd URI, which is the same trade ADR-0097 already made for ungranted rows, and the diagnosis
   path is `session.whoami` (ADR-0471), not the error text.
+- **The gated read leaves no server-side trace at all** — no `audit_log` row per decision 3, and
+  no log line either. That is deliberate and symmetric: `on_list_resources` does not log the docs
+  it drops, so logging the read would reintroduce on the logging plane exactly the asymmetry
+  between the two arms that this ADR removes on the wire. The degraded-auth path keeps its
+  existing `_log.warning`, because a failing role check is a server fault rather than a
+  concealment.
 - `tests/guards/test_denial_envelope_actions.py` is **not** extended. It is an AST walk over
   `ErrorCategory.AUTHORIZATION_DENIED` call arguments; this site raises no categorized error and
   builds no envelope, so registering it there is inapplicable — the guard would have nothing to
