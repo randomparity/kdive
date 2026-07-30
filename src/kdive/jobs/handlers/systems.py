@@ -19,6 +19,7 @@ from kdive.db.repositories import (
     SYSTEMS,
     ObjectNotFound,
     delete_snapshots_for_system,
+    record_system_failure_category,
     snapshot_by_name,
 )
 from kdive.domain.capacity.state import IllegalTransition, SnapshotState, SystemState
@@ -188,7 +189,7 @@ async def _record_system_failure(
     try:
         async with conn.transaction():
             await SYSTEMS.update_state(conn, system_id, SystemState.FAILED)
-            await _record_failure_category(conn, system_id, category)
+            await record_system_failure_category(conn, system_id, category)
             await audit_transition(
                 conn,
                 job,
@@ -205,25 +206,6 @@ async def _record_system_failure(
             operation,
             system_id,
             exc_info=True,
-        )
-
-
-async def _record_failure_category(
-    conn: AsyncConnection, system_id: UUID, category: ErrorCategory
-) -> None:
-    """Stamp ``systems.failure_category`` on the row the caller just drove to ``failed``.
-
-    Deliberately unguarded on ``state``. The caller's transaction has already run
-    ``update_state``, whose ``SELECT … FOR UPDATE`` holds this row and whose ``UPDATE`` set it
-    to ``failed``; ``FAILED`` has an empty outbound transition set, so no concurrent writer can
-    move it. A ``WHERE state = 'failed'`` predicate could therefore never be false, and if it
-    somehow were it would fail *silently* — zero rows affected, no signal — which is worse than
-    the arrangement it claims to protect.
-    """
-    async with conn.cursor() as cur:
-        await cur.execute(
-            "UPDATE systems SET failure_category = %s WHERE id = %s",
-            (category.value, system_id),
         )
 
 
