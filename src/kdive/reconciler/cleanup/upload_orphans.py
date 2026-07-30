@@ -472,10 +472,11 @@ async def _delete_if_still_reclaimable(
     §6 exist to prevent.
 
     The cost is one snapshot held across one ``delete_object``, which is the property
-    :func:`reclaimable_upload_keys` documents avoiding on the page classify. Per key that is a
-    lock acquire, one statement and one round trip — strictly less than
-    ``_claim_abandoned_prefix``, which
-    already holds ``LockScope.RUN`` across a whole paginating ``list_prefix``.
+    :func:`reclaimable_upload_keys` documents avoiding on the page classify. Per key that is a lock
+    acquire, one statement and one round trip — strictly less than ``_claim_abandoned_prefix``,
+    which already holds ``LockScope.RUN`` across a whole paginating ``list_prefix``. What it costs
+    in the other direction is disclosed in ADR-0502 §Consequences: an unresponsive delete holds this
+    owner's lock for botocore's retry budget, and every foreground operation on that Run waits.
 
     Returns:
         Whether the object was deleted. ``False`` means the re-read declined it, the owner was

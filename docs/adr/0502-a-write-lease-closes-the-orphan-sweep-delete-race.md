@@ -123,6 +123,22 @@ before it deletes.
   `_claim_abandoned_prefix`, which already holds `LockScope.RUN` across a whole paginating
   `list_prefix`. It does mean `reclaimable_upload_keys`' "no snapshot across blocking store calls"
   property no longer holds on the per-key path; it still holds on the page classify.
+- **A store that blackholes deletes now blocks that owner's foreground operations, not just the
+  sweep.** The lock is held across the `delete_object`, so with botocore's default five-attempt/60s
+  budget one unresponsive delete holds `LockScope.RUN` for that Run for up to a minute, and
+  `precheck_run`, `finalize_capture`, `control.capture_traffic` and `_fail_job_and_run` all wait on
+  it. The exposure is bounded by that budget per key and repeats up to `MAX_RECLAIMS_PER_ROOT` times
+  a pass. It is the same shape and the same budget ADR-0497 already accepted in the other direction
+  — its verify HEADs run *under* the Run lock, so "a store that blackholes them holds that lock for
+  minutes" is disclosed there — and it is why the sweep's own acquire is a `try`: the sweep never
+  adds itself to such a queue, it only ever forms one. A `lock_timeout` would not help, since it
+  bounds the waiter's wait and not the holder's hold.
+- **A permanently locked owner is skipped silently and forever.** The skip is deliberately not a
+  counted fault, so an owner whose lock is held by something wedged has its keys deferred on every
+  pass while the sweep reports a clean count — the same "a healthy zero and a scoped-out sweep look
+  identical" hazard ADR-0455 §4 added its drift warning for. The per-skip INFO line names the owner
+  and the key, which is the whole of the signal; no counter or warning threshold is added, because
+  the condition is a wedged lock holder rather than a property of this sweep.
 - **A capture whose job lease lapses mid-write loses its fence.** The exposure window is exactly the
   window in which the queue has already declared the job abandoned and `repair_abandoned_jobs` will
   reclaim it, and ADR-0497's verify still refuses to commit rows against the lost bytes. Tying the

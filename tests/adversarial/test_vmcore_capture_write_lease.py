@@ -22,15 +22,16 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import psycopg
 import pytest
 from psycopg_pool import AsyncConnectionPool
 
-from kdive.artifacts.storage import HeadResult, StoredArtifact
+from kdive.artifacts.storage import HeadResult, ObjectListing, StoredArtifact
 from kdive.artifacts.upload_manifest import RUN_UPLOAD_OWNER, lock_scope_for
 from kdive.artifacts.write_lease import hold_write_lease, reap_stale_write_leases
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
@@ -42,12 +43,16 @@ from kdive.jobs import queue
 from kdive.jobs.handlers.artifacts import vmcore as vmcore_plane
 from kdive.jobs.payloads import Authorizing, CaptureVmcorePayload
 from kdive.providers.ports.retrieve import CaptureOutput
+from kdive.reconciler.cleanup.upload_orphans import repair_leaked_upload_objects
 from tests.capture_store import WrittenObjects
 from tests.mcp._seed import seed_crashed_system, seed_run_on_system
 from tests.mcp.systems_support import provider_resolver
 
 _AUTH = Authorizing(principal="alice", agent_session="s", project="proj")
 _METHOD = CaptureMethod.HOST_DUMP
+_GRACE = timedelta(hours=1)
+_NO_TTL = timedelta(0)
+_ABANDONED_ETAG = "etag-of-the-abandoned-first-attempt"
 
 
 def _core(run_id: str) -> CaptureOutput:
@@ -75,12 +80,17 @@ class _SuspendedCapture:
         self.entered = threading.Event()
         self.resume = threading.Event()
         self.raised: BaseException | None = None
+        #: When set, the capture's objects are recorded here instead of in ``_objects`` — the joined
+        #: test needs the provider and the swept bucket to be the *same* store.
+        self.write_through: _SweepableCaptureStore | None = None
 
     def capture(self, system_id: UUID, run_id: UUID, method: CaptureMethod) -> CaptureOutput:
         self.entered.set()
         assert self.resume.wait(timeout=30), "the probe never released the capture"
         if self.raised is not None:
             raise self.raised
+        if self.write_through is not None:
+            return self.write_through.record(_core(self._run_id))
         return self._objects.record(_core(self._run_id))
 
     def head(self, key: str) -> HeadResult | None:
@@ -278,5 +288,167 @@ def test_the_guard_admits_a_transaction_free_connection(migrated_url: str) -> No
                 require_top_level_transaction(conn, "the test's own precondition")
                 await hold_write_lease(conn, RUN_UPLOAD_OWNER, UUID(run_id), job.id)
             assert await _leases_for(migrated_url, run_id) == [job.id]
+
+    asyncio.run(_run())
+
+
+class _SweepableCaptureStore:
+    """One double serving the real sweep's port *and* the finalize verify, over ``key -> (etag,
+    age)``.
+
+    The joined test needs both: the ADR-0455 sweep lists, heads and deletes through it while the
+    capture is suspended, and ``finalize_capture`` then heads through it. ``age`` fixes
+    ``last_modified`` at ``now - age``, which is what lets a key sit past the sweep's grace — the
+    state a first attempt that died before finalize leaves behind.
+    """
+
+    def __init__(self, objects: dict[str, tuple[str, timedelta]]) -> None:
+        self._objects = dict(objects)
+        self.deleted: list[str] = []
+
+    @property
+    def present(self) -> set[str]:
+        return set(self._objects)
+
+    def record(self, output: CaptureOutput) -> CaptureOutput:
+        for stored in (output.raw, output.redacted):
+            self._objects[stored.key] = (stored.etag, timedelta(0))
+        return output
+
+    def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]:
+        page = [
+            ObjectListing(key=key, last_modified=self._mtime(key))
+            for key in sorted(self._objects)
+            if key.startswith(prefix)
+        ]
+        if page:
+            yield page
+
+    def head(self, key: str) -> HeadResult | None:
+        entry = self._objects.get(key)
+        if entry is None:
+            return None
+        return HeadResult(
+            etag=entry[0], size_bytes=1, last_modified=self._mtime(key), checksum_sha256=None
+        )
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        return sorted(k for k in self._objects if k.startswith(prefix))
+
+    def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self._objects.pop(key, None)
+
+    def _mtime(self, key: str) -> datetime:
+        return datetime.now(UTC) - self._objects[key][1]
+
+
+async def _claimed_capture_job(pool: AsyncConnectionPool) -> tuple[str, Job]:
+    """A capture job in the state the worker actually dispatches from: claimed and leased.
+
+    ``queue.dequeue`` is what makes ``jobs.state = 'running'`` with a future ``lease_expires_at``,
+    and that pair *is* the write lease's liveness predicate. An ``enqueue``-only job is ``queued``
+    with a NULL lease, so a lease it holds fences nothing — which is why the tests above, which only
+    need the row's visibility, cannot stand in for this one.
+    """
+    run_id, _job = await _seeded_capture_job(pool)
+    async with pool.connection() as conn:
+        claimed = await queue.dequeue(conn, "w-capture-1", lease=timedelta(minutes=5))
+    assert claimed is not None, "the capture job must be claimable"
+    return run_id, claimed
+
+
+async def _sweep_now(url: str, store: _SweepableCaptureStore) -> int:
+    """Run the real ADR-0455 orphan sweep on a connection of its own, as the reconciler does."""
+    async with await psycopg.AsyncConnection.connect(url) as conn:
+        return await repair_leaked_upload_objects(conn, store, _GRACE, _NO_TTL)
+
+
+def test_the_real_sweep_cannot_reclaim_under_a_claimed_capture(migrated_url: str) -> None:
+    """The acceptance criterion, with both halves real: handler *and* sweep, live job lease.
+
+    Everything else about the key says "delete me": it is the abandoned first attempt's object,
+    twice the grace old, with no ``artifacts`` row and no ``upload_manifests`` row. The only thing
+    standing between it and ``delete_object`` is the lease the claimed capture holds — and the
+    sweep runs here for real, on its own connection, while the provider is mid-write.
+
+    The two halves are tested apart elsewhere (the fence in
+    ``tests/reconciler/test_upload_orphan_sweep_write_lease.py``, the mint's visibility above) and
+    neither is sufficient: the fence tests hand-seed a ``running`` job and never run the handler,
+    and the visibility tests run the handler on an ``enqueue``-only job whose lease is not live, so
+    the fence they exercise is inert. This is the only test in the tree where the mechanism that
+    ships is the mechanism under test.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id, job = await _claimed_capture_job(pool)
+            raw = f"local/runs/{run_id}/vmcore-{_METHOD.value}"
+            store = _SweepableCaptureStore({raw: (_ABANDONED_ETAG, _GRACE * 2)})
+            retriever = _SuspendedCapture(run_id)
+            retriever.write_through = store
+
+            async def _handle() -> object:
+                async with pool.connection() as conn:
+                    return await vmcore_plane.capture_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=retriever),
+                        artifact_store=store,
+                    )
+
+            handler = asyncio.create_task(_handle())
+            try:
+                await asyncio.to_thread(retriever.entered.wait, 30)
+                assert retriever.entered.is_set()
+                assert await _sweep_now(migrated_url, store) == 0
+            finally:
+                retriever.resume.set()
+            result = await handler
+        assert store.deleted == [], "the in-flight capture's prefix must not be swept"
+        assert raw in store.present
+        assert isinstance(result, str), f"the capture should have finalized, got {result!r}"
+
+    asyncio.run(_run())
+
+
+def test_the_same_pass_reclaims_once_the_lease_is_gone(migrated_url: str) -> None:
+    """The falsifier for the test above: identical pass, identical key, no lease.
+
+    Without this arm the assertion "nothing was deleted" is satisfied by any sweep that failed to
+    reach the root at all, and by the store-mtime fence had the ages been chosen differently. Here
+    the lease is dropped from an outside session at the same instant, and the same pass destroys the
+    same key — so the lease is what accounts for the difference and nothing else can.
+    """
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id, job = await _claimed_capture_job(pool)
+            raw = f"local/runs/{run_id}/vmcore-{_METHOD.value}"
+            store = _SweepableCaptureStore({raw: (_ABANDONED_ETAG, _GRACE * 2)})
+            retriever = _SuspendedCapture(run_id)
+            retriever.write_through = store
+
+            async def _handle() -> object:
+                async with pool.connection() as conn:
+                    return await vmcore_plane.capture_handler(
+                        conn,
+                        job,
+                        resolver=provider_resolver(retriever=retriever),
+                        artifact_store=store,
+                    )
+
+            handler = asyncio.create_task(_handle())
+            try:
+                await asyncio.to_thread(retriever.entered.wait, 30)
+                async with await psycopg.AsyncConnection.connect(
+                    migrated_url, autocommit=True
+                ) as outside:
+                    await outside.execute("DELETE FROM object_write_leases")
+                assert await _sweep_now(migrated_url, store) == 1
+            finally:
+                retriever.resume.set()
+            await handler
+        assert store.deleted == [raw]
 
     asyncio.run(_run())
