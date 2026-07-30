@@ -529,6 +529,46 @@ def test_repeated_failing_finalizes_cannot_extend_the_window_past_the_cap(
     asyncio.run(_run())
 
 
+def test_a_ttl_lowered_after_the_mint_reports_a_capped_refresh(
+    migrated_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refresh that grants nothing tells the operator so, whatever spent the budget (#1724).
+
+    The window is minted at an hour and the operator then lowers `KDIVE_UPLOAD_TTL_SECONDS` to a
+    minute — the case ADR-0511 §2 records, and the shape a row migration `0085` backfilled arrives
+    in. The standing deadline already outruns the `now() + ttl` this refresh computes, so `GREATEST`
+    keeps it and the finalize buys nothing. The old predicate compared the surviving deadline
+    against `now() + ttl`, found it larger, and called that uncapped: a retry loop was told its
+    window was still growing while every extension was a no-op.
+    """
+    monkeypatch.setenv("KDIVE_UPLOAD_TTL_SECONDS", "3600")
+    monkeypatch.setenv("KDIVE_UPLOAD_WINDOW_MAX_TTL_MULTIPLE", "3")
+
+    async def _run() -> None:
+        async with _pool(migrated_url) as pool:
+            run_id = await seed_external_run_with_manifest(pool, entries=[_CHUNKED_KERNEL])
+            minted = await _window_deadline(pool, run_id)
+
+            monkeypatch.setenv("KDIVE_UPLOAD_TTL_SECONDS", "60")
+            with caplog.at_level(logging.WARNING, logger=complete_build.__name__):
+                await _complete_swallowing_failure(
+                    pool,
+                    run_id,
+                    CompleteBuildFinalizer(
+                        validate_complete_build=FakeValidator(_output(run_id)),
+                        object_store_factory=lambda: _ChunkedStore(bad_head=True),
+                    ),
+                )
+            after = await _window_deadline(pool, run_id)
+
+        assert after == minted  # the refresh granted nothing: no shortening, no extension
+        assert "upload window extension capped" in caplog.text
+
+    asyncio.run(_run())
+
+
 def test_the_cap_multiple_is_read_from_configuration(
     migrated_url: str,
     monkeypatch: pytest.MonkeyPatch,

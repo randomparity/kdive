@@ -105,9 +105,11 @@ class WindowRefresh(NamedTuple):
     ``now() + ttl``: an extension is clamped to the window's cumulative cap, and it never shortens
     an already-open window, so on a spent budget it is the unchanged prior deadline.
 
-    ``capped`` is true when the clamp bound — i.e. this refresh granted less than a full ``ttl``.
-    It is computed in SQL against the same statement's ``now()`` rather than derived by the caller,
-    because the only clock the comparison may use is Postgres's (ADR-0448 decision 1).
+    ``capped`` is true when this refresh did not leave the deadline a full ``ttl`` out — either
+    ``LEAST`` clamped the grant short of one, or ``GREATEST`` kept a standing deadline that already
+    reached past one and the refresh granted nothing at all (#1724). It is computed in SQL against
+    the same statement's ``now()`` rather than derived by the caller, because the only clock the
+    comparison may use is Postgres's (ADR-0448 decision 1).
     """
 
     deadline: datetime
@@ -219,6 +221,12 @@ async def refresh_deadline(
     bound rather than the new one: a bounded leak, never an exposure, since no refresh moves the
     deadline later than the mint already placed it.
 
+    That outcome is a capped one and is reported as such (#1724). ``capped`` asks whether the
+    deadline landed a full ``ttl`` out, not whether it landed short of one, because both clamps
+    withhold the grant: ``LEAST`` by holding the deadline below ``now() + ttl``, ``GREATEST`` by
+    holding one already above it. The second only ever selects the standing deadline, so a refresh
+    reporting a deadline past ``now() + ttl`` is a refresh that moved nothing.
+
     ``window_started_at`` is restamped only by :func:`replace_manifest`, so a re-mint through
     ``artifacts.create_run_upload`` starts a new window with a full budget. That is deliberate:
     ADR-0448 makes the re-mint the advertised recovery from every "your window is gone" rejection,
@@ -254,7 +262,7 @@ async def refresh_deadline(
             "UPDATE upload_manifests SET deadline = "
             "  GREATEST(deadline, LEAST(now() + %(ttl)s, window_started_at + %(max_window)s)) "
             "WHERE owner_kind = %(owner_kind)s AND owner_id = %(owner_id)s AND deadline >= now() "
-            "RETURNING deadline, deadline < now() + %(ttl)s",
+            "RETURNING deadline, deadline <> now() + %(ttl)s",
             {
                 "ttl": ttl,
                 "max_window": max_window,

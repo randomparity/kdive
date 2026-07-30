@@ -362,6 +362,75 @@ def test_refresh_never_shortens_an_open_window(migrated_url: str) -> None:
     asyncio.run(_run_test())
 
 
+def test_refresh_reports_capped_when_the_standing_deadline_outruns_the_ttl(
+    migrated_url: str,
+) -> None:
+    """A TTL lowered after the mint leaves every refresh granting nothing, and it says so (#1724).
+
+    The window was minted at the old, larger ``KDIVE_UPLOAD_TTL_SECONDS``, so its standing deadline
+    is already further out than the ``now() + ttl`` a refresh under the new, smaller one computes.
+    ``GREATEST`` keeps the standing deadline — correctly, since shortening it would hand the reaper
+    an in-flight reassembly's chunk objects — but the refresh granted the caller nothing, which is
+    a capped outcome and not the uncapped one the old ``deadline < now() + ttl`` predicate reported.
+    """
+
+    async def _run_test() -> None:
+        owner_id = uuid4()
+        # An hour at the mint, a minute at the refresh: the operator lowered the knob in between.
+        shrunk = timedelta(minutes=1)
+        async with await _connect(migrated_url) as conn:
+            await replace_manifest(
+                conn, _request(owner_id, [ManifestEntry("kernel", "Zm9v", 10)], ttl=_HOUR)
+            )
+            _, before = await _window_row(conn, owner_id)
+            refreshed = await refresh_deadline(
+                conn, "runs", owner_id, shrunk, max_window=shrunk * 3
+            )
+            _, after = await _window_row(conn, owner_id)
+        assert refreshed is not None
+        assert refreshed.deadline == before
+        assert after == before
+        assert refreshed.capped is True
+
+    asyncio.run(_run_test())
+
+
+def test_refresh_reports_capped_on_a_backfilled_row_minted_under_a_larger_ttl(
+    migrated_url: str,
+) -> None:
+    """The same outcome for a row migration ``0085`` backfilled (#1724, ADR-0511 §2).
+
+    ``window_started_at DEFAULT now()`` gives the backfilled row a fresh budget, but its deadline
+    was stamped by a mint that predates the column, under whatever TTL was live then. Six hours out
+    against a one-hour refresh, the clamped grant is never the greater of the two and the deadline
+    stands untouched — a capped refresh, reported as one.
+    """
+
+    async def _run_test() -> None:
+        owner_id = uuid4()
+        async with await _connect(migrated_url) as conn:
+            await conn.execute(
+                "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, deadline) "
+                "VALUES ('runs', %s, %s, %s, now() + interval '6 hours')",
+                (
+                    owner_id,
+                    f"local/runs/{owner_id}/",
+                    Jsonb([{"name": "kernel", "sha256": "Zm9v", "size_bytes": 10}]),
+                ),
+            )
+            _, before = await _window_row(conn, owner_id)
+            refreshed = await refresh_deadline(
+                conn, "runs", owner_id, _HOUR, max_window=timedelta(hours=3)
+            )
+            _, after = await _window_row(conn, owner_id)
+        assert refreshed is not None
+        assert refreshed.deadline == before
+        assert after == before
+        assert refreshed.capped is True
+
+    asyncio.run(_run_test())
+
+
 def test_a_remint_restarts_the_extension_budget(migrated_url: str) -> None:
     """The cap bounds extension, not re-minting (ADR-0511, ADR-0448 §4).
 
