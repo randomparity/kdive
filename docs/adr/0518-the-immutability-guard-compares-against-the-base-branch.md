@@ -111,6 +111,42 @@ a pass that CI turns into a failure. CI is the authority, as for the ordering gu
 The `find_violations` signature now takes the base ref's filenames as well as the diff, so the
 empty-base hard failure is reachable from a unit test rather than only from a real repository.
 
+### Amendment (2026-07-30): ADR-0015's rejection was better than this record allowed (#1745)
+
+Appended rather than substituted, because this record is merged and append-only outside
+`## Status`. The rebuttal above stands on its facts and is left as written. It is uncharitable in
+one place and incomplete in another, and being fair to a record you are overturning is worth a
+paragraph — a later reader should not come away thinking ADR-0015 was careless.
+
+**"Gives CI no protection on a clean checkout" — what it probably meant.** Read literally the
+sentence is false, and that is what the paragraph above says. But there is a reading on which it
+was true when written: a base-branch guard could not run in CI at all, because nothing fetched a
+base ref there. `.github/workflows/ci.yml` carried no `fetch-depth: 0` and no `git fetch origin
+main` until [ADR-0517](0517-migration-numbers-are-strictly-ascending-across-merges.md) and its PR
+(#1736, issue #1720) added `git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main`
+for the ordering guard. On that reading ADR-0015 was not mistaken about which comparison protects
+CI; it was observing that the protective one was unavailable, and settling for the one that could
+run. **That fetch step is what changed**, and it is the precondition for everything decided here.
+This record reuses it and adds a second fetch beside it; without #1736 there was nothing to build
+on.
+
+**The other reason was real, is specific, and remains a cost of this decision.** ADR-0015 also
+rejected the base-branch comparison because it "would also flag a *sanctioned* one-time correction
+(restoring #1218's reverted bytes) as a violation". That is not hypothetical. Commit `101633243`,
+"fix(1218): revert comment-only edits to 7 applied migrations", modifies exactly seven
+`src/kdive/db/schema/*.sql` files — seven `M` records, the shape this guard rejects. Under the
+`HEAD` base such a correction is a one-time speed bump: it fails while staged, and once committed
+every later run sees a clean tree. Under a base-branch comparison it is flagged for the life of the
+branch, on every run, with no expiry — so a repeat of #1218's cleanup could not merge without an
+administrator bypassing a required check.
+
+This record does not solve that, and did not previously admit it. It is the deliberate trade: the
+guard is worth more than the escape hatch, because #1218 arrived through inattention rather than
+through anyone needing to edit a migration on purpose, and a bypass that exists is a bypass that
+gets used. If a sanctioned correction is ever needed again, the honest path is an explicit,
+reviewed change to the guard in the same PR — not a flag it ships with. Nobody should discover
+this constraint by hitting it.
+
 ## Considered & rejected
 
 **Keep the `HEAD` diff as a second, local-only check beside a new CI guard.** Rejected. It
