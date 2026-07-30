@@ -395,6 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin the OTel sampler in one place, guard the constructor (#1693)
 - The sourced profile files are not executables
 - Satisfy ty 0.0.62's stricter union and protocol checks
+- Rewrite the ADR template in the canonical record shape
 
 ### Build
 
