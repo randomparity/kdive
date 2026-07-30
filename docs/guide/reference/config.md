@@ -285,6 +285,7 @@ Non-registry `KDIVE_*` variables read outside the process config registry — by
 | `KDIVE_WARM_STORE_IMAGE` | — | Catalog rootfs image `warm-store.sh` passes to `python -m kdive build-fs`. Unset → the script dies. |
 | `KDIVE_WARM_STORE_TARGET_NVR` | — | Supplied pinned guest-kernel NVR the warm-store refresh keys freshness on (the operator/CI computes it from the base image; no live distro query). Unset → the script dies. Same-NVR distro rebuilds need `KDIVE_WARM_STORE_FORCE`. |
 | `KDIVE_WORKER_AS_ROOT` | `1` | Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker as root via sudo (1) or as the current user (0). |
+| `KDIVE_WORKER_COUNT` | `1` | How many `kdive worker` processes `restart_host_processes()` in `scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the local stack's only job-concurrency knob; raise it to exercise cross-worker paths such as the rootfs fetch advisory lock. Each worker past the first gets its own aux health port and log file. |
 
 ## In-guest helpers
 

@@ -476,6 +476,16 @@ EXTERNAL_ENV_VARS: tuple[ExternalEnvVar, ...] = (
         "Whether `restart_host_processes()` in `scripts/live-stack/lib.sh` starts the worker "
         "as root via sudo (1) or as the current user (0).",
     ),
+    ExternalEnvVar(
+        "KDIVE_WORKER_COUNT",
+        "script",
+        "1",
+        "How many `kdive worker` processes `restart_host_processes()` in "
+        "`scripts/live-stack/lib.sh` starts. A worker runs one job at a time, so this is the "
+        "local stack's only job-concurrency knob; raise it to exercise cross-worker paths such "
+        "as the rootfs fetch advisory lock. Each worker past the first gets its own aux health "
+        "port and log file.",
+    ),
     # Host-published ports for the compose backends. Each is read by BOTH `docker-compose.yml`
     # (the publish side) and `scripts/live-stack/env.sh` (the client-facing DSN/endpoint), so an
     # override relocates the host mapping and the URL that reaches it together. Container-internal

@@ -1,11 +1,15 @@
+import os
 import shutil
 import socket
 import subprocess
+import time
 from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
+
+from kdive.health.aux_bind import PROCESS_DEFAULT_PORTS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -56,6 +60,117 @@ def _free_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _lib(snippet: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Source lib.sh and run `snippet`, with `env` overlaid on the current environment."""
+    return subprocess.run(
+        ["bash", "-c", f'source "{ROOT}/scripts/live-stack/lib.sh"\n{snippet}'],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+
+
+def _start_workers(tmp_path: Path, worker_count: str) -> list[Path]:
+    """Really run `restart_host_processes` against a stub interpreter; return the worker logs.
+
+    Stubs only the environment the launch loop cannot have in a unit test — the interpreter, the
+    log directory, and the three helpers that touch the live process table — so the loop itself,
+    the per-worker log naming, and the per-worker health-bind override are the code under test.
+    The stub records the aux bind address it was handed, which is the collision this guards.
+    """
+    stub = tmp_path / "python-stub"
+    stub.write_text(
+        '#!/usr/bin/env bash\necho "argv=$* health=${KDIVE_HEALTH_BIND_ADDR:-<unset>}"\n'
+    )
+    stub.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    result = _lib(
+        f'py="{stub}"\n'
+        f'log_dir="{log_dir}"\n'
+        "stop_daemons() { :; }\n"
+        "require_free_http_port() { :; }\n"
+        "wait_for_daemons_to_settle() { :; }\n"
+        "restart_host_processes\n"
+        'echo "DAEMON_COUNT=${DAEMON_COUNT}"\n',
+        KDIVE_WORKER_COUNT=worker_count,
+        KDIVE_WORKER_AS_ROOT="0",
+    )
+    assert result.returncode == 0, result.stderr
+    expected = 2 + int(worker_count)
+    assert f"DAEMON_COUNT={expected}" in result.stdout, (
+        f"settle check must expect server + reconciler + {worker_count} workers: {result.stdout}"
+    )
+    # The launches are detached (`setsid nohup ... &`), so poll rather than `wait` on them.
+    deadline = time.monotonic() + 10
+    logs: list[Path] = []
+    while time.monotonic() < deadline:
+        logs = sorted(p for p in log_dir.glob("worker*.log") if p.read_text().strip())
+        if len(logs) >= int(worker_count):
+            break
+        time.sleep(0.1)
+    return logs
+
+
+def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
+    """The knob must fail loud on a value that would silently start the wrong number of workers."""
+    assert _lib("configured_worker_count").stdout == "1"
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="3").stdout == "3"
+    # Empty reads as unset, as every other knob in lib.sh does (`${VAR:-default}`).
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="").stdout == "1"
+    for bad in ("0", "-1", "abc", "2.5"):
+        result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=bad)
+        assert result.returncode != 0, f"{bad!r} must be rejected"
+        assert "positive integer" in result.stderr
+
+
+def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
+    """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
+
+    uvicorn's bind is exclusive, so an extra worker that reused 9465 — or stepped up onto the
+    reconciler's 9466 — would die at startup instead of claiming jobs, and the multi-worker stack
+    would silently degrade back to the single-worker serialization this knob exists to escape.
+    """
+    assert _lib("extra_worker_health_bind 1").stdout == "", "worker 1 must keep the default bind"
+    ports = {
+        int(_lib(f"extra_worker_health_bind {index}").stdout.rsplit(":", 1)[1])
+        for index in (2, 3, 4)
+    }
+    assert len(ports) == 3, f"each extra worker needs its own port, got {ports}"
+    assert not ports & set(PROCESS_DEFAULT_PORTS.values()), (
+        f"extra-worker ports {ports} collide with the registered defaults {PROCESS_DEFAULT_PORTS}"
+    )
+    # An explicit operator bind still wins for worker 1, so extras must step off ITS host.
+    explicit = _lib("extra_worker_health_bind 2", KDIVE_HEALTH_BIND_ADDR="0.0.0.0:9500").stdout
+    assert explicit.startswith("0.0.0.0:")
+
+
+def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
+    """Worker 1 keeps the name recorded runbooks and proof records already cite."""
+    root_logs = [_lib(f"worker_log_path {i}", KDIVE_WORKER_AS_ROOT="1").stdout for i in (1, 2, 3)]
+    user_logs = [_lib(f"worker_log_path {i}", KDIVE_WORKER_AS_ROOT="0").stdout for i in (1, 2, 3)]
+    assert root_logs[0].endswith("/worker-root.log")
+    assert user_logs[0].endswith("/worker.log")
+    assert len(set(root_logs)) == 3, root_logs
+    assert len(set(user_logs)) == 3, user_logs
+
+
+def test_restart_host_processes_starts_one_worker_by_default(tmp_path: Path) -> None:
+    logs = _start_workers(tmp_path, "1")
+    assert [p.name for p in logs] == ["worker.log"]
+    assert "health=<unset>" in logs[0].read_text(), "the sole worker keeps the process default"
+
+
+def test_restart_host_processes_starts_every_configured_worker(tmp_path: Path) -> None:
+    """Three workers must really be launched, each with its own log and its own aux port."""
+    logs = _start_workers(tmp_path, "3")
+    assert [p.name for p in logs] == ["worker-2.log", "worker-3.log", "worker.log"]
+    binds = [p.read_text().split("health=")[1].strip() for p in logs]
+    assert binds.count("<unset>") == 1, f"exactly one worker keeps the default bind: {binds}"
+    explicit = [b for b in binds if b != "<unset>"]
+    assert len(set(explicit)) == 2, f"extra workers must not share a bind: {binds}"
 
 
 def test_live_stack_env_exports_required_defaults() -> None:

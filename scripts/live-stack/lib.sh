@@ -98,15 +98,93 @@ require_free_http_port() {
   return 1
 }
 
+# How many `kdive worker` processes restart_host_processes() starts (KDIVE_WORKER_COUNT, default 1).
+#
+# A worker's claim loop runs jobs strictly one at a time, so a single worker gives the stack NO job
+# concurrency: two MCP calls issued at the same instant queue behind each other. Worker
+# *processes* are the concurrency unit — `queue.dequeue` claims under `FOR UPDATE SKIP LOCKED` so
+# parallel workers take disjoint rows, job deadlines come from the database clock so no worker
+# clocks need to agree, and `accepted_lanes` bounds what each one dispatches. Raising this is
+# therefore the only way to make the local stack exercise a cross-worker path — the
+# per-(investigation, checksum) rootfs fetch advisory lock is the one the live-testing runbook
+# drives. Default 1 keeps the ordinary stack byte-identical to the single-worker shape.
+configured_worker_count() {
+  local count="${KDIVE_WORKER_COUNT:-1}"
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] || {
+    echo "KDIVE_WORKER_COUNT must be a positive integer, got '${count}'" >&2
+    return 1
+  }
+  printf '%s' "$count"
+}
+
+# Aux health/metrics listener bind (ADR-0090 §5) for worker <index>, empty for worker 1.
+#
+# uvicorn's bind is exclusive, so a second worker inheriting the first one's port dies at startup
+# instead of claiming jobs — the failure this override exists to prevent. Worker 1 keeps the
+# untouched environment so it lands on the registered per-process default (9465) where the
+# ADR-0482 skew preflight probes for it, and so an operator's explicit KDIVE_HEALTH_BIND_ADDR still
+# wins. Extras are numbered from their own base rather than stepping up from the worker default,
+# which would put worker 2 on the reconciler's 9466.
+EXTRA_WORKER_HEALTH_PORT_BASE=9470
+
+extra_worker_health_bind() {
+  local index="$1" addr
+  ((index > 1)) || return 0
+  addr="${KDIVE_HEALTH_BIND_ADDR:-127.0.0.1:9465}"
+  printf '%s:%s' "${addr%:*}" "$((EXTRA_WORKER_HEALTH_PORT_BASE + index - 2))"
+}
+
+# Log file for worker <index>. Worker 1 keeps the historical unsuffixed name so the runbooks and
+# recorded proof runs that name `worker-root.log` still point at a real file; each additional
+# worker gets its own so an observation is attributable to one process rather than an interleave.
+worker_log_path() {
+  local index="$1" suffix="" stem="worker"
+  ((index > 1)) && suffix="-${index}"
+  [[ "${KDIVE_WORKER_AS_ROOT:-1}" == "1" && "$(id -un)" != "root" ]] && stem="worker-root"
+  printf '%s/%s%s.log' "$log_dir" "$stem" "$suffix"
+}
+
+# Start ONE `kdive worker`, indexed from 1. Split out of restart_host_processes so the root and
+# non-root launches stay a single branch while the caller loops over the configured worker count.
+start_worker() {
+  local index="$1" build_user="$2" kernel_src="$3"
+  local log health_bind health_export=""
+  log="$(worker_log_path "$index")"
+  health_bind="$(extra_worker_health_bind "$index")"
+  if [[ "${KDIVE_WORKER_AS_ROOT:-1}" == "1" && "$(id -un)" != "root" ]]; then
+    # The worker needs root (install staging + libvirt/VM ops). sudo resets the environment, so any
+    # override the invoking user set is stripped before env.sh re-runs under sudo and re-defaults it.
+    # Forward the vars the root worker actually consumes so env.sh honors them verbatim (via its
+    # `:-` defaults) instead of silently reverting: KDIVE_KERNEL_SRC (else HOME=/root points at a
+    # nonexistent /root/src/linux) and the resolved backend endpoints KDIVE_DATABASE_URL +
+    # KDIVE_S3_ENDPOINT_URL — without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would
+    # leave the worker connecting to the default host ports (nothing published there) while the
+    # same-user server/reconciler use the overridden ones. The health-bind export lands AFTER the
+    # env.sh source so it overrides, not precedes, that file's defaulting.
+    [[ -n "$health_bind" ]] && health_export="export KDIVE_HEALTH_BIND_ADDR='${health_bind}' && "
+    sudo bash -c "cd '${repo_root}' \
+      && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
+      && export KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
+      && source scripts/live-stack/env.sh \
+      && ${health_export}setsid nohup '${py}' -m kdive worker >>'${log}' 2>&1 </dev/null &"
+  else
+    local -a worker_env=(KDIVE_KERNEL_SRC="$kernel_src")
+    [[ -n "$health_bind" ]] && worker_env+=(KDIVE_HEALTH_BIND_ADDR="$health_bind")
+    env "${worker_env[@]}" setsid nohup "$py" -m kdive worker >"$log" 2>&1 </dev/null &
+  fi
+}
+
 # Restart the host-run kdive daemons with the code in THIS checkout: server + reconciler as the
 # invoking user, worker as root (unless KDIVE_WORKER_AS_ROOT=0) for install-staging + VM ops.
 # Stops live daemons found in the process table first. Assumes env.sh is already sourced and the
 # compose backends are up. Env: KDIVE_WORKER_AS_ROOT (default 1), KDIVE_BUILD_USER (default
-# invoking user; a root worker REFUSES the local build lane without it — ADR-0214), KDIVE_KERNEL_SRC.
+# invoking user; a root worker REFUSES the local build lane without it — ADR-0214), KDIVE_KERNEL_SRC,
+# KDIVE_WORKER_COUNT (default 1; see configured_worker_count).
 restart_host_processes() {
-  local worker_as_root="${KDIVE_WORKER_AS_ROOT:-1}"
   local build_user="${KDIVE_BUILD_USER:-$(id -un)}"
   local kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
+  local worker_count index
+  worker_count="$(configured_worker_count)" || return 1
   [[ -x "$py" ]] || {
     echo "no venv python at ${py}; run 'just setup' first" >&2
     return 1
@@ -116,26 +194,13 @@ restart_host_processes() {
   # Stopped our own daemons above; anything still on KDIVE_HTTP_PORT is foreign — fail loudly rather
   # than let the new server lose the bind race and die silently.
   require_free_http_port || return 1
-  echo "starting kdive host processes @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
+  echo "starting kdive host processes (${worker_count} worker(s)) @ $(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?') ..."
   setsid nohup "$py" -m kdive server >"${log_dir}/server.log" 2>&1 </dev/null &
   setsid nohup "$py" -m kdive reconciler >"${log_dir}/reconciler.log" 2>&1 </dev/null &
-  if [[ "$worker_as_root" == "1" && "$(id -un)" != "root" ]]; then
-    # The worker needs root (install staging + libvirt/VM ops). sudo resets the environment, so any
-    # override the invoking user set is stripped before env.sh re-runs under sudo and re-defaults it.
-    # Forward the vars the root worker actually consumes so env.sh honors them verbatim (via its
-    # `:-` defaults) instead of silently reverting: KDIVE_KERNEL_SRC (else HOME=/root points at a
-    # nonexistent /root/src/linux) and the resolved backend endpoints KDIVE_DATABASE_URL +
-    # KDIVE_S3_ENDPOINT_URL — without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would
-    # leave the worker connecting to the default host ports (nothing published there) while the
-    # same-user server/reconciler use the overridden ones.
-    sudo bash -c "cd '${repo_root}' \
-      && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
-      && export KDIVE_DATABASE_URL='${KDIVE_DATABASE_URL}' KDIVE_S3_ENDPOINT_URL='${KDIVE_S3_ENDPOINT_URL}' \
-      && source scripts/live-stack/env.sh \
-      && setsid nohup '${py}' -m kdive worker >>'${log_dir}/worker-root.log' 2>&1 </dev/null &"
-  else
-    KDIVE_KERNEL_SRC="$kernel_src" setsid nohup "$py" -m kdive worker >"${log_dir}/worker.log" 2>&1 </dev/null &
-  fi
+  for ((index = 1; index <= worker_count; index++)); do
+    start_worker "$index" "$build_user" "$kernel_src"
+  done
+  DAEMON_COUNT="$((2 + worker_count))"
   wait_for_daemons_to_settle
 }
 
@@ -148,6 +213,9 @@ restart_host_processes() {
 # later. The most reachable trigger is the sudo-root-worker env footgun above: a KDIVE_DATABASE_URL
 # the root worker cannot reach now kills it outright instead of showing up as a not-ready /readyz.
 DAEMON_SETTLE_SECONDS=15
+# server + reconciler + KDIVE_WORKER_COUNT workers. restart_host_processes() recomputes this from
+# the count it resolved; the initializer is the one-worker stack so a consumer that only reads it
+# still sees the ordinary shape.
 DAEMON_COUNT=3
 
 wait_for_daemons_to_settle() {
@@ -164,21 +232,44 @@ wait_for_daemons_to_settle() {
   done
 }
 
-# worker-root.log is append-only, so report the LAST stamp of each service's own log.
+# worker-root.log is append-only, so report the LAST stamp of each service's own log. Every
+# configured worker gets its own row: a skew check that reported one worker's stamp would pass on a
+# multi-worker stack whose other workers are running different code (ADR-0482).
 report_build_stamps() {
-  local head_sha entry stamp worker_log
+  local head_sha worker_count index label
   head_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  worker_log="${log_dir}/worker.log"
-  [[ -f "${log_dir}/worker-root.log" ]] && worker_log="${log_dir}/worker-root.log"
+  worker_count="$(configured_worker_count)" || return 1
   echo "=== build stamps (expect g${head_sha}) ==="
-  for entry in \
-    "server:${log_dir}/server.log" \
-    "reconciler:${log_dir}/reconciler.log" \
-    "worker:${worker_log}"; do
-    stamp="$(grep -h 'starting kdive' "${entry#*:}" 2>/dev/null | tail -1 |
-      grep -oE 'g[0-9a-f]+ [(][a-z]+[)]' || true)"
-    printf '  %-11s %s\n' "${entry%%:*}" "${stamp:-<no startup log line>}"
+  _report_build_stamp server "${log_dir}/server.log"
+  _report_build_stamp reconciler "${log_dir}/reconciler.log"
+  for ((index = 1; index <= worker_count; index++)); do
+    label="worker"
+    ((worker_count > 1)) && label="worker[${index}]"
+    _report_build_stamp "$label" "$(_existing_worker_log "$index")"
   done
+}
+
+_report_build_stamp() {
+  local stamp
+  stamp="$(grep -h 'starting kdive' "$2" 2>/dev/null | tail -1 |
+    grep -oE 'g[0-9a-f]+ [(][a-z]+[)]' || true)"
+  printf '  %-11s %s\n' "$1" "${stamp:-<no startup log line>}"
+}
+
+# The log worker <index> actually wrote. worker_log_path() answers for the CURRENT
+# KDIVE_WORKER_AS_ROOT, but status.sh may run against a stack started under the other setting, so
+# fall back to the sibling name when the computed one is absent.
+_existing_worker_log() {
+  local path sibling
+  path="$(worker_log_path "$1")"
+  [[ -f "$path" ]] && {
+    printf '%s' "$path"
+    return 0
+  }
+  sibling="${path/worker-root/worker}"
+  [[ "$sibling" == "$path" ]] && sibling="${path/worker/worker-root}"
+  [[ -f "$sibling" ]] && path="$sibling"
+  printf '%s' "$path"
 }
 
 # Returns 0 iff the host MCP server answers 401 (= up, auth required).
