@@ -228,6 +228,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Trim the ADR-0500 index row and record its mutation checks
 - Record ADR-0502, a write lease closes the sweep's delete race
 - Re-point the two loss tests at the unleased path
+- Record the savepoint-demotion class of each advisory-lock site
 
 ### Fixed
 
@@ -396,6 +397,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The sourced profile files are not executables
 - Satisfy ty 0.0.62's stricter union and protocol checks
 - Rewrite the ADR template in the canonical record shape
+- Commit each promotion candidate so its locks release
+- Name the leaked locks and verify the reaper's guard
 
 ### Build
 
