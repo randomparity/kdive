@@ -38,7 +38,7 @@ RUN mvn --batch-mode --strict-checksums \
         | sha256sum --check --strict
 
 # --- runtime: the resolved classpath on a bare multi-arch JRE ---------------------------
-FROM eclipse-temurin:25-jre@sha256:d0eb1b9018b3044da1b7346f39e945f71095749853d69a3aa16b8c99dad9bb45
+FROM eclipse-temurin:25-jre@sha256:681c543d6f36c50f45e9b5226930a46203dcfa351d3670e9d0bdf0dabae53539
 
 # Reproduce the compose service contract: the standalone main reads SERVER_PORT (default
 # 8080) and serves the `/default` issuer's discovery/JWKS/token endpoints. aud=kdive is
