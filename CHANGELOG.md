@@ -434,6 +434,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-raise reports.generate's member over-reach to the auditor
 - Defer a locked owner in the upload reap instead of waiting
 - Cap cumulative upload-window extension against the mint
+- Pin the private-upload publish to a top-level transaction
+- Tighten the upload-lock record and pin the denial commit
 
 ### Build
 
