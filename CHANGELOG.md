@@ -387,6 +387,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pin OTel sampler in gateway usage-recording e2e test (#1683)
 - Age the staging-drain lane on the investigation
 - Commit a Run's terminal transition with its job's dead-letter
+- Convert a malformed store reply at the boundary
+- Hold a present optional reply field to the same contract
 
 ### Build
 
