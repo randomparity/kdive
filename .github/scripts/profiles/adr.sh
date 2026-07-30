@@ -21,8 +21,15 @@ RECORD_LABEL="ADR"
 
 # docs/adr/README.md lives inside the record directory, so the deferral gate's "nothing else in
 # here" rule cannot carry over unchanged. Exempt means "not a record", not "invisible":
-# profile_check_directory below reads it.
-RECORD_EXEMPT_FILES="README.md"
+# profile_check_directory below reads both of these.
+#
+# 0000-template.md is exempt despite being record-shaped, because it is not a decision — it is
+# the shape a decision is copied from. As a record it was immutable, so correcting it was the
+# one edit the gate refused, and it sat teaching the pre-0504 shape while the gate rejected
+# every record written from it. Exempting it moves it out of the immutability rules and under
+# check_template_sections below, which holds it to REQUIRED_SECTIONS at full severity instead.
+RECORD_EXEMPT_FILES="README.md
+0000-template.md"
 
 REQUIRED_SECTIONS="## Status
 ## Context
@@ -114,11 +121,41 @@ profile_migrate_markers() {
   migrate_h1 "$num" <"$file" | migrate_headings | migrate_status | migrate_fields
 }
 
-# Once per profile, for a rule whose subject is not a record. Heuristic — a prose list of ADRs
-# is not detected — so it warns and never fails. warn_full because no record's base-ref verdict
-# has any bearing on a file that is not a record. The record list the engine passes is unused
-# here; the hook takes it because a directory rule may need it.
+# The exempt file every new record is copied from. Its section list is the one thing in this
+# directory that has to agree with REQUIRED_SECTIONS above, because an author who follows the
+# documented process writes whatever shape it teaches — and if that shape is wrong, the gate
+# rejects the record rather than the template.
+#
+# Exempting it from the record rules is what makes it fixable; this is what keeps it correct
+# afterwards. Nothing else does: the exemption also takes it out of check_sections, so without
+# this rule a template could declare any sections at all, or none.
+RECORD_TEMPLATE="0000-template.md"
+
+# Exactly REQUIRED_SECTIONS, in the same order — a superset is drift too, since a record copied
+# from the template inherits the extra heading and APPEND_ONLY_SECTIONS then pins it there for
+# the life of the record.
+#
+# err_full for the same reason W-INDEX-TABLE uses warn_full: a directory-level rule reports at
+# full severity, so a `downgrade` leaking past the record loop's last record cannot soften it.
+check_template_sections() {
+  local template="$RECORD_DIR/$RECORD_TEMPLATE" declared got want
+  # A profile need not ship a template, and this rule does not invent the requirement that it
+  # must. Deleting one that a repo does have is a plain content deletion, visible in the diff.
+  [ -f "$template" ] || return 0
+  declared=$(grep '^## ' "$template" || true)
+  if [ "$declared" != "$REQUIRED_SECTIONS" ]; then
+    got=$(printf '%s' "$declared" | tr '\n' ' ')
+    want=$(printf '%s' "$REQUIRED_SECTIONS" | tr '\n' ' ')
+    err_full "E-TEMPLATE-DRIFT: $template declares [$got] but must declare exactly [$want] — a record copied from it has to pass this gate on the first run"
+  fi
+}
+
+# Once per profile, for rules whose subject is not a record. W-INDEX-TABLE is heuristic — a prose
+# list of ADRs is not detected — so it warns and never fails. warn_full/err_full because no
+# record's base-ref verdict has any bearing on a file that is not a record. The record list the
+# engine passes is unused here; the hook takes it because a directory rule may need it.
 profile_check_directory() {
+  check_template_sections
   local readme="$RECORD_DIR/README.md"
   [ -f "$readme" ] || return 0
   if grep -qE '^\|[[:space:]]*\[?[0-9]{4}' "$readme"; then
