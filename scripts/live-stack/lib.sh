@@ -88,11 +88,14 @@ stop_daemons() {
   done
   # One scan per poll, reused by the WARN. A second `daemon_pids` down there was a separate `ps`,
   # so the set it printed was not the set that decided to warn — the same double-scan skew fixed
-  # in require_workers_alive, and this list is likewise what an operator would act on.
+  # in require_workers_alive, and this list is likewise what an operator would act on. Sleep
+  # FIRST so the surviving scan is the last thing observed: checking before the sleep would
+  # report a set already half a second stale, and nothing dies in the instant after SIGTERM
+  # anyway — a daemon's bounded pool teardown alone is seconds (ADR-0449).
   for _ in {1..20}; do
+    sleep 0.5
     mapfile -t remaining < <(daemon_pids)
     ((${#remaining[@]})) || return 0
-    sleep 0.5
   done
   echo "WARN: daemons still running after stop: ${remaining[*]}" >&2
 }
@@ -349,34 +352,37 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
+    local pid_csv
+    printf -v pid_csv '%s,' "${pids[@]}"
+    pid_csv="${pid_csv%,}"
     # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
     # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
     # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
     # (`--yes` gates only the --wipe prompt, so `down.sh --yes` is `down.sh` here.)
     #
-    # Escalating to SIGKILL inside stop_daemons was the alternative, and is rejected on two counts.
-    # It runs on EVERY bring-up, not just teardown, so it would hard-kill a worker legitimately
-    # mid-job — discarding a multi-GiB fetch or a kernel build that was about to finish. And
-    # daemon_pids matches every kdive daemon, so the escalation would take the RECONCILER down the
-    # same way: the drift-repair loop (ADR-0021) that reclaims the abandoned job's lease, repairs
-    # the orphaned System and reaps its leaked domain is precisely what cleans up after an
-    # abruptly-killed worker, so hard-killing it alongside the damage is the wrong trade.
-    #
-    # Which leaves the operator the judgement call, so give them both options and the consequence.
+    # Escalating to SIGKILL inside stop_daemons was the alternative, and is rejected because that
+    # helper runs on EVERY bring-up, not just teardown: escalation would hard-kill a worker that is
+    # legitimately mid-job every time anyone runs up.sh, discarding a multi-GiB fetch or a build
+    # that was about to finish. Recovery is not free either — reclaiming the abandoned job spends
+    # one of its bounded attempts. So the judgement call is the operator's; state both options and
+    # what killing actually costs, rather than making the choice for them silently.
     {
       echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
       echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
       echo "  until its current job ends, and the ten-second wait only warns. It may be running"
       echo "  older code, and it masks a new worker that failed to start."
       echo "  Live worker pids: ${pids[*]}"
-      echo "  Those are every worker from this checkout, INCLUDING the ones this run just started"
-      echo "  — the survivor is whichever has the older start time (ps -o pid,lstart,etime -p ...)."
+      echo "  That list is every worker running under ${py}, INCLUDING the ones this run started."
+      echo "  The survivor is whichever has the older start time:"
+      echo "    ps -o pid,lstart,etime,args -p ${pid_csv}"
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
       echo "  gives up the same way. So either wait for the in-flight job to finish and re-run,"
       echo "  or end these yourself (root unless KDIVE_WORKER_AS_ROOT=0) and re-run:"
       echo "    sudo kill -9 ${pids[*]}"
-      echo "  Killing abandons that job mid-flight; the reconciler's drift repair reclaims its"
-      echo "  lease and reaps anything it left behind once the stack is running again."
+      echo "  Killing abandons that job mid-flight: another worker reclaims it once its lease"
+      echo "  lapses, spending one of its bounded attempts. Any VM it had already provisioned is"
+      echo "  reaped only once its System reaches torn_down — down.sh --wipe forces that, at the"
+      echo "  cost of the Postgres volume."
     } >&2
     return 1
   fi
