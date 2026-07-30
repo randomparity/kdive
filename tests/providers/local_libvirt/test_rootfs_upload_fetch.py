@@ -2699,3 +2699,30 @@ def test_the_fetch_lease_is_cleared_when_the_fetch_raises(tmp_path: Path) -> Non
         fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
 
     assert not list((tmp_path / str(inv)).glob(f"*{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"))
+
+
+def test_an_unleasable_host_does_not_chain_onto_the_real_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The degrade path must not demote the error an operator acts on. Yielding from inside an
+    # `except OSError` would make the lease's own EACCES the __context__ of everything the fetch
+    # later raises, so a checksum mismatch or a never-uploaded object prints under "During handling
+    # of the above exception, another exception occurred" behind an unrelated file-permission
+    # error — on precisely the degraded hosts where the real error matters most. This is the
+    # __context__ demotion _release_fetch_lock documents one function away in this same module.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=None)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    def _refuse(*args: Any, **kwargs: Any) -> int:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(rootfs_upload_fetch.os, "open", _refuse)
+
+    with pytest.raises(CategorizedError) as excinfo:
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    # The fetch still ran unleased (degrade, not outage) and reached its own actionable error...
+    assert excinfo.value.category is ErrorCategory.CONFIGURATION_ERROR
+    # ...with nothing from the lease attempt hanging off it.
+    assert excinfo.value.__context__ is None

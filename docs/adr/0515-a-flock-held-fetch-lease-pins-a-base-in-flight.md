@@ -148,6 +148,23 @@ Each fetch now costs three extra syscalls (`open`, `flock`, `unlink`) on a path 
 the base and is about to move multiple GiB. A reuse-fast-path hit pays them too, and still returns
 without a download.
 
+Because the lease must exist *before* the row is resolved, the staging directory
+`<uploads>/<investigation_id>/` is now created before that resolution rather than inside
+`stage_uploaded_rootfs`. A fetch whose checksum the investigation does not own therefore leaves an
+empty directory where it previously wrote nothing. It is bounded — one per investigation regardless
+of how many bad checksums are attempted, since the path is not keyed on the token — and the drain
+sweep's `rmdir` retires it. Named rather than guarded, because guarding it would mean either
+resolving the row first (which is the window this record closes) or a second cleanup path for a
+directory that already has a collector.
+
+The degrade path opens the lease in a helper so the `yield` is not inside an `except OSError`. That
+is not cosmetic: yielding there makes the lease's own `EACCES` the `__context__` of everything the
+fetch later raises, printing every actionable error — checksum mismatch, non-qcow2 upload, object
+never uploaded — under "During handling of the above exception, another exception occurred" behind
+an unrelated file-permission error, on exactly the degraded hosts where the real error matters most.
+`_release_fetch_lock` documents the same demotion one function away in this module;
+`test_an_unleasable_host_does_not_chain_onto_the_real_error` pins it.
+
 This does **not** pin a base across the gap between `fetch_uploaded_rootfs` returning and the
 caller creating its overlay. That gap predates this change and is unaltered by it.
 

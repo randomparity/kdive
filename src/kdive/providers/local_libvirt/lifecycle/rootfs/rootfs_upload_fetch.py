@@ -242,20 +242,8 @@ def _fetch_lease(dest: Path, *, system_id: UUID) -> Iterator[None]:
     ``flock`` at all, where the reclaim's probe cannot read the lease either.
     """
     lease = staged_rootfs_fetch_lease_path(dest, uuid4().hex)
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # 0o600, not the partial's 0o666: this file is never ``os.replace``\\ d onto a base QEMU
-        # reads as the unprivileged hypervisor user, and its whole content is its existence.
-        fd = os.open(lease, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except OSError as err:
-        _log.warning(
-            "could not take the rootfs fetch lease at %s (%s); staging unleased for system %s — a "
-            "concurrent reclaim cannot see this download until its partial exists (ADR-0495's "
-            "window 2 stays open for this fetch), which is the behavior before ADR-0515",
-            lease,
-            err.strerror,
-            system_id,
-        )
+    fd = _open_fetch_lease(lease, system_id=system_id)
+    if fd is None:
         yield
         return
     try:
@@ -265,6 +253,35 @@ def _fetch_lease(dest: Path, *, system_id: UUID) -> Iterator[None]:
         os.close(fd)
         with suppress(OSError):
             lease.unlink()
+
+
+def _open_fetch_lease(lease: Path, *, system_id: UUID) -> int | None:
+    """Create this fetch's lease file, or ``None`` when the host will not allow one.
+
+    The ``except`` lives here so that :func:`_fetch_lease`'s ``yield`` lives **outside** it, which
+    is load-bearing rather than tidy: yielding from inside an ``except OSError`` makes that
+    ``OSError`` the ``__context__`` of whatever the fetch body later raises. Every actionable
+    failure on such a host — a checksum mismatch, a non-qcow2 upload, a never-uploaded object —
+    would then be printed under "During handling of the above exception, another exception
+    occurred", behind an unrelated ``EACCES`` on a file the operator has no reason to care about.
+    That is the same demotion :func:`_release_fetch_lock` documents and fixes one function away,
+    and it would land on exactly the degraded hosts where the real error matters most.
+    """
+    try:
+        lease.parent.mkdir(parents=True, exist_ok=True)
+        # 0o600, not the partial's 0o666: this file is never ``os.replace``\\ d onto a base QEMU
+        # reads as the unprivileged hypervisor user, and its whole content is its existence.
+        return os.open(lease, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as err:
+        _log.warning(
+            "could not take the rootfs fetch lease at %s (%s); staging unleased for system %s — a "
+            "concurrent reclaim cannot see this download until its partial exists (ADR-0495's "
+            "window 2 stays open for this fetch), which is the behavior before ADR-0515",
+            lease,
+            err.strerror,
+            system_id,
+        )
+        return None
 
 
 def _hold_fetch_lease(fd: int, lease: Path, *, system_id: UUID) -> None:
