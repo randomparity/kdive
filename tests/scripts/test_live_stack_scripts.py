@@ -94,12 +94,19 @@ def _start_workers(tmp_path: Path, worker_count: str) -> list[Path]:
         "stop_daemons() { :; }\n"
         "require_free_http_port() { :; }\n"
         "wait_for_daemons_to_settle() { :; }\n"
-        "restart_host_processes\n"
+        # Stubbed too: the stub interpreter exits immediately, so the real check would scan the
+        # process table, find no workers, and fail. Without this the snippet's status came from
+        # the trailing `echo` and restart_host_processes could have failed unnoticed.
+        "require_workers_alive() { :; }\n"
+        "restart_host_processes || echo 'BRING_UP_FAILED'\n"
         'echo "DAEMON_COUNT=${DAEMON_COUNT}"\n',
         KDIVE_WORKER_COUNT=worker_count,
         KDIVE_WORKER_AS_ROOT="0",
     )
     assert result.returncode == 0, result.stderr
+    assert "BRING_UP_FAILED" not in result.stdout, (
+        f"restart_host_processes must succeed against the stubs: {result.stdout}\n{result.stderr}"
+    )
     expected = 2 + int(worker_count)
     assert f"DAEMON_COUNT={expected}" in result.stdout, (
         f"settle check must expect server + reconciler + {worker_count} workers: {result.stdout}"
@@ -134,10 +141,34 @@ def test_configured_worker_count_is_ceilinged() -> None:
     into the count would fork thousands of root processes on the operator's host.
     """
     assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="8").stdout == "8"
+    # 99999999999999999999 wraps POSITIVE in bash's int64 arithmetic (mod 2^64 ->
+    # 7766279631452241919), so it is still greater than the ceiling and is rejected on the
+    # ordinary path. It is kept because that is a real operator typo, but it does not reach the
+    # wrap defect — see test_configured_worker_count_rejects_an_int64_wrapping_value.
     for over in ("9", "9470", "99999999999999999999"):
         result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=over)
         assert result.returncode != 0, f"{over!r} must be refused"
         assert "ceiling" in result.stderr, result.stderr
+
+
+def test_configured_worker_count_rejects_an_int64_wrapping_value() -> None:
+    """A value that wraps NEGATIVE slipped the ceiling entirely — a distinct failure mode.
+
+    The regex bounds sign and format but not magnitude, and bash arithmetic is 64-bit signed, so
+    `((count <= MAX_WORKER_COUNT))` was true for anything that wrapped below zero. 2^63 is the
+    minimal such value, landing exactly on INT64_MIN. It did not merely bypass the bound: the
+    unwrapped string reached the launch loop, whose `index <= count` ran ZERO times, while
+    `DAEMON_COUNT` went negative and disabled the settle gate — so a stack with no workers at all
+    reported a *surplus*. The ceiling must therefore bound BOTH ends, not just the upper one.
+    """
+    # Both of these defeat the one-sided check: 2^63 wraps to INT64_MIN, 2^64 wraps to 0. A
+    # value that wraps back to a large positive (e.g. 1e20) does NOT belong here — it is caught
+    # by the upper bound and would pass this test without the fix.
+    for wrapping in ("9223372036854775808", "18446744073709551616"):
+        result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=wrapping)
+        assert result.returncode != 0, f"{wrapping!r} wraps past int64 and must be refused"
+        assert "ceiling" in result.stderr, result.stderr
+        assert not result.stdout, f"a refused count must print nothing, got {result.stdout!r}"
 
 
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
@@ -270,6 +301,61 @@ def test_bring_up_fails_on_a_surplus_worker_too(tmp_path: Path) -> None:
     assert "111" in surplus.stderr and "222" in surplus.stderr, "name the pids to stop"
 
 
+def test_the_surplus_remedy_is_one_that_actually_clears_the_surplus(tmp_path: Path) -> None:
+    """The remedy must not be `down.sh`, which cannot end the worker this message is about.
+
+    `down.sh` calls the same `stop_daemons` that just let the survivor through: one SIGTERM, a
+    ten-second poll, a WARN, `return 0` — there is no escalation past SIGTERM anywhere. So a
+    worker parked in a long job (the message's own scenario, and the one the contention arm
+    manufactures deliberately) survives `down.sh` exactly as it survived bring-up, and the
+    compose backends get torn down for nothing. `--yes` does not change that either: it gates
+    only the `--wipe` confirmation prompt, so `down.sh --yes` is `down.sh`.
+
+    The two remedies that do work are waiting for the job to end, and ending the pids the
+    message already prints. Both must be named, and the ineffective one must be gone.
+    """
+    surplus = _lib(
+        f'py="{tmp_path}/no-such-python"\nworker_pids() {{ echo 111; echo 222; }}\n'
+        "require_workers_alive 1\n"
+    )
+    assert surplus.returncode != 0
+    assert "down.sh" not in surplus.stderr, (
+        f"down.sh cannot clear a SIGTERM-ignoring worker; it must not be the remedy: "
+        f"{surplus.stderr}"
+    )
+    assert "kill -9 111 222" in surplus.stderr, (
+        f"the remedy must name the pids it just printed: {surplus.stderr}"
+    )
+    assert "wait" in surplus.stderr, "the non-destructive option must be offered first"
+
+
+def test_the_surplus_report_scans_the_process_table_exactly_once(tmp_path: Path) -> None:
+    """One scan, or the count and the pid list the operator is told to kill can disagree.
+
+    Counting with one `ps` and printing with a second lets a worker exit in between, so the
+    message reports a count its own pid list contradicts — and that list is what the remedy
+    tells the operator to act on. The stub here returns two pids to the first scan and one to
+    every scan after it, which is exactly that interleaving.
+    """
+    counter = tmp_path / "scans"
+    surplus = _lib(
+        f'py="{tmp_path}/no-such-python"\n'
+        f'worker_pids() {{ echo scan >>"{counter}"\n'
+        f'  if (( $(wc -l <"{counter}") == 1 )); then printf "111\\n222\\n"; else echo 111; fi\n'
+        "}\n"
+        "require_workers_alive 1\n"
+    )
+    assert surplus.returncode != 0
+    assert counter.read_text().count("scan") == 1, (
+        f"the process table must be scanned once, not once per use: {counter.read_text()!r}"
+    )
+    # The consequence of the single scan: count and pid list still agree after the table moved.
+    assert "but 2 from this checkout are running" in surplus.stderr, surplus.stderr
+    assert "222" in surplus.stderr, (
+        f"the pid list must match the count it reported: {surplus.stderr}"
+    )
+
+
 def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
     """An empty log dir must still print a worker row, not silently drop the process."""
     rows = _build_stamps(tmp_path, {})
@@ -356,12 +442,14 @@ def test_restart_host_processes_starts_every_configured_worker(tmp_path: Path) -
 def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path: Path) -> None:
     """The DEFAULT launch branch is the sudo-root one, and it is what the runbook arm runs.
 
-    The per-worker bind is spliced into a quoted `sudo bash -c` string there, and it must land
-    AFTER `source scripts/live-stack/env.sh` — sourced first, env.sh's `:-` defaulting would
-    already have set the variable and the export would be the thing overriding it, but spliced
-    before, env.sh re-defaults over the top and every worker inherits one port. A regression
-    there degrades a two-worker stack back to serialization, which is the failure the whole
-    change exists to remove.
+    The per-worker bind is spliced into a quoted `sudo bash -c` string there, and each extra
+    worker must get its OWN bind — a regression that gives them one port degrades a two-worker
+    stack back to serialization, which is the failure the whole change exists to remove.
+
+    The ordering assertion below is a cheap guard, not a live constraint: env.sh does not mention
+    KDIVE_HEALTH_BIND_ADDR at all today, so nothing re-defaults over the export and either order
+    would work. It is asserted so that the export stays the last writer if env.sh ever grows a
+    `:-` default for that variable, as it already has for the other forwarded vars.
     """
     sudo_stub = tmp_path / "sudo"
     sudo_stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{tmp_path}/sudo-argv"\n')
@@ -388,7 +476,7 @@ def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path:
         assert "export KDIVE_HEALTH_BIND_ADDR=" in launch, f"extra worker got no bind: {launch}"
         assert launch.index("source scripts/live-stack/env.sh") < launch.index(
             "export KDIVE_HEALTH_BIND_ADDR="
-        ), "the bind export must come after env.sh, or env.sh re-defaults over it"
+        ), "the bind export must stay the last writer, after the env.sh source"
         binds.append(launch.split("export KDIVE_HEALTH_BIND_ADDR=")[1].split("'")[1])
     assert len(set(binds)) == 2, f"extra workers must not share a bind: {binds}"
     # Each worker still writes its own log, so an observation is attributable to one process.
