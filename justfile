@@ -494,6 +494,14 @@ env-docs-check:
 schema-guard:
     python3 scripts/schema_immutable_guard.py
 
+# Ordering guard: a migration this branch adds must be numbered strictly above the highest
+# version already on origin/main. Pre-assigned numbers stop filename collisions but not
+# out-of-order merges (#1553 landed 0085 after 0086), which apply cleanly on a fresh DB and
+# out of order on an existing one (#1720). Offline by design (ADR-0505): it reads the local
+# origin/main, so `git fetch origin main` first. Stdlib-only (git only).
+migration-order-check:
+    python3 scripts/migration_ordering_guard.py
+
 # Drift guard: the docker-compose image set matches the ADR-0356 arch-support matrix, and each
 # handling token meets its ppc64le obligation (ADR-0356). Parses compose via yaml.safe_load.
 container-arch-check:
@@ -518,4 +526,4 @@ chart-version-check:
     echo "appVersion == pyproject == $pyproject"
 
 # Run the full gate that PR CI runs, reproducible locally.
-ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test
+ci: lint type lock-check lint-shell lint-ansible test-ansible lint-workflows check-mermaid docs-links docs-paths served-doc-links adr-status-check docs-check config-docs-check config-guard env-docs-check schema-guard migration-order-check container-arch-check resources-docs-check doc-constants-check chart-version-check cli-verbs-check test

@@ -137,6 +137,21 @@ jobs:
         # adding it only to `just ci` would not gate PRs.
         run: just env-docs-check
 
+      - name: Fetch the base branch for the migration-ordering guard
+        # This job's checkout is shallow and its refspec covers only the PR ref, so
+        # refs/remotes/origin/main does not exist. The guard needs one tree, not history,
+        # so fetch that single ref at depth 1 rather than putting fetch-depth: 0 on the
+        # whole job. The repository is public and this step needs no credentials, which is
+        # why persist-credentials: false on the checkout does not break it.
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: Migration ordering guard
+        # A migration added by this branch must be numbered strictly above the highest
+        # version already on origin/main; pre-assigned numbers do not stop two branches
+        # from merging out of order (#1720). Listed here because CI invokes recipes
+        # individually, so adding it only to `just ci` would not gate PRs.
+        run: just migration-order-check
+
       - name: Doc-resource snapshot guard
         # The packaged MCP doc-resource snapshots (src/kdive/mcp/resources/_content) must
         # match the canonical docs/ they mirror (ADR-0151). Listed here because CI invokes
