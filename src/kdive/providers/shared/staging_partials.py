@@ -1,15 +1,13 @@
-"""The ``flock`` liveness test the uploaded-rootfs staging paths share (ADR-0446/0452/0495/0515).
+"""The ``flock`` liveness test the uploaded-rootfs partial paths share (ADR-0446/0452/0495).
 
-A fetcher holds an exclusive ``flock`` on two files, and both are SENSITIVE staging state no
-``artifacts`` row owns: its ``<token>.<uuid>.partial``, the multi-GiB download target, and — since
-ADR-0515 — its zero-byte ``<token>.<uuid>.fetching`` lease, which brackets the *whole* fetch
-including the prologue in which the partial does not exist yet. Three places ask about them: the
-opportunistic sweep on the next fetch of that base (``rootfs_upload_fetch._unlink_orphan_staging``),
-the reclaim-side backstop when the investigation drains
-(``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``), and the row-driven
-reclaim's per-checksum gate (``rootfs_reclaim._live_fetch_in_flight``). The first two **collect**
-the file; the third only **reads** it, which is why this module exposes two mappings over one
-shared probe.
+A ``<token>.<uuid>.partial`` is written by exactly one fetcher and is a SENSITIVE multi-GiB file no
+``artifacts`` row owns. Three places ask about one: the opportunistic sweep on the next fetch of
+that base (``rootfs_upload_fetch._unlink_orphan_partials``), the reclaim-side backstop when the
+investigation drains (``jobs.handlers.artifacts.rootfs_reclaim.sweep_investigation_staging_dir``),
+and the row-driven reclaim's per-checksum gate
+(``rootfs_reclaim._live_writer_holds_a_partial``). The first two **collect** the file; the third
+only
+**reads** it, which is why this module exposes two mappings over one shared probe.
 
 None of them can tell a crash orphan from a download in flight by looking at the filesystem, and
 each originally derived the distinction from state it holds: the fetch side from its
@@ -152,17 +150,10 @@ def _probed(partial: Path) -> Iterator[_Liveness]:
         os.close(fd)
 
 
-def live_writer_holds_staging_file(candidate: Path) -> bool:
-    """Whether a live writer **provably** holds ``candidate``'s ``flock``; never unlinks.
+def live_writer_holds_partial(partial: Path) -> bool:
+    """Whether a live writer **provably** holds ``partial``'s ``flock`` — read-only, never unlinks.
 
-    The reclaim gate's question, asked of either staging file a fetcher holds: its
-    ``<token>.<uuid>.partial`` (ADR-0446) or its ``<token>.<uuid>.fetching`` lease (ADR-0515). The
-    two differ only in *when* they exist — the lease brackets the whole fetch, the partial only the
-    transfer — and not at all in what a held ``flock`` on one proves, so this takes a path rather
-    than a kind. It is named for the question instead of for the partial because answering it about
-    the lease is what closes ADR-0495's residual window 2, where there is no partial to ask about.
-
-    It differs from :func:`unlink_partial_if_unheld` in the
+    The ADR-0495 reclaim gate's question. It differs from :func:`unlink_partial_if_unheld` in the
     one way that matters for a caller whose answer licenses deleting a staged base, an object-store
     object and an ``artifacts`` row: it does not touch the file. Collecting a partial stays the two
     sweeps' job on every path, and a gate that mutated the filesystem to reach a verdict could not
@@ -191,7 +182,7 @@ def live_writer_holds_staging_file(candidate: Path) -> bool:
     download could not be ruled out. Narrowing that needs #1558's option 2 (evidence that a
     ``torn_down`` System was mid-provision), not a longer wait on a file nothing will fix.
     """
-    with _probed(candidate) as liveness:
+    with _probed(partial) as liveness:
         return liveness is _Liveness.HELD
 
 
@@ -214,7 +205,7 @@ def unlink_partial_if_unheld(partial: Path, *, unlink_when_unlockable: bool) -> 
 
             The ADR-0495 reclaim gate is not a caller of this function at all, so it has no answer
             here: it must not unlink on **any** answer, least of all this one, where the file it
-            would take may be a live writer's only copy. See :func:`live_writer_holds_staging_file`.
+            would take may be a live writer's only copy. See :func:`live_writer_holds_partial`.
 
     Returns:
         ``True`` when a live writer's ``flock`` kept the file, ``False`` in every other case —

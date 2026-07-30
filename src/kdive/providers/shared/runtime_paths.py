@@ -144,35 +144,6 @@ def staged_rootfs_marker_path(base: Path) -> Path:
     return base.with_suffix(STAGED_ROOTFS_MARKER_SUFFIX)
 
 
-#: The suffix of a fetcher's in-flight lease file (ADR-0515, #1702/#1558 option 2). A
-#: ``<token>.<uuid>.fetching`` beside the base it is staging, held under an exclusive ``flock`` for
-#: the fetch's **whole** life — from before the ``artifacts`` row is resolved to after the publish —
-#: which is strictly wider than the ``<token>.<uuid>.partial`` window it brackets. It is what lets
-#: the reclaim's liveness gate see a download that has resolved its row but has not yet created its
-#: partial (ADR-0495's residual window 2). Named beside :data:`STAGED_ROOTFS_MARKER_SUFFIX` for the
-#: same reason: four sites derive from it — the fetcher that takes the lease, the reclaim gate that
-#: reads it, and the two sweeps that collect an unheld one.
-STAGED_ROOTFS_FETCH_LEASE_SUFFIX = ".fetching"
-
-
-def staged_rootfs_fetch_lease_path(base: Path, holder: str) -> Path:
-    """This fetcher's own lease path beside the staged base at ``base`` (ADR-0515).
-
-    ``holder`` is a per-fetch ``uuid4().hex``, exactly as the partial's is, so two sibling fetchers
-    of the same base never name the same lease and neither can take the other's ``O_EXCL`` create.
-    The token stays the *stem* so the reclaim gate can select this base's leases by prefix, the same
-    derivation :func:`staged_rootfs_path` writes and the partial glob already reads back.
-
-    Args:
-        base: The staged base path :func:`staged_rootfs_path` returned.
-        holder: The fetch-unique holder id.
-
-    Returns:
-        The lease path, ``<token>.<holder>.fetching`` in the base's own staging directory.
-    """
-    return base.parent / f"{base.stem}.{holder}{STAGED_ROOTFS_FETCH_LEASE_SUFFIX}"
-
-
 def console_log_path(system_id: UUID) -> Path:
     return Path(_CONSOLE_DIR) / f"{system_id}.log"
 

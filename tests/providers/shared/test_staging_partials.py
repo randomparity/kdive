@@ -7,8 +7,7 @@ whole checksum on it — so "held" and "could not evaluate" must not collapse in
 
 Two functions over one probe, and the cases below are paired across them. They agree on the verdict
 for every answer; where they differ is the **action**. The collector unlinks; the gate
-(:func:`live_writer_holds_staging_file`) never does, because its answer licenses deleting a
-staged base,
+(:func:`live_writer_holds_partial`) never does, because its answer licenses deleting a staged base,
 an object-store object and an ``artifacts`` row, and because on an unlockable filesystem the file it
 would take may be a live writer's only copy.
 
@@ -31,7 +30,7 @@ from typing import Any
 import pytest
 
 from kdive.providers.shared.staging_partials import (
-    live_writer_holds_staging_file,
+    live_writer_holds_partial,
     unlink_partial_if_unheld,
 )
 
@@ -214,7 +213,7 @@ def test_the_read_only_probe_reports_a_held_partial_and_leaves_it(tmp_path: Path
     partial = _partial(tmp_path)
 
     with _flocked(partial):
-        assert live_writer_holds_staging_file(partial) is True
+        assert live_writer_holds_partial(partial) is True
 
     assert partial.read_bytes() == b"staged bytes"
 
@@ -227,7 +226,7 @@ def test_the_read_only_probe_reports_a_crash_orphan_unheld_and_still_leaves_it(
     # the checksum either way, and the drain tail remains its collector.
     partial = _partial(tmp_path)
 
-    assert live_writer_holds_staging_file(partial) is False
+    assert live_writer_holds_partial(partial) is False
 
     assert partial.exists(), "the read-only probe collected a file it was only asked about"
 
@@ -235,7 +234,7 @@ def test_the_read_only_probe_reports_a_crash_orphan_unheld_and_still_leaves_it(
 def test_the_read_only_probe_reads_an_absent_candidate_as_no_writer(tmp_path: Path) -> None:
     # A candidate that vanished between the directory walk and the open is the achieved post-state,
     # not a fault, so it must not defer a reclaim.
-    assert live_writer_holds_staging_file(tmp_path / "token.gone.partial") is False
+    assert live_writer_holds_partial(tmp_path / "token.gone.partial") is False
 
 
 def test_the_read_only_probe_does_not_defer_on_a_partial_it_cannot_open(
@@ -259,7 +258,7 @@ def test_the_read_only_probe_does_not_defer_on_a_partial_it_cannot_open(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(os, "open", refusing_open)
-        assert live_writer_holds_staging_file(partial) is False
+        assert live_writer_holds_partial(partial) is False
 
     assert partial.exists(), "the read-only probe unlinked a candidate it could not even open"
     assert any("could not open the staging partial" in r.getMessage() for r in caplog.records), (
@@ -276,7 +275,7 @@ def test_the_read_only_probe_does_not_defer_on_a_per_candidate_lock_fault(
 
     with caplog.at_level(logging.WARNING), pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", _unlockable_flock(errno.EIO))
-        assert live_writer_holds_staging_file(partial) is False
+        assert live_writer_holds_partial(partial) is False
 
     assert partial.exists()
     assert any(
@@ -297,6 +296,6 @@ def test_the_read_only_probe_proceeds_on_an_unlockable_filesystem_without_unlink
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(fcntl, "flock", _unlockable_flock(lock_errno))
-        assert live_writer_holds_staging_file(partial) is False
+        assert live_writer_holds_partial(partial) is False
 
     assert partial.read_bytes() == b"staged bytes"
