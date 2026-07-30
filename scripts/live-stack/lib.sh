@@ -224,18 +224,25 @@ restart_host_processes() {
   local kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
   local worker_count index
   worker_count="$(configured_worker_count)" || return 1
-  # An explicit KDIVE_HEALTH_BIND_ADDR wins for EVERY process (ADR-0090 §5), so it already
-  # collapses server, reconciler and worker 1 onto one exclusive uvicorn port — a layout this
-  # bring-up cannot satisfy at any worker count. Refuse the combination rather than pick a base
-  # for the extras: honouring the operator's port would walk them onto the registered server and
-  # reconciler defaults, and ignoring it would silently discard the setting for every worker but
-  # the first. Neither is a stack that comes up, so say which knob to drop.
+  # An explicit KDIVE_HEALTH_BIND_ADDR reaches the daemons unevenly here, so a multi-worker aux
+  # layout cannot be placed deterministically under one. ADR-0090 §5 says an explicit value wins
+  # for every process, but this bring-up does not deliver it to every process: the default root
+  # worker is launched through `sudo bash -c`, which strips the environment and re-forwards only
+  # the four variables named below — not this one — so a root worker 1 silently falls back to the
+  # registered 9465, while a KDIVE_WORKER_AS_ROOT=0 worker 1 honours the operator's port. Worker 1
+  # therefore lands somewhere that depends on a *different* knob, and the extras are numbered from
+  # their own base regardless. Refuse rather than place ports on that footing.
+  #
+  # (An explicit bind is already unsound for the same-user server and reconciler at any count —
+  # both do inherit it and both race one port. That is pre-existing and not gated here; this guard
+  # covers only the multi-worker layout this file added.)
   if ((worker_count > 1)) && [[ -n "${KDIVE_HEALTH_BIND_ADDR:-}" ]]; then
     {
       echo "ERROR: KDIVE_WORKER_COUNT=${worker_count} and KDIVE_HEALTH_BIND_ADDR are incompatible."
-      echo "  An explicit health bind applies to every process, so the daemons would race one"
-      echo "  aux port and all but one would exit at startup. Unset KDIVE_HEALTH_BIND_ADDR to run"
-      echo "  more than one worker; each worker past the first then binds from ${EXTRA_WORKER_HEALTH_PORT_BASE}."
+      echo "  An explicit health bind does not reach every daemon here — sudo strips it from the"
+      echo "  root worker, so worker 1's port depends on KDIVE_WORKER_AS_ROOT while the extra"
+      echo "  workers are numbered from ${EXTRA_WORKER_HEALTH_PORT_BASE} regardless. Unset KDIVE_HEALTH_BIND_ADDR to run"
+      echo "  more than one worker; every worker then takes a port this bring-up chose."
     } >&2
     return 1
   fi
@@ -255,7 +262,8 @@ restart_host_processes() {
     start_worker "$index" "$build_user" "$kernel_src"
   done
   DAEMON_COUNT="$((2 + worker_count))"
-  wait_for_daemons_to_settle
+  wait_for_daemons_to_settle || return 1
+  require_workers_alive "$worker_count"
 }
 
 # Host processes have no supervisor — unlike the systemd units and the compose/Helm surfaces,
@@ -291,6 +299,29 @@ wait_for_daemons_to_settle() {
       return 1
     fi
   done
+}
+
+# Assert the stack really has the workers that were asked for, from THIS checkout.
+#
+# wait_for_daemons_to_settle counts a host-wide total against DAEMON_COUNT, and daemon_pids is
+# deliberately checkout-agnostic, so a leftover daemon from another worktree — or a survivor of
+# stop_daemons, which warns and returns 0 after ten seconds rather than failing — makes the total
+# add up while one of this checkout's workers is missing. That is the silent degradation to fewer
+# workers the whole knob exists to escape: bring-up would exit 0 and the contention arm would
+# quietly measure serialization. Count workers specifically, and scoped, so the total cannot cover
+# for the shortfall.
+require_workers_alive() {
+  local want="$1" have
+  have="$(worker_pids | grep -c . || true)"
+  ((have >= want)) && return 0
+  {
+    echo "ERROR: asked for ${want} worker(s) but only ${have} from this checkout are running."
+    echo "  Each worker writes its own log under ${log_dir} — read the one with no 'starting kdive'"
+    echo "  line, or a traceback at its end. An 'address already in use' there means that worker's"
+    echo "  aux health port (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is held by something else, which is a local port"
+    echo "  conflict rather than a backend problem."
+  } >&2
+  return 1
 }
 
 # worker-root.log is append-only, so report the LAST stamp of each service's own log. EVERY worker

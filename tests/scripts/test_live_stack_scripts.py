@@ -195,12 +195,18 @@ def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
 
 
 def _build_stamps(tmp_path: Path, logs: dict[str, str]) -> list[str]:
-    """Run report_build_stamps against a seeded log dir; return its output lines."""
+    """Run report_build_stamps against a seeded log dir; return its output lines.
+
+    `py` is stubbed to a path nothing can be running from, so the live-worker count is a property
+    of the fixture rather than of the developer's machine. Without it this test reads the host
+    process table and goes red whenever this worktree's own live stack is up — which is exactly
+    the state the new runbook arm tells the operator to create.
+    """
     log_dir = tmp_path / "logs"
     log_dir.mkdir(exist_ok=True)
     for name, body in logs.items():
         (log_dir / name).write_text(body)
-    result = _lib(f'log_dir="{log_dir}"\nreport_build_stamps\n')
+    result = _lib(f'py="{tmp_path}/no-such-python"\nlog_dir="{log_dir}"\nreport_build_stamps\n')
     assert result.returncode == 0, result.stderr
     return result.stdout.splitlines()
 
@@ -222,9 +228,28 @@ def test_build_stamps_report_one_row_per_worker_log(tmp_path: Path) -> None:
     assert "build stamps" in header and "worker process(es) live" in header, header
     labels = [line.split()[0] for line in rows[1:] if line.startswith("  ")]
     assert labels == ["server", "reconciler", "worker-root", "worker-root-2"], labels
-    # No live workers from this checkout during a unit test, so the count exposes both rows as
-    # stale logs rather than as graded processes.
+    # Nothing runs from the stubbed interpreter, so the count exposes both rows as stale logs
+    # rather than as graded processes — the direction a file-only enumeration cannot report.
     assert "0 worker process(es) live" in header, header
+
+
+def test_bring_up_fails_when_a_worker_did_not_come_up(tmp_path: Path) -> None:
+    """The settle gate counts a host-wide total, so it cannot see a missing worker on its own.
+
+    `daemon_pids` is deliberately checkout-agnostic, and `stop_daemons` warns rather than fails
+    after ten seconds — so a survivor from another worktree makes 2 + N add up while one of THIS
+    checkout's workers is dead. Bring-up would exit 0 on a stack that silently serializes, which
+    is the whole failure the knob exists to escape. The count must be asserted on workers.
+    """
+    result = _lib(
+        f'py="{tmp_path}/no-such-python"\nlog_dir="{tmp_path}"\nrequire_workers_alive 2\n'
+    )
+    assert result.returncode != 0, "a shortfall must fail bring-up, not warn"
+    assert "asked for 2 worker(s) but only 0" in result.stderr, result.stderr
+    # The message must reach the aux-port cause, which is otherwise a silent local port conflict.
+    assert "address already in use" in result.stderr, result.stderr
+    # A satisfied count passes.
+    assert _lib(f'py="{tmp_path}/no-such-python"\nrequire_workers_alive 0\n').returncode == 0
 
 
 def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
