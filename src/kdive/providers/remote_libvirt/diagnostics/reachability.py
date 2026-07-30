@@ -29,6 +29,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, Protocol
 
 import libvirt
 
@@ -45,6 +46,17 @@ from kdive.security.secrets.secrets import SecretBackend, secret_backend_from_en
 _log = logging.getLogger(__name__)
 
 
+class _ReachableConn(Protocol):
+    """The connection slice this probe uses: the ``getInfo()`` liveness call plus per-op close.
+
+    Deliberately narrower than the discovery plane's slice — the probe calls nothing else, so a
+    test fake supplies just these two.
+    """
+
+    def getInfo(self) -> list[Any]: ...  # noqa: N802 - libvirt binding name
+    def close(self) -> object: ...
+
+
 def _default_secret_backend() -> SecretBackend:
     # A fresh per-probe registry: the probe is short-lived and read-only, so the resolved TLS
     # material registers and is dropped with the registry when the probe returns.
@@ -54,7 +66,7 @@ def _default_secret_backend() -> SecretBackend:
 def remote_libvirt_reachability_probe(
     *,
     config_factory: Callable[[], RemoteLibvirtConfig] = unbound_remote_config,
-    open_connection: Callable[[str], object] = open_libvirt,
+    open_connection: Callable[[str], _ReachableConn] = open_libvirt,
     secret_backend_factory: Callable[[], SecretBackend] = _default_secret_backend,
     pki_base_dir: Path | None = None,
 ) -> ReachabilityProbe:
@@ -88,7 +100,7 @@ def remote_libvirt_reachability_probe(
 
 def _probe_sync(
     config: RemoteLibvirtConfig,
-    open_connection: Callable[[str], object],
+    open_connection: Callable[[str], _ReachableConn],
     secret_backend_factory: Callable[[], SecretBackend],
     pki_base_dir: Path | None,
 ) -> ReachabilityOutcome:

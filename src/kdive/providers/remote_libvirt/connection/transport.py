@@ -43,9 +43,14 @@ _log = logging.getLogger(__name__)
 
 
 class ClosableConn(Protocol):
-    """The minimum any plane's connection slice must satisfy: per-op close."""
+    """The minimum any plane's connection slice must satisfy: per-op close.
 
-    def close(self) -> None: ...
+    ``close()`` is typed as returning ``object`` because libvirt's own ``virConnect.close()``
+    returns an ``int`` status. Every caller discards it, so the protocol only has to admit a
+    return value, not require it be ``None`` — which no real libvirt connection satisfies.
+    """
+
+    def close(self) -> object: ...
 
 
 class _LibvirtConn(Protocol):

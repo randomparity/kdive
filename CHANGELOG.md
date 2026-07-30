@@ -393,12 +393,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hold a present optional reply field to the same contract
 - Close the orphan sweep's delete/PUT race with a write lease
 - Pin the OTel sampler in one place, guard the constructor (#1693)
+- The sourced profile files are not executables
+- Satisfy ty 0.0.62's stricter union and protocol checks
 
 ### Build
 
 - Bump the github-actions group with 2 updates
 - Bump the python-dependencies group with 4 updates
 - Bump the docker-images group across 1 directory with 2 updates
+- Pin the ppc64le uv wheel to 0.11.31
 
 ### Style
 

@@ -188,7 +188,7 @@ def test_with_egress_records_a_distinct_provisioning_audit(migrated_url: str) ->
         async with _pool(migrated_url) as pool:
             await diagnostics.run_diagnostics(pool, _factory(_HEALTHY), _OPERATOR, with_egress=True)
         rows = await _platform_audit_rows(migrated_url)
-        tools = sorted(r[2] for r in rows)
+        tools = sorted(str(r[2]) for r in rows)
         # The mutating opt-in is audited distinctly from the read-only run (ADR-0091 §4).
         assert tools == ["ops.diagnostics", "ops.diagnostics.egress"]
 

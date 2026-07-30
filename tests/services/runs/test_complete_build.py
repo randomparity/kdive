@@ -636,10 +636,10 @@ def test_complete_build_chunked_cleanup_deletes_chunks_and_manifest(migrated_url
         # Reassembly targets the final key and copies exactly the chunk source keys built from
         # the manifest prefix (pins _reassemble_artifacts prefix/final_key).
         assert ("create", final_key) in store.events
-        copied = sorted(src for op, src in store.events if op == "copy")
+        copied = sorted(str(src) for op, src in store.events if op == "copy")
         assert copied == sorted(part_keys)
         # Cleanup then deletes every chunk key and removes the manifest.
-        deleted = sorted(key for op, key in store.events if op == "delete")
+        deleted = sorted(str(key) for op, key in store.events if op == "delete")
         assert deleted == sorted(part_keys)
         assert manifest_gone
 
