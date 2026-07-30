@@ -71,6 +71,18 @@ UPDATE upload_manifests
 RETURNING deadline, deadline < now() + ttl
 ```
 
+> **Amended (#1724).** The `RETURNING` predicate above is now `deadline <> now() + ttl`. The
+> strictly-less-than form is wrong in exactly the TTL-decrease and migration-`0085`-backfill case
+> described four paragraphs below: `GREATEST` keeps a standing deadline that already reaches past
+> `now() + ttl`, so the refresh grants nothing, and comparing the surviving deadline against
+> `now() + ttl` finds it *larger* and calls that outcome uncapped. `capped` therefore asks whether
+> the deadline landed a full `ttl` out rather than short of one, which lets both clamps report:
+> `LEAST` when it holds the deadline below `now() + ttl`, `GREATEST` when it holds one already
+> above it. `GREATEST` selecting the standing deadline is the only way the returned value can
+> exceed `now() + ttl` — the clamped grant never does — so a refresh reporting a deadline past it
+> is a refresh that moved nothing. Reporting only: no deadline was ever written incorrectly, and
+> decision 4's warning is still the only thing `capped` drives.
+
 `LEAST` is the cap: no sequence of refreshes carries one minted window past `max_window` from its
 mint.
 
