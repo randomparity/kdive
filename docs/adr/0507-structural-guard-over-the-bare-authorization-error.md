@@ -77,7 +77,8 @@ Four ways to be covered:
 
 1. the project argument is bound by iterating `ctx.projects` (every value it can take is a
    membership — how `projects_with_role` and the granted-set readers enumerate);
-2. `require_project(ctx, …)` or a `… in ctx.projects` test precedes the call in the same function;
+2. `require_project(ctx, …)` or a `… in ctx.projects` test precedes the call in the same function,
+   **naming the same project expression** the `require_role` authorizes;
 3. the call is in the body of a `try` whose handler catches the base `AuthorizationError`;
 4. every call to the enclosing function *within its module* is itself covered by (2) or (3).
 
@@ -86,6 +87,16 @@ Rule 4 is one level of intra-module call graph, and it is what the deliberate ra
 (ADR-0493 §1), and `raw_fetch.py`'s `_resolve_key` is called only after its caller has checked
 `run.project not in ctx.projects`. It requires at least one call site, so a function with none
 stays uncovered rather than passing vacuously.
+
+Rule 2 compares unparsed source, so it holds only for a syntactically identical expression:
+`require_project(ctx, other)` above `require_role(ctx, project, …)`, or a `run.debuginfo_ref not
+in ctx.projects` guarding a `require_role(ctx, run.project, …)`, establishes nothing about the
+project actually being authorized and does not clear the site. Text equality is a weaker
+relation than "the same value", but it is the right direction of weak: it can refuse a site that
+is in fact safe (which the allowlist absorbs), and it cannot accept one that is unsafe because the
+check names a different object. Rule 4 deliberately drops the expression match, because the
+caller's binding is a different name in a different scope — which is why it compensates by
+demanding that *every* call site be covered.
 
 `except RoleDenied` does **not** satisfy rule 3. `RoleDenied` is the arm a boundary already owns;
 catching only it leaves the non-member arm still propagating. Accepting it would have made the
@@ -144,11 +155,15 @@ only on drift, which is what makes it survivable. The cost lands on new code: a 
 a project with no established membership fails `just ci` with the site named and the two
 mitigations spelled out in the failure message.
 
-**Mutation-verified, not assumed.** Five mutations were re-applied and confirmed to redden the
+**Mutation-verified, not assumed.** Seven mutations were applied and confirmed to redden the
 guard, then reverted: #1661's pre-fix shape in `accounting/report` (the required one — it names
 `_resolve_granted_set`); dropping a row membership check; narrowing a catch from
-`AuthorizationError` to `RoleDenied`; dropping a `require_project` pre-guard; and unwrapping a
-`require_platform_role`. Each reddened; the clean tree is green.
+`AuthorizationError` to `RoleDenied`; dropping a `require_project` pre-guard; unwrapping a
+`require_platform_role`; and the two wrong-project shapes rule 2's expression match exists for —
+a `require_project` on a different project, and a membership check on a different attribute of the
+row. Each named the offending site; the clean tree is green. A guard that cannot be made to fail
+is indistinguishable from one that passes, which is what
+`test_the_guard_sees_the_authorization_surface` and this exercise together rule out.
 
 **ADR-0493's residual paragraph is amended, not left standing.** It asserted in the present tense
 that nothing in `just ci` fails this shape. That is now false, and an un-retracted disclosure is
