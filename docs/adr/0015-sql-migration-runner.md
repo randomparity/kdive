@@ -121,6 +121,13 @@ uses the same harness. So a broken Docker daemon on the runner cannot turn the D
 suite into a silent green, CI sets `KDIVE_REQUIRE_DOCKER=1`, which converts the
 skip into a hard failure — only local runs may skip.
 
+**Superseded above, on the guard's reference:** diffing against `HEAD` made the guard
+vacuous on the clean checkout CI runs, so it enforced nothing on any PR (#1723). The
+guard now compares against `origin/main` and runs as its own required CI step; see
+[ADR-0518](0518-the-immutability-guard-compares-against-the-base-branch.md). Everything
+else in that bullet — what the guard forbids, that it is stdlib-only, and the runtime
+checksum backstop — still holds.
+
 ## Consequences
 
 What becomes easier:
