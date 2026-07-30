@@ -22,6 +22,7 @@ from kdive.jobs import assembly as handler_module
 from kdive.jobs.assembly import build_handler_registry
 from kdive.jobs.models import HandlerRegistry
 from kdive.mcp.assembly.app import build_app
+from kdive.observability.debug_session_telemetry import DebugSessionTelemetry
 from kdive.providers.assembly import composition
 from kdive.security.secrets.secret_registry import SecretRegistry
 from kdive.store.assembly import ObjectStoreAssembly, build_object_store_assembly
@@ -234,6 +235,50 @@ def test_ops_images_registration_uses_standard_register_entrypoint(
         "image_store": store,
         "upload_store": store,
     }
+
+
+def test_debug_tools_registrar_wires_enabled_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registrar must pass a live ``DebugSessionTelemetry``, not the disabled default.
+
+    Every other debug-telemetry test injects a locally built instance, so this assembly
+    site is the only place a ``.disabled()`` regression here can surface (issue #1705).
+    """
+    pool = AsyncConnectionPool("postgresql://unused", open=False)
+    app = FastMCP("probe")
+    expected_resolver = object()
+    expected_secret_registry = SecretRegistry()
+    captured: dict[str, object] = {}
+
+    def _register(
+        registered_app: FastMCP,
+        registered_pool: AsyncConnectionPool,
+        *,
+        resolver: object,
+        secret_registry: object,
+        telemetry: object | None = None,
+    ) -> None:
+        captured["app"] = registered_app
+        captured["pool"] = registered_pool
+        captured["resolver"] = resolver
+        captured["secret_registry"] = secret_registry
+        captured["telemetry"] = telemetry
+
+    monkeypatch.setattr(tool_module.debug_tools, "register", _register)
+
+    registrar = tool_module._debug_tools_registrar(
+        cast(Any, expected_resolver), expected_secret_registry
+    )
+    registrar(app, pool)
+
+    assert captured["app"] is app
+    assert captured["pool"] is pool
+    assert captured["resolver"] is expected_resolver
+    assert captured["secret_registry"] is expected_secret_registry
+    telemetry = captured["telemetry"]
+    assert isinstance(telemetry, DebugSessionTelemetry)
+    assert telemetry.enabled
 
 
 def test_object_store_assembly_preserves_configured_store_error(

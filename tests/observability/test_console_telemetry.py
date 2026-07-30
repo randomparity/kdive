@@ -92,3 +92,12 @@ def test_disabled_is_noop() -> None:
     telem.record(100)
     pts = _points(reader, "kdive.console.bytes")
     assert not pts
+
+
+def test_enabled_reports_whether_instruments_are_wired() -> None:
+    # The public flag the assembly-site tests assert on: without it a `.disabled()`
+    # substitution at a wiring site emits nothing and is invisible to every test.
+    reader = InMemoryMetricReader()
+    live = ConsoleTelemetry(meter=MeterProvider(metric_readers=[reader]).get_meter("t"))
+    assert live.enabled is True
+    assert ConsoleTelemetry.disabled().enabled is False
