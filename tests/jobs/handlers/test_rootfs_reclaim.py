@@ -1401,3 +1401,150 @@ def test_an_orphan_base_drains_a_closed_investigation_that_has_no_rows_left(
             await check.close()
 
     asyncio.run(_run())
+
+
+def _insert_lease(
+    conn: psycopg.AsyncConnection, inv: UUID, system_id: UUID, ttl: timedelta, token: str = _TOKEN
+) -> Any:
+    """A ``rootfs_fetch_leases`` row, as a fetcher's acquire leaves it.
+
+    ``ttl`` is applied against Postgres ``now()``, never a Python clock: the gate's own predicate
+    compares in the database, and seeding from here would make the test assert against a different
+    clock than the code under test reads.
+    """
+    return conn.execute(
+        "INSERT INTO rootfs_fetch_leases (id, investigation_id, token, system_id, expires_at) "
+        "VALUES (%s, %s, %s, %s, now() + %s)",
+        (uuid4(), inv, token, system_id, ttl),
+    )
+
+
+@pytest.mark.parametrize("system_state", ["torn_down", "failed"])
+def test_an_unexpired_fetch_lease_pins_the_base_with_no_partial_yet(
+    migrated_url: str, tmp_path: Path, system_state: str
+) -> None:
+    # #1702/#1558 option 2, on the exact interleaving ADR-0495 left open (its residual window 2):
+    # the artifacts row is resolved, NO partial exists yet, and the System that requested the base
+    # is in a pin-dropping terminal state. Neither older gate sees the download —
+    # _ROOTFS_REFERENCERS_SQL excludes torn_down outright and FAILED is outside
+    # ROOTFS_BASE_PRE_OVERLAY_SYSTEM_STATES, so the ADR-0441 §6 classifier calls the base
+    # reclaimable, and there is no partial for the ADR-0495 flock probe to find. Before ADR-0515
+    # the base, the object and the row were all deleted out from under a live download.
+    #
+    # Both terminal states are parametrized because the issue names both and they defeat the
+    # classifier for *different* reasons; a fix closing only one would pass a single-state test.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            system_id = await _seed_system(seed, inv, system_state, _upload_profile())
+            await _insert_lease(seed, inv, system_id, timedelta(hours=6))
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+        assert not list((uploads / str(inv)).glob("*.partial")), "the window has no partial"
+
+        result = await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads)
+
+        assert result == "0"  # deferred, not drained — and the job still succeeded
+        assert staged.exists(), "the base was unlinked under a live download"
+        assert staged_rootfs_marker_path(staged).exists()
+        assert store.deleted == []  # the object the download will read is retained
+        check = await connect(migrated_url)
+        try:
+            assert await _row_exists(check, artifact_id)  # the worklist anchor survives
+            assert await _marker(check, inv) is not None
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_an_expired_fetch_lease_does_not_pin_the_base(migrated_url: str, tmp_path: Path) -> None:
+    # AC-8's property in the form ADR-0515 gives it, and the single most important test in this
+    # change. The regression AC-8 guards is a pin nothing can ever release: a base pinned by a dead
+    # fetcher is a SENSITIVE leak of up to the 50 GiB canonical cap, per investigation.
+    #
+    # This design is exposed to exactly that, because a fetcher killed by SIGKILL releases nothing
+    # and nothing else ever clears its row — `failed` is terminal with no transition out of it,
+    # `torn_down` is the achieved post-state, and no reconciler repair reaches a lease. The deadline
+    # is the ONLY thing standing between the lease and an unbounded pin. So: a lease whose fetcher
+    # is gone and whose deadline has passed must not defer, and the checksum must drain whole in the
+    # very same pass that would have deferred on an unexpired one.
+    inv = uuid4()
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            system_id = await _seed_system(seed, inv, "failed", _upload_profile())
+            await _insert_lease(seed, inv, system_id, timedelta(hours=-1))
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+
+        assert await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == (
+            "1"
+        )
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+        assert not (uploads / str(inv)).exists()
+        check = await connect(migrated_url)
+        try:
+            assert not await _row_exists(check, artifact_id)
+            assert await _marker(check, inv) is None
+            # The expired row is reaped as table-growth hygiene while the lock is already held.
+            # Correctness never depended on this — the gate ignored it above regardless — so this
+            # asserts the reap ran, not that the drain needed it.
+            leases = await check.execute(
+                "SELECT count(*) FROM rootfs_fetch_leases WHERE investigation_id = %s", (inv,)
+            )
+            remaining = await leases.fetchone()
+            assert remaining is not None and remaining[0] == 0
+        finally:
+            await check.close()
+
+    asyncio.run(_run())
+
+
+def test_a_fetch_lease_for_another_token_does_not_defer_this_checksum(
+    migrated_url: str, tmp_path: Path
+) -> None:
+    # The lease probe is scoped to the checksum being reclaimed, not to the investigation. The
+    # staging tree is per investigation, so a sibling System fetching a *different* base is a
+    # routine concurrent state; deferring this checksum on that lease would stall it for the length
+    # of an unrelated multi-GiB download — ADR-0442 §7's starvation, keyed on an unrelated name.
+    inv = uuid4()
+    other_token = rootfs_object_token(_CHECKSUM_Y)
+
+    async def _run() -> None:
+        nonlocal inv
+        seed = await connect(migrated_url)
+        try:
+            inv = await _seed_investigation(seed, state="closed", closed=True)
+            artifact_id = await _seed_rootfs_row(seed, inv)
+            system_id = await _seed_system(seed, inv, "torn_down", _upload_profile())
+            await _insert_lease(seed, inv, system_id, timedelta(hours=6), token=other_token)
+        finally:
+            await seed.close()
+        rootfs_dir, uploads = _dirs(tmp_path)
+        staged = _stage(uploads, inv)
+        store = _RecordingStore()
+
+        assert await _run_handler(migrated_url, inv, [artifact_id], store, rootfs_dir, uploads) == (
+            "1"
+        )
+        assert not staged.exists()
+        assert store.deleted == [_object_key(inv)]
+
+    asyncio.run(_run())

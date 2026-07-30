@@ -1278,6 +1278,7 @@ class _FakeCursor:
         elif "FROM artifacts" in sql:
             queried_key = params[2]
             self._conn.queried_object_keys.append(str(queried_key))
+            self._conn.trace.append("resolve-object")
             self._row = (
                 (self._conn.encoding, self._conn.uncompressed_size)
                 if queried_key == self._conn.owned_object_key
@@ -1306,9 +1307,16 @@ class _FakeConn:
         self.queried_object_keys: list[str] = []
         self.lock_keys: list[int] = []
         self.unlock_keys: list[int] = []
+        # ADR-0515: every lease statement and object-key resolve, in ONE interleaved list. Two
+        # separate lists would let a test named for the ordering assert only the contents of each,
+        # which is the vacuous shape that passes however the calls are reordered.
+        self.trace: list[str] = []
         # The release path reports the OBSERVED connection state rather than an inferred cause,
         # so the fake carries the same flag a real psycopg connection exposes.
         self.closed = False
+        # ADR-0515's lease is only visible to the reclaim on an autocommit connection, which is
+        # what rootfs_upload_fetch_from_env opens; the fake mirrors that.
+        self.autocommit = True
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
@@ -1318,6 +1326,10 @@ class _FakeConn:
             self.lock_keys.append(int(params[0]))
         elif "pg_advisory_unlock" in sql:
             self.unlock_keys.append(int(params[0]))
+        elif "INSERT INTO rootfs_fetch_leases" in sql:
+            self.trace.append("lease-acquire")
+        elif "DELETE FROM rootfs_fetch_leases" in sql:
+            self.trace.append("lease-release")
 
 
 def _upload(tmp_path: Path, system_id: UUID | None = None) -> RootfsUploadContext:
@@ -2631,3 +2643,64 @@ def test_stage_names_the_sweep_when_the_unguarded_partial_is_taken_mid_download(
     assert "while it was being downloaded" in str(error.value)
     assert "the usual cause is a stage the filesystem could not flock" in str(error.value)
     assert not dest.exists()
+
+
+def test_the_fetch_lease_is_taken_before_the_artifacts_row_is_resolved(tmp_path: Path) -> None:
+    # ADR-0515's load-bearing ordering claim (#1702). The reclaim gate can only see a fetch that has
+    # already left evidence, so the lease must be recorded by the time the artifacts row is
+    # resolved — that instant is the start of ADR-0495's residual window 2, and everything after it
+    # (the session-lock wait in particular, which can be a sibling's whole multi-GiB download) is
+    # unprotected without it. Taking the lease one line later would leave the window open while
+    # looking correct, so the *order* is asserted, not merely that a lease was taken.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2
+    # The interleaving is the contract: acquire, THEN the resolve that opens window 2, then the
+    # whole stage, then release. Asserted as one sequence so moving the acquire after the resolve
+    # reddens this — two separate per-kind lists would not notice.
+    assert conn.trace == ["lease-acquire", "resolve-object", "lease-release"]
+
+
+def test_the_fetch_lease_is_released_when_the_fetch_raises(tmp_path: Path) -> None:
+    # The other half of "cleared on every unwind path". A fetch that raises — here an unresolvable
+    # checksum, the CONFIGURATION_ERROR raised from inside the leased region — must still release.
+    # A lease leaked on the error path is worse than one leaked on success, because the error paths
+    # are the ones that fire in production, and each leak pins a base for the whole TTL.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=None)
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+
+    with pytest.raises(CategorizedError):
+        fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert conn.trace == ["lease-acquire", "resolve-object", "lease-release"]
+
+
+def test_a_lease_acquire_fault_degrades_instead_of_failing_the_provision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pin is advisory, so a database blip must not become a total uploaded-rootfs outage: the
+    # fetch proceeds unleased and the reclaim reverts to its pre-ADR-0515 reach. This is
+    # _flocked_partial's own ENOLCK precedent. It also asserts the release is skipped — issuing a
+    # DELETE for a lease that was never acquired would hide the acquire failure from anyone reading
+    # the statement sequence, which is the only evidence the degrade fired.
+    inv = uuid4()
+    conn = _FakeConn(investigation_id=inv, owned_object_key=_owned_key(inv))
+    store = _FakeStore(_QCOW2, checksum=_sha256_b64(_QCOW2))
+    real_execute = conn.execute
+
+    def _fault_on_leases(sql: str, params: tuple[Any, ...]) -> None:
+        if "rootfs_fetch_leases" in sql:
+            raise psycopg.OperationalError("the connection pool is gone")
+        real_execute(sql, params)
+
+    monkeypatch.setattr(conn, "execute", _fault_on_leases)
+
+    result = fetch_uploaded_rootfs(conn, store, _upload(tmp_path))  # ty: ignore[invalid-argument-type]
+
+    assert result.read_bytes() == _QCOW2, "a lease fault must not fail the provision"
+    assert conn.trace == ["resolve-object"]  # nothing acquired, so nothing released
