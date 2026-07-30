@@ -256,6 +256,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explain why the capped equality is exact
 - Drop a misapplied ADR-0449 citation from stop_daemons
 - Note that a re-run can hit the same surplus
+- State precisely why the flock lease was not taken
 
 ### Fixed
 
