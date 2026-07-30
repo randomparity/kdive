@@ -307,11 +307,16 @@ def test_fetch_version_reads_the_body_of_a_503(unready_stack: str) -> None:
     assert version["commit"] == version_info().commit
 
 
-def test_fetch_version_is_none_on_a_closed_port() -> None:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        closed = probe.getsockname()[1]
-    assert skew._fetch_version(f"http://127.0.0.1:{closed}/readyz") is None
+def test_fetch_version_is_none_on_a_refused_port() -> None:
+    # The socket is held bound — but never listening — across the assertion. A bound port
+    # cannot be handed to anything else, and a connect with no listen backlog behind it is
+    # refused, so "nothing answers here" holds by construction. Binding and *closing* first
+    # released the port back to the ephemeral range, where a busy host's wildcard listeners
+    # can answer instead (#1713).
+    with socket.socket() as refusing:
+        refusing.bind(("127.0.0.1", 0))
+        port = refusing.getsockname()[1]
+        assert skew._fetch_version(f"http://127.0.0.1:{port}/readyz") is None
 
 
 def test_fetch_version_is_none_on_a_non_http_listener() -> None:
@@ -332,12 +337,25 @@ class _GarbageHandler(socketserver.BaseRequestHandler):
 def test_probe_stack_skew_degrades_to_unknown_when_nothing_answers() -> None:
     # A stack that predates this feature, or is simply down, must warn — never skip, never
     # raise. This is the backward-compatibility contract.
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        closed = probe.getsockname()[1]
-    results = probe_stack_skew(f"http://127.0.0.1:{closed}/mcp")
+    #
+    # The no-answer case is injected through the transport seam rather than staged on a port
+    # (#1713): the previous form bound an ephemeral port, closed it, and assumed the OS would
+    # leave it quiet, which on a host with wildcard listeners in that range it does not.
+    probed: list[str] = []
+
+    def nothing_answers(url: str) -> dict[str, object] | None:
+        probed.append(url)
+        return None
+
+    base = "http://127.0.0.1:8000/mcp"
+    results = probe_stack_skew(base, fetch=nothing_answers)
     assert {r.verdict for r in results} == {SkewVerdict.UNKNOWN}
     assert [r.process for r in results] == ["reconciler", "server", "worker"]
+    # The injected transport is the one consulted, for every process — a `fetch` argument
+    # accepted and then ignored would still satisfy the verdicts above on a host with no stack.
+    # Derived from readyz_urls, which has its own tests: the port table is pinned there, and
+    # restating it here would only redden two tests for one edit.
+    assert probed == list(readyz_urls(base).values())
 
 
 def test_repo_facts_describe_this_actual_checkout() -> None:
