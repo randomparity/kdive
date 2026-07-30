@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kdive.fullname" . }}-worker
+  labels:
+    {{- include "kdive.labels" . | nindent 4 }}
+spec:
+  # The governing headless Service (service-worker.yaml). It carries no ports and fronts
+  # nothing; a StatefulSet requires the field, which is the whole reason that Service exists.
+  serviceName: {{ include "kdive.fullname" . }}-worker
+  replicas: {{ .Values.worker.replicas }}
+  # Workers are interchangeable queue consumers: `FOR UPDATE SKIP LOCKED` lets them claim
+  # disjoint rows without blocking (ADR-0018), and no ordinal owns a role or waits on another.
+  # Parallel start/stop avoids OrderedReady's one-at-a-time serialization on scale and rollout.
+  podManagementPolicy: Parallel
+  # build/install are scratch (a warm build tree and install staging; the state of record is
+  # Postgres and the artifacts are in the object store). Releasing the claims on scale-down and
+  # uninstall keeps a scaled-down replica from stranding storage a scale-up would rebuild anyway.
+  persistentVolumeClaimRetentionPolicy:
+    whenScaled: Delete
+    whenDeleted: Delete
+  selector:
+    matchLabels:
+      app: {{ include "kdive.fullname" . }}-worker
+  template:
+    metadata:
+      labels:
+        app: {{ include "kdive.fullname" . }}-worker
+        {{- include "kdive.labels" . | nindent 8 }}
+      annotations:
+        {{- include "kdive.configChecksum" . | nindent 8 }}
+        {{- include "kdive.scrapeAnnotations" 9465 | nindent 8 }}
+    spec:
+      securityContext:
+        # fsGroup so the non-root worker UID owns the mounted PVCs (ADR-0088 §3).
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: worker
+          image: {{ include "kdive.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["worker"]
+          env:
+            {{- include "kdive.auxEnv" 9465 | nindent 12 }}
+            {{- include "kdive.secretsEnv" . | nindent 12 }}
+            {{- include "kdive.systemsEnv" . | nindent 12 }}
+            {{- include "kdive.fixturesEnv" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "kdive.fullname" . }}-config
+          ports:
+            - containerPort: 9465
+          {{- include "kdive.auxProbes" 9465 | nindent 10 }}
+          volumeMounts:
+            # build/install resolve to this replica's own volumeClaimTemplates claim
+            # (build-<sts>-<ordinal>), so no two replicas share a volume.
+            - name: build
+              mountPath: /var/lib/kdive/build
+            - name: install
+              mountPath: /var/lib/kdive/install
+            {{- include "kdive.secretsVolumeMount" . | nindent 12 }}
+            {{- include "kdive.systemsVolumeMount" . | nindent 12 }}
+            {{- include "kdive.fixturesVolumeMount" . | nindent 12 }}
+      {{- if or .Values.secrets.secretName .Values.systems.configMapName .Values.fixtures.configMapName }}
+      volumes:
+        {{- include "kdive.secretsVolume" . | nindent 8 }}
+        {{- include "kdive.systemsVolume" . | nindent 8 }}
+        {{- include "kdive.fixturesVolume" . | nindent 8 }}
+      {{- end }}
+  # volumeClaimTemplates is IMMUTABLE after creation: the API server rejects an update to any
+  # StatefulSet field outside replicas/template/updateStrategy/minReadySeconds/ordinals and the
+  # retention policy. So nothing version-dependent may appear here — in particular NOT
+  # `kdive.labels`, whose helm.sh/chart carries the chart version, or every chart bump would
+  # make `helm upgrade` fail. Changing a persistence size likewise needs the migration in the
+  # chart README, not an in-place upgrade.
+  volumeClaimTemplates:
+    - metadata:
+        name: build
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.worker.persistence.build.size }}
+    - metadata:
+        name: install
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.worker.persistence.install.size }}

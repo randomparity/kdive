@@ -59,6 +59,13 @@ class ErrorCategory(StrEnum):
     # (the symbol will not appear on a bare re-invocation).
     SYMBOL_NOT_FOUND = "symbol_not_found"
 
+    # Snapshot-restore limbo (#1560, ADR-0513). A `restoring` System whose restore job can never
+    # run again — the worker died mid-revert, or the job dead-lettered / was canceled — is driven
+    # to `failed` by the reconciler with no exception and no job to attribute. The guest's disk
+    # state is indeterminate, which is a different operator response from `infrastructure_failure`
+    # (an unclassified fault in the layer below, and retryable).
+    RESTORE_INCOMPLETE = "restore_incomplete"
+
 
 # Categories whose human-readable reason must never reach a client (ADR-0123): a denial or a
 # by-id lookup miss carries a fixed constant so no raise site — even one whose message embeds a
@@ -115,6 +122,7 @@ RETRYABLE_BY_CATEGORY: dict[ErrorCategory, bool] = {
     ErrorCategory.NOT_IMPLEMENTED: False,
     ErrorCategory.NOT_FOUND: False,
     ErrorCategory.SYMBOL_NOT_FOUND: False,
+    ErrorCategory.RESTORE_INCOMPLETE: False,
     ErrorCategory.CONFLICT: False,
     ErrorCategory.AUTHORIZATION_DENIED: False,
     ErrorCategory.QUOTA_EXCEEDED: False,

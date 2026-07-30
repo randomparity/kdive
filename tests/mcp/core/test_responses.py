@@ -537,6 +537,15 @@ def test_symbol_not_found_is_not_retryable() -> None:
     assert resp.retryable is False
 
 
+def test_restore_incomplete_is_not_retryable() -> None:
+    # A half-reverted guest (ADR-0513) is indeterminate and its System is terminal `failed`, so no
+    # bare re-invocation can succeed. This is the whole point of the category: the
+    # `infrastructure_failure` it replaces is retryable, and told an agent to keep trying.
+    resp = ToolResponse.failure("id", ErrorCategory.RESTORE_INCOMPLETE)
+    assert resp.error_category == "restore_incomplete"
+    assert resp.retryable is False
+
+
 def test_retryable_is_never_caller_set() -> None:
     # A caller-supplied value is overwritten by the derived one.
     forced = ToolResponse(
@@ -570,6 +579,7 @@ def test_every_category_has_an_explicit_expected_bool() -> None:
         ErrorCategory.NOT_IMPLEMENTED: False,
         ErrorCategory.NOT_FOUND: False,
         ErrorCategory.SYMBOL_NOT_FOUND: False,
+        ErrorCategory.RESTORE_INCOMPLETE: False,
         ErrorCategory.CONFLICT: False,
         ErrorCategory.AUTHORIZATION_DENIED: False,
         ErrorCategory.QUOTA_EXCEEDED: False,

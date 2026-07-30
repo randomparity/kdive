@@ -53,9 +53,84 @@ bare `--reuse-values` no longer reintroduces the local-libvirt reaper crash-loop
 `-f kdive-values.yaml` is the general fix for *any* future config-default drift, so prefer it.
 
 A `helm upgrade` that changes a `config.*` value now rolls the server/worker/reconciler
-Deployments automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
+workloads automatically (a `checksum/config` pod annotation, ADR-0134) — no manual
 `kubectl rollout restart` is needed. The bundled Postgres/MinIO backends carry no such
 annotation, so a config change never rolls their `emptyDir` pods.
+
+### Migrating to chart 0.5.0 — the worker becomes a StatefulSet
+
+Chart `0.5.0` converts the worker from a Deployment to a **StatefulSet** so each replica gets
+its own build and install volume (ADR-0514). Before `0.5.0`, `worker.replicas > 1` multi-attached
+one pair of `ReadWriteOnce` claims and either wedged the extra pods in `Pending` or silently
+shared the scratch directories, depending on where the scheduler placed them.
+
+**The old volumes are not carried forward.** A StatefulSet adopts only claims named
+`<template>-<statefulset>-<ordinal>`, so the release-scoped `<release>-kdive-build` and
+`<release>-kdive-install` claims are Deployment-era leftovers the new `volumeClaimTemplates` will
+never look for. That costs nothing here: both volumes are **disposable scratch**.
+`/var/lib/kdive/build` is the build workspace (a warm kernel tree plus uuid-scoped per-build
+directories) and `/var/lib/kdive/install` is install staging. State of record is Postgres and
+durable artifacts are in the object store, so discarding both costs a rebuild or a re-fetch on
+the next run, not data.
+
+**Drain the workers before upgrading.** A bare `helm upgrade` does converge on its own — Helm 3
+deletes resources the new chart no longer renders, matching on name/namespace/**kind**, so the
+old Deployment (a different kind under the same name) and the two shared PVCs are removed. But
+Helm creates the new resources *before* deleting the old ones, so for the length of that window
+the Deployment's pods and the StatefulSet's pods are both claiming jobs — briefly double the
+intended workers, some of them mid-build against volumes that are about to be deleted. Those
+jobs fail and are re-dispatched, which is survivable and pointless. Draining first makes the
+transition deterministic:
+
+```sh
+# 1. Stop the workers and wait for the pods to go away.
+kubectl scale deployment/<release>-kdive-worker --replicas=0 -n <ns>
+# `|| true` because `kubectl wait` exits non-zero on "no matching resources found", which is
+# exactly the state you want if the workers were already drained or the step is re-run.
+kubectl wait --for=delete pod -l app=<release>-kdive-worker -n <ns> --timeout=5m || true
+
+# 2. Upgrade. Helm removes the drained Deployment and the two shared PVCs, and creates the
+#    StatefulSet with a fresh pair of claims per ordinal.
+helm get values <release> -o yaml > kdive-values.yaml
+helm upgrade <release> deploy/helm/kdive -f kdive-values.yaml -n <ns>
+
+# 3. Confirm the old shared claims are gone and each ordinal owns its own pair.
+kubectl get pvc -n <ns>   # expect build-<release>-kdive-worker-N / install-<release>-kdive-worker-N
+```
+
+If step 2 leaves either shared PVC behind — a `helm.sh/resource-policy: keep` annotation, or a
+`pvc-protection` finalizer waiting on a pod that never terminated — delete it by hand once no
+worker pod is running:
+
+```sh
+kubectl delete pvc/<release>-kdive-build pvc/<release>-kdive-install -n <ns>
+```
+
+Two things change size after the migration:
+
+- **`worker.replicas` now defaults to 2** (it was 1). The queue is built for parallel workers
+  (`FOR UPDATE SKIP LOCKED`, ADR-0018); a one-worker default never exercises that path. Set it
+  back to 1 if you want the old footprint.
+- **`worker.persistence.*.size` is now per replica.** The shipped default requests
+  2 × (10Gi + 5Gi) = 30Gi rather than 15Gi. Lower the sizes or the replica count on a tight quota.
+
+**Changing a persistence size after install requires the same delete-and-recreate.**
+`volumeClaimTemplates` is immutable — Kubernetes rejects an update to any StatefulSet field
+outside `replicas`, `template`, `updateStrategy`, `minReadySeconds`, `ordinals` and the PVC
+retention policy — so a size change fails the upgrade rather than silently doing nothing.
+
+Scaling down or uninstalling now **deletes** the departing replicas' claims
+(`persistentVolumeClaimRetentionPolicy` is `Delete`/`Delete`), because they hold only scratch:
+the build tree rebuilds, and install staging is pushed into the guest and not read again. This
+is the one place the chart removes storage on your behalf, so `Chart.yaml` requires Kubernetes
+`>=1.27` — the field is gated behind `StatefulSetAutoDeletePVC`, off by default before then, and
+an older API server would prune it silently and leak the claims instead.
+
+> The scratch claim does **not** hold on the local-libvirt path, where the staged
+> `kernel`/`initrd` are the domain XML's direct-boot files and durable for the System's
+> lifetime. This chart cannot reach that path — it sets `KDIVE_LOCAL_LIBVIRT_ENABLED: "false"`
+> and mounts neither a libvirt socket nor `/dev/kvm`. If you wire one up anyway, scaling the
+> worker down un-boots the Systems installed by the departing ordinals until you reinstall them.
 
 ## Bundled backends (demo only)
 

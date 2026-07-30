@@ -1,9 +1,11 @@
 """Tests for the reconciler upload reaper (ADR-0048 §6, ADR-0104 §7, ADR-0444, ADR-0453, #11).
 
 The reaper commits the manifest-row delete of a past-deadline window under the owner's advisory
-lock, then sweeps the window's uncommitted objects holding neither lock nor connection — row
-first, so a failing sweep can never restore a window over deleted bytes (ADR-0453,
-issue #1552). For ``runs`` it sweeps whether the Run is pre-finalize (a true abandon) or
+lock, then sweeps the window's uncommitted objects, re-deciding each key under that same lock
+(ADR-0509) — row first, so a failing sweep can never restore a window over deleted bytes (ADR-0453,
+issue #1552). Neither phase waits on the owner lock: an owner whose lock is held is deferred to the
+next pass rather than blocking the ones behind it (ADR-0510, issue #1554). For ``runs`` it sweeps
+whether the Run is pre-finalize (a true abandon) or
 finalized with leftover chunks (ADR-0104 §7); for ``investigations`` it sweeps on the deadline
 alone, in every investigation state (ADR-0444, superseding ADR-0441 §6's terminal-state gate —
 ``complete_rootfs_upload`` now rejects a past-deadline finalize, so the reap races nothing
@@ -20,7 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -32,6 +35,7 @@ from psycopg_pool import AsyncConnectionPool
 from kdive.artifacts import upload_manifest
 from kdive.artifacts.upload_manifest import lock_scope_for as _lock_scope_for
 from kdive.artifacts.uploads import ManifestEntry
+from kdive.db.locks import advisory_xact_lock
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.uploads import ReapOutcome
@@ -464,7 +468,11 @@ def test_reap_one_owner_declines_renewed_manifest(migrated_url: str) -> None:
             await upload_manifest.replace_manifest(conn, request)
             store = _FakeStore({prefix: [f"{prefix}kernel"]})
             outcome = await _reap_one_owner(conn, store, "runs", run_id)
-            assert outcome == ReapOutcome(reaped=False, attempted=0, undeleted=0)
+            # ``deferred`` false: a renewed manifest is a *decline*, and the two must not be
+            # conflated — a decline is final for this owner, a deferral is retried (ADR-0510).
+            assert outcome == ReapOutcome(
+                reaped=False, deferred=False, attempted=0, declined=0, undeleted=0
+            )
             assert store.deleted == []
 
     asyncio.run(_run())
@@ -532,49 +540,6 @@ def test_a_clean_sweep_returns_the_reaped_count_and_does_not_raise(migrated_url:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _reap(store)) == 1
         assert store.deleted == [f"{prefix}a"]
-
-    asyncio.run(_run())
-
-
-def test_a_key_that_gains_an_artifacts_row_after_the_claim_is_still_deleted(
-    migrated_url: str,
-) -> None:
-    """Pins ADR-0453's second residual (#1557) as *known* behaviour rather than a claim.
-
-    The exemption is decided in phase 1 and phase 2 re-reads nothing, so a key that acquires a
-    committed ``artifacts`` row between the two — which the reaped window's own finalizes cannot
-    do, but a re-mint, a `control.capture_traffic` retry, or a vmcore finalize can, because
-    ``local/runs/<id>/`` is the Run's *owner* prefix and phase 2 holds no `RUN` lock — has its
-    object deleted anyway, leaving the row dangling.
-
-    This test exists so the residual has a reproducer and so the day it is closed, it fails
-    loudly rather than passing silently.
-    """
-
-    async def _run() -> None:
-        run_id, prefix = await _seed_expired_run(migrated_url)
-        pcap_key = f"{prefix}pcap-late"
-
-        def _commit_the_row_mid_sweep() -> None:
-            # Stands in for the concurrent writer taking the RUN lock phase 2 no longer holds.
-            with psycopg.connect(migrated_url, autocommit=True) as writer:
-                writer.execute(
-                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, "
-                    "    sensitivity, retention_class) VALUES (%s, %s, %s, %s, %s, %s)",
-                    ("runs", run_id, pcap_key, "etag-1", "sensitive", "pcap"),
-                )
-
-        store = _HookedStore(
-            {prefix: [pcap_key]}, before_delete=_commit_the_row_mid_sweep, once=True
-        )
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            assert await run_repair(pool, _reap(store)) == 1
-        assert store.deleted == [pcap_key]  # the disclosed residual: row committed, object gone
-        async with await connect(migrated_url) as check:
-            row = await (
-                await check.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (pcap_key,))
-            ).fetchone()
-        assert row is not None
 
     asyncio.run(_run())
 
@@ -848,3 +813,174 @@ def test_lock_scope_rejects_unknown_owner_kind() -> None:
         assert str(exc) == "unsupported upload owner kind: allocations"
     else:
         raise AssertionError("unknown owner kind should fail loud, not resolve to a scope")
+
+
+# --- #1554: a held owner lock defers that owner, not the pass (ADR-0510) -------------------------
+
+
+@asynccontextmanager
+async def _owner_lock_held(url: str, owner_id: UUID) -> AsyncIterator[None]:
+    """Hold the ``runs`` advisory lock for ``owner_id`` on a separate connection over the block.
+
+    Models the holder that motivates #1554: chunked ``complete_build`` takes ``LockScope.RUN``
+    before its reassembly and holds it to request end (ADR-0244), so the lock can span a whole
+    multi-GiB write — and therefore a whole reconciler pass.
+    """
+    holder = await psycopg.AsyncConnection.connect(url)
+    try:
+        async with (
+            holder.transaction(),
+            advisory_xact_lock(holder, _lock_scope_for("runs"), owner_id),
+        ):
+            yield
+    finally:
+        await holder.close()
+
+
+def test_a_locked_owner_does_not_stall_an_unrelated_owner_in_the_same_pass(
+    migrated_url: str,
+) -> None:
+    """#1554, the head-of-line stall: a held lock must cost that owner a pass, not the pass.
+
+    Phase 1 used to *block* on the owner lock, so a candidate whose lock a slow finalize held parked
+    ``repair_abandoned_uploads`` mid-loop — every remaining candidate waited behind it, and so did
+    every repair after it, because ``_run_repair_plan`` keeps one pooled connection checked out for
+    the whole call and runs its repairs serially.
+
+    The timeout is the assertion. Against the blocking acquisition this pass never returns at all:
+    the holder is released only *after* the pass is awaited, so the wait is unbounded rather than
+    slow. Candidate order is deliberately not pinned — the candidate select has no ``ORDER BY`` —
+    and does not need to be, because blocking hangs the pass whether the locked owner is reached
+    first or second, while deferring reaps the free owner either way.
+
+    The mutation control for ``count == 1`` is ``test_reaps_multiple_abandoned_owners_counted``:
+    with no holder, the same two-owner shape returns 2. Without it, a phase 1 that deferred
+    unconditionally would satisfy this test while reaping nothing.
+    """
+
+    async def _run() -> None:
+        locked_id, locked_prefix = await _seed_expired_run(migrated_url)
+        free_id, free_prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore(
+            {locked_prefix: [f"{locked_prefix}kernel"], free_prefix: [f"{free_prefix}kernel"]}
+        )
+        async with (
+            _owner_lock_held(migrated_url, locked_id),
+            AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
+        ):
+            count = await asyncio.wait_for(run_repair(pool, _reap(store)), timeout=20)
+        assert count == 1  # the free owner, reaped without waiting for the locked one
+        assert store.deleted == [f"{free_prefix}kernel"]
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", free_id) is None
+            # The locked owner's row is untouched — nothing was claimed, so nothing was lost.
+            assert await upload_manifest.get_manifest(check, "runs", locked_id) is not None
+
+    asyncio.run(_run())
+
+
+def test_a_deferred_owner_is_reaped_by_the_next_pass_once_its_lock_is_free(
+    migrated_url: str,
+) -> None:
+    """A deferral costs a pass, not the reap — the claim ADR-0510 makes against ADR-0509.
+
+    ADR-0509 §Consequences kept phase 1 blocking on the ground that "a reap that gave up on a
+    contended owner would never claim it — the manifest row is the pass's only record that the
+    window is past its deadline". The row is not consumed by a deferral: it is left exactly as
+    found, still past its deadline, which is the predicate the candidate select uses. So the next
+    pass re-derives the owner. This test drives both passes.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({prefix: [f"{prefix}kernel"]})
+        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+            async with _owner_lock_held(migrated_url, run_id):
+                deferred_pass = await asyncio.wait_for(run_repair(pool, _reap(store)), timeout=20)
+            assert deferred_pass == 0
+            assert store.deleted == []
+            async with await connect(migrated_url) as check:
+                assert await upload_manifest.get_manifest(check, "runs", run_id) is not None
+            assert await run_repair(pool, _reap(store)) == 1
+        assert store.deleted == [f"{prefix}kernel"]
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())
+
+
+def test_reap_one_owner_reports_a_held_lock_as_deferred_not_declined(migrated_url: str) -> None:
+    """The two no-claim outcomes are distinct, and only one of them is retried.
+
+    A decline (``test_reap_one_owner_declines_renewed_manifest``) is final for this owner: the
+    window it would have reaped no longer exists. A deferral is not — the window is still there and
+    still past its deadline. Collapsing them into a bare ``reaped=False`` would make the pass unable
+    to report the one that can starve.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({prefix: [f"{prefix}kernel"]})
+        async with (
+            _owner_lock_held(migrated_url, run_id),
+            await connect(migrated_url) as conn,
+        ):
+            outcome = await _reap_one_owner(conn, store, "runs", run_id)
+        assert outcome == ReapOutcome(
+            reaped=False, deferred=True, attempted=0, declined=0, undeleted=0
+        )
+        assert store.deleted == []
+
+    asyncio.run(_run())
+
+
+def test_a_deferred_owner_is_reported_with_its_count_and_age(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deferring silently would make perpetual starvation invisible, so the pass reports it.
+
+    Each pass looks locally fine when an owner is deferred — nothing failed, nothing was lost — so
+    an owner whose lock is *never* free is never reaped and never complained about. The summary
+    carries the count and the oldest candidate's age past its deadline, computed by Postgres at the
+    candidate select (never from a Python clock, which would not share the database's session
+    timezone), so a starved owner shows as an age that grows pass over pass.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({prefix: [f"{prefix}kernel"]})
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+            async with (
+                _owner_lock_held(migrated_url, run_id),
+                AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool,
+            ):
+                assert await asyncio.wait_for(run_repair(pool, _reap(store)), timeout=20) == 0
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "deferred 1 of 1 past-deadline owner(s)" in message
+        assert "past its deadline" in message
+
+    asyncio.run(_run())
+
+
+def test_a_clean_pass_reports_no_deferral(
+    migrated_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mutation control for the summary above: an uncontended pass must stay quiet.
+
+    A summary emitted unconditionally would warn on every pass of a healthy deployment and train
+    operators to ignore the one line that says an owner is starving.
+    """
+
+    async def _run() -> None:
+        run_id, prefix = await _seed_expired_run(migrated_url)
+        store = _FakeStore({prefix: [f"{prefix}kernel"]})
+        with caplog.at_level(logging.WARNING, logger="kdive.reconciler.cleanup.uploads"):
+            async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
+                assert await run_repair(pool, _reap(store)) == 1
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+        async with await connect(migrated_url) as check:
+            assert await upload_manifest.get_manifest(check, "runs", run_id) is None
+
+    asyncio.run(_run())

@@ -187,9 +187,14 @@ async def _reject_if_expired(
     measures against (ADR-0444), so finalize and the reaper cannot reach opposite verdicts on the
     same manifest. ``now()`` is the transaction's start, so a request that arrived inside the
     window is never rejected for time it spent waiting on the investigation lock.
+
+    The verdict itself comes from :attr:`~kdive.artifacts.upload_manifest.ManifestStamp.expired`,
+    the same predicate the runs finalize asks (ADR-0512). Only the rejection differs, and it
+    differs deliberately: the detail names the rootfs, and the recovery action is the
+    investigation-scoped mint.
     """
     stamp = await upload_manifest.deadline_stamp(conn, manifest)
-    if stamp.deadline >= stamp.server_time:
+    if not stamp.expired:
         return None
     return ToolResponse.failure(
         raw_id,
@@ -199,7 +204,7 @@ async def _reject_if_expired(
         detail="the rootfs upload window has expired; re-mint it and finalize again",
         suggested_next_actions=[CREATE_INVESTIGATION_UPLOAD_TOOL],
         data={
-            "reason": "upload_window_expired",
+            "reason": upload_manifest.UPLOAD_WINDOW_EXPIRED,
             **upload_expiry_contract(stamp, remint_tool=CREATE_INVESTIGATION_UPLOAD_TOOL),
         },
     )

@@ -122,8 +122,10 @@ def test_failed_system_reports_the_jobs_category_not_infrastructure_failure() ->
 
 
 def test_failed_system_without_a_job_keeps_the_infrastructure_default() -> None:
-    # The reconciler orphan (`repair_stalled_restoring_systems`) drives a System to `failed`
-    # with no job to attribute it to; the default is what that path is for.
+    # A `failed` System with neither a recorded category nor an attributable job: a row that
+    # predates migration 0083, or a non-CategorizedError escape that dead-lettered the job
+    # without reaching `_record_system_failure`. The default is what those paths are for.
+    # `repair_stalled_restoring_systems` used to be a third; ADR-0513 gave it a real verdict.
     resp = system_envelope(_system(), failing_job=None, failure_attributed=True)
 
     assert resp.error_category == "infrastructure_failure"
@@ -634,6 +636,11 @@ def test_get_system_after_the_real_abandoned_job_sweep(migrated_url: str) -> Non
     # zombie restore job (`lease_expired`, `failure_context` untouched), and only then does
     # `repair_stalled_restoring_systems` resolve the System to `failed`. Driven through the real
     # reconciler rather than a hand-built row, so the shape cannot drift from the sweep.
+    #
+    # ADR-0513 re-baselines what this reports. The repair now stamps `restore_incomplete`, and
+    # the System's own verdict outranks the job's (ADR-0492 §3), so the envelope stops quoting
+    # `lease_expired` — a true statement about the *job's* bookkeeping that read as a retryable
+    # verdict on the System. The job is still cited; only the category it lends is superseded.
     async def _run() -> None:
         async with _pool(migrated_url) as conn_pool:
             alloc_id = await _granted_allocation(conn_pool)
@@ -657,8 +664,10 @@ def test_get_system_after_the_real_abandoned_job_sweep(migrated_url: str) -> Non
                 conn_pool, _ctx(), str(system_id), resolver=_provider_resolver()
             )
         assert resp.status == "error"
-        assert resp.error_category == "lease_expired"
-        assert resp.detail == ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
+        assert resp.error_category == "restore_incomplete"
+        assert resp.retryable is False  # `lease_expired` was already false; the reason changed
+        assert resp.detail == RECORDED_SYSTEM_FAILURE_DETAIL
+        assert resp.detail != ABANDONED_JOB_SYSTEM_FAILURE_DETAIL
         assert "failing_job_id" in resp.data
 
     asyncio.run(_run())
@@ -728,9 +737,11 @@ def test_systems_list_reports_a_recorded_category_without_a_query(migrated_url: 
 
 def test_systems_list_keeps_the_flattened_category(migrated_url: str) -> None:
     # ADR-0454 §4, pinned so the *remaining* gap is a fact rather than an assumption: a System
-    # that recorded no category of its own (a pre-ADR-0492 row, or one failed by the job-less
-    # reconciler repair) still needs the per-row lookup the list path does not do, so it still
-    # reports the default.
+    # that recorded no category of its own still needs the per-row lookup the list path does not
+    # do, so it still reports the default. ADR-0513 narrowed which Systems those are — the
+    # job-less reconciler repair now records one, leaving pre-ADR-0492 rows and the
+    # non-CategorizedError escape as the shapes this covers. It is seeded directly, because the
+    # reconciler no longer produces it.
     async def _run() -> None:
         async with _pool(migrated_url) as conn_pool:
             alloc_id = await _granted_allocation(conn_pool)
@@ -752,5 +763,42 @@ def test_systems_list_keeps_the_flattened_category(migrated_url: str) -> None:
         # about it is not.
         assert resp.items[0].detail is None
         assert resp.items[0].detail != NO_JOB_SYSTEM_FAILURE_DETAIL
+
+    asyncio.run(_run())
+
+
+def test_systems_list_reports_restore_incomplete_after_the_reconciler_sweep(
+    migrated_url: str,
+) -> None:
+    # #1560 end to end: the reconciler path was the one failure path whose reason no per-row job
+    # lookup could ever have recovered — it leaves no failed job to attribute — so it listed as
+    # the `infrastructure_failure` default and, worse, as `retryable: true`. Driven through the
+    # real repair rather than a seeded column, so the two halves of the fix are proved together.
+    async def _run() -> None:
+        async with _pool(migrated_url) as conn_pool:
+            alloc_id = await _granted_allocation(conn_pool)
+            system_id = await _seed_system(conn_pool, alloc_id, SystemState.RESTORING)
+            async with conn_pool.connection() as conn:
+                await queue.enqueue(
+                    conn,
+                    JobKind.RESTORE,
+                    _payload_for(JobKind.RESTORE, system_id),
+                    {"principal": "user-1", "agent_session": "s", "project": "proj"},
+                    "dk-restore",
+                )
+                # The worker died mid-revert: its job is dead-lettered and can never run again.
+                await conn.execute("UPDATE jobs SET state = 'failed', worker_id = NULL")
+                assert await repair_stalled_restoring_systems(conn) == 1
+            resp = await list_systems(
+                conn_pool, _ctx(), SystemsListRequest(state=SystemState.FAILED.value)
+            )
+        assert [item.object_id for item in resp.items] == [str(system_id)]
+        assert resp.items[0].error_category == "restore_incomplete"
+        assert resp.items[0].error_category != "infrastructure_failure"
+        # The harm the default did was not only vagueness: it told the agent to retry a System
+        # whose disk is indeterminate and which is fenced from every lifecycle op.
+        assert resp.items[0].retryable is False
+        # `detail` stays get-only on the list path (ADR-0492 Consequences) — unchanged here.
+        assert resp.items[0].detail is None
 
     asyncio.run(_run())

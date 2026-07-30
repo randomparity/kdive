@@ -13,3 +13,8 @@ image:
   pullPolicy: Always
 bundledBackends: true
 demoAcknowledged: true
+worker:
+  # One worker for the demo. Every other demo component runs on emptyDir precisely so the
+  # chart fits a laptop-sized cluster; the chart default of 2 replicas would ask that cluster
+  # for 2 x (10Gi + 5Gi) of real PVC. Production keeps the default — see ADR-0514.
+  replicas: 1

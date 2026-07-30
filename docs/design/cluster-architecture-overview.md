@@ -19,7 +19,7 @@ flowchart LR
     subgraph K8s["Kubernetes cluster — deployed by the Helm chart"]
         svc(["Service :8000<br/>(MCP endpoint)"])
         server["server Deployment<br/>FastMCP HTTP API<br/>authz · admission · state machines"]
-        worker["worker Deployment<br/>runs provider ops<br/>build / install / debug / capture"]
+        worker["worker StatefulSet<br/>runs provider ops<br/>build / install / debug / capture"]
         recon["reconciler Deployment<br/>drift repair · lease reclaim<br/>dead-session cleanup"]
         jobs["one-shot Jobs<br/>migrate · validate-systems"]
 
@@ -59,7 +59,7 @@ flowchart LR
 | Component | Helm object | Role |
 |-----------|-------------|------|
 | **server** | `deployment-server` + `service` (`:8000`) | The MCP HTTP API. Thin and fast: owns authz (OIDC/RBAC, on-behalf-of tokens), admission control (quota/budget/capacity), lifecycle state machines, and response shaping. Never blocks on a long operation — it enqueues a job and returns `{job_id, running}`. |
-| **worker** | `deployment-worker` + `pvc-worker` (build 10Gi / install 5Gi) | Pulls durable jobs from the Postgres-backed queue and runs the actual provider operations (provision, build, install, debug-op, capture-vmcore). This is the only tier that opens long-lived connections to a remote host. |
+| **worker** | `statefulset-worker` + `service-worker` (headless) | Pulls durable jobs from the Postgres-backed queue and runs the actual provider operations (provision, build, install, debug-op, capture-vmcore). This is the only tier that opens long-lived connections to a remote host. A StatefulSet because each replica owns its own build (10Gi) and install (5Gi) scratch volume from `volumeClaimTemplates` — ADR-0514; two replicas by default. |
 | **reconciler** | `deployment-reconciler` | Periodic drift-repair loop: tears down orphaned Systems, reclaims expired leases, detaches dead debug sessions, and resets a dead worker's stale gdbstub. |
 | **migrate / validate** | `job-migrate`, `job-validate-systems` | One-shot Jobs run at install/upgrade. `migrate` applies the DB schema; `validate-systems` fails the deploy fast if `systems.toml` is malformed. |
 | **Postgres** | external, or bundled `demo/postgres` | System-of-record for all structured state: resources, allocations, systems, runs, the durable job queue, and the accounting/audit ledger. |

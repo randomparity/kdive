@@ -277,12 +277,15 @@ def _resolve_failure_verdict(
 
     ``systems.failure_category`` wins over the failing job's (ADR-0492): the handler writes it
     in the same transaction as the ``failed`` transition, so it is the one statement that cannot
-    be separated from the failure it explains. The job's category is the fallback for the three
-    paths that record none — a System failed by the reconciler, a row from before the column
-    existed, and a non-``CategorizedError`` escape that dead-letters the job without touching
-    System state. The two agree on every normal path (both derive from the same exception); they
-    diverge exactly in the window #1562 describes, where the job says ``lease_expired`` or
-    ``succeeded`` and the System says what actually went wrong.
+    be separated from the failure it explains. The job's category is the fallback for the two
+    paths that still record none — a row from before the column existed, and a
+    non-``CategorizedError`` escape that dead-letters the job without touching System state.
+    ADR-0492 §3 listed a third, the reconciler's stalled-``restoring`` repair; ADR-0513 removed it
+    by giving that repair its own ``restore_incomplete`` verdict, which is why it is the one such
+    path a job lookup could never have covered — it leaves no failed job to attribute. The two
+    sources agree on every normal path (both derive from the same exception); they diverge exactly
+    in the window #1562 describes, where the job says ``lease_expired`` or ``succeeded`` and the
+    System says what actually went wrong.
 
     Each flattening to the default is logged, because #1550 is a bug that survived precisely
     because the flattening was silent: an operator asking why a System still reads

@@ -1,4 +1,4 @@
-"""The work-conserving FIFO promotion sweep + queue_timeout reaper (ADR-0069).
+"""The work-conserving FIFO promotion sweep + queue_timeout reaper (ADR-0069, ADR-0506).
 
 The reconciler half of the pending-queue scheduler. :func:`promote_pending` re-runs
 selection for each queued ``requested`` allocation from its persisted inputs (PCIe-aware,
@@ -9,7 +9,12 @@ the **oldest *placeable*** request per resource to ``granted``: under
 ``resource_id``, transitions ``requested → granted``, writes the ``reserved`` debit, and
 sets the lease window. Each candidate runs in its own committed transaction so a sibling's
 grant is observed by the next candidate's capacity replay — the per-host cap and the
-per-project grant quota can never be overshot within one pass.
+per-project grant quota can never be overshot within one pass. Both sweeps therefore need a
+**transaction-free** connection and assert it per candidate (ADR-0506): on a connection
+already in a transaction every ``conn.transaction()`` here is a savepoint that commits
+nothing and releases no advisory lock, so each candidate's locks would accumulate to the end
+of the pass and the next candidate would take PROJECT while still holding the previous one's
+RESOURCE and ALLOCATION — the reverse of the order ``admit`` takes them in.
 
 Work-conserving: scanning oldest-first and re-resolving *all* matching hosts per request, a
 younger request placeable on a free host is promoted even while the global-oldest waits on a
@@ -35,7 +40,7 @@ from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.db.repositories import ALLOCATIONS
 from kdive.domain.accounting.cost import Selector
 from kdive.domain.capacity.state import AllocationState, ensure_transition
@@ -74,14 +79,27 @@ async def promote_pending(conn: AsyncConnection, metrics: AdmissionMetrics | Non
     Candidate-selects every ``requested`` allocation oldest-first (the partial index), then
     attempts each in its own committed transaction. Returns the number promoted to
     ``granted`` this pass. A budget recheck failure terminates a request to ``failed``
-    (counted as not promoted); a per-candidate error rolls that candidate back and leaves it
-    ``requested`` for the next pass without starving its siblings.
+    (counted as not promoted); a per-candidate *operational* error rolls that candidate back
+    and leaves it ``requested`` for the next pass without starving its siblings. A
+    transaction-state fault is the one exception — it is a fault of the pass, not of the
+    candidate, so it aborts the remaining candidates (see ``Raises``).
 
-    ``metrics`` (default the no-op) records a grant decision + the request→grant wait
-    (``now - created_at``) per promoted allocation (ADR-0190 D).
+    Args:
+        conn: An async connection with **no** transaction open; every transaction here is
+            opened and committed by this function. On a connection already in one, each
+            ``conn.transaction()`` below would be a savepoint that commits nothing and
+            releases no advisory lock (ADR-0506), so that is rejected rather than run.
+        metrics: The metrics sink (default the no-op); records a grant decision + the
+            request→grant wait (``now - created_at``) per promoted allocation (ADR-0190 D).
+
+    Raises:
+        RuntimeError: ``conn`` is already in a transaction, on entry or between candidates.
+            Candidates already committed keep their grants, but the returned count is lost
+            with the pass.
     """
     metrics = metrics or AdmissionMetrics.disabled()
-    async with conn.cursor(row_factory=dict_row) as cur:
+    require_top_level_transaction(conn, "the promotion sweep's candidate select")
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id FROM allocations WHERE state = %s ORDER BY created_at, id",
             (_REQUESTED_VALUE,),
@@ -89,6 +107,13 @@ async def promote_pending(conn: AsyncConnection, metrics: AdmissionMetrics | Non
         candidate_ids = [row["id"] for row in await cur.fetchall()]
     promoted = 0
     for alloc_id in candidate_ids:
+        # Outside the try: a dirty connection means the previous candidate's transaction is
+        # still open, so its PROJECT/RESOURCE/ALLOCATION locks are still held and this
+        # candidate would take PROJECT while holding them — the reverse of the
+        # PROJECT -> RESOURCE -> ALLOCATION total order, against a concurrent `admit`.
+        # That is a pass-wide fault, not this candidate's, so it must not be logged and
+        # skipped like one.
+        require_top_level_transaction(conn, f"promoting queued allocation {alloc_id}")
         try:
             promoted_alloc = await _promote_one(conn, alloc_id)
         except Exception:  # noqa: BLE001 - one candidate's failure must not starve the rest
@@ -114,19 +139,28 @@ async def _promote_one(conn: AsyncConnection, alloc_id: UUID) -> Allocation | No
     metric); otherwise ``None``. A budget recheck failure terminates it to ``failed`` (it is
     not re-queued); any other denial leaves it ``requested`` (a wait). A locked re-read fences
     a release that won the race (the row is no longer ``requested``).
+
+    The read of ``project`` — needed to derive the PROJECT lock key, so it cannot itself be
+    taken under that lock — runs **inside** the transaction rather than before it. Run
+    before, it would open an implicit transaction on a non-autocommit connection and demote
+    the ``conn.transaction()`` below to a savepoint (ADR-0506), leaving every candidate's
+    locks held to the end of the pass. It takes no advisory lock, so it does not enter the
+    ``PROJECT → RESOURCE → ALLOCATION`` order; the locked re-read below is what the decision
+    rests on.
     """
-    async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute("SELECT project FROM allocations WHERE id = %s", (alloc_id,))
-        proj_row = await cur.fetchone()
-    if proj_row is None:
-        return None
-    project: str = proj_row["project"]
-    async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
-        alloc = await ALLOCATIONS.get(conn, alloc_id)
-        if alloc is None or alloc.state is not AllocationState.REQUESTED:
-            return None  # a release/another pass won the race
-        granted = await _place_or_terminate(conn, alloc)
-        return alloc if granted else None
+    async with conn.transaction():
+        async with conn.cursor(row_factory=dict_row) as cur:
+            await cur.execute("SELECT project FROM allocations WHERE id = %s", (alloc_id,))
+            proj_row = await cur.fetchone()
+        if proj_row is None:
+            return None
+        project: str = proj_row["project"]
+        async with advisory_xact_lock(conn, LockScope.PROJECT, project):
+            alloc = await ALLOCATIONS.get(conn, alloc_id)
+            if alloc is None or alloc.state is not AllocationState.REQUESTED:
+                return None  # a release/another pass won the race
+            granted = await _place_or_terminate(conn, alloc)
+            return alloc if granted else None
 
 
 async def _place_or_terminate(conn: AsyncConnection, alloc: Allocation) -> bool:
@@ -403,8 +437,19 @@ async def reap_queue_timeouts(
     ``lease_expired`` (a queued row never held a lease, ADR-0069). A row promoted by the
     earlier step (now ``granted``) is skipped by the locked re-read. Returns the count
     reaped; the credit/active_ended stamps are skipped (a queued row was never reserved).
+
+    Args:
+        conn: An async connection with **no** transaction open; every transaction here is
+            opened and committed by this function. See :func:`promote_pending` — the
+            savepoint demotion and its lock-ordering consequence are the same (ADR-0506).
+        max_wait: The queue age past which a still-``requested`` row is terminated.
+        metrics: The admission metrics sink.
+
+    Raises:
+        RuntimeError: ``conn`` is already in a transaction, on entry or between candidates.
     """
-    async with conn.cursor(row_factory=dict_row) as cur:
+    require_top_level_transaction(conn, "the queue-timeout sweep's candidate select")
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
             "SELECT id, project FROM allocations WHERE state = %s AND created_at < now() - %s",
             (_REQUESTED_VALUE, max_wait),
@@ -412,6 +457,10 @@ async def reap_queue_timeouts(
         candidates = await cur.fetchall()
     reaped = 0
     for candidate in candidates:
+        # Outside the try, for the reason given in `promote_pending`: a still-open
+        # transaction here holds the previous row's PROJECT + ALLOCATION locks, so this row
+        # would take PROJECT out of order rather than after they released.
+        require_top_level_transaction(conn, f"reaping queued allocation {candidate['id']}")
         try:
             if await _reap_one(conn, candidate["id"], candidate["project"], max_wait):
                 reaped += 1

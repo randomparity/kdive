@@ -186,6 +186,17 @@ fixed, because repairing it changes a second tool's behaviour on a path #1661 do
 which has its own tests to re-baseline. It is filed as follow-on work. Its envelope is not wrong —
 `missing_roles` is populated identically — so the loss is the audit row alone.
 
+> **Retracted by [ADR-0508](0508-reports-generate-re-raises-the-member-over-reach.md)
+> (2026-07-30, #1680).** The follow-on work landed: that arm is now a bare `raise`, the member
+> over-reach reaches this boundary, and the row is written. The disclosure above holds only for
+> the state of the tree between #1661 and #1680. Two consequences of this record change with it.
+> The rejected alternative in §1, "mirroring `reports/generate.py`'s three arms", is moot — the
+> three-arm shape no longer exists anywhere, and `generate.py` now uses the two-arm shape this
+> ADR chose. And "its envelope is not wrong" turns out to be true in every field but one:
+> `object_id` moves from the handler's `"report"` to the boundary's `"reports.generate"`,
+> the same shift `accounting.report` took here. ADR-0508 measures both envelopes and records the
+> diff.
+
 **The 52-site audit is a point-in-time result, not an invariant.** Nothing in `just ci` fails a new
 `require_role` call on a caller-named project with no guard and no catch; the next one reaches the
 client as a raw `ToolError` exactly as this one did, and with §2 landed there is no longer even a
@@ -193,6 +204,19 @@ metering arm pretending otherwise. A structural guard over that shape is the dur
 deliberately out of scope here — it needs to distinguish a caller-named project from a
 row-resolved one, which is a dataflow property, not a grep. Recorded so the next reader knows the
 audit is the evidence for *this* change and not a standing guarantee.
+
+> **Superseded by [ADR-0507](0507-structural-guard-over-the-bare-authorization-error.md)
+> (2026-07-30, #1681).** The guard now exists:
+> `tests/guards/test_require_role_membership_guard.py` fails any `require_role` that can reach its
+> non-member arm with no membership check and no handler that envelopes the base
+> `AuthorizationError`, and pins the same property for `require_platform_role`. It sidesteps the
+> dataflow problem named above rather than solving it — it requires a mitigation at *every* call
+> site instead of deciding which projects are caller-named, because the premise that a
+> row-resolved project is safe turns out not to hold, and the row-resolving tools already carry
+> the membership check that satisfies the rule. The residual that remains is the analysis's own
+> boundary: it is intra-procedural plus one level of intra-module call graph, and the sites it
+> cannot resolve are listed with a prose reason rather than passed silently. ADR-0507 records what
+> it can and cannot see.
 
 **`doc_exposure.py` raises a bare `AuthorizationError` too**, on `on_read_resource`. That is the
 resources plane, which `UsageTrackingMiddleware` does not hook and `DenialAuditMiddleware` does not

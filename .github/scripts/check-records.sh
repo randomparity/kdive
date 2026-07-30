@@ -393,12 +393,23 @@ renumbered_elsewhere() {
   return 1
 }
 
+# Exempt names are filtered here as well as in collect_records, and both filter *before* the
+# record-shape test. The two listings have to agree on what a record is: an exempt name that
+# happens to be record-shaped — docs/adr/0000-template.md — left in this list but absent from
+# collect_records' would read as a record the base ref had and the tree lost, which is E-GONE.
 records_in_ref() {
-  local ref=$1 raw
+  local ref=$1 raw path
   # The checker's coded ::error:: lines are its interface; a bare `fatal:` from git is not,
   # so a bad ref's stderr is suppressed here rather than at each call site.
   raw=$(git ls-tree -r --name-only "$ref" -- "$RECORD_DIR" 2>/dev/null) || return 1
-  printf '%s' "$raw" | grep -E "$RECORD_RE" || true
+  raw=$(printf '%s' "$raw" | grep -E "$RECORD_RE" || true)
+  [ -n "$raw" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if ! is_exempt_file "$path"; then
+      printf '%s\n' "$path"
+    fi
+  done <<<"$raw"
 }
 
 # Heading lines are the one region section_body skips outright — it matches a heading only to
@@ -872,6 +883,14 @@ collect_records() {
       err "E-RECORD-SYMLINK: $path is a symlink — a record must be a real file"
       continue
     fi
+    # Before the shape test, not after it. A profile may exempt a name that is itself
+    # record-shaped — docs/adr/0000-template.md — and testing shape first makes the exemption
+    # unreachable for exactly that case, which is the one where it matters: the template is the
+    # shape every record is copied from, not a decision, so the immutability rules must not
+    # reach it or it can never be corrected once wrong.
+    if is_exempt_file "$path"; then
+      continue
+    fi
     if printf '%s' "$path" | grep -qE "$RECORD_RE"; then
       if [ -n "$records" ]; then
         records="$records
@@ -880,9 +899,6 @@ $path"
         records=$path
       fi
     else
-      if is_exempt_file "$path"; then
-        continue
-      fi
       err "E-NOT-RECORD: $path is under $RECORD_DIR but is not a record — records are NNNN-slug.md at the top level"
     fi
   done <<<"$found"

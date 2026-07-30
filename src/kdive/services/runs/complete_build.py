@@ -22,7 +22,7 @@ from kdive.artifacts.storage import HeadResult, StoredArtifact, chunk_key
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.build_artifacts.results import BuildOutput, ValidatedUpload
 from kdive.build_artifacts.validation import validate_external_artifacts
-from kdive.config.core_settings import UPLOAD_TTL_SECONDS
+from kdive.config.core_settings import UPLOAD_TTL_SECONDS, UPLOAD_WINDOW_MAX_TTL_MULTIPLE
 from kdive.db.locks import LockScope, advisory_xact_lock
 from kdive.db.repositories import ARTIFACTS
 from kdive.domain.capacity.state import RunState
@@ -78,13 +78,11 @@ NO_UPLOAD_MANIFEST = "no_upload_manifest"
 UPLOAD_WINDOW_REPLACED = "upload_window_replaced"
 """A re-mint replaced the window this finalize validated (ADR-0448 §2)."""
 
-UPLOAD_WINDOW_EXPIRED = "upload_window_expired"
-"""The window's deadline had passed when this finalize arrived (ADR-0448 §1).
-
-Raised as :class:`CompleteBuildExpiredWindowError` rather than through
-:class:`CompleteBuildConfigurationError`, because the response layer needs the clock pair to
-render the self-correcting payload; the reason string is shared from here all the same.
-"""
+# The expired-window rejection is raised as `CompleteBuildExpiredWindowError` rather than through
+# `CompleteBuildConfigurationError`, because the response layer needs the clock pair to render the
+# self-correcting payload. Its reason string is `upload_manifest.UPLOAD_WINDOW_EXPIRED`, which
+# lives beside the predicate that decides it so the investigations lane can name the same constant
+# without importing a runs service module (ADR-0512).
 
 # Every exception below is `eq=False` and unfrozen, deliberately. `contextlib` assigns
 # `__traceback__` to an exception it re-raises out of an async context manager, so a *frozen*
@@ -283,7 +281,7 @@ async def _require_open_window(
         CompleteBuildExpiredWindowError: The window closed before this finalize arrived.
     """
     stamp = await upload_manifest.deadline_stamp(conn, manifest_row)
-    if stamp.deadline < stamp.server_time:
+    if stamp.expired:
         _log.info(
             "runs.complete_build rejected: upload window expired (run %s, deadline %s, "
             "server_time %s)",
@@ -308,15 +306,36 @@ async def _reassemble_chunked_artifacts(
     drop it: the lock is held for the rest of the request. That is deliberate — it is what keeps
     the reaper off the chunk objects for the whole reassembly — and it is why the unlocked stretch
     ``_require_unreaped_window`` guards exists only on the single-PUT path.
+
+    The savepoint also commits the extension independently of the rest of the finalize, which is
+    why the extension has to be bounded here rather than unwound later. Every failure past this
+    point — a reassembly error, a validation rejection — is caught at the MCP tool layer and
+    returned as a ``ToolResponse``, so the pooled connection exits its ``async with`` cleanly and
+    psycopg commits. Nothing undoes the refresh, so an unbounded one let a retry loop hold its
+    uncommitted objects forever (#1553); ``max_window`` is the bound (ADR-0511).
     """
     ttl = timedelta(seconds=config.require(UPLOAD_TTL_SECONDS))
+    max_window = ttl * config.require(UPLOAD_WINDOW_MAX_TTL_MULTIPLE)
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.RUN, uid):
-        refreshed = await upload_manifest.refresh_deadline(conn, "runs", uid, ttl)
+        refreshed = await upload_manifest.refresh_deadline(
+            conn, "runs", uid, ttl, max_window=max_window
+        )
     if refreshed is None:
         # `_require_open_window` passed on this transaction's clock, and `now()` is
         # `transaction_timestamp()`, so the refresh predicate cannot have flipped on time since:
         # a declined refresh here means the row is gone, reaped between the two reads.
         raise CompleteBuildConfigurationError({"reason": NO_UPLOAD_MANIFEST})
+    if refreshed.capped:
+        # The one place a spent extension budget is visible. The reassembly still runs — it holds
+        # the `RUN` lock the reaper needs — but this window will not outlive its deadline again,
+        # so an operator watching a Run retry in a loop sees why it eventually stops.
+        _log.warning(
+            "runs.complete_build: upload window extension capped at %s past its mint "
+            "(run %s, deadline %s); artifacts.create_run_upload re-mints a fresh window",
+            max_window,
+            uid,
+            refreshed.deadline,
+        )
     try:
         await _reassemble_artifacts(manifest_row, store)
     except CategorizedError as exc:
@@ -324,7 +343,7 @@ async def _reassemble_chunked_artifacts(
         if recorded is not None:
             raise _CompleteBuildAlreadyRecorded(recorded) from exc
         raise
-    return refreshed
+    return refreshed.deadline
 
 
 async def _reassemble_artifacts(
@@ -531,7 +550,6 @@ async def _cleanup_chunks_and_manifest(
 
 __all__ = [
     "NO_UPLOAD_MANIFEST",
-    "UPLOAD_WINDOW_EXPIRED",
     "UPLOAD_WINDOW_REPLACED",
     "CompleteBuildConfigurationError",
     "CompleteBuildExpiredWindowError",

@@ -46,6 +46,16 @@ _LOCK_SCOPES: dict[UploadOwnerKind, LockScope] = {
 #: derives the object-store roots it walks from this, so its scope cannot drift from the reaper's.
 UPLOAD_OWNER_KINDS: tuple[UploadOwnerKind, ...] = tuple(_LOCK_SCOPES)
 
+UPLOAD_WINDOW_EXPIRED = "upload_window_expired"
+"""The window's deadline had passed when a finalize arrived (ADR-0444, ADR-0448 §1).
+
+The agent-facing reason string both finalize lanes emit. It lives beside :attr:`ManifestStamp
+.expired` — the predicate that decides it — rather than in either lane, because the lanes sit at
+different layers: the runs finalize enforces in the service layer, the investigations finalize in
+the MCP tool layer, and this is the only module both can import without one reaching into the
+other's stack (ADR-0512).
+"""
+
 
 class UploadManifest(NamedTuple):
     """A persisted manifest: the declared entries, the key prefix, and the deadline."""
@@ -65,6 +75,43 @@ class ManifestStamp(NamedTuple):
 
     server_time: datetime
     deadline: datetime
+
+    @property
+    def expired(self) -> bool:
+        """Whether the upload window had already closed at ``server_time`` (ADR-0512).
+
+        The single expiry rule both finalize lanes ask. Each used to write its own comparison,
+        and they were spelled as exact logical negations — ``deadline < server_time`` in the runs
+        service, ``deadline >= server_time`` in the investigations tool — so a later change to the
+        rule would have landed on one lane only (#1555).
+
+        A bare ``bool``, deliberately: the runs lane raises on it from the service layer and the
+        investigations lane returns a ``ToolResponse`` from the MCP tool layer, so the shared
+        verdict can carry neither lane's signalling type.
+
+        A deadline **equal** to the reference clock is open, not expired. Both SQL sites agree at
+        that instant from opposite directions: :func:`refresh_deadline` extends a window matching
+        ``deadline >= now()``, and the reaper claims one matching ``deadline < now()``. So a
+        finalize and the reaper cannot reach opposite verdicts on one manifest.
+        """
+        return self.deadline < self.server_time
+
+
+class WindowRefresh(NamedTuple):
+    """The outcome of one :func:`refresh_deadline` extension (ADR-0511).
+
+    ``deadline`` is the value on the row after the update — the window's identity, which the
+    finalize carries to its locked pre-commit re-read (ADR-0448 §2). It is *not* necessarily
+    ``now() + ttl``: an extension is clamped to the window's cumulative cap, and it never shortens
+    an already-open window, so on a spent budget it is the unchanged prior deadline.
+
+    ``capped`` is true when the clamp bound — i.e. this refresh granted less than a full ``ttl``.
+    It is computed in SQL against the same statement's ``now()`` rather than derived by the caller,
+    because the only clock the comparison may use is Postgres's (ADR-0448 decision 1).
+    """
+
+    deadline: datetime
+    capped: bool
 
 
 @dataclass(frozen=True)
@@ -103,6 +150,13 @@ async def replace_manifest(
 
     Full-set replace: a re-mint overwrites the prior manifest, prefix, and deadline.
 
+    It also restamps ``window_started_at``, which is what makes a re-mint the reset for
+    :func:`refresh_deadline`'s cumulative cap (ADR-0511). Deliberately *not* ``created_at``, which
+    this upsert leaves alone: a cap measured from the row's birth would bound the re-mint too, and
+    granting a full fresh window on demand is the recovery ADR-0448 points every "your window is
+    gone" rejection at. Both timestamps come from one statement's ``now()``, so
+    ``deadline - window_started_at == ttl`` exactly on a fresh window.
+
     Args:
         conn: An async connection (autocommit or within a transaction).
         request: Owner, prefix, entries, and upload-window TTL for the replacement.
@@ -115,11 +169,12 @@ async def replace_manifest(
     payload = [_entry_payload(e) for e in request.entries]
     async with conn.cursor() as cur:
         await cur.execute(
-            "INSERT INTO upload_manifests (owner_kind, owner_id, prefix, manifest, deadline) "
-            "VALUES (%s, %s, %s, %s, now() + %s) "
+            "INSERT INTO upload_manifests "
+            "  (owner_kind, owner_id, prefix, manifest, deadline, window_started_at) "
+            "VALUES (%s, %s, %s, %s, now() + %s, now()) "
             "ON CONFLICT (owner_kind, owner_id) DO UPDATE SET "
             "  prefix = EXCLUDED.prefix, manifest = EXCLUDED.manifest, "
-            "  deadline = EXCLUDED.deadline "
+            "  deadline = EXCLUDED.deadline, window_started_at = EXCLUDED.window_started_at "
             "RETURNING now(), deadline",
             (request.owner_kind, request.owner_id, request.prefix, Jsonb(payload), request.ttl),
         )
@@ -132,12 +187,36 @@ async def replace_manifest(
 
 
 async def refresh_deadline(
-    conn: AsyncConnection, owner_kind: UploadOwnerKind, owner_id: UUID, ttl: timedelta
-) -> datetime | None:
-    """Set ``deadline = now() + ttl`` if a non-expired manifest exists; return the new deadline.
+    conn: AsyncConnection,
+    owner_kind: UploadOwnerKind,
+    owner_id: UUID,
+    ttl: timedelta,
+    *,
+    max_window: timedelta,
+) -> WindowRefresh | None:
+    """Extend a non-expired manifest's deadline toward ``now() + ttl``, bounded by ``max_window``.
 
     Refreshing the deadline under the per-Run lock the reaper also takes is what stops the reaper
     from reclaiming an in-flight reassembly's chunk objects (ADR-0104 §6 step A).
+
+    The extension is **bounded and monotonic** (ADR-0511)::
+
+        deadline := GREATEST(deadline, LEAST(now() + ttl, window_started_at + max_window))
+
+    ``LEAST`` is the cap: no sequence of refreshes can carry one minted window past
+    ``max_window`` from its mint, which is what stops a client retrying a failing finalize inside
+    its own still-open window from buying a fresh TTL on every attempt, forever. ``GREATEST`` is
+    what keeps a spent budget from *shortening* an open window — a refresh that moved the deadline
+    backward would hand the reaper the very chunk objects this call exists to protect, converting
+    a retention bound into data loss.
+
+    ``window_started_at`` is restamped only by :func:`replace_manifest`, so a re-mint through
+    ``artifacts.create_run_upload`` starts a new window with a full budget. That is deliberate:
+    ADR-0448 makes the re-mint the advertised recovery from every "your window is gone" rejection,
+    and a cap that bound it too would take away a capability rather than bound a silent one.
+
+    Every comparison is against Postgres's ``now()``, never a Python clock — the reaper measures
+    ``deadline`` against the same one, so the two cannot reach opposite verdicts under skew.
 
     ``None`` means the ``UPDATE`` matched nothing: either no row exists or its deadline is already
     past. **The caller must have established that the window is open before calling** — the sole
@@ -145,21 +224,37 @@ async def refresh_deadline(
     transaction, and ``now()`` is ``transaction_timestamp()``, so the ``deadline >= now()`` arm
     cannot flip in between and a ``None`` there means the row was reaped. A caller without that
     precondition cannot tell the two apart from the return value alone and must re-read the row.
+    A spent budget never returns ``None``: it returns the unchanged deadline with ``capped`` set,
+    so the caller cannot mistake an exhausted extension for a reaped window.
 
-    The stamped deadline is returned, not just a success flag, so the caller can carry it as the
-    identity of the window it is committing against (ADR-0448 §2): a later re-read that finds a
-    different deadline is a manifest some other call replaced, not the one this finalize
-    validated.
+    Args:
+        conn: An async connection, in the transaction whose ``now()`` is the reference clock.
+        owner_kind: The owning table name — ``'runs'`` or ``'investigations'``.
+        owner_id: The owning row's primary key.
+        ttl: The extension a refresh grants when the cap leaves room for it.
+        max_window: The furthest past ``window_started_at`` this window's deadline may reach.
+
+    Returns:
+        The post-update deadline and whether the cap bound this refresh, or ``None`` if no open
+        window exists. The deadline is returned rather than a success flag so the caller can carry
+        it as the identity of the window it is committing against (ADR-0448 §2): a later re-read
+        finding a different value is a manifest some other call replaced.
     """
     async with conn.cursor() as cur:
         await cur.execute(
-            "UPDATE upload_manifests SET deadline = now() + %s "
-            "WHERE owner_kind = %s AND owner_id = %s AND deadline >= now() "
-            "RETURNING deadline",
-            (ttl, owner_kind, owner_id),
+            "UPDATE upload_manifests SET deadline = "
+            "  GREATEST(deadline, LEAST(now() + %(ttl)s, window_started_at + %(max_window)s)) "
+            "WHERE owner_kind = %(owner_kind)s AND owner_id = %(owner_id)s AND deadline >= now() "
+            "RETURNING deadline, deadline < now() + %(ttl)s",
+            {
+                "ttl": ttl,
+                "max_window": max_window,
+                "owner_kind": owner_kind,
+                "owner_id": owner_id,
+            },
         )
         row = await cur.fetchone()
-    return None if row is None else row[0]
+    return None if row is None else WindowRefresh(deadline=row[0], capped=row[1])
 
 
 async def deadline_stamp(conn: AsyncConnection, manifest: UploadManifest) -> ManifestStamp:

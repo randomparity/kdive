@@ -320,11 +320,12 @@ async def generate_granted_set(
             return ToolResponse.failure_from_error(
                 _REPORT_OBJECT_ID, exc, suggested_next_actions=[_TOOL]
             )
-        except RoleDenied as exc:
-            # A member ranking below the `viewer` floor on a project they named: the role is
-            # safe to disclose because RoleDenied only fires for members, so it confirms
-            # nothing the caller's own membership did not already tell them (ADR-0490).
-            return ToolResponse.denied(_REPORT_OBJECT_ID, missing_roles=[exc.required])
+        except RoleDenied:
+            # The member over-reach. `DenialAuditMiddleware` is the one place ADR-0062 §5's
+            # `audit_log` row is written, and it only sees a denial that keeps propagating, so
+            # this arm must re-raise rather than envelope (ADR-0508, amending ADR-0493). The
+            # boundary rebuilds the same envelope and still names the role (ADR-0490).
+            raise
         except AuthorizationError:
             # The non-member arm. Naming `viewer` here would confirm the named project exists
             # and is simply not granted, which ADR-0123's seam exists to prevent.

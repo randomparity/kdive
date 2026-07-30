@@ -1,9 +1,12 @@
 """Render/lint gate for the kdive Helm chart (ADR-0088, M2.1 Phase 4).
 
 These tests shell out to a real ``helm`` binary so the chart's templating logic
-(the demo-acknowledged render gate, migrate-Job hook phase, Deployment count) is
+(the demo-acknowledged render gate, migrate-Job hook phase, workload count) is
 exercised end to end. They skip when ``helm`` is not installed; a skipped run
 validates nothing, so CI must provide the binary for this gate to mean anything.
+
+The worker is a StatefulSet, not a Deployment (ADR-0514), so the per-process helpers
+index both kinds — see :func:`_workloads`.
 """
 
 from __future__ import annotations
@@ -24,6 +27,10 @@ CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
 
 # Per-process aux health/metrics ports (ADR-0090 §5), matching the registry defaults.
 _AUX_PORTS = {"server": 9464, "worker": 9465, "reconciler": 9466}
+
+# The workload kind that carries each app process's pod template. The worker owns per-replica
+# scratch volumes, so it is a StatefulSet with volumeClaimTemplates (ADR-0514).
+_WORKLOAD_KINDS = {"server": "Deployment", "worker": "StatefulSet", "reconciler": "Deployment"}
 
 
 def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
@@ -72,10 +79,12 @@ def _oidc_request_mappings(res: subprocess.CompletedProcess[str]) -> list[dict[s
     raise AssertionError("no -oidc Deployment with a JSON_CONFIG env var in the render")
 
 
-def test_renders_three_deployments_against_external_backends() -> None:
+def test_renders_three_app_workloads_against_external_backends() -> None:
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
-    assert res.stdout.count("kind: Deployment") == 3
+    # server + reconciler are Deployments; the worker is a StatefulSet (ADR-0514).
+    assert res.stdout.count("kind: Deployment") == 2
+    assert res.stdout.count("kind: StatefulSet") == 1
     assert "pre-install" in res.stdout
 
 
@@ -236,77 +245,112 @@ def test_bundled_configmap_stays_a_normal_resource() -> None:
     assert "ConfigMap" not in hooks, "bundled-path ConfigMap should stay a normal resource"
 
 
-def _deployments() -> dict[str, dict[str, Any]]:
-    """Render the external-backend chart and index Deployments by process name."""
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Render the external-backend chart and index each app workload by process name.
+
+    Covers both workload kinds: server/reconciler are Deployments, the worker is a
+    StatefulSet (ADR-0514). Extra ``--set`` args layer onto the external-backend base.
+    """
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
     assert res.returncode == 0, res.stderr
     out: dict[str, dict[str, Any]] = {}
     for doc in yaml.safe_load_all(res.stdout):
-        if isinstance(doc, dict) and doc.get("kind") == "Deployment":
-            name = doc["metadata"]["name"]
-            for proc in _AUX_PORTS:
-                if name.endswith(f"-{proc}"):
-                    out[proc] = doc
+        if not (isinstance(doc, dict) and doc.get("kind") in set(_WORKLOAD_KINDS.values())):
+            continue
+        name = doc["metadata"]["name"]
+        for proc, kind in _WORKLOAD_KINDS.items():
+            if name.endswith(f"-{proc}") and doc["kind"] == kind:
+                out[proc] = doc
     return out
 
 
-def _container(deploy: dict[str, Any]) -> dict[str, Any]:
-    return deploy["spec"]["template"]["spec"]["containers"][0]
+def _container(workload: dict[str, Any]) -> dict[str, Any]:
+    return workload["spec"]["template"]["spec"]["containers"][0]
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
-def test_deployment_binds_aux_listener_to_pod_interface(proc: str) -> None:
+def test_workload_carries_its_process_kind(proc: str) -> None:
+    # The worker's kind is load-bearing: only a StatefulSet gives each replica its own
+    # build/install claim. A silent revert to a Deployment reintroduces #1703.
+    #
+    # Matched on NAME against every pod-carrying kind, not via _workloads(), which filters on
+    # the kind it expects — asserting there could only ever fail with a KeyError, never on the
+    # kind itself. The candidate set is deliberately wider than what the chart renders.
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert res.returncode == 0, res.stderr
+    candidates = [
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet")
+        and doc["metadata"]["name"] == f"kdive-kdive-{proc}"
+    ]
+    assert len(candidates) == 1, f"expected exactly one {proc} workload, got {len(candidates)}"
+    assert candidates[0]["kind"] == _WORKLOAD_KINDS[proc]
+
+
+@pytest.mark.parametrize("proc", list(_AUX_PORTS))
+def test_workload_binds_aux_listener_to_pod_interface(proc: str) -> None:
     # Each pod runs in its own network namespace; the kubelet probes from the node and a
     # scrape comes from outside the container, so the aux listener binds 0.0.0.0:<port>
     # via an explicit per-deployment KDIVE_HEALTH_BIND_ADDR env (env wins over the shared
     # configMap). No Service fronts the aux port, so it stays pod-local / non-public.
-    env = {e["name"]: e.get("value") for e in _container(_deployments()[proc])["env"]}
+    env = {e["name"]: e.get("value") for e in _container(_workloads()[proc])["env"]}
     assert env["KDIVE_HEALTH_BIND_ADDR"] == f"0.0.0.0:{_AUX_PORTS[proc]}"
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
-def test_deployment_liveness_probes_livez_on_aux_port(proc: str) -> None:
+def test_workload_liveness_probes_livez_on_aux_port(proc: str) -> None:
     # Liveness probes /livez (loop-alive), NOT /readyz: a failing readiness (a backend
     # down) must not let the kubelet kill a live-but-not-ready pod (ADR-0090 §5).
-    probe = _container(_deployments()[proc])["livenessProbe"]
+    probe = _container(_workloads()[proc])["livenessProbe"]
     assert probe["httpGet"]["path"] == "/livez"
     assert probe["httpGet"]["port"] == _AUX_PORTS[proc]
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
-def test_deployment_readiness_probes_readyz_on_aux_port(proc: str) -> None:
-    probe = _container(_deployments()[proc])["readinessProbe"]
+def test_workload_readiness_probes_readyz_on_aux_port(proc: str) -> None:
+    probe = _container(_workloads()[proc])["readinessProbe"]
     assert probe["httpGet"]["path"] == "/readyz"
     assert probe["httpGet"]["port"] == _AUX_PORTS[proc]
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))
-def test_deployment_has_prometheus_scrape_annotations(proc: str) -> None:
+def test_workload_has_prometheus_scrape_annotations(proc: str) -> None:
     # The pull-based scrape targets /metrics on the aux port (ADR-0090 §5).
-    annotations = _deployments()[proc]["spec"]["template"]["metadata"].get("annotations", {})
+    annotations = _workloads()[proc]["spec"]["template"]["metadata"].get("annotations", {})
     assert annotations.get("prometheus.io/scrape") == "true"
     assert annotations.get("prometheus.io/path") == "/metrics"
     assert annotations.get("prometheus.io/port") == str(_AUX_PORTS[proc])
 
 
-def test_service_does_not_expose_the_aux_port() -> None:
-    # The aux listener carries no auth; the network boundary is its access control. The
-    # only Service (server's MCP) must front 8000 only, never the aux port.
+def test_no_service_exposes_an_aux_port() -> None:
+    # The aux listener carries no auth; the network boundary is its access control. No Service
+    # may front it. The server's MCP Service publishes 8000 only; the worker's governing
+    # headless Service (ADR-0514) publishes NO ports at all — declaring 9465 there would give
+    # the unauthenticated aux listener a named Service endpoint.
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
     assert res.returncode == 0, res.stderr
+    published: dict[str, set[int]] = {}
     for doc in yaml.safe_load_all(res.stdout):
         if isinstance(doc, dict) and doc.get("kind") == "Service":
-            svc_ports = {p.get("port") for p in doc["spec"]["ports"]}
-            assert svc_ports == {8000}
+            ports = doc["spec"].get("ports") or []
+            published[doc["metadata"]["name"]] = {p.get("port") for p in ports}
+    assert published == {"kdive-kdive-server": {8000}, "kdive-kdive-worker": set()}
+    for name, ports in published.items():
+        assert not ports & set(_AUX_PORTS.values()), name
 
 
 def _service(*set_args: str) -> dict[str, Any]:
+    """The server's MCP Service — the only Service in the render that publishes ports."""
     res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
     assert res.returncode == 0, res.stderr
     return next(
         doc
         for doc in yaml.safe_load_all(res.stdout)
-        if isinstance(doc, dict) and doc.get("kind") == "Service"
+        if isinstance(doc, dict)
+        and doc.get("kind") == "Service"
+        and str(doc["metadata"]["name"]).endswith("-server")
     )
 
 
@@ -329,24 +373,10 @@ def test_service_nodeport_can_be_pinned() -> None:
     assert svc["spec"]["ports"][0]["nodePort"] == 30800
 
 
-def _deployments_with(*set_args: str) -> dict[str, dict[str, Any]]:
-    """Render with extra --set args and index Deployments by process name."""
-    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
-    assert res.returncode == 0, res.stderr
-    out: dict[str, dict[str, Any]] = {}
-    for doc in yaml.safe_load_all(res.stdout):
-        if isinstance(doc, dict) and doc.get("kind") == "Deployment":
-            name = doc["metadata"]["name"]
-            for proc in _AUX_PORTS:
-                if name.endswith(f"-{proc}"):
-                    out[proc] = doc
-    return out
-
-
 def test_secrets_unset_mounts_nothing() -> None:
     # The opt-in secret projection (#313) must be inert by default: no mount, no volume, no
     # KDIVE_SECRETS_ROOT, so a deployment that does not need file secrets is unchanged.
-    for proc, deploy in _deployments_with().items():
+    for proc, deploy in _workloads().items():
         container = _container(deploy)
         env_names = {e["name"] for e in container["env"]}
         assert "KDIVE_SECRETS_ROOT" not in env_names, proc
@@ -361,7 +391,7 @@ def test_secrets_set_projects_readonly_on_each_component(proc: str) -> None:
     # With secrets.secretName set, every component that resolves file-ref secrets gets the
     # Secret mounted read-only under KDIVE_SECRETS_ROOT (#313): worker/reconciler open the
     # remote-libvirt qemu+tls transport, the server resolves debug-session secrets.
-    deploy = _deployments_with("secrets.secretName=kdive-remote-tls")[proc]
+    deploy = _workloads("secrets.secretName=kdive-remote-tls")[proc]
     container = _container(deploy)
     env = {e["name"]: e.get("value") for e in container["env"]}
     assert env["KDIVE_SECRETS_ROOT"] == "/etc/kdive/secrets"
@@ -380,7 +410,7 @@ def test_secrets_set_projects_readonly_on_each_component(proc: str) -> None:
 
 
 def test_systems_inventory_unset_mounts_nothing() -> None:
-    for proc, deploy in _deployments_with().items():
+    for proc, deploy in _workloads().items():
         container = _container(deploy)
         env_names = {e["name"] for e in container["env"]}
         assert "KDIVE_SYSTEMS_TOML" not in env_names, proc
@@ -395,13 +425,9 @@ def test_systems_inventory_configmap_mounts_on_components_not_migrate() -> None:
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
 
-    deployments = {
-        doc["metadata"]["name"].removeprefix("kdive-kdive-"): doc
-        for doc in docs
-        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].startswith("kdive-kdive-")
-    }
+    workloads = _workloads("systems.configMapName=inv")
     for proc in ("server", "worker", "reconciler"):
-        deploy = deployments[proc]
+        deploy = workloads[proc]
         container = _container(deploy)
         env = {e["name"]: e.get("value") for e in container["env"]}
         assert env["KDIVE_SYSTEMS_TOML"] == "/etc/kdive/systems/systems.toml"
@@ -429,7 +455,7 @@ def test_systems_inventory_configmap_mounts_on_components_not_migrate() -> None:
 
 
 def test_fixtures_unset_mounts_nothing() -> None:
-    for proc, deploy in _deployments_with().items():
+    for proc, deploy in _workloads().items():
         container = _container(deploy)
         env_names = {e["name"] for e in container["env"]}
         assert "KDIVE_FIXTURE_CATALOG_PATH" not in env_names, proc
@@ -444,13 +470,9 @@ def test_fixtures_configmap_mounts_on_components_not_migrate() -> None:
     assert res.returncode == 0, res.stderr
     docs = [doc for doc in yaml.safe_load_all(res.stdout) if isinstance(doc, dict)]
 
-    deployments = {
-        doc["metadata"]["name"].removeprefix("kdive-kdive-"): doc
-        for doc in docs
-        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].startswith("kdive-kdive-")
-    }
+    workloads = _workloads("fixtures.configMapName=fx")
     for proc in ("server", "worker", "reconciler"):
-        deploy = deployments[proc]
+        deploy = workloads[proc]
         container = _container(deploy)
         env = {e["name"]: e.get("value") for e in container["env"]}
         assert env["KDIVE_FIXTURE_CATALOG_PATH"] == "/etc/kdive/fixtures", proc
@@ -474,8 +496,10 @@ def test_bundled_renders_demo_backends() -> None:
         assert f"name: {name}\n" in res.stdout, name
     assert "mock-oauth2-server" in res.stdout
     assert "kind: NetworkPolicy" in res.stdout
-    # six Deployments on the demo path: 3 app + 3 demo backends.
-    assert res.stdout.count("kind: Deployment") == 6
+    # Five Deployments on the demo path: 2 app (server, reconciler) + 3 demo backends. The
+    # worker is the one StatefulSet (ADR-0514).
+    assert res.stdout.count("kind: Deployment") == 5
+    assert res.stdout.count("kind: StatefulSet") == 1
 
 
 def test_external_path_has_no_demo_backends() -> None:
@@ -483,7 +507,8 @@ def test_external_path_has_no_demo_backends() -> None:
     assert res.returncode == 0, res.stderr
     assert "mock-oauth2-server" not in res.stdout
     assert "kind: NetworkPolicy" not in res.stdout
-    assert res.stdout.count("kind: Deployment") == 3
+    assert res.stdout.count("kind: Deployment") == 2
+    assert res.stdout.count("kind: StatefulSet") == 1
 
 
 def test_bundled_oidc_pins_audience_kdive() -> None:
@@ -675,6 +700,124 @@ def test_lint_is_clean() -> None:
     )
     assert res.returncode == 0, res.stdout + res.stderr
     assert "0 chart(s) failed" in res.stdout
+
+
+# --- Worker scale-out: per-replica scratch volumes (#1703, ADR-0514) ----------------------
+
+
+def _worker_workload(*set_args: str) -> dict[str, Any]:
+    """The rendered doc carrying the worker pod template, whatever workload kind it is.
+
+    Deliberately kind-agnostic (unlike :func:`_workloads`, which pins the kind) so the
+    guards below stay meaningful against a chart that spells the worker as a Deployment —
+    which is exactly the shape #1703 describes.
+    """
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", *set_args)
+    assert res.returncode == 0, res.stderr
+    return next(
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") in ("Deployment", "StatefulSet")
+        and str(doc["metadata"]["name"]).endswith("-worker")
+    )
+
+
+def _worker_shared_claim_names(*set_args: str) -> set[str]:
+    """PVC names the worker pod template mounts by fixed ``claimName``.
+
+    Every such entry is one claim mounted into EVERY replica: a pod-template
+    ``persistentVolumeClaim`` volume names a single claim, so two replicas either
+    multi-attach it (different nodes, ReadWriteOnce, Pending) or share the filesystem
+    (same node). ``volumeClaimTemplates`` produces per-replica claims and never appears
+    here, so this set must be empty.
+    """
+    volumes = _worker_workload(*set_args)["spec"]["template"]["spec"].get("volumes") or []
+    return {
+        v["persistentVolumeClaim"]["claimName"] for v in volumes if "persistentVolumeClaim" in v
+    }
+
+
+@pytest.mark.parametrize("replicas", [1, 2, 5])
+def test_scaled_worker_mounts_no_shared_claim(replicas: int) -> None:
+    # The #1703 regression guard. Asserted at every replica count, including 1: the old chart
+    # mounted the same two ReadWriteOnce claims by name regardless, so the breakage was latent
+    # at 1 and only surfaced when the scheduler placed a second pod.
+    shared = _worker_shared_claim_names(f"worker.replicas={replicas}")
+    assert shared == set(), f"worker replicas share fixed claims across replicas: {sorted(shared)}"
+
+
+def test_worker_scratch_comes_from_per_replica_claim_templates() -> None:
+    # The positive half: with no shared claims, the build/install mounts must still resolve —
+    # to volumeClaimTemplates, which Kubernetes instantiates once per ordinal.
+    sts = _worker_workload("worker.replicas=2")
+    assert sts["kind"] == "StatefulSet"
+    assert sts["spec"]["replicas"] == 2
+    templates = {t["metadata"]["name"]: t for t in sts["spec"]["volumeClaimTemplates"]}
+    assert set(templates) == {"build", "install"}
+    for name, template in templates.items():
+        assert template["spec"]["accessModes"] == ["ReadWriteOnce"], name
+        assert template["spec"]["resources"]["requests"]["storage"], name
+    mounts = {m["name"]: m["mountPath"] for m in _container(sts)["volumeMounts"]}
+    assert mounts["build"] == "/var/lib/kdive/build"
+    assert mounts["install"] == "/var/lib/kdive/install"
+
+
+def test_chart_renders_no_standalone_worker_pvc() -> None:
+    # The retired pvc-worker.yaml declared two release-scoped ReadWriteOnce PVCs. A standalone
+    # PVC is by construction shared by every replica that names it, so the chart must render none.
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y", "worker.replicas=2")
+    assert res.returncode == 0, res.stderr
+    standalone = [
+        doc["metadata"]["name"]
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict) and doc.get("kind") == "PersistentVolumeClaim"
+    ]
+    assert standalone == [], standalone
+
+
+def test_worker_claim_templates_carry_no_version_dependent_metadata() -> None:
+    # volumeClaimTemplates is immutable after install: the API server rejects an update to any
+    # StatefulSet field outside replicas/template/updateStrategy/minReadySeconds/ordinals and the
+    # retention policy. `kdive.labels` embeds helm.sh/chart (the chart version), so labelling the
+    # templates would make every chart bump fail `helm upgrade` with an immutable-field error.
+    sts = _worker_workload()
+    for template in sts["spec"]["volumeClaimTemplates"]:
+        assert set(template["metadata"]) == {"name"}, template["metadata"]
+
+
+def test_worker_statefulset_is_governed_by_a_headless_service() -> None:
+    # serviceName must name a Service that exists, or the pods get no stable DNS identity.
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert res.returncode == 0, res.stderr
+    docs = [d for d in yaml.safe_load_all(res.stdout) if isinstance(d, dict)]
+    sts = next(d for d in docs if d["kind"] == "StatefulSet")
+    svc = next(
+        d
+        for d in docs
+        if d["kind"] == "Service" and d["metadata"]["name"] == sts["spec"]["serviceName"]
+    )
+    assert svc["spec"]["clusterIP"] == "None"
+    assert svc["spec"]["selector"] == sts["spec"]["selector"]["matchLabels"]
+
+
+def test_worker_replicas_default_to_two() -> None:
+    # The job queue is built for parallel workers (FOR UPDATE SKIP LOCKED, ADR-0018); a
+    # one-worker default never exercises that path in any stock deploy.
+    assert _worker_workload()["spec"]["replicas"] == 2
+
+
+def test_worker_pods_start_in_parallel() -> None:
+    # Workers are interchangeable and claim disjoint rows, so OrderedReady's one-at-a-time
+    # start/stop buys nothing and serializes every scale and rollout.
+    assert _worker_workload()["spec"]["podManagementPolicy"] == "Parallel"
+
+
+def test_worker_claims_are_released_on_scale_down_and_uninstall() -> None:
+    # build/install are scratch. Retaining them would strand a full set of PVCs per removed
+    # ordinal, which a scale-up would repopulate from the object store anyway.
+    policy = _worker_workload()["spec"]["persistentVolumeClaimRetentionPolicy"]
+    assert policy == {"whenScaled": "Delete", "whenDeleted": "Delete"}
 
 
 # --- Bundled observability (opt-in Prometheus, ADR-0189) ----------------------------------

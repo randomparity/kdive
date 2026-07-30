@@ -1,0 +1,25 @@
+-- 0085_upload_manifests_window_started_at.sql — the mint instant one upload window's
+-- cumulative extension is bounded against (ADR-0511, #1553). Additive, forward-only (ADR-0015).
+--
+-- `refresh_deadline` — the chunked `runs.complete_build`'s pre-reassembly extension, kept
+-- deliberately by ADR-0448 §4 — had no reference point: it set `deadline = now() + ttl`
+-- unconditionally on any still-open window. Its caller commits that UPDATE in its own savepoint
+-- *before* reassembly runs, and every downstream failure is caught at the MCP tool layer and
+-- returned as a ToolResponse, so the pooled connection exits cleanly and psycopg commits the
+-- extension even for a finalize that failed. A client retrying a failing finalize inside its own
+-- still-open window therefore bought another full TTL on every attempt, without bound.
+--
+-- This is deliberately NOT `created_at`. `replace_manifest`'s ON CONFLICT DO UPDATE sets only
+-- prefix/manifest/deadline, so `created_at` survives a re-mint — capping against it would also
+-- bound `artifacts.create_run_upload`, which ADR-0448 relies on granting a full fresh window on
+-- demand as the documented recovery from every "your window is gone" rejection. A column the
+-- re-mint resets, and only the re-mint resets, draws exactly the line the cap needs: extension is
+-- bounded, re-minting is not.
+--
+-- DEFAULT now() serves two purposes. It backfills every in-flight window at migrate time with a
+-- fresh budget rather than a retroactively exhausted one — the conservative direction, since
+-- backfilling from `created_at` could clamp a live reassembly's window on its first refresh after
+-- the upgrade and hand the reaper its chunk objects. And it keeps the column optional for any
+-- writer that does not name it, so a plain INSERT still yields a well-formed window.
+ALTER TABLE upload_manifests
+    ADD COLUMN window_started_at timestamptz NOT NULL DEFAULT now();

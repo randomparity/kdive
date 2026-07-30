@@ -17,7 +17,7 @@ import asyncio
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import NamedTuple, Protocol
 from uuid import UUID
 
@@ -28,12 +28,14 @@ from kdive.artifacts.storage import HeadResult, ObjectListing
 from kdive.artifacts.upload_manifest import (
     UPLOAD_OWNER_KINDS,
     UPLOAD_TENANT,
-    UploadOwnerKind,
     lock_scope_for,
 )
-from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
 from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
+from kdive.reconciler.cleanup.upload_fences import (
+    UploadOrphanCandidate,
+    reclaimable_upload_keys,
+)
 from kdive.reconciler.cleanup.uploads import UploadStore
 
 _log = logging.getLogger(__name__)
@@ -68,39 +70,6 @@ MAX_RECLAIMS_PER_ROOT = 200
 # this many and a key with any other shape was not written by the upload lane.
 _KEY_COMPONENTS = 4
 
-# One statement decides reclaimability, and it serves both the per-page classify and the per-key
-# re-check so the two cannot drift into disagreeing about what is safe to delete (ADR-0455 §2).
-# Its four parallel arrays are a listing **page** wide, not a root wide (ADR-0498). The width is
-# visible to the planner — ``unnest``'s row estimate tracks the array's real length — so the plan
-# does change with it, and it changes toward the index: at a page's width the ``artifacts`` anti-
-# join is a nested loop over #1570's ``object_key`` btree, where a root's width tipped it to a
-# hash anti-join over a sequential scan. Measured wall-clock time is flat across the widths
-# (ADR-0498 §5).
-# Every fence is evaluated against Postgres ``now()``, never a Python clock:
-#   * no ``artifacts`` row reaches the key — the object is unregistered;
-#   * the owner holds no ``upload_manifests`` row *at all* — not merely no live one. A lapsed
-#     window is the reaper's to collect, and a live or re-minted window owns these key names
-#     because upload keys are owner-addressed;
-#   * the owner holds no **live** write lease — a job that declared, before its first write, that it
-#     is writing under this prefix (ADR-0502). This is the fence for the writers that mint no upload
-#     window at all: local-libvirt's vmcore ``put_stream`` is one, and it is the reachable path into
-#     ADR-0455 §3's delete/PUT race. "Live" is the holding job's own liveness
-#     (:data:`~kdive.artifacts.write_lease.LIVE_HOLDER_SQL`), read from that module so the pass that
-#     honours a lease and the pass that collects one cannot disagree;
-#   * the object is older than the grace.
-_RECLAIMABLE_SQL = f"""
-SELECT c.key
-FROM unnest(%s::text[], %s::timestamptz[], %s::text[], %s::uuid[])
-     AS c(key, last_modified, owner_kind, owner_id)
-WHERE c.last_modified < now() - %s
-  AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)
-  AND NOT EXISTS (SELECT 1 FROM upload_manifests m
-                  WHERE m.owner_kind = c.owner_kind AND m.owner_id = c.owner_id)
-  AND NOT EXISTS (SELECT 1 FROM object_write_leases l
-                  WHERE l.owner_kind = c.owner_kind AND l.owner_id = c.owner_id
-                    AND {LIVE_HOLDER_SQL})
-"""
-
 
 class UploadOrphanStore(UploadStore, Protocol):
     """The reaper's port plus the two reads the orphan sweep needs.
@@ -124,16 +93,6 @@ class UploadOrphanStore(UploadStore, Protocol):
 
     def iter_prefix_pages_with_mtime(self, prefix: str) -> Iterator[list[ObjectListing]]: ...
     def head(self, key: str) -> HeadResult | None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class UploadOrphanCandidate:
-    """One listed object attributed to the upload owner whose prefix it sits under."""
-
-    key: str
-    last_modified: datetime
-    owner_kind: UploadOwnerKind
-    owner_id: UUID
 
 
 async def repair_leaked_upload_objects(
@@ -542,47 +501,6 @@ async def _reread_from_store(
     if head is None:
         return None
     return _CurrentObject(replace(candidate, last_modified=head.last_modified), head.etag)
-
-
-async def reclaimable_upload_keys(
-    conn: AsyncConnection, candidates: list[UploadOrphanCandidate], grace: timedelta
-) -> list[str]:
-    """Return the subset of ``candidates`` that is safe to delete, deciding every fence in Postgres.
-
-    A candidate is reclaimable only when no ``artifacts`` row references its key, its owner holds
-    no ``upload_manifests`` row at all, its owner holds no write lease with a live holder
-    (ADR-0502), and its store mtime is older than ``grace`` measured against Postgres ``now()``.
-
-    This is deliberately usable for one key as well as for a listing page: it is the per-key
-    re-check ADR-0453 §Consequences costed for its second residual (#1557), so wiring it into the
-    reaper's ``_sweep_uncommitted_objects`` is a call rather than a rewrite.
-
-    Args:
-        conn: An async connection. One round trip is issued, whatever ``candidates``' length.
-        candidates: The listed objects, each already attributed to an upload owner. The sweep passes
-            one listing page (ADR-0498); the length is what bounds the array parameters' width.
-        grace: How long past its store mtime an object is protected.
-
-    Returns:
-        The reclaimable keys, in no guaranteed order.
-    """
-    if not candidates:
-        return []
-    # Its own transaction: the connection is not autocommit, so without this the snapshot this
-    # read opens would be held across every following blocking LIST and delete, pinning one of the
-    # pool's ten slots idle-in-transaction for the length of an I/O-bound sweep.
-    async with conn.transaction(), conn.cursor() as cur:
-        await cur.execute(
-            _RECLAIMABLE_SQL,
-            (
-                [c.key for c in candidates],
-                [c.last_modified for c in candidates],
-                [c.owner_kind for c in candidates],
-                [c.owner_id for c in candidates],
-                grace,
-            ),
-        )
-        return [row[0] for row in await cur.fetchall()]
 
 
 def _warn_if_wholly_unattributable(root: str, listed: int, attributed: int) -> None:

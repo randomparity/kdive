@@ -9,5 +9,10 @@ type: application
 #   appVersion — the deployed APPLICATION version. MUST mirror pyproject [project].version
 #                (ADR-0041 source of truth); `just set-version` rewrites it and
 #                `just chart-version-check` fails CI on any appVersion != pyproject drift.
-version: 0.4.0
+version: 0.5.0
 appVersion: "0.4.1"
+# The worker StatefulSet sets persistentVolumeClaimRetentionPolicy (ADR-0514). That field is
+# gated behind the StatefulSetAutoDeletePVC feature gate, which is off by default before 1.27:
+# an older API server prunes it silently, so the chart would claim to release a scaled-down
+# replica's scratch PVCs and quietly leak them instead. Fail the install rather than mislead.
+kubeVersion: ">=1.27.0-0"
