@@ -12,7 +12,12 @@ to git.
 
 from __future__ import annotations
 
-from scripts.migration_ordering_guard import find_violations, parse_version
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from scripts.migration_ordering_guard import GuardError, find_violations, parse_version
 
 
 def _names(hits) -> list[str]:
@@ -52,13 +57,17 @@ def test_unchanged_tree_passes() -> None:
     assert find_violations(base, list(base)) == []
 
 
-def test_no_migrations_at_all_passes() -> None:
-    assert find_violations([], []) == []
+def test_a_base_with_no_migrations_is_a_hard_error() -> None:
+    # There is no such state in this repository, so an empty base means the read went
+    # wrong. Without a maximum every added file would pass — the guard would report a
+    # clean run over nothing, which is the one failure mode it exists to avoid.
+    with pytest.raises(GuardError):
+        find_violations([], ["0001_initial.sql"])
 
 
-def test_first_ever_migration_passes() -> None:
-    # An empty base branch has no maximum to be above.
-    assert find_violations([], ["0001_initial.sql"]) == []
+def test_a_base_of_only_unparseable_names_is_a_hard_error() -> None:
+    with pytest.raises(GuardError):
+        find_violations(["notes.sql"], ["notes.sql", "0001_initial.sql"])
 
 
 def test_every_offending_file_is_reported() -> None:
@@ -95,8 +104,73 @@ def test_violation_message_names_the_file_its_number_and_the_maximum() -> None:
 
 
 def test_unparseable_violation_message_names_the_expected_shape() -> None:
-    hits = find_violations([], ["nope.sql"])
+    hits = find_violations(["0086_b.sql"], ["0086_b.sql", "nope.sql"])
     assert "NNNN_" in hits[0].message()
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    """A throwaway repo whose `base` branch carries migrations 0085 and 0086."""
+    schema = tmp_path / "src/kdive/db/schema"
+    schema.mkdir(parents=True)
+    for name in ("0085_a.sql", "0086_b.sql"):
+        (schema / name).write_text("-- SELECT 1;\n")
+    _git(tmp_path, "init", "-q", "-b", "base")
+    _git(tmp_path, "config", "user.email", "guard@test")
+    _git(tmp_path, "config", "user.name", "guard")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base migrations")
+    return tmp_path
+
+
+def _run(
+    repo: Path, cwd: Path | None = None, base_ref: str = "base"
+) -> subprocess.CompletedProcess[str]:
+    """Invoke the guard's entry point as a subprocess, so the exit code is the real one.
+
+    Running it as `python3` with no venv also holds it to its stdlib-only contract.
+    """
+    guard = Path(__file__).resolve().parents[2] / "scripts/migration_ordering_guard.py"
+    return subprocess.run(
+        ["python3", str(guard), base_ref], cwd=cwd or repo, capture_output=True, text=True
+    )
+
+
+def test_end_to_end_a_migration_below_the_base_maximum_is_rejected(repo: Path) -> None:
+    (repo / "src/kdive/db/schema/0084_late.sql").write_text("-- SELECT 1;\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "0084_late.sql" in result.stderr
+    assert "0086" in result.stderr
+
+
+def test_end_to_end_a_migration_above_the_base_maximum_is_accepted(repo: Path) -> None:
+    (repo / "src/kdive/db/schema/0087_next.sql").write_text("-- SELECT 1;\n")
+    assert _run(repo).returncode == 0
+
+
+def test_end_to_end_names_the_violation_when_invoked_from_a_subdirectory(repo: Path) -> None:
+    # `git ls-tree` filters entries by the cwd prefix unless --full-tree is passed, so from
+    # a subdirectory it reports an empty base — which must not degrade into a different
+    # error, let alone a pass. The guard names the same offending file from anywhere.
+    (repo / "src/kdive/db/schema/0084_late.sql").write_text("-- SELECT 1;\n")
+    result = _run(repo, cwd=repo / "src/kdive/db")
+    assert result.returncode == 1
+    assert "0084_late.sql" in result.stderr
+
+
+def test_end_to_end_an_unresolvable_base_ref_is_a_failure_with_a_fetch_hint(repo: Path) -> None:
+    result = _run(repo, base_ref="no-such-ref")
+    assert result.returncode == 1
+    assert "git fetch" in result.stderr
+
+
+def test_end_to_end_a_clean_branch_is_accepted(repo: Path) -> None:
+    assert _run(repo).returncode == 0
 
 
 def test_parse_version_reads_the_four_digit_prefix() -> None:

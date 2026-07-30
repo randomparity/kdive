@@ -15,14 +15,17 @@ This guard compares the migrations on disk against those on a base ref (default
 the highest version the base branch already carries. Strictly-above, not exactly-plus-one:
 abandoned numbers leave legitimate gaps.
 
-It is deliberately offline — it reads a local ref and never fetches, so it cannot make a
-core gate depend on network reachability (ADR-0505). Resolving the base ref is therefore the
-caller's job; CI fetches it in the step before this one, and locally ``git fetch origin``
-before ``just ci`` is the existing convention. An unresolvable base ref is a hard failure,
-never a silent pass — a guard that cannot fail is worthless (#1723).
+It is deliberately offline — it reads a local ref and never fetches, so the guard itself
+does not depend on network reachability (ADR-0505) and reproduces exactly from a checkout.
+Making the base ref resolvable is the caller's job; CI fetches it in the step before this
+one, and locally ``git fetch origin`` before ``just ci`` is the existing convention.
+
+Every way the comparison can come up empty is a hard failure, never a clean run: an
+unreadable base ref, a base ref carrying no migrations, a missing schema directory, a cwd
+outside the repository. A guard that cannot fail is worthless (#1723).
 
 Stdlib-only (``subprocess`` + ``git``) so it runs without a synced venv. Exit 0 clean,
-1 on violations or an unresolvable base ref.
+1 on violations or on any of those failures.
 """
 
 from __future__ import annotations
@@ -34,15 +37,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-SCHEMA_DIR = Path("src/kdive/db/schema")
+SCHEMA_SUBDIR = "src/kdive/db/schema"
 DEFAULT_BASE_REF = "origin/main"
 
 # Mirrors kdive.db.migrate._FILENAME_RE: the runner rejects anything else outright.
 _FILENAME_RE = re.compile(r"^(\d{4})_.+\.sql$")
 
 
-class BaseRefError(RuntimeError):
-    """The base ref could not be resolved, so the guard has nothing to compare against."""
+class GuardError(RuntimeError):
+    """The guard cannot compare anything, so it must fail rather than report a clean run."""
 
 
 @dataclass(frozen=True)
@@ -51,7 +54,7 @@ class Violation:
 
     filename: str
     version: str | None  # None when the filename does not parse as NNNN_*.sql
-    base_max: str | None  # highest version on the base ref, None when it has no migrations
+    base_max: str  # highest version on the base ref
 
     def message(self) -> str:
         """A one-line, actionable description naming the file, its number, and the max."""
@@ -87,49 +90,77 @@ def find_violations(
         One :class:`Violation` per offending added file, ordered by filename. Files
         already on the base ref are ignored — an in-place edit or a deletion is the
         schema-immutability guard's concern (ADR-0015), not this one.
+
+    Raises:
+        GuardError: The base ref carries no parseable migration. There is no such
+            state in this repository, so it means the base read went wrong — and
+            without a maximum the guard would pass everything it was given.
     """
     base = set(base_filenames)
     base_versions = [v for v in (parse_version(name) for name in base) if v is not None]
-    base_max = max(base_versions, key=int) if base_versions else None
+    if not base_versions:
+        raise GuardError("the base ref carries no NNNN_*.sql migration")
+    base_max = max(base_versions, key=int)
     violations: list[Violation] = []
     for filename in sorted(set(head_filenames) - base):
         version = parse_version(filename)
-        if version is None or (base_max is not None and int(version) <= int(base_max)):
+        if version is None or int(version) <= int(base_max):
             violations.append(Violation(filename, version, base_max))
     return violations
 
 
-def _base_filenames(base_ref: str) -> list[str]:
-    """Return the migration filenames on ``base_ref``, or raise if it does not resolve."""
+def _fetch_hint(base_ref: str) -> str:
+    """The ``git fetch`` command that would make ``base_ref`` resolvable."""
+    remote, _, branch = base_ref.rpartition("/")
+    return f"git fetch {remote or 'origin'} {branch}"
+
+
+def _repo_root() -> Path:
+    """The repository root, so neither read depends on the caller's cwd."""
     result = subprocess.run(
-        ["git", "ls-tree", "--name-only", f"{base_ref}:{SCHEMA_DIR}"],
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise GuardError(f"not inside a git repository: {result.stderr.strip()}")
+    return Path(result.stdout.strip())
+
+
+def _base_filenames(base_ref: str) -> list[str]:
+    """Return the migration filenames on ``base_ref``, or raise if it cannot be read."""
+    # --full-tree: without it `ls-tree` filters entries by the cwd prefix and returns an
+    # empty list, exit 0, from any subdirectory — a silent pass instead of a failure.
+    result = subprocess.run(
+        ["git", "ls-tree", "--full-tree", "--name-only", f"{base_ref}:{SCHEMA_SUBDIR}"],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        raise BaseRefError(
-            f"cannot read {SCHEMA_DIR}/ at {base_ref!r}: {result.stderr.strip()}. "
-            f"Run 'git fetch origin {base_ref.removeprefix('origin/')}' first — this guard "
-            "reads a local ref and never fetches on its own"
+        raise GuardError(
+            f"cannot read {SCHEMA_SUBDIR}/ at {base_ref!r}: {result.stderr.strip()}. "
+            f"Run '{_fetch_hint(base_ref)}' first — this guard reads a local ref and "
+            "never fetches on its own"
         )
     return [name for name in result.stdout.splitlines() if name.endswith(".sql")]
 
 
-def _head_filenames() -> list[str]:
-    """Return the migration filenames in the working tree (so an uncommitted add counts)."""
-    return [path.name for path in SCHEMA_DIR.glob("*.sql")]
+def _head_filenames(root: Path) -> list[str]:
+    """Return the migration filenames on disk (so an uncommitted add counts), or raise."""
+    schema_dir = root / SCHEMA_SUBDIR
+    if not schema_dir.is_dir():
+        raise GuardError(f"{schema_dir} is not a directory — the guard has nothing to check")
+    return [path.name for path in schema_dir.glob("*.sql")]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     base_ref = args[0] if args else DEFAULT_BASE_REF
     try:
-        base = _base_filenames(base_ref)
-    except BaseRefError as exc:
+        root = _repo_root()
+        violations = find_violations(_base_filenames(base_ref), _head_filenames(root))
+    except GuardError as exc:
         print(f"::error::migration-ordering guard could not run: {exc}", file=sys.stderr)
         return 1
-    violations = find_violations(base, _head_filenames())
     for violation in violations:
         print(f"::error::{violation.message()}", file=sys.stderr)
     if violations:

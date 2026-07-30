@@ -43,14 +43,23 @@ gap in the sequence is harmless — every surviving migration still applies in o
 
 The guard compares two file *sets* — the schema directory on the base ref against the one on
 disk — rather than a diff. A file already on the base ref is out of scope whatever happened to
-it; that is the immutability guard's job. A newly added file whose name does not parse as
-`NNNN_*.sql` is itself a violation, so the guard has no case it silently skips.
+it; that is the immutability guard's job. A newly added `*.sql` whose name does not parse as
+`NNNN_*.sql` is itself a violation rather than a file the guard passes over.
 
-It is offline. It reads a local ref and never fetches, so it does not make a core gate depend
-on network reachability (ADR-0505). Resolving the base ref is the caller's job: the CI job
-fetches `refs/heads/main` at depth 1 in the step before, and `git fetch origin` before
-`just ci` is the existing local convention. An unresolvable base ref exits non-zero with the
-fetch command to run — the guard never treats a missing comparison point as a pass.
+Every way the comparison can come up empty is a hard failure, never a clean run: an unreadable
+base ref, a base ref carrying no migrations, a missing schema directory, a cwd outside the
+repository. This matters more than the ordering rule itself. A guard that reports success over
+nothing is worse than no guard, because it also retires the attention that would have caught
+the problem (#1723), and every one of those states is a bug in how the guard was invoked
+rather than evidence that the branch is clean.
+
+The guard itself is offline: it reads a local ref and never fetches, so it reproduces exactly
+from a checkout and does not put a network round-trip inside the check (ADR-0505). Making the
+base ref resolvable is the caller's job — the CI job fetches `refs/heads/main` at depth 1 in
+the step before, and `git fetch origin` before `just ci` is the existing local convention. The
+CI gate as a whole therefore does depend on reaching github.com, but the dependency sits in a
+step of its own, where a network failure is reported as a failed fetch rather than as a
+migration-ordering verdict.
 
 It is wired as its own step in `.github/workflows/ci.yml`, not only into the `ci` recipe. CI
 invokes justfile recipes individually and never runs `just ci`, so a guard reachable only
