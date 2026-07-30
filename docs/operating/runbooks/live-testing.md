@@ -253,10 +253,29 @@ then `just onboard` for a funded project and a token. Then, per ADR-0441:
 
 Traps this run hit, in the order they bite:
 
-- **Provision concurrently, not serially.** Two serial provisions prove nothing
-  about deduplication: the second short-circuits on `dest.is_file()` and never
-  reaches the fetch lock. Only concurrent provisions exercise the per-(investigation,
-  checksum) session advisory lock that collapses the redundant download.
+- **Provision concurrently, not serially — but know what that does and does not
+  prove.** Two serial provisions prove nothing about deduplication: the second
+  short-circuits on the reuse fast path and never reaches the fetch lock. Two
+  *concurrent* provisions do satisfy the arm's "exactly one `GetObject`"
+  assertion, and on a one-worker stack that is where the assertion is satisfied —
+  at the same fast path. It is **not** evidence of fetch-lock contention. A
+  worker's claim loop runs one job at a time and the stack starts one worker by
+  default, so the second provision sits `queued` until the first has finished
+  staging; there is no sibling to block on `pg_advisory_lock`. That still tests
+  something real — the fast path collapses the redundant download, and since
+  ADR-0443 it verifies the base rather than trusting its presence.
+
+  Be precise about what is left uncovered, because it is narrower than "the lock
+  never runs". The arm's *first* provision is a cold fetch, so it does take
+  `pg_advisory_lock`, does re-run the staged-base check under it, and does call
+  `_unlink_orphan_partials` — uncontended, on one worker, every time. What a
+  one-worker stack can never reach are the **contended branches**: the "a sibling
+  fetcher finished while we waited on the lock" early return, the "a sibling
+  published a staged rootfs base that does not verify" warning, and
+  `_unlink_orphan_partials`'s skip of a partial whose `flock` a live writer still
+  holds. Each needs a second fetcher that exists at the same moment. To reach
+  them, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
+  below, which needs a second worker process.
 - **The catalog images are too big to upload as-is.** They are 6 GiB virtual,
   over the 5 GiB single-PUT cap, so a declaration is rejected at
   `artifacts.create_investigation_upload`. `qemu-img convert -O qcow2 <src> <dst>`
@@ -265,6 +284,11 @@ Traps this run hit, in the order they bite:
 - **A multi-kernel rootfs needs a `baseline_kernel` hint.** `fedora-kdive-ready-43`
   carries two kernels, so direct-kernel boot is `not_provisionable` until the
   profile names one (bare version, e.g. `6.18.5-200.fc43.x86_64`).
+- **An upload-kind rootfs needs `investigation_id` on the provision call.** The
+  allocation does not carry the binding, so omitting it is rejected up front with
+  `configuration_error` — "upload-kind rootfs requires a bound investigation_id" —
+  before any job is enqueued. The refusal is clear, but it looks like a profile
+  problem rather than a missing argument.
 - **`systems.provision` returns a job, not a System.** `object_id` is the job id;
   the System id is `data.system_id`. Polling `systems.get` on the returned
   `object_id` answers `not_found` and looks like a failure.
@@ -295,6 +319,160 @@ deliberately runs the worker as root for install-staging and VM ops while the
 server and reconciler run as the invoking user. Any future work that has one
 daemon touch another's files must account for it, and a stack whose daemons all
 share a uid (compose, Helm) will not reproduce this class of defect.
+
+### Fetch-lock contention (needs two workers)
+
+The four arms above take the per-(investigation, checksum) fetch lock on every
+cold fetch, but always uncontended — a one-worker stack cannot produce two
+simultaneous stagings. This arm can, and it is the only local procedure that
+reaches a *contended* outcome: the waiter's "a sibling fetcher finished while we
+waited on the lock" early return, after really blocking on `pg_advisory_lock`
+(ADR-0443).
+
+That is one branch, and claiming more would repeat the defect this arm was
+written to fix. Two neighbours stay uncovered locally even here, because each
+needs a fault the arm does not engineer. The "a sibling published a staged rootfs
+base that does not verify" warning needs the holder to publish a base that fails
+the marker or qcow2 gate. `_unlink_orphan_partials` skipping a live writer's
+`flock` needs a partial that is still held when a sibling sweeps — but the holder
+unlinks its own partial before it releases the fetch lock, and the waiter returns
+early without ever reaching the sweep, so a plain two-worker race cannot produce
+it. Both are lost-lock and crash paths (ADR-0446), reachable by killing a worker
+mid-download or reaping its Postgres backend, not by concurrency alone.
+
+Bring the stack up with two workers. `KDIVE_WORKER_COUNT` is the local stack's
+only job-concurrency knob — worker *processes* are the concurrency unit, since a
+single worker's claim loop runs one job at a time:
+
+```bash
+KDIVE_WORKER_COUNT=2 scripts/live-stack/up.sh
+```
+
+Confirm two worker processes really came up before drawing any conclusion — this
+arm is worthless against one worker, and it fails in exactly the silent way the
+old procedure did:
+
+```bash
+scripts/live-stack/status.sh
+```
+
+The `=== build stamps ===` header must read `2 worker process(es) live`, and both
+worker rows must carry the same build stamp. That count comes from the same
+matcher bring-up asserts against: it resolves `KDIVE_PYTHON` and is scoped to this
+checkout, so it does not count a worker left running from another worktree — which
+is how an operator otherwise gets two rows on a stack that started one worker and
+then drives the whole arm against serialized execution. (Bring-up now fails rather
+than exiting 0 on the wrong count, so reaching this step at all is a good sign;
+read it anyway, since it also catches a stack that lost a worker afterwards.)
+
+The second worker binds its aux health listener on `:9470` rather than
+the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
+under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log. Leave
+`KDIVE_HEALTH_BIND_ADDR` unset: an explicit value applies to every process, so it
+cannot coexist with more than one worker, and bring-up refuses the combination
+rather than starting workers that die on an exclusive bind.
+
+Drive it as the Reuse arm — one investigation, one uploaded rootfs, two
+`systems.provision` calls issued together — with two changes:
+
+- **Use a rootfs no run has staged before, on the identity lane.** Staging is
+  content-addressed, so a checksum already present under
+  `/var/lib/kdive/rootfs-uploads/<investigation>/` is served by the reuse fast path
+  and never takes the lock. Generate a unique image per run, and declare the upload
+  with no transport `encoding`. The gzip lane streams the object as a sequence of
+  ranged GETs rather than one whole-object GET, so the request count in the third
+  assert below stops meaning anything — a correct run would look like hundreds of
+  downloads. (This is why the arm does not reuse the oversized catalog image the
+  Reuse arm's trap routes onto the gzip lane.)
+- **Make the download long enough to observe.** The lock is held across the
+  object-store fetch, so the contention window is the download. A ~1.4 GiB
+  incompressible qcow2 gives a window of several seconds against local MinIO —
+  ample for a sub-second poll. It does not need to be bootable: this arm asserts
+  on the fetch, which precedes every boot concern.
+
+While both provisions are in flight, read the advisory lock directly. Postgres
+reports the holder and the waiter as two rows on one key:
+
+```bash
+docker compose exec -T postgres psql -U kdive -d kdive -c "
+SELECT l.classid, l.objid, l.pid, l.granted, a.wait_event_type, a.wait_event
+  FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+ WHERE l.locktype = 'advisory' AND a.query LIKE '%pg_advisory_lock%'
+ ORDER BY l.granted DESC"
+```
+
+`classid`/`objid` are how Postgres exposes the advisory key, and the pass rule
+below needs them: other session advisory locks run on this cluster (the inventory
+reconcile's multi-transaction pass, ADR-0095 console-hosting leadership), so
+without the key columns two rows in this output are only co-occurring, not
+provably the same lock.
+
+(The compose backend carries `psql`; the host generally does not.)
+
+The arm passes on **all three** of these. The first two are the discriminators —
+together they separate contention from serialization, and neither does it alone.
+The third is the outcome: contention that did not collapse the second download
+would mean the lock ran and achieved nothing.
+
+| Assert | Where | Why it is required |
+|--------|-------|--------------------|
+| Two rows sharing one `(classid, objid)`: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity`, above | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
+| Both of **your two** provision jobs `running`, each with a non-NULL `jobs.worker_id`, and the two values **different** | `SELECT id, state, worker_id FROM jobs WHERE id IN ('<job1>', '<job2>')` — the two ids the provisions returned as `object_id` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock rows above were something else |
+| Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
+
+Name the two job ids explicitly in row 2; do not reach for the newest provision
+rows. Every relaxation of that query passes on the serialization the row exists to
+catch. Ordering by `heartbeat_at DESC` picks up an unclaimed job first, because it
+has a NULL `heartbeat_at` and Postgres sorts NULLs first under `DESC` — and its
+`worker_id` is NULL too, so it "differs" from the running job's. Dropping the id
+filter lets any other running provision on the stack supply the second row, and
+this arm manufactures those: it parks a worker inside a multi-GiB download, a
+worker does not act on `SIGTERM` until its job ends, and a re-claimed job whose
+lease lapsed is a running provision with a fresh `worker_id`. Both ids, both
+`running`, both non-NULL, values different — nothing weaker.
+
+Do not substitute a file count for that third row. Counting `.qcow2` files in the
+staging dir proves nothing: both fetchers download into a private
+`<token>.<uuid>.partial` and publish by rename, and a fetcher that finds the base
+already published discards its own copy without touching `dest`. A waiter that
+re-downloaded the whole object therefore still leaves exactly one `.qcow2` with
+an unchanged mtime. The store's request count is what separates one download from
+two; the waiter's own log is the corroborating signal, since the ADR-0446 "a
+sibling published the staged rootfs base … the fetch lock was lost mid-transfer"
+warning appears only when it did re-download.
+
+Finish by reclaiming the state. The arm requires a fresh multi-GiB object every
+run and by construction can reuse nothing, so repeat runs accumulate in
+`/var/lib/kdive/rootfs-uploads/<investigation>/` and in the object store until the
+staging filesystem tightens and starts failing *unrelated* provisions with a
+free-space shortfall that points at the wrong run. Close the investigation with
+`force` (the arm's Systems outlive their provisions and need reaping) and confirm
+the sweep collected the object, staged base, staging dir and `artifacts` row —
+the same checks the Reclaim arm asserts, including its one-day grace trap.
+
+**2026-07-30 run** (branch `feat/multi-worker-fetch-lock-1551`, both workers
+build-stamped identically): all three rows pass.
+
+| | Observed |
+|---|---|
+| Claim | Both provision jobs held by different workers — `jobs.worker_id` read `homer…:1194523` and `homer…:1194534`, the two live worker pids. (Their `heartbeat_at` was read after both jobs had finished, so it is a last-heartbeat time, not a claim time; the distinct `worker_id` values are the assertion, and the lock timings below are what bound the overlap.) |
+| Lock | `18:13:37.009654` pid 244 takes `(classid, objid) = (486701297, 24917193)`, `granted=t`; 237 µs later pid 245 blocks on the same key, `granted=f`, `wait_event_type=Lock`, `wait_event=advisory` |
+| Download | One `s3.GetObject` for the rootfs key, `18:13:37.015`→`18:13:39.545`, `200 OK`, ↓ 1.4 GiB in 2.53 s. The whole trace holds exactly one `GetObject` and one `HeadObject` for that key |
+| Teardown | `investigations.close` with `force`, then the sweep at `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS=0`: `reclaim_investigation_rootfs` reached `succeeded`, and the staging dir, the object, and the `artifacts` row are gone with `rootfs_cleanup_pending_at` cleared |
+
+So the waiter blocked on the lock for the full duration of the holder's download
+and then took the base rather than fetching its own — contention and the dedup
+outcome, not one standing in for the other. Both provisions still failed
+afterwards at baseline-kernel extraction, because the workspace venv has no
+`guestfs` binding; that is downstream of the fetch and does not affect the arm.
+
+One limit to record: the ADR-0482 skew preflight probes one worker. Its URL set is
+built from the registered per-process ports, so workers 2..N are outside it and a
+`fresh` verdict grades only worker 1 — tracked in
+[deferral record 0002](../../debt/0002-skew-preflight-probes-one-worker.md). On a
+multi-worker stack, read the `=== build stamps ===` block instead: it prints a row
+per worker log and a live worker count in its header, so a row without a live
+worker behind it is visible as a stale log rather than read as a graded process.
 
 ## Hard-won quirks
 

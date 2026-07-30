@@ -1,11 +1,16 @@
+import os
 import shutil
 import socket
 import subprocess
+import sys
+import time
 from collections.abc import Generator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
+
+from kdive.health.aux_bind import PROCESS_DEFAULT_PORTS
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -56,6 +61,338 @@ def _free_port() -> int:
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _lib(snippet: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Source lib.sh and run `snippet`, with `env` overlaid on the current environment."""
+    return subprocess.run(
+        ["bash", "-c", f'source "{ROOT}/scripts/live-stack/lib.sh"\n{snippet}'],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+
+
+def _start_workers(tmp_path: Path, worker_count: str) -> list[Path]:
+    """Really run `restart_host_processes` against a stub interpreter; return the worker logs.
+
+    Stubs only the environment the launch loop cannot have in a unit test — the interpreter, the
+    log directory, and the three helpers that touch the live process table — so the loop itself,
+    the per-worker log naming, and the per-worker health-bind override are the code under test.
+    The stub records the aux bind address it was handed, which is the collision this guards.
+    """
+    stub = tmp_path / "python-stub"
+    stub.write_text(
+        '#!/usr/bin/env bash\necho "argv=$* health=${KDIVE_HEALTH_BIND_ADDR:-<unset>}"\n'
+    )
+    stub.chmod(0o755)
+    log_dir = tmp_path / "logs"
+    result = _lib(
+        f'py="{stub}"\n'
+        f'log_dir="{log_dir}"\n'
+        "stop_daemons() { :; }\n"
+        "require_free_http_port() { :; }\n"
+        "wait_for_daemons_to_settle() { :; }\n"
+        "restart_host_processes\n"
+        'echo "DAEMON_COUNT=${DAEMON_COUNT}"\n',
+        KDIVE_WORKER_COUNT=worker_count,
+        KDIVE_WORKER_AS_ROOT="0",
+    )
+    assert result.returncode == 0, result.stderr
+    expected = 2 + int(worker_count)
+    assert f"DAEMON_COUNT={expected}" in result.stdout, (
+        f"settle check must expect server + reconciler + {worker_count} workers: {result.stdout}"
+    )
+    # The launches are detached (`setsid nohup ... &`), so poll rather than `wait` on them.
+    deadline = time.monotonic() + 10
+    logs: list[Path] = []
+    while time.monotonic() < deadline:
+        logs = sorted(p for p in log_dir.glob("worker*.log") if p.read_text().strip())
+        if len(logs) >= int(worker_count):
+            break
+        time.sleep(0.1)
+    return logs
+
+
+def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
+    """The knob must fail loud on a value that would silently start the wrong number of workers."""
+    assert _lib("configured_worker_count").stdout == "1"
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="3").stdout == "3"
+    # Empty reads as unset, as every other knob in lib.sh does (`${VAR:-default}`).
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="").stdout == "1"
+    for bad in ("0", "-1", "abc", "2.5"):
+        result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=bad)
+        assert result.returncode != 0, f"{bad!r} must be rejected"
+        assert "positive integer" in result.stderr
+
+
+def test_configured_worker_count_is_ceilinged() -> None:
+    """Each worker is a root process with its own pool; the loop asks for no confirmation.
+
+    The aux port the runbook prints a few lines from the knob is 9470, so a transposition typo
+    into the count would fork thousands of root processes on the operator's host.
+    """
+    assert _lib("configured_worker_count", KDIVE_WORKER_COUNT="8").stdout == "8"
+    for over in ("9", "9470", "99999999999999999999"):
+        result = _lib("configured_worker_count", KDIVE_WORKER_COUNT=over)
+        assert result.returncode != 0, f"{over!r} must be refused"
+        assert "ceiling" in result.stderr, result.stderr
+
+
+def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
+    """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
+
+    uvicorn's bind is exclusive, so an extra worker that reused 9465 — or stepped up onto the
+    reconciler's 9466 — would die at startup instead of claiming jobs, and the multi-worker stack
+    would silently degrade back to the single-worker serialization this knob exists to escape.
+    """
+    assert _lib("extra_worker_health_bind 1").stdout == "", "worker 1 must keep the default bind"
+    ports = {
+        int(_lib(f"extra_worker_health_bind {index}").stdout.rsplit(":", 1)[1])
+        for index in (2, 3, 4)
+    }
+    assert len(ports) == 3, f"each extra worker needs its own port, got {ports}"
+    assert not ports & set(PROCESS_DEFAULT_PORTS.values()), (
+        f"extra-worker ports {ports} collide with the registered defaults {PROCESS_DEFAULT_PORTS}"
+    )
+
+
+def test_multiple_workers_refuse_an_explicit_health_bind() -> None:
+    """An explicit bind wins for EVERY process, so it cannot coexist with more than one worker.
+
+    Both accommodations are wrong: honouring the operator's port walks the extras onto the
+    registered server and reconciler defaults, and ignoring it silently discards the setting for
+    every worker but the first. Neither yields a stack that comes up, so bring-up must refuse and
+    name the knob to drop rather than start workers that die on an exclusive bind.
+    """
+    result = _lib(
+        'py="/nonexistent/python"\nrestart_host_processes\n',
+        KDIVE_WORKER_COUNT="2",
+        KDIVE_HEALTH_BIND_ADDR="127.0.0.1:9500",
+    )
+    assert result.returncode != 0, "the combination must be refused"
+    assert "KDIVE_HEALTH_BIND_ADDR" in result.stderr, result.stderr
+    assert "Unset KDIVE_HEALTH_BIND_ADDR" in result.stderr, "the message must name the remedy"
+    # One worker with an explicit bind is the pre-existing single-process case and stays allowed:
+    # it must fail later (on the stub interpreter), not on this guard.
+    single = _lib(
+        'py="/nonexistent/python"\nrestart_host_processes\n',
+        KDIVE_WORKER_COUNT="1",
+        KDIVE_HEALTH_BIND_ADDR="127.0.0.1:9500",
+    )
+    assert "KDIVE_HEALTH_BIND_ADDR" not in single.stderr, single.stderr
+
+
+def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
+    """Worker 1 keeps the name recorded runbooks and proof records already cite."""
+    root_logs = [_lib(f"worker_log_path {i}", KDIVE_WORKER_AS_ROOT="1").stdout for i in (1, 2, 3)]
+    user_logs = [_lib(f"worker_log_path {i}", KDIVE_WORKER_AS_ROOT="0").stdout for i in (1, 2, 3)]
+    assert root_logs[0].endswith("/worker-root.log")
+    assert user_logs[0].endswith("/worker.log")
+    assert len(set(root_logs)) == 3, root_logs
+    assert len(set(user_logs)) == 3, user_logs
+
+
+def _build_stamps(tmp_path: Path, logs: dict[str, str]) -> list[str]:
+    """Run report_build_stamps against a seeded log dir; return its output lines.
+
+    `py` is stubbed to a path nothing can be running from, so the live-worker count is a property
+    of the fixture rather than of the developer's machine. Without it this test reads the host
+    process table and goes red whenever this worktree's own live stack is up — which is exactly
+    the state the new runbook arm tells the operator to create.
+    """
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir(exist_ok=True)
+    for name, body in logs.items():
+        (log_dir / name).write_text(body)
+    result = _lib(f'py="{tmp_path}/no-such-python"\nlog_dir="{log_dir}"\nreport_build_stamps\n')
+    assert result.returncode == 0, result.stderr
+    return result.stdout.splitlines()
+
+
+def test_build_stamps_report_one_row_per_worker_log(tmp_path: Path) -> None:
+    """Every worker gets a row, and the header states how many are actually alive.
+
+    The deferral record for the ADR-0482 preflight's single-worker probe set nominates this
+    block as the standing mitigation, so it has to be readable in both directions: a worker
+    running different code must not be omitted, and a stale log left by a stack that has since
+    been downgraded must not read as a live, graded process.
+    """
+    stamp = '{"msg": "starting kdive 0.4.1-dev+gcafe1234 (worker)"}\n'
+    rows = _build_stamps(
+        tmp_path,
+        {"worker-root.log": stamp, "worker-root-2.log": stamp, "server.log": stamp},
+    )
+    header = rows[0]
+    assert "build stamps" in header and "worker process(es) live" in header, header
+    labels = [line.split()[0] for line in rows[1:] if line.startswith("  ")]
+    assert labels == ["server", "reconciler", "worker-root", "worker-root-2"], labels
+    # Nothing runs from the stubbed interpreter, so the count exposes both rows as stale logs
+    # rather than as graded processes — the direction a file-only enumeration cannot report.
+    assert "0 worker process(es) live" in header, header
+
+
+def test_bring_up_fails_when_a_worker_did_not_come_up(tmp_path: Path) -> None:
+    """The settle gate counts a host-wide total, so it cannot see a missing worker on its own.
+
+    `daemon_pids` is deliberately checkout-agnostic, and `stop_daemons` warns rather than fails
+    after ten seconds — so a survivor from another worktree makes 2 + N add up while one of THIS
+    checkout's workers is dead. Bring-up would exit 0 on a stack that silently serializes, which
+    is the whole failure the knob exists to escape. The count must be asserted on workers.
+    """
+    result = _lib(
+        f'py="{tmp_path}/no-such-python"\nlog_dir="{tmp_path}"\nrequire_workers_alive 2\n'
+    )
+    assert result.returncode != 0, "a shortfall must fail bring-up, not warn"
+    assert "asked for 2 worker(s) but only 0" in result.stderr, result.stderr
+    # The message must reach the aux-port cause, which is otherwise a silent local port conflict.
+    assert "address already in use" in result.stderr, result.stderr
+    # An exact count passes.
+    assert _lib(f'py="{tmp_path}/no-such-python"\nrequire_workers_alive 0\n').returncode == 0
+
+
+def test_bring_up_fails_on_a_surplus_worker_too(tmp_path: Path) -> None:
+    """A survivor of stop_daemons is from THIS checkout, so `>=` would let it mask a dead worker.
+
+    stop_daemons warns and returns 0 after ten seconds, and a worker ignores SIGTERM until its
+    job ends — which the contention arm arranges by parking workers inside a multi-GiB fetch. So
+    a leftover worker is the expected state here, not an edge case, and it may be running older
+    code. The two directions need different remedies, so the surplus must fail on its own.
+    """
+    surplus = _lib(
+        f'py="{tmp_path}/no-such-python"\nworker_pids() {{ echo 111; echo 222; }}\n'
+        "require_workers_alive 1\n"
+    )
+    assert surplus.returncode != 0, "a surplus must fail, not pass as 'at least enough'"
+    assert "but 2 from this checkout are running" in surplus.stderr, surplus.stderr
+    assert "outlived stop_daemons" in surplus.stderr, "the surplus remedy differs from a shortfall"
+    assert "111" in surplus.stderr and "222" in surplus.stderr, "name the pids to stop"
+
+
+def test_build_stamps_still_report_a_worker_row_with_no_logs(tmp_path: Path) -> None:
+    """An empty log dir must still print a worker row, not silently drop the process."""
+    rows = _build_stamps(tmp_path, {})
+    labels = [line.split()[0] for line in rows[1:] if line.startswith("  ")]
+    assert labels == ["server", "reconciler", "worker"], labels
+    assert all("<no startup log line>" in line for line in rows[1:]), rows
+
+
+def test_worker_pids_are_scoped_to_this_checkout(tmp_path: Path) -> None:
+    """A worker from a sibling worktree must not inflate the live count.
+
+    Several worktrees run on this host, and `stop_daemons` deliberately matches every checkout's
+    daemons. Counting them here too would let a foreign worker mask a stale log — the blindness
+    the header exists to expose — so this matcher is anchored on the resolved interpreter.
+
+    Runs a REAL process whose argv is exactly `<venv>/bin/python -m kdive worker`, against a stub
+    `kdive` package that just sleeps, so the matcher is exercised rather than the source text.
+    """
+    root = tmp_path / "other"
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    python = venv_bin / "python"
+    python.symlink_to(sys.executable)
+    stub_pkg = root / "kdive"
+    stub_pkg.mkdir()
+    (stub_pkg / "__init__.py").write_text("")
+    (stub_pkg / "__main__.py").write_text("import time\ntime.sleep(120)\n")
+
+    # A hermetic env: PYTHONPATH pins the stub package, and PYTHONSAFEPATH is cleared because it
+    # would drop the cwd `-m` relies on. Inheriting pytest's environment let the real installed
+    # kdive answer `-m kdive`, and that process exits on its own once it cannot reach a database.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONSAFEPATH", "PYTHONHOME")}
+    env["PYTHONPATH"] = str(root)
+
+    with subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+        [str(python), "-m", "kdive", "worker"], cwd=root, env=env
+    ) as proc:
+        try:
+            deadline = time.monotonic() + 30
+            counted = ""
+            while time.monotonic() < deadline:
+                assert proc.poll() is None, (
+                    f"the stub worker exited early (rc={proc.returncode}); `-m kdive` did not "
+                    "resolve to the sleeping stub, so the matcher was never exercised"
+                )
+                counted = _lib(f'py="{python}"\nworker_pids\n').stdout
+                if counted.strip():
+                    break
+                time.sleep(0.1)
+            assert str(proc.pid) in counted, (
+                f"a worker launched from py={python} must be counted, got {counted!r}"
+            )
+            other = _lib(f'py="{tmp_path}/elsewhere/.venv/bin/python"\nworker_pids\n').stdout
+            assert str(proc.pid) not in other, (
+                f"a worker from another checkout must NOT be counted, got {other!r}"
+            )
+            # ps truncates each line to COLUMNS, and a checkout path plus " -m kdive worker" runs
+            # well past 80. Without `-ww` every daemon matcher here finds NOTHING in an ordinary
+            # 80-column shell — stop_daemons reports none running and bring-up counts zero alive.
+            narrow = _lib(f'py="{python}"\nworker_pids\ndaemon_pids\n', COLUMNS="80").stdout
+            assert str(proc.pid) in narrow, (
+                f"COLUMNS=80 truncated ps and lost the worker: {narrow!r}"
+            )
+        finally:
+            proc.kill()
+
+
+def test_restart_host_processes_starts_one_worker_by_default(tmp_path: Path) -> None:
+    logs = _start_workers(tmp_path, "1")
+    assert [p.name for p in logs] == ["worker.log"]
+    assert "health=<unset>" in logs[0].read_text(), "the sole worker keeps the process default"
+
+
+def test_restart_host_processes_starts_every_configured_worker(tmp_path: Path) -> None:
+    """Three workers must really be launched, each with its own log and its own aux port."""
+    logs = _start_workers(tmp_path, "3")
+    assert [p.name for p in logs] == ["worker-2.log", "worker-3.log", "worker.log"]
+    binds = [p.read_text().split("health=")[1].strip() for p in logs]
+    assert binds.count("<unset>") == 1, f"exactly one worker keeps the default bind: {binds}"
+    explicit = [b for b in binds if b != "<unset>"]
+    assert len(set(explicit)) == 2, f"extra workers must not share a bind: {binds}"
+
+
+def test_root_worker_launch_splices_the_health_bind_after_sourcing_env(tmp_path: Path) -> None:
+    """The DEFAULT launch branch is the sudo-root one, and it is what the runbook arm runs.
+
+    The per-worker bind is spliced into a quoted `sudo bash -c` string there, and it must land
+    AFTER `source scripts/live-stack/env.sh` — sourced first, env.sh's `:-` defaulting would
+    already have set the variable and the export would be the thing overriding it, but spliced
+    before, env.sh re-defaults over the top and every worker inherits one port. A regression
+    there degrades a two-worker stack back to serialization, which is the failure the whole
+    change exists to remove.
+    """
+    sudo_stub = tmp_path / "sudo"
+    sudo_stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "{tmp_path}/sudo-argv"\n')
+    sudo_stub.chmod(0o755)
+    result = _lib(
+        f'py="/nonexistent/python"\n'
+        f'log_dir="{tmp_path}/logs"\n'
+        'mkdir -p "$log_dir"\n'
+        "start_worker 1 builduser /src/linux\n"
+        "start_worker 2 builduser /src/linux\n"
+        "start_worker 3 builduser /src/linux\n",
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        KDIVE_WORKER_AS_ROOT="1",
+        KDIVE_DATABASE_URL="postgresql://x/y",
+        KDIVE_S3_ENDPOINT_URL="http://x",
+    )
+    assert result.returncode == 0, result.stderr
+    launches = (tmp_path / "sudo-argv").read_text().splitlines()
+    assert len(launches) == 3, launches
+
+    assert "KDIVE_HEALTH_BIND_ADDR" not in launches[0], "worker 1 must keep the process default"
+    binds = []
+    for launch in launches[1:]:
+        assert "export KDIVE_HEALTH_BIND_ADDR=" in launch, f"extra worker got no bind: {launch}"
+        assert launch.index("source scripts/live-stack/env.sh") < launch.index(
+            "export KDIVE_HEALTH_BIND_ADDR="
+        ), "the bind export must come after env.sh, or env.sh re-defaults over it"
+        binds.append(launch.split("export KDIVE_HEALTH_BIND_ADDR=")[1].split("'")[1])
+    assert len(set(binds)) == 2, f"extra workers must not share a bind: {binds}"
+    # Each worker still writes its own log, so an observation is attributable to one process.
+    assert len({launch.split(">>")[1] for launch in launches}) == 3, launches
 
 
 def test_live_stack_env_exports_required_defaults() -> None:

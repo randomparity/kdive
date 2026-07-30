@@ -17,8 +17,10 @@ docker compose ps --format 'table {{.Service}}\t{{.Status}}' \
 
 echo
 echo "=== host daemons ==="
-# $1 is the numeric PID column (drops the awk self-line + header); $2 is the username.
-ps -eo pid,user,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$/' || true
+# $1 is the numeric PID column (drops the awk self-line + header); $2 is the username. `-ww` for
+# the same reason lib.sh needs it: ps truncates to COLUMNS, and a checkout path plus the module
+# argument runs past 80 characters, so a narrow shell would report no daemons on a healthy stack.
+ps -ww -eo pid,user,args | awk -v re="$_daemon_match" '$0 ~ re && $1 ~ /^[0-9]+$/' || true
 echo
 report_build_stamps
 
