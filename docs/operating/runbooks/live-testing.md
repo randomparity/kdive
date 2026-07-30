@@ -353,10 +353,15 @@ arm is worthless against one worker, and it fails in exactly the silent way the
 old procedure did:
 
 ```bash
-pgrep -fa 'python -m kdive worker'
+pgrep -fa "$PWD/.venv/bin/python -m kdive worker"
 ```
 
-Two rows. The second worker binds its aux health listener on `:9470` rather than
+Two rows, and anchor the pattern on this checkout's interpreter as above — a bare
+`python -m kdive worker` also matches a worker left running from another worktree,
+which is how an operator gets two rows on a stack that started one worker and then
+drives the whole arm against serialized execution.
+
+The second worker binds its aux health listener on `:9470` rather than
 the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
 under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log. Leave
 `KDIVE_HEALTH_BIND_ADDR` unset: an explicit value applies to every process, so it
@@ -381,11 +386,17 @@ reports the holder and the waiter as two rows on one key:
 
 ```bash
 docker compose exec -T postgres psql -U kdive -d kdive -c "
-SELECT l.pid, l.granted, a.wait_event_type, a.wait_event, a.query
+SELECT l.classid, l.objid, l.pid, l.granted, a.wait_event_type, a.wait_event
   FROM pg_locks l JOIN pg_stat_activity a USING (pid)
  WHERE l.locktype = 'advisory' AND a.query LIKE '%pg_advisory_lock%'
  ORDER BY l.granted DESC"
 ```
+
+`classid`/`objid` are how Postgres exposes the advisory key, and the pass rule
+below needs them: other session advisory locks run on this cluster (the inventory
+reconcile's multi-transaction pass, ADR-0095 console-hosting leadership), so
+without the key columns two rows in this output are only co-occurring, not
+provably the same lock.
 
 (The compose backend carries `psql`; the host generally does not.)
 
@@ -396,9 +407,17 @@ would mean the lock ran and achieved nothing.
 
 | Assert | Where | Why it is required |
 |--------|-------|--------------------|
-| Two rows on one advisory key: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity` | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
-| The two provision jobs carry **different** `jobs.worker_id` values, claimed within milliseconds of each other | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' ORDER BY heartbeat_at DESC LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock row above was something else |
+| Two rows sharing one `(classid, objid)`: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity`, above | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
+| Two **running** provision jobs, both with a non-NULL `jobs.worker_id`, and the two values **different** | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' AND state = 'running' ORDER BY heartbeat_at DESC NULLS LAST LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock rows above were something else |
 | Exactly one `GetObject` for the rootfs key | `mc admin trace` at the store, per the "count downloads at the store" trap above | The dedup *outcome* the lock exists to produce, and the only place it is observable |
+
+The `state = 'running'` filter and the non-NULL requirement in row 2 are both
+load-bearing, and a query without them inverts the arm. An unclaimed job has a
+NULL `worker_id` and a NULL `heartbeat_at`, and Postgres sorts NULLs *first* under
+`DESC` — so on the one-worker stack this arm exists to detect, the plain query
+returns the still-`queued` job ahead of the running one, and their `worker_id`
+values differ because one of them is NULL. The check would pass on exactly the
+serialization it is meant to catch.
 
 Do not substitute a file count for that third row. Counting `.qcow2` files in the
 staging dir proves nothing: both fetchers download into a private
