@@ -225,6 +225,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correct ADR-0498's identical-outcome claim, amend 0455 §5
 - Condense the ADR-0499 index row to three sentences
 - Point ADR-0494's age-gate entry at ADR-0501
+- Trim the ADR-0500 index row and record its mutation checks
 
 ### Fixed
 
@@ -385,6 +386,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Answer a gated doc read as not-found, not code 0
 - Pin OTel sampler in gateway usage-recording e2e test (#1683)
 - Age the staging-drain lane on the investigation
+- Commit a Run's terminal transition with its job's dead-letter
 
 ### Build
 
