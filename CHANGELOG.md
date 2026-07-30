@@ -226,6 +226,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Condense the ADR-0499 index row to three sentences
 - Point ADR-0494's age-gate entry at ADR-0501
 - Trim the ADR-0500 index row and record its mutation checks
+- Record ADR-0502, a write lease closes the sweep's delete race
+- Re-point the two loss tests at the unleased path
 
 ### Fixed
 
@@ -389,6 +391,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Commit a Run's terminal transition with its job's dead-letter
 - Convert a malformed store reply at the boundary
 - Hold a present optional reply field to the same contract
+- Close the orphan sweep's delete/PUT race with a write lease
 - Pin the OTel sampler in one place, guard the constructor (#1693)
 
 ### Build
@@ -396,6 +399,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump the github-actions group with 2 updates
 - Bump the python-dependencies group with 4 updates
 - Bump the docker-images group across 1 directory with 2 updates
+
+### Style
+
+- Rewrap docstring paragraphs left ragged by the reflow
 
 ## [0.4.0] - 2026-07-23
 
