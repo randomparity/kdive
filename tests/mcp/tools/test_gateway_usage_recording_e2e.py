@@ -80,13 +80,22 @@ from fastmcp import Client
 from fastmcp.server.auth.providers.jwt import JWTVerifier
 from mcp.server.auth.middleware.auth_context import auth_context_var
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from opentelemetry import context as otel_context
+from opentelemetry.context import Context
 from opentelemetry.metrics import Meter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import Tracer
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    TraceFlags,
+    Tracer,
+    set_span_in_context,
+)
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
@@ -160,12 +169,17 @@ def _recorders() -> _Recorders:
     one's assertions. That set-once constraint is the whole reason ADR-0487 put the seam on
     ``build_app`` instead.
 
-    The sampler is ``TracerProvider``'s default rather than the facade's
-    ``ParentBased(TraceIdRatioBased(0.1))``, so a missing span below is a missing span
-    rather than a sampling decision that would make these assertions flaky at 1-in-10.
+    The sampler is pinned to ``ALWAYS_ON`` rather than left at ``TracerProvider``'s default
+    ``ParentBased(ALWAYS_ON)``. ``ParentBased`` honors the sampled flag of whatever context
+    happens to be ambient when a span opens, and an ``-n auto --dist worksteal`` worker can
+    still have another test's non-sampled parent context attached at that point (#1683):
+    against the default sampler, ``start_as_current_span`` then exports nothing and
+    ``SimpleSpanProcessor`` drops it silently, no different from any other missing span.
+    ``ALWAYS_ON`` ignores the ambient context entirely, so a missing span below is a missing
+    span rather than an inherited sampling decision.
     """
     span_exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider()
+    tracer_provider = TracerProvider(sampler=ALWAYS_ON)
     tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
     metric_reader = InMemoryMetricReader()
     meter_provider = MeterProvider(metric_readers=[metric_reader])
@@ -175,6 +189,47 @@ def _recorders() -> _Recorders:
         tracer=tracer_provider.get_tracer("kdive.mcp"),
         meter=meter_provider.get_meter("kdive.mcp"),
     )
+
+
+def _non_sampled_ambient_context() -> Context:
+    """A context carrying a non-recording parent span with the sampled flag unset.
+
+    Stands in for the ambient context an ``-n auto --dist worksteal`` worker can still have
+    attached when it picks up this test, left behind by whichever other test ran on the same
+    worker beforehand and does not clear it. ``trace_flags=TraceFlags.DEFAULT`` is the
+    "not sampled" bit; a ``ParentBased`` sampler propagates that decision to any span opened
+    while this context is current, which is the exact leak #1683 traced.
+    """
+    span_context = SpanContext(
+        trace_id=0x1,
+        span_id=0x1,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.DEFAULT),
+    )
+    return set_span_in_context(NonRecordingSpan(span_context))
+
+
+def test_recorders_survive_a_leaked_non_sampled_ambient_context() -> None:
+    """``_recorders()`` must not drop a span because some other test left a non-sampled
+    parent context attached to the worker process (#1683).
+
+    Reproduces the leak deterministically rather than by re-running the suite under
+    ``-n 4 --dist worksteal`` and hoping for the right interleaving: attach the same kind of
+    context a leaking test would leave behind, then open a span the same way
+    ``TelemetryMiddleware.on_call_tool`` does (``start_as_current_span`` under
+    ``SpanKind.SERVER``, ADR-0487). Against the unpinned ``TracerProvider()`` default this
+    span is silently dropped, which is what made the two ``span_names()`` assertions below
+    flaky under worker reordering; against ``sampler=ALWAYS_ON`` it is always recorded.
+    """
+    recorders = _recorders()
+    token = otel_context.attach(_non_sampled_ambient_context())
+    try:
+        with recorders.tracer.start_as_current_span("mcp.tool/probe"):
+            pass
+    finally:
+        otel_context.detach(token)
+
+    assert recorders.span_names() == ["mcp.tool/probe"]
 
 
 @contextlib.asynccontextmanager
