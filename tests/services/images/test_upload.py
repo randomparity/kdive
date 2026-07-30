@@ -6,7 +6,9 @@ to ``publish_image`` with ``visibility='private'``/``owner=project``. These test
 non-conforming image is rejected with a named reason while still quarantined (never registered);
 an over-cap upload is denied fail-closed and audited; two concurrent uploads cannot both pass the
 cap (held PROJECT lock); a registered private image resolves only within its owning project and
-shadows a same-identity public image there.
+shadows a same-identity public image there; and the publish refuses a connection that already
+opened a transaction, which would demote its lock to a savepoint held across the object-store
+PUT (ADR-0516).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 
 from kdive.artifacts import storage as artifact_types
 from kdive.config.core_settings import (
@@ -104,6 +107,32 @@ class _FakeStore:
 
 async def _connect(url: str) -> psycopg.AsyncConnection:
     return await psycopg.AsyncConnection.connect(url, autocommit=True)
+
+
+async def _connect_pooled_shape(url: str) -> psycopg.AsyncConnection:
+    """Connect the way an MCP tool handler's connection arrives: **non**-autocommit.
+
+    ``db/pool.py`` sets no ``autocommit``, so ``pool.connection()`` yields a connection on which
+    one bare statement silently opens a transaction that lives until the pool takes it back
+    (ADR-0506). The tests above use autocommit connections, where that state cannot arise.
+    """
+    return await psycopg.AsyncConnection.connect(url)
+
+
+async def _advisory_locks_held_by(url: str, backend_pid: int) -> int:
+    """Count advisory locks held by ``backend_pid``, probed from a **second** connection.
+
+    Probing from the connection under test would itself issue the statement that opens the
+    transaction being measured (ADR-0506).
+    """
+    async with await _connect(url) as probe, probe.cursor() as cur:
+        await cur.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = %s",
+            (backend_pid,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _quarantine(payload: bytes, key: str = "uploads/q/proj/rootfs.qcow2") -> _FakeStore:
@@ -465,6 +494,85 @@ def test_concurrent_uploads_cannot_both_pass_the_cap(
                 r for r in await IMAGE_CATALOG.list_all(conn) if r.state is ImageState.REGISTERED
             ]
             assert len(registered) == 1
+
+    asyncio.run(_run())
+
+
+def test_publish_refuses_a_connection_that_already_opened_a_transaction(migrated_url: str) -> None:
+    # The publish holds the PROJECT lock across the object-store PUT on purpose (fail-closed
+    # quota, ADR-0516). That only works if its `conn.transaction()` is a real one: on a
+    # non-autocommit connection with a statement already run, it would be a SAVEPOINT, whose
+    # release commits nothing and releases no advisory lock — so the PROJECT lock would be held
+    # to the *caller's* commit, well past the PUT (ADR-0506, ADR-0244). No caller does this
+    # today, which is exactly why it is guarded rather than left to hold by luck; the dirty case
+    # is constructed here deliberately.
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    store = _quarantine(b"conforming-rootfs")
+
+    async def _run() -> None:
+        async with await _connect_pooled_shape(migrated_url) as conn:
+            await conn.execute("SELECT 1")  # one bare read is all it takes
+            assert conn.info.transaction_status is TransactionStatus.INTRANS
+            with pytest.raises(RuntimeError, match="needs a transaction-free connection"):
+                await _register(conn, store)
+            await conn.rollback()
+            # Refused *before* the publish: no object written, no catalog row.
+            assert store.puts == []
+            assert await IMAGE_CATALOG.list_all(conn) == []
+
+    asyncio.run(_run())
+
+
+def test_publish_accepts_a_clean_pooled_connection_and_releases_the_lock(migrated_url: str) -> None:
+    # The live MCP shape: `_register_upload` takes a fresh `pool.connection()` (non-autocommit)
+    # and runs nothing on it before calling in. The guard must not fire there — a check that
+    # rejects every legitimate call is worse than none — and the PROJECT lock must be gone once
+    # the publish returns, which is the property the guard exists to keep true.
+    store = _quarantine(b"conforming-rootfs")
+
+    from kdive.db.repositories import IMAGE_CATALOG
+
+    async def _run() -> None:
+        async with await _connect_pooled_shape(migrated_url) as conn:
+            entry = await _register(conn, store)
+            assert entry.state is ImageState.REGISTERED
+            assert store.puts != []
+            # The publish's transaction really committed and really ended: the row is visible to
+            # a *different* connection, and the lock it took is released. A savepoint would leave
+            # the row invisible and the lock held.
+            async with await _connect(migrated_url) as observer:
+                assert [r.id for r in await IMAGE_CATALOG.list_all(observer)] == [entry.id]
+            assert await _advisory_locks_held_by(migrated_url, conn.info.backend_pid) == 0
+
+    asyncio.run(_run())
+
+
+def test_quota_denial_is_audited_durably_on_a_pooled_connection(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The denial path opens a *second* `conn.transaction()` (`_audit_denial`) after the locked one
+    # has closed. On the live MCP shape that connection is non-autocommit, so this pins that the
+    # denial audit really commits there rather than deferring to the caller — the existing denial
+    # tests read the row back on their own autocommit connection, which cannot tell the two apart
+    # (ADR-0506, ADR-0516). The connection is left untouched before the call so the new
+    # top-level-transaction guard does not fire first.
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "1")
+    store = _quarantine(b"rootfs-a")
+    store._objects["uploads/q/proj/b.qcow2"] = b"rootfs-b"  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _register(seed, store, name="first")
+        async with await _connect_pooled_shape(migrated_url) as conn:
+            with pytest.raises(CategorizedError) as err:
+                await _register(conn, store, name="second", quarantine_key="uploads/q/proj/b.qcow2")
+            assert err.value.category is ErrorCategory.QUOTA_EXCEEDED
+            # Both transactions ended, so nothing is left open to defer the audit to.
+            assert conn.info.transaction_status is TransactionStatus.IDLE
+        # Durable: the denial row is readable from a connection that never saw the upload.
+        async with await _connect(migrated_url) as observer:
+            assert await _denial_rows(observer) == 1
 
     asyncio.run(_run())
 
