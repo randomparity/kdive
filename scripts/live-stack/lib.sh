@@ -143,8 +143,16 @@ configured_worker_count() {
     echo "KDIVE_WORKER_COUNT must be a positive integer, got '${count}'" >&2
     return 1
   }
-  ((count <= MAX_WORKER_COUNT)) || {
-    echo "KDIVE_WORKER_COUNT=${count} exceeds the ceiling of ${MAX_WORKER_COUNT}. Each worker is a" >&2
+  # BOTH ends, deliberately. The regex above bounds sign and format but NOT magnitude, and bash
+  # arithmetic is 64-bit signed — so a value past int64 wraps, and a one-sided `<=` accepted every
+  # value that wrapped below zero (2^63 lands on INT64_MIN, 2^64 lands on 0). That did not merely
+  # skip the bound: the unwrapped string flowed on to the launch loop, whose `index <= count` ran
+  # zero times, and to `DAEMON_COUNT="$((2 + count))"`, which went negative and made the settle
+  # gate's `alive < DAEMON_COUNT` unreachable. A stack with no workers then took the SURPLUS branch
+  # below and reported one for a condition that was not occurring.
+  ((count >= 1 && count <= MAX_WORKER_COUNT)) || {
+    echo "KDIVE_WORKER_COUNT=${count} is outside 1..${MAX_WORKER_COUNT}. A value past the ceiling —" >&2
+    echo "or one so large it wraps bash's signed 64-bit arithmetic — is refused: each worker is a" >&2
     echo "root process with its own database pool and aux health port; the live-testing runbook's" >&2
     echo "contention arm needs 2. Raise MAX_WORKER_COUNT in lib.sh if you genuinely need more." >&2
     return 1
@@ -199,7 +207,9 @@ start_worker() {
     # KDIVE_S3_ENDPOINT_URL — without these a relocated KDIVE_POSTGRES_PORT/KDIVE_MINIO_PORT would
     # leave the worker connecting to the default host ports (nothing published there) while the
     # same-user server/reconciler use the overridden ones. The health-bind export lands AFTER the
-    # env.sh source so it overrides, not precedes, that file's defaulting.
+    # env.sh source so the export is the last writer. That ordering is INERT today — env.sh never
+    # mentions KDIVE_HEALTH_BIND_ADDR — and it is kept only because it costs nothing and would
+    # become load-bearing the moment env.sh grew a `:-` default for it, like the vars above.
     [[ -n "$health_bind" ]] && health_export="export KDIVE_HEALTH_BIND_ADDR='${health_bind}' && "
     sudo bash -c "cd '${repo_root}' \
       && export KDIVE_KERNEL_SRC='${kernel_src}' KDIVE_BUILD_USER='${build_user}' \
@@ -313,7 +323,12 @@ wait_for_daemons_to_settle() {
 # for the shortfall.
 require_workers_alive() {
   local want="$1" have
-  have="$(worker_pids | grep -c . || true)"
+  # ONE scan, reused. Counting with one `ps` and printing the pid list with a second let a worker
+  # exit between them, so the message could report a count its own pid list contradicted — and
+  # that list is what the remedy below tells the operator to act on.
+  local -a pids
+  mapfile -t pids < <(worker_pids)
+  have="${#pids[@]}"
   ((have == want)) && return 0
   # Exact, not `>=`. A surplus is the failure this function was written about: stop_daemons warns
   # and returns 0 after ten seconds, and a worker does not act on SIGTERM until its job ends — so
@@ -323,13 +338,23 @@ require_workers_alive() {
   # count exists to prevent. The two directions need different remedies, so they say different
   # things.
   if ((have > want)); then
+    # The remedy is deliberately NOT down.sh. It calls this same stop_daemons — one SIGTERM, a
+    # ten-second poll, a WARN, `return 0`, no escalation — so the survivor this message is about
+    # outlives it exactly as it outlived bring-up, and the compose backends come down for nothing.
+    # (`--yes` gates only the --wipe prompt, so `down.sh --yes` is `down.sh` here.) Escalating
+    # inside stop_daemons was rejected: it runs on EVERY bring-up, and SIGKILLing a worker parked
+    # in a provision abandons its libvirt domain and qcow2 overlay, which nothing outside
+    # `down.sh --wipe` reaps. Waiting vs. killing is the operator's call, so state both.
     {
       echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
       echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
       echo "  until its current job ends, and the ten-second wait only warns. It may be running"
-      echo "  older code, and it masks a new worker that failed to start. Stop them and re-run:"
-      echo "    scripts/live-stack/down.sh --yes"
-      echo "  Live worker pids: $(worker_pids | tr '\n' ' ')"
+      echo "  older code, and it masks a new worker that failed to start."
+      echo "  Live worker pids: ${pids[*]}"
+      echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
+      echo "  gives up the same way. Either wait for the in-flight job to finish and re-run, or"
+      echo "  end those processes yourself (they are root unless KDIVE_WORKER_AS_ROOT=0):"
+      echo "    sudo kill -9 ${pids[*]}"
     } >&2
     return 1
   fi
