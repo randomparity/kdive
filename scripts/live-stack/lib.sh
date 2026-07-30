@@ -47,6 +47,14 @@ daemon_pids() {
   ps -eo pid=,comm=,args= | awk -v re="$_daemon_match" '$2 ~ /^python/ && $0 ~ re {print $1}'
 }
 
+# The worker subset of daemon_pids(), one pid per line. There is no per-worker identity in the
+# argv — every worker runs the same `-m kdive worker` — so this counts them rather than naming
+# them, which is all the build-stamp header needs to expose a stale log.
+worker_pids() {
+  ps -eo pid=,comm=,args= | awk -v re='[.]venv/bin/python -m kdive worker' \
+    '$2 ~ /^python/ && $0 ~ re {print $1}'
+}
+
 stop_daemons() {
   local pids pid owner
   mapfile -t pids < <(daemon_pids)
@@ -121,22 +129,21 @@ configured_worker_count() {
 #
 # uvicorn's bind is exclusive, so a second worker inheriting the first one's port dies at startup
 # instead of claiming jobs — the failure this override exists to prevent. Worker 1 keeps the
-# untouched environment so it lands on whatever ADR-0090 §5 resolves for it: the registered
-# per-process default 9465, where the ADR-0482 skew preflight probes, or an explicit
-# KDIVE_HEALTH_BIND_ADDR, which wins for every process.
+# untouched environment so it lands on the registered per-process default 9465, where the ADR-0482
+# skew preflight probes for it. Extras are numbered from their own base, clear of the whole
+# registered block (server 9464, worker 9465, reconciler 9466), so worker 2 does not land on the
+# reconciler.
 #
-# Extras step off WORKER 1's resolved port, not off a constant — an operator who sets
-# KDIVE_HEALTH_BIND_ADDR would otherwise have their port honored for worker 1 and silently
-# discarded for the rest, landing two workers on one port again if the value they chose happened
-# to be the constant. The gap clears the whole registered block (server 9464, worker 9465,
-# reconciler 9466) so the default stack's worker 2 does not land on the reconciler.
-EXTRA_WORKER_HEALTH_PORT_GAP=5
+# This is a fixed base rather than an offset from worker 1's *resolved* port because an explicit
+# KDIVE_HEALTH_BIND_ADDR is refused outright above one worker (see restart_host_processes) — so
+# worker 1's resolved port is always this default, and deriving from it would only add a way for
+# an operator-chosen base to walk the extras onto the server's and reconciler's ports.
+EXTRA_WORKER_HEALTH_PORT_BASE=9470
 
 extra_worker_health_bind() {
-  local index="$1" addr
+  local index="$1"
   ((index > 1)) || return 0
-  addr="${KDIVE_HEALTH_BIND_ADDR:-127.0.0.1:9465}"
-  printf '%s:%s' "${addr%:*}" "$((${addr##*:} + EXTRA_WORKER_HEALTH_PORT_GAP + index - 2))"
+  printf '127.0.0.1:%s' "$((EXTRA_WORKER_HEALTH_PORT_BASE + index - 2))"
 }
 
 # Log file for worker <index>. Worker 1 keeps the historical unsuffixed name so the runbooks and
@@ -190,6 +197,21 @@ restart_host_processes() {
   local kernel_src="${KDIVE_KERNEL_SRC:-${HOME}/src/linux}"
   local worker_count index
   worker_count="$(configured_worker_count)" || return 1
+  # An explicit KDIVE_HEALTH_BIND_ADDR wins for EVERY process (ADR-0090 §5), so it already
+  # collapses server, reconciler and worker 1 onto one exclusive uvicorn port — a layout this
+  # bring-up cannot satisfy at any worker count. Refuse the combination rather than pick a base
+  # for the extras: honouring the operator's port would walk them onto the registered server and
+  # reconciler defaults, and ignoring it would silently discard the setting for every worker but
+  # the first. Neither is a stack that comes up, so say which knob to drop.
+  if ((worker_count > 1)) && [[ -n "${KDIVE_HEALTH_BIND_ADDR:-}" ]]; then
+    {
+      echo "ERROR: KDIVE_WORKER_COUNT=${worker_count} and KDIVE_HEALTH_BIND_ADDR are incompatible."
+      echo "  An explicit health bind applies to every process, so the daemons would race one"
+      echo "  aux port and all but one would exit at startup. Unset KDIVE_HEALTH_BIND_ADDR to run"
+      echo "  more than one worker; each worker past the first then binds from ${EXTRA_WORKER_HEALTH_PORT_BASE}."
+    } >&2
+    return 1
+  fi
   [[ -x "$py" ]] || {
     echo "no venv python at ${py}; run 'just setup' first" >&2
     return 1
@@ -232,6 +254,13 @@ wait_for_daemons_to_settle() {
       echo "kdive host processes exited during startup (${alive}/${DAEMON_COUNT} alive)" >&2
       echo "check ${log_dir}/*.log — 'no database connection within' means the backend was" >&2
       echo "unreachable, or its credentials or database name are wrong" >&2
+      # Above one worker there is a second cause with a very different remedy, and each worker
+      # writes its own log so the failing one is identifiable. A worker whose aux port is held by
+      # something foreign dies on an exclusive uvicorn bind, which leaves a bind traceback rather
+      # than a database message — and the stack silently comes up with fewer workers than asked
+      # for, which is the single-worker serialization a multi-worker run exists to escape.
+      echo "on a multi-worker stack, an 'address already in use' traceback in one worker's own" >&2
+      echo "log means its aux health port (${EXTRA_WORKER_HEALTH_PORT_BASE} and up) is taken, not that the backend is down" >&2
       return 1
     fi
   done
@@ -244,13 +273,18 @@ wait_for_daemons_to_settle() {
 # The worker set comes from the log directory, not from KDIVE_WORKER_COUNT. status.sh is a bare
 # read-only command an operator runs in a fresh shell long after bring-up, where that variable is
 # gone — reading it there would report one worker for a stack started with several, which is the
-# exact blind spot this per-worker reporting exists to close. A row whose stamp is stale relative
-# to the `=== host daemons ===` process list above it is visible; a row that was never printed is
-# not.
+# exact blind spot this per-worker reporting exists to close.
+#
+# Logs outlive processes, though: nothing prunes them, and the root launch appends, so a stack
+# brought up with two workers and then with one leaves a `worker-root-2.log` whose last stamp still
+# reads. Enumerating files alone would report that dead worker as live — the same blindness in the
+# other direction. So the header states how many worker processes are ACTUALLY running: a row count
+# above it means at least one row is a stale log, not a worker.
 report_build_stamps() {
-  local head_sha log found=0 name
+  local head_sha log found=0 name live
   head_sha="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || echo '?')"
-  echo "=== build stamps (expect g${head_sha}) ==="
+  live="$(worker_pids | grep -c . || true)"
+  echo "=== build stamps (expect g${head_sha}; ${live} worker process(es) live) ==="
   _report_build_stamp server "${log_dir}/server.log"
   _report_build_stamp reconciler "${log_dir}/reconciler.log"
   # Each row is labelled by its own log's name rather than by a running counter, so the label

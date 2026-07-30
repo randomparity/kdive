@@ -126,14 +126,6 @@ def test_configured_worker_count_defaults_to_one_and_rejects_nonsense() -> None:
         assert "positive integer" in result.stderr
 
 
-def _worker_binds(count: int, **env: str) -> list[str]:
-    """The effective aux bind of workers 1..count, with worker 1 resolved as ADR-0090 §5 would."""
-    worker_1 = env.get("KDIVE_HEALTH_BIND_ADDR", f"127.0.0.1:{PROCESS_DEFAULT_PORTS['worker']}")
-    return [worker_1] + [
-        _lib(f"extra_worker_health_bind {index}", **env).stdout for index in range(2, count + 1)
-    ]
-
-
 def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> None:
     """Worker 1 keeps the process default; extras must not land on ANOTHER process's port.
 
@@ -152,22 +144,30 @@ def test_extra_workers_get_health_ports_clear_of_the_registered_defaults() -> No
     )
 
 
-def test_extra_worker_binds_step_off_an_explicit_operator_bind() -> None:
-    """An explicit KDIVE_HEALTH_BIND_ADDR wins for worker 1, so extras must offset from ITS port.
+def test_multiple_workers_refuse_an_explicit_health_bind() -> None:
+    """An explicit bind wins for EVERY process, so it cannot coexist with more than one worker.
 
-    Deriving extras from a constant instead put worker 2 back on worker 1's port whenever the
-    operator's chosen value happened to equal that constant — the exact bind collision the
-    override exists to prevent, reintroduced only under an explicit setting.
+    Both accommodations are wrong: honouring the operator's port walks the extras onto the
+    registered server and reconciler defaults, and ignoring it silently discards the setting for
+    every worker but the first. Neither yields a stack that comes up, so bring-up must refuse and
+    name the knob to drop rather than start workers that die on an exclusive bind.
     """
-    for explicit in ("127.0.0.1:9470", "127.0.0.1:9471", "0.0.0.0:9500"):
-        binds = _worker_binds(4, KDIVE_HEALTH_BIND_ADDR=explicit)
-        assert len(set(binds)) == len(binds), f"{explicit}: workers share a bind: {binds}"
-        assert all(b.startswith(explicit.rsplit(":", 1)[0] + ":") for b in binds), (
-            f"{explicit}: extras must keep the operator's host: {binds}"
-        )
-    # And the default configuration stays pairwise distinct from the other processes' defaults.
-    binds = _worker_binds(4)
-    assert len(set(binds)) == len(binds), binds
+    result = _lib(
+        'py="/nonexistent/python"\nrestart_host_processes\n',
+        KDIVE_WORKER_COUNT="2",
+        KDIVE_HEALTH_BIND_ADDR="127.0.0.1:9500",
+    )
+    assert result.returncode != 0, "the combination must be refused"
+    assert "KDIVE_HEALTH_BIND_ADDR" in result.stderr, result.stderr
+    assert "Unset KDIVE_HEALTH_BIND_ADDR" in result.stderr, "the message must name the remedy"
+    # One worker with an explicit bind is the pre-existing single-process case and stays allowed:
+    # it must fail later (on the stub interpreter), not on this guard.
+    single = _lib(
+        'py="/nonexistent/python"\nrestart_host_processes\n',
+        KDIVE_WORKER_COUNT="1",
+        KDIVE_HEALTH_BIND_ADDR="127.0.0.1:9500",
+    )
+    assert "KDIVE_HEALTH_BIND_ADDR" not in single.stderr, single.stderr
 
 
 def test_worker_log_paths_are_distinct_and_keep_the_first_unsuffixed() -> None:
