@@ -1,4 +1,4 @@
-"""Project-private upload registration (ADR-0093, issue #286).
+"""Project-private upload registration (ADR-0093, ADR-0516, issue #286).
 
 A developer uploads a custom rootfs through the ADR-0048 ingest, which lands the bytes as a
 *quarantined* object (its guest contract unverified, its scope not yet owner-bound).
@@ -39,7 +39,7 @@ from kdive.config.core_settings import (
     IMAGE_PRIVATE_MAX_BYTES,
     IMAGE_PRIVATE_MAX_COUNT,
 )
-from kdive.db.locks import LockScope, advisory_xact_lock
+from kdive.db.locks import LockScope, advisory_xact_lock, require_top_level_transaction
 from kdive.domain.catalog.image_format import ImageFormat
 from kdive.domain.catalog.images import ImageCatalogEntry, ImageState, ImageVisibility
 from kdive.domain.errors import CategorizedError, ErrorCategory
@@ -222,8 +222,10 @@ async def register_private_upload(
     uploading ``principal`` is recorded only for audit attribution.
 
     Args:
-        conn: An async Postgres connection (autocommit; this function opens its own transaction
-            to hold the project lock).
+        conn: An async Postgres connection with **no transaction open** — this function opens its
+            own to hold the project lock across the publish, and a savepoint would not scope the
+            lock to it. An autocommit connection, or a freshly checked-out pooled one on which
+            nothing has run yet, satisfies this.
         store: The object store holding the quarantined object and receiving the published image.
         request: The upload identity, owning project, source key, expiry, and required guest
             contract tags.
@@ -237,6 +239,7 @@ async def register_private_upload(
         CategorizedError: ``QUOTA_EXCEEDED`` (audited) if a cap would be breached;
             ``CONFIGURATION_ERROR`` if the image fails its guest contract or its bytes do not hash
             to the computed digest; ``STALE_HANDLE``/``INFRASTRUCTURE_FAILURE`` from the store.
+        RuntimeError: ``conn`` already has a transaction open when the publish is reached.
     """
     # Validate the identity components before any filesystem or object-key use: `arch`/`name`/
     # `provider` are folded into the staged temp path and the object key, so a `/`-bearing value
@@ -304,10 +307,16 @@ async def _publish_under_quota(
     separate transaction before raising, so an over-cap upload is denied **and** audited. The
     lock is held across the count/bytes read and the publish, so two concurrent uploads cannot
     both pass the cap.
+
+    The publish writes the image object, so the transaction must be a real one and not a
+    savepoint: a savepoint would hold the PROJECT lock to the caller's own commit — past the PUT
+    rather than to the end of the quota window. Every caller supplies a statement-free connection
+    today, but that is a property of the callers, so it is asserted (ADR-0516, ADR-0506).
     """
     project = request.owner
     if project is None:  # Invariant: this path always sets owner to the project.
         raise RuntimeError("private upload has no owning project")
+    require_top_level_transaction(conn, "the private-upload publish")
     async with conn.transaction(), advisory_xact_lock(conn, LockScope.PROJECT, project):
         count, used_bytes = await _project_usage(conn, project, store)
         denial = _quota_denial(
