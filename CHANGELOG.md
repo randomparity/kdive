@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Yield listing pages instead of one flattened root
 - Add a worker-count knob for real job concurrency
 - Add the restore_incomplete failure category
+- Gate PRs on strictly ascending migration numbers
 
 ### Changed
 
@@ -439,6 +440,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tighten the upload-lock record and pin the denial commit
 - Report capped when a refresh grants nothing
 - Stop the capped warning naming the wrong cause
+- Close two silent-pass paths in the migration-ordering guard
+- Fail the migration guard on an empty schema dir and stop guessing remotes
 
 ### Build
 
