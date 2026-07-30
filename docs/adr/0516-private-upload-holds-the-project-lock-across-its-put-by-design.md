@@ -101,10 +101,12 @@ and safe-by-pattern groups with a reason each instead of leaving them silent.
 
 ### 4. This closes ADR-0506's deferred scope for this site only
 
-Two of the 18 are now classified — `services/images/upload.py` (top-level, asserted) and
-`mcp/tools/catalog/artifacts/uploads.py` (demoted, spans no I/O) — plus
-`complete_rootfs_upload.py` recorded above as demoted over a bounded `head`. The remaining
-server-path sites stay unclassified, and the async worker path is out of scope entirely: #1725
+Four of the 18 are now classified: `services/images/upload.py` (top-level, and now asserted),
+`mcp/tools/catalog/artifacts/uploads.py` (demoted, spans only local signing),
+`mcp/tools/lifecycle/investigations/complete_rootfs_upload.py` (demoted over one bounded `head`),
+and `services/runs/complete_build.py` (demoted across a real write, deliberately and already
+documented as such — characterised in Context, not changed). The remaining 14 stay unclassified,
+and the async worker path is out of scope entirely: #1725
 covers `jobs/handlers/control/diagnostic_sysrq.py` and `capture_traffic.py`, which do hold a lock
 across a real `put_artifact`, on connections the worker's `set_autocommit(True)` dispatch makes
 top-level.
@@ -121,20 +123,24 @@ top-level.
   On the MCP path that surfaces as a `RuntimeError` escaping `_register_upload`'s
   `except CategorizedError`, so it becomes an internal error rather than a typed envelope — which
   is the right shape for a programming error in the caller, not a condition an agent can act on.
-- Two tests are added to `tests/services/images/test_upload.py`, and they are the first there to
+- Three tests are added to `tests/services/images/test_upload.py`, and they are the first there to
   use a **non-autocommit** connection — the shape ADR-0506 found the promotion tests were missing.
-  The 19 that preceded them connect with `autocommit=True`, where `transaction_status` is `IDLE`
-  and the trap cannot arise, which is why nothing in the suite would have caught a caller
-  dirtying the connection. New tests about lock lifetime or commit boundaries in this file must
-  use `_connect_pooled_shape`, not `_connect`.
+  The 16 that preceded them either open no connection at all or connect with `autocommit=True`,
+  where `transaction_status` is `IDLE` and the trap cannot arise, which is why nothing in the
+  suite would have caught a caller dirtying the connection. New tests about lock lifetime or
+  commit boundaries in this file must use `_connect_pooled_shape`, not `_connect`.
 - The guard test was mutation-verified: with the `require_top_level_transaction` line deleted it
   fails with `DID NOT RAISE RuntimeError`, and it is the only test that fails, so no other test is
   silently pinning it.
 - The positive-control test reads `pg_locks` from a **second** connection filtered to the
   publish's backend pid, for the reason ADR-0506 gives: probing from the connection under test
-  would itself issue the statement that opens the transaction being measured. It asserts zero
-  advisory locks held after `register_private_upload` returns — the property the guard exists to
-  keep true, rather than the guard itself.
+  would itself issue the statement that opens the transaction being measured. It asserts both
+  halves of "the transaction was real" from that observer — the published row is visible to it,
+  and zero advisory locks remain on the publish's backend. That is the property the guard exists
+  to keep true, rather than the guard itself. The third test pins the same boundary on the
+  **denial** path, where `_audit_denial` opens a second transaction after the locked one closes:
+  the existing denial tests read the audit row back on their own autocommit connection, which
+  cannot distinguish a commit from a savepoint.
 - No schema, migration, config, tool schema, RBAC rule or agent-visible string changes. No new
   dependency.
 - The PROJECT lock still spans N `store.head` calls plus a multi-GiB PUT. That is accepted here
@@ -163,9 +169,14 @@ top-level.
   Possible, by taking a second connection for the resolve. It buys nothing: the block spans no
   external I/O, so the only effect of the demotion is a longer hold on the owner lock within one
   request, and it would add a pool checkout per presign call.
-- **Assert at the entry of `register_private_upload` instead.** Reads better and covers the public
-  function rather than a private helper. Rejected in §1: it would pass while an edit between the
-  two functions demoted the transaction, guarding the wrong instant.
+- **Assert at the entry of `register_private_upload` instead.** Reads better, covers the public
+  function rather than a private helper, and would fail *cheaply* — before the artifact is pulled
+  into memory, hashed, staged, and probed by libguestfs, all of which a dirtied caller now pays
+  for before the `RuntimeError`. Rejected as a *replacement* for the check in §1, which is the
+  one that cannot drift: an entry check would still pass if an edit inserted a read between the
+  two functions. The two are not exclusive and an entry check could be added later; it is left
+  out because the path it makes cheaper is a caller programming error that should not be
+  happening at all, and one check is easier to keep meaningful than two.
 - **Make pooled connections autocommit**, which removes the trap tree-wide. ADR-0506 rejected this
   as out of scope for a bugfix — it changes the semantics of 195 `conn.transaction()` sites,
   including paths that rely on an enclosing transaction rolling back a multi-statement failure —

@@ -531,14 +531,48 @@ def test_publish_accepts_a_clean_pooled_connection_and_releases_the_lock(migrate
     # the publish returns, which is the property the guard exists to keep true.
     store = _quarantine(b"conforming-rootfs")
 
+    from kdive.db.repositories import IMAGE_CATALOG
+
     async def _run() -> None:
         async with await _connect_pooled_shape(migrated_url) as conn:
             entry = await _register(conn, store)
             assert entry.state is ImageState.REGISTERED
             assert store.puts != []
-            # The publish's transaction really committed and really ended, so the lock it took
-            # is released. A savepoint would leave it held here.
+            # The publish's transaction really committed and really ended: the row is visible to
+            # a *different* connection, and the lock it took is released. A savepoint would leave
+            # the row invisible and the lock held.
+            async with await _connect(migrated_url) as observer:
+                assert [r.id for r in await IMAGE_CATALOG.list_all(observer)] == [entry.id]
             assert await _advisory_locks_held_by(migrated_url, conn.info.backend_pid) == 0
+
+    asyncio.run(_run())
+
+
+def test_quota_denial_is_audited_durably_on_a_pooled_connection(
+    migrated_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The denial path opens a *second* `conn.transaction()` (`_audit_denial`) after the locked one
+    # has closed. On the live MCP shape that connection is non-autocommit, so this pins that the
+    # denial audit really commits there rather than deferring to the caller — the existing denial
+    # tests read the row back on their own autocommit connection, which cannot tell the two apart
+    # (ADR-0506, ADR-0516). The connection is left untouched before the call so the new
+    # top-level-transaction guard does not fire first.
+    monkeypatch.setenv(IMAGE_PRIVATE_MAX_COUNT.name, "1")
+    store = _quarantine(b"rootfs-a")
+    store._objects["uploads/q/proj/b.qcow2"] = b"rootfs-b"  # noqa: SLF001 - test seam
+
+    async def _run() -> None:
+        async with await _connect(migrated_url) as seed:
+            await _register(seed, store, name="first")
+        async with await _connect_pooled_shape(migrated_url) as conn:
+            with pytest.raises(CategorizedError) as err:
+                await _register(conn, store, name="second", quarantine_key="uploads/q/proj/b.qcow2")
+            assert err.value.category is ErrorCategory.QUOTA_EXCEEDED
+            # Both transactions ended, so nothing is left open to defer the audit to.
+            assert conn.info.transaction_status is TransactionStatus.IDLE
+        # Durable: the denial row is readable from a connection that never saw the upload.
+        async with await _connect(migrated_url) as observer:
+            assert await _denial_rows(observer) == 1
 
     asyncio.run(_run())
 

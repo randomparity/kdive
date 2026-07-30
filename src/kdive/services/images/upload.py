@@ -308,16 +308,10 @@ async def _publish_under_quota(
     lock is held across the count/bytes read and the publish, so two concurrent uploads cannot
     both pass the cap.
 
-    The publish writes the image object, so this transaction must be a real one: on a connection
-    already in a transaction ``conn.transaction()`` opens a savepoint, whose release commits
-    nothing and releases no advisory lock, and the PROJECT lock would then be held to the
-    caller's own commit — past the object-store PUT rather than to the end of the quota window
-    (ADR-0516, ADR-0506). Today every caller supplies a statement-free connection, but that is a
-    property of the callers, not of this function, so it is asserted rather than assumed.
-
-    Raises:
-        RuntimeError: ``conn`` already has a transaction open, so the lock would not be scoped to
-            this block.
+    The publish writes the image object, so the transaction must be a real one and not a
+    savepoint: a savepoint would hold the PROJECT lock to the caller's own commit — past the PUT
+    rather than to the end of the quota window. Every caller supplies a statement-free connection
+    today, but that is a property of the callers, so it is asserted (ADR-0516, ADR-0506).
     """
     project = request.owner
     if project is None:  # Invariant: this path always sets owner to the project.
