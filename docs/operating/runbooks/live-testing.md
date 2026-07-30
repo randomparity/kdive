@@ -353,13 +353,17 @@ arm is worthless against one worker, and it fails in exactly the silent way the
 old procedure did:
 
 ```bash
-pgrep -fa "$PWD/.venv/bin/python -m kdive worker"
+scripts/live-stack/status.sh
 ```
 
-Two rows, and anchor the pattern on this checkout's interpreter as above — a bare
-`python -m kdive worker` also matches a worker left running from another worktree,
-which is how an operator gets two rows on a stack that started one worker and then
-drives the whole arm against serialized execution.
+The `=== build stamps ===` header must read `2 worker process(es) live`, and both
+worker rows must carry the same build stamp. That count comes from the same
+matcher bring-up asserts against: it resolves `KDIVE_PYTHON` and is scoped to this
+checkout, so it does not count a worker left running from another worktree — which
+is how an operator otherwise gets two rows on a stack that started one worker and
+then drives the whole arm against serialized execution. (Bring-up now fails rather
+than exiting 0 on the wrong count, so reaching this step at all is a good sign;
+read it anyway, since it also catches a stack that lost a worker afterwards.)
 
 The second worker binds its aux health listener on `:9470` rather than
 the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
@@ -371,10 +375,15 @@ rather than starting workers that die on an exclusive bind.
 Drive it as the Reuse arm — one investigation, one uploaded rootfs, two
 `systems.provision` calls issued together — with two changes:
 
-- **Use a rootfs no run has staged before.** Staging is content-addressed, so a
-  checksum already present under `/var/lib/kdive/rootfs-uploads/<investigation>/`
-  is served by the reuse fast path and never takes the lock. Generate a unique
-  image per run.
+- **Use a rootfs no run has staged before, on the identity lane.** Staging is
+  content-addressed, so a checksum already present under
+  `/var/lib/kdive/rootfs-uploads/<investigation>/` is served by the reuse fast path
+  and never takes the lock. Generate a unique image per run, and declare the upload
+  with no transport `encoding`. The gzip lane streams the object as a sequence of
+  ranged GETs rather than one whole-object GET, so the request count in the third
+  assert below stops meaning anything — a correct run would look like hundreds of
+  downloads. (This is why the arm does not reuse the oversized catalog image the
+  Reuse arm's trap routes onto the gzip lane.)
 - **Make the download long enough to observe.** The lock is held across the
   object-store fetch, so the contention window is the download. A ~1.4 GiB
   incompressible qcow2 gives a window of several seconds against local MinIO —
@@ -446,7 +455,7 @@ build-stamped identically): all three rows pass.
 
 | | Observed |
 |---|---|
-| Claim | Both provision jobs claimed at `18:13:36.979407`, the same microsecond, by `homer…:1194523` and `homer…:1194534` — the two live worker pids |
+| Claim | Both provision jobs held by different workers — `jobs.worker_id` read `homer…:1194523` and `homer…:1194534`, the two live worker pids. (Their `heartbeat_at` was read after both jobs had finished, so it is a last-heartbeat time, not a claim time; the distinct `worker_id` values are the assertion, and the lock timings below are what bound the overlap.) |
 | Lock | `18:13:37.009654` pid 244 takes `(classid, objid) = (486701297, 24917193)`, `granted=t`; 237 µs later pid 245 blocks on the same key, `granted=f`, `wait_event_type=Lock`, `wait_event=advisory` |
 | Download | One `s3.GetObject` for the rootfs key, `18:13:37.015`→`18:13:39.545`, `200 OK`, ↓ 1.4 GiB in 2.53 s. The whole trace holds exactly one `GetObject` and one `HeadObject` for that key |
 | Teardown | `investigations.close` with `force`, then the sweep at `KDIVE_INVESTIGATION_CLEANUP_GRACE_DAYS=0`: `reclaim_investigation_rootfs` reached `succeeded`, and the staging dir, the object, and the `artifacts` row are gone with `rootfs_cleanup_pending_at` cleared |
