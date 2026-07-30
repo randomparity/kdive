@@ -27,6 +27,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import kdive.config as config
+from kdive.artifacts.write_lease import reap_stale_write_leases as _reap_stale_write_leases
 from kdive.config.core_settings import (
     IMAGE_PUBLISH_GRACE,
     UPLOAD_ORPHAN_GRACE,
@@ -427,6 +428,11 @@ _REPAIR_CATALOG: tuple[_RepairCatalogEntry, ...] = (
             )
         ),
     ),
+    # Runs before the orphan sweep, whose classify honours a lease only while its holder is live —
+    # so this pass never removes a fence the very next repair was relying on (ADR-0502). It collects
+    # for table growth, not for exposure: capture_handler's `except` releases no lease, so every
+    # failed capture leaves a row whose holder has stopped running.
+    _RepairCatalogEntry("stale_write_leases", lambda _r, _c, _g: _reap_stale_write_leases),
     _RepairCatalogEntry("abandoned_uploads", _abandoned_uploads_repair),
     # Runs after the reaper so a window reaped this pass is already row-less. It is the reclaim
     # threshold (orphan grace *plus* the upload TTL), not the ordering, that keeps a

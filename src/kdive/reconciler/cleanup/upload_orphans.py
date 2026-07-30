@@ -25,9 +25,16 @@ import psycopg
 from psycopg import AsyncConnection
 
 from kdive.artifacts.storage import HeadResult, ObjectListing
-from kdive.artifacts.upload_manifest import UPLOAD_TENANT
+from kdive.artifacts.upload_manifest import (
+    UPLOAD_OWNER_KINDS,
+    UPLOAD_TENANT,
+    UploadOwnerKind,
+    lock_scope_for,
+)
+from kdive.artifacts.write_lease import LIVE_HOLDER_SQL
+from kdive.db.locks import require_top_level_transaction, try_advisory_xact_lock
 from kdive.domain.errors import CategorizedError, ErrorCategory
-from kdive.reconciler.cleanup.uploads import UPLOAD_OWNER_KINDS, UploadStore
+from kdive.reconciler.cleanup.uploads import UploadStore
 
 _log = logging.getLogger(__name__)
 
@@ -74,8 +81,14 @@ _KEY_COMPONENTS = 4
 #   * the owner holds no ``upload_manifests`` row *at all* — not merely no live one. A lapsed
 #     window is the reaper's to collect, and a live or re-minted window owns these key names
 #     because upload keys are owner-addressed;
+#   * the owner holds no **live** write lease — a job that declared, before its first write, that it
+#     is writing under this prefix (ADR-0502). This is the fence for the writers that mint no upload
+#     window at all: local-libvirt's vmcore ``put_stream`` is one, and it is the reachable path into
+#     ADR-0455 §3's delete/PUT race. "Live" is the holding job's own liveness
+#     (:data:`~kdive.artifacts.write_lease.LIVE_HOLDER_SQL`), read from that module so the pass that
+#     honours a lease and the pass that collects one cannot disagree;
 #   * the object is older than the grace.
-_RECLAIMABLE_SQL = """
+_RECLAIMABLE_SQL = f"""
 SELECT c.key
 FROM unnest(%s::text[], %s::timestamptz[], %s::text[], %s::uuid[])
      AS c(key, last_modified, owner_kind, owner_id)
@@ -83,6 +96,9 @@ WHERE c.last_modified < now() - %s
   AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.object_key = c.key)
   AND NOT EXISTS (SELECT 1 FROM upload_manifests m
                   WHERE m.owner_kind = c.owner_kind AND m.owner_id = c.owner_id)
+  AND NOT EXISTS (SELECT 1 FROM object_write_leases l
+                  WHERE l.owner_kind = c.owner_kind AND l.owner_id = c.owner_id
+                    AND {LIVE_HOLDER_SQL})
 """
 
 
@@ -116,7 +132,7 @@ class UploadOrphanCandidate:
 
     key: str
     last_modified: datetime
-    owner_kind: str
+    owner_kind: UploadOwnerKind
     owner_id: UUID
 
 
@@ -131,8 +147,10 @@ async def repair_leaked_upload_objects(
     Walks ``local/runs/`` and ``local/investigations/`` a listing page at a time, attributes each
     listed key to its owner by parsing it, classifies each page in one query, then re-runs that same
     predicate for each reclaimable key immediately before deleting it — so a finalize or a re-mint
-    that commits between the listing and the delete protects its object. Nothing is held for a whole
-    root: peak memory and the classify's parameter width are bounded by a page (ADR-0498).
+    that commits between the listing and the delete protects its object. That per-key re-check and
+    its delete run under the owner's advisory lock, which is what closes the gap the re-check alone
+    left open to a writer holding an ADR-0502 write lease. Nothing is held for a whole root: peak
+    memory and the classify's parameter width are bounded by a page (ADR-0498).
 
     The reclaim threshold is ``orphan_grace + upload_ttl``, and the second term is not padding
     (ADR-0455 §2). The manifest fence protects an object only until the reaper deletes its window's
@@ -435,19 +453,60 @@ async def _delete_if_still_reclaimable(
     written. That is the one fence that has to come from the store rather than from Postgres, and
     it is why this is not simply ``repair_leaked_images``' row re-check.
 
+    The re-classify and the delete run inside **one transaction holding the owner's advisory lock**,
+    and that is what turns three fences into a closure (ADR-0502). Re-reading committed state and
+    then deleting under no lock leaves a gap the re-read cannot see into: a writer that commits its
+    fence after the re-classify and PUTs before the delete is still destroyed, which is
+    ADR-0455 §3's residual and ADR-0497 §3's "mitigates … does not close". ``hold_write_lease``
+    mints under this same lock, so a mint either precedes the re-classify — which then sees the
+    lease and declines —
+    or waits until this transaction ends, by which point the delete has already happened and the
+    write that follows it is not the one being deleted.
+
+    The lock is attempted, not waited on. A held owner lock means a writer or a reaper is active on
+    that owner, so the key is left for a later pass: neither deleted nor counted as a fault, since
+    nothing failed. Waiting instead would put a reconciler pass that has no deadline behind
+    whatever the holder is doing — ``capture_traffic`` holds ``LockScope.RUN`` across a whole
+    ``put_artifact`` — ahead of allocation expiry and orphaned-System repair, which is the
+    starvation ADR-0455 §5 and
+    §6 exist to prevent.
+
+    The cost is one snapshot held across one ``delete_object``, which is the property
+    :func:`reclaimable_upload_keys` documents avoiding on the page classify. Per key that is a
+    lock acquire, one statement and one round trip — strictly less than
+    ``_claim_abandoned_prefix``, which
+    already holds ``LockScope.RUN`` across a whole paginating ``list_prefix``.
+
     Returns:
-        Whether the object was deleted. ``False`` means the re-read declined it, or the object was
-        already gone.
+        Whether the object was deleted. ``False`` means the re-read declined it, the owner was
+        locked, or the object was already gone.
     """
     current = await _reread_from_store(store, candidate)
     if current is None:
         return False  # deleted by someone else between the listing and here
-    if not await reclaimable_upload_keys(conn, [current.candidate], grace):
-        return False  # a row landed, or the object was rewritten, after the classify
-    await asyncio.to_thread(store.delete, current.candidate.key)
+    # A savepoint here would hold the owner lock for the rest of the pass instead of for this one
+    # delete, so the transaction has to be a real one. ``_run_repair_plan`` hands each repair a
+    # freshly pooled connection and the page classify commits its own transaction, so this holds
+    # today; it is asserted because nothing at this call site would show if it stopped.
+    require_top_level_transaction(conn, "the upload orphan sweep's per-key delete")
+    async with conn.transaction():
+        if not await try_advisory_xact_lock(
+            conn, lock_scope_for(candidate.owner_kind), candidate.owner_id
+        ):
+            _log.info(
+                "reconciler: upload orphan sweep left %s for a later pass; owner %s/%s is locked, "
+                "so a writer or a reap is active on it (ADR-0502)",
+                candidate.key,
+                candidate.owner_kind,
+                candidate.owner_id,
+            )
+            return False
+        if not await reclaimable_upload_keys(conn, [current.candidate], grace):
+            return False  # a row or a lease landed, or the object was rewritten, after the classify
+        await asyncio.to_thread(store.delete, current.candidate.key)
     _log.info(
         "reconciler: leaked upload object %s (etag %s) deleted (no artifacts row, no upload "
-        "window, past grace)",
+        "window, no live write lease, past grace)",
         current.candidate.key,
         current.etag,
     )
@@ -492,8 +551,8 @@ async def reclaimable_upload_keys(
     """Return the subset of ``candidates`` that is safe to delete, deciding every fence in Postgres.
 
     A candidate is reclaimable only when no ``artifacts`` row references its key, its owner holds
-    no ``upload_manifests`` row at all, and its store mtime is older than ``grace`` measured
-    against Postgres ``now()``.
+    no ``upload_manifests`` row at all, its owner holds no write lease with a live holder
+    (ADR-0502), and its store mtime is older than ``grace`` measured against Postgres ``now()``.
 
     This is deliberately usable for one key as well as for a listing page: it is the per-key
     re-check ADR-0453 §Consequences costed for its second residual (#1557), so wiring it into the
@@ -562,7 +621,11 @@ def _attribute(listing: ObjectListing) -> UploadOrphanCandidate | None:
     if len(parts) != _KEY_COMPONENTS or not parts[3]:
         return None
     tenant, kind, owner_id = parts[0], parts[1], parts[2]
-    if tenant != UPLOAD_TENANT or kind not in UPLOAD_OWNER_KINDS:
+    # Matched out of the curated tuple rather than merely tested against it, so the attributed kind
+    # carries its ``UploadOwnerKind`` type onward: ADR-0502's per-key delete feeds it to
+    # ``lock_scope_for``, which must never be reached with a kind nothing locks under.
+    owner_kind = next((known for known in UPLOAD_OWNER_KINDS if known == kind), None)
+    if tenant != UPLOAD_TENANT or owner_kind is None:
         return None
     try:
         parsed = UUID(owner_id)
@@ -571,6 +634,6 @@ def _attribute(listing: ObjectListing) -> UploadOrphanCandidate | None:
     return UploadOrphanCandidate(
         key=listing.key,
         last_modified=listing.last_modified,
-        owner_kind=kind,
+        owner_kind=owner_kind,
         owner_id=parsed,
     )

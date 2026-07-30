@@ -30,13 +30,11 @@ import pytest
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.artifacts import upload_manifest
+from kdive.artifacts.upload_manifest import lock_scope_for as _lock_scope_for
 from kdive.artifacts.uploads import ManifestEntry
 from kdive.domain.capacity.state import RunState
 from kdive.domain.errors import CategorizedError, ErrorCategory
 from kdive.reconciler.cleanup.uploads import ReapOutcome
-from kdive.reconciler.cleanup.uploads import (
-    lock_scope_for as _lock_scope_for,
-)
 from kdive.reconciler.cleanup.uploads import (
     reap_one_owner as _reap_one_owner,
 )

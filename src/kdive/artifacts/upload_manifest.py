@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from kdive.artifacts.uploads import ChunkEntry, ManifestEntry
+from kdive.db.locks import LockScope
 
 UploadOwnerKind = Literal["runs", "investigations"]
 RUN_UPLOAD_OWNER: UploadOwnerKind = "runs"
@@ -30,6 +31,20 @@ INVESTIGATION_UPLOAD_OWNER: UploadOwnerKind = "investigations"
 #: prefix: a sweep whose tenant drifts from the mint's lists an empty prefix and reports a healthy
 #: zero forever while the leak resumes.
 UPLOAD_TENANT = "local"
+
+# The advisory-lock scope each upload owner kind serializes under. It lives here rather than with
+# the reaper that used to own it because three separate mechanisms now have to agree on it: the
+# reaper's claim, the ADR-0502 write lease's mint, and the orphan sweep's per-key delete. The mint
+# and the delete take the *same* lock, and that pairing is the whole of ADR-0502's ordering
+# argument — a second copy of this two-entry map would unpair them silently.
+_LOCK_SCOPES: dict[UploadOwnerKind, LockScope] = {
+    RUN_UPLOAD_OWNER: LockScope.RUN,
+    INVESTIGATION_UPLOAD_OWNER: LockScope.INVESTIGATION,
+}
+
+#: The owner kinds an upload window can be minted for, in reap order. The orphan sweep (ADR-0455)
+#: derives the object-store roots it walks from this, so its scope cannot drift from the reaper's.
+UPLOAD_OWNER_KINDS: tuple[UploadOwnerKind, ...] = tuple(_LOCK_SCOPES)
 
 
 class UploadManifest(NamedTuple):
@@ -289,3 +304,17 @@ async def delete_manifest(
         "DELETE FROM upload_manifests WHERE owner_kind = %s AND owner_id = %s",
         (owner_kind, owner_id),
     )
+
+
+def lock_scope_for(owner_kind: UploadOwnerKind) -> LockScope:
+    """Return the advisory-lock scope for an upload owner kind, failing loud on an unknown one.
+
+    An owner kind no writer of that owner locks under must never be locked under a guessed scope —
+    that would take a lock nobody else takes and serialize against nothing at all. Both the reaper's
+    claim and ADR-0502's write-lease mint/delete pairing depend on this raising rather than falling
+    back.
+    """
+    scope = _LOCK_SCOPES.get(owner_kind)
+    if scope is None:
+        raise ValueError(f"unsupported upload owner kind: {owner_kind}")
+    return scope
