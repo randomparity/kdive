@@ -212,6 +212,53 @@ upgrade a fetcher started before this change is mid-download with a partial and 
 dropping the older evidence would reclaim its base out from under it and reintroduce #1565 for the
 length of the deploy.
 
+### Amendment (2026-07-30): the flock lease, stated precisely
+
+Appended rather than substituted, because this record is merged and append-only outside `## Status`.
+The paragraph above is accurate but under-specified about *why* the alternative loses, and it reads
+as though the choice were only a preference. It is narrower than that, in both directions.
+
+**A `flock`-held lease file in the staging directory.** Exact where it applies: the kernel drops the
+lock at process exit, including on `SIGKILL`, so a crashed fetcher's pin ends immediately — no TTL,
+no heartbeat, and none of §4's derivation or the residual leak window in `## Consequences`. It also
+matches how ADR-0446 and ADR-0452 both ended up asking the kernel rather than a state column.
+Rejected **not** because it is wrong in ADR-0441's single-host local-libvirt shape — there it is
+strictly more precise than what is chosen here, with a zero leak window — but because it is
+filesystem-local. It answers only where the fetcher and the reclaimer share a kernel, and the
+deployment this must survive puts the worker and reconciler in a Kubernetes cluster with the
+VM-running provider host separate. Durable database state is answerable from either side of that
+boundary; a kernel lock is not.
+
+Two things this amendment deliberately does **not** claim, because neither is established. It does
+not claim the flock lease fails in the local-libvirt path this code runs in today: ADR-0441 ":373
+**Topology.** For local-libvirt (single-host M0/M1) the reconciler is host-local" scopes the feature
+to a single host, and ADR-0442 ":75 the unlink in the **same process that created the file**" put
+the filesystem work on the worker for exactly that reason — so in the shape shipped today the
+fetcher and the reclaimer do share a filesystem and the flock lease would be correct. And it does
+not claim any specific replica topology makes it incorrect; that would need a cross-replica proof
+this record does not have. The argument is about which topologies the answer must remain readable
+in, not about a defect in `flock`.
+
+Read that way, `## Consequences`'s residual is not a self-inflicted cost of a weaker mechanism. It
+is the price of answering a liveness question across a boundary no kernel spans: where the asker and
+the answerer may be different processes on different hosts, the evidence has to live in the state of
+record, and durable state that outlives its writer needs a deadline. The leak window is what a
+cross-topology answer costs.
+
+### Why ADR-0495's `flock` probe stays, restated
+
+The paragraph above keeps it for a rolling-upgrade reason, which is true but is the weaker argument
+and invites a later reader to retire it once no pre-lease fetcher can exist. The durable reason is
+that the probe **fails open**: a held `flock` can only ever *withhold* a reclaim, never license one.
+It can therefore only add pins on top of the database marker's, never remove one, so keeping it is
+safe on any topology — where it is blind it simply contributes nothing, and where the fetcher and
+reclaimer are co-located it is a same-node fast path that is strictly more precise than a deadline.
+
+That cuts both ways, and both halves matter. It must not be "simplified" away as redundant: it costs
+one `scandir` and can only make the gate more conservative. It must equally not be trusted as
+sufficient, which is the whole point of this record — a probe that answers only on one node cannot
+be the only thing standing between a reclaim and a live download.
+
 ## References
 
 - Issue #1702 (this record), #1558 (option 2 as originally stated), #1565, #1544, #1522
