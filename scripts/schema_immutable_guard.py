@@ -158,8 +158,9 @@ def _repo_root() -> Path:
 
 def _base_filenames(root: Path, base_ref: str) -> list[str]:
     """Return the migration filenames on ``base_ref``, or raise if it cannot be read."""
-    # --full-tree: without it `ls-tree` filters entries by the cwd prefix and returns an
-    # empty list, exit 0, from any subdirectory — a silent pass instead of a failure.
+    # `cwd=root` is what makes this cwd-independent; `--full-tree` says so a second time,
+    # because `ls-tree` filters entries by the cwd prefix without it and would return an
+    # empty list at exit 0 — a silent pass — if the anchoring above were ever lost.
     result = subprocess.run(
         ["git", "ls-tree", "--full-tree", "--name-only", f"{base_ref}:{SCHEMA_SUBDIR}"],
         cwd=root,
@@ -181,10 +182,17 @@ def _name_status(root: Path, base_ref: str) -> list[str]:
     Run from the repository root because a `git diff` pathspec resolves against the *cwd*:
     from a subdirectory it would match nothing and report a clean tree. `-M` pins rename
     detection on rather than inheriting whatever `diff.renames` the caller has configured,
-    so a rename is always reported against its source path.
+    so a rename is always reported against its source path. `core.quotePath=false` stops git
+    wrapping a non-ASCII path in quotes and octal escapes, which would no longer match the
+    schema prefix and would drop the file from the comparison silently.
     """
     result = subprocess.run(
-        ["git", "diff", "--name-status", "-M", base_ref, "--", _SCHEMA_PREFIX],
+        # fmt: off
+        [
+            "git", "-c", "core.quotePath=false",
+            "diff", "--name-status", "-M", base_ref, "--", _SCHEMA_PREFIX,
+        ],
+        # fmt: on
         cwd=root,
         capture_output=True,
         text=True,

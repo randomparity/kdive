@@ -71,9 +71,11 @@ repos:
         # its whole-file checksum and breaks upgrades of any DB migrated by an earlier
         # build (#1218). Invokes python3 directly (not `just`) so it needs no venv, and
         # diffs against origin/main, so an edit already committed on the branch fails too
-        # — against HEAD it passed the moment it was committed (#1723). CI enforces the
-        # same script from the lint-type-test job (which fetches origin/main first), so
-        # this hook is SKIPped in the CI pre-commit job; here it is the commit-time bite.
+        # — against HEAD it passed the moment it was committed (#1723). This is the fast
+        # commit-time bite, not the gate: prek builds its file list from added/modified
+        # paths, so a commit that only DELETES a migration matches nothing here. The gate
+        # is the lint-type-test job's step, which runs the same script against the PR's
+        # base commit; that is also why this hook is SKIPped in the CI pre-commit job.
         entry: python3 scripts/schema_immutable_guard.py
         language: system
         files: ^src/kdive/db/schema/.*\.sql$

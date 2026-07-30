@@ -220,6 +220,47 @@ def test_end_to_end_a_committed_rename_names_the_source(repo: Path) -> None:
     result = _run(repo)
     assert result.returncode == 1
     assert "0086_b.sql" in result.stderr
+    assert "(R" in result.stderr
+
+
+def test_end_to_end_a_rename_is_detected_with_diff_renames_off(repo: Path) -> None:
+    # `-M` exists so the verdict does not depend on the caller's `diff.renames`. On the
+    # default (renames on) the test above passes with or without the flag, so this is the
+    # only case that pins it: with renames configured off and no `-M`, git reports a delete
+    # plus an add and the R never appears.
+    _git(repo, "config", "diff.renames", "false")
+    _git(repo, "mv", "src/kdive/db/schema/0086_b.sql", "src/kdive/db/schema/0087_b.sql")
+    _commit(repo, "renumber an applied migration")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "(R" in result.stderr
+
+
+def test_end_to_end_an_edit_to_a_non_ascii_migration_is_rejected(repo: Path) -> None:
+    # git quotes and octal-escapes a non-ASCII path by default, which no longer starts with
+    # the schema prefix — the file would drop out of the comparison and the guard would
+    # report a clean run. Filenames are ASCII today; nothing enforces that.
+    (repo / "src/kdive/db/schema/0086_café.sql").write_text(_SQL)
+    _commit(repo, "add a migration with a non-ascii name")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "feature")
+    (repo / "src/kdive/db/schema/0086_café.sql").write_text("-- SELECT 2;\n")
+    _commit(repo, "reword it")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "0086_caf" in result.stderr
+
+
+def test_end_to_end_an_unmerged_migration_stays_editable_across_commits(repo: Path) -> None:
+    # A deliberate reversal of ADR-0015's "a not-yet-merged migration cannot be edited in
+    # place across commits", which was a consequence of the HEAD base rather than a rule
+    # anyone wanted. A file the base ref does not carry is an addition however many commits
+    # shaped it, so authoring a migration no longer means amending every iteration.
+    new = repo / "src/kdive/db/schema/0087_next.sql"
+    new.write_text(_SQL)
+    _commit(repo, "add a migration")
+    new.write_text("-- SELECT 2;\n")
+    _commit(repo, "fix it up before review")
+    assert _run(repo).returncode == 0
 
 
 def test_end_to_end_a_new_higher_numbered_migration_is_accepted(repo: Path) -> None:
