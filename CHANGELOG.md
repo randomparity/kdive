@@ -394,6 +394,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Close the orphan sweep's delete/PUT race with a write lease
 - Pin the OTel sampler in one place, guard the constructor (#1693)
 - The sourced profile files are not executables
+- Satisfy ty 0.0.62's stricter union and protocol checks
 
 ### Build
 
