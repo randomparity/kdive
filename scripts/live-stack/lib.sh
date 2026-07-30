@@ -366,6 +366,10 @@ require_workers_alive() {
     # that was about to finish. Recovery is not free either — reclaiming the abandoned job spends
     # one of its bounded attempts. So the judgement call is the operator's; state both options and
     # what killing actually costs, rather than making the choice for them silently.
+    #
+    # That leaves teardown with no supported way to end a SIGTERM-ignoring worker, which is a real
+    # gap and is tracked in #1733 — escalation scoped to down.sh, where it does not run on every
+    # bring-up. Until that lands, the pids below are the operator's only handle.
     {
       echo "ERROR: asked for ${want} worker(s) but ${have} from this checkout are running."
       echo "  A worker from a previous stack outlived stop_daemons — it does not act on SIGTERM"
@@ -374,15 +378,14 @@ require_workers_alive() {
       echo "  Live worker pids: ${pids[*]}"
       echo "  That list is every worker running under ${py}, INCLUDING the ones this run started."
       echo "  The survivor is whichever has the older start time:"
-      echo "    ps -o pid,lstart,etime,args -p ${pid_csv}"
+      echo "    ps -ww -o pid,lstart,etime,args -p ${pid_csv}"
       echo "  Tearing the stack down will NOT clear it: that path sends the same SIGTERM and"
-      echo "  gives up the same way. So either wait for the in-flight job to finish and re-run,"
-      echo "  or end these yourself (root unless KDIVE_WORKER_AS_ROOT=0) and re-run:"
+      echo "  gives up the same way. So either wait for the in-flight job to finish and re-run"
+      echo "  (that only helps if the SIGTERM landed — if it did not, the worker keeps claiming"
+      echo "  new jobs and waiting never ends it), or end these yourself and re-run:"
       echo "    sudo kill -9 ${pids[*]}"
       echo "  Killing abandons that job mid-flight: another worker reclaims it once its lease"
-      echo "  lapses, spending one of its bounded attempts. Any VM it had already provisioned is"
-      echo "  reaped only once its System reaches torn_down — down.sh --wipe forces that, at the"
-      echo "  cost of the Postgres volume."
+      echo "  lapses, spending one of its bounded attempts."
     } >&2
     return 1
   fi
