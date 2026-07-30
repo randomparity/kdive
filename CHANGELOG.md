@@ -376,6 +376,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Decide the drain from the walk, not from the token set
 - Refuse to register a captured object the store no longer holds
 - Sweep each upload root a listing page at a time
+- Defer a checksum whose partial a live writer holds
+- Make the reclaim liveness gate read-only and fail-closed
+- Defer only on a proven hold, per ADR-0452 §5
 
 ### Build
 
