@@ -55,10 +55,43 @@ that misdirects an agent.
 
 The name states the System-facing fact (the revert did not complete, so the disk is between two
 defined states) rather than the queue-internal cause (a worker died). That is what determines the
-recovery: tear the System down and provision a replacement, onto which the untouched snapshot can
-be restored. `symbol_not_found` (ADR-0307) is the precedent for a category this narrow — one
-condition, one raise site, added because the general category it was flattened into carried the
-wrong retryability.
+recovery: the System is not recoverable, so tear it down and provision a replacement. Its
+snapshots do not survive it — `teardown_handler` calls `delete_snapshots_for_system` and a
+best-effort `delete_all` — so the replacement starts with none, and the served errors guide says
+so rather than implying the checkpoint can be carried across. `symbol_not_found` (ADR-0307) is the
+precedent for a category this narrow — one condition, one raise site, added because the general
+category it was flattened into carried the wrong retryability.
+
+### 1a. The repair records its verdict only when the job explains nothing
+
+Stamping unconditionally would be wrong, and this is the one place this ADR's shape differs from
+ADR-0492's. `_record_system_failure` classifies a **caught exception**, so its verdict is the
+best information anyone has, which is why ADR-0492 §3 gave a recorded category precedence over
+the job's. This repair's evidence is an **absence** — no `restore` job can run again — so it can
+be holding strictly weaker information than the job row, and the same precedence would let
+`restore_incomplete` displace a real reason. Two live paths produce one:
+
+- `restore_handler` calls `load_payload` and `_bind_snapshotter` *before* the `try` that routes
+  `restoring -> failed`. `_require_snapshotter` raises `CategorizedError(CONFIGURATION_ERROR)`
+  for a provider with no snapshot plane, and `load_payload` raises `PayloadValidationError`
+  (`configuration_error`). Either dead-letters the job with its own category and never touches
+  System state, leaving the System `restoring` for this repair to find.
+- `_record_system_failure` is best-effort by contract, so a swallowed write leaves the System
+  `restoring` beside a job that holds both the real category and the redacted failure message.
+  Overwriting there would put a generic category next to a specific `detail` in one envelope.
+
+So `_restore_limbo_category` consults the newest terminal `restore` job first and records
+`restore_incomplete` only when that job explains nothing: absent, carrying no category, or
+carrying `lease_expired` — which `repair_abandoned_jobs` stamps unconditionally over a job that
+never recorded a reason of its own, and which is a statement about the lease rather than about
+the guest. Otherwise the column is left NULL, which is exactly the ADR-0454 job fallback this
+repair should defer to. The System still leaves `restoring` either way; only the stamp differs.
+
+The lookup is a keyed read on the `jobs.payload->>'system_id'` expression index (ADR-0491,
+migration 0082) and runs once per System actually recovered, inside the transaction that already
+holds that System's advisory lock. It is not the per-row list-path lookup ADR-0454 §4 declined —
+it runs on the write path, on the failure path only, for the Systems this sweep is already
+mutating.
 
 ### 2. `retryable: false`
 
@@ -107,11 +140,12 @@ at one of them, on a column an agent reads to decide whether to retry.
 
 ADR-0492 narrowed the ADR-0454 §4 list-path gap to "a System whose failure predates the column,
 or whose category is only on its job". Its §3 named this repair as one of three NULL-category
-paths and left it to the job fallback. This ADR removes it from that list — not by making the
-fallback reach it, but by giving the path a verdict of its own. Two shapes remain and are
-deliberately left: rows written before migration 0083, and a non-`CategorizedError` escape that
-dead-letters the job without reaching `_record_system_failure`. Both have an attributable job, so
-both are what the job fallback is for.
+paths and left it to the job fallback. This ADR removes it from that list for the shapes where
+the fallback has nothing to offer — not by making the fallback reach them, but by giving the path
+a verdict of its own — and, per §1a, leaves it on that list for the shapes where the fallback has
+the better answer. Two other shapes remain and are deliberately untouched: rows written before
+migration 0083, and a non-`CategorizedError` escape that dead-letters the job without reaching
+`_record_system_failure`. Both have an attributable job, so both are what the job fallback is for.
 
 The issue's own suggested direction is not built. Its cost analysis was correct for ADR-0454's
 world and is moot in ADR-0492's: the `LATERAL` join and the partial index it wanted priced first
@@ -142,8 +176,16 @@ would buy the list path a lookup it no longer needs.
   keeps its NULL column and reports exactly what it reports today. The correlation is not
   recoverable after the fact anyway — the evidence the repair acted on is the *absence* of an
   active job.
-- No new query, index, config setting or dependency. One `UPDATE` on a row already locked and
-  being updated in the same transaction, on a path that runs only for a System being failed.
+- One new query and one `UPDATE`, both on the failure path only, for a System this sweep is
+  already mutating under its advisory lock, and the query is served by an existing index. No new
+  index, config setting or dependency.
+- **Migration 0086 holds an ACCESS EXCLUSIVE lock while it revalidates four tables**, including
+  the append-only `jobs`, and `apply_migrations` runs every pending migration in one transaction,
+  so the lock spans the deploy step. This is inherited from 0059 and 0083 rather than introduced
+  here, and is stated so the next category addition prices it: at a `jobs` size where the scan
+  matters, the shape to reach for is `ADD CONSTRAINT … NOT VALID` followed by a separate
+  `VALIDATE CONSTRAINT`, which `CHECK_ENUMS` reads identically because it inspects
+  `pg_get_constraintdef`.
 
 ## Considered & rejected
 
@@ -177,3 +219,15 @@ would buy the list path a lookup it no longer needs.
 - **Record a failure *message* on the System as well.** ADR-0492 already declined this for the
   handler path (redaction is the worker's boundary). Here there is no message to record: no
   exception was caught, and the category is the whole of what this path knows.
+- **Stamp `restore_incomplete` unconditionally and let ADR-0492 §3's precedence stand.** One
+  line, no query. Rejected in §1a: this writer's evidence is an absence, so on the paths where
+  `restore_handler` raises before its `try` — or where `_record_system_failure`'s best-effort
+  write is swallowed — the job holds the real category and the generic verdict would displace it.
+  ADR-0492's precedence rule was written for a writer that classifies a caught exception, and
+  extending it to one that classifies an absence is not what it decided.
+- **Have the reconciler re-derive ADR-0454's full attribution** (newest terminal job across
+  `SYSTEM_FAILING_JOB_KINDS`) instead of consulting the restore job. A second copy of the
+  attribution rule, in a subsystem that must not import the MCP view layer, to decide a write
+  whose only job is to not clobber. The repair's own precondition is about the `restore` job, so
+  that is the job it asks about; where some other kind's job wins the envelope's attribution, the
+  ordering residual is the one ADR-0492 Consequences already disclosed.
