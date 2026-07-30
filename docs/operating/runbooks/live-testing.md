@@ -253,10 +253,20 @@ then `just onboard` for a funded project and a token. Then, per ADR-0441:
 
 Traps this run hit, in the order they bite:
 
-- **Provision concurrently, not serially.** Two serial provisions prove nothing
-  about deduplication: the second short-circuits on `dest.is_file()` and never
-  reaches the fetch lock. Only concurrent provisions exercise the per-(investigation,
-  checksum) session advisory lock that collapses the redundant download.
+- **Provision concurrently, not serially — but know what that does and does not
+  prove.** Two serial provisions prove nothing about deduplication: the second
+  short-circuits on the reuse fast path and never reaches the fetch lock. Two
+  *concurrent* provisions do satisfy the arm's "exactly one `GetObject`"
+  assertion, and on a one-worker stack that is where the assertion is satisfied —
+  at the same fast path. It is **not** evidence of fetch-lock contention. A
+  worker's claim loop runs one job at a time and the stack starts one worker by
+  default, so the second provision sits `queued` until the first has finished
+  staging; there is no sibling to block on `pg_advisory_lock`. That still tests
+  something real — the fast path collapses the redundant download, and since
+  ADR-0443 it verifies the base rather than trusting its presence — but the
+  post-lock re-check and `_unlink_orphan_partials` are never entered. To exercise
+  those, run the [fetch-lock contention arm](#fetch-lock-contention-needs-two-workers)
+  below, which needs a second worker process.
 - **The catalog images are too big to upload as-is.** They are 6 GiB virtual,
   over the 5 GiB single-PUT cap, so a declaration is rejected at
   `artifacts.create_investigation_upload`. `qemu-img convert -O qcow2 <src> <dst>`
@@ -265,6 +275,11 @@ Traps this run hit, in the order they bite:
 - **A multi-kernel rootfs needs a `baseline_kernel` hint.** `fedora-kdive-ready-43`
   carries two kernels, so direct-kernel boot is `not_provisionable` until the
   profile names one (bare version, e.g. `6.18.5-200.fc43.x86_64`).
+- **An upload-kind rootfs needs `investigation_id` on the provision call.** The
+  allocation does not carry the binding, so omitting it is rejected up front with
+  `configuration_error` — "upload-kind rootfs requires a bound investigation_id" —
+  before any job is enqueued. The refusal is clear, but it looks like a profile
+  problem rather than a missing argument.
 - **`systems.provision` returns a job, not a System.** `object_id` is the job id;
   the System id is `data.system_id`. Polling `systems.get` on the returned
   `object_id` answers `not_found` and looks like a failure.
@@ -295,6 +310,81 @@ deliberately runs the worker as root for install-staging and VM ops while the
 server and reconciler run as the invoking user. Any future work that has one
 daemon touch another's files must account for it, and a stack whose daemons all
 share a uid (compose, Helm) will not reproduce this class of defect.
+
+### Fetch-lock contention (needs two workers)
+
+The four arms above never reach the per-(investigation, checksum) fetch lock,
+because a one-worker stack cannot produce two simultaneous stagings. This arm
+does, and it is the only local procedure that enters the post-`pg_advisory_lock`
+re-check and `_unlink_orphan_partials` (ADR-0443, ADR-0446).
+
+Bring the stack up with two workers. `KDIVE_WORKER_COUNT` is the local stack's
+only job-concurrency knob — worker *processes* are the concurrency unit, since a
+single worker's claim loop runs one job at a time:
+
+```bash
+KDIVE_WORKER_COUNT=2 scripts/live-stack/up.sh
+```
+
+Confirm two worker processes really came up before drawing any conclusion — this
+arm is worthless against one worker, and it fails in exactly the silent way the
+old procedure did:
+
+```bash
+pgrep -fa 'python -m kdive worker'
+```
+
+Two rows. The second worker binds its aux health listener on `:9470` rather than
+the worker default `:9465`, and writes `worker-root-2.log` (or `worker-2.log`
+under `KDIVE_WORKER_AS_ROOT=0`) beside the first worker's log.
+
+Drive it as the Reuse arm — one investigation, one uploaded rootfs, two
+`systems.provision` calls issued together — with two changes:
+
+- **Use a rootfs no run has staged before.** Staging is content-addressed, so a
+  checksum already present under `/var/lib/kdive/rootfs-uploads/<investigation>/`
+  is served by the reuse fast path and never takes the lock. Generate a unique
+  image per run.
+- **Make the download long enough to observe.** The lock is held across the
+  object-store fetch, so the contention window is the download. A ~1.4 GiB
+  incompressible qcow2 gives a window of several seconds against local MinIO —
+  ample for a sub-second poll. It does not need to be bootable: this arm asserts
+  on the fetch, which precedes every boot concern.
+
+While both provisions are in flight, read the advisory lock directly. Postgres
+reports the holder and the waiter as two rows on one key:
+
+```bash
+docker compose exec -T postgres psql -U kdive -d kdive -c "
+SELECT l.pid, l.granted, a.wait_event_type, a.wait_event, a.query
+  FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+ WHERE l.locktype = 'advisory' AND a.query LIKE '%pg_advisory_lock%'
+ ORDER BY l.granted DESC"
+```
+
+(The compose backend carries `psql`; the host generally does not.)
+
+The arm passes on **both** of these, and neither alone:
+
+| Assert | Where | Why it is the discriminator |
+|--------|-------|-----------------------------|
+| Two rows on one advisory key: one `granted=t`, one `granted=f` with `wait_event_type=Lock`, `wait_event=advisory` | `pg_locks` ⋈ `pg_stat_activity` | A serialized run shows at most one row — the second fetcher has not started, so there is nothing to block |
+| The two provision jobs carry **different** `jobs.worker_id` values, claimed within milliseconds of each other | `SELECT id, worker_id, heartbeat_at FROM jobs WHERE kind = 'provision' ORDER BY heartbeat_at DESC LIMIT 2` | `worker_id` is `hostname:pid`; one value for both jobs means one worker ran them in sequence and the lock row above was something else |
+
+A single `.qcow2` under the investigation's staging dir, written once and
+followed by its `.ready` marker, confirms the lock did its job: the waiter
+re-checked after acquiring and returned the base the holder had just published
+rather than downloading it again.
+
+**2026-07-30 run** (branch `feat/multi-worker-fetch-lock-1551`, both workers
+build-stamped identically): contention confirmed. The two provisions were claimed
+91 µs apart by two different workers (`…:3870543` and `…:3870590`); 30 ms later
+one backend held the fetch lock and the other was blocked on it with
+`wait_event_type=Lock`, `wait_event=advisory`; the holder released ~4.4 s later,
+after writing the single 1,468,465,152-byte base and its `.ready` marker. Both
+provisions then failed at baseline-kernel extraction — the workspace venv has no
+`guestfs` binding — which does not affect this arm: the fetch and its lock both
+complete before that step.
 
 ## Hard-won quirks
 
