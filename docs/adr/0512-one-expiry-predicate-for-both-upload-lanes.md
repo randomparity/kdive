@@ -68,13 +68,16 @@ refactor's clothes. The envelope is already as shared as it should be — `uploa
 renders the three fields that must agree, and the two fields that must differ stay at the call
 sites.
 
-A guard test fails any new hand-rolled comparison of a stamp's two fields outside the module that
-owns the predicate, so the spelling cannot silently return.
+A guard test walks `src/kdive/` and fails any comparison that puts a stamp's two fields against
+each other outside the module that owns the predicate. It matches an AST shape, so it raises the
+cost of re-rolling the comparison rather than making it impossible — a comparison routed through
+local aliases still passes, and catching that would need dataflow. Its limits are stated in the
+guard's own docstring so it is not read as a proof.
 
 ## Consequences
 
 - A change to the expiry rule — grace period, strictness at equality, skew allowance — has one
-  edit site and reaches both lanes, or fails the guard test.
+  edit site and reaches both lanes. Reintroducing a lane-local spelling trips the guard.
 - The wire is unchanged. The reason literal, both `detail` strings, both
   `suggested_next_actions` lists, and the three `upload_expiry_contract` fields are byte-identical
   before and after; the behavior tests that assert them were not modified.

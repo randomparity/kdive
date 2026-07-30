@@ -13,9 +13,17 @@ the predicate.
 
 It matches on the *attribute pair*, not on a receiver name, so it catches the comparison however
 the stamp is spelled — ``stamp.deadline < stamp.server_time``, ``exc.stamp.deadline <
-now.server_time``, or a swapped-operand rewrite. It deliberately does not try to match a
-comparison against a Python-side clock: ``deadline < datetime.now(UTC)`` is a different defect
-(ADR-0444's "measure against the Postgres clock"), already argued in the lanes' own docstrings.
+now.server_time``, or a swapped-operand rewrite.
+
+Two things it does **not** reach, stated so the guard is not over-trusted:
+
+- **Comparisons through local aliases.** ``d, s = stamp.deadline, stamp.server_time`` followed by
+  ``if d < s:`` reads no attribute inside the ``Compare`` node, so it passes. Catching that needs
+  dataflow, not an AST shape match. The guard raises the cost of the duplication; it does not make
+  it impossible.
+- **A comparison against a Python-side clock.** ``deadline < datetime.now(UTC)`` is a different
+  defect (ADR-0444's "measure against the Postgres clock"), argued in the lanes' own docstrings,
+  and it names only one of the two fields so it is not this rule.
 """
 
 from __future__ import annotations

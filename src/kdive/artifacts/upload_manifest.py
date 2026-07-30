@@ -89,9 +89,10 @@ class ManifestStamp(NamedTuple):
         investigations lane returns a ``ToolResponse`` from the MCP tool layer, so the shared
         verdict can carry neither lane's signalling type.
 
-        A deadline **equal** to the reference clock is open, not expired. That matches
-        :func:`refresh_deadline`'s and the reaper's ``deadline >= now()`` arm, so a finalize and
-        the reaper cannot reach opposite verdicts on one manifest at that instant.
+        A deadline **equal** to the reference clock is open, not expired. Both SQL sites agree at
+        that instant from opposite directions: :func:`refresh_deadline` extends a window matching
+        ``deadline >= now()``, and the reaper claims one matching ``deadline < now()``. So a
+        finalize and the reaper cannot reach opposite verdicts on one manifest.
         """
         return self.deadline < self.server_time
 
