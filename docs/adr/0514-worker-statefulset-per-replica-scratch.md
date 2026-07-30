@@ -40,12 +40,22 @@ each worker an explicit dispatch boundary so provider- or pool-specific workers 
 work they cannot execute — a feature with no meaning at one worker. The engine supported
 concurrency that the only supported deployment surface could not express.
 
-The two volumes are **scratch**, which is what makes a fix cheap. `KDIVE_BUILD_WORKSPACE`
-(`/var/lib/kdive/build`) is the worker's build workspace: a warm kernel tree plus uuid-scoped
-per-build directories (`kdive-build-<uuid>`). `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install`)
-is staging for install artifacts. Neither is a state of record — that is Postgres — and neither
-holds a durable artifact — those are in the object store, referenced by row. Losing either costs
-a rebuild or a re-fetch, not data.
+The two volumes are **scratch for the deployments this chart produces**, which is what makes a
+fix cheap. `KDIVE_BUILD_WORKSPACE` (`/var/lib/kdive/build`) is the worker's build workspace: a
+warm kernel tree plus uuid-scoped per-build directories (`kdive-build-<uuid>`); the one
+persistent artifact under it, a built rootfs qcow2, is uploaded to the object store as it is
+produced. `KDIVE_INSTALL_STAGING` (`/var/lib/kdive/install`) is staging for install artifacts,
+which on the remote path are pushed into the guest and not read again. Neither is a state of
+record — that is Postgres — and no durable artifact lives only there.
+
+That qualifier is load-bearing, so state the exception outright: on the **local-libvirt** path
+the staged `kernel`/`initrd` are *not* scratch. `providers/local_libvirt/lifecycle/install.py`
+writes them under the staging root and embeds their absolute paths into the domain XML as the
+direct-boot `<kernel>`/`<initrd>`, so they are durable for the System's lifetime and deleting
+them un-boots that System until a reinstall. This chart cannot reach that path: it sets
+`KDIVE_LOCAL_LIBVIRT_ENABLED: "false"` (ADR-0127) and mounts neither a libvirt socket nor
+`/dev/kvm`, so a worker pod has no local hypervisor to install into. An operator who wires one
+up anyway inherits the caveat, and the values file and README say so.
 
 ## Decision
 
@@ -70,7 +80,11 @@ Four properties come with the kind, each chosen rather than defaulted:
   scale and rollout for an ordering guarantee nothing needs.
 - **`persistentVolumeClaimRetentionPolicy: {whenScaled: Delete, whenDeleted: Delete}`.** The
   volumes are scratch. Retaining them would strand a full pair of PVCs per removed ordinal, and
-  a later scale-up would repopulate them from source and the object store anyway.
+  a later scale-up would repopulate them from source and the object store anyway. This is the
+  one place the chart destroys storage on the operator's behalf, so `Chart.yaml` declares
+  `kubeVersion: ">=1.27.0-0"`: the field is gated behind `StatefulSetAutoDeletePVC`, which is
+  off by default before 1.27, and an older API server prunes it silently — the chart would then
+  promise to release those claims and leak them instead. Failing the install beats misleading.
 - **`volumeClaimTemplates` metadata carries `name` and nothing else.** The field is immutable
   after creation — the API server rejects an update to any StatefulSet field outside `replicas`,
   `template`, `updateStrategy`, `minReadySeconds`, `ordinals` and the retention policy. The

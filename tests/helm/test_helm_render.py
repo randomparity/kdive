@@ -272,7 +272,21 @@ def _container(workload: dict[str, Any]) -> dict[str, Any]:
 def test_workload_carries_its_process_kind(proc: str) -> None:
     # The worker's kind is load-bearing: only a StatefulSet gives each replica its own
     # build/install claim. A silent revert to a Deployment reintroduces #1703.
-    assert _workloads()[proc]["kind"] == _WORKLOAD_KINDS[proc]
+    #
+    # Matched on NAME against every pod-carrying kind, not via _workloads(), which filters on
+    # the kind it expects — asserting there could only ever fail with a KeyError, never on the
+    # kind itself. The candidate set is deliberately wider than what the chart renders.
+    res = _template("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    assert res.returncode == 0, res.stderr
+    candidates = [
+        doc
+        for doc in yaml.safe_load_all(res.stdout)
+        if isinstance(doc, dict)
+        and doc.get("kind") in ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet")
+        and doc["metadata"]["name"] == f"kdive-kdive-{proc}"
+    ]
+    assert len(candidates) == 1, f"expected exactly one {proc} workload, got {len(candidates)}"
+    assert candidates[0]["kind"] == _WORKLOAD_KINDS[proc]
 
 
 @pytest.mark.parametrize("proc", list(_AUX_PORTS))

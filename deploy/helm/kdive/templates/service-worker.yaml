@@ -1,11 +1,12 @@
 {{/*
 The worker StatefulSet's governing Service. It is headless (clusterIP: None) and declares NO
 ports: nothing calls into a worker — it pulls jobs from the Postgres queue — so this Service
-exists only to satisfy the StatefulSet's serviceName and to publish stable per-pod DNS
-(<pod>.<service>.<ns>.svc) for operators. Declaring the aux port here would put the
-unauthenticated /metrics /livez /readyz listener behind a named Service endpoint; the aux port's
-access control is the network boundary (ADR-0090 §5), and the Prometheus scrape finds it by pod
-annotation, not by Service. A headless Service is the one shape Kubernetes permits with no ports.
+exists only to satisfy the StatefulSet's required serviceName. Declaring the aux port here would
+put the unauthenticated /metrics /livez /readyz listener behind a named Service endpoint; the aux
+port's access control is the network boundary (ADR-0090 §5), and the Prometheus scrape finds it
+by pod annotation, not by Service. A headless Service is the one shape Kubernetes permits with no
+ports. The per-pod DNS records it publishes are a side effect, and only for Ready pods
+(publishNotReadyAddresses is left at its default) — nothing in kdive resolves them.
 */}}
 apiVersion: v1
 kind: Service
