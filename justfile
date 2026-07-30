@@ -490,11 +490,12 @@ env-docs-check:
 # Immutability guard: no modify/delete/rename of an existing src/kdive/db/schema/*.sql
 # (only new migrations may be added). Applied migrations are byte-immutable (ADR-0015);
 # a cosmetic edit breaks upgrades of any DB migrated by an earlier build (#1218). Diffs
-# against origin/main, so a committed edit fails on a clean checkout too — diffing against
-# HEAD passed every PR CI ever ran (#1723). Offline by design (ADR-0505): it reads the local
-# origin/main, so `git fetch origin main` first. Stdlib-only (git only).
-schema-guard:
-    python3 scripts/schema_immutable_guard.py
+# against the base ref, so a committed edit fails on a clean checkout too — diffing against
+# HEAD passed every PR CI ever ran (#1723). CI passes the PR's base commit; locally the
+# default origin/main is the closest stand-in. Offline by design (ADR-0505): it reads a local
+# ref, so `git fetch origin main` first. Stdlib-only (git only).
+schema-guard base_ref="origin/main":
+    python3 scripts/schema_immutable_guard.py {{base_ref}}
 
 # Ordering guard: a migration this branch adds must be numbered strictly above the highest
 # version already on origin/main. Pre-assigned numbers stop filename collisions but not

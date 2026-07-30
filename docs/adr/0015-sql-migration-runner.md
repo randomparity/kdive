@@ -169,6 +169,14 @@ What becomes harder / new obligations:
 - Two dev-only dependencies are added: `psycopg-pool` (the async pool the plan
   names) and `testcontainers` (the disposable-Postgres harness).
 
+**Superseded above, on editing an unmerged migration:** the guard now compares against
+the base branch, so a `NNNN_*.sql` the base does not carry stays editable across commits
+and no longer has to be amended into one. The bullet's second reason for rejecting that
+comparison — that it "gives CI no protection on a clean checkout" — had it backwards: the
+`HEAD` diff is what gave CI no protection, on every PR (#1723). See
+[ADR-0518](0518-the-immutability-guard-compares-against-the-base-branch.md). Immutability
+of an *applied* migration is unchanged, and now actually enforced.
+
 ## Alternatives considered
 
 - **Alembic.** Rejected: its value is autogeneration from SQLAlchemy ORM metadata,

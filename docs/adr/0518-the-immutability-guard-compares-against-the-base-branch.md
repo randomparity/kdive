@@ -57,10 +57,21 @@ as an *addition*, which this guard allows by design — so an unread base passes
 rewrote all of them. The reads are anchored at the repository root for the same reason, because
 a `git diff` pathspec resolves against the cwd and would match nothing from a subdirectory.
 
+In CI the base is the PR's own base commit, `github.event.pull_request.base.sha`, not
+`origin/main`. The two migration guards want opposite things from their base and it is worth
+saying why. The ordering guard needs main's *tip*, because a sibling migration that merged after
+this PR opened is the collision it exists to catch (ADR-0517). This guard needs the commit the
+branch is merging into, because it asks what the branch did to the migrations it carries, and a
+newer main tells it nothing: a branch cannot have modified a file it does not have. Freshness
+buys it nothing and costs it a false positive, so it takes the exact base instead — the same
+`base.sha` idiom `records.yml` already uses. Outside a `pull_request` there is no such commit,
+so the guard falls back to `origin/main`; `just schema-guard` takes the ref as an argument and
+defaults to the same thing.
+
 The guard stays offline: it reads a local ref and never fetches (ADR-0505). Making the base ref
-resolvable is the caller's job. CI fetches `refs/heads/main` at depth 1 in the step ADR-0517
-already added for the ordering guard — one fetch, two guards — and locally `git fetch origin`
-before `just ci` is the existing convention.
+resolvable is the caller's job. CI fetches `base.sha` at depth 1 in the step before, next to the
+`refs/heads/main` fetch ADR-0517 added, and locally `git fetch origin` before `just ci` is the
+existing convention.
 
 It is wired as its own step in `.github/workflows/ci.yml`, inside the required `lint · type ·
 test` job. Adding it only to the `ci` recipe would gate nothing, and a new job would gate
@@ -71,25 +82,28 @@ nothing either: the ruleset requires checks by name.
 A PR that modifies, deletes, or renames an applied migration now fails a required check. That
 is the point, and it is the first time it has been true.
 
-The comparison is against `origin/main` as it stands when the job runs, not against the PR's
-merge base, matching ADR-0517. The checkout is shallow, so no merge base is computable without
-deepening the whole job's history, and the ordering guard already established this base.
+**A not-yet-merged migration becomes editable in place across commits.** ADR-0015's
+Consequences recorded the opposite as deliberate — "once a new `NNNN_*.sql` is committed,
+iterating on it means amending that commit … not a second edit commit" — and rejected the
+base-branch comparison partly on that ground. This record supersedes that. The discipline was a
+by-product of the `HEAD` base rather than a rule anyone chose: a file the base does not carry is
+an addition however many commits shaped it, and nothing about immutability is weakened, because
+the file has never been applied anywhere. What it removes is a commit-shaping demand on the
+author of a migration still in review. The behaviour is pinned by a test rather than left
+implicit.
 
-That choice has one false-positive shape, which the ordering guard does not share because it
-only looks at added files. A migration on `origin/main` that the branch does not carry is
-absent from the working tree, and the guard reports it as a deletion. Two things produce it. In
-CI, `origin/main` gaining a migration between the job's checkout and its fetch step — a window
-of the minute or so of dependency installation, needing a migration-adding PR to merge inside
-it. Locally, an un-merged branch: a developer who fetches without merging `origin/main` sees the
-phantom deletion until they do, which is the sync `just ci` before a push already assumes.
-Neither is silent, both clear the same way, and the deletion message says so rather than leaving
-the reader to work out that a file they never touched is being blamed on them. Requiring
-branches to be up to date before merge would close the CI half along with ADR-0517's staler
-variant; that is a repository-settings change tracked in #1734.
+That same ADR-0015 bullet gave a second reason for the rejection — the base-branch comparison
+"gives CI no protection on a clean checkout" — which is exactly backwards, and is #1723. The
+`HEAD` base is the one that gives CI no protection on a clean checkout.
 
-The residual is that the guard cannot distinguish the two causes, only describe both. The
-distinction needs a merge base, and the merge base is exactly what a shallow checkout does not
-have.
+Any base other than the PR's own leaves one false-positive shape, which the ordering guard does
+not share because it only looks at added files: a migration on the base that the branch does not
+carry is absent from the working tree and reads as a deletion. Using `base.sha` removes it on a
+`pull_request`, where the branch is merging into exactly that commit. It remains on the fallback
+path — a push to `main`, a manual dispatch, and every local run, where `origin/main` may be
+ahead of the branch. Locally that is a developer who fetched without merging, which the sync
+`just ci` before a push already assumes; the deletion message says so rather than leaving the
+reader to work out that a file they never touched is being blamed on them.
 
 Local runs compare against whatever `origin/main` was last fetched, so a stale clone can report
 a pass that CI turns into a failure. CI is the authority, as for the ordering guard.
@@ -105,15 +119,17 @@ still score a committed violation as clean — so a developer who ran `just ci` 
 would get a pass on the exact change CI was about to reject. Changing the base fixes the local
 check as well; there was nothing worth preserving in the old comparison.
 
-**Compare against the PR's merge base.** Exact — the merge base is precisely what the branch
-forked from, which removes the false-positive window above. Rejected because the CI checkout is
-shallow and no merge base exists in it; obtaining one means `fetch-depth: 0` on the whole job,
-which ADR-0517 deliberately avoided in favour of fetching a single tree.
+**Compute the merge base with `git merge-base`.** Exact, and it would work on the fallback
+path too. Rejected because the CI checkout is shallow and no merge base exists in it; obtaining
+one means `fetch-depth: 0` on the whole job, which ADR-0517 deliberately avoided in favour of
+fetching a single tree. `base.sha` gets the same answer on a `pull_request` for the cost of one
+depth-1 fetch.
 
-**Fetch `github.event.pull_request.base.sha` and use that as the base.** Also exact, and
-shallow-fetchable. Rejected for scope: it is event-shaped, so it needs a separate fallback for
-pushes to `main` and for local runs, and it would leave the two migration guards comparing
-against two different bases for no stated reason.
+**Use `origin/main` in CI, as the ordering guard does.** One fetch, two guards, one base. It was
+the first shape of this change. Rejected once the false positive turned out not to be a race:
+`actions/checkout` resolves the SHA from the event payload while the fetch takes main's tip as
+of now, so re-running a job after a migration merges reddens a branch that never touched a
+migration, deterministically and for as long as the PR stays open.
 
 **Add the `origin/main` fetch to the CI `pre-commit` job and let the hook enforce it there.**
 Rejected. It puts the same script in two CI jobs, doubling the surface for one rule while
