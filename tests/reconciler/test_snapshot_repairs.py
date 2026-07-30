@@ -30,18 +30,24 @@ _DT_PRINCIPAL = "user-1"
 
 
 async def _seed_job(
-    conn: psycopg.AsyncConnection, kind: str, payload: dict[str, Any], *, state: str
+    conn: psycopg.AsyncConnection,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    state: str,
+    error_category: str | None = None,
 ) -> None:
     await conn.execute(
         "INSERT INTO jobs (kind, payload, state, attempt, max_attempts, worker_id, "
-        "    lease_expires_at, authorizing, dedup_key) "
-        "VALUES (%s, %s, %s, 1, 3, 'w', now() + make_interval(secs => 300), %s, %s)",
+        "    lease_expires_at, authorizing, dedup_key, error_category) "
+        "VALUES (%s, %s, %s, 1, 3, 'w', now() + make_interval(secs => 300), %s, %s, %s)",
         (
             kind,
             Jsonb(payload),
             state,
             Jsonb({"principal": "t", "agent_session": None, "project": "proj"}),
             f"{uuid4()}",
+            error_category,
         ),
     )
 
@@ -121,6 +127,75 @@ def test_leaves_restoring_with_active_restore_job(migrated_url: str) -> None:
         # The category is written only by the transition that earns it: a System left for the
         # retry path must not be labelled as though its restore had already been abandoned.
         assert await _system_failure_category(conn, sid) is None
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_does_not_overwrite_a_restore_jobs_own_category(migrated_url: str) -> None:
+    # ADR-0513: this repair's evidence is an *absence*, so it can hold weaker information than the
+    # job row — `restore_handler` binds its snapshotter before the `try` that routes
+    # restoring -> failed, so a CategorizedError there dead-letters the job with a real category
+    # and never touches System state. A recorded category outranks the job's
+    # (`_resolve_failure_verdict`), so stamping here would displace the real reason with a generic
+    # one. Leave the column NULL and let the ADR-0454 job fallback answer.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.RESTORING)
+        await _seed_job(
+            conn,
+            "restore",
+            {"system_id": str(sid)},
+            state=JobState.FAILED.value,
+            error_category=ErrorCategory.CONFIGURATION_ERROR.value,
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_restoring_systems)
+        # Still recovered — the System must leave `restoring` either way; only the stamp differs.
+        assert recovered == 1
+        assert await _system_state(conn, sid) == SystemState.FAILED.value
+        assert await _system_failure_category(conn, sid) is None
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_stamps_over_a_lease_expired_restore_job(migrated_url: str) -> None:
+    # `repair_abandoned_jobs` stamps `lease_expired` unconditionally over a job that never
+    # recorded a reason of its own — a statement about the lease, not about the guest. That is
+    # not information worth deferring to, so the limbo verdict still wins.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.RESTORING)
+        await _seed_job(
+            conn,
+            "restore",
+            {"system_id": str(sid)},
+            state=JobState.FAILED.value,
+            error_category=ErrorCategory.LEASE_EXPIRED.value,
+        )
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_restoring_systems)
+        assert recovered == 1
+        assert await _system_failure_category(conn, sid) == ErrorCategory.RESTORE_INCOMPLETE.value
+        await conn.close()
+
+    asyncio.run(_run())
+
+
+def test_stamps_when_no_restore_job_row_survives(migrated_url: str) -> None:
+    # The job-less shape: a canceled restore whose row was never written, or the invariant-only
+    # absent row. Nothing to defer to, so the verdict is recorded.
+    async def _run() -> None:
+        conn = await connect(migrated_url)
+        sid = await seed_system(conn, system_state=SystemState.RESTORING)
+        async with AsyncConnectionPool(migrated_url, min_size=1, open=False) as pool:
+            await pool.open()
+            recovered = await run_repair(pool, repair_stalled_restoring_systems)
+        assert recovered == 1
+        assert await _system_failure_category(conn, sid) == ErrorCategory.RESTORE_INCOMPLETE.value
         await conn.close()
 
     asyncio.run(_run())

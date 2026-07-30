@@ -55,8 +55,10 @@ errors.
   new System.
 - **`restore_incomplete`** — the guest was left part-way between its live state and the
   snapshot, so no operation on it has a defined starting point (`retryable` is false, and
-  the System is `failed`, which fences every lifecycle op anyway). Call `systems.teardown`
-  and provision a replacement; the snapshot itself is unharmed and can be restored onto it.
+  the System is `failed`, which fences every lifecycle op anyway). The System is not
+  recoverable: call `systems.teardown` and provision a replacement. Its snapshots do not
+  survive it — they are keyed to the System and removed with it — so the replacement starts
+  with none, and any checkpoint you need must be taken again with `systems.snapshot`.
 - **`transport_conflict`** — wait for the existing session to detach, then retry
   `debug.start_session`.
 - **`transport_failure`** — a console/debug transport or held long-poll stream failed; it is
