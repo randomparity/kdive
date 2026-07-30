@@ -329,12 +329,17 @@ async def _reassemble_chunked_artifacts(
         # The one place a spent extension budget is visible. The reassembly still runs — it holds
         # the `RUN` lock the reaper needs — but this window will not outlive its deadline again,
         # so an operator watching a Run retry in a loop sees why it eventually stops.
+        #
+        # The cap is reported as a fact beside the deadline rather than as the thing that bound
+        # this refresh, because it is not always what did: a `KDIVE_UPLOAD_TTL_SECONDS` lowered
+        # after the mint leaves a standing deadline past `window_started_at + max_window`, and
+        # naming the cap as the cause there would contradict the deadline printed next to it.
         _log.warning(
-            "runs.complete_build: upload window extension capped at %s past its mint "
-            "(run %s, deadline %s); artifacts.create_run_upload re-mints a fresh window",
-            max_window,
-            uid,
+            "runs.complete_build: upload window extension capped — the deadline stands at %s "
+            "(run %s, cap %s past its mint); artifacts.create_run_upload re-mints a fresh window",
             refreshed.deadline,
+            uid,
+            max_window,
         )
     try:
         await _reassemble_artifacts(manifest_row, store)
