@@ -449,8 +449,19 @@ kubeconfig context's default namespace, not the release's. Target the install na
 
 ```bash
 helm uninstall kdive -n <ns>
-kubectl delete pvc -l app.kubernetes.io/name=kdive -n <ns>   # PVCs are not removed by uninstall
+kubectl get pvc -n <ns>                                      # see the note below before deleting
 kubectl delete secret kdive-remote-tls -n <ns>               # if created in step 3
+```
+
+**PVCs after uninstall.** From chart `0.5.0` the worker's build/install volumes come from the
+StatefulSet's `volumeClaimTemplates` with a `Delete` retention policy (ADR-0514), so deleting the
+StatefulSet garbage-collects them. These claims inherit the StatefulSet's *selector* labels, not
+the chart's, so `-l app.kubernetes.io/name=kdive` no longer selects them. Sweep any survivors by
+the release-scoped names instead:
+
+```bash
+kubectl delete pvc -l app.kubernetes.io/name=kdive -n <ns>       # pre-0.5.0 claims, if any linger
+kubectl delete pvc -l app=kdive-kdive-worker -n <ns>             # 0.5.0+ per-replica claims
 ```
 
 `helm uninstall` does **not** garbage-collect the chart's hook resources (the migrate /

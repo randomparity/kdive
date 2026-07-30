@@ -4,8 +4,9 @@ Two upgrade footguns the chart must close:
 
 - #470: a ``config.*`` change must roll the pods that read it via ``envFrom``. A
   ``checksum/config`` pod annotation makes the pod template vary with the rendered
-  ConfigMap, so ``helm upgrade`` rolls exactly the three app Deployments — and never
+  ConfigMap, so ``helm upgrade`` rolls exactly the three app workloads — and never
   postgres/minio (which do not consume the ConfigMap, so their demo data is preserved).
+  The worker is a StatefulSet (ADR-0514); the other two are Deployments.
 - #469: ``helm upgrade --reuse-values`` drops new chart-default config keys. The chart
   renders ``KDIVE_LOCAL_LIBVIRT_ENABLED`` from a defensive ``default "false"`` so a reused
   value-set missing the key still renders it (no reaper crash-loop after upgrade).
@@ -32,6 +33,9 @@ CHART = str(Path(__file__).resolve().parents[2] / "deploy" / "helm" / "kdive")
 _APP_PROCS = ("server", "worker", "reconciler")
 # The bundled-demo backends that do NOT consume the config ConfigMap (must NOT roll).
 _BACKEND_PROCS = ("postgres", "minio", "oidc")
+# Every workload kind carrying a pod template in this chart. The worker's per-replica scratch
+# volumes make it a StatefulSet (ADR-0514); everything else is a Deployment.
+_WORKLOAD_KINDS = ("Deployment", "StatefulSet")
 
 
 def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
@@ -41,13 +45,13 @@ def _template(*set_args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
-def _deployments(*set_args: str) -> dict[str, dict[str, Any]]:
-    """Render and index every Deployment by its process-name suffix."""
+def _workloads(*set_args: str) -> dict[str, dict[str, Any]]:
+    """Render and index every pod-template-carrying workload by its process-name suffix."""
     res = _template(*set_args)
     assert res.returncode == 0, res.stderr
     out: dict[str, dict[str, Any]] = {}
     for doc in yaml.safe_load_all(res.stdout):
-        if not (isinstance(doc, dict) and doc.get("kind") == "Deployment"):
+        if not (isinstance(doc, dict) and doc.get("kind") in _WORKLOAD_KINDS):
             continue
         name = str(doc["metadata"]["name"])
         suffix = name.rsplit("-", 1)[-1]
@@ -55,8 +59,8 @@ def _deployments(*set_args: str) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _pod_annotations(deploy: dict[str, Any]) -> dict[str, str]:
-    return deploy["spec"]["template"]["metadata"].get("annotations", {}) or {}
+def _pod_annotations(workload: dict[str, Any]) -> dict[str, str]:
+    return workload["spec"]["template"]["metadata"].get("annotations", {}) or {}
 
 
 def _config_value(res: subprocess.CompletedProcess[str], key: str) -> str | None:
@@ -75,7 +79,7 @@ def _config_value(res: subprocess.CompletedProcess[str], key: str) -> str | None
 
 @pytest.mark.parametrize("proc", _APP_PROCS)
 def test_app_pods_carry_config_checksum_annotation(proc: str) -> None:
-    deploy = _deployments("config.KDIVE_DATABASE_URL=postgresql://x/y")[proc]
+    deploy = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")[proc]
     annotations = _pod_annotations(deploy)
     checksum = annotations.get("checksum/config")
     assert checksum, f"{proc} pod template has no checksum/config annotation"
@@ -85,8 +89,8 @@ def test_app_pods_carry_config_checksum_annotation(proc: str) -> None:
 
 
 def test_config_checksum_changes_when_a_config_value_changes() -> None:
-    a = _deployments("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    b = _deployments(
+    a = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    b = _workloads(
         "config.KDIVE_DATABASE_URL=postgresql://x/y", "config.KDIVE_S3_BUCKET=other-bucket"
     )
     for proc in _APP_PROCS:
@@ -97,8 +101,8 @@ def test_config_checksum_changes_when_a_config_value_changes() -> None:
 
 def test_config_checksum_is_stable_across_renders() -> None:
     # Same inputs must hash the same, or every upgrade would needlessly roll the pods.
-    a = _deployments("config.KDIVE_DATABASE_URL=postgresql://x/y")
-    b = _deployments("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    a = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
+    b = _workloads("config.KDIVE_DATABASE_URL=postgresql://x/y")
     for proc in _APP_PROCS:
         assert (
             _pod_annotations(a[proc])["checksum/config"]
@@ -109,7 +113,7 @@ def test_config_checksum_is_stable_across_renders() -> None:
 def test_backend_pods_have_no_config_checksum_annotation() -> None:
     # postgres/minio/oidc do not consume the config ConfigMap; a checksum on them would roll
     # the emptyDir demo backends on a config change and wipe demo data (#470 acceptance).
-    deploys = _deployments("bundledBackends=true", "demoAcknowledged=true")
+    deploys = _workloads("bundledBackends=true", "demoAcknowledged=true")
     for proc in _BACKEND_PROCS:
         assert proc in deploys, proc
         assert "checksum/config" not in _pod_annotations(deploys[proc]), proc
