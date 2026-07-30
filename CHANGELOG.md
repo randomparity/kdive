@@ -73,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Index jobs on the payload system_id correlation key
 - Add a staging-drain lane keyed on systems
 - Yield listing pages instead of one flattened root
+- Add the restore_incomplete failure category
 
 ### Changed
 
@@ -105,6 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Delete UsageTrackingMiddleware's dead denial arm
 - Stat the orphan sweep's re-read key instead of listing it
 - Inline single-use context helper and dedupe docstrings
+- Give systems.failure_category a single writer
+- Flatten the job-category null check
 
 ### Documentation
 
@@ -229,6 +232,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Record ADR-0502, a write lease closes the sweep's delete race
 - Re-point the two loss tests at the unleased path
 - Record the savepoint-demotion class of each advisory-lock site
+- Record ADR-0513 for the restore-limbo failure category
 
 ### Fixed
 
@@ -399,6 +403,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rewrite the ADR template in the canonical record shape
 - Commit each promotion candidate so its locks release
 - Name the leaked locks and verify the reaper's guard
+- Record restore_incomplete on a stalled restore
+- Do not let the limbo verdict displace a job's own
 
 ### Build
 
