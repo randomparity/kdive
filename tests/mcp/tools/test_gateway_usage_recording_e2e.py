@@ -84,17 +84,9 @@ from opentelemetry import context as otel_context
 from opentelemetry.metrics import Meter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader, NumberDataPoint
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.sdk.trace.sampling import ALWAYS_ON
-from opentelemetry.trace import (
-    NonRecordingSpan,
-    SpanContext,
-    TraceFlags,
-    Tracer,
-    set_span_in_context,
-)
+from opentelemetry.trace import Tracer
 from psycopg_pool import AsyncConnectionPool
 
 from kdive.mcp.assembly.app import build_app
@@ -107,6 +99,7 @@ from tests.mcp.usage_support import (
     recording_must_not_fail,
     warm_pool,
 )
+from tests.support.otel import non_sampled_ambient_context, tracer_provider
 
 # A viewer on exactly one project: enough for session.whoami, and denied on any other
 # project — the two outcomes these tests need from one token. Every claim the recorder
@@ -168,21 +161,21 @@ def _recorders() -> _Recorders:
     one's assertions. That set-once constraint is the whole reason ADR-0487 put the seam on
     ``build_app`` instead.
 
-    The sampler is pinned to ``ALWAYS_ON`` rather than left at ``TracerProvider``'s default
-    ``ParentBased(ALWAYS_ON)``, so a missing span below is a missing span rather than an
-    ambient sampling decision inherited from another test (#1683). See
-    ``test_recorders_survive_a_leaked_non_sampled_ambient_context`` for the mechanism this
-    guards against.
+    The provider comes from :func:`tests.support.otel.tracer_provider`, whose sampler is
+    pinned so a missing span below is a missing span rather than an ambient sampling decision
+    inherited from another test (#1683, generalized to the other eleven telemetry modules in
+    #1693). See ``test_recorders_survive_a_leaked_non_sampled_ambient_context`` for the
+    mechanism this guards against.
     """
     span_exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider(sampler=ALWAYS_ON)
-    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    provider = tracer_provider()
+    provider.add_span_processor(SimpleSpanProcessor(span_exporter))
     metric_reader = InMemoryMetricReader()
     meter_provider = MeterProvider(metric_readers=[metric_reader])
     return _Recorders(
         span_exporter=span_exporter,
         metric_reader=metric_reader,
-        tracer=tracer_provider.get_tracer("kdive.mcp"),
+        tracer=provider.get_tracer("kdive.mcp"),
         meter=meter_provider.get_meter("kdive.mcp"),
     )
 
@@ -205,19 +198,12 @@ def test_recorders_survive_a_leaked_non_sampled_ambient_context() -> None:
     leaking test would leave behind), then open a span the same way
     ``TelemetryMiddleware.on_call_tool`` does (``start_as_current_span`` under
     ``SpanKind.SERVER``, ADR-0487). Against the unpinned ``TracerProvider()`` default this
-    span is silently dropped; against ``sampler=ALWAYS_ON``, which ignores the ambient
-    context entirely, it is always recorded.
+    span is silently dropped; against the pinned sampler, which ignores the ambient context
+    entirely, it is always recorded — ``tests/support/test_otel.py`` asserts both halves of
+    that contrast directly on the factory.
     """
-    span_context = SpanContext(
-        trace_id=0x1,
-        span_id=0x1,
-        is_remote=False,
-        trace_flags=TraceFlags(TraceFlags.DEFAULT),  # the "not sampled" bit
-    )
-    non_sampled_parent = set_span_in_context(NonRecordingSpan(span_context))
-
     recorders = _recorders()
-    token = otel_context.attach(non_sampled_parent)
+    token = otel_context.attach(non_sampled_ambient_context())
     try:
         with recorders.tracer.start_as_current_span("mcp.tool/probe"):
             pass

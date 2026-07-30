@@ -12,7 +12,6 @@ from typing import Any
 
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 
 from kdive.domain.capture import CaptureMethod
 from kdive.domain.errors import ErrorCategory
@@ -33,6 +32,7 @@ from kdive.services.allocation.admission.metrics import (
     _AdmissionReason,
 )
 from tests.jobs.test_worker_telemetry import _job
+from tests.support.otel import tracer_provider
 
 from kdive.domain.capacity.state import (  # isort: skip
     AllocationState,
@@ -61,7 +61,7 @@ _IDENTIFIER_KEYS = {"project", "principal", "object_id", "secret_ref", "tenant"}
 
 def _emit_everything(reader: InMemoryMetricReader) -> None:
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
 
     recon = ReconcilerTelemetry(tracer=tracer, meter=meter)
     recon.record_repairs({k: 1 for k in ALL_REPAIR_KINDS}, failures=["leaked_domains"])

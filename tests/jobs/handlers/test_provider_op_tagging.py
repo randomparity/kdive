@@ -18,7 +18,6 @@ from uuid import UUID, uuid4
 
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-from opentelemetry.sdk.trace import TracerProvider
 
 from kdive.domain.capacity.state import JobState, SystemState
 from kdive.domain.catalog.resources import ResourceKind
@@ -29,6 +28,7 @@ from kdive.jobs.provider_context import clear_provider_kind
 from kdive.jobs.worker_telemetry import WorkerTelemetry
 from kdive.providers.core.resolver import ProviderBinding, ProviderResolver
 from kdive.providers.core.runtime import ProviderRuntime
+from tests.support.otel import tracer_provider
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _SYSTEM_ID = uuid4()
@@ -128,7 +128,7 @@ def test_teardown_handler_tags_provider_kind_and_metric_is_emitted() -> None:
     """
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter("test")
-    tracer = TracerProvider().get_tracer("test")
+    tracer = tracer_provider().get_tracer("test")
     telem = WorkerTelemetry(tracer=tracer, meter=meter)
 
     runtime = _FakeRuntime()

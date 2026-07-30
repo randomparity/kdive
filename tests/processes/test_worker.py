@@ -18,12 +18,13 @@ def _telemetry() -> Telemetry:
     from opentelemetry.sdk._logs import LoggerProvider
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-    from opentelemetry.sdk.trace import TracerProvider
+
+    from tests.support.otel import tracer_provider
 
     reader = InMemoryMetricReader()
     return Telemetry(
         logger_provider=LoggerProvider(),
-        tracer_provider=TracerProvider(),
+        tracer_provider=tracer_provider(),
         meter_provider=MeterProvider(metric_readers=[reader]),
         scrape_reader=reader,
     )
