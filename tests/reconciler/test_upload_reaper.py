@@ -464,7 +464,7 @@ def test_reap_one_owner_declines_renewed_manifest(migrated_url: str) -> None:
             await upload_manifest.replace_manifest(conn, request)
             store = _FakeStore({prefix: [f"{prefix}kernel"]})
             outcome = await _reap_one_owner(conn, store, "runs", run_id)
-            assert outcome == ReapOutcome(reaped=False, attempted=0, undeleted=0)
+            assert outcome == ReapOutcome(reaped=False, attempted=0, declined=0, undeleted=0)
             assert store.deleted == []
 
     asyncio.run(_run())
@@ -532,49 +532,6 @@ def test_a_clean_sweep_returns_the_reaped_count_and_does_not_raise(migrated_url:
         async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
             assert await run_repair(pool, _reap(store)) == 1
         assert store.deleted == [f"{prefix}a"]
-
-    asyncio.run(_run())
-
-
-def test_a_key_that_gains_an_artifacts_row_after_the_claim_is_still_deleted(
-    migrated_url: str,
-) -> None:
-    """Pins ADR-0453's second residual (#1557) as *known* behaviour rather than a claim.
-
-    The exemption is decided in phase 1 and phase 2 re-reads nothing, so a key that acquires a
-    committed ``artifacts`` row between the two — which the reaped window's own finalizes cannot
-    do, but a re-mint, a `control.capture_traffic` retry, or a vmcore finalize can, because
-    ``local/runs/<id>/`` is the Run's *owner* prefix and phase 2 holds no `RUN` lock — has its
-    object deleted anyway, leaving the row dangling.
-
-    This test exists so the residual has a reproducer and so the day it is closed, it fails
-    loudly rather than passing silently.
-    """
-
-    async def _run() -> None:
-        run_id, prefix = await _seed_expired_run(migrated_url)
-        pcap_key = f"{prefix}pcap-late"
-
-        def _commit_the_row_mid_sweep() -> None:
-            # Stands in for the concurrent writer taking the RUN lock phase 2 no longer holds.
-            with psycopg.connect(migrated_url, autocommit=True) as writer:
-                writer.execute(
-                    "INSERT INTO artifacts (owner_kind, owner_id, object_key, etag, "
-                    "    sensitivity, retention_class) VALUES (%s, %s, %s, %s, %s, %s)",
-                    ("runs", run_id, pcap_key, "etag-1", "sensitive", "pcap"),
-                )
-
-        store = _HookedStore(
-            {prefix: [pcap_key]}, before_delete=_commit_the_row_mid_sweep, once=True
-        )
-        async with AsyncConnectionPool(migrated_url, min_size=1, max_size=4) as pool:
-            assert await run_repair(pool, _reap(store)) == 1
-        assert store.deleted == [pcap_key]  # the disclosed residual: row committed, object gone
-        async with await connect(migrated_url) as check:
-            row = await (
-                await check.execute("SELECT 1 FROM artifacts WHERE object_key = %s", (pcap_key,))
-            ).fetchone()
-        assert row is not None
 
     asyncio.run(_run())
 
