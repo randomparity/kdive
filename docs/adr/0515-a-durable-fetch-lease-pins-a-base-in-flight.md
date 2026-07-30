@@ -141,6 +141,14 @@ Two older residuals remain unchanged: the sub-syscall instant between the last p
 unlink, and a partial the `flock` probe cannot evaluate at all (`EACCES`, `ENOLCK`, `EOPNOTSUPP`),
 where the reclaim proceeds as it did before ADR-0495 per ADR-0452 §5.
 
+The lease is only visible to the reclaim on an **autocommit** connection, which is what
+`rootfs_upload_fetch_from_env` opens. That is checked rather than assumed, because it is the one way
+this design fails silently and totally: inside a transaction the row stays invisible until commit —
+on the production path, after the download it exists to protect has finished — while the fetch still
+succeeds and nothing raises. `acquire_fetch_lease` records no lease on a non-autocommit connection
+and says so, since a lease that pins nothing is worse than none: it reads as protection in the table
+an operator inspects.
+
 A lease acquire that faults degrades to an unleased fetch with a `WARNING` rather than failing the
 provision — the reclaim reverts to its pre-ADR-0515 reach, which is a rare and survivable race,
 where failing would turn any transient database blip into a total uploaded-rootfs provisioning

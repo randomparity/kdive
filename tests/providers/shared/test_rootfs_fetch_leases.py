@@ -27,9 +27,10 @@ from kdive.providers.shared.rootfs_fetch_leases import (
 class _RecordingConn:
     """A sync connection that records statements, optionally faulting on the lease ones."""
 
-    def __init__(self, *, fault: bool = False) -> None:
+    def __init__(self, *, fault: bool = False, autocommit: bool = True) -> None:
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
         self.fault = fault
+        self.autocommit = autocommit
 
     def execute(self, sql: str, params: tuple[Any, ...]) -> None:
         if self.fault:
@@ -102,3 +103,19 @@ def test_a_release_fault_is_reported_and_never_raises(caplog: pytest.LogCaptureF
 
     # The remedy is named: the row is not orphaned forever, it expires.
     assert "until it expires" in caplog.text
+
+
+def test_a_non_autocommit_connection_records_no_lease(caplog: pytest.LogCaptureFixture) -> None:
+    # The one way ADR-0515 could fail silently and totally. Inside a transaction the row is
+    # invisible to the reclaim's separate connection until commit — on the production path, after
+    # the download the lease exists to protect has already finished. The fetch would still succeed
+    # and nothing would raise, so the mechanism would be a no-op that every test still passed.
+    # Recording a lease that pins nothing is strictly worse than recording none: it would read as
+    # protection in the table an operator inspects.
+    conn = _RecordingConn(autocommit=False)
+
+    with caplog.at_level("WARNING"):
+        assert acquire_fetch_lease(conn, uuid4(), "token-x", system_id=uuid4()) is None  # ty: ignore[invalid-argument-type]
+
+    assert conn.statements == []
+    assert "not in autocommit" in caplog.text

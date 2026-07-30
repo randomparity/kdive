@@ -102,6 +102,22 @@ def acquire_fetch_lease(
     any transient database blip into a total uploaded-rootfs provisioning outage. The caller must
     treat ``None`` as "no lease to release".
     """
+    if not conn.autocommit:
+        # The one way this whole mechanism fails *silently and totally*, so it is checked rather
+        # than assumed. Inside a transaction the row is invisible to the reclaim's separate
+        # connection until commit — which, on the production path, is after the multi-GiB download
+        # this lease exists to protect has already finished. The fetch would still succeed, the
+        # reclaim would still race it, and nothing would raise: a conditional written down as an
+        # invariant, which is the defect this subsystem's own docstrings keep naming. Only
+        # ``rootfs_upload_fetch_from_env`` opens this connection and it passes ``autocommit=True``,
+        # so reaching here means that changed and took ADR-0515 with it.
+        _log.warning(
+            "the rootfs fetch connection is not in autocommit, so a fetch lease would stay "
+            "invisible to the reclaim until this transaction commits; staging unleased for system "
+            "%s rather than recording a lease that pins nothing",
+            system_id,
+        )
+        return None
     lease_id = uuid4()
     try:
         conn.execute(

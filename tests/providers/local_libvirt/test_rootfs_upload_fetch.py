@@ -1314,6 +1314,9 @@ class _FakeConn:
         # The release path reports the OBSERVED connection state rather than an inferred cause,
         # so the fake carries the same flag a real psycopg connection exposes.
         self.closed = False
+        # ADR-0515's lease is only visible to the reclaim on an autocommit connection, which is
+        # what rootfs_upload_fetch_from_env opens; the fake mirrors that.
+        self.autocommit = True
 
     def cursor(self) -> _FakeCursor:
         return _FakeCursor(self)
